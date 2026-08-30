@@ -4174,6 +4174,56 @@ describe('dashboard message-handler dispatch', () => {
       expect(getReplayWindowDepth('s1')).toBe(0)
     })
 
+    // #7524 — the same nested DELTA -> FULL interleave, plus the one extra user
+    // action the #7522 reviewer found: Stop, landing between the two starts. The
+    // baseline was an array INDEX captured when the window opened, and
+    // `sendInterrupt` (connection.ts:3721) removes every queued bubble without
+    // going anywhere near the replay window — so the swap cut two entries INTO
+    // the replayed tail and the store kept only the last one. Measured pre-fix:
+    // 1 message where 3 were replayed.
+    it('keeps the replayed set when Stop drops queued bubbles mid-window (#7524)', () => {
+      seedOne([
+        { id: 'h-1', type: 'response', content: 'history', timestamp: 1 },
+        { id: 'q-1', type: 'user', content: 'queued one', timestamp: 2 },
+        { id: 'q-2', type: 'user', content: 'queued two', timestamp: 3 },
+      ])
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: false },
+        ctx() as any,
+      )
+      // Verbatim the shape of `sendInterrupt`'s optimistic drop: the queued
+      // bubbles leave `messages`, the replay window is untouched.
+      store.setState((prev: any) => ({
+        sessionStates: {
+          ...prev.sessionStates,
+          s1: {
+            ...prev.sessionStates.s1,
+            messages: prev.sessionStates.s1.messages.filter(
+              (m: any) => m.id !== 'q-1' && m.id !== 'q-2',
+            ),
+          },
+        },
+      }))
+      handleMessage(
+        { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+        ctx() as any,
+      )
+      handleMessage(question({ toolUseId: 'r-1' }) as any, ctx() as any)
+      handleMessage(question({ toolUseId: 'r-2' }) as any, ctx() as any)
+      handleMessage(question({ toolUseId: 'r-3' }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      // All three survive the single deferred swap (pre-fix: only the last one)...
+      expect(msgs).toHaveLength(3)
+      // ...and the swap really happened — the surviving pre-replay entry is gone,
+      // so this is not passing because the rebuild was cancelled altogether.
+      expect(msgs.every((m: any) => m.type === 'prompt')).toBe(true)
+      expect(msgs.some((m: any) => m.id === 'h-1')).toBe(false)
+      expect(getReplayWindowDepth('s1')).toBe(0)
+    })
+
     // #7456 — the store drops a session's messages wholesale on prune and on
     // timeout; module state here used to survive both with nothing left to
     // correspond to.

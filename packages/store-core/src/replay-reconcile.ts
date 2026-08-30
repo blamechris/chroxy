@@ -30,9 +30,12 @@
  *      seq-reset fallback): keep the existing messages VISIBLE while the
  *      authoritative replayed set is rebuilt, then swap atomically at
  *      `history_replay_end`. Implemented as a "deferred swap": record the
- *      pre-replay message count as a baseline; replayed entries append AFTER it;
- *      at end, slice the array down to the appended tail (the replayed set) in a
- *      single store update. When two full replays of one session overlap the
+ *      pre-replay prefix as a baseline; replayed entries append AFTER it; at
+ *      end, slice the array down to the appended tail (the replayed set) in a
+ *      single store update. The baseline records the prefix's message IDS and
+ *      re-derives the cut at each use (#7524), so a store path that REMOVES a
+ *      message mid-window — Stop dropping the queued bubbles — moves the cut
+ *      instead of leaving it pointing at the wrong element. When two full replays of one session overlap the
  *      OUTERMOST baseline is the one that survives and the swap waits for the
  *      last end (#7477), so nothing appended between the two starts is sliced
  *      off. The pre-replay prefix stays on screen the whole time
@@ -51,13 +54,17 @@
  * Either way the swap only ever slices off the pre-baseline prefix, so a racing
  * flush can neither be duplicated nor reordered relative to replayed entries —
  * see `reconcileReplayEnd` and the race test in `replay-reconcile.test.ts`.
+ * #7524 does not touch that shape: it changes only HOW the end of the prefix is
+ * identified (by the ids captured at window open, not by a fixed index), so the
+ * cut still falls between prefix and tail — and now keeps falling there when the
+ * prefix shrinks underneath it.
  */
 
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
- * session (delta replay or no replay). The value is the `messages.length`
- * captured at the OUTERMOST full `history_replay_start` — the index the
- * deferred swap slices at.
+ * session (delta replay or no replay). The value is the {@link RebuildBaseline}
+ * adopted from the OUTERMOST replay WINDOW (#7492) — where the deferred swap
+ * cuts, held as message IDENTITY rather than as a bare array index (#7524).
  *
  * "Outermost" is the whole of #7477. This map used to be written by every full
  * start and deleted by the first end, which is the non-refcount shape #7455
@@ -98,7 +105,7 @@
  * If either of those ever regresses, this map wedges where it used to recover.
  * Treat the teardown as part of this invariant, not as housekeeping.
  */
-const _rebuildBaseline = new Map<string, number>()
+const _rebuildBaseline = new Map<string, RebuildBaseline>()
 
 /**
  * Per-session highest applied `historySeq`. Sent back as `historyCursors` in
@@ -144,43 +151,43 @@ const _historyCursors = new Map<string, number>()
  * of the store. Fixed as #7477 — the two compose, the ledger protecting the
  * racer and the swap no longer dropping it.)
  *
- * The value carries {@link ReplayWindow.openLen} alongside the depth because
- * that number has exactly this map's lifetime (#7492) — see the interface.
+ * The value carries {@link ReplayWindow.baseline} alongside the depth because
+ * that record has exactly this map's lifetime (#7492) — see the interface.
  */
 const _replayWindowOpen = new Map<string, ReplayWindow>()
 
 /**
- * The open replay window for one session: the refcount, plus the
- * `messages.length` captured when it OPENED.
+ * The open replay window for one session: the refcount, plus the BASELINE
+ * captured when it OPENED — where the deferred swap will cut.
  *
- * One record and not two maps, deliberately. `openLen` is meaningful for
+ * One record and not two maps, deliberately. The baseline is meaningful for
  * exactly as long as the refcount is non-zero and must be dropped at the same
  * instant — so making it a field of the refcount's own value means the four
  * teardown paths (`closeReplayWindow`'s last decrement, `resetReplayReconcile`,
  * {@link dropReplaySessionState}, and the `delete` inside `closeReplayWindow`)
- * cannot clear one and leave the other. A sibling `Map<string, number>` would
- * be a second thing to remember at each of them, which is the drift the
- * `_rebuildBaseline` teardown comment already warns about at length.
+ * cannot clear one and leave the other. A sibling map would be a second thing
+ * to remember at each of them, which is the drift the `_rebuildBaseline`
+ * teardown comment already warns about at length.
  */
 interface ReplayWindow {
   /** How many replays are in flight for this session right now (>= 1). */
   depth: number
   /**
-   * `messages.length` at the 0->1 transition — the OUTERMOST start, whatever
-   * KIND it was (#7492).
+   * The prefix as it stood at the 0->1 transition — the OUTERMOST start,
+   * whatever KIND it was (#7492).
    *
    * #7477 made the outermost FULL rebuild own {@link _rebuildBaseline}, which
    * covers `start(full) start(full) end end`. It does not cover a full rebuild
    * nested inside a DELTA window: the delta contributes no baseline, so the
-   * nested full start is the first to set one and captures a `messages.length`
-   * that already counts everything appended during the delta — including a
-   * live racer, which the deferred swap then slices off. That is #7420's own
-   * window again, reached by a different interleave: the ledger vouches for the
+   * nested full start is the first to set one and captures a prefix that
+   * already counts everything appended during the delta — including a live
+   * racer, which the deferred swap then slices off. That is #7420's own window
+   * again, reached by a different interleave: the ledger vouches for the
    * message right up to the moment the swap discards it.
    *
    * So the OUTERMOST WINDOW owns the baseline, not the outermost full rebuild,
-   * and a nested full start adopts this number instead of its own `currentLen`.
-   * At depth 1 the two are the same value, so every #7477 case is unchanged.
+   * and a nested full start adopts this record instead of snapshotting its own.
+   * At depth 1 the two are the same prefix, so every #7477 case is unchanged.
    *
    * KNOWN LIMIT, stated rather than hidden: when the delta actually APPENDED
    * entries before the nested full start, those entries are now inside the
@@ -191,11 +198,126 @@ interface ReplayWindow {
    * strictly better failure than the silent DROP it replaces (nothing is lost,
    * and the next full replay re-orders it), and fixing it needs the swap to
    * distinguish replayed appends from live ones — a change to the "slice off a
-   * prefix" shape rather than to this number. Tracked as #7519, and PINNED by
-   * `full rebuild nested inside a DELTA window (#7492) > the delta's own
-   * appends keep their early position` so it cannot change unnoticed.
+   * prefix" SHAPE, rather than to where the prefix ends, which is all #7524
+   * changed. Tracked as #7519, and PINNED by `full rebuild nested inside a
+   * DELTA window (#7492) > the delta's own appends keep their early position`
+   * so it cannot change unnoticed.
+   */
+  baseline: RebuildBaseline
+}
+
+/**
+ * Where the deferred swap cuts, in a form that survives a non-append-only
+ * mutation of `messages` while the window is open (#7524).
+ *
+ * A bare `openLen` is an array INDEX, captured once at the window's 0->1
+ * transition and held until the last end — a span that can cover 30s of
+ * back-pressure (`BACKPRESSURE_MAX_WAIT_MS`, ws-history.js). Nothing in this
+ * module owns `messages`, and store paths REMOVE from it without touching the
+ * window: `sendInterrupt` drops every queued bubble on Stop
+ * (`connection.ts:3721` dashboard, `:1876` app), `cancelQueuedMessage` drops
+ * one (`:3793` / `:1918`), and `reorderEmptyResponseSlot` moves one to the end
+ * of the array (`message-handler.ts:2498-2511`). After any of those the index
+ * addresses a different element and the swap cuts there anyway. Measured on the
+ * reviewer's reproduction: `['r3']` where `['r1','r2','r3']` had just been
+ * replayed, and `[]` — a blanked transcript — for a larger shrink. Both
+ * silent.
+ *
+ * So the record also carries the IDS the prefix consisted of, and
+ * {@link resolveBaselineIndex} re-derives the cut from them against the array
+ * as it stands at each use.
+ *
+ * Identity rather than a notification from those three call sites, and the
+ * difference is the whole point: a "tell the reconciler you shrank" hook is
+ * correct only for the mutations someone remembered to wire it to, and the next
+ * one lands silently — the guard-wired-to-only-some-of-its-callers shape this
+ * repo keeps a catalogue entry for. Re-deriving needs no cooperation from any
+ * mutator, present or future.
+ *
+ * Clamping — `Math.min(openLen, messages.length)` at the slice — is NOT an
+ * alternative: `Array.prototype.slice` already clamps a past-the-end start, so
+ * the expression is INERT. It cannot even stop the blanked transcript, which is
+ * `slice` landing exactly AT the end rather than past it.
+ */
+interface RebuildBaseline {
+  /**
+   * The prefix length at window open. The cut whenever the prefix is intact,
+   * which is every append-only window — i.e. the overwhelming majority.
    */
   openLen: number
+  /**
+   * The ids of `messages[0..openLen)` at window open, in order — or `null` when
+   * the snapshot could not be taken (see {@link snapshotPrefix}), which degrades
+   * to the pre-#7524 index behaviour rather than to a guess.
+   */
+  prefixIds: readonly string[] | null
+}
+
+/** A message's id, or `null` when it has none this module can match on. */
+function idOf(message: unknown): string | null {
+  if (typeof message !== 'object' || message === null) return null
+  const id = (message as { id?: unknown }).id
+  return typeof id === 'string' && id.length > 0 ? id : null
+}
+
+/**
+ * Snapshot the prefix a replay window opens over.
+ *
+ * Bails to `prefixIds: null` — index only — the moment an entry has no matchable
+ * id, rather than recording a snapshot with a HOLE in it. The walk in
+ * {@link resolveBaselineIndex} would stall AT that hole, and a hole early in the
+ * prefix collapses the cut towards 0 — an identity slice, i.e. a swap that
+ * silently does not happen and leaves the discarded prefix on screen for the
+ * life of the connection. That is #7477's failure, not #7524's, and it is worse
+ * than the index this degrades to. Every `ChatMessage` carries a non-empty
+ * string id, so this is a floor and not a live path.
+ */
+function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
+  const prefixIds: string[] = []
+  for (const message of messages) {
+    const id = idOf(message)
+    if (id === null) return { openLen: messages.length, prefixIds: null }
+    prefixIds.push(id)
+  }
+  return { openLen: prefixIds.length, prefixIds }
+}
+
+/**
+ * Where to cut `messages` for this baseline, RIGHT NOW.
+ *
+ * A strict positional walk: each recorded prefix id in turn either matches the
+ * next unconsumed message — consuming it — or is skipped as removed. Removals
+ * anywhere in the prefix (front, middle, or all of it) move the cut by exactly
+ * the number removed, and appends never move it at all, because the walk can
+ * never consume more entries than the prefix held.
+ *
+ * Strict, and deliberately NOT a search-ahead. A walk allowed to skip forward
+ * would match a removed id against a copy the full replay re-delivers LATER,
+ * and cut PAST the replayed set — losing it. Strict matching can only ever
+ * UNDER-advance, and under-advancing retains one stale prefix entry for a
+ * single swap. Retention is visible and self-heals on the next full replay;
+ * loss is silent and permanent. Same ordering #7492's adjudication settled on,
+ * applied to the residual instead of to the defect.
+ *
+ * Cost is O(openLen), against a `messages.slice()` both callers already pay on
+ * every call, so it changes no asymptotics — and it is recomputed rather than
+ * memoised, because a cache keyed on anything this module can see (a length, an
+ * array identity) is exactly what shrink-then-append defeats.
+ */
+function resolveBaselineIndex(baseline: RebuildBaseline, messages: readonly unknown[]): number {
+  const { openLen, prefixIds } = baseline
+  // Index-only snapshot — the documented degradation, never a guess. There is
+  // deliberately no `openLen === 0` fast path above this: an empty prefix gives
+  // `prefixIds: []`, the loop below never runs, and the walk returns 0 anyway.
+  // A branch whose two sides cannot be told apart by any input is a branch no
+  // test can prove, so it is not written.
+  if (prefixIds === null) return openLen
+  let cut = 0
+  for (const prefixId of prefixIds) {
+    if (cut >= messages.length) break
+    if (idOf(messages[cut]) === prefixId) cut += 1
+  }
+  return cut
 }
 
 /**
@@ -337,10 +459,16 @@ export function getHistoryCursor(sessionId: string): number | undefined {
 
 /**
  * Begin a replay for a session. `fullHistory` is the server's flag from
- * `history_replay_start`; `currentLen` is `messages.length` right now.
+ * `history_replay_start`; `currentMessages` is the session's `messages` array
+ * right now.
  *
  * For a full rebuild we record the baseline so the appended replay tail can be
- * sliced out at end.
+ * sliced out at end. The ARRAY and not its length, since #7524: the baseline
+ * has to be re-derivable from message identity, or a mid-window removal leaves
+ * it addressing the wrong element (see {@link RebuildBaseline}). Making it a
+ * required parameter rather than an optional extra is the guard — the compiler
+ * refuses a caller that still hands over only a count, which no test can do for
+ * a call site that has not been written yet.
  *
  * The `latestSeq` carried on the start frame is INTENTIONALLY NOT applied to
  * the cursor here. If the socket drops mid-replay (before history_replay_end),
@@ -355,7 +483,7 @@ export function getHistoryCursor(sessionId: string): number | undefined {
 export function reconcileReplayStart(
   sessionId: string | null,
   fullHistory: boolean,
-  currentLen: number,
+  currentMessages: readonly unknown[],
   // Accepted for call-site symmetry with the wire frame; deliberately unused —
   // see the doc comment above on why the cursor is not advanced at start.
   _latestSeq?: unknown,
@@ -367,11 +495,15 @@ export function reconcileReplayStart(
   const existing = _replayWindowOpen.get(sessionId)
   // 0→1 ONLY — a genuinely new window, whatever KIND of replay opened it.
   const isOutermost = existing === undefined
-  const replayWindow = existing ?? { depth: 0, openLen: Math.max(0, currentLen | 0) }
+  const replayWindow: ReplayWindow = existing ?? {
+    depth: 0,
+    baseline: snapshotPrefix(currentMessages),
+  }
   replayWindow.depth += 1
   if (isOutermost) {
-    // #7492 — the record (and with it `openLen`) is installed here and nowhere
-    // else, so the captured length is the OUTERMOST start's by construction.
+    // #7492 — the record (and with it the baseline) is installed here and
+    // nowhere else, so the captured prefix is the OUTERMOST start's by
+    // construction.
     _replayWindowOpen.set(sessionId, replayWindow)
     // Drop the previous window's live-arrival ids: every prompt already on
     // screen pre-dates this replay, so nothing about it is vouched for by this
@@ -387,12 +519,17 @@ export function reconcileReplayStart(
     // A genuinely new window never has one (the last end and every teardown
     // path clear it), so at depth 1 this always sets.
     //
-    // #7492 — and the value is the WINDOW's open length, not this start's own
-    // `currentLen`. They are the same number when a full start opened the
-    // window; they differ when a DELTA did, and `currentLen` then counts a live
-    // racer that arrived during the delta straight into the discarded prefix.
+    // #7492 — and the value is the WINDOW's prefix, not one snapshotted here.
+    // They are the same prefix when a full start opened the window; they differ
+    // when a DELTA did, and this start's own view then counts a live racer that
+    // arrived during the delta straight into the discarded prefix.
+    //
+    // The window's record is SHARED, not copied: it is never mutated, and the
+    // two maps are cleared independently on paths that must not clear the other
+    // (`closeReplayWindow` at the last end drops the window while the swap
+    // still needs the baseline, three statements later in `reconcileReplayEnd`).
     if (!_rebuildBaseline.has(sessionId)) {
-      _rebuildBaseline.set(sessionId, replayWindow.openLen)
+      _rebuildBaseline.set(sessionId, replayWindow.baseline)
     }
     return { rebuildInProgress: true }
   }
@@ -425,10 +562,13 @@ export function replayDedupCache<T>(
   sessionId: string | null | undefined,
   messages: readonly T[],
 ): readonly T[] {
-  if (sessionId && _rebuildBaseline.has(sessionId)) {
-    const base = _rebuildBaseline.get(sessionId) as number
-    return messages.slice(base)
-  }
+  const baseline = sessionId ? _rebuildBaseline.get(sessionId) : undefined
+  // #7524 — resolved against THIS array, on every call. The cut and the swap's
+  // cut are the same computation over the same record, so a mid-window shrink
+  // moves both together; scoping the dedup cache and the swap differently is
+  // how a replayed entry gets suppressed by a prefix that is about to be
+  // discarded (the hazard the paragraph above is about).
+  if (baseline) return messages.slice(resolveBaselineIndex(baseline, messages))
   return messages
 }
 
@@ -473,12 +613,15 @@ export function reconcileReplayEnd(
   if (isReplayWindowOpen(sessionId)) {
     return { swappedMessages: null }
   }
-  const base = _rebuildBaseline.get(sessionId) as number
+  const baseline = _rebuildBaseline.get(sessionId) as RebuildBaseline
   _rebuildBaseline.delete(sessionId)
   // Slice off the pre-replay prefix → exactly the replayed (+ any racing live)
-  // tail, in array order. A baseline at or past the end yields [] (a session
-  // that genuinely had no replayed entries, e.g. server-side trim to empty).
-  return { swappedMessages: messages.slice(base) }
+  // tail, in array order. The cut is re-derived from the prefix's ids against
+  // THIS array (#7524), so a removal that landed anywhere inside the window
+  // moves it instead of shifting the whole tail. A prefix still wholly present
+  // and nothing appended yields [] (a session that genuinely had no replayed
+  // entries, e.g. server-side trim to empty).
+  return { swappedMessages: messages.slice(resolveBaselineIndex(baseline, messages)) }
 }
 
 // ---------------------------------------------------------------------------

@@ -5392,9 +5392,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // replay (cursor honoured) this is purely append-only. `latestSeq` seeds
       // the cursor so an already-current empty replay still advances it.
       {
-        const curLen =
-          (replayTargetId && get().sessionStates[replayTargetId]?.messages.length) || 0;
-        reconcileReplayStart(replayTargetId, fullHistory, curLen, latestSeq);
+        // #7524 — the MESSAGES, not their length. The baseline the swap cuts at
+        // is re-derived from these ids, so a mid-window removal (Stop dropping
+        // the queued bubbles, `sendInterrupt` in connection.ts) moves the cut
+        // instead of leaving it addressing the wrong element.
+        const curMessages =
+          (replayTargetId && get().sessionStates[replayTargetId]?.messages) || [];
+        reconcileReplayStart(replayTargetId, fullHistory, curMessages, latestSeq);
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect

@@ -128,7 +128,7 @@ async function openConnectedSocket(): Promise<FakeSocket> {
 
 /** Open a replay window for `s1` with one live question inside it. */
 function openReplayWindowWithRacer(): void {
-  reconcileReplayStart('s1', true, 0);
+  reconcileReplayStart('s1', true, []);
   noteLivePromptDuringReplay('s1', 'live-q');
   recordHistorySeq('s1', 42);
   // Positive controls — the fixture took effect, so the assertions below are
