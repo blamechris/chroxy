@@ -1100,8 +1100,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     messages:
       "ChatMessage[] — the ACTIVE session's flat mirror of `sessionStates[activeSessionId]" +
       ".messages`, re-synced from the newly-active session by the flat-field block at " +
-      'session_list / session_timeout and emptied by `messages: []` at auth_ok / forgetSession ' +
-      '/ _resetSessionMemory (#7527)',
+      'session_list / session_timeout, and emptied by the `createEmptyFlatSessionMirror()` spread ' +
+      'at auth_ok / forgetSession / _resetSessionMemory (#7527, #7555 — which replaced the three ' +
+      '`messages: []` literals this reason used to name)',
   }
 
   // -- Bucket 3: session-scoped and NOT yet cleaned — tracked, not hidden. ----
@@ -2102,15 +2103,35 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  *
  * `disconnect()` is NOT unconditional on the switch paths: `switchServer` and
  * `connectLocal` call it only `if (get().connectionPhase !== 'disconnected')`.
- * So a server switch made from an already-disconnected tab — after a
- * `server_down`, a failed connect, or a user Disconnect — runs
+ * So a server switch made from a tab already at `'disconnected'` runs
  * `_resetSessionMemory()` alone, and all 16 `CLEARED_ON_DISCONNECT` members
- * survive it. `serverCapabilities` is the sharpest: its own `#3272` comment says
- * the empty map is the fail-CLOSED state for capability-gated UI. That is #7559,
- * and it is out of scope here (a conditional call, not a missing clear).
- * Answer 2 therefore means "cleared by disconnect(), with #7559 open against
- * that being enough" — stated rather than implied, so nobody reads this bucket
- * as a clean bill of health.
+ * survive it.
+ *
+ * ONE route reaches that state with the previous server's values intact, and it
+ * is worth naming precisely — PR #7564's review checked the first draft of this
+ * paragraph and two of the three triggers it listed were wrong:
+ *
+ *   * a FAILED CONNECT — real. `onRestartGaveUp` / `onProbeGaveUp`
+ *     (`connection.ts`), the pinned-identity refusal and the key-exchange
+ *     failures (`message-handler.ts`) all land at `'disconnected'` with server
+ *     A's state fully populated.
+ *   * `server_down` — NOT this. It is its OWN `ConnectionPhase`
+ *     (`store-core/src/types/connection.ts`), so the `!== 'disconnected'` test
+ *     is true and `disconnect()` does run.
+ *   * a user Disconnect — NOT this either. `disconnect()` is what set the
+ *     phase, so it has already cleared all sixteen.
+ *
+ * `serverCapabilities` looks like the sharpest member and is in fact the
+ * weakest: `auth_ok` full-replaces it unconditionally on BOTH branches, and
+ * store-core's auth handler normalises an omitted `capabilities` to `{}`, so
+ * even an older server B overwrites the stale map. The genuinely sharp one is
+ * `availablePermissionModes`, re-set only CONDITIONALLY (`message-handler.ts`,
+ * `if (auth.availablePermissionModes)`).
+ *
+ * That is #7559, and it is out of scope here (a conditional call, not a missing
+ * clear). Answer 2 therefore means "cleared by disconnect(), with #7559 open
+ * against that being enough" — stated rather than implied, so nobody reads this
+ * bucket as a clean bill of health.
  */
 describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one', () => {
   /**

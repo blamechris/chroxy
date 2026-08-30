@@ -48,6 +48,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
+import ts from 'typescript'
 
 // Mock localStorage before importing the store (same idiom as
 // session-reset-clears-pr-maps.test.ts — connection.ts reads persisted settings
@@ -145,59 +146,139 @@ function restoreFlatState() {
 }
 
 describe('#7555 the flat session mirror is derived, not hand-listed', () => {
-  const typesSrc = readFileSync(resolve(__dirname, 'types.ts'), 'utf8')
-  const coreSessionSrc = readFileSync(
-    resolve(__dirname, '../../../store-core/src/types/session.ts'),
-    'utf8',
-  )
+  // The derivation is the TypeScript CHECKER, not a regex over the source.
+  //
+  // PR #7564's review killed the regex version with the declaration style the
+  // repo already uses: `/^ {2}(\w+)\??: ([^\n]*)$/` requires the type to start
+  // on the same line as the colon, so a member written
+  //
+  //     lastTurnSummary:
+  //       | { text: string; at: number }
+  //       | null;
+  //
+  // was invisible to it — a genuine thirteenth flat field, never reset at any of
+  // the three sites, and the whole file stayed green at 53/53. That is not
+  // hypothetical about THIS interface: `ConnectionState` already declares
+  // `addMcpServer` across six lines, which is why the regex OVER-included it.
+  //
+  // `docs/false-safety-guards.md`, "a guard whose comment describes a stronger
+  // check than its code performs" — committed inside the guard written to
+  // prevent its cousin, which is the same way #7481 killed this file's ancestor.
+  //
+  // A shape-guard cell rejecting `/^ {2}\w+\??:\s*$/` would have closed THAT
+  // spelling. The checker closes the CLASS: it is the real `keyof
+  // ConnectionState & keyof SessionState`, the same expression the compile-time
+  // binding in `store/utils.ts` asserts the roster is a subset of — so the two
+  // halves of the contract are now written against one definition of "declared
+  // on both interfaces" rather than two.
+  const typesPath = resolve(__dirname, 'types.ts')
 
-  /** The body of a named interface, brace-matched (not line-counted). */
-  function interfaceBody(src: string, decl: string): string {
-    const i = src.indexOf(decl)
-    expect(i, `${decl} must exist`).toBeGreaterThan(-1)
-    const open = src.indexOf('{', i)
-    let depth = 0
-    let j = open
-    for (; j < src.length; j++) {
-      if (src[j] === '{') depth++
-      else if (src[j] === '}') { depth--; if (depth === 0) break }
+  /** Property names of a named interface, resolved by the checker. */
+  function interfaceProps(program: ts.Program, sf: ts.SourceFile, name: string): string[] {
+    let decl: ts.InterfaceDeclaration | null = null
+    ts.forEachChild(sf, (n) => {
+      if (ts.isInterfaceDeclaration(n) && n.name.text === name) decl = n
+    })
+    expect(decl, `interface ${name} must exist in ${sf.fileName}`).not.toBeNull()
+    return program
+      .getTypeChecker()
+      .getTypeAtLocation((decl as unknown as ts.InterfaceDeclaration).name)
+      .getProperties()
+      .map((s) => s.getName())
+  }
+
+  /** `keyof ConnectionState & keyof SessionState`, for a built program. */
+  function intersectionOf(program: ts.Program, sf: ts.SourceFile): string[] {
+    const conn = new Set(interfaceProps(program, sf, 'ConnectionState'))
+    return interfaceProps(program, sf, 'SessionState').filter((p) => conn.has(p)).sort()
+  }
+
+  /**
+   * A program over the REAL `types.ts`. `SessionState extends BaseSessionState`
+   * from `@chroxy/store-core`, and the checker follows that import itself — so
+   * unlike the regex version this needs no second hand-named source file, and a
+   * field moving between the base and the derived interface changes nothing.
+   */
+  const realProgram = ts.createProgram([typesPath], {
+    target: ts.ScriptTarget.ES2020,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    jsx: ts.JsxEmit.ReactJSX,
+    strict: true,
+    skipLibCheck: true,
+    noEmit: true,
+    allowImportingTsExtensions: true,
+    lib: ['lib.es2020.d.ts', 'lib.dom.d.ts', 'lib.dom.iterable.d.ts'],
+  })
+  const realSf = realProgram.getSourceFile(typesPath)!
+
+  /** A program over an in-memory synthetic source, for the phantom cells. */
+  function syntheticProgram(source: string): { program: ts.Program; sf: ts.SourceFile } {
+    const fileName = '/synthetic-state.ts'
+    const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.ES2020, true)
+    const host: ts.CompilerHost = {
+      getSourceFile: (f) => (f === fileName ? sf : undefined),
+      getDefaultLibFileName: () => 'lib.d.ts',
+      writeFile: () => {},
+      getCurrentDirectory: () => '/',
+      getDirectories: () => [],
+      fileExists: (f) => f === fileName,
+      readFile: (f) => (f === fileName ? source : undefined),
+      getCanonicalFileName: (f) => f,
+      useCaseSensitiveFileNames: () => true,
+      getNewLine: () => '\n',
     }
-    return src.slice(open, j + 1)
+    const program = ts.createProgram([fileName], { noLib: true, strict: true }, host)
+    return { program, sf: program.getSourceFile(fileName)! }
+  }
+  const syntheticIntersection = (source: string): string[] => {
+    const { program, sf } = syntheticProgram(source)
+    return intersectionOf(program, sf)
   }
 
-  /** Non-function members declared at the interface's own indent level. */
-  function members(body: string): string[] {
-    return [...body.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)]
-      .filter((m) => !/=>/.test(m[2]!.replace(/\/\/.*$/, '')))
-      .map((m) => m[1]!)
-  }
+  it('control: the checker really resolved both interfaces', () => {
+    // Non-vacuous in both directions. An unresolved program yields zero
+    // properties, which would make the intersection empty and every roster
+    // assertion below pass for free.
+    expect(realSf, 'types.ts must be in the program').toBeTruthy()
+    expect(
+      interfaceProps(realProgram, realSf, 'ConnectionState').length,
+      'no ConnectionState properties resolved',
+    ).toBeGreaterThan(300)
+    expect(
+      interfaceProps(realProgram, realSf, 'SessionState').length,
+      'no SessionState properties resolved — the store-core import did not resolve',
+    ).toBeGreaterThan(40)
+  })
 
-  /** The roster the two interfaces imply, from a given pair of sources. */
-  function intersectionFrom(dashSrc: string, coreSrc: string): string[] {
-    const conn = new Set(members(interfaceBody(dashSrc, 'export interface ConnectionState')))
-    const session = [
-      ...members(interfaceBody(dashSrc, 'export interface SessionState extends BaseSessionState')),
-      ...members(interfaceBody(coreSrc, 'export interface BaseSessionState')),
-    ]
-    return [...new Set(session)].filter((f) => conn.has(f)).sort()
-  }
-
-  const connMembers = members(interfaceBody(typesSrc, 'export interface ConnectionState'))
-  const sessionMembers = [
-    ...members(interfaceBody(typesSrc, 'export interface SessionState extends BaseSessionState')),
-    ...members(interfaceBody(coreSessionSrc, 'export interface BaseSessionState')),
-  ]
-
-  it('control: the extraction really read both interfaces', () => {
-    // Non-vacuous in both directions — an empty members list would make the
-    // intersection empty and the roster check below pass for free.
-    expect(connMembers.length, 'no ConnectionState members extracted').toBeGreaterThan(150)
-    expect(sessionMembers.length, 'no SessionState members extracted').toBeGreaterThan(40)
+  it('SessionState declares no callable property — so the intersection is data-only', () => {
+    // Why the intersection needs no function filter, asserted rather than
+    // assumed. `ConnectionState` mixes ~195 state members with ~200 ACTIONS, and
+    // a plain `keyof ∩ keyof` would happily include an action whose name
+    // collided with a session field — `createEmptyFlatSessionMirror` would then
+    // copy a function into flat state. It cannot happen while this holds, and
+    // if `SessionState` ever grows a callback member this cell says so instead
+    // of the roster quietly admitting one.
+    const checker = realProgram.getTypeChecker()
+    let decl: ts.InterfaceDeclaration | null = null
+    ts.forEachChild(realSf, (n) => {
+      if (ts.isInterfaceDeclaration(n) && n.name.text === 'SessionState') decl = n
+    })
+    const callable = checker
+      .getTypeAtLocation((decl as unknown as ts.InterfaceDeclaration).name)
+      .getProperties()
+      .filter((s) => {
+        const at = s.valueDeclaration ?? s.declarations?.[0]
+        if (!at) return false
+        return checker.getTypeOfSymbolAtLocation(s, at).getCallSignatures().length > 0
+      })
+      .map((s) => s.getName())
+    expect(callable, 'SessionState grew a callable property — re-adjudicate the roster').toEqual([])
   })
 
   it('the roster IS `keyof ConnectionState & keyof SessionState`', () => {
     expect(
-      intersectionFrom(typesSrc, coreSessionSrc),
+      intersectionOf(realProgram, realSf),
       'a field is declared on BOTH ConnectionState and SessionState but is not in the flat-mirror ' +
       'roster (or vice versa). Every such field holds the ACTIVE session\'s value at top level, so ' +
       'a site that empties the roster must reset it — add it to FLAT_SESSION_FIELDS in ' +
@@ -224,71 +305,143 @@ describe('#7555 the flat session mirror is derived, not hand-listed', () => {
 
   // ---- The derivation's own contract, on synthetic sources. -------------
   //
-  // Kept as PERMANENT cells rather than run once as a mutant, the same move
-  // `session-destroy-prunes-pr-maps.test.ts` makes for its site detector and
-  // for the same reason: a mutant proves the guard was alive on the day someone
-  // ran it, and these prove it is alive on every run. Named for what a real
+  // PERMANENT cells rather than one-off mutants, the same move
+  // `session-destroy-prunes-pr-maps.test.ts` makes for its site detector and for
+  // the same reason: a mutant proves the guard was alive on the day someone ran
+  // it, and these prove it is alive on every run. Named for what a real
   // thirteenth field would be called, not for the pattern that extracts it —
   // #7481's review killed a guard certified by a mutant named after its own
-  // regex.
-
-  const dashIface = (conn: string[], session: string[]): string =>
-    [
-      'export interface ConnectionState {',
-      ...conn.map((m) => `  ${m}`),
-      '}',
-      '',
-      'export interface SessionState extends BaseSessionState {',
-      ...session.map((m) => `  ${m}`),
-      '}',
-      '',
-    ].join('\n')
-  const coreIface = (members: string[]): string =>
-    ['export interface BaseSessionState {', ...members.map((m) => `  ${m}`), '}', ''].join('\n')
+  // regex, and #7564's review killed this one's regex outright.
 
   it('sees a phantom 13th field declared on BOTH interfaces', () => {
     // THE cell the roster exists for: a new flat field lands on both interfaces
     // and is RED until it joins the roster (which resets it at all three sites)
     // or someone says why it should not.
     expect(
-      intersectionFrom(
-        dashIface(['isIdle: boolean;', 'lastTurnSummary: string | null;'], ['selectedFilePath: string | null;']),
-        coreIface(['isIdle: boolean;', 'lastTurnSummary: string | null;']),
-      ),
+      syntheticIntersection(`
+        export interface ConnectionState {
+          isIdle: boolean;
+          lastTurnSummary: { text: string; at: number } | null;
+        }
+        export interface SessionState {
+          isIdle: boolean;
+          lastTurnSummary: { text: string; at: number } | null;
+          selectedFilePath: string | null;
+        }
+      `),
+    ).toEqual(['isIdle', 'lastTurnSummary'])
+  })
+
+  it('sees a phantom 13th field whose TYPE starts on the next line', () => {
+    // #7564 review, finding 1 — the exact evasion that took the regex version
+    // to 53/53 green, byte for byte, kept as a cell so the spelling cannot come
+    // back as a blind spot. The six-line `addMcpServer` beside it is the shape
+    // that already exists at types.ts (the regex OVER-included it), here to
+    // prove the checker is not merely tolerant of multi-line members but
+    // correct about them: an action must NOT enter the intersection.
+    expect(
+      syntheticIntersection(`
+        export interface ConnectionState {
+          isIdle: boolean;
+          lastTurnSummary:
+            | { text: string; at: number }
+            | null;
+          addMcpServer: (
+            name: string,
+            cfg: { command: string },
+            scope: 'user' | 'project',
+          ) => void;
+        }
+        export interface SessionState {
+          isIdle: boolean;
+          lastTurnSummary: { text: string; at: number } | null;
+          selectedFilePath: string | null;
+        }
+      `),
     ).toEqual(['isIdle', 'lastTurnSummary'])
   })
 
   it('does not read members off a NEIGHBOURING interface', () => {
-    // types.ts declares plenty of other two-space-indented interfaces. A field
-    // that happens to be named the same on one of them is not store state, and
-    // extracting it would make the roster permanently red on a phantom.
-    const dash = [
-      'export interface ConnectionState {',
-      '  isIdle: boolean;',
-      '}',
-      '',
-      'export interface McpServerConfig {',
-      '  claudeReady: boolean;',
-      '}',
-      '',
-      'export interface SessionState extends BaseSessionState {',
-      '  selectedFilePath: string | null;',
-      '}',
-      '',
-    ].join('\n')
-    expect(intersectionFrom(dash, coreIface(['isIdle: boolean;', 'claudeReady: boolean;']))).toEqual(['isIdle'])
+    // types.ts declares plenty of other interfaces. A field that happens to be
+    // named the same on one of them is not store state, and extracting it would
+    // make the roster permanently red on a phantom.
+    expect(
+      syntheticIntersection(`
+        export interface ConnectionState { isIdle: boolean; }
+        export interface McpServerConfig { claudeReady: boolean; }
+        export interface SessionState { isIdle: boolean; claudeReady: boolean; }
+      `),
+    ).toEqual(['isIdle'])
   })
 
-  it('does not mistake a function-typed member for state', () => {
-    // ConnectionState is ~195 state members and ~200 ACTIONS. An action name
-    // that collided with a SessionState field would otherwise enter the roster
-    // and make `createEmptyFlatSessionMirror` write a function into flat state.
+  it('an action that exists on ConnectionState alone stays out of the roster', () => {
+    // The over-inclusion half. `ConnectionState` is roughly half actions; the
+    // intersection must be indifferent to all of them.
     expect(
-      intersectionFrom(
-        dashIface(['isIdle: boolean;', 'setIsIdle: (v: boolean) => void;'], ['selectedFilePath: string | null;']),
-        coreIface(['isIdle: boolean;', 'setIsIdle: (v: boolean) => void;']),
-      ),
+      syntheticIntersection(`
+        export interface ConnectionState {
+          isIdle: boolean;
+          switchSession: (id: string) => boolean;
+          setViewMode: (m: 'chat' | 'terminal') => void;
+        }
+        export interface SessionState { isIdle: boolean; selectedFilePath: string | null; }
+      `),
     ).toEqual(['isIdle'])
+  })
+
+  it('follows `extends`, so a base-interface field still counts', () => {
+    // The real `SessionState extends BaseSessionState` from @chroxy/store-core,
+    // in miniature. The regex version needed the base file named by hand; the
+    // checker does not, and a field MOVING between the two must not change the
+    // roster.
+    expect(
+      syntheticIntersection(`
+        export interface BaseSessionState { isIdle: boolean; }
+        export interface ConnectionState { isIdle: boolean; selectedFilePath: string | null; }
+        export interface SessionState extends BaseSessionState { selectedFilePath: string | null; }
+      `),
+    ).toEqual(['isIdle', 'selectedFilePath'])
+  })
+
+
+  it('the not-mirrored exclusion list names only REAL roster fields', async () => {
+    // #7564 review, finding 2 (Copilot's thread). `Record<string, string>`
+    // accepted any key, so `primaryClientld` (lowercase L) silently promoted
+    // `primaryClientId` back into the mirror with tsc and 1458 store tests
+    // green. The `satisfies Partial<Record<FlatSessionField, string>>` in
+    // utils.ts is the primary fix and turns that typo into a COMPILE error;
+    // this is the runtime half, so the pin survives a future widening of the
+    // declared type.
+    const { FLAT_SESSION_FIELDS, FLAT_SESSION_FIELDS_NOT_MIRRORED, UPDATE_SESSION_MIRRORED_FIELDS } =
+      await import('./utils')
+    const roster = new Set<string>(FLAT_SESSION_FIELDS)
+    const excluded = Object.keys(FLAT_SESSION_FIELDS_NOT_MIRRORED)
+    expect(
+      excluded.filter((k) => !roster.has(k)),
+      'a not-mirrored key is not a FLAT_SESSION_FIELDS member — a typo here silently MIRRORS the ' +
+      'field it was meant to exclude. #7564',
+    ).toEqual([])
+    // Non-vacuous: the list is not empty, so the filter above is doing work.
+    expect(excluded.length, 'the exclusion list is empty — this cell proves nothing').toBe(2)
+    // …and the derived list really is the roster MINUS exactly those keys.
+    expect([...UPDATE_SESSION_MIRRORED_FIELDS].sort())
+      .toEqual([...FLAT_SESSION_FIELDS].filter((f) => !excluded.includes(f)).sort())
+    // Every exclusion carries a reason, not a placeholder.
+    for (const [k, reason] of Object.entries(FLAT_SESSION_FIELDS_NOT_MIRRORED)) {
+      expect(reason.length, `${k} needs a real reason`).toBeGreaterThan(40)
+    }
+  })
+
+  it('the exclusion filter reads OWN properties, not the prototype chain', () => {
+    // `in` would exclude a flat field named `toString` / `constructor` /
+    // `valueOf` on the strength of Object.prototype alone, silently dropping it
+    // from the mirror. Proven on the same predicate the source uses, because
+    // no such field exists yet to prove it on directly (#7564 review).
+    const excl = { primaryClientId: 'x' } as Record<string, string>
+    const own = (f: string) => Object.prototype.hasOwnProperty.call(excl, f)
+    expect('toString' in excl, 'the prototype-chain hazard is real').toBe(true)
+    expect(own('toString'), 'hasOwnProperty must not see the prototype chain').toBe(false)
+    expect(own('primaryClientId')).toBe(true)
   })
 
   it("updateSession's mirror block has no hand-written field assignment left", () => {

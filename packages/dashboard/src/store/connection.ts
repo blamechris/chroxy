@@ -3329,7 +3329,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // NOT cleared at `auth_ok`'s non-reconnect branch, deliberately: that
       // branch is also reached by Disconnect → Connect to the SAME server, and
       // a preset for a cwd is still true there. The server-switch path reaches
-      // it too, but `_resetSessionMemory` has already run by then.
+      // it too, but `_resetSessionMemory` has already run by then. Every OTHER
+      // route into that branch is covered not by a caller census but by
+      // `connect()`'s own url-differs self-clear a few hundred lines up, which
+      // calls THIS action — see the invariant cell in
+      // session-preset-snapshots-lifecycle.test.ts (#7564 review).
       sessionPresetSnapshots: {},
       // #7555 — the FLAT session mirror: the twelve ConnectionState fields that
       // hold the ACTIVE session's value (`isIdle`, `claudeReady`, the context

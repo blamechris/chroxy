@@ -41,10 +41,35 @@
  *   to the SAME server, where a preset for a cwd is still true; dropping it
  *   would make every reconnect re-fetch a drawer the user is reading. It is also
  *   reached on the server-switch route, but only AFTER `_resetSessionMemory` has
- *   already cleared the map. The one remaining route into that branch —
- *   `connectToServer` — cannot carry another server's presets: its two callers
- *   are App.tsx's mount-only effect (a fresh page load, where the store starts
- *   at `{}`) and `retryConnection`, which targets the server already active.
+ *   already cleared the map.
+ *
+ *   What makes that safe on every OTHER route into the branch is an INVARIANT,
+ *   not a caller census. PR #7564's review is why this is worded that way: the
+ *   first draft claimed `connectToServer` was "the one remaining route" and
+ *   named its two callers, and the reviewer found four more — `retryConnection`'s
+ *   LOCAL branch, `useTauriEvents`' `server_ready`, the `visibilitychange` retry,
+ *   and `scheduleRetry`. A census goes stale the moment someone adds a caller.
+ *   The invariant does not:
+ *
+ *       // connection.ts, inside connect()
+ *       const currentUrl = get().wsUrl;
+ *       if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
+ *         get().forgetSession();
+ *         clearMessageQueue();
+ *       }
+ *
+ *   `connect()` self-clears via `forgetSession()` — which this PR makes clear
+ *   `sessionPresetSnapshots` — whenever the target URL differs from the last
+ *   one. So reaching `auth_ok` against a DIFFERENT daemon has already dropped
+ *   the presets, by a different door than `_resetSessionMemory`. The cell at the
+ *   bottom of this file drives that door end to end.
+ *
+ *   The one hole, named rather than omitted: that guard is
+ *   `_retryCount === 0`-conditional, and `scheduleRetry` always re-enters with
+ *   `nextAttempt >= 1`, so a mid-ladder host change would slip past it.
+ *   Unreachable today — there is no `storage` listener in the dashboard, and
+ *   `applyRotatedTunnelUrlDashboard` repoints to a new tunnel for the SAME
+ *   daemon — but it is where this argument ends.
  * - `session_list` `removedIds` — DOES NOT APPLY. `removedIds` holds session
  *   ids; this map is keyed by cwd, so there is nothing to diff against.
  *
@@ -230,6 +255,39 @@ describe('#7488 the cross-server bleed, end to end', () => {
     )
     expect(useConnectionStore.getState().sessionPresetSnapshots[SHARED_CWD]?.preamble)
       .toBe('SECRET PREAMBLE FROM SERVER A')
+  })
+
+  it('INVARIANT: connect() to a DIFFERENT url self-clears the presets via forgetSession', () => {
+    // #7564 review, finding 6 — the thing the adjudication actually rests on,
+    // converted from prose into a test. This is the door that defuses every
+    // route into `auth_ok`'s non-reconnect branch that does NOT go through
+    // `_resetSessionMemory` (the Tauri `server_ready` handler, the
+    // visibilitychange retry, `retryConnection`'s local branch): a first-attempt
+    // `connect()` whose target url differs from `wsUrl` calls `forgetSession()`,
+    // and `forgetSession` clears this map.
+    useConnectionStore.setState({ wsUrl: 'wss://server-a' })
+    expect(
+      useConnectionStore.getState().sessionPresetSnapshots[SHARED_CWD]?.preamble,
+      'control: server A presets are in the store before the connect',
+    ).toBe('SECRET PREAMBLE FROM SERVER A')
+    useConnectionStore.getState().connect('wss://server-b', 'tok')
+    expect(
+      useConnectionStore.getState().sessionPresetSnapshots,
+      "connect() to a different url must self-clear server A's presets",
+    ).toEqual({})
+    useConnectionStore.getState().disconnect()
+  })
+
+  it('INVARIANT control: connect() to the SAME url does NOT self-clear', () => {
+    // The negative half — otherwise the cell above would pass on a `connect()`
+    // that cleared unconditionally, which would silently drop the presets on
+    // every ordinary reconnect and make the whole `auth_ok`-KEEP adjudication
+    // moot.
+    useConnectionStore.setState({ wsUrl: 'wss://server-a' })
+    useConnectionStore.getState().connect('wss://server-a', 'tok')
+    expect(useConnectionStore.getState().sessionPresetSnapshots[SHARED_CWD]?.preamble)
+      .toBe('SECRET PREAMBLE FROM SERVER A')
+    useConnectionStore.getState().disconnect()
   })
 
   it('a session_list that removes a session does NOT touch the map', () => {
