@@ -68,7 +68,7 @@ export function getJsonlMtime(filePath) {
 
 /**
  * Parse raw JSONL text into Chroxy message format.
- * Shared by both sync and async readers.
+ * Shared parse core for the reader.
  *
  * Returns the parsed slice ALONGSIDE whether content was dropped to produce it
  * (#7484). Two independent things can drop content, and a caller cannot infer
@@ -173,7 +173,7 @@ function parseJsonlContent(raw, { byteTruncated = false } = {}) {
 }
 
 /**
- * The ONE transcript reader (#7484/#7520): returns { messages, truncated } so
+ * This module's sole exported transcript reader (#7484/#7520; conversation-search/-scanner and transcript-tasks read transcripts their own way): returns { messages, truncated } so
  * a caller can report the slice's own truncation. The sync and array-returning
  * variants were removed in #7520 — the array shape structurally cannot report
  * truncation, which is the false-safety footgun this file used to carry.
@@ -199,7 +199,7 @@ export async function readConversationHistoryWithMetaAsync(filePath, maxBytes = 
 }
 
 /**
- * Async variant of readTailBytesSync — read the last `maxBytes` of a file so an
+ * Read the last `maxBytes` of a file so an
  * oversized transcript read stays bounded (see MAX_TRANSCRIPT_BYTES).
  */
 async function readTailBytesAsync(filePath, maxBytes) {

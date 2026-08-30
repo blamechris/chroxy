@@ -497,43 +497,6 @@ describe('readConversationHistoryWithMetaAsync — read behaviour', () => {
     assert.deepEqual(result, [])
   })
 
-  it('produces identical output to sync variant', async () => {
-    setup()
-    try {
-      const filePath = writeJsonl('test.jsonl', [
-        {
-          type: 'user',
-          uuid: 'u1',
-          timestamp: '2026-01-15T10:00:00.000Z',
-          message: { content: [{ type: 'text', text: 'Hello Claude' }] },
-        },
-        {
-          type: 'assistant',
-          uuid: 'a1',
-          timestamp: '2026-01-15T10:01:00.000Z',
-          message: {
-            content: [
-              { type: 'text', text: 'Hi there!' },
-              { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/x' } },
-            ],
-          },
-        },
-        { type: 'queue-operation', data: {} },
-      ])
-
-      const syncResult = (await readConversationHistoryWithMetaAsync(filePath)).messages
-      const asyncResult = (await readConversationHistoryWithMetaAsync(filePath)).messages
-
-      assert.deepEqual(asyncResult, syncResult)
-      assert.equal(asyncResult.length, 3)
-      assert.equal(asyncResult[0].type, 'user_input')
-      assert.equal(asyncResult[1].type, 'response')
-      assert.equal(asyncResult[2].type, 'tool_use')
-    } finally {
-      teardown()
-    }
-  })
-
   it('handles malformed JSON lines', async () => {
     setup()
     try {
@@ -602,21 +565,6 @@ describe('transcript byte ceiling', () => {
         'the most-recent message must be retained')
       assert.ok(!capped.some(m => m.content === 'message-0'),
         'the earliest message must be dropped by the tail cap')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('sync: caps an oversized transcript to a tail window', async () => {
-    setup()
-    try {
-      const filePath = writeJsonl('big.jsonl', manyEntries(50))
-      const full = (await readConversationHistoryWithMetaAsync(filePath)).messages
-      assert.equal(full.length, 50)
-      const capped = (await readConversationHistoryWithMetaAsync(filePath, 200)).messages
-      assert.ok(capped.length > 0 && capped.length < 50)
-      assert.equal(capped[capped.length - 1].content, 'message-49')
-      assert.ok(!capped.some(m => m.content === 'message-0'))
     } finally {
       teardown()
     }
