@@ -8307,6 +8307,135 @@ describe('dashboard message-handler dispatch', () => {
       expect(states.unknown).toBeUndefined()
     })
 
+    // #7518 — the resync moved to the SHARED store-core dispatch table so the
+    // mobile app could stop being a false negative. These three pin the parts of
+    // the dashboard's prior local case that a lift could quietly change: the
+    // write's SCOPE, and the deliberate absence of an active-session fallback.
+    it('SCOPE — session_activity writes isIdle only, not the turn-boundary fields', () => {
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: {
+              ...createEmptySessionState(),
+              isIdle: false,
+              streamingMessageId: 'live-1',
+              activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }],
+            },
+          },
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_activity', sessionId: 's1', isBusy: false } as any,
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+      // agent_idle clears both of these; this reconciliation must not — #7500's
+      // replay synthesis and #7508's prompt resend own them.
+      expect(ss.streamingMessageId).toBe('live-1')
+      expect(ss.activeTools).toHaveLength(1)
+    })
+
+    it('SCOPE — the session_list resync writes isIdle only', () => {
+      store = createMockStore(
+        baseState({
+          sessionStates: {
+            s1: {
+              ...createEmptySessionState(),
+              isIdle: false,
+              streamingMessageId: 'live-1',
+              activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }],
+            },
+          },
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: false } as any] },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+      expect(ss.streamingMessageId).toBe('live-1')
+      expect(ss.activeTools).toHaveLength(1)
+    })
+
+    it('session_activity without a sessionId does NOT fall back to the active session', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage({ type: 'session_activity', isBusy: true } as any, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(true)
+    })
+
+    it('the session_list resync leaves isIdle alone when the snapshot omits isBusy', () => {
+      store = createMockStore(
+        baseState({
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: false } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1' } as any] },
+        ctx() as any,
+      )
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(false)
+    })
+
+    it('the session_list resync never COERCES a non-boolean isBusy (both truthy and falsy)', () => {
+      // A `!isBusy` coercion is only visible from the side whose inversion
+      // differs from the seeded value, so both arms are needed — one alone
+      // passes under the mutant it is meant to catch.
+      store = createMockStore(
+        baseState({
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: 'yes' } as any] },
+        ctx() as any,
+      )
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(true)
+
+      store = createMockStore(
+        baseState({
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: false } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: null } as any] },
+        ctx() as any,
+      )
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(false)
+    })
+
+    it('session_activity never COERCES a non-boolean isBusy (both truthy and falsy)', () => {
+      store = createMockStore(
+        baseState({
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: true } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage({ type: 'session_activity', sessionId: 's1', isBusy: 'no' } as any, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(true)
+
+      store = createMockStore(
+        baseState({
+          sessionStates: { s1: { ...createEmptySessionState(), isIdle: false } },
+        } as any),
+      )
+      setStore(store)
+      handleMessage({ type: 'session_activity', sessionId: 's1', isBusy: null } as any, ctx() as any)
+      expect((store.getState() as any).sessionStates.s1.isIdle).toBe(false)
+    })
+
     it('session_activity syncs the flat isIdle when the active session changes', () => {
       // When the active session's busy state changes, the flat-state mirror
       // (read by App.tsx's `isBusy={!isIdle}` props) must update too so the

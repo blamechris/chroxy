@@ -121,6 +121,42 @@ export function handleAgentBusy(): { isIdle: false } {
 }
 
 // ---------------------------------------------------------------------------
+// session_activity (#4639 / #7518)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a `session_activity` ping into the `isIdle` the server's authoritative
+ * `isBusy` implies — the LIVE half of the #4639 resync.
+ *
+ * `ws-forwarding.js` broadcasts this to every authenticated client on
+ * `stream_start` (`isBusy: true`) and `result` (`isBusy: false`), for EVERY
+ * session, so it is the only per-session busy channel that moves on a turn
+ * boundary (`sessions[].isBusy` from `session_list` is a create/destroy/switch
+ * snapshot; flat `isIdle` mirrors the active session alone).
+ *
+ * Returns `null` — the caller writes nothing — when either field is missing or
+ * the wrong type. There is deliberately NO active-session fallback: unlike
+ * `agent_idle`, this ping always carries an explicit `sessionId`
+ * (`ServerSessionActivitySchema` requires it), and resolving a malformed one
+ * onto the active session would apply another session's busy state to the tab
+ * the user is looking at.
+ *
+ * The patch is `isIdle` ALONE. `agent_idle` additionally clears
+ * `streamingMessageId` + `activeTools` because it marks a turn BOUNDARY; this is
+ * a state reconciliation against a snapshot, and clearing turn-scoped state on
+ * it would fight the #7500 replay synthesis and #7508's pending-question resend
+ * for fields they own.
+ */
+export function handleSessionActivity(
+  msg: Record<string, unknown>,
+): { sessionId: string; isIdle: boolean } | null {
+  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  if (!sessionId) return null
+  if (typeof msg.isBusy !== 'boolean') return null
+  return { sessionId, isIdle: !msg.isBusy }
+}
+
+// ---------------------------------------------------------------------------
 // thinking_level_changed
 // ---------------------------------------------------------------------------
 

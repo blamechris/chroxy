@@ -13,6 +13,7 @@ import {
   handleClaudeReady,
   handleAgentIdle,
   handleAgentBusy,
+  handleSessionActivity,
   handleThinkingLevelChanged,
   handleBudgetWarning,
   handleBudgetExceeded,
@@ -464,6 +465,57 @@ describe('handleAgentIdle', () => {
 describe('handleAgentBusy', () => {
   it('returns isIdle: false', () => {
     expect(handleAgentBusy()).toEqual({ isIdle: false })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionActivity (#4639 / #7518)
+// ---------------------------------------------------------------------------
+describe('handleSessionActivity', () => {
+  it('inverts the server isBusy into the isIdle it implies', () => {
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: false })).toEqual({
+      sessionId: 's1',
+      isIdle: true,
+    })
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: true })).toEqual({
+      sessionId: 's1',
+      isIdle: false,
+    })
+  })
+
+  it('returns ONLY isIdle — never the turn-boundary fields agent_idle clears', () => {
+    // The distinction is load-bearing, not stylistic: agent_idle marks a turn
+    // BOUNDARY and so clears streamingMessageId + activeTools (#4308). This ping
+    // is a state reconciliation that can arrive at any time, and widening it
+    // would let a routine broadcast wipe state #7500's replay synthesis and
+    // #7508's pending-question resend own.
+    expect(Object.keys(handleSessionActivity({ sessionId: 's1', isBusy: false })!).sort()).toEqual([
+      'isIdle',
+      'sessionId',
+    ])
+  })
+
+  it('returns null without an explicit string sessionId — NO active-session fallback', () => {
+    // ServerSessionActivitySchema requires sessionId. Resolving a malformed one
+    // onto the active session would apply ANOTHER session's busy state to the
+    // tab the user is looking at.
+    expect(handleSessionActivity({ isBusy: true })).toBeNull()
+    expect(handleSessionActivity({ sessionId: 42, isBusy: true })).toBeNull()
+    expect(handleSessionActivity({ sessionId: null, isBusy: true })).toBeNull()
+  })
+
+  it('returns null when isBusy is missing or a non-boolean (never coerces)', () => {
+    expect(handleSessionActivity({ sessionId: 's1' })).toBeNull()
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: 'yes' })).toBeNull()
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: 1 })).toBeNull()
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: null })).toBeNull()
+  })
+
+  it('ignores lastCost — this handler owns busy state only', () => {
+    expect(handleSessionActivity({ sessionId: 's1', isBusy: false, lastCost: 1.23 })).toEqual({
+      sessionId: 's1',
+      isIdle: true,
+    })
   })
 })
 
@@ -2479,6 +2531,53 @@ describe('buildSessionListPatches', () => {
     const sessions = [makeSession('s1'), makeSession('s2')]
     const out = buildSessionListPatches({ sessions }, ['s1'], null)
     expect(out!.removedIds).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // isIdlePatches (#4639 derivation, lifted here by #7518)
+  //
+  // The dashboard has re-derived isIdle from the server's authoritative isBusy
+  // since #4639; the app had no such path at all, which made the server's
+  // `isRunning`-gated JSONL replay heal a mobile false negative (#7507/#7518).
+  // The `!` inversion and the "only a boolean is an opinion" rule live HERE so
+  // the two clients cannot drift on them.
+  // -------------------------------------------------------------------------
+  it('maps isBusy to the isIdle it implies, for every session that states one', () => {
+    const sessions = [
+      makeSession('busy', { isBusy: true }),
+      makeSession('idle', { isBusy: false }),
+    ]
+    const out = buildSessionListPatches({ sessions }, ['busy', 'idle'], null)
+    expect(out!.isIdlePatches.get('busy')).toBe(false)
+    expect(out!.isIdlePatches.get('idle')).toBe(true)
+  })
+
+  it('OMITS a session whose entry has no isBusy — an older server has no opinion', () => {
+    const s1 = makeSession('s1') as Partial<SessionInfo>
+    delete s1.isBusy
+    const out = buildSessionListPatches({ sessions: [s1] }, ['s1'], null)
+    expect(out!.isIdlePatches.has('s1')).toBe(false)
+    expect(out!.isIdlePatches.size).toBe(0)
+  })
+
+  it('OMITS a session whose isBusy is a non-boolean (never coerces)', () => {
+    const sessions = [
+      { ...makeSession('truthy'), isBusy: 'yes' },
+      { ...makeSession('nullish'), isBusy: null },
+      { ...makeSession('numeric'), isBusy: 1 },
+    ] as unknown as SessionInfo[]
+    const out = buildSessionListPatches({ sessions }, ['truthy', 'nullish', 'numeric'], null)
+    expect(out!.isIdlePatches.size).toBe(0)
+  })
+
+  it('covers NEW and EXISTING sessions alike — the map is not filtered by newSessionIds', () => {
+    // Consumers use it twice: to seed a fresh shell and to resync a session the
+    // client already tracks. A map scoped to either half would silently drop the
+    // other, which is exactly the arm the app was missing.
+    const sessions = [makeSession('known', { isBusy: true }), makeSession('fresh', { isBusy: true })]
+    const out = buildSessionListPatches({ sessions }, ['known'], null)
+    expect(out!.newSessionIds).toEqual(['fresh'])
+    expect([...out!.isIdlePatches.keys()].sort()).toEqual(['fresh', 'known'])
   })
 
   it('lists new sessions not present in prevSessionStateIds in snapshot order', () => {

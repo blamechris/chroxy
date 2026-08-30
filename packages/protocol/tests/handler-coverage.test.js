@@ -161,7 +161,11 @@ const PLATFORM_SPECIFIC = {
   // same write-callback → xterm path as 'raw'); no PLATFORM_SPECIFIC entry
   // needed. Coverage passes because each handler has a `case 'terminal_output':`.
   'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); mobile applies resize from its own pane measurement (#5987) but does not yet consume the server's terminal_size echo, so still dashboard-only
-  'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
+  // 'session_activity' removed from PLATFORM_SPECIFIC — #7518 lifted the #4639
+  // isBusy → isIdle resync out of the dashboard's switch into the SHARED
+  // store-core dispatch table, so both clients now handle it (the mobile gap was
+  // a live false negative: the server's JSONL replay heal is gated on the same
+  // `isRunning` this ping publishes). Coverage passes via extractSharedDispatchTypes.
   // 'activity_snapshot' / 'activity_delta' removed from PLATFORM_SPECIFIC — the
   // mobile app now feeds them too (#6246/#6247, the Phase-2 mobile-parity
   // fast-follow per epic #5159), so they are BOTH-CLIENTS and the coverage test

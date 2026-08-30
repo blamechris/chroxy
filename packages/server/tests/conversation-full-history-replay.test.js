@@ -731,9 +731,10 @@ describe('#7484 — request_full_history heals the chip on the JSONL path too', 
  * decision is recorded as behaviour: in that state the heal is SUPPRESSED.
  * Narrowing the guard to `_isBusy` flips the first test below, which is exactly
  * what should happen — the choice is consistency with the server's single busy
- * authority (`listSessions().isBusy` is the same `isRunning`, and the dashboard
- * re-derives `isIdle` from it on every `session_list` / `session_activity`,
- * #4639), and it is a choice, not an accident.
+ * authority (`listSessions().isBusy` is the same `isRunning`, and BOTH clients
+ * re-derive `isIdle` from it on every `session_list` / `session_activity`:
+ * #4639 for the dashboard, #7518 for the mobile app), and it is a choice, not an
+ * accident.
  *
  * `getFullHistoryAsync` is stubbed to a JSONL descriptor because the transcript
  * READ is not what is under test here (it is pinned at the producer, in

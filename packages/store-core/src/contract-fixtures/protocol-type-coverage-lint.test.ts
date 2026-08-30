@@ -158,7 +158,9 @@ const DASHBOARD_ONLY = new Set<string>([
   // #6323 (batch 1 of #6314): schemaing these surfaced an existing asymmetry —
   // both are handled by the dashboard only today (the app has no `case`). Not
   // introduced here; the schema just made the lint see them.
-  'session_activity',           // per-session busy/idle + cost ping — dashboard activity tree only
+  // session_activity removed — #7518 lifted the #4639 isBusy → isIdle resync into
+  // the SHARED store-core dispatch table, so the mobile app consumes it too. The
+  // asymmetry this line recorded was the #7507 mobile false negative, not a design.
   'symbols_snapshot',           // #6471 (epic #6469) opt-in IDE workspace symbol table — dashboard symbol panel (#6472) only for v1; mobile parity is a tracked fast-follow
   'symbol_location',            // #6475 (epic #6469) opt-in IDE go-to-definition result — dashboard file viewer cmd/ctrl+click jump; dashboard-only for v1, mobile parity deferred
   'code_search_results',        // #6474 (epic #6469) opt-in IDE find-in-project results — dashboard Cmd+Shift+F palette; distinct from cross-session `search_results`; dashboard-only for v1

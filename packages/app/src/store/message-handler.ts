@@ -2265,6 +2265,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         sessionList,
         removedIds,
         newSessionIds,
+        isIdlePatches,
         conversationIdPatches,
         cumulativeUsagePatches,
         backgroundShellBuilders,
@@ -2310,7 +2311,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         set(patch);
       }
       set({ sessions: sessionList });
-      // Initialize session state for any new sessions not yet tracked
+      // Initialize session state for any new sessions not yet tracked.
+      //
+      // #7518 — the fresh shell keeps its default `isIdle: true`; the resync
+      // below is what applies the snapshot's `isBusy` to it, INCLUDING for a
+      // brand-new entry (`isIdlePatches` is not filtered to existing sessions).
+      // This is a deliberate divergence from the dashboard's #4639 seed, and the
+      // reason is app-only: this client derives `activityState` inside
+      // `updateSession`. Writing `isIdle` straight into the shell would bypass
+      // that derivation, and the resync would then short-circuit on
+      // `ss.isIdle === desired` — leaving a session that reads busy whose chat
+      // lozenge still says idle. One writer, one derivation.
       if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newStates = { ...currentStates };
@@ -2320,6 +2331,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           }
         }
         set({ sessionStates: newStates });
+      }
+      // #7518: resync `isIdle` on EXISTING session states against the snapshot
+      // (the #4639 resync the dashboard has had since then; the app had NEITHER
+      // this nor `session_activity`, so `agent_idle` was its only `isIdle`
+      // writer). That mattered because the server's JSONL full-history replay
+      // suppresses its synthesized `agent_idle` while `isSessionBusy` reports the
+      // session live — and "live" includes an un-polled
+      // `Bash(run_in_background: true)` shell whose turn already ended. On the
+      // dashboard the next `session_list` / `session_activity` corrects that; on
+      // mobile nothing did, so a stale tool chip survived until the shell was
+      // polled, the session was destroyed, or the 4h hard quiesce reaped it
+      // (#7507). Sessions whose entry omits `isBusy` are absent from the map, so
+      // an older server leaves the local value alone.
+      //
+      // `isIdle` ONLY. `agent_idle` also clears `streamingMessageId` +
+      // `activeTools` because it is a turn BOUNDARY; a snapshot resync is not,
+      // and widening it here would fight #7500's replay synthesis and #7508's
+      // pending-question resend for state they own.
+      for (const [sid, desiredIsIdle] of isIdlePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
       }
       // Sync conversationId from session list into session states
       for (const [sid, cid] of conversationIdPatches) {

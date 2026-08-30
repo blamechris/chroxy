@@ -620,6 +620,9 @@ export {
   handleClaudeReady,
   handleAgentIdle,
   handleAgentBusy,
+  // #7518 — `session_activity` → { sessionId, isIdle }; the LIVE half of the
+  // #4639 isBusy resync, now shared by both clients via the dispatch table.
+  handleSessionActivity,
   handleThinkingLevelChanged,
   handleBudgetWarning,
   handleBudgetExceeded,
