@@ -269,8 +269,17 @@ function idOf(message: unknown): string | null {
  * prefix collapses the cut towards 0 — an identity slice, i.e. a swap that
  * silently does not happen and leaves the discarded prefix on screen for the
  * life of the connection. That is #7477's failure, not #7524's, and it is worse
- * than the index this degrades to. Every `ChatMessage` carries a non-empty
- * string id, so this is a floor and not a live path.
+ * than the index this degrades to.
+ *
+ * How reachable, stated rather than assumed: the `ChatMessage` TYPE requires a
+ * non-empty string id and no producer omits one, but the type is not enforced on
+ * REHYDRATION — `loadSessionMessages` (dashboard `persistence.ts:688-707`, and
+ * the app's equivalent) returns `Array.isArray(parsed) ? parsed : []` straight
+ * out of `JSON.parse(localStorage)` with no per-element validation. A legacy or
+ * corrupt blob can therefore seed an id-less entry, and ONE anywhere in the
+ * prefix reverts that whole window to the pre-#7524 index — silently, with no
+ * signal that it happened. The degradation is deliberate and pinned; "floor,
+ * not a live path" was too strong.
  */
 function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
   const prefixIds: string[] = []
@@ -285,24 +294,62 @@ function snapshotPrefix(messages: readonly unknown[]): RebuildBaseline {
 /**
  * Where to cut `messages` for this baseline, RIGHT NOW.
  *
- * A strict positional walk: each recorded prefix id in turn either matches the
- * next unconsumed message — consuming it — or is skipped as removed. Removals
- * anywhere in the prefix (front, middle, or all of it) move the cut by exactly
- * the number removed, and appends never move it at all, because the walk can
- * never consume more entries than the prefix held.
+ * A greedy SUBSEQUENCE walk. Being exact about that is the point of this
+ * paragraph: the first version of it claimed the walk "can only ever
+ * UNDER-advance", which is false, and a comment describing a stronger check
+ * than its code performs is its own catalogued defect (#7290, #7291).
  *
- * Strict, and deliberately NOT a search-ahead. A walk allowed to skip forward
- * would match a removed id against a copy the full replay re-delivers LATER,
- * and cut PAST the replayed set — losing it. Strict matching can only ever
- * UNDER-advance, and under-advancing retains one stale prefix entry for a
- * single swap. Retention is visible and self-heals on the next full replay;
- * loss is silent and permanent. Same ordering #7492's adjudication settled on,
- * applied to the residual instead of to the defect.
+ * Each recorded prefix id in turn is compared against the message sitting AT the
+ * cut. On a match the cut advances by one; otherwise that prefix id is skipped
+ * as removed and the NEXT one is tried against the SAME message. So
+ * `messages[0..cut)` is the greedy prefix of `messages` that matches
+ * `prefixIds` as a subsequence, and `cut <= openLen` always — the walk can never
+ * consume more entries than the prefix held. It does NOT stop at the first
+ * mismatch, and must not: a stop-on-mismatch walk returns 0 for a removal at the
+ * FRONT of the prefix.
  *
- * Cost is O(openLen), against a `messages.slice()` both callers already pay on
- * every call, so it changes no asymptotics — and it is recomputed rather than
- * memoised, because a cache keyed on anything this module can see (a length, an
- * array identity) is exactly what shrink-then-append defeats.
+ * What that buys, stated as narrowly as it is true:
+ *
+ *   - Appends never move the cut. Whatever is appended sits past the surviving
+ *     prefix, and the walk halts at the first message that does not continue the
+ *     match.
+ *   - A removal moves the cut BACK by the number removed, UNLESS the message now
+ *     at the cut equals one of the prefix ids the walk has not yet tried — i.e.
+ *     unless the replay re-delivers, at exactly that position, an id from the
+ *     removed part of the prefix.
+ *
+ * KNOWN LIMIT (#7543), pinned rather than left to be discovered. When the
+ * surviving prefix runs out and the tail continues the match, the walk marches
+ * into the replayed tail and the swap discards it. Measured: `[]` for a
+ * whole-prefix-removed window whose ids the replay re-delivers in order, and
+ * `['c']` — the cut moved by ZERO after two removals — for the
+ * splice-then-re-append shape. `main` returns those same two values, so this is
+ * the #7524 symptom in a shape identity cannot reach, not something identity
+ * broke. Because `replayHistory` re-delivers oldest-first, a prefix entry
+ * surviving at the front normally blocks it (the oldest id is already consumed,
+ * so it cannot match a later one) — normally, not always: a server-side trim can
+ * make the tail begin at a LATER prefix id, which does continue the match.
+ * Nothing id-based can separate a re-delivered copy from the original, which is
+ * the same conclusion #7519 reaches: provenance per append, `historySeq` present
+ * ⇒ replayed.
+ *
+ * Strict rather than a search-ahead for a MEASURED reason, then, and not an
+ * absolute one: a walk allowed to scan forward makes that limit the NORMAL case
+ * instead of the edge, because it finds a removed id's re-delivered copy
+ * anywhere in the tail rather than only at the cut. The mutant that does exactly
+ * that dies on `reorderEmptyResponseSlot`'s move-to-the-end and on the
+ * re-delivered-id pin. Where the two resolutions differ from the raw index, this
+ * one keeps strictly more: measured `['a','b']` here against `main`'s `['b']`.
+ *
+ * Cost is O(openLen) — the PREFIX, which is precisely the part that used to cost
+ * nothing. It is NOT free work already being done: the `messages.slice()` both
+ * callers pay is O(n - cut), the TAIL. Measured on node 22 over a 1000-entry
+ * replay: 4.2ms at a 1 000-entry prefix, 20.3ms at 10 000, 47.7ms at 20 000,
+ * against ~0.4ms for the bare index — ~20µs per replayed entry at a 10k prefix,
+ * and the server's ring caps a replay at `maxMessages` (default 1000).
+ * Immaterial, and said with the right numbers rather than waved at. Recomputed
+ * rather than memoised, because a cache keyed on anything this module can see (a
+ * length, an array identity) is exactly what shrink-then-append defeats.
  */
 function resolveBaselineIndex(baseline: RebuildBaseline, messages: readonly unknown[]): number {
   const { openLen, prefixIds } = baseline
@@ -707,7 +754,8 @@ function closeReplayWindow(sessionId: string): void {
     replayWindow.depth -= 1
     return
   }
-  // Last (or unmatched) end — the whole record goes, `openLen` with it (#7492).
+  // Last (or unmatched) end — the whole record goes, its baseline with it
+  // (#7492; the baseline carries `openLen` AND `prefixIds` since #7524).
   _replayWindowOpen.delete(sessionId)
   const ids = _liveDuringReplay.get(sessionId)
   _liveDuringReplay.delete(sessionId)

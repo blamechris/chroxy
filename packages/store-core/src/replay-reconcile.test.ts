@@ -927,11 +927,19 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
   })
 
   it('a removed id RE-DELIVERED into the tail must not pull the cut past it', () => {
-    // The reason the walk is a strict positional match and not a search-ahead.
+    // The reason the walk is greedy-but-positional rather than a search-ahead.
     // A search allowed to skip forward finds the removed 'q1' at index 2 — its
     // re-delivered copy, inside the replayed tail — and cuts there, returning []
-    // and blanking the session. Strict matching stops at the first mismatch and
-    // can only ever cut SHORT, which retains rather than loses.
+    // and blanking the session. The walk here halts instead, because the message
+    // AT the cut ('r-1') continues no remaining prefix id.
+    //
+    // Note what this does NOT show, since the comment here used to claim it: the
+    // walk does not "stop at the first mismatch" and cannot "only ever cut
+    // SHORT". It skips a non-matching prefix id and tries the next against the
+    // same message — which is what makes `handles a removal at the FRONT of the
+    // prefix` pass — and it can march into the tail when the surviving prefix
+    // runs out. The 'r-1' between the survivor and the re-delivered 'q1' is what
+    // stops it here. Both of those cases are pinned below (#7543).
     const live: Msg[] = [{ id: 'h1' }, { id: 'q1' }]
     reconcileReplayStart('s1', true, live)
     live.splice(1, 1) // the queued bubble is cancelled...
@@ -940,6 +948,61 @@ describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
     expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
       { id: 'r-1' },
       { id: 'q1' },
+    ])
+  })
+
+  // --- the KNOWN LIMIT the walk does NOT cover (#7543) ---------------------
+  //
+  // `messages[0..cut)` is the greedy SUBSEQUENCE match of `prefixIds`, so once
+  // the surviving prefix runs out the walk continues into the appended tail if
+  // the tail keeps matching — and a full replay re-delivers exactly the ids the
+  // prefix held. Both shapes below return the SAME values on `main` (measured:
+  // [] and ['c']), so this is the #7524 symptom in a shape the identity baseline
+  // cannot reach rather than something it broke. Nothing id-based can separate a
+  // re-delivered copy from the original; the answer is provenance per append,
+  // the same one #7519 lands on.
+  //
+  // Change these two expectations only alongside #7543.
+  it('KNOWN LIMIT: whole prefix removed + same ids re-delivered blanks the swap (#7543)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.length = 0 // every prefix entry removed mid-window
+    // The replay re-delivers them in order, through the dedup gate exactly as
+    // both clients drive it.
+    for (const id of ['a', 'b']) {
+      const cache = replayDedupCache('s1', live) as Msg[]
+      if (!cache.some((m) => m.id === id)) live.push({ id })
+    }
+    // The replayed set IS there — the fixture took effect — and the swap
+    // discards it anyway. This is the #7543 residual, not the fix working.
+    expect(live.map((m) => m.id)).toEqual(['a', 'b'])
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([])
+  })
+
+  it('KNOWN LIMIT: a removal can move the cut by ZERO when its id is re-appended (#7543)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.splice(0, 2) // two removed, so a "moves back by the number removed"
+    live.push({ id: 'a' }, { id: 'b' }, { id: 'c' }) // ...walk would cut at 0
+    // The cut is 2, not 0: 'a' and 'b' re-match the prefix ids from the tail.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'c' }])
+  })
+
+  it('but ONE survivor at the front already keeps more than the raw index does', () => {
+    // The positive control for the two pins above — without it they read as "the
+    // mechanism does nothing". Same re-delivery, one prefix entry surviving: the
+    // walk halts on it and the replayed set is kept. `main`'s raw index returns
+    // ['b'] here, losing the re-delivered 'a'; this returns both.
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.length = 1 // 'a' survives
+    for (const id of ['a', 'b']) {
+      const cache = replayDedupCache('s1', live) as Msg[]
+      if (!cache.some((m) => m.id === id)) live.push({ id })
+    }
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'a' },
+      { id: 'b' },
     ])
   })
 
