@@ -30,8 +30,10 @@
 // Because the structure above cannot fail silently, the gate's job is narrower
 // and sharper: stop `WINDOWS_EXEMPT` from becoming the new silent skip. It is
 // checked by `lint-windows-test-exemptions.mjs`, which runs on LINUX in
-// `Server Lint` — a REQUIRED status check. `Server Windows Tests` is not one,
-// so a manifest defect has to be caught somewhere that actually blocks a merge.
+// `Server Lint` so the manifest's blocking power never depends on the
+// required-status roster's contents. (`Server Windows Tests` IS required
+// today — CONTRIBUTING.md's guarded list, #7502 — but the gate's placement
+// must survive that changing either way.)
 //
 // ── The seeding rule, which is not optional ─────────────────────────────────
 //

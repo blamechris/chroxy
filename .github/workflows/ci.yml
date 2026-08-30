@@ -354,9 +354,15 @@ jobs:
     # box it fires on every same-repo push/PR (the old platform-changed-only gate
     # existed only to spare windows-latest minutes).
     #
-    # The manifest itself is gated in `Server Lint`, which is a REQUIRED status
-    # check — this job is not one, so a manifest defect has to be caught
-    # somewhere that actually blocks a merge.
+    # The manifest itself is gated in `Server Lint`, so its blocking power
+    # never depends on the required-status roster. THIS JOB IS ALSO REQUIRED
+    # (#7502 — an earlier version of this comment claimed otherwise), and it
+    # runs on exactly one machine: OPERATOR RUNBOOK — if chroxy-win-01 is down,
+    # every merge wedges on this context. Remedy: temporarily un-require it
+    # (one API call), verify with scripts/check-required-contexts.sh (updating
+    # CONTRIBUTING.md's roster + pins in the same motion), and re-require on
+    # recovery. Do NOT let a red/hung run of this job ride on the belief it is
+    # non-blocking; that belief was the stale half of #7502.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}
     # 15 was sized for EIGHT files (~4s of test time). The derived set is ~483,
@@ -466,11 +472,12 @@ jobs:
         # 553. The list is inverted now: every *.test.js runs on Windows unless
         # WINDOWS_EXEMPT classifies it out.
         #
-        # This is the half that runs HERE, on Linux, in a REQUIRED check.
-        # `Server Windows Tests` is NOT a required context, so a red Windows job
-        # does not block a merge; if the only check on this manifest lived
-        # inside that job the whole thing would be advisory —
-        # docs/false-safety-guards.md's "Never reached" mode.
+        # This is the half that runs HERE, on Linux, inside `Server Lint`, so
+        # the manifest's blocking power never depends on the required-status
+        # roster (`Server Windows Tests` IS required today — #7502 — but if it
+        # were ever un-required, a manifest gate living only inside it would
+        # silently become advisory — docs/false-safety-guards.md's "Never
+        # reached" mode).
         #
         # It checks the MANIFEST, not the tests: stale rows, unknown reason
         # categories, tracked-debt rows with no issue, missing measured

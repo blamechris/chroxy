@@ -16,14 +16,15 @@
  *
  * ── Why this runs on LINUX, in Server Lint ─────────────────────────────────
  *
- * `Server Windows Tests` is NOT a required status check (the 11 required
- * contexts are Server Tests, App Type Check, Server Lint, Dashboard Tests,
- * Dashboard Type Check, Protocol Tests, Store Core Type Check, App Tests,
- * Store Core Tests, Desktop Rust Tests, App Expo Doctor). A red Windows job
- * does not block a merge. If the only check on this manifest lived inside that
- * job, the whole thing would be advisory — `docs/false-safety-guards.md`'s
- * "Never reached" mode. `Server Lint` IS required, so the manifest is gated
- * there and the tests merely RUN on Windows.
+ * The manifest gate lives HERE — in `Server Lint`, on Linux — so that its
+ * blocking power never depends on which contexts happen to be in the
+ * required-status roster. (That roster changes: `Server Windows Tests` IS a
+ * required check today — see CONTRIBUTING.md's guarded list, #7448/#7502 —
+ * after this comment spent a while claiming otherwise with a hand-copied
+ * 11-name list that had drifted. The placement stands on its own reason: if
+ * the only check on this manifest lived inside the Windows job, un-requiring
+ * that job — one API call — would silently demote the whole thing to
+ * advisory, `docs/false-safety-guards.md`'s "Never reached" mode.)
  *
  * Linux is also the stricter host for the stale-row direction: NTFS is
  * case-insensitive, so a row spelled `tests/Foo.test.js` could match on Windows
