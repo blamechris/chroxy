@@ -907,9 +907,15 @@ export function resetReplayFlags(): void {
  *     while replay #2 was still streaming history — the #3758/#4466 activity
  *     bump reset "last activity Ns ago" and dismissed the "Agent quiet for 46m"
  *     chip on a REPLAYED event, the #6627 queue reconcile trimmed the live
- *     queue against a stale `queueLength`, the #4491 activeTools wipe restarted
- *     the "Running Bash · 1s" clock, and the #4889 continuation split invented
- *     a `-cont-` bubble that never existed in the turn;
+ *     queue against a stale `queueLength`, and the #4889 continuation split
+ *     invented a `-cont-` bubble that never existed in the turn;
+ *
+ *     (A fourth reader, the #4491 `activeTools` wipe in `case 'result'`, was
+ *     on that list until #7515. It is gone: the server pairs every `result`
+ *     with an ungated `agent_idle`, so the gate could not change the outcome
+ *     — see the `case 'result'` comment. The three above are unaffected:
+ *     `agent_idle` is not an ACTIVITY_EVENT_TYPE and touches neither
+ *     `queuedMessages` nor the continuation split.)
  *   - after a `session_list` prune or a `session_timeout` the Set said
  *     "replaying" forever. `dropReplaySessionState` clears the refcount and
  *     cannot reach a client-local Set, and the `history_replay_end` that would
@@ -4966,29 +4972,37 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       }
       // Initialize session state for any new sessions not yet tracked.
-      // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
-      // fresh tab / new-session entry reflects the real working state
-      // instead of defaulting to `isIdle: true` and silently dropping the
-      // Working banner until the next live event arrives.
+      //
+      // #7529 — the shell is created EMPTY. `isIdle` is not written here, and
+      // must not be: `updateSession` is the only writer that mirrors `isIdle`
+      // into the dashboard's FLAT connection state (the value `App.tsx` reads
+      // for `isBusy={!isIdle}` — the Send/Stop button and the Working banner),
+      // and it only does so for the ACTIVE session. A direct assignment into
+      // the fresh shell bypassed that mirror, and the #4639 resync loop below
+      // then short-circuited on `ss.isIdle === desired` and returned before
+      // writing anything — so a tab that restored `activeSessionId` before the
+      // roster landed showed **Send** for a session the server said was
+      // mid-turn. Measured, pre-fix: `{ shell: false, flat: true }`.
+      //
+      // `isIdlePatches` covers NEW and EXISTING ids alike, so the loop below
+      // is sufficient on its own — one writer, one derivation. This is the
+      // same conclusion the mobile app reached in #7518, where the bypassed
+      // derivation was `activityState` instead of the flat mirror.
       if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
         for (const sid of newSessionIds) {
-          if (!newInitStates[sid]) {
-            const fresh = createEmptySessionState();
-            const seededIsIdle = isIdlePatches.get(sid);
-            if (seededIsIdle !== undefined) fresh.isIdle = seededIsIdle;
-            newInitStates[sid] = fresh;
-          }
+          if (!newInitStates[sid]) newInitStates[sid] = createEmptySessionState();
         }
         set({ sessionStates: newInitStates });
       }
-      // #4639: resync `isIdle` on EXISTING session states against the
-      // snapshot's `isBusy`. Without this, a session that became busy on
-      // the server while the dashboard's local handlers missed the flip
-      // (tab swap during a long turn, peer-tab triggered the work, race
-      // between agent_busy and history_replay) shows the wrong banner and
-      // the wrong Send/Stop button. The snapshot is the source of truth.
+      // #4639: resync `isIdle` against the snapshot's `isBusy` — for the
+      // sessions just seeded above AND for existing ones. Without this, a
+      // session that became busy on the server while the dashboard's local
+      // handlers missed the flip (tab swap during a long turn, peer-tab
+      // triggered the work, race between agent_busy and history_replay) shows
+      // the wrong banner and the wrong Send/Stop button. The snapshot is the
+      // source of truth.
       for (const [sid, desiredIsIdle] of isIdlePatches) {
         if (!get().sessionStates[sid]) continue;
         updateSession(sid, (ss) =>
@@ -5656,16 +5670,33 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // broadcast) and must be dropped so the activity indicator can't
           // get stuck on a phantom "Running X". Mirror in agent_idle.
           //
-          // #4466 — but ONLY for live result events. `result` events are
-          // recorded in the server's per-session history ring buffer
-          // (session-message-history.js) and replayed on switch_session via
-          // PROXIED_EVENTS (session-manager.js). Without this gate, every
-          // tab switch on a session that's completed at least one prior
-          // turn fires a replayed `result` that wipes the activeTools the
-          // history_replay_start guard is trying to preserve — the
-          // replayed in-flight tool_start then re-adds the entry with a
-          // fresh Date.now() startedAt, restoring the exact "Running X · 1s"
-          // clock-reset symptom #4466 set out to fix.
+          // #7515 — and it is UNCONDITIONAL. This clear carried a
+          // `!isSessionReplaying(targetId)` replay gate from #4491 until
+          // #7515 adjudicated the contradiction it created: the gate could
+          // not change what the user sees, because `agent_idle` — which is
+          // NOT replay-gated, anywhere — wipes `activeTools` on the very next
+          // frame. `sendHistoryEntry` (packages/server/src/ws-history.js)
+          // synthesizes one after EVERY replayed `result`, deliberately since
+          // #4628, and `event-normalizer.js` appends one to every live
+          // `result` just as unconditionally. There is no wire path on which
+          // a `result` frame reaches a client unpaired, so the gated and
+          // ungated branches had the same observable outcome — the
+          // false-safety shape docs/false-safety-guards.md catalogues.
+          //
+          // `agent_idle` OWNS the wipe. It has to: it is the only frame that
+          // can clear a zombie "Running X" chip left by an orphan tool_start
+          // (#4628), and on a JSONL-sourced full-history replay it is the only
+          // frame that touches tool state at all (#7484/#7500 — a heal
+          // emitted MID-window on purpose, which is why gating `agent_idle`
+          // on the replay window was rejected rather than adopted).
+          //
+          // #4466's actual symptom — the "Running Bash · 1s" clock reset — is
+          // NOT what this gate was holding back. History entries carry the
+          // server-side `timestamp` stamped at append time, and
+          // `sharedToolStart` re-anchors `startedAt` from it, so the elapsed
+          // clock survives an empty activeTools set (#4607). Pinned by
+          // "the wipe does not reset the elapsed clock…" in
+          // message-handler.test.ts.
           // #6627 — self-heal a stale "Queued" bubble on the turn boundary.
           // LIVE results only: a REPLAYED result (on switch_session) carries a
           // stale queueLength that must not trim the current queue (mirrors the
@@ -5686,9 +5717,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             messages: finalizeThinkingStreams([...ss.messages]),
             ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
-          // #4493 — gate per target session id. A live `result` for
-          // session B during A's replay must still sweep B's activeTools.
-          if (ss.activeTools.length > 0 && !isSessionReplaying(targetId)) patch.activeTools = [];
+          if (ss.activeTools.length > 0) patch.activeTools = [];
           return patch;
         });
       } else {

@@ -2316,12 +2316,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #7518 — the fresh shell keeps its default `isIdle: true`; the resync
       // below is what applies the snapshot's `isBusy` to it, INCLUDING for a
       // brand-new entry (`isIdlePatches` is not filtered to existing sessions).
-      // This is a deliberate divergence from the dashboard's #4639 seed, and the
-      // reason is app-only: this client derives `activityState` inside
-      // `updateSession`. Writing `isIdle` straight into the shell would bypass
-      // that derivation, and the resync would then short-circuit on
-      // `ss.isIdle === desired` — leaving a session that reads busy whose chat
-      // lozenge still says idle. One writer, one derivation.
+      // Writing `isIdle` straight into the shell would bypass the
+      // `activityState` derivation `updateSession` performs, and the resync
+      // would then short-circuit on `ss.isIdle === desired` — leaving a session
+      // that reads busy whose chat lozenge still says idle. One writer, one
+      // derivation.
+      //
+      // This was a deliberate divergence from the dashboard's #4639 seed until
+      // #7529, which found the same defect there against a different derivation
+      // (the FLAT `isIdle` mirror) and removed that seed too. The two clients
+      // now agree.
       if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newStates = { ...currentStates };

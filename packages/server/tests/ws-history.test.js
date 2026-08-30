@@ -1903,6 +1903,14 @@ describe('replayHistory', () => {
   // a session with an orphan tool_start in history (e.g. dropped
   // PostToolUse hook) shows a zombie chip on every dashboard
   // reconnect until the next chroxy restart.
+  //
+  // #7515 — this is the WIRE PIN for who owns that wipe, and the ORDER
+  // assertion below is the load-bearing part. The dashboard's `case 'result'`
+  // carried a replay gate (#4491) that read as a second, independent owner;
+  // #7515 removed it after establishing that this synthesis lands on the very
+  // next frame and defeats it on every path. Both clients now depend on this
+  // pairing (the mobile app has no `activeTools` reader at all), so this test
+  // is what goes red first if the synthesis is ever dropped or reordered.
   it('emits synthetic agent_idle after each `result` entry to mirror live event-normalizer fan-out (#4628)', async () => {
     const history = [
       { type: 'tool_start', tool: 'Bash', toolUseId: 'toolu_orphan' },

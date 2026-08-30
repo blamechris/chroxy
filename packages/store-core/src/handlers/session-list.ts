@@ -98,12 +98,15 @@ export interface SessionListPatches {
    * `agent_busy` racing `history_replay`. Filtering it to either half would
    * silently drop the other.
    *
-   * HOW to apply it is the consumer's: the dashboard both seeds its fresh shell
-   * from this map and resyncs existing entries; the APP only resyncs, and
-   * writes nothing into the shell, because it derives `activityState` inside
-   * `updateSession` — a direct shell write would bypass that derivation and the
-   * resync would then short-circuit on `ss.isIdle === desired`, leaving a
-   * session that reads busy whose chat lozenge says idle.
+   * BOTH consumers apply it the same way: create the shell EMPTY and let the
+   * resync loop write `isIdle` through `updateSession`. Neither writes into the
+   * fresh shell directly, because on both clients `updateSession` is where a
+   * derivation lives that a direct write would bypass — `activityState` on the
+   * app (#7518), the FLAT `isIdle` mirror on the dashboard (#7529) — and the
+   * resync would then short-circuit on `ss.isIdle === desired` and never run
+   * it. The app's symptom was a session that read busy whose chat lozenge said
+   * idle; the dashboard's was a **Send** button on a session the server said
+   * was mid-turn. One writer, one derivation.
    *
    * The `!` inversion lives HERE rather than at each call site: the app got
    * this resync only in #7518, and a second hand-written inversion is exactly
