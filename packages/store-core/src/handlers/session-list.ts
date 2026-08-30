@@ -78,11 +78,43 @@ export interface SessionListPatches {
   /**
    * Session ids in the new snapshot that are NOT in `prevSessionStateIds`.
    * Consumers seed `sessionStates[id]` for these (typically with their
-   * platform-specific `createEmptySessionState()`); the dashboard's
-   * `isBusy → isIdle` seed (#4639) stays at the call site because it
-   * mutates the consumer's own state shape.
+   * platform-specific `createEmptySessionState()`). How a fresh entry gets the
+   * snapshot's busy state is the consumer's call — see
+   * {@link SessionListPatches.isIdlePatches}, which covers new and existing ids
+   * alike so a consumer may seed from it, resync into it, or both.
    */
   newSessionIds: string[]
+  /**
+   * `sessionId → !isBusy` — the `isIdle` the snapshot's authoritative `isBusy`
+   * implies, for every session whose entry carries a BOOLEAN `isBusy`
+   * (#4639 / #7518). Entries that omit the field, or whose server sent a
+   * non-boolean, are ABSENT — "no opinion", so the consumer leaves the local
+   * value alone rather than defaulting it to idle.
+   *
+   * Covers NEW and EXISTING ids alike, deliberately: it both seeds a session
+   * this client is hearing about for the first time (possibly already mid-turn)
+   * and corrects one whose local `agent_busy`/`agent_idle` handlers missed a
+   * flip — tab swap during a long turn, a peer client driving the work, an
+   * `agent_busy` racing `history_replay`. Filtering it to either half would
+   * silently drop the other.
+   *
+   * HOW to apply it is the consumer's: the dashboard both seeds its fresh shell
+   * from this map and resyncs existing entries; the APP only resyncs, and
+   * writes nothing into the shell, because it derives `activityState` inside
+   * `updateSession` — a direct shell write would bypass that derivation and the
+   * resync would then short-circuit on `ss.isIdle === desired`, leaving a
+   * session that reads busy whose chat lozenge says idle.
+   *
+   * The `!` inversion lives HERE rather than at each call site: the app got
+   * this resync only in #7518, and a second hand-written inversion is exactly
+   * the drift the shared builder exists to prevent.
+   *
+   * The write is `isIdle` ALONE. `agent_idle` also clears `streamingMessageId`
+   * and `activeTools` because it is a turn BOUNDARY; a snapshot resync is not,
+   * and clearing turn-scoped state on it would fight #7500's replay synthesis
+   * and #7508's pending-question resend for fields they own.
+   */
+  isIdlePatches: Map<string, boolean>
   /**
    * `sessionId → conversationId` for every session whose snapshot has a
    * non-null `conversationId`. Consumers gate on `sessionStates[id]` and
@@ -166,6 +198,11 @@ export function cumulativeUsageEquals(
  *   `prevSessionStateIds`, in snapshot order. Mirrors both prior
  *   `for (const s of sessionList) if (!newStates[s.sessionId]) ...` loops
  *   (app L1236-1241 / dashboard L2206-2213).
+ * - `isIdlePatches` includes every session whose snapshot carries a BOOLEAN
+ *   `isBusy`, mapped to `!isBusy` — matching the dashboard's prior inline
+ *   `if (typeof s.isBusy !== 'boolean') continue` guard exactly (#4639), now
+ *   shared with the app (#7518). The `ss.isIdle === desired` no-op
+ *   short-circuit stays at the call site, like `conversationIdPatches`.
  * - `conversationIdPatches` includes every session with a truthy
  *   `conversationId` — the consumer's `ss.conversationId !== cid` short-
  *   circuit stays at the call site (existing `updateSession` callback).
@@ -189,7 +226,10 @@ export function cumulativeUsageEquals(
  * - The app's `loadLastConversationId()` auto-resume on empty list +
  *   reconnect (L1196-1207).
  * - The dashboard's `activeModel` lookup against `availableModels`
- *   (L2188-2197) and `isBusy → isIdle` resync (#4639, L2223-2230).
+ *   (L2188-2197). Its `isBusy → isIdle` resync (#4639) is no longer call-site
+ *   -only: the DERIVATION moved here as `isIdlePatches` in #7518, when the
+ *   mobile app adopted the same resync, so the two clients cannot drift on
+ *   which snapshot entries are authoritative.
  * - Both consumers' `clearPersistedSession(prevId)` call per removed id.
  * - The app's `persistLastConversationId(activeConversationId)` after seeding.
  * - The dashboard's "active session removed → copy flat fields into the
@@ -218,6 +258,7 @@ export function buildSessionListPatches(
   }
 
   const newSessionIds: string[] = []
+  const isIdlePatches = new Map<string, boolean>()
   const conversationIdPatches = new Map<string, string>()
   const cumulativeUsagePatches = new Map<string, CumulativeUsage>()
   const backgroundShellBuilders = new Map<string, PendingBackgroundShellsBuilder>()
@@ -226,6 +267,10 @@ export function buildSessionListPatches(
     if (!s || typeof s.sessionId !== 'string') continue
     const sid = s.sessionId
     if (!prevIdSet.has(sid)) newSessionIds.push(sid)
+    // #4639 / #7518 — only a BOOLEAN isBusy is an opinion. `typeof` rather than
+    // truthiness: `isBusy: false` is the whole point of the heal, and an older
+    // server that omits the field must leave the local value untouched.
+    if (typeof s.isBusy === 'boolean') isIdlePatches.set(sid, !s.isBusy)
     if (s.conversationId) conversationIdPatches.set(sid, s.conversationId)
     if (s.cumulativeUsage) cumulativeUsagePatches.set(sid, s.cumulativeUsage)
     backgroundShellBuilders.set(
@@ -243,6 +288,7 @@ export function buildSessionListPatches(
     sessionList,
     removedIds,
     newSessionIds,
+    isIdlePatches,
     conversationIdPatches,
     cumulativeUsagePatches,
     backgroundShellBuilders,

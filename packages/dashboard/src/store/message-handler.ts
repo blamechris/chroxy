@@ -4812,7 +4812,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // #4767: centralised dispatch — store-core precomputes GC + new-session
       // ids + conversationId / cumulativeUsage / pendingShells patch maps;
       // the consumer applies them with platform-specific side-effects
-      // (dashboard's activeModel lookup + isBusy → isIdle resync stay here).
+      // (dashboard's activeModel lookup stays here; the #4639 isBusy → isIdle
+      // DERIVATION moved into the builder as `isIdlePatches` in #7518, when the
+      // mobile app adopted the same resync — only its APPLICATION is here).
       const initialActiveId = get().activeSessionId;
       const patches = sharedBuildSessionListPatches(
         msg,
@@ -4824,6 +4826,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         sessionList,
         removedIds,
         newSessionIds,
+        isIdlePatches,
         conversationIdPatches,
         cumulativeUsagePatches,
         backgroundShellBuilders,
@@ -4970,12 +4973,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
-        const sessionsBySid = new Map(sessionList.map((s) => [s.sessionId, s]));
         for (const sid of newSessionIds) {
           if (!newInitStates[sid]) {
             const fresh = createEmptySessionState();
-            const s = sessionsBySid.get(sid);
-            if (s && typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
+            const seededIsIdle = isIdlePatches.get(sid);
+            if (seededIsIdle !== undefined) fresh.isIdle = seededIsIdle;
             newInitStates[sid] = fresh;
           }
         }
@@ -4987,11 +4989,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // (tab swap during a long turn, peer-tab triggered the work, race
       // between agent_busy and history_replay) shows the wrong banner and
       // the wrong Send/Stop button. The snapshot is the source of truth.
-      for (const s of sessionList) {
-        if (typeof s.isBusy !== 'boolean') continue;
-        if (!get().sessionStates[s.sessionId]) continue;
-        const desiredIsIdle = !s.isBusy;
-        updateSession(s.sessionId, (ss) =>
+      for (const [sid, desiredIsIdle] of isIdlePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
           ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
         );
       }
@@ -5082,27 +5082,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_activity': {
-      // #4639: server-emitted busy/idle broadcast (ws-forwarding.js fires it
-      // on stream_start and result for every session, to every authenticated
-      // client). Pre-fix the dashboard had no handler, so a peer tab driving
-      // the session — or this tab's own session_list snapshot — was the only
-      // way to learn about busy state changes for non-active sessions. That
-      // gap is what made the Working banner desync after a tab swap.
-      //
-      // Defensive: ignore if either field is missing/wrong type, and skip
-      // unknown sessions (session_list is responsible for seeding new
-      // entries — we don't want session_activity racing it).
-      const activitySessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const activityIsBusy = typeof msg.isBusy === 'boolean' ? msg.isBusy : null;
-      if (activitySessionId && activityIsBusy !== null && get().sessionStates[activitySessionId]) {
-        const desiredIsIdle = !activityIsBusy;
-        updateSession(activitySessionId, (ss) =>
-          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
-        );
-      }
-      break;
-    }
+    // session_activity — migrated to the shared store-core dispatch table
+    // (#7518; runDispatch handles it before this switch). It was DASHBOARD-LOCAL
+    // from #4639 until then, and the app's having no counterpart was a live false
+    // negative: the server's JSONL replay heal is gated on the same `isRunning`
+    // this ping publishes, so a session holding an un-polled background shell kept
+    // a stale tool chip on mobile with nothing able to clear it (#7507). Lifting
+    // rather than copying keeps ONE implementation. Behaviour is unchanged here —
+    // explicit sessionId only, `hasSession` gate, same no-op short-circuit, and
+    // the flat `isIdle` mirror still rides the adapter's `updateSession`.
 
     // conversation_id — migrated to the shared dispatch table (#5556)
 

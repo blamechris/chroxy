@@ -283,6 +283,85 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { active: { isIdle: false } } },
   },
 
+  // 3a. session_activity (#4639 / #7518) — the LIVE half of the isBusy → isIdle
+  // resync, lifted out of the dashboard's switch so BOTH clients share it. Until
+  // #7518 the app had no handler at all: `agent_idle` was its only `isIdle`
+  // writer, so when the server suppressed the JSONL replay heal for a session
+  // holding an un-polled background shell (`isRunning`, #7507), nothing on mobile
+  // could clear the stale tool chip.
+  //
+  // Note what these fixtures pin BESIDES the happy path, because each is a
+  // deliberate difference from `agent_idle` above:
+  //  - no active-session fallback for a missing/mistyped sessionId;
+  //  - no flat fallback for an unknown session (`session_list` seeds);
+  //  - `isIdle` alone — `streamingMessageId` / `activeTools` are NOT cleared.
+  {
+    name: 'session_activity flips the target session busy from the server isBusy',
+    type: 'session_activity',
+    init: { sessions: { s1: { isIdle: true } } },
+    message: { type: 'session_activity', sessionId: 's1', isBusy: true, lastCost: null },
+    expect: { sessions: { s1: { isIdle: false } } },
+  },
+  {
+    name: 'session_activity heals a stale-busy session when the server reports idle',
+    type: 'session_activity',
+    init: {
+      sessions: { s1: { isIdle: false, streamingMessageId: 'live-1', activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }] } },
+    },
+    message: { type: 'session_activity', sessionId: 's1', isBusy: false, lastCost: 0.12 },
+    // The turn-boundary fields survive — this is a snapshot resync, not an
+    // `agent_idle`. #7500 (replay synthesis) and #7508 (prompt resend) own them.
+    expect: {
+      sessions: {
+        s1: {
+          isIdle: true,
+          streamingMessageId: 'live-1',
+          activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }],
+        },
+      },
+    },
+  },
+  {
+    name: 'session_activity is a no-op for a session neither client has seeded',
+    type: 'session_activity',
+    init: { activeSessionId: 'active', sessions: { active: { isIdle: true } } },
+    message: { type: 'session_activity', sessionId: 'unknown', isBusy: true, lastCost: null },
+    expect: { noop: true },
+  },
+  {
+    // NOTE the explicit `isIdle` assertion rather than `noop: true`. `noop` checks
+    // for keys a handler ADDED to a seeded session; it cannot see a same-key
+    // OVERWRITE, so on a field the fixture itself seeds it is satisfied by the
+    // very mutation these rows exist to catch — measured, not assumed: the
+    // isBusy-coercion mutant left this row green. Harness fix tracked in #7531;
+    // assert the value until then.
+    name: 'session_activity does NOT fall back to the active session without a sessionId',
+    type: 'session_activity',
+    init: { activeSessionId: 'active', sessions: { active: { isIdle: true } } },
+    message: { type: 'session_activity', isBusy: true, lastCost: null },
+    expect: { sessions: { active: { isIdle: true } }, added: [] },
+  },
+  {
+    // Truthy arm: `!'yes'` is false, so a coercing handler marks an IDLE session
+    // busy. Paired with the falsy arm below — either alone passes under the
+    // coercion mutant, because only the side whose inversion differs from the
+    // seeded value is observable.
+    name: 'session_activity does not coerce a truthy non-boolean isBusy',
+    type: 'session_activity',
+    init: { sessions: { s1: { isIdle: true } } },
+    message: { type: 'session_activity', sessionId: 's1', isBusy: 'yes', lastCost: null },
+    expect: { sessions: { s1: { isIdle: true } }, added: [] },
+  },
+  {
+    // Falsy arm: `!null` is true, so a coercing handler "heals" a genuinely BUSY
+    // session off a malformed frame — the worse direction of the two.
+    name: 'session_activity does not coerce a falsy non-boolean isBusy',
+    type: 'session_activity',
+    init: { sessions: { s1: { isIdle: false } } },
+    message: { type: 'session_activity', sessionId: 's1', isBusy: null, lastCost: null },
+    expect: { sessions: { s1: { isIdle: false } }, added: [] },
+  },
+
   // 3b. model_changed (#5618) — set the target session's activeModel. Reconciled
   // from the two clients' divergent edge fallbacks: a known target updates that
   // session (incl. the active session, whose flat mirror the dashboard adapter

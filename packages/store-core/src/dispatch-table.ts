@@ -66,6 +66,7 @@ import {
   handleSessionUpdated,
   handleAgentBusy,
   handleAgentIdle,
+  handleSessionActivity,
   handlePermissionModeChanged,
   handleBudgetResumed,
   handleBudgetWarning,
@@ -629,6 +630,12 @@ export interface DispatchMessageMap {
     type: 'agent_idle'
     sessionId?: string
   }
+  session_activity: {
+    type: 'session_activity'
+    sessionId?: string
+    isBusy?: boolean
+    lastCost?: number | null
+  }
   permission_mode_changed: {
     type: 'permission_mode_changed'
     sessionId?: string
@@ -1077,6 +1084,41 @@ function dispatchAgentIdle<S extends DispatchSessionBase>(
   } else {
     adapter.applyNoSessionFallback?.(idlePatch as unknown as Record<string, unknown>)
   }
+}
+
+/**
+ * `session_activity` — re-derive the target session's `isIdle` from the server's
+ * authoritative `isBusy` (#4639, lifted to the shared table by #7518).
+ *
+ * Lifted rather than copied: this was DASHBOARD-LOCAL, and the mobile app's
+ * having no counterpart was a live false negative. `sessionManager.isSessionBusy`
+ * — the `isRunning` the #7484 JSONL replay heal is gated on — is the SAME value
+ * this ping publishes, so the guard is only correct on a client that consumes the
+ * ping. The app consumed nothing, so a session holding an un-polled
+ * `Bash(run_in_background: true)` shell kept a stale tool chip until the shell was
+ * polled, the session died, or the 4h hard quiesce reaped it (#7507 / #7518).
+ *
+ * Byte-identical to the dashboard's prior `case 'session_activity'`:
+ *  - explicit `sessionId` only — NO `resolveSessionId` active-session fallback
+ *    (see {@link handleSessionActivity});
+ *  - `hasSession` gate, so an unknown session is a no-op and `session_list` stays
+ *    the sole seeder — and therefore NO `applyNoSessionFallback`, unlike
+ *    `agent_idle`: the dashboard never mirrored this ping into flat state for an
+ *    unseeded session, and its flat `isIdle` for the ACTIVE session still updates
+ *    through its own `updateSession` mirror;
+ *  - the `ss.isIdle === desired ? {} : …` short-circuit, which both clients'
+ *    `updateSession` treats as "no write, no re-render".
+ */
+function dispatchSessionActivity<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_activity'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const parsed = handleSessionActivity(msg as Record<string, unknown>)
+  if (!parsed) return
+  if (!adapter.hasSession(parsed.sessionId)) return
+  adapter.updateSession(parsed.sessionId, (ss) =>
+    (ss.isIdle === parsed.isIdle ? {} : { isIdle: parsed.isIdle }) as Partial<S>,
+  )
 }
 
 /**
@@ -2193,6 +2235,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_updated: dispatchSessionUpdated,
     agent_busy: dispatchAgentBusy,
     agent_idle: dispatchAgentIdle,
+    session_activity: dispatchSessionActivity,
     permission_mode_changed: dispatchPermissionModeChanged,
     budget_warning: dispatchBudgetWarning,
     plan_ready: dispatchPlanReady,
@@ -2294,6 +2337,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'session_updated',
   'agent_busy',
   'agent_idle',
+  // #7518 — lifted out of the dashboard's switch so both clients share one
+  // isBusy → isIdle resync.
+  'session_activity',
   'permission_mode_changed',
   'budget_warning',
   'plan_ready',
