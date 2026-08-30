@@ -7,6 +7,7 @@
 import { Alert } from 'react-native';
 import {
   _testMessageHandler,
+  updateSession,
   setStore,
   sendIfOpen,
   _testResetStore,
@@ -1262,6 +1263,58 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
     expect(msgs.map((m: any) => m.content)).toEqual(['h-1', 'h-2', 'Which approach?']);
     // ...and the racer is still a racer: the sweep left it alone (#7420).
     expect(answeredOf(store, 2)).toBeUndefined();
+  });
+
+  // KNOWN LIMIT (#7577), pinned at the wire level in both clients because it
+  // lands on the exact path this family exists to protect: the optimistic bubble
+  // a user types mid-replay.
+  //
+  // `sendMessage` appends the user's bubble AND a `{ id: 'thinking' }`
+  // placeholder in ONE update, and every `message` frame — every replayed
+  // history entry included — STRIPS that placeholder while appending. The next
+  // replayed entry is therefore a remove-then-append, which is neither an append
+  // at the end nor an untouched run, so the provenance record is dropped and the
+  // swap falls back to array order for the rest of the window.
+  //
+  // Nothing is lost, duplicated or moved: the result is byte-for-byte pre-#7519.
+  // This asserts the CURRENT degraded behaviour — a `go red with the docs` pin
+  // rather than a red-first one — and it REACHES red: the naive repair (treat a
+  // single removal plus a single trailing append as remove-then-append) flips
+  // it, measured as mutant 13 in store-core. When #7577 lands, this is the test
+  // that says so.
+  it('KNOWN LIMIT: a user typing mid-replay loses the reorder for that window (#7577)', () => {
+    const store = seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }]);
+    const entry = (messageId: string, extra: Record<string, unknown> = {}) => ({
+      type: 'message',
+      messageType: 'response',
+      content: messageId,
+      messageId,
+      sessionId: 's1',
+      timestamp: 100,
+      ...extra,
+    });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: false });
+    _testMessageHandler.handle(entry('h-2', { historySeq: 2 }));
+    _testMessageHandler.handle(entry('racer'));
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory: true });
+    // `sendMessage`'s exact optimistic write (connection.ts:1710) — user bubble
+    // AND placeholder, one `updateSession`, which is the funnel the hook is on.
+    updateSession('s1', ((ss: any) => ({
+      messages: [
+        ...ss.messages.filter((m: any) => m.id !== 'thinking'),
+        { id: 'u-1', type: 'user_input', content: 'typed mid-replay', timestamp: 200 },
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 200 },
+      ],
+    })) as any);
+    // The next replayed entry strips the placeholder while appending.
+    _testMessageHandler.handle(entry('h-1', { historySeq: 1 }));
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+
+    const msgs = store.getState().sessionStates.s1.messages;
+    expect(msgs.map((m: any) => m.id).slice().sort()).toEqual(['h-1', 'h-2', 'racer', 'u-1']);
+    // Array order, oldest history entry last. Truth: ['h-1','h-2','racer','u-1'].
+    expect(msgs.map((m: any) => m.id)).toEqual(['h-2', 'racer', 'u-1', 'h-1']);
   });
 
   // #7524 — the same nested DELTA -> FULL interleave, plus the one extra user

@@ -508,6 +508,20 @@ function provenanceStart(baseline: RebuildBaseline, messages: readonly unknown[]
  * {@link provenanceStart}'s alignment check, which returns `null` and takes the
  * walk unmodified.
  *
+ * Verified, not counted. `provenanceStart` walks the run id by id on this path,
+ * which is the `replayDedupCache` hot path, and that is deliberate: taking the
+ * COUNT alone here (and keeping the verification only for the swap's ordering
+ * guard) reds `the record is POSITIONAL: a tail that no longer matches it is
+ * refused, not trusted` — measured, on exactly that mutant. An unverified count
+ * widens the dedup window past the prefix boundary, and a replayed entry can
+ * then be suppressed by an about-to-be-discarded prefix id and lost from the
+ * swap, which is #7477's failure. The cost was measured over a whole 1000-entry
+ * replay on node 22 rather than argued: 5.7ms vs 2.6ms at a 0-entry prefix,
+ * 5.9 vs 4.1 at 1 000, 25.4 vs 23.2 at 10 000 — +1.8ms across an entire replay
+ * at the server's ring cap, dominated by the O(n·openLen) walk #7524 already
+ * measured and accepted. The asymptotics are real; the magnitude does not buy
+ * the guard's removal.
+ *
  * The provenance side is what closes #7543. That issue's degenerate case (whole
  * prefix removed, the replay re-delivering its ids) and the legitimate empty
  * replay beside it present the WALK identical inputs — proven, not asserted, and
@@ -937,12 +951,57 @@ export function endReplayFrame(): void {
  *     the tail, so it is dropped and the swap reverts to its pre-#7519
  *     behaviour for the rest of the window.
  *
- * The check is the cheap ANCHOR — the most recent recorded append must still sit
- * where an untouched run would put it — and not the whole run, deliberately: the
- * full positional verification runs once at the swap ({@link provenanceStart}),
- * where it is the guard, rather than once per append, where it would be O(n) per
- * frame. Anything this admits is caught there and degrades to array order; the
- * anchor's job is only to keep the common cases cheap and the record honest.
+ * THE DEGRADATION THAT ACTUALLY BITES, named rather than left inside "anything
+ * else" (#7577, found reviewing #7574). `sendMessage` appends the user's bubble
+ * AND a `{ id: 'thinking' }` placeholder in one update (`connection.ts:3550`
+ * dashboard, `:1710` app), and every `message` frame — every replayed history
+ * entry included — STRIPS that placeholder while appending
+ * (`ss.messages.filter((m) => m.id !== 'thinking' || …)`). So a user typing
+ * mid-replay makes the next replayed entry a remove-then-append: the third shape
+ * above, on the exact path — the optimistic bubble racing a replay — that this
+ * whole family of issues exists to protect. Measured through the real dashboard
+ * handler: `['h-2','racer','u-1','h-1']` against a truth of
+ * `['h-1','h-2','racer','u-1']`, i.e. the #7519 artifact verbatim, and identical
+ * to pre-#7519 (nothing lost, nothing duplicated, nothing moved).
+ *
+ * The same strip landing while the record is still EMPTY is quieter and not the
+ * same shape: branch 2 is vacuous at `n === 0`, so the record is KEPT and the
+ * append it could not classify is simply never recorded — an under-count, which
+ * `resolveCut`'s `Math.min` and the swap's exact-alignment gate make safe. Both
+ * are pinned (`KNOWN LIMIT: a user typing mid-replay …`, `KNOWN LIMIT: a strip
+ * while the record is still EMPTY …`, plus one per client handler suite).
+ *
+ * Not repaired here because the repair is not the cheap thing it looks like:
+ * telling a remove-then-append apart from a genuine reorder is a diff engine
+ * over the record, and its wrong answer is a positionally DRIFTED provenance
+ * array — the one state #7556 rules out. #7577 carries it, with both shapes and
+ * that constraint.
+ *
+ * A third source of un-provenanced appends, recorded rather than degraded: the
+ * "Sync Full History" JSONL slice (`handleRequestFullHistory`,
+ * conversation-handlers.js) emits `fullHistory: true` and then bare `message`
+ * frames with NO `historySeq` — `getFullHistoryAsync`'s JSONL entries carry no
+ * `_seq` by construction. Alone that is benign and identical to `main`: every
+ * append classifies LIVE, the live half keeps arrival order. Overlapped with a
+ * seq-STAMPED replay it is not: the stamped half sorts in front of history it
+ * does not order (`['r-1','r-2','j-1','j-2']` where `main` gives
+ * `['j-1','j-2','r-1','r-2']`). Narrow — it needs Sync Full History to overlap a
+ * `switch_session`/`subscribe_sessions` replay — and arguably ill-defined on
+ * `main` too, so it is documented rather than guarded.
+ *
+ * The check is the cheap ANCHOR — the append point must still sit where an
+ * untouched run would put it — and not the whole run, deliberately: the full
+ * positional verification runs once at the swap ({@link provenanceStart}), where
+ * it is the guard, rather than once per append, where it would be O(n) per
+ * frame. Anything this admits is caught there and degrades to array order.
+ *
+ * "Anything this admits is caught there" is a claim with a history: it was FALSE
+ * at `n === 0`, where the anchor used to be skipped entirely, and the review of
+ * #7574 built the counterexample (a mid-array insert recorded a prefix entry as
+ * an append, and the swap returned an order neither the walk nor array order
+ * produces). It is true now because the empty-record case anchors on `before`'s
+ * own last entry — see the two anchors below, which are deliberately different
+ * per branch.
  */
 export function noteReplayMessagesUpdate(
   sessionId: string | null | undefined,
@@ -956,10 +1015,37 @@ export function noteReplayMessagesUpdate(
   const appends = baseline.appends
   if (appends === null) return
   const n = appends.length
-  const anchorId = n === 0 ? null : (appends[n - 1] as ReplayAppend).id
-  const anchoredAt = (index: number): boolean =>
-    anchorId === null || (index >= 0 && index < after.length && idOf(after[index]) === anchorId)
-  if (after.length >= before.length && anchoredAt(before.length - 1)) {
+  // The record IS `before`'s own tail, by construction and by every path above.
+  // If it cannot be, this update is not one that can be reasoned about
+  // positionally at all, and a record that is not the tail is the drifted array
+  // #7556 rules out — so it goes rather than being argued with.
+  if (n > before.length) {
+    baseline.appends = null
+    return
+  }
+  const recordAnchorId = n === 0 ? null : (appends[n - 1] as ReplayAppend).id
+  // Branch 1's anchor — the position the append happened AT must be unmoved.
+  // With entries recorded that is the record's last id. With an EMPTY record
+  // there is no recorded id to check it with, and this used to accept
+  // UNCONDITIONALLY (#7574 review, finding 2): a mid-array INSERT then took the
+  // append branch and recorded the shifted last element of `before` — a PREFIX
+  // entry — as an append, carrying the inserting frame's seq. `provenanceStart`
+  // passes on that record (the ids really do line up), the over-count pulls the
+  // cut below the walk, and the swap returns a prefix entry sorted to the end by
+  // a fabricated seq: an order NEITHER the walk nor array order produces, which
+  // is worse than any degradation and is exactly what the paragraph above
+  // promises cannot happen. Measured on the reviewer's reproduction:
+  // `['r-1','r-2','p3']` where `main` and the walk both give `['r-1','r-2']`.
+  //
+  // So an empty record anchors on `before`'s own last entry instead, and an
+  // id-less anchor is a REFUSAL rather than a pass — no anchor at all is
+  // accepted only when there is genuinely nothing to anchor on (an empty
+  // `before`, which by the guard above implies an empty record).
+  const appendAnchorId = recordAnchorId ?? idOf(before[before.length - 1] ?? null)
+  const appendPointUnmoved =
+    before.length === 0 ||
+    (appendAnchorId !== null && idOf(after[before.length - 1] ?? null) === appendAnchorId)
+  if (after.length >= before.length && appendPointUnmoved) {
     for (let i = before.length; i < after.length; i++) {
       const id = idOf(after[i])
       // The same bail as `snapshotPrefix`, for the same reason: a hole would
@@ -986,7 +1072,16 @@ export function noteReplayMessagesUpdate(
     }
     return
   }
-  if (anchoredAt(after.length - 1)) return
+  // Branch 2 — nothing was appended and the record still describes the tail. An
+  // EMPTY record describes the tail of ANY array vacuously (there are no entries
+  // to disagree), which is why this stays unconditional at `n === 0` and does
+  // NOT borrow branch 1's anchor: the whole-prefix removal #7543 is made of
+  // (`messages` emptied while the record is still empty) arrives here, and
+  // anchoring it would give up the case the record exists to decide. The cost is
+  // that an append this update also made goes UNRECORDED rather than dropping
+  // the record — an under-count, which `resolveCut`'s `Math.min` and the swap's
+  // exact-alignment gate already make safe, and which is pinned as such.
+  if (n === 0 || idOf(after[after.length - 1] ?? null) === recordAnchorId) return
   baseline.appends = null
 }
 

@@ -986,6 +986,135 @@ describe('append PROVENANCE orders the swapped tail (#7519)', () => {
     ])
   })
 
+  // --- the `thinking` placeholder, on the racer path (#7574 review, finding 1)
+  //
+  // `sendMessage` appends the user's bubble AND a `{ id: 'thinking' }`
+  // placeholder (`connection.ts:3550` dashboard, `:1710` app), and every
+  // `message` frame — every replayed history entry included — STRIPS that
+  // placeholder while appending
+  // (`ss.messages.filter((m) => m.id !== 'thinking' || …)`). So a user typing
+  // mid-replay makes the next replayed entry a remove-then-append, which is
+  // neither branch of `noteReplayMessagesUpdate`.
+  //
+  // These two pin the CURRENT, degraded behaviour, and they are `go red with
+  // the docs` pins rather than red-first ones: they cannot fail today because
+  // they describe today. What makes them worth writing is that they REACH red
+  // — a naive repair that simply accepts remove-then-append as an append flips
+  // both — so when the repair lands (#7577) these are the tests that say so,
+  // and they go with it rather than being discovered stale. Neither shape
+  // loses, duplicates or reorders a message: both land on exactly pre-#7519
+  // behaviour.
+  it('KNOWN LIMIT: a user typing mid-replay drops the record for the window (#7577)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live)
+    replayed('s1', live, 'h-2', 2)
+    arrivedLive('s1', live, 'racer')
+    reconcileReplayStart('s1', true, live)
+    // `sendMessage`: the user's bubble AND the placeholder, in ONE update.
+    frame('s1', live, null, (m) => m.push({ id: 'u-1' }, { id: 'thinking' }))
+    // The next replayed entry strips the placeholder while appending.
+    frame('s1', live, 1, (m) => {
+      const kept = m.filter((e) => e.id !== 'thinking')
+      m.length = 0
+      m.push(...kept, { id: 'h-1' })
+    })
+    // Unclassifiable, so the record goes rather than drifting.
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    // Array order — the #7519 artifact verbatim, with the oldest history entry
+    // last. The truth is ['h-1','h-2','racer','u-1'].
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'h-2',
+      'racer',
+      'u-1',
+      'h-1',
+    ])
+  })
+
+  it('KNOWN LIMIT: a strip while the record is still EMPTY under-counts instead (#7577)', () => {
+    // The quieter second shape: the placeholder is already on screen when the
+    // window opens (send, drop, reconnect inside the safety-net timer), so the
+    // strip lands at `n === 0`. Branch 2 is vacuous there — deliberately, it is
+    // what keeps #7543 — so the record is KEPT and the append it could not
+    // classify is simply not recorded. An under-count, which `Math.min` and the
+    // swap's exact-alignment gate already make safe, rather than a drop.
+    const live: Msg[] = [{ id: 'old' }, { id: 'thinking' }]
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, 1, (m) => {
+      const kept = m.filter((e) => e.id !== 'thinking')
+      m.length = 0
+      m.push(...kept, { id: 'h-1' })
+    })
+    replayed('s1', live, 'h-2', 2)
+
+    // Kept, and short by one — 'h-1' never entered it.
+    expect(idsOf(getReplayAppendProvenance('s1'))).toEqual(['h-2'])
+    // So `start !== cut` and the reorder does not run. Nothing is lost.
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['h-1', 'h-2'])
+  })
+
+  it('a mid-array INSERT cannot enter an EMPTY record with a fabricated seq (#7574 F2)', () => {
+    // The reviewer's reproduction. With no anchor at `n === 0` the append branch
+    // was taken on ANY growth, so an insert recorded the shifted last element of
+    // `before` — a PREFIX entry — carrying the inserting frame's seq. The ids
+    // line up, so `provenanceStart` passes, the over-count pulls the cut below
+    // the walk, and the swap returned ['r-1','r-2','p3']: a prefix entry kept
+    // and sorted to the end by a seq that was never its own — an order NEITHER
+    // the walk nor array order produces. Measured red before the anchor landed.
+    const live: Msg[] = [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, 99, (m) => m.splice(1, 0, { id: 'X' })) // a mid-array insert
+    frame('s1', live, 1, (m) => m.push({ id: 'r-1' }))
+    frame('s1', live, 2, (m) => m.push({ id: 'r-2' }))
+    frame('s1', live, null, (m) => {
+      m.splice(
+        m.findIndex((e) => e.id === 'X'),
+        1,
+      )
+    })
+
+    // No prefix entry in the record, and no fabricated seq.
+    expect(getReplayAppendProvenance('s1')).toEqual([
+      { id: 'r-1', seq: 1 },
+      { id: 'r-2', seq: 2 },
+    ])
+    // The walk's own answer, which is `main`'s.
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual(['r-1', 'r-2'])
+  })
+
+  it('branch 2 stays VACUOUS at n === 0 — borrowing branch 1 anchor would undo #7543', () => {
+    // The trap in the fix for the finding above, pinned so the next reader does
+    // not fall into it: the two branches need DIFFERENT anchors. Branch 1 asks
+    // "is the append point unmoved" and at `n === 0` must anchor on `before`'s
+    // last entry. Branch 2 asks "does the record still describe the tail", and
+    // an EMPTY record describes any tail vacuously. Anchoring branch 2 the same
+    // way reds all three #7543 tests, because the whole-prefix removal empties
+    // `messages` while the record is still empty and then has no index to
+    // anchor at — measured, on the reviewer's own literal snippet.
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, null, (m) => { m.length = 0 })
+    expect(getReplayAppendProvenance('s1')).toEqual([]) // kept, not dropped
+    replayed('s1', live, 'a', 1)
+    expect(idsOf(getReplayAppendProvenance('s1'))).toEqual(['a'])
+  })
+
+  it('a record that is not `before`’s own tail is given up, not argued with', () => {
+    // The precondition guarding both branches. It cannot be reached from a live
+    // path (every removal that empties the record also empties `before`), so it
+    // is a floor rather than a case — but a record longer than the array it is
+    // supposed to be the tail of is the drifted array #7556 rules out, and a
+    // floor with no test is the shape this repo keeps a catalogue for.
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    replayed('s1', live, 'r-1', 1)
+    replayed('s1', live, 'r-2', 2)
+    // `before` shorter than the two-entry record: unreachable live, refused here.
+    noteReplayMessagesUpdate('s1', [{ id: 'old' }], live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
   it('the record is POSITIONAL: a tail that no longer matches it is refused, not trusted', () => {
     // The guard the whole mechanism rests on. If the parallel array has drifted
     // by even one position it describes each tail entry with its NEIGHBOUR's
