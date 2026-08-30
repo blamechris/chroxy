@@ -201,7 +201,13 @@ import type {
   MCPResourceItem,
   McpServerOpResult,
 } from './types';
-import { createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils';
+import {
+  createEmptyFlatSessionMirror,
+  createEmptySessionState,
+  pruneSessionKeyedMap,
+  pruneSessionScopedKeySet,
+  UPDATE_SESSION_MIRRORED_FIELDS,
+} from './utils';
 import { clearPersistedSession } from './persistence';
 
 // ---------------------------------------------------------------------------
@@ -1480,16 +1486,15 @@ export function updateSession(sessionId: string, updater: (session: SessionState
 
   if (sessionId === state.activeSessionId) {
     const flatPatch: Record<string, unknown> = { sessionStates: newSessionStates };
-    if ('messages' in patch) flatPatch.messages = patch.messages;
-    if ('streamingMessageId' in patch) flatPatch.streamingMessageId = patch.streamingMessageId;
-    if ('claudeReady' in patch) flatPatch.claudeReady = patch.claudeReady;
-    if ('activeModel' in patch) flatPatch.activeModel = patch.activeModel;
-    if ('permissionMode' in patch) flatPatch.permissionMode = patch.permissionMode;
-    if ('contextUsage' in patch) flatPatch.contextUsage = patch.contextUsage;
-    if ('contextOccupancy' in patch) flatPatch.contextOccupancy = patch.contextOccupancy;
-    if ('lastResultCost' in patch) flatPatch.lastResultCost = patch.lastResultCost;
-    if ('lastResultDuration' in patch) flatPatch.lastResultDuration = patch.lastResultDuration;
-    if ('isIdle' in patch) flatPatch.isIdle = patch.isIdle;
+    // #7555 — ONE roster, shared with the three sites that RESET this mirror
+    // (`forgetSession`, `_resetSessionMemory`, `auth_ok`'s non-reconnect
+    // branch). This was ten hand-written `if ('x' in patch)` lines and the
+    // resets carried none of them, so every field here survived a server switch
+    // and described a session that no longer existed. #7550 converged exactly
+    // one of the ten, at the consumer; the roster is the durable repair.
+    for (const field of UPDATE_SESSION_MIRRORED_FIELDS) {
+      if (field in patch) flatPatch[field] = patch[field];
+    }
     getStore().setState(flatPatch);
   } else {
     getStore().setState({ sessionStates: newSessionStates });
@@ -4544,9 +4549,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           exposureBannerDismissed: false,
           // #5821: same for the billing banner — fresh connect re-surfaces it.
           billingBannerDismissed: false,
-          messages: [],
+          // #7555 — `messages` / `terminalRawBuffer` moved into the
+          // `createEmptyFlatSessionMirror()` spread inside the marked block
+          // below (they are two of the twelve FLAT_SESSION_FIELDS).
+          // `terminalBuffer` is connection-scoped, not a session mirror, so it
+          // stays here.
           terminalBuffer: '',
-          terminalRawBuffer: '',
           sessions: [],
           activeSessionId: null,
           // #7470 authok-reset-start — the roster wipe and everything scoped to
@@ -4583,6 +4591,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // that no longer knows the session.
           pendingServerSeed: {},
           cancellingActivityIds: new Set<string>(),
+          // #7555 — the FLAT session mirror goes with the roster too, and for
+          // the same mechanical reason one level over: those twelve fields hold
+          // the ACTIVE session's value, `activeSessionId` is nulled two lines
+          // up, and `updateSession` only re-writes them for a session that
+          // EXISTS. So anything left here describes a session this branch just
+          // deleted — a Stop button and a Working banner on a dashboard with no
+          // session, until the user creates one.
+          //
+          // Only the NON-reconnect branch, exactly as above: a silent reconnect
+          // keeps `sessionStates`, so its mirror still describes a live session
+          // and blanking it would wipe the transcript the user is reading on
+          // every transient drop. (`connectedState` above already re-resets
+          // `claudeReady` / `streamingMessageId` on BOTH branches — a dropped
+          // socket invalidates readiness and any in-flight stream id
+          // regardless. This spread agrees with it.)
+          ...createEmptyFlatSessionMirror(),
           // #7470 authok-reset-end
           customAgents: [],
         });

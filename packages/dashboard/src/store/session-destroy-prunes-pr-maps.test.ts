@@ -1123,8 +1123,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     messages:
       "ChatMessage[] — the ACTIVE session's flat mirror of `sessionStates[activeSessionId]" +
       ".messages`, re-synced from the newly-active session by the flat-field block at " +
-      'session_list / session_timeout and emptied by `messages: []` at auth_ok / forgetSession ' +
-      '/ _resetSessionMemory (#7527)',
+      'session_list / session_timeout, and emptied by the `createEmptyFlatSessionMirror()` spread ' +
+      'at auth_ok / forgetSession / _resetSessionMemory (#7527, #7555 — which replaced the three ' +
+      '`messages: []` literals this reason used to name)',
   }
 
   // -- Bucket 3: session-scoped and NOT yet cleaned — tracked, not hidden. ----
@@ -1177,7 +1178,17 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
   // element DOES carry a session id does not belong in this bucket, however
   // incidental the tagging looks; that is what SESSION_TAGGED_BY_DESIGN is for.
   const NOT_SESSION_KEYED: Record<string, string> = {
-    sessionPresetSnapshots: 'keyed by cwd (#5553)',
+    // #7488 — the classification is unchanged and still correct: it IS keyed by
+    // cwd, so `removedIds` (a list of session ids) has nothing to diff against
+    // it and this bucket is where it belongs. What #7488 established is that the
+    // bucket answers the KEY question, not the LIFETIME one: "not keyed by a
+    // session id" says nothing about whether an entry may outlive the
+    // CONNECTION. It may not — cwd paths are shared across machines, so a preset
+    // (full preamble + seed text + approval state) fetched from server A was
+    // being read against server B at the same path. It is cleared at the two
+    // full-reset sites now, which the `connection lifecycle` describe below
+    // holds for this field and for every other member of this bucket.
+    sessionPresetSnapshots: 'keyed by cwd (#5553); cleared at the two full-reset sites (#7488)',
     reindexingRepoPaths: 'keyed by the repoPath the dashboard sent',
     reindexResults: 'per repo path',
     relayRerunningRepoPaths: 'repo paths with an in-flight relay re-run',
@@ -2168,7 +2179,347 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     const assigned = new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`)
     expect(assigned.test(block), `${site} must assign ${field} (token match, not substring)`).toBe(true)
   })
+
+/**
+ * #7488 — the LIFETIME axis of the `NOT_SESSION_KEYED` bucket.
+ *
+ * ## Why a second axis
+ *
+ * The bucket above answers ONE question: what is this collection keyed by. That
+ * is the right question for a SESSION-death roster, and `sessionPresetSnapshots`
+ * was correctly parked there: it is keyed by cwd, so `removedIds` — a list of
+ * session ids — has nothing to diff against it, and no session-keyed prune
+ * should ever touch it.
+ *
+ * The classification is also what hid #7488 for three PRs. "Not keyed by a
+ * session id" says nothing about whether an entry may outlive the CONNECTION,
+ * and for this field it may not: cwd paths have none of the entropy that keeps
+ * two daemons' session-id spaces apart (`/home/user/project`, `/workspace`,
+ * `/Users/chris/Projects/chroxy` are shared across machines routinely), and
+ * `ServerSessionPresetFull` carries the full preamble + seed text and the
+ * preset's approval state. A preset fetched from server A was being rendered —
+ * and could be approved and applied — as server B's.
+ *
+ * So this describe asks the second question of every member of that bucket:
+ * where does it die? Three honest answers, and nothing else:
+ *
+ *   1. it is cleared at BOTH full-reset sites (derived — no list to maintain),
+ *   2. it is cleared by `disconnect()`, named in `CLEARED_ON_DISCONNECT` and
+ *      VERIFIED against that action's own body,
+ *   3. it outlives the connection ON PURPOSE, named in `OUTLIVES_BY_DESIGN`
+ *      with the adjudication,
+ *   4. it is not cleared at all, named in `CONNECTION_LIFECYCLE_DEFERRED` with a
+ *      tracking issue.
+ *
+ * A member in none of them is red. That is the same classify-or-fail contract
+ * the bucket above uses, one axis over — and it is why #7488's acceptance did
+ * NOT get answered with a comment: a comment beside a growing set is the defect
+ * this whole file is about.
+ *
+ * ## What it found
+ *
+ * Of the 46 members: 17 are cleared at both full-reset sites, 16 by
+ * `disconnect()`, 1 (`serverRegistry`) outlives every connection by design, and
+ * 12 by nothing at all — the orchestration / scheduled-task / credential-test
+ * family plus `pendingPairRequests`, `serverStartupLogs` and
+ * `infoNotifications`, filed as #7557. Those twelve are the deferral below,
+ * visible rather than invisible, which is the whole point of #7481's "a
+ * deferral a reader can SEE beats a pattern that cannot see the field at all".
+ *
+ * ## The caveat on answer 2, which is a finding rather than a footnote
+ *
+ * `disconnect()` is NOT unconditional on the switch paths: `switchServer` and
+ * `connectLocal` call it only `if (get().connectionPhase !== 'disconnected')`.
+ * So a server switch made from a tab already at `'disconnected'` runs
+ * `_resetSessionMemory()` alone, and all 16 `CLEARED_ON_DISCONNECT` members
+ * survive it.
+ *
+ * ONE route reaches that state with the previous server's values intact, and it
+ * is worth naming precisely — PR #7564's review checked the first draft of this
+ * paragraph and two of the three triggers it listed were wrong:
+ *
+ *   * a FAILED CONNECT — real. `onRestartGaveUp` / `onProbeGaveUp`
+ *     (`connection.ts`), the pinned-identity refusal and the key-exchange
+ *     failures (`message-handler.ts`) all land at `'disconnected'` with server
+ *     A's state fully populated.
+ *   * `server_down` — NOT this. It is its OWN `ConnectionPhase`
+ *     (`store-core/src/types/connection.ts`), so the `!== 'disconnected'` test
+ *     is true and `disconnect()` does run.
+ *   * a user Disconnect — NOT this either. `disconnect()` is what set the
+ *     phase, so it has already cleared all sixteen.
+ *
+ * `serverCapabilities` looks like the sharpest member and is in fact the
+ * weakest: `auth_ok` full-replaces it unconditionally on BOTH branches, and
+ * store-core's auth handler normalises an omitted `capabilities` to `{}`, so
+ * even an older server B overwrites the stale map. The genuinely sharp one is
+ * `availablePermissionModes`, re-set only CONDITIONALLY (`message-handler.ts`,
+ * `if (auth.availablePermissionModes)`).
+ *
+ * That is #7559, and it is out of scope here (a conditional call, not a missing
+ * clear). Answer 2 therefore means "cleared by disconnect(), with #7559 open
+ * against that being enough" — stated rather than implied, so nobody reads this
+ * bucket as a clean bill of health.
+ */
+describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one', () => {
+  /**
+   * The whole `set({ … })` payload of each action, not the `#7470` marked span.
+   * These fields are connection-scoped rather than roster-scoped, so most of
+   * them sit OUTSIDE the markers by design (the `reindex*` / `container*` /
+   * `wsl*` families have done since #5500) — slicing to the markers would
+   * report twenty false deferrals.
+   */
+  function actionBody(src: string, startNeedle: string, endNeedle: string): string {
+    const s = src.indexOf(startNeedle)
+    expect(s, `${startNeedle} must exist`).toBeGreaterThan(-1)
+    const e = src.indexOf(endNeedle, s)
+    expect(e, `${endNeedle} must follow it`).toBeGreaterThan(s)
+    return src.slice(s, e)
+  }
+
+  const forgetBody = actionBody(connectionSrc, '  forgetSession: () => {', '  /** Reset in-memory session state')
+  const switchBody = actionBody(connectionSrc, '  _resetSessionMemory: () => {', '  setViewMode:')
+  const disconnectBody = actionBody(connectionSrc, "      connectionPhase: 'disconnected',", '  forgetSession:')
+
+  /** Token match, not substring — `reindexResults` contains `reindex`. */
+  const assigns = (block: string, field: string): boolean =>
+    new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`).test(block)
+
+  /**
+   * Answer 2: cleared by `disconnect()`, not by the two full-reset sites.
+   *
+   * The reason string is not decoration — the cell below asserts each of these
+   * really IS assigned in `disconnect()`'s body, so a field cannot be parked
+   * here with a shrug, and one that stops being cleared there goes red.
+   *
+   * Read with the #7559 caveat in this describe's docstring: `disconnect()` is
+   * conditional on the switch paths.
+   */
+  const CLEARED_ON_DISCONNECT: Record<string, string> = {
+    permissionInputs: 'disconnect() — a half-typed permission reply is dead with the socket',
+    resolvedPermissions: 'disconnect() — the requestIds belong to the dropped connection',
+    serverCapabilities:
+      '#3272 review — disconnect() clears it so a reconnect against a different (or older) server ' +
+      'cannot have its UI gates left enabled by stale state (empty = fail-closed)',
+    availableProviders: 'disconnect() — the provider registry is per daemon',
+    availableModels: 'disconnect() — the model list is per daemon/provider',
+    availablePermissionModes: 'disconnect() — the mode enum is advertised per daemon',
+    connectedClients: 'disconnect() — the presence roster belongs to the dropped socket',
+    webTasks: 'disconnect() — web-task list is per daemon',
+    slashCommands: 'disconnect() — project commands differ per daemon and per session cwd',
+    filePickerFiles: "disconnect() — a listing of the OLD daemon's filesystem",
+    mcpResources: 'disconnect() — the MCP resource list is per daemon',
+    customAgents: 'disconnect() — project agents differ per daemon and per session cwd',
+    conversationHistory: "disconnect() — transcripts pulled from the OLD daemon",
+    searchResults: "disconnect() — a search over the OLD daemon's transcripts",
+    checkpoints: 'disconnect() — checkpoints belong to a session on the old daemon',
+    environments: 'disconnect() — container/worktree environments are per daemon',
+  }
+
+  /**
+   * Answer 3: outlives the connection on purpose. An entry here cites the
+   * adjudication, exactly as a deferral cites its tracking issue.
+   */
+  const OUTLIVES_BY_DESIGN: Record<string, string> = {
+    serverRegistry:
+      'ServerEntry[] — the multi-server picker IS this list, and it is loaded from localStorage at ' +
+      'construction. Clearing it on a connection boundary would delete the user\'s servers (#5281). ' +
+      'Its NOT_SESSION_KEYED reason already says it "outlives every connection by design".',
+  }
+
+  /** Answer 4: not cleared anywhere. Tracked, not hidden. */
+  const CONNECTION_LIFECYCLE_DEFERRED: Record<string, string> = {
+    orchestrationPendingActions: 'keyed by requestId; never cleared on any path. #7557',
+    orchestrationActionResults: 'keyed by requestId; never cleared on any path. #7557',
+    scheduledTaskPendingActions: 'keyed by requestId; never cleared on any path. #7557',
+    scheduledTaskActionResults: 'keyed by requestId; never cleared on any path. #7557',
+    orchestrationRunDetails:
+      'keyed by runId — a snapshot pulled from ONE daemon, readable against another after a ' +
+      'switchServer. #7557',
+    orchestrationRunDetailErrors: 'keyed by runId; never cleared on any path. #7557',
+    orchestrationRunDetailStale: 'keyed by runId; never cleared on any path. #7557',
+    orchestrationRunDetailLoading:
+      'keyed by runId. Reset on a SOCKET DROP (the reconnect reset for a reply that will never ' +
+      'arrive) — which is not a connection lifetime: switchServer does not go through it when the ' +
+      'dashboard is already disconnected. #7557',
+    credentialTestResults:
+      'keyed by credential key (`anthropic`, `openai`, …) — identical on every daemon by ' +
+      "construction, so server A's green verdict renders against server B. #7557",
+    pendingPairRequests:
+      'ServerPairPendingMessage[] keyed by requestId — a device-pairing request from one daemon, ' +
+      'surfaced against another after a switch. #7557',
+    serverStartupLogs:
+      "string[] | null — ONE daemon's startup output, rendered without provenance, so after a " +
+      "switchServer the operator reads server A's failure while looking at server B. #7557",
+    infoNotifications:
+      'ServerError[] — info-level toasts accumulated for the life of the tab, with no connection ' +
+      'boundary. #7557',
+  }
+
+  it('every NOT_SESSION_KEYED member has a lifetime, or is a tracked deferral', () => {
+    const unaccounted = Object.keys(NOT_SESSION_KEYED).filter(
+      (f) =>
+        !(assigns(forgetBody, f) && assigns(switchBody, f)) &&
+        !(f in CLEARED_ON_DISCONNECT) &&
+        !(f in OUTLIVES_BY_DESIGN) &&
+        !(f in CONNECTION_LIFECYCLE_DEFERRED),
+    )
+    expect(
+      unaccounted,
+      'a NOT_SESSION_KEYED collection is cleared by nothing and classified by nothing. Being keyed ' +
+      'by something other than a session id does not mean it may outlive the CONNECTION — clear it ' +
+      'at both full-reset sites, or name where it dies in CLEARED_ON_DISCONNECT, or state the ' +
+      'adjudication in OUTLIVES_BY_DESIGN, or defer it in CONNECTION_LIFECYCLE_DEFERRED with a ' +
+      'tracking issue. #7488',
+    ).toEqual([])
+    // Non-vacuous: the classification really is looking at the whole bucket.
+    expect(Object.keys(NOT_SESSION_KEYED).length, 'the bucket is empty — nothing was classified')
+      .toBeGreaterThanOrEqual(40)
+  })
+
+  it('sessionPresetSnapshots is cleared at BOTH full-reset sites', () => {
+    // The site axis for #7488's fix, source-anchored beside the behavioural
+    // assertions in session-preset-snapshots-lifecycle.test.ts. Named per site
+    // so clearing one and not the other says which one is missing.
+    expect(assigns(forgetBody, 'sessionPresetSnapshots'), 'forgetSession must clear it').toBe(true)
+    expect(assigns(switchBody, 'sessionPresetSnapshots'), '_resetSessionMemory must clear it').toBe(true)
+  })
+
+  it('sessionPresetSnapshots is NOT cleared by auth_ok — the adjudication, pinned', () => {
+    // A same-server reconnect keeps its presets: `auth_ok`'s non-reconnect
+    // branch is reached by Disconnect → Connect to the SAME server, where a
+    // preset for a cwd is still true. The server-switch route reaches it too,
+    // but only after `_resetSessionMemory` has already cleared the map.
+    const authokBlock = handlerSrc.slice(
+      handlerSrc.indexOf('#7470 authok-reset-start'),
+      handlerSrc.indexOf('#7470 authok-reset-end'),
+    )
+    expect(authokBlock.length, 'the authok marked block must exist').toBeGreaterThan(0)
+    expect(
+      assigns(authokBlock, 'sessionPresetSnapshots'),
+      'auth_ok must NOT clear sessionPresetSnapshots — a same-server reconnect keeps its presets (#7488)',
+    ).toBe(false)
+  })
+
+  it('control: the three action slices are real, and they disagree with each other', () => {
+    // Non-vacuous in both directions. A slice that failed to match would make
+    // `assigns` false for everything and turn the classification test into a
+    // demand that all 29 be deferred; a slice that swallowed the whole file
+    // would make it true for everything and the test would pass empty.
+    for (const [name, body] of [['forget', forgetBody], ['switch', switchBody], ['disconnect', disconnectBody]] as const) {
+      expect(body.length, `${name} slice is empty`).toBeGreaterThan(500)
+      expect(body.length, `${name} slice swallowed the file`).toBeLessThan(connectionSrc.length / 2)
+    }
+    // The slices are DIFFERENT regions: `serverCapabilities` is disconnect-only,
+    // `reindexResults` is full-reset-only. If either claim stopped holding, the
+    // classification above would be measuring one region three times.
+    expect(assigns(disconnectBody, 'serverCapabilities')).toBe(true)
+    expect(assigns(forgetBody, 'serverCapabilities')).toBe(false)
+    expect(assigns(forgetBody, 'reindexResults')).toBe(true)
+    expect(assigns(disconnectBody, 'reindexResults')).toBe(false)
+  })
+
+  it('every CLEARED_ON_DISCONNECT entry is really cleared by disconnect()', () => {
+    // The escape hatch, checked rather than trusted — this is what stops the
+    // bucket becoming a place to park a field nobody looked at.
+    for (const [field, reason] of Object.entries(CLEARED_ON_DISCONNECT)) {
+      expect(reason.length, `${field} needs a reason`).toBeGreaterThan(10)
+      expect(assigns(disconnectBody, field), `${field} claims disconnect() clears it, and it does not`).toBe(true)
+      // …and NOT at the full-reset sites, or it belongs in answer 1. Keeping the
+      // buckets disjoint is what makes #7559's caveat apply to exactly this set.
+      expect(
+        assigns(forgetBody, field) && assigns(switchBody, field),
+        `${field} IS cleared at both full-reset sites now — drop it from CLEARED_ON_DISCONNECT`,
+      ).toBe(false)
+    }
+  })
+
+  it('every OUTLIVES_BY_DESIGN entry states the adjudication and is really uncleared', () => {
+    for (const [field, reason] of Object.entries(OUTLIVES_BY_DESIGN)) {
+      expect(reason.length, `${field} needs the adjudication written down`).toBeGreaterThan(40)
+      expect(assigns(forgetBody, field), `${field} is claimed to outlive the connection`).toBe(false)
+      expect(assigns(switchBody, field), `${field} is claimed to outlive the connection`).toBe(false)
+      expect(assigns(disconnectBody, field), `${field} is claimed to outlive the connection`).toBe(false)
+    }
+  })
+
+  it('every deferral cites a tracking issue AND is really uncleared', () => {
+    for (const [field, reason] of Object.entries(CONNECTION_LIFECYCLE_DEFERRED)) {
+      expect(reason, `CONNECTION_LIFECYCLE_DEFERRED.${field} must cite a tracking issue (#N)`)
+        .toMatch(/#\d{3,}/)
+      // The other half, and the one that makes the deferral expire on its own:
+      // a field someone has since FIXED must leave this list, or the list
+      // becomes a permanent excuse for work that is already done.
+      expect(
+        assigns(forgetBody, field) && assigns(switchBody, field),
+        `${field} is deferred but IS now cleared at both full-reset sites — drop it from ` +
+        'CONNECTION_LIFECYCLE_DEFERRED (that removal is the acceptance for #7557)',
+      ).toBe(false)
+    }
+  })
+
+  it('no field is in two lifetime answers at once', () => {
+    const answers = [CLEARED_ON_DISCONNECT, OUTLIVES_BY_DESIGN, CONNECTION_LIFECYCLE_DEFERRED]
+    const seen = new Map<string, number>()
+    answers.forEach((bucket, i) => {
+      for (const f of Object.keys(bucket)) {
+        expect(seen.has(f), `${f} is in two lifetime answers (${seen.get(f)} and ${i})`).toBe(false)
+        seen.set(f, i)
+      }
+    })
+    const clearedAndDeferred = Object.keys(CONNECTION_LIFECYCLE_DEFERRED).filter(
+      (f) => assigns(forgetBody, f) && assigns(switchBody, f),
+    )
+    expect(clearedAndDeferred).toEqual([])
+  })
+
+  it('stale allowlist: every classified name is really a classified member', () => {
+    // The list-goes-stale direction: a field renamed or DELETED must not leave a
+    // dangling entry here quietly excusing nothing.
+    //
+    // #7552 merge. This cell did its job and caught a real cross-PR collision:
+    // #7552 moved `environments` out of NOT_SESSION_KEYED into
+    // SESSION_TAGGED_BY_DESIGN (the `sessions` tag stopped being dead surface and
+    // now carries live session ids), which left its CLEARED_ON_DISCONNECT entry
+    // pointing at a name that was no longer in the scanned bucket. `git merge`
+    // resolved both changes textually and produced a red suite.
+    //
+    // The resolution keeps BOTH intents rather than picking a side. The entry is
+    // a TRUE and independently-asserted fact — `disconnect()` really does clear
+    // `environments` (connection.ts, inside `disconnect()`), and the
+    // `every CLEARED_ON_DISCONNECT entry is really cleared by disconnect()` cell
+    // below is the ONLY thing pinning it. Dropping the entry to satisfy this one
+    // would have deleted that coverage for a field #7552 made MORE sensitive, not
+    // less: it now carries session ids belonging to one specific daemon, so
+    // leaking it across a server switch is worse than it was when the tag was
+    // permanently `[]`.
+    //
+    // So the predicate widens by exactly one bucket, and only in the STALENESS
+    // direction. This does NOT require SESSION_TAGGED_BY_DESIGN members to have a
+    // lifetime — the `every NOT_SESSION_KEYED member has a lifetime` cell above
+    // still scans NOT_SESSION_KEYED alone, which is the axis #7488 scoped itself
+    // to. It says only: a name parked in a lifetime map must still BE a
+    // classified member somewhere, so a deleted or renamed field still goes red.
+    // The other three by-design members (sessionNotifications / serverErrors /
+    // logEntries) appear in no lifetime map, so nothing else moves.
+    const classifiedMembers = { ...NOT_SESSION_KEYED, ...SESSION_TAGGED_BY_DESIGN }
+    const stale = [
+      ...Object.keys(CLEARED_ON_DISCONNECT),
+      ...Object.keys(OUTLIVES_BY_DESIGN),
+      ...Object.keys(CONNECTION_LIFECYCLE_DEFERRED),
+    ].filter((f) => !(f in classifiedMembers))
+    expect(stale, 'classified name(s) that are no longer classified members of either bucket').toEqual([])
+
+    // Non-vacuous, and specifically that the widening did not turn the cell into
+    // "anything goes": a name in NEITHER bucket is still stale.
+    expect(
+      ['permissionInputs', 'environments', 'sessionPrMutantGhostField']
+        .filter((f) => !(f in classifiedMembers)),
+      'the widened predicate must still reject a name that is in no bucket at all',
+    ).toEqual(['sessionPrMutantGhostField'])
+  })
 })
+})
+
 
 /**
  * Roster REMOVAL sites — the SITE axis, found structurally (#7495).
