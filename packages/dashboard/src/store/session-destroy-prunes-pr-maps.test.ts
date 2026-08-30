@@ -936,6 +936,22 @@ const connectionSrc = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
  * unchanged — only the direction of the claim moved, which is what the old cell
  * said would happen and told the next reader to do.
  */
+/**
+ * Blank every comment in a source, preserving line breaks so derived line
+ * numbers stay true.
+ *
+ * #7552 review, F2. Both cross-package detectors below scan SERVER source text
+ * for a call site, and the code they look for is documented in comments that
+ * quote it verbatim — `session-manager.js` names `environmentManager` and
+ * `removeSession` several times in the JSDoc explaining the very calls being
+ * detected. Scanning raw text lets the documentation satisfy the check for the
+ * code, which is a guard reporting on its own prose. The same reason the
+ * `roster removal sites` describe blanks comments before ITS scan; the regex is
+ * that one, and the two are kept identical on purpose.
+ */
+const blankSourceComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '))
+
 const serverSrcDir = resolve(__dirname, '../../../server/src')
 const serverProductionSources: [string, string][] = readdirSync(serverSrcDir, { recursive: true })
   .map((e) => String(e))
@@ -1729,11 +1745,14 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
    * detect anything at all.
    */
   function addSessionCallers(sources: [string, string][]): string[] {
-    return sources.flatMap(([file, src]) =>
-      [...src.matchAll(/[A-Za-z0-9_$)\]]\s*\??\.\s*addSession\s*\(/g)].map(
+    return sources.flatMap(([file, raw]) => {
+      // Comments blanked, not stripped, so the reported line number is still the
+      // line in the ORIGINAL file (#7552 review, F2).
+      const src = blankSourceComments(raw)
+      return [...src.matchAll(/[A-Za-z0-9_$)\]]\s*\??\.\s*addSession\s*\(/g)].map(
         (m) => `${file}:${src.slice(0, m.index).split('\n').length}`,
-      ),
-    )
+      )
+    })
   }
 
   it('the addSession detector sees both spellings of a call, and neither definition', () => {
@@ -1761,6 +1780,19 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // Nor is an unrelated method that merely ends in the same letters.
     expect(addSessionCallers([['d.js', 'ctx.timeouts.removeSession(sid)\nctx.x.readdSession(sid)']]))
       .toEqual([])
+    // Nor is a COMMENT that quotes one (#7552 review, F2). This is not
+    // hypothetical: session-manager.js documents both calls in JSDoc that names
+    // them, so without blanking, deleting the code and leaving the comment —
+    // the #7421 shape, a guard removed with its documentation left behind —
+    // would read as a live caller.
+    expect(addSessionCallers([['e.js', '// ctx.services.environmentManager.addSession(envId, sid)']]))
+      .toEqual([])
+    expect(addSessionCallers([['f.js', '/* x.addSession(a, b) */\nconst y = 1']]))
+      .toEqual([])
+    // …and blanking preserves offsets, so a real call after a comment still
+    // reports its true line.
+    expect(addSessionCallers([['g.js', '// addSession is wired here:\nmgr.addSession(a, b)']]))
+      .toEqual(['g.js:2'])
   })
 
   it('EnvironmentInfo.sessions has a production writer, and it is paired with a remover', () => {
@@ -1782,6 +1814,19 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // half — an `addSession` with no matching `removeSession` caller is the
     // INVERSE bug (a stale id makes the environment permanently undestroyable),
     // so both are pinned here rather than only the writer the old cell named.
+    //
+    // KNOWN LIMIT, stated rather than left for the next reader to discover
+    // (#7552 review, R1). This cell greps for the CALL SITE. It cannot see the
+    // RECEIVER: `this._environmentManager?.addSession(...)` is optional-chained,
+    // so deleting the single `environmentManager,` argument from
+    // `new SessionManager({…})` in server-cli.js leaves every call site intact,
+    // running against null, with this cell green and the tag `[]` again. That
+    // injection point has its own anchored cell in
+    // `packages/server/tests/environment-session-wiring.test.js`
+    // ("server-cli hands the EnvironmentManager to the SessionManager"), and the
+    // behaviour has six detach cells and an attach cell beside it. Those are the
+    // teeth; this is the cross-package structural half that keeps the
+    // CLASSIFICATION below honest, and it is defence in depth, not the guard.
     //
     // Positive controls FIRST, so a scan that reached the wrong tree — or no
     // tree — cannot report a clean answer in EITHER direction. This is the
@@ -1847,12 +1892,19 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // calls, so reusing one in a `.filter()` skips files at random — a detector
     // whose answer depends on iteration order.
     const ENV_REMOVE_RE = /environmentManager\s*\??\.\s*removeSession\s*\(/i
-    // Control: the detector is anchored to the receiver, not to the method name.
+    // Controls: anchored to the receiver, not to the method name…
     expect('    this._timeoutManager.removeSession(sessionId)'.match(ENV_REMOVE_RE)).toBe(null)
     expect('this._environmentManager?.removeSession(id, sid)'.match(ENV_REMOVE_RE)).not.toBe(null)
+    // …and not satisfiable by the JSDoc that documents the call (#7552 review,
+    // F2). environment-manager.js's own `removeSession` docstring says
+    // "called from SessionManager._cleanupSessionMaps", so this matters.
+    expect(ENV_REMOVE_RE.test(blankSourceComments('// this._environmentManager?.removeSession(a, b)')))
+      .toBe(false)
+    expect(ENV_REMOVE_RE.test(blankSourceComments('this._environmentManager?.removeSession(a, b)')))
+      .toBe(true)
 
     const removeCallers = serverProductionSources
-      .filter(([, src]) => ENV_REMOVE_RE.test(src))
+      .filter(([, src]) => ENV_REMOVE_RE.test(blankSourceComments(src)))
       .map(([file]) => file)
     expect(
       removeCallers,
@@ -2187,9 +2239,11 @@ describe('#7495 roster removal sites: every site that drops a session is account
    * `(?<!:)` keeps a `https://` inside a string literal from blanking the rest
    * of its line.
    */
-  function blankComments(src: string): string {
-    return src.replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '))
-  }
+  // #7552 review, F2: DELEGATES to the module-scope helper rather than carrying
+  // a second copy of the regex. Two hand-written copies of the same derivation
+  // is the drift shape this repo keeps paying for; the docstring above stays
+  // because the REASON this scan needs it is specific to these sources.
+  const blankComments = blankSourceComments
 
   /**
    * Every statement in `src` that removes entries from the session roster.

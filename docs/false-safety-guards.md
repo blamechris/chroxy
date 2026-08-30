@@ -1436,12 +1436,12 @@ about behaviour that does not exist, and someone eventually accepts it.
 The fix (#7552) wired the association that already existed — `create_session`
 takes an `environmentId` and resolves the container from it — attaching in
 `SessionManager.createSession` and detaching in `_cleanupSessionMaps`, the sole
-funnel out of `_sessions`, plus `destroyAll()`. The detach placement is the load
--bearing choice: hanging it off the `session_destroyed` EVENT would have missed
-`_handleAsyncStartFailure`'s restore-rebind branch, which leaves `_sessions` and
-emits `session_restore_failed` instead — and a missed detach is the *inverse*
-false safety, a stale id that disables the button forever and makes the
-environment undestroyable.
+funnel out of `_sessions`, plus `destroyAll()`. The detach placement is the
+load-bearing choice: hanging it off the `session_destroyed` EVENT would have
+missed `_handleAsyncStartFailure`'s restore-rebind branch, which leaves
+`_sessions` and emits `session_restore_failed` instead — and a missed detach is
+the *inverse* false safety, a stale id that disables the button forever and
+makes the environment undestroyable.
 
 **Guard against it:** a guard that reads a *field* is only as alive as the
 field's writers, and "the type declares it" is not a writer. When a check's
