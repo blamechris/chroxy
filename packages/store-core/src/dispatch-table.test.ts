@@ -409,7 +409,7 @@ describe('shared dispatch table', () => {
     // the verdict has to be recorded here rather than re-derived at replay-end.
     it('records a live question (no historySeq) as a live arrival during the replay window', () => {
       resetReplayReconcile({ clearCursors: true })
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       const env = makeAdapter({
         activeSessionId: 's1',
         sessions: { s1: { sessionId: 's1', messages: [] } },
@@ -430,7 +430,7 @@ describe('shared dispatch table', () => {
 
     it('does NOT record a question the replay delivered (historySeq present)', () => {
       resetReplayReconcile({ clearCursors: true })
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       const env = makeAdapter({
         activeSessionId: 's1',
         sessions: { s1: { sessionId: 's1', messages: [] } },
@@ -634,8 +634,11 @@ describe('shared dispatch table', () => {
             },
           },
         })
-        // Full rebuild: baseline = 2, so BOTH held entries are prefix.
-        reconcileReplayStart('s1', true, 2)
+        // Full rebuild: baseline = 2, so BOTH held entries are prefix. Read off
+        // the fixture rather than mirrored by hand — a literal here keeps
+        // passing (resolving to 0) if `held()`'s id ever changes, and silently
+        // stops measuring the prefix bound this test exists for.
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
         dispatch(env, {
           type: 'user_question',
           sessionId: 's1',
@@ -671,8 +674,9 @@ describe('shared dispatch table', () => {
             },
           },
         })
-        // baseline = 1: everything appended from here on is the authoritative set.
-        reconcileReplayStart('s1', true, 1)
+        // baseline = 1: everything appended from here on is the authoritative
+        // set. Read off the fixture, not mirrored by hand (see above).
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
         // The replay delivers the question into the tail...
         dispatch(env, {
           type: 'user_question',
@@ -721,7 +725,10 @@ describe('shared dispatch table', () => {
             },
           },
         })
-        reconcileReplayStart('s1', false, 2) // delta: no baseline
+        // Delta: no baseline, so the prefix ids are never consulted — still read
+        // off the fixture so the three converted call sites in this file stay
+        // uniform.
+        reconcileReplayStart('s1', false, env.sessions.s1!.messages)
         dispatch(env, {
           type: 'user_question',
           sessionId: 's1',
@@ -761,7 +768,7 @@ describe('shared dispatch table', () => {
       // nothing and the sweep would re-stamp the very prompt the merge revived.
       it('records the SURVIVING id in the live-arrival ledger when a window is open', () => {
         resetReplayReconcile({ clearCursors: true })
-        reconcileReplayStart('s1', false, 0)
+        reconcileReplayStart('s1', false, [])
         const env = makeAdapter({
           activeSessionId: 's1',
           sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },

@@ -414,7 +414,7 @@ export class FakeHandshakeClient {
         this.phases.push('replay-start')
         const sid = msg.sessionId as string
         const current = this.store.getMessages(sid)
-        reconcileReplayStart(sid, !!msg.fullHistory, current.length, msg.latestSeq)
+        reconcileReplayStart(sid, !!msg.fullHistory, current, msg.latestSeq)
         break
       }
       case 'history_replay_entry': {

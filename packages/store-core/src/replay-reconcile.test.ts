@@ -20,6 +20,15 @@ import {
 
 type Msg = { id: string }
 
+/**
+ * N placeholder on-screen messages, for a start whose prefix IDS are never
+ * consulted — a delta that opens no baseline, or a window torn down before any
+ * swap. Anywhere the prefix is actually cut, the test passes the REAL array, so
+ * the walk in `resolveBaselineIndex` runs against the ids the swap will see
+ * (#7524).
+ */
+const prefix = (n: number): Msg[] => Array.from({ length: n }, (_, i) => ({ id: `p-${i + 1}` }))
+
 beforeEach(() => {
   resetReplayReconcile({ clearCursors: true })
 })
@@ -88,13 +97,13 @@ describe('history cursor tracking (#5555.3)', () => {
 
 describe('delta replay — append-only, no rebuild (#5555.4)', () => {
   it('reconcileReplayStart(fullHistory=false) does NOT start a rebuild', () => {
-    const { rebuildInProgress } = reconcileReplayStart('s1', false, 3)
+    const { rebuildInProgress } = reconcileReplayStart('s1', false, prefix(3))
     expect(rebuildInProgress).toBe(false)
     expect(isRebuildInProgress('s1')).toBe(false)
   })
 
   it('reconcileReplayEnd returns null swap for a delta replay (messages untouched)', () => {
-    reconcileReplayStart('s1', false, 3)
+    reconcileReplayStart('s1', false, prefix(3))
     const { swappedMessages } = reconcileReplayEnd('s1', [{ id: 'a' }])
     expect(swappedMessages).toBeNull()
   })
@@ -102,18 +111,18 @@ describe('delta replay — append-only, no rebuild (#5555.4)', () => {
   it('start frame latestSeq does NOT advance the cursor (mid-replay drop safety)', () => {
     // The cursor must only finalise once the slice is fully delivered (at end),
     // so a socket drop mid-replay can't claim un-applied entries.
-    reconcileReplayStart('s1', false, 0, 12)
+    reconcileReplayStart('s1', false, [], 12)
     expect(getHistoryCursor('s1')).toBeUndefined()
   })
 
   it('END frame latestSeq advances the cursor even with no entries (already current)', () => {
-    reconcileReplayStart('s1', false, 0, 12)
+    reconcileReplayStart('s1', false, [], 12)
     reconcileReplayEnd('s1', [], 12)
     expect(getHistoryCursor('s1')).toBe(12)
   })
 
   it('delta replay dedups against the WHOLE message array', () => {
-    reconcileReplayStart('s1', false, 2)
+    reconcileReplayStart('s1', false, prefix(2))
     const msgs: Msg[] = [{ id: 'a' }, { id: 'b' }]
     expect(replayDedupCache('s1', msgs)).toEqual(msgs)
   })
@@ -121,7 +130,7 @@ describe('delta replay — append-only, no rebuild (#5555.4)', () => {
 
 describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () => {
   it('keeps a rebuild in progress and does NOT wipe (caller leaves messages visible)', () => {
-    const { rebuildInProgress } = reconcileReplayStart('s1', true, 3)
+    const { rebuildInProgress } = reconcileReplayStart('s1', true, prefix(3))
     expect(rebuildInProgress).toBe(true)
     expect(isRebuildInProgress('s1')).toBe(true)
   })
@@ -129,7 +138,7 @@ describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () =
   it('dedup cache is scoped to the appended tail so the discarded prefix cannot suppress a replayed entry', () => {
     // 3 pre-existing messages; replay starts → baseline 3. The tail (entries
     // appended during replay) is what we dedup against, NOT the prefix.
-    reconcileReplayStart('s1', true, 3)
+    reconcileReplayStart('s1', true, [{ id: 'old-1' }, { id: 'old-2' }, { id: 'old-3' }])
     const msgs: Msg[] = [
       { id: 'old-1' }, { id: 'old-2' }, { id: 'old-3' }, // prefix (discarded)
       { id: 'new-1' }, // replayed so far
@@ -138,7 +147,7 @@ describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () =
   })
 
   it('end swaps messages down to exactly the replayed tail in one update', () => {
-    reconcileReplayStart('s1', true, 2)
+    reconcileReplayStart('s1', true, [{ id: 'old-1' }, { id: 'old-2' }])
     // prefix [old-1, old-2] stayed visible; replay appended [r-1, r-2, r-3]
     const finalArray: Msg[] = [
       { id: 'old-1' }, { id: 'old-2' },
@@ -151,7 +160,7 @@ describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () =
   })
 
   it('empty replay (baseline at end) swaps to [] — server trimmed history to nothing', () => {
-    reconcileReplayStart('s1', true, 2)
+    reconcileReplayStart('s1', true, [{ id: 'old-1' }, { id: 'old-2' }])
     const { swappedMessages } = reconcileReplayEnd('s1', [{ id: 'old-1' }, { id: 'old-2' }])
     expect(swappedMessages).toEqual([])
   })
@@ -161,7 +170,7 @@ describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () =
     // reconcileReplayEnd swap changes identity. We assert that dedupCache always
     // exposes a non-destructive view and that no API zeroes the array mid-flight.
     const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }, { id: 'old-3' }]
-    reconcileReplayStart('s1', true, live.length)
+    reconcileReplayStart('s1', true, live)
     // simulate appending replayed entries
     live.push({ id: 'r-1' })
     expect(live.length).toBe(4) // never dropped below the prefix
@@ -173,7 +182,7 @@ describe('full rebuild — deferred atomic swap, no blank flash (#5555.4)', () =
 
 describe('replay × delta-flusher race ordering (#5588)', () => {
   it('a forced flush landing DURING a full rebuild survives the swap in array order', () => {
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     // prefix [old]; replay appends r-1, then a forced flush appends a streamed
     // response f-1, then replay appends r-2.
     const live: Msg[] = [
@@ -188,7 +197,7 @@ describe('replay × delta-flusher race ordering (#5588)', () => {
   })
 
   it('a flush landing AFTER end appends to the already-swapped set with no duplication', () => {
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     const live: Msg[] = [{ id: 'old' }, { id: 'r-1' }]
     const { swappedMessages } = reconcileReplayEnd('s1', live)
     expect(swappedMessages).toEqual([{ id: 'r-1' }])
@@ -268,7 +277,7 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
 
   describe('live-arrival ledger', () => {
     it('skips a prompt that arrived live inside the window, stamps one the replay delivered', () => {
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       // Only the live one is recorded; the replayed one carried a historySeq at
       // the call site and so is never noted.
       noteLivePromptDuringReplay('s1', 'live-q')
@@ -291,7 +300,7 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
     it('is a no-op outside a replay window — a prompt that pre-dates it stays stampable', () => {
       noteLivePromptDuringReplay('s1', 'q1')
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       reconcileReplayEnd('s1', [])
       expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
         { id: 'q1', type: 'prompt', answered: REPLAY_RESOLVED_PLACEHOLDER },
@@ -301,27 +310,27 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
     it('opens the window for a DELTA replay too, not just a full rebuild', () => {
       // `_rebuildBaseline` only tracks full rebuilds, so the window has to be
       // its own thing — a live question races a delta replay just as easily.
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       expect(isRebuildInProgress('s1')).toBe(false)
       noteLivePromptDuringReplay('s1', 'q1')
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
     })
 
     it('closes the window at replay end — a later arrival is not protected', () => {
-      reconcileReplayStart('s1', true, 0)
+      reconcileReplayStart('s1', true, [])
       reconcileReplayEnd('s1', [])
       noteLivePromptDuringReplay('s1', 'after-q')
       expect(wasPromptLiveDuringReplay('s1', 'after-q')).toBe(false)
     })
 
     it('forgets the previous window at the next start', () => {
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       noteLivePromptDuringReplay('s1', 'q1')
       reconcileReplayEnd('s1', [])
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
       // Second replay: q1 is now just an old on-screen prompt with nothing
       // vouching for it, so the sweep is entitled to stamp it again.
-      reconcileReplayStart('s1', false, 1)
+      reconcileReplayStart('s1', false, prefix(1))
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
       reconcileReplayEnd('s1', [])
       expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
@@ -330,7 +339,7 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
     })
 
     it("is per-session — s2's window does not protect a prompt in s1", () => {
-      reconcileReplayStart('s2', false, 0)
+      reconcileReplayStart('s2', false, [])
       noteLivePromptDuringReplay('s1', 'q1')
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
       expect(sweepUnansweredPromptsAtReplayEnd('s1', [prompt('q1')])).toEqual([
@@ -339,7 +348,7 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
     })
 
     it('ignores a null session id or message id', () => {
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       noteLivePromptDuringReplay(null, 'q1')
       noteLivePromptDuringReplay('s1', null)
       noteLivePromptDuringReplay('s1', '')
@@ -349,7 +358,7 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
     })
 
     it('resetReplayReconcile drops the window and the ledger (fresh auth)', () => {
-      reconcileReplayStart('s1', false, 0)
+      reconcileReplayStart('s1', false, [])
       noteLivePromptDuringReplay('s1', 'q1')
       resetReplayReconcile()
       expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(false)
@@ -381,8 +390,8 @@ describe('replay-end unanswered-prompt sweep (#7380 / #7410 / #7420)', () => {
 describe('overlapping replays of one session (#7455)', () => {
   it('keeps the window open until the LAST end — a racer after end#1 is still protected', () => {
     // The reviewer's reproduction, verbatim: start, start, note, end, note, end.
-    reconcileReplayStart('s1', true, 0) // subscribe_sessions (forceFull)
-    reconcileReplayStart('s1', true, 0) // switch_session (forceFull), replay #1 still streaming
+    reconcileReplayStart('s1', true, []) // subscribe_sessions (forceFull)
+    reconcileReplayStart('s1', true, []) // switch_session (forceFull), replay #1 still streaming
     noteLivePromptDuringReplay('s1', 'q1')
     reconcileReplayEnd('s1', [])
     noteLivePromptDuringReplay('s1', 'q2')
@@ -405,20 +414,20 @@ describe('overlapping replays of one session (#7455)', () => {
   })
 
   it('a nested start does NOT discard the still-open outer window ledger', () => {
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q0')
     expect(wasPromptLiveDuringReplay('s1', 'q0')).toBe(true)
     // Replay #2 starts while #1 is in flight: the outer window is still
     // protecting q0, so its evidence must survive.
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
     expect(wasPromptLiveDuringReplay('s1', 'q0')).toBe(true)
   })
 
   it('refcounts the window: depth climbs per start and returns to 0 on balanced ends', () => {
     expect(getReplayWindowDepth('s1')).toBe(0)
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     expect(getReplayWindowDepth('s1')).toBe(1)
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     expect(getReplayWindowDepth('s1')).toBe(2)
     reconcileReplayEnd('s1', [])
     expect(getReplayWindowDepth('s1')).toBe(1)
@@ -427,8 +436,8 @@ describe('overlapping replays of one session (#7455)', () => {
   })
 
   it('is per-session — s2 starting a replay does not hold s1 window open', () => {
-    reconcileReplayStart('s1', false, 0)
-    reconcileReplayStart('s2', false, 0)
+    reconcileReplayStart('s1', false, [])
+    reconcileReplayStart('s2', false, [])
     reconcileReplayEnd('s1', [])
     expect(getReplayWindowDepth('s1')).toBe(0)
     expect(getReplayWindowDepth('s2')).toBe(1)
@@ -439,7 +448,7 @@ describe('overlapping replays of one session (#7455)', () => {
   it('an unmatched end cannot drive the depth negative (a later start still opens once)', () => {
     reconcileReplayEnd('s1', [])
     expect(getReplayWindowDepth('s1')).toBe(0)
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     expect(getReplayWindowDepth('s1')).toBe(1)
     reconcileReplayEnd('s1', [])
     expect(getReplayWindowDepth('s1')).toBe(0)
@@ -471,9 +480,9 @@ describe('overlapping replays of one session (#7455)', () => {
 describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)', () => {
   it('keeps a live message appended between the two starts (the issue reproduction)', () => {
     // Verbatim from the issue.
-    reconcileReplayStart('s1', true, 0) // replay #1 — subscribe_sessions (forceFull)
+    reconcileReplayStart('s1', true, []) // replay #1 — subscribe_sessions (forceFull)
     const messages: Msg[] = [{ id: 'live-q' }] // a LIVE arrival during replay #1
-    reconcileReplayStart('s1', true, messages.length) // replay #2 — switch_session (forceFull)
+    reconcileReplayStart('s1', true, messages) // replay #2 — switch_session (forceFull)
 
     // end#1 must NOT swap — replay #2 is still streaming, so the array is not
     // yet the authoritative set. Pre-fix this returned [] and 'live-q' was gone.
@@ -483,9 +492,9 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
   })
 
   it('the single swap is the union of both replays appended tails, prefix still dropped', () => {
-    reconcileReplayStart('s1', true, 2) // prefix [old-1, old-2] stays visible
+    reconcileReplayStart('s1', true, [{ id: 'old-1' }, { id: 'old-2' }]) // prefix [old-1, old-2] stays visible
     const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }, { id: 'r1-a' }]
-    reconcileReplayStart('s1', true, live.length) // replay #2 starts mid-#1
+    reconcileReplayStart('s1', true, live) // replay #2 starts mid-#1
     live.push({ id: 'racer' }, { id: 'r2-a' })
 
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
@@ -499,17 +508,17 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
   })
 
   it('the dedup cache stays scoped to the OUTER baseline while replay #2 streams', () => {
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     const live: Msg[] = [{ id: 'old' }, { id: 'r1-a' }]
-    reconcileReplayStart('s1', true, live.length)
+    reconcileReplayStart('s1', true, live)
     // Replay #2 re-delivers r1-a. It must be inside the dedup cache or it is
     // appended a second time; pre-fix the cache was rescoped to 2 and missed it.
     expect(replayDedupCache('s1', live)).toEqual([{ id: 'r1-a' }])
   })
 
   it('a rebuild is still in progress after end#1 and cleared after the LAST end', () => {
-    reconcileReplayStart('s1', true, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', true, [])
     reconcileReplayEnd('s1', [])
     expect(isRebuildInProgress('s1')).toBe(true)
     expect(getReplayWindowDepth('s1')).toBe(1)
@@ -523,11 +532,11 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
     // new window and wrong for one nested inside a live full rebuild: it used to
     // delete the outer baseline, and then the swap never happened at all and the
     // about-to-be-discarded prefix stayed on screen forever.
-    reconcileReplayStart('s1', true, 1) // full rebuild, baseline 1
+    reconcileReplayStart('s1', true, [{ id: 'old' }]) // full rebuild, baseline 1
     const live: Msg[] = [{ id: 'old' }, { id: 'r-1' }]
     // The nested delta reports the rebuild that is still in flight, rather than
     // the kind of replay it is itself.
-    expect(reconcileReplayStart('s1', false, live.length).rebuildInProgress).toBe(true)
+    expect(reconcileReplayStart('s1', false, live).rebuildInProgress).toBe(true)
     expect(isRebuildInProgress('s1')).toBe(true)
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
     expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
@@ -536,18 +545,18 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
   it('SEQUENTIAL full replays each capture a FRESH baseline', () => {
     // "Set only when absent" must not retain a baseline past the last end, or
     // the second replay would keep the first one's messages forever.
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
     expect(reconcileReplayEnd('s1', [{ id: 'r-1' }]).swappedMessages).toEqual([{ id: 'r-1' }])
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'r-1' }])
     expect(
       reconcileReplayEnd('s1', [{ id: 'r-1' }, { id: 'r-2' }]).swappedMessages,
     ).toEqual([{ id: 'r-2' }])
   })
 
   it('is per-session: s2 overlapping replays do not defer s1 swap', () => {
-    reconcileReplayStart('s1', true, 1)
-    reconcileReplayStart('s2', true, 0)
-    reconcileReplayStart('s2', true, 0)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
+    reconcileReplayStart('s2', true, [])
+    reconcileReplayStart('s2', true, [])
     expect(reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages).toEqual([
       { id: 'r-1' },
     ])
@@ -557,14 +566,14 @@ describe('overlapping full rebuilds — swap at the OUTERMOST baseline (#7477)',
     // The deferral is what makes this load-bearing: a start with no matching end
     // strands a +1, and every later end would then decrement from a too-high
     // base and never swap again for that session.
-    reconcileReplayStart('s1', true, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', true, [])
     resetReplayReconcile()
     expect(isRebuildInProgress('s1')).toBe(false)
     expect(getReplayWindowDepth('s1')).toBe(0)
 
-    reconcileReplayStart('s1', true, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', true, [])
     dropReplaySessionState('s1')
     expect(isRebuildInProgress('s1')).toBe(false)
     expect(getReplayWindowDepth('s1')).toBe(0)
@@ -579,9 +588,9 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     // Verbatim from the issue. Pre-fix: end#2 returned [{ id: 'r-1' }] — the
     // delta contributed no baseline, so the NESTED full start was the first to
     // set one and captured a length that already counted the racer.
-    reconcileReplayStart('s1', false, 0) // outermost = DELTA (handshake, cursor path)
+    reconcileReplayStart('s1', false, []) // outermost = DELTA (handshake, cursor path)
     const live: Msg[] = [{ id: 'racer' }] // a LIVE arrival during the delta window
-    reconcileReplayStart('s1', true, live.length) // nested FULL start
+    reconcileReplayStart('s1', true, live) // nested FULL start
     live.push({ id: 'r-1' }) // the full replay appends
 
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
@@ -597,9 +606,9 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     // sliced off by the rebuild. Without this the fix would "pass" by never
     // swapping anything.
     const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }]
-    reconcileReplayStart('s1', false, live.length) // outermost DELTA at length 2
+    reconcileReplayStart('s1', false, live) // outermost DELTA at length 2
     live.push({ id: 'racer' }) // live arrival inside the delta window
-    reconcileReplayStart('s1', true, live.length) // nested FULL — must adopt 2, not 3
+    reconcileReplayStart('s1', true, live) // nested FULL — must adopt 2, not 3
     live.push({ id: 'r-1' })
 
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
@@ -615,9 +624,9 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     // the window-open length has to move BOTH — otherwise the racer survives
     // the swap and is invisible to dedup.
     const live: Msg[] = [{ id: 'old' }]
-    reconcileReplayStart('s1', false, live.length)
+    reconcileReplayStart('s1', false, live)
     live.push({ id: 'racer' })
-    reconcileReplayStart('s1', true, live.length)
+    reconcileReplayStart('s1', true, live)
 
     expect(replayDedupCache('s1', live)).toEqual([{ id: 'racer' }])
   })
@@ -627,8 +636,8 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     // start and the full start, so the two baselines coincide and this case was
     // already correct. Here so the fix is pinned as covering BOTH racer
     // positions rather than trading one for the other.
-    reconcileReplayStart('s1', false, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', false, [])
+    reconcileReplayStart('s1', true, [])
     const live: Msg[] = [{ id: 'racer' }]
     live.push({ id: 'r-1' })
 
@@ -640,9 +649,9 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
   })
 
   it('reports the rebuild the nested full started, not the delta that opened the window', () => {
-    expect(reconcileReplayStart('s1', false, 0).rebuildInProgress).toBe(false)
+    expect(reconcileReplayStart('s1', false, []).rebuildInProgress).toBe(false)
     expect(isRebuildInProgress('s1')).toBe(false)
-    expect(reconcileReplayStart('s1', true, 0).rebuildInProgress).toBe(true)
+    expect(reconcileReplayStart('s1', true, []).rebuildInProgress).toBe(true)
     expect(isRebuildInProgress('s1')).toBe(true)
     expect(getReplayWindowDepth('s1')).toBe(2)
   })
@@ -650,36 +659,36 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
   it('does not leak the window-open length into the NEXT window', () => {
     // The recorded length lives exactly as long as the refcount does. A stale
     // 5 here would make the following rebuild swap to [] and blank the session.
-    reconcileReplayStart('s1', false, 5)
+    reconcileReplayStart('s1', false, [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' }])
     reconcileReplayEnd('s1', [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }, { id: 'e' }])
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     expect(
       reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
     ).toEqual([{ id: 'r-1' }])
   })
 
   it('teardown drops the window-open length with the refcount (mid-window socket drop)', () => {
-    reconcileReplayStart('s1', false, 5)
+    reconcileReplayStart('s1', false, prefix(5))
     resetReplayReconcile()
     expect(getReplayWindowDepth('s1')).toBe(0)
     // A fresh rebuild must use ITS OWN length, not the torn-down window's 5.
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     expect(
       reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
     ).toEqual([{ id: 'r-1' }])
 
-    reconcileReplayStart('s2', false, 5)
+    reconcileReplayStart('s2', false, prefix(5))
     dropReplaySessionState('s2')
     expect(getReplayWindowDepth('s2')).toBe(0)
-    reconcileReplayStart('s2', true, 1)
+    reconcileReplayStart('s2', true, [{ id: 'old' }])
     expect(
       reconcileReplayEnd('s2', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
     ).toEqual([{ id: 'r-1' }])
   })
 
   it('is per-session — s2 opening a delta window does not give s1 a baseline', () => {
-    reconcileReplayStart('s2', false, 4)
-    reconcileReplayStart('s1', true, 1)
+    reconcileReplayStart('s2', false, prefix(4))
+    reconcileReplayStart('s1', true, [{ id: 'old' }])
     expect(
       reconcileReplayEnd('s1', [{ id: 'old' }, { id: 'r-1' }]).swappedMessages,
     ).toEqual([{ id: 'r-1' }])
@@ -688,8 +697,8 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
   it('overlapping PURE deltas still swap nothing at all', () => {
     // No full start anywhere, so no baseline is ever recorded and both ends
     // return null — the window-open length is captured but never adopted.
-    reconcileReplayStart('s1', false, 2)
-    reconcileReplayStart('s1', false, 2)
+    reconcileReplayStart('s1', false, [{ id: 'old-1' }, { id: 'old-2' }])
+    reconcileReplayStart('s1', false, [{ id: 'old-1' }, { id: 'old-2' }])
     const live: Msg[] = [{ id: 'old-1' }, { id: 'old-2' }, { id: 'd-1' }]
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
     expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
@@ -709,10 +718,10 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
   // Change this expectation only alongside #7519.
   it("the delta's own appends keep their early position — the known ordering limit (#7519)", () => {
     const live: Msg[] = [{ id: 'old' }]
-    reconcileReplayStart('s1', false, live.length) // outermost DELTA opens at 1
+    reconcileReplayStart('s1', false, live) // outermost DELTA opens at 1
     live.push({ id: 'd-1' }) // the delta appends the newest history entry
     live.push({ id: 'racer' }) // a LIVE arrival
-    reconcileReplayStart('s1', true, live.length) // nested FULL start
+    reconcileReplayStart('s1', true, live) // nested FULL start
 
     // The full replay re-delivers the whole ring buffer, deduped against the
     // cache exactly as both clients do it.
@@ -733,10 +742,10 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
     // The delta branch only clears a stale baseline when it OPENS the window
     // (#7477). Now that a nested FULL can install one under a delta-opened
     // window, a THIRD, deeper delta must not cancel that rebuild's swap.
-    reconcileReplayStart('s1', false, 0) // outermost DELTA
+    reconcileReplayStart('s1', false, []) // outermost DELTA
     const live: Msg[] = [{ id: 'racer' }]
-    reconcileReplayStart('s1', true, live.length) // nested FULL
-    reconcileReplayStart('s1', false, live.length) // deeper DELTA
+    reconcileReplayStart('s1', true, live) // nested FULL
+    reconcileReplayStart('s1', false, live) // deeper DELTA
     live.push({ id: 'r-1' })
 
     expect(isRebuildInProgress('s1')).toBe(true)
@@ -750,6 +759,267 @@ describe('full rebuild nested inside a DELTA window (#7492)', () => {
 })
 
 // ---------------------------------------------------------------------------
+// #7524 — the baseline is where the PREFIX ends, not an index that once was
+// ---------------------------------------------------------------------------
+//
+// The baseline used to be an array INDEX captured at the window's 0->1
+// transition and held until the last end. Nothing in the module owns
+// `messages`, and three store paths REMOVE from it without touching the window:
+// `sendInterrupt` (Stop) drops every queued bubble, `cancelQueuedMessage` drops
+// one, `reorderEmptyResponseSlot` moves one to the end. After any of them the
+// index addressed a different element and the swap cut there anyway.
+//
+// Both reproductions below are the #7522 reviewer's, verbatim, and both were
+// measured RED before the fix: the first returned ['r3'] with r1 and r2
+// silently gone, the second returned [] — a blanked transcript. The class is
+// older than #7492: the same arithmetic bites a FULL-opened window whenever the
+// shrink lands after the full start, which is the third case here.
+describe('mid-window messages SHRINK moves the swap cut (#7524)', () => {
+  it('keeps every replayed entry when Stop drops the queued bubbles mid-window', () => {
+    // 2 history entries + 2 queued bubbles on screen; the user taps Stop
+    // between the delta start and the nested full start.
+    const live: Msg[] = [{ id: 'h1' }, { id: 'h2' }, { id: 'q1' }, { id: 'q2' }]
+    reconcileReplayStart('s1', false, live) // outermost DELTA, prefix of 4
+    live.splice(2, 2) // sendInterrupt: both queued bubbles dropped
+    reconcileReplayStart('s1', true, live) // nested FULL adopts the WINDOW's prefix
+    live.push({ id: 'r1' }, { id: 'r2' }, { id: 'r3' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    // Pre-fix: [{ id: 'r3' }]. The cut sat at 4 — two entries into the replayed
+    // tail — so r1 and r2 were sliced off with the prefix.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'r1' },
+      { id: 'r2' },
+      { id: 'r3' },
+    ])
+  })
+
+  it('does not blank the transcript when the shrink is larger than the replay', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]
+    reconcileReplayStart('s1', false, live)
+    live.length = 1
+    reconcileReplayStart('s1', true, live)
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    // Pre-fix: [] — the whole session, replayed set included, vanished.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+
+  it('covers a shrink AFTER the start, under a FULL-opened window (pre-#7492 class)', () => {
+    // No delta anywhere: this is the shape that bites `main`'s outermost-FULL
+    // baseline, and the reason the fix is the baseline's SHAPE rather than
+    // which of two lengths #7492 adopts.
+    const live: Msg[] = [{ id: 'h1' }, { id: 'h2' }, { id: 'q1' }, { id: 'q2' }]
+    reconcileReplayStart('s1', true, live) // outermost FULL, prefix of 4
+    live.push({ id: 'r1' }) // the replay is already streaming...
+    live.splice(2, 2) // ...when Stop drops the queued bubbles
+    live.push({ id: 'r2' })
+
+    // Pre-fix: [] — the cut at 4 landed exactly at the end of a 4-long array.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'r1' },
+      { id: 'r2' },
+    ])
+  })
+
+  it('moves the dedup cache with the swap, not independently of it', () => {
+    // The cache and the swap read the SAME record through the same resolution.
+    // If only one of them followed the shrink, a replayed entry would either be
+    // suppressed by the about-to-be-discarded prefix or appended twice.
+    const live: Msg[] = [{ id: 'h1' }, { id: 'h2' }, { id: 'q1' }, { id: 'q2' }]
+    reconcileReplayStart('s1', false, live)
+    live.splice(2, 2)
+    reconcileReplayStart('s1', true, live)
+    // Nothing replayed yet: the tail is empty, so nothing can dedup against it.
+    expect(replayDedupCache('s1', live)).toEqual([])
+    live.push({ id: 'r1' })
+    // Pre-fix: [] — the cache sat past the end and r1 was invisible to dedup.
+    expect(replayDedupCache('s1', live)).toEqual([{ id: 'r1' }])
+    live.push({ id: 'r2' })
+    expect(replayDedupCache('s1', live)).toEqual([{ id: 'r1' }, { id: 'r2' }])
+    // ...and the swap agrees with the cache, exactly.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'r1' },
+      { id: 'r2' },
+    ])
+  })
+
+  it('handles a single-bubble cancel (cancelQueuedMessage), not just a bulk Stop', () => {
+    const live: Msg[] = [{ id: 'h1' }, { id: 'cancel-me' }, { id: 'h2' }]
+    reconcileReplayStart('s1', true, live)
+    // `messages.filter((m) => m.id !== clientMessageId)` — a hole in the MIDDLE
+    // of the prefix, which a "shrink from the end" assumption would miss.
+    const idx = live.findIndex((m) => m.id === 'cancel-me')
+    live.splice(idx, 1)
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+
+  it('handles a removal at the FRONT of the prefix', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    reconcileReplayStart('s1', true, live)
+    live.splice(0, 1)
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+
+  it('handles the prefix being removed ENTIRELY (cut collapses to 0, nothing lost)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', false, live)
+    live.length = 0
+    reconcileReplayStart('s1', true, live)
+    live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+
+  it("follows reorderEmptyResponseSlot's move-to-the-end", () => {
+    // `message-handler.ts:2498-2511` — length-preserving, but it takes an entry
+    // out of the prefix and puts it at the very end of the array, i.e. inside
+    // the tail. The cut has to come back by one or the swap keeps a message the
+    // rebuild is replacing AND loses the last replayed entry.
+    const live: Msg[] = [{ id: 'a' }, { id: 'empty-slot' }, { id: 'c' }]
+    reconcileReplayStart('s1', true, live)
+    const slot = live.splice(1, 1)[0]!
+    live.push({ id: 'r-1' }, slot)
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'r-1' },
+      { id: 'empty-slot' },
+    ])
+  })
+
+  it('is per-session — s2 shrinking does not move s1 cut', () => {
+    const s1Live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    const s2Live: Msg[] = [{ id: 'x' }, { id: 'y' }]
+    reconcileReplayStart('s1', true, s1Live)
+    reconcileReplayStart('s2', true, s2Live)
+    s2Live.length = 0
+    s1Live.push({ id: 'r-1' })
+
+    expect(reconcileReplayEnd('s1', s1Live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+
+  // --- the two boundaries of the mechanism ---------------------------------
+
+  it('an APPEND-ONLY window cuts at exactly openLen — the resolution is a no-op', () => {
+    // The positive control for every other describe in this file: with nothing
+    // removed, the walk consumes the whole prefix and returns the same number
+    // the pre-#7524 index held. If this ever drifts, the #5555.4 / #5588 /
+    // #7477 / #7492 blocks are no longer measuring what they claim to.
+    const live: Msg[] = [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]
+    reconcileReplayStart('s1', true, live)
+    // The full replay re-delivers the SAME ids it is replacing — the case where
+    // a search-ahead resolution would match a prefix id against its own
+    // re-delivered copy and cut past the replayed set.
+    live.push({ id: 'p1' }, { id: 'p2' }, { id: 'p3' })
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'p1' },
+      { id: 'p2' },
+      { id: 'p3' },
+    ])
+  })
+
+  it('a removed id RE-DELIVERED into the tail must not pull the cut past it', () => {
+    // The reason the walk is greedy-but-positional rather than a search-ahead.
+    // A search allowed to skip forward finds the removed 'q1' at index 2 — its
+    // re-delivered copy, inside the replayed tail — and cuts there, returning []
+    // and blanking the session. The walk here halts instead, because the message
+    // AT the cut ('r-1') continues no remaining prefix id.
+    //
+    // Note what this does NOT show, since the comment here used to claim it: the
+    // walk does not "stop at the first mismatch" and cannot "only ever cut
+    // SHORT". It skips a non-matching prefix id and tries the next against the
+    // same message — which is what makes `handles a removal at the FRONT of the
+    // prefix` pass — and it can march into the tail when the surviving prefix
+    // runs out. The 'r-1' between the survivor and the re-delivered 'q1' is what
+    // stops it here. Both of those cases are pinned below (#7543).
+    const live: Msg[] = [{ id: 'h1' }, { id: 'q1' }]
+    reconcileReplayStart('s1', true, live)
+    live.splice(1, 1) // the queued bubble is cancelled...
+    live.push({ id: 'r-1' }, { id: 'q1' }) // ...and the replay delivers an entry reusing its id
+
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'r-1' },
+      { id: 'q1' },
+    ])
+  })
+
+  // --- the KNOWN LIMIT the walk does NOT cover (#7543) ---------------------
+  //
+  // `messages[0..cut)` is the greedy SUBSEQUENCE match of `prefixIds`, so once
+  // the surviving prefix runs out the walk continues into the appended tail if
+  // the tail keeps matching — and a full replay re-delivers exactly the ids the
+  // prefix held. Both shapes below return the SAME values on `main` (measured:
+  // [] and ['c']), so this is the #7524 symptom in a shape the identity baseline
+  // cannot reach rather than something it broke. Nothing id-based can separate a
+  // re-delivered copy from the original; the answer is provenance per append,
+  // the same one #7519 lands on.
+  //
+  // Change these two expectations only alongside #7543.
+  it('KNOWN LIMIT: whole prefix removed + same ids re-delivered blanks the swap (#7543)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.length = 0 // every prefix entry removed mid-window
+    // The replay re-delivers them in order, through the dedup gate exactly as
+    // both clients drive it.
+    for (const id of ['a', 'b']) {
+      const cache = replayDedupCache('s1', live) as Msg[]
+      if (!cache.some((m) => m.id === id)) live.push({ id })
+    }
+    // The replayed set IS there — the fixture took effect — and the swap
+    // discards it anyway. This is the #7543 residual, not the fix working.
+    expect(live.map((m) => m.id)).toEqual(['a', 'b'])
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([])
+  })
+
+  it('KNOWN LIMIT: a removal can move the cut by ZERO when its id is re-appended (#7543)', () => {
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.splice(0, 2) // two removed, so a "moves back by the number removed"
+    live.push({ id: 'a' }, { id: 'b' }, { id: 'c' }) // ...walk would cut at 0
+    // The cut is 2, not 0: 'a' and 'b' re-match the prefix ids from the tail.
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'c' }])
+  })
+
+  it('but ONE survivor at the front already keeps more than the raw index does', () => {
+    // The positive control for the two pins above — without it they read as "the
+    // mechanism does nothing". Same re-delivery, one prefix entry surviving: the
+    // walk halts on it and the replayed set is kept. `main`'s raw index returns
+    // ['b'] here, losing the re-delivered 'a'; this returns both.
+    const live: Msg[] = [{ id: 'a' }, { id: 'b' }]
+    reconcileReplayStart('s1', true, live)
+    live.length = 1 // 'a' survives
+    for (const id of ['a', 'b']) {
+      const cache = replayDedupCache('s1', live) as Msg[]
+      if (!cache.some((m) => m.id === id)) live.push({ id })
+    }
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([
+      { id: 'a' },
+      { id: 'b' },
+    ])
+  })
+
+  it('degrades to the plain index — never to 0 — when the prefix has an un-idable entry', () => {
+    // `snapshotPrefix` bails rather than recording a hole. A hole would stall
+    // the walk and collapse the cut towards 0, i.e. an identity slice: a swap
+    // that silently never happens and leaves the discarded prefix on screen,
+    // which is #7477's failure rather than this one's. No ChatMessage reaches
+    // this, so the pin is on the FLOOR, not on a live path.
+    const live: Msg[] = [{} as Msg, { id: 'h2' }]
+    reconcileReplayStart('s1', true, live)
+    live.push({ id: 'r-1' })
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toEqual([{ id: 'r-1' }])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // #7456 — ledger lifetime: release at replay end, teardown, and a loud cap
 // ---------------------------------------------------------------------------
 describe('live-arrival ledger lifetime (#7456)', () => {
@@ -758,7 +1028,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   })
 
   it('releases the per-session ledger when the LAST window closes, while the sweep can still read it', () => {
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q1')
     expect(getLiveReplayLedgerSessionIds()).toEqual(['s1'])
 
@@ -773,8 +1043,8 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   })
 
   it('does not release while an overlapping replay is still open (#7455 interaction)', () => {
-    reconcileReplayStart('s1', false, 0)
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q1')
     reconcileReplayEnd('s1', [])
     expect(getLiveReplayLedgerSessionIds()).toEqual(['s1'])
@@ -783,10 +1053,10 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   })
 
   it('dropReplaySessionState forgets one session entirely and leaves the others alone', () => {
-    reconcileReplayStart('s1', true, 3)
+    reconcileReplayStart('s1', true, prefix(3))
     noteLivePromptDuringReplay('s1', 'q1')
     recordHistorySeq('s1', 11)
-    reconcileReplayStart('s2', true, 0)
+    reconcileReplayStart('s2', true, [])
     noteLivePromptDuringReplay('s2', 'q2')
     recordHistorySeq('s2', 22)
 
@@ -805,7 +1075,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   })
 
   it('dropReplaySessionState also drops a ledger already released to the sweep', () => {
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q1')
     reconcileReplayEnd('s1', [])
     expect(wasPromptLiveDuringReplay('s1', 'q1')).toBe(true)
@@ -814,7 +1084,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   })
 
   it('ignores a null/empty session id', () => {
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q1')
     dropReplaySessionState(null)
     dropReplaySessionState('')
@@ -828,7 +1098,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   // prompt would be protected forever. Both clients now call
   // `resetReplayReconcile()` from `socket.onclose`/`socket.onerror`.
   it('a drop mid-replay strands nothing once the transport teardown runs', () => {
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
     noteLivePromptDuringReplay('s1', 'q1')
     recordHistorySeq('s1', 5)
 
@@ -843,7 +1113,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
     expect(getHistoryCursor('s1')).toBe(5)
 
     // ...and the #7420 protection still works on the NEXT replay.
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q2')
     reconcileReplayEnd('s1', [])
     expect(
@@ -859,7 +1129,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
     // One open window with one live question per session, one past the cap.
     for (let i = 0; i < MAX_LIVE_REPLAY_LEDGERS + 1; i++) {
       const sid = `s${i}`
-      reconcileReplayStart(sid, false, 0)
+      reconcileReplayStart(sid, false, [])
       noteLivePromptDuringReplay(sid, `q-${i}`)
     }
     expect(getLiveReplayLedgerSessionIds()).toHaveLength(MAX_LIVE_REPLAY_LEDGERS)
@@ -889,13 +1159,13 @@ describe('live-arrival ledger lifetime (#7456)', () => {
   it('re-noting an existing session refreshes its recency so it is not the one evicted', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     for (let i = 0; i < MAX_LIVE_REPLAY_LEDGERS; i++) {
-      reconcileReplayStart(`s${i}`, false, 0)
+      reconcileReplayStart(`s${i}`, false, [])
       noteLivePromptDuringReplay(`s${i}`, `q-${i}`)
     }
     // Touch the oldest so it moves to the tail...
     noteLivePromptDuringReplay('s0', 'q-0-again')
     // ...then overflow by one: s1 (now the oldest) goes, s0 stays.
-    reconcileReplayStart('overflow', false, 0)
+    reconcileReplayStart('overflow', false, [])
     noteLivePromptDuringReplay('overflow', 'q-overflow')
 
     expect(getLiveReplayLedgerSessionIds()).toContain('s0')
@@ -905,7 +1175,7 @@ describe('live-arrival ledger lifetime (#7456)', () => {
 
   it('the cap does not fire in the normal case (no warn for a single session)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    reconcileReplayStart('s1', false, 0)
+    reconcileReplayStart('s1', false, [])
     noteLivePromptDuringReplay('s1', 'q1')
     noteLivePromptDuringReplay('s1', 'q2')
     reconcileReplayEnd('s1', [])

@@ -9118,7 +9118,7 @@ describe('sharedStreamDelta (#4981)', () => {
     const h = makeHarness('s1')
     // #7497 — open a real replay window rather than seeding a context Set. The
     // guard reads the store-core refcount now, so this is the production path.
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
     h.seedResponse('resp-1', 'First sentence.')
     h.seedTool('toolu_a')
     h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
@@ -9142,8 +9142,8 @@ describe('sharedStreamDelta (#4981)', () => {
   // The refcount is still at 1 there, so the guard holds until the LAST end.
   it('replay guard: no continuation split in replay #2 tail after end#1 (#7497)', () => {
     const h = makeHarness('s1')
-    reconcileReplayStart('s1', true, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', true, [])
     reconcileReplayEnd('s1', [])
     // A precondition, not decoration: at depth 0 the assertions below would
     // pass for the wrong reason — there would be nothing left to gate.
@@ -9165,8 +9165,8 @@ describe('sharedStreamDelta (#4981)', () => {
   // being stuck on.
   it('replay guard: splits again once the LAST replay window closes (#7497)', () => {
     const h = makeHarness('s1')
-    reconcileReplayStart('s1', true, 0)
-    reconcileReplayStart('s1', true, 0)
+    reconcileReplayStart('s1', true, [])
+    reconcileReplayStart('s1', true, [])
     reconcileReplayEnd('s1', [])
     reconcileReplayEnd('s1', [])
     expect(getReplayWindowDepth('s1')).toBe(0)
