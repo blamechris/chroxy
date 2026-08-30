@@ -2517,6 +2517,48 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       'the widened predicate must still reject a name that is in no bucket at all',
     ).toEqual(['sessionPrMutantGhostField'])
   })
+
+  it("environments keeps its disconnect lifetime entry — #7552's stake in this axis", () => {
+    // #7552 review, A3. The resolution above REFUSED to drop
+    // `CLEARED_ON_DISCONNECT.environments`, because the
+    // `every CLEARED_ON_DISCONNECT entry is really cleared by disconnect()` cell
+    // is the only thing pinning that `disconnect()` clears it. But refusing is
+    // not the same as requiring: nothing made the entry mandatory, so the
+    // coverage was held by CONVENTION, not construction. Measured before this
+    // cell existed: deleting the entry AND `environments: []` from
+    // `disconnect()` — the two halves that only make sense together — passed
+    // 137/137.
+    //
+    // Deliberately NOT fixed by widening the axis. `every NOT_SESSION_KEYED
+    // member has a lifetime` still scans NOT_SESSION_KEYED alone, which is the
+    // scope #7488 chose and the right one — demanding a connection lifetime from
+    // every SESSION_TAGGED_BY_DESIGN member is a different adjudication nobody
+    // has made. This pins ONE member, for a reason specific to it.
+    //
+    // The reason: `environments` is the only by-design member whose clear #7552
+    // made MORE valuable. The tag stopped being permanently `[]` and now carries
+    // live session ids belonging to ONE daemon, so an `environments` array
+    // surviving a server switch shows the operator sessions that do not exist on
+    // the daemon they are looking at — and the Destroy guard would be reading
+    // those ids. Before #7552 the array was empty and leaking it was harmless.
+    expect(
+      Object.keys(CLEARED_ON_DISCONNECT),
+      '`environments` lost its CLEARED_ON_DISCONNECT entry. That entry is what makes the cell ' +
+      'below assert `disconnect()` really clears the array, and #7552 is why it matters: the ' +
+      '`sessions` tag now carries live session ids from ONE daemon, so an array that survives a ' +
+      'server switch renders another daemon\'s sessions — and gates the Destroy button on them. ' +
+      'Removing the entry and the `environments: []` line together used to be green; this cell is ' +
+      'why it no longer is.',
+    ).toContain('environments')
+    // Positive control: the entry is not decorative — the clear it names is real,
+    // which is the fact this cell is protecting. (The bulk cell below asserts the
+    // same thing for every entry; naming it here means THIS pin cannot pass
+    // against an entry pointing at nothing.)
+    expect(
+      assigns(disconnectBody, 'environments'),
+      'disconnect() no longer clears environments — the entry pinned above is now a false claim',
+    ).toBe(true)
+  })
 })
 })
 
