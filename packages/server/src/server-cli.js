@@ -801,6 +801,14 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
+    // #7552: so a session created with an `environmentId` is TAGGED onto that
+    // environment for its lifetime (and untagged on teardown). Null when
+    // container environments are off — the block above only constructs one when
+    // the feature is enabled — and every use inside SessionManager is
+    // optional-chained. Ordering matters and already holds: the manager is
+    // constructed AND `reconnect()`ed (which clears every stale session tag from
+    // the previous process) above, before this line runs.
+    environmentManager,
     // #5859 (audit P1-7): reclaim orphaned chroxy session worktrees at boot when
     // the operator opted into worktree auto-reaping. Clean-tree-guarded.
     sweepOrphanWorktrees: config.worktreeGc?.autoReap === true,

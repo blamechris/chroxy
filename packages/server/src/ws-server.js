@@ -1130,6 +1130,26 @@ export class WsServer {
     // Multi-session support: prefer sessionManager, fall back to single cliSession
     this.sessionManager = sessionManager || null
     this.environmentManager = environmentManager || null
+    // #7552: a session opening or closing inside a container environment changes
+    // `EnvironmentInfo.sessions`, which the dashboard's Environments panel both
+    // RENDERS ("N connected") and gates its Destroy button on. Nothing else
+    // re-sends the list on session lifecycle — the four `environment_list` emit
+    // sites in feature-handlers.js fire on env list/create/destroy requests
+    // only — so without this the panel would show a stale count for as long as
+    // it stays mounted, and the destroy guard would be deciding from it. Cheap
+    // and quiet: EnvironmentManager emits only on a REAL tag change.
+    if (this.environmentManager && typeof this.environmentManager.on === 'function') {
+      this._environmentSessionsChangedHandler = () => {
+        try {
+          this.broadcast({ type: 'environment_list', environments: this.environmentManager.list() })
+        } catch (err) {
+          log.warn(`environment_list re-broadcast failed: ${err?.message || err}`)
+        }
+      }
+      this.environmentManager.on('environment_sessions_changed', this._environmentSessionsChangedHandler)
+    } else {
+      this._environmentSessionsChangedHandler = null
+    }
     // #6691 (E-4): the OrchestrationManager (null when the feature is off). Its
     // run_delta events are forwarded to host-level clients by server-cli via
     // _broadcastOrchestrationDelta; the handlers read it off ctx.services.
@@ -3128,6 +3148,15 @@ export class WsServer {
         this.sessionManager.off('session_event', this._sessionEventAuditHandler)
         this._sessionEventAuditHandler = null
       }
+    }
+
+    // #7552: same reason as the SessionManager listeners above — the
+    // EnvironmentManager outlives a WsServer instance, so a closed server must
+    // not stay subscribed (and must not broadcast on a torn-down socket set).
+    if (this.environmentManager && typeof this.environmentManager.off === 'function' &&
+        this._environmentSessionsChangedHandler) {
+      this.environmentManager.off('environment_sessions_changed', this._environmentSessionsChangedHandler)
+      this._environmentSessionsChangedHandler = null
     }
 
     if (this._pingInterval) {

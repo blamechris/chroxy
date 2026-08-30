@@ -513,6 +513,12 @@ export class EnvironmentManager extends EventEmitter {
 
   /**
    * Track a session connecting to an environment.
+   *
+   * #7552: called from `SessionManager.createSession` for every session created
+   * with an `environmentId` — the production writer `env.sessions` spent its
+   * whole life without. Idempotent; a no-op for an unknown environment (which
+   * can be destroyed between the handler's `getContainerInfo` and the create).
+   *
    * @param {string} envId
    * @param {string} sessionId
    */
@@ -522,19 +528,48 @@ export class EnvironmentManager extends EventEmitter {
     if (!env.sessions.includes(sessionId)) {
       env.sessions.push(sessionId)
       this._persist()
+      this._emitSessionsChanged(env)
     }
   }
 
   /**
    * Track a session disconnecting from an environment.
+   *
+   * #7552: called from `SessionManager._cleanupSessionMaps` (the single funnel
+   * every session takes OUT of `_sessions`) and from `destroyAll()`. A MISSED
+   * detach is the inverse of the bug this wiring fixes — a stale id would make
+   * the environment permanently undestroyable — so the caller side is pinned
+   * path-by-path in `tests/environment-session-wiring.test.js`.
+   *
    * @param {string} envId
    * @param {string} sessionId
    */
   removeSession(envId, sessionId) {
     const env = this._environments.get(envId)
     if (!env) return
+    if (!env.sessions.includes(sessionId)) return
     env.sessions = env.sessions.filter(s => s !== sessionId)
     this._persist()
+    this._emitSessionsChanged(env)
+  }
+
+  /**
+   * #7552: announce that an environment's session tag CHANGED, so the WsServer
+   * can re-broadcast `environment_list` and the dashboard's copy stays true.
+   *
+   * Without this the dashboard refreshes only when the Environments panel
+   * mounts or an environment is created/destroyed — none of which is a session
+   * lifecycle event. A destroy guard reading a stale `sessions.length` is the
+   * same false safety by a different route, so the freshness is part of the fix
+   * rather than a follow-up. Emitted only on a REAL change (a duplicate add or
+   * an absent remove is silent) so a busy-but-unchanged daemon broadcasts
+   * nothing.
+   *
+   * @param {Object} env
+   * @private
+   */
+  _emitSessionsChanged(env) {
+    this.emit('environment_sessions_changed', { id: env.id, sessions: [...env.sessions] })
   }
 
   /**
