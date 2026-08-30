@@ -1325,7 +1325,7 @@ jobs:
       - name: Run lint-write-only-ctx-fields tests
         run: node scripts/__tests__/lint-write-only-ctx-fields.test.mjs
 
-      - name: No write-only fields on the app's MessageHandlerContext
+      - name: No write-only per-connection state (app context + dashboard bindings)
         # #7452 — a field on the app store's `_ctx` that is written but never
         # read compiles, type-checks and passes every test: writing to a field
         # nobody reads is indistinguishable from working code, and
@@ -1334,11 +1334,17 @@ jobs:
         # then `pendingSwitchSessionId`, orphaned by the very PR removing the
         # first and caught only by a review pass.
         #
-        # It runs HERE, not in an App job, because it is a pure-node source scan
-        # with no dependencies: this job has setup-node and deliberately no
-        # `npm ci`, which is the same reason `compile-skill-targets --check`
-        # lives here. Exit 2 (cannot check) is a distinct, loud outcome from
-        # exit 0.
+        # #7467 — the ONE invocation now covers both targets in the script's
+        # TARGETS table: the app's `MessageHandlerContext`, and the ~78
+        # module-level `let`/`const` bindings that hold the same per-connection
+        # state across packages/dashboard/src/store/. A `Map` there that is
+        # populated and cleared but never consulted is the identical class.
+        #
+        # It runs HERE, not in an App or Dashboard job, because it is a
+        # pure-node source scan with no dependencies: this job has setup-node
+        # and deliberately no `npm ci`, which is the same reason
+        # `compile-skill-targets --check` lives here. Exit 2 (cannot check) is a
+        # distinct, loud outcome from exit 0.
         run: node scripts/lint-write-only-ctx-fields.mjs
 
       - name: Check compiled skill artifacts are in sync with .claude/commands

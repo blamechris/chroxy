@@ -38,7 +38,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 53
+const MIN_CASES = 125
 
 let pass = 0
 let fail = 0
@@ -77,6 +77,17 @@ const throws = (fn, Type, match) => {
 // ---------------------------------------------------------------------------
 
 const DECL_REL = 'packages/app/src/store/message-handler.ts'
+const DASH_DECL_REL = 'packages/dashboard/src/store/message-handler.ts'
+
+// The SHIPPED allowlist names these two bindings, and an allowlist entry whose
+// subject is not in the roster is a cannot-check — so every fixture tree must
+// declare them or the CLI exits 2 for a reason the case is not about.
+const DASH_TEST_EXPORTS =
+  'export const _testQueueInternals = { getQueue: () => [] };\n' +
+  'export const _testMessageHandler = { handle: () => {} };\n'
+const DASH_CLEAN_DECL =
+  `${DASH_TEST_EXPORTS}let flag = false;\nexport function a(): boolean { flag = true; return flag; }\n`
+
 const tmpDirs = []
 
 function fixtureRoot(declText, extra = {}) {
@@ -84,6 +95,11 @@ function fixtureRoot(declText, extra = {}) {
   tmpDirs.push(dir)
   mkdirSync(join(dir, dirname(DECL_REL)), { recursive: true })
   writeFileSync(join(dir, DECL_REL), declText)
+  // Every target in TARGETS runs on every CLI invocation, so a fixture that
+  // seeds only the app tree makes the dashboard target exit 2 and turns each
+  // app case into a test of the wrong thing.
+  mkdirSync(join(dir, dirname(DASH_DECL_REL)), { recursive: true })
+  writeFileSync(join(dir, DASH_DECL_REL), DASH_CLEAN_DECL)
   for (const [rel, text] of Object.entries(extra)) {
     mkdirSync(join(dir, dirname(rel)), { recursive: true })
     writeFileSync(join(dir, rel), text)
@@ -138,7 +154,7 @@ test('importing the module does NOT run the lint (a guard stuck TRUE would erase
   const r = spawnSync(process.execPath, [probe], { encoding: 'utf8' })
   assert(r.status === 0, `probe exited ${r.status}\n${r.stdout}${r.stderr}`)
   assert(
-    /IMPORT-RETURNED:1/.test(r.stdout),
+    /IMPORT-RETURNED:[1-9]\d*/.test(r.stdout),
     `the import never returned — the module ran and exited on import\n${r.stdout}${r.stderr}`,
   )
   assert(
@@ -165,9 +181,14 @@ if (fail > 0) {
 
 const {
   CannotCheckError,
+  TARGETS,
   analyzeTarget,
+  atStatementStart,
+  blankModuleClauses,
+  classifyBindingReferences,
   classifyReferences,
   extractInterfaceFields,
+  extractModuleBindings,
   stripComments,
 } = await import(pathToFileURL(SCRIPT).href)
 
@@ -529,6 +550,434 @@ test("a lone apostrophe in JSX prose cannot open a blind span (S3: quote spans s
   const src = "const label = <p>the server's daemon</p>;\n// _ctx.n = 1\n_ctx.n = 2;\n"
   const { reads, writes } = classifyReferences(stripComments(src), 'n', RECEIVERS)
   assert(writes.length === 1 && reads.length === 0, `blind span altered classification: ${reads.length}r ${writes.length}w`)
+})
+
+
+// ---------------------------------------------------------------------------
+// 10. MODULE-LEVEL BINDINGS (#7467) — the dashboard store's shape.
+//
+// Same core, two differences: the roster comes from module-level `let`/`const`
+// declarations rather than an interface, and a reference is a BARE identifier
+// rather than `<receiver>.<field>`. Everything below exists because one of
+// those two differences can fail silently: an extractor that quietly stops
+// finding bindings, or a classifier that quietly files every reference as a
+// read, both report "clean".
+// ---------------------------------------------------------------------------
+
+const analyzeBindings = (text, opts = {}) =>
+  analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/mod.ts', text }],
+    sources: [{ path: 'store/mod.ts', text }],
+    mutatorsAreWrites: true,
+    ...opts,
+  })
+
+const K = (name) => `store/mod.ts::${name}`
+
+// --- 10a. RED --------------------------------------------------------------
+
+test('a module-level LET written and never read FAILS, named by file::binding', () => {
+  const r = analyzeBindings("let flag = false;\nexport function a(): void { flag = true; }\n")
+  assert(r.failures.length === 1, `expected 1 failure, got ${JSON.stringify(r.failures)}`)
+  assert(/store\/mod\.ts::flag is WRITE-ONLY: 1 write site\(s\)/.test(r.failures[0]), r.failures[0])
+})
+
+test('the binding failure lists EVERY write site with a line number', () => {
+  const r = analyzeBindings("let n = 0;\nfunction a() { n = 1; }\nfunction b() { n = 2; }\n")
+  const sites = r.failures[0].match(/write: store\/mod\.ts:\d+/g) || []
+  assert(sites.length === 2, `expected 2 write sites, got ${sites.length}: ${r.failures[0]}`)
+})
+
+test('#7421 shape on a binding: written in four places, read nowhere', () => {
+  const src = `
+let isSessionSwitchReplay = false;
+export function reset(): void { isSessionSwitchReplay = false; }
+export function a(): void { isSessionSwitchReplay = true; }
+export function b(): void { isSessionSwitchReplay = true; }
+export function c(): void { isSessionSwitchReplay = false; }
+`
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 1, `expected 1, got ${JSON.stringify(r.failures)}`)
+  assert(/isSessionSwitchReplay is WRITE-ONLY: 4 write site\(s\)/.test(r.failures[0]), r.failures[0])
+})
+
+test('a CONST Map populated and cleared but never consulted FAILS', () => {
+  // The exact shape #7467 names. A `const` cannot be reassigned, so without the
+  // mutator rule this binding would have zero writes by construction and could
+  // never fail — a guard reporting clean on state it structurally cannot judge.
+  const src = `
+const pending = new Map<string, number>();
+export function add(k: string): void { pending.set(k, 1); }
+export function drop(k: string): void { pending.delete(k); }
+export function reset(): void { pending.clear(); }
+`
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 1, `expected 1, got ${JSON.stringify(r.failures)}`)
+  assert(/pending is WRITE-ONLY: 3 write site\(s\)/.test(r.failures[0]), r.failures[0])
+})
+
+test('the mutator rule is what makes that case reachable (control)', () => {
+  // With mutatorsAreWrites off, the SAME source has zero writes and can never
+  // reach the failure bucket. Pinned so the flag cannot be dropped silently.
+  const src = 'const pending = new Map();\nexport function add(k) { pending.set(k, 1); }\n'
+  const off = analyzeBindings(src, { mutatorsAreWrites: false })
+  assert(off.failures.length === 0 && off.warnings.length === 0, 'expected a plain read')
+  assert(off.perName.get(K('pending')).writes.length === 0, 'a mutator was still a write')
+  const on = analyzeBindings(src)
+  assert(on.perName.get(K('pending')).writes.length === 1, 'the mutator was not a write')
+})
+
+test('a COMMENTED-OUT reader does not rescue a write-only binding', () => {
+  const r = analyzeBindings("let flag = false;\nfunction a() { flag = true; }\n// if (flag) doThing();\n")
+  assert(r.failures.length === 1, `a commented reader was counted: ${JSON.stringify(r.failures)}`)
+})
+
+// --- 10b. GREEN — read shapes ----------------------------------------------
+
+const bindingReadShapes = [
+  ['an if condition', 'flag = true;\n  if (flag) { doThing(); }'],
+  ['a right-hand side', 'flag = true;\n  const x = flag;\n  void x;'],
+  ['an argument', 'flag = true;\n  doThing(flag);'],
+  ['a template interpolation', 'flag = true;\n  const s = `v=${flag}`;\n  void s;'],
+  ['a property access through it', 'flag = true;\n  void flag.valueOf();'],
+  ['a return', 'flag = true;\n  return flag;'],
+]
+for (const [label, body] of bindingReadShapes) {
+  test(`a binding read via ${label} PASSES`, () => {
+    const r = analyzeBindings(`let flag: unknown = null;\nfunction run(): unknown {\n  ${body}\n}\n`)
+    assert(r.failures.length === 0, `false positive: ${JSON.stringify(r.failures)}`)
+  })
+}
+
+test('a PROPERTY that shares a binding name is not a reference to the binding', () => {
+  const r = analyzeBindings('let flag = false;\nfunction a() { flag = true; }\nfunction b() { return o.flag; }\n')
+  assert(r.failures.length === 1, `obj.flag rescued the binding: ${JSON.stringify(r.failures)}`)
+})
+
+// --- 10c. The statement-position rule for ++/-- and mutators ---------------
+
+const incdecCases = [
+  ['n++ alone is a WRITE and not a read', 'n++;', 0, 1],
+  ['--n alone is a WRITE and not a read', '--n;', 0, 1],
+  ['a for-update n++ is a WRITE (nothing consumes it)', 'for (let i = 0; i < 3; n++) {}', 0, 1],
+  ['return n++ is a READ — its value is handed on', 'function f() { return n++; }', 1, 0],
+  ['String(++n) is a READ — its value is consumed', 'const s = String(++n);', 1, 0],
+  ['f(n++) is a READ', 'f(n++);', 1, 0],
+  ['a plain assignment is still a WRITE', 'n = 1;', 0, 1],
+  // #7530 F2 — the header used to claim the rule was "the value is DISCARDED".
+  // It is not: the code tests STATEMENT POSITION, a strict subset. These two
+  // discard the value and still classify as reads. Rescue-only, so it cannot
+  // produce a false accusation — pinned so the gap stays a decision on record
+  // instead of an assumption about what the regex does.
+  ['void n++ is a READ — discarded, but not at statement position', 'void n++;', 1, 0],
+  ['c && n++ is a READ — discarded, but not at statement position', 'c && n++;', 1, 0],
+]
+for (const [label, stmt, wantReads, wantWrites] of incdecCases) {
+  test(`binding: ${label}`, () => {
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), 'n')
+    assert(
+      reads.length === wantReads && writes.length === wantWrites,
+      `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
+    )
+  })
+}
+
+test('the SAME rule applies to a context field — return _ctx.n++ is a read', () => {
+  // One classifier, one rule. If these two ever disagree, the "one core" claim
+  // in the header is false.
+  const { reads, writes } = classifyReferences(stripComments('function f() { return _ctx.n++; }'), 'n', RECEIVERS)
+  assert(reads.length === 1 && writes.length === 0, `got ${reads.length}r ${writes.length}w`)
+})
+
+const mutatorCases = [
+  ['m.set(k, v); is a WRITE', 'm.set(k, v);', 'm', 0, 1],
+  ['m.clear(); is a WRITE', 'm.clear();', 'm', 0, 1],
+  ['arr.push(x); is a WRITE', 'arr.push(x);', 'arr', 0, 1],
+  ['if (m.delete(k)) is a READ — the result is consumed', 'if (m.delete(k)) doThing();', 'm', 1, 0],
+  ['const last = m.pop() is a READ', 'const last = m.pop();', 'm', 1, 0],
+  ['m.get(k) is a READ', 'm.get(k);', 'm', 1, 0],
+  ['m.size is a READ', 'const n = m.size;', 'm', 1, 0],
+  // #7530 F3 — MUTATOR_AHEAD carries a `\??` for optional chaining. Dropping
+  // it survived every other case in this file, so the optional form gets its
+  // own pin: `m?.set(...)` at statement position must classify exactly as
+  // `m.set(...)` does.
+  ['m?.set(k, v); is a WRITE — optional chaining is the same mutation', 'm?.set(k, v);', 'm', 0, 1],
+  // #7530 F1 — a DELIBERATE, DOCUMENTED gap, pinned so it cannot change
+  // silently. The assignment's target is the element, not the binding, so
+  // index/property assignment classifies as a READ of the binding and a
+  // `const` object populated only that way can never fail. `gitOneshotTimers`
+  // in connection.ts is the live instance (6 reads / 0 writes, four of the six
+  // references being `gitOneshotTimers[key] = …`). Widening this is #7537; if
+  // that lands, this pin goes red and the header must be updated with it.
+  ['o[k] = v; is a READ of o — index assignment targets the element (#7537)', 'o[k] = v;', 'o', 1, 0],
+  ['o.k = v; is a READ of o — property assignment targets the element (#7537)', 'o.k = v;', 'o', 1, 0],
+]
+for (const [label, stmt, name, wantReads, wantWrites] of mutatorCases) {
+  test(`binding: ${label}`, () => {
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { mutatorsAreWrites: true })
+    assert(
+      reads.length === wantReads && writes.length === wantWrites,
+      `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
+    )
+  })
+}
+
+test('a comment-padded increment still classifies as a WRITE (C1 window, binding side)', () => {
+  // atStatementStart scans back over the BLANKS a stripped comment leaves, so
+  // the comment's length cannot flip the verdict — the mirror of #7464 C1.
+  const long = `/* ${'x'.repeat(200)} */`
+  const { reads, writes } = classifyBindingReferences(stripComments(`${long} n++;`), 'n')
+  assert(writes.length === 1 && reads.length === 0, `padded increment misclassified: ${reads.length}r ${writes.length}w`)
+})
+
+test('atStatementStart answers alike for a prefix and a postfix increment', () => {
+  assert(atStatementStart('n++;', 0) === true, 'postfix at file start')
+  assert(atStatementStart('++n;', 2) === true, 'prefix at file start')
+  assert(atStatementStart('return n++;', 7) === false, 'after `return`')
+  assert(atStatementStart('f(++n);', 4) === false, 'inside a call')
+  assert(atStatementStart('{ n++; }', 2) === true, 'after a brace')
+  assert(atStatementStart('if (c) n++;', 7) === true, 'after a paren')
+})
+
+// --- 10d. Roster discovery -------------------------------------------------
+
+test('every module-level LET is state; a nested one is not', () => {
+  const names = extractModuleBindings('let a = 1;\nfunction f() { let b = 2; return b; }\n').map((b) => b.name)
+  assert(JSON.stringify(names) === JSON.stringify(['a']), `got ${JSON.stringify(names)}`)
+})
+
+const constRoster = [
+  ['a number literal', 'const CAP = 32;', false],
+  ['a string literal', "const MSG = 'x';", false],
+  ['a regex literal', 'const RE = /^a$/i;', false],
+  ['a boolean literal', 'const ON = true;', false],
+  ['an alias of another binding', 'const A = SC_A;', false],
+  ['a dotted alias', 'const A = mod.thing;', false],
+  ['an arrow function', 'const f = (s: S): boolean => s.x;', false],
+  ['a function expression', 'const f = function () { return 1; };', false],
+  ['a `new` expression', 'const m = new Map<string, number>();', true],
+  ['an array literal', 'const q: string[] = [];', true],
+  ['an object literal', 'const o: T = { a: 1 };', true],
+  ['a factory call', 'const h = createHeartbeat({ a: 1 });', true],
+  ['a generic factory call', 'const t = createTable<S>();', true],
+]
+for (const [label, decl, inRoster] of constRoster) {
+  test(`a const initialised from ${label} is ${inRoster ? '' : 'NOT '}state`, () => {
+    const found = extractModuleBindings(stripComments(decl)).length
+    assert(found === (inRoster ? 1 : 0), `got ${found} binding(s) from: ${decl}`)
+  })
+}
+
+test('the DECLARATION itself is neither a read nor a write', () => {
+  // Counting it as a write would push "declared and never mentioned again"
+  // into the failure bucket, where the interface kind warns — and
+  // `noUnusedLocals` already covers a genuinely unused private binding.
+  const r = analyzeBindings('let held = 0;\nlet used = 0;\nexport function run(): void { void used; }\n')
+  assert(r.failures.length === 0, `expected no failure, got ${JSON.stringify(r.failures)}`)
+  assert(r.warnings.length === 1 && /held is UNREFERENCED/.test(r.warnings[0]), JSON.stringify(r.warnings))
+})
+
+test('the roster records the declaration OFFSET, not just the name', () => {
+  const src = 'let alpha = 1;\n'
+  const [b] = extractModuleBindings(src)
+  assert(b.index === src.indexOf('alpha'), `index ${b.index} !== ${src.indexOf('alpha')}`)
+  assert(b.exported === false && b.keyword === 'let', JSON.stringify(b))
+})
+
+test('an EXPORTED binding is marked as such', () => {
+  const [b] = extractModuleBindings('export let n = 0;\n')
+  assert(b.exported === true, JSON.stringify(b))
+})
+
+// --- 10e. Clause blanking --------------------------------------------------
+
+test('an `import { x } from` clause is not a read of x', () => {
+  const src = "import { n } from './other';\nlet n2 = 0;\n"
+  const out = blankModuleClauses(stripComments(src))
+  assert(out.length === src.length, `length changed: ${out.length} vs ${src.length}`)
+  assert(out.split('\n').length === src.split('\n').length, 'line count changed')
+  assert(classifyBindingReferences(out, 'n').reads.length === 0, 'the import clause counted as a read')
+})
+
+test('an `export { x }` clause is not a read of x — the re-export rescue', () => {
+  const src = 'let n = 0;\nfunction a() { n = 1; }\nexport { n };\n'
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 1, `a re-export line rescued a write-only binding: ${JSON.stringify(r.failures)}`)
+})
+
+test('an `export const` DECLARATION is NOT blanked', () => {
+  const out = blankModuleClauses('export const n = 1;\nfunction a() { return n; }\n')
+  assert(/export const n = 1;/.test(out), `the declaration was blanked: ${JSON.stringify(out)}`)
+  assert(extractModuleBindings(out).length === 0, 'a literal const should not be state')
+})
+
+// --- 10f. Scan-set scoping -------------------------------------------------
+
+test('a PRIVATE binding is scanned in its own module only', () => {
+  // A same-named local in an unrelated file must not rescue it. `_store` is the
+  // real name this protects: generic enough to appear anywhere.
+  const decl = 'let _store = null;\nfunction a() { _store = mk(); }\n'
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/mod.ts', text: decl }],
+    sources: [
+      { path: 'store/mod.ts', text: decl },
+      { path: 'other/thing.ts', text: 'function b() { const _store = mk(); return _store; }\n' },
+    ],
+    mutatorsAreWrites: true,
+  })
+  assert(r.failures.length === 1, `an unrelated local rescued a private binding: ${JSON.stringify(r.failures)}`)
+})
+
+test('an EXPORTED binding IS scanned across the target', () => {
+  const decl = 'export let n = 0;\nfunction a() { n = 1; }\n'
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/mod.ts', text: decl }],
+    sources: [
+      { path: 'store/mod.ts', text: decl },
+      { path: 'ui/panel.ts', text: "import { n } from '../store/mod';\nexport const show = () => String(n);\n" },
+    ],
+    mutatorsAreWrites: true,
+  })
+  assert(r.failures.length === 0, `a cross-file reader was not seen: ${JSON.stringify(r.failures)}`)
+})
+
+// --- 10g. CANNOT-CHECK -----------------------------------------------------
+
+test('ZERO discovered bindings is a cannot-check, not a clean run', () => {
+  throws(
+    () => analyzeBindings('export function f(): number { return 1; }\n'),
+    CannotCheckError,
+    /ZERO module-level bindings/,
+  )
+})
+
+test('an empty declaring-file set is a cannot-check', () => {
+  throws(
+    () => analyzeTarget({ kind: 'module-bindings', declSources: [], sources: [{ path: 'a.ts', text: 'let n = 0;' }] }),
+    CannotCheckError,
+    /no declaring file/,
+  )
+})
+
+test('an EMPTY scan set is a cannot-check for the binding kind too', () => {
+  throws(
+    () => analyzeTarget({ kind: 'module-bindings', declSources: [{ path: 'a.ts', text: 'let n = 0;' }], sources: [] }),
+    CannotCheckError,
+    /no source files/,
+  )
+})
+
+test('two EXPORTED bindings sharing a name is a cannot-check', () => {
+  throws(
+    () => analyzeTarget({
+      kind: 'module-bindings',
+      declSources: [
+        { path: 'store/a.ts', text: 'export let dup = 0;\nfunction f() { return dup; }\n' },
+        { path: 'store/b.ts', text: 'export let dup = 0;\nfunction g() { return dup; }\n' },
+      ],
+      sources: [
+        { path: 'store/a.ts', text: 'export let dup = 0;\nfunction f() { return dup; }\n' },
+        { path: 'store/b.ts', text: 'export let dup = 0;\nfunction g() { return dup; }\n' },
+      ],
+    }),
+    CannotCheckError,
+    /two files export a module-level binding named 'dup'/,
+  )
+})
+
+test('two PRIVATE bindings sharing a name are FINE — the live tree has a pair', () => {
+  const a = 'const pending = new Map();\nfunction f() { return pending.get(1); }\n'
+  const b = 'const pending = new Map();\nfunction g() { return pending.get(2); }\n'
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    mutatorsAreWrites: true,
+  })
+  assert(r.failures.length === 0 && r.fields.length === 2, JSON.stringify({ f: r.failures, k: r.fields }))
+})
+
+// --- 10h. Allowlist, binding kind ------------------------------------------
+
+test('a binding allowlist entry is keyed by file::binding', () => {
+  const src = 'let flag = false;\nfunction a() { flag = true; }\n'
+  const r = analyzeBindings(src, { allow: { [K('flag')]: 'kept as a debugger marker' } })
+  assert(r.failures.length === 0, `not admitted: ${JSON.stringify(r.failures)}`)
+  assert(r.stats.allowlisted === 1, `stats.allowlisted=${r.stats.allowlisted}`)
+})
+
+test('a BARE binding name (no file prefix) is refused as not in the roster', () => {
+  const src = 'let flag = false;\nfunction a() { flag = true; }\n'
+  throws(() => analyzeBindings(src, { allow: { flag: 'why' } }), CannotCheckError, /not declared/)
+})
+
+test('a binding allowlist entry without a justification is refused', () => {
+  const src = 'let flag = false;\nfunction a() { flag = true; }\n'
+  throws(() => analyzeBindings(src, { allow: { [K('flag')]: '  ' } }), CannotCheckError, /no justification/)
+})
+
+test('a binding allowlist entry whose subject regained a reader is refused as STALE', () => {
+  const src = 'let flag = false;\nfunction a() { flag = true; }\nfunction b() { return flag; }\n'
+  throws(() => analyzeBindings(src, { allow: { [K('flag')]: 'was write-only' } }), CannotCheckError, /stale/)
+})
+
+// --- 10i. CLI end to end ---------------------------------------------------
+
+test('CLI exits 1 on a write-only dashboard binding and names it on stderr', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]: `${DASH_TEST_EXPORTS}let flag = false;\nexport function a(): void { flag = true; }\n`,
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::flag is WRITE-ONLY/.test(r.stderr), r.stderr)
+  assert(/write: packages\/dashboard\/src\/store\/message-handler\.ts:\d+/.test(r.stderr), r.stderr)
+})
+
+test('CLI ignores a dashboard reader that lives in a test file', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]: `${DASH_TEST_EXPORTS}let flag = false;\nexport function a(): void { flag = true; }\n`,
+    'packages/dashboard/src/store/mod.test.ts': "import { flag } from './message-handler';\nexport const seen = flag;\n",
+  }))
+  assert(r.status === 1, `a test-file read masked the write-only binding (exit ${r.status})\n${r.stderr}`)
+})
+
+test('CLI exits 2 when the dashboard declaring directory is missing — never 0', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-woctx-'))
+  tmpDirs.push(dir)
+  mkdirSync(join(dir, dirname(DECL_REL)), { recursive: true })
+  writeFileSync(join(dir, DECL_REL), CLEAN_DECL)
+  const r = runCliOn(dir)
+  assert(r.status === 2, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/CANNOT CHECK/.test(r.stderr) && /unreadable/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 2 when the dashboard store declares no state at all — never 0', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]: 'export function noop(): void {}\n',
+  }))
+  assert(r.status === 2, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/ZERO module-level bindings/.test(r.stderr), r.stderr)
+})
+
+test('CLI reports the binding target with its own noun', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL))
+  assert(/dashboard\/store-module-state: \d+ binding\(s\)/.test(r.stdout), r.stdout)
+})
+
+test('the SHIPPED TARGETS table still covers both kinds', () => {
+  // A target silently dropped from the table is a lint that checks half of what
+  // its own header claims, and every run stays green.
+  const kinds = TARGETS.map((t) => t.kind)
+  assert(kinds.includes('interface'), `no interface target: ${JSON.stringify(kinds)}`)
+  assert(kinds.includes('module-bindings'), `no module-bindings target: ${JSON.stringify(kinds)}`)
+  const dash = TARGETS.find((t) => t.kind === 'module-bindings')
+  assert(dash.mutatorsAreWrites === true, 'the dashboard target must treat mutators as writes')
+  assert(
+    dash.declDirs.includes('packages/dashboard/src/store'),
+    `declDirs drifted: ${JSON.stringify(dash.declDirs)}`,
+  )
 })
 
 // ---------------------------------------------------------------------------
