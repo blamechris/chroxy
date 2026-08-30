@@ -47,13 +47,22 @@
  * A field with NO reference at all is a WARNING, not a failure — and the
  * distinction is load-bearing rather than squeamish. Zero references is the
  * signature of both "dead field" and "reached some way this regex cannot see",
- * and the live tree contains the second: `rttSmoother` is held on the context
- * so that replacing the context replaces it, while its two consumers close over
- * the LOCAL `const rttSmoother` that `createDefaultContext` built it from.
- * `_ctx.rttSmoother` is never written either, so it is not the #7421 class and
- * failing on it would buy an allowlist entry that suppresses a whole category
- * rather than a case. The warning names the field on every run (as a GitHub
- * `::warning::` annotation) so it stays visible instead of silent.
+ * and when this lint landed the tree contained the second: `rttSmoother` was
+ * held on the context so that replacing the context replaced it, while its two
+ * consumers closed over the LOCAL `const rttSmoother` that
+ * `createDefaultContext` built it from. `_ctx.rttSmoother` was never written
+ * either, so it was not the #7421 class, and failing on it would have bought an
+ * allowlist entry that suppresses a whole category rather than a case. The
+ * warning names such a field on every run (as a GitHub `::warning::`
+ * annotation) so it stays visible instead of silent.
+ *
+ * #7468 resolved that one instance the other way — both consumers now read
+ * `ctx.rttSmoother` — so the bucket is EMPTY today and a clean run emits no
+ * `::warning::` at all. That is the point of the bucket: a standing warning on
+ * every green run trains readers to skip warnings, which is precisely the
+ * signal a genuinely dead field would have to arrive on. The closure-capture
+ * shape stays documented here because the lint still cannot see it, not
+ * because an instance of it survives.
  *
  * WHAT IT CANNOT SEE — read this before trusting a green run
  * ----------------------------------------------------------
