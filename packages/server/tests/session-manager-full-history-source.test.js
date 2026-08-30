@@ -317,18 +317,47 @@ describe('#7507 — isSessionBusy is LIVENESS (isRunning), not mid-turn (_isBusy
     }
   })
 
-  it('agrees with listSessions().isBusy — they are the same authority, and must not diverge', () => {
+  it('agrees with listSessions().isBusy in EVERY state — they are the same authority', () => {
     // The load-bearing consistency claim in the guard's comment. If these two
     // ever disagree, the dashboard's `session_list` resync (#4639) reverts the
     // heal the guard just allowed.
+    //
+    // Asserted across all three states BaseSession's getter distinguishes rather
+    // than spot-checked in one (#7521 review, nitpick 3): a single state kills
+    // the obvious divergence but would not catch an INLINED copy of `isRunning`
+    // inside `isSessionBusy` that later drifts from the getter — say a third arm
+    // added to `BaseSession.isRunning` and reflected in only one of the two
+    // readers. Agreement per state is the property; one state is a sample of it.
     const mgr = newManager()
     const session = realSession()
     mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/authority', createdAt: Date.now() })
+    const listedIsBusy = () => mgr.listSessions().find(s => s.sessionId === 's1').isBusy
+    const agree = (label, expected) => {
+      assert.equal(listedIsBusy(), expected, `precondition: the broadcast reports ${expected} when ${label}`)
+      assert.equal(mgr.isSessionBusy('s1'), listedIsBusy(),
+        `isSessionBusy and listSessions().isBusy must not diverge when ${label}`)
+    }
     try {
+      agree('at rest', false)
+
+      // Arm 1 — background shells only, no turn in flight.
       session.trackBackgroundShell({ shellId: 'brk1', command: 'x' })
-      const listed = mgr.listSessions().find(s => s.sessionId === 's1')
-      assert.equal(listed.isBusy, true, 'precondition: the broadcast reports busy in this state')
-      assert.equal(mgr.isSessionBusy('s1'), listed.isBusy)
+      assert.equal(session._isBusy, false, 'precondition: shells-only, not mid-turn')
+      agree('a background shell is pending', true)
+
+      // Arm 2 — mid-turn only, empty pending map.
+      session.clearBackgroundShell('brk1')
+      session._isBusy = true
+      assert.equal(session.getPendingBackgroundShells().length, 0, 'precondition: mid-turn, no shells')
+      agree('mid-turn with no shells', true)
+
+      // Both arms at once, then back to rest — the round trip, so a reader that
+      // latched on first read is caught too.
+      session.trackBackgroundShell({ shellId: 'brk2', command: 'y' })
+      agree('both arms are live', true)
+      session.clearBackgroundShell('brk2')
+      session._isBusy = false
+      agree('back at rest', false)
     } finally {
       session._destroyPendingBackgroundShells()
     }

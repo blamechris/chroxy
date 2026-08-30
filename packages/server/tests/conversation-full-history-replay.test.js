@@ -827,3 +827,86 @@ describe('#7507 — the JSONL heal is gated on LIVENESS, and a pending backgroun
     assert.equal(sends[sends.length - 1].type, 'history_replay_end')
   })
 })
+
+/**
+ * #7521 review, finding 1 — the ten pins above constrain WHAT `isSessionBusy`
+ * returns for a given state, and THAT the handler consults it. None of them
+ * constrains WHEN it is consulted. `sendChunkedWithBackpressure` drains across
+ * `setImmediate` turns, and the guard is deliberately read inside `onDone` — the
+ * latest, most conservative point. Hoisting that read to just after the
+ * `history_replay_start` send and caching it across the drain was green on all
+ * four suites (38/38, 16/16, 18/18, 43/43), which is the gap this closes.
+ *
+ * The mutant is not cosmetic. A session that goes live DURING the replay (a turn
+ * starts, or a background shell is tracked) would be handed the synthesized
+ * `agent_idle` mid-turn — precisely the outcome the guard exists to prevent —
+ * and the reverse (busy -> idle during the drain) suppresses a heal that is due.
+ *
+ * The ctx is the file's own `build()` rather than a copy of it: `build` already
+ * mirrors each payload's bytes back into the ws stub, which is the "ctx that
+ * mirrors bufferedAmount back into ws" this probe needs. Everything else —
+ * fixture size, the frame counter that flips `live`, `turn(50)`, both assertions
+ * — is the probe as written in the review.
+ */
+describe('#7521 review — the busy guard is READ at onDone, not cached across the drain', () => {
+  it('a session that goes LIVE DURING the replay is not declared idle at replay-end', async () => {
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let live = false, frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++; if (frames > 2) live = true } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => live },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.ok(live, 'precondition: the session really did go live during the drain')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 0,
+      'the guard must be read at onDone, not cached before the drain')
+    assert.equal(sends.filter(m => m.type === 'message').length, entries.length,
+      'positive control: the whole replay really did drain, so the 0 above is not a stalled loop')
+    assert.equal(sends[sends.length - 1].type, 'history_replay_end')
+  })
+
+  it('POSITIVE CONTROL: a session that stays idle through the SAME drain IS healed', async () => {
+    // Without this, a probe that only ever observed "no agent_idle" would pass
+    // against a handler that had stopped healing altogether.
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++ } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => false },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.ok(frames > 2, 'precondition: the same multi-chunk drain really did happen')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1)
+  })
+
+  it('and the reverse: busy at the START, idle by the END, still heals', async () => {
+    // The other direction of the same read-point property. A cached read taken
+    // before the drain sees BUSY here and suppresses a heal that is due by the
+    // time the replay actually ends.
+    const entries = Array.from({ length: 300 }, (_, i) => ({ type: 'response', content: `m${i}`, timestamp: i }))
+    let live = true, frames = 0
+    const ws = { readyState: 1, bufferedAmount: 0, send() { frames++; if (frames > 2) live = false } }
+    const { ctx, sends } = build(entries, {
+      ws,
+      source: 'jsonl',
+      managerOverrides: { isSessionBusy: () => live },
+    })
+
+    await handler(ws, client(), { type: 'request_full_history' }, ctx)
+    await turn(50)
+
+    assert.equal(live, false, 'precondition: the session really did go quiet during the drain')
+    assert.equal(sends.filter(m => m.type === 'agent_idle').length, 1,
+      'a read cached before the drain would have suppressed this heal')
+  })
+})

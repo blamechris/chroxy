@@ -227,11 +227,15 @@ async function handleRequestConversationTranscript(ws, client, msg, ctx) {
   try {
     const read = await readTranscript(resolveJsonlPath(cwd, conversationId))
     if (Array.isArray(read)) {
-      // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a public
-      // injection seam, so a legacy fixture still supplies a bare array —
-      // accepted and reported as untruncated rather than throwing on a shape
-      // that used to work, the same posture handleRequestFullHistory takes
-      // toward a descriptor-less legacy manager.
+      // The pre-#7501 reader shape. `ctx.readConversationTranscript` is a
+      // TEST-ONLY injection seam — nothing in production injects it, so this
+      // branch is unreachable outside the suite — and a legacy fixture still
+      // supplies a bare array, accepted and reported as untruncated rather than
+      // throwing on a shape that used to work. `false` over omitting the field:
+      // omitting it puts the frame back into the exact absent-vs-false ambiguity
+      // #7501 removes, and gives the wire two shapes to pin instead of one. Same
+      // posture handleRequestFullHistory takes toward a descriptor-less legacy
+      // manager.
       messages = read
     } else if (read && Array.isArray(read.messages)) {
       messages = read.messages
