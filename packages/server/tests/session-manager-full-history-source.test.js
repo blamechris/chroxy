@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
+import { BaseSession } from '../src/base-session.js'
 import { encodeProjectPath, MAX_MESSAGES } from '../src/jsonl-reader.js'
 
 /**
@@ -27,6 +28,7 @@ import { encodeProjectPath, MAX_MESSAGES } from '../src/jsonl-reader.js'
 
 let tmpRoot
 let fakeHome
+let emptySkillsDir
 let realHome
 let realUserProfile
 
@@ -34,6 +36,9 @@ before(() => {
   tmpRoot = mkdtempSync(join(tmpdir(), 'sm-full-history-source-'))
   fakeHome = join(tmpRoot, 'home')
   mkdirSync(fakeHome, { recursive: true })
+  // #7507 needs a REAL BaseSession, which loads skills from a directory.
+  emptySkillsDir = join(tmpRoot, 'skills')
+  mkdirSync(emptySkillsDir, { recursive: true })
   realHome = process.env.HOME
   realUserProfile = process.env.USERPROFILE
   // os.homedir() reads $HOME on POSIX and %USERPROFILE% on Windows.
@@ -202,5 +207,151 @@ describe('#7484 — isSessionBusy gates the JSONL heal', () => {
 
   it('is false — never a throw — for an unknown session', () => {
     assert.equal(newManager().isSessionBusy('nope'), false)
+  })
+})
+
+/**
+ * #7507 — the three tests above pin `isSessionBusy` against `fakeSession()`, a
+ * plain object with an OWN `isRunning` property. That fixture cannot witness the
+ * thing this method actually depends on: BaseSession's `isRunning` is a GETTER,
+ * `_isBusy || _backgroundShellTracker.size > 0` (base-session.js), and the two
+ * halves come apart. Mutating `isSessionBusy` to read `_isBusy` fails those
+ * tests only on the fixture's SHAPE — a real session would let the mutant
+ * survive, which is exactly what the #7500 review measured.
+ *
+ * So these drive a REAL `BaseSession`. The state under test is reachable and
+ * potentially unbounded: `_clearMessageState` clears `_isBusy` at turn end and
+ * deliberately PRESERVES the pending-shells map (#4307), so a session that ran
+ * `Bash(run_in_background: true)` and has not been polled with `BashOutput` has
+ * `isRunning === true` with no turn in flight. Release comes only from
+ * `BashOutput`, `destroy()`, or the 4-hour `BACKGROUND_SHELL_HARD_QUIESCE_MS`
+ * reap — the 60s advisory sweep explicitly does NOT flip liveness (#5247).
+ *
+ * The DECISION being pinned, rather than left incidental: that state counts as
+ * BUSY, so the #7484 JSONL heal is suppressed in it. The reason is consistency
+ * with the server's single busy authority — `listSessions()` publishes this same
+ * `isRunning` as `isBusy`, and the dashboard re-derives `isIdle` from it on
+ * every `session_list` / `session_activity` (#4639), so a narrower `_isBusy`
+ * guard would emit an `agent_idle` the next broadcast reverts. The mobile
+ * residual (no such resync there, so the suppression is a pure false negative)
+ * is tracked in #7518, not papered over here.
+ */
+describe('#7507 — isSessionBusy is LIVENESS (isRunning), not mid-turn (_isBusy)', () => {
+  /** A REAL BaseSession — the point is the getter, which a stub cannot have. */
+  function realSession() {
+    return new BaseSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+  }
+
+  it('is BUSY for a pending background shell with NO turn in flight', () => {
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/bg-shell' })
+    try {
+      assert.equal(session._isBusy, false, 'precondition: no turn is running')
+      assert.equal(mgr.isSessionBusy('s1'), false, 'precondition: idle before any shell is tracked')
+
+      session.trackBackgroundShell({ shellId: 'brk57kt6pm', command: 'npm run dev' })
+
+      assert.equal(session._isBusy, false,
+        'still no turn in flight — this is the whole gap between liveness and mid-turn')
+      assert.equal(mgr.isSessionBusy('s1'), true,
+        'the session is LIVE: an un-polled background shell holds liveness until BashOutput/destroy/hard-quiesce (#4307)')
+    } finally {
+      // Stop the #5177 sweep interval this armed, or the timer outlives the test.
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('survives turn-end the way the real lifecycle does', () => {
+    // The sequence that actually produces the state: a turn runs, backgrounds a
+    // shell, then ENDS. `_clearMessageState` clears `_isBusy` and preserves the
+    // pending map (#4307), so the session stays busy across the boundary.
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/turn-end' })
+    try {
+      session._isBusy = true
+      session.trackBackgroundShell({ shellId: 'brk1', command: 'tail -f log' })
+      assert.equal(mgr.isSessionBusy('s1'), true, 'busy mid-turn, trivially')
+
+      session._clearMessageState()
+
+      assert.equal(session._isBusy, false, 'the turn really did end')
+      assert.equal(mgr.isSessionBusy('s1'), true, 'and the session is still live')
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('POSITIVE CONTROL: mid-turn with an EMPTY pending map is busy too (the other arm)', () => {
+    // Without this, an implementation that returned `_backgroundShellTracker.size > 0`
+    // ALONE — dropping the mid-turn half — would pass the two tests above.
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/mid-turn' })
+    session._isBusy = true
+    assert.equal(session.getPendingBackgroundShells().length, 0, 'precondition: no background shells')
+    assert.equal(mgr.isSessionBusy('s1'), true)
+  })
+
+  it('POSITIVE CONTROL: a real session at rest is NOT busy', () => {
+    // And without this, `return true` passes everything above.
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/at-rest' })
+    assert.equal(mgr.isSessionBusy('s1'), false)
+  })
+
+  it('goes idle once the shell is ACKNOWLEDGED (BashOutput), not merely quiesced', () => {
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/ack' })
+    try {
+      session.trackBackgroundShell({ shellId: 'brk1', command: 'x' })
+      assert.equal(mgr.isSessionBusy('s1'), true)
+      session.clearBackgroundShell('brk1')
+      assert.equal(mgr.isSessionBusy('s1'), false,
+        'liveness authority is BashOutput / destroy only (#5247)')
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('agrees with listSessions().isBusy — they are the same authority, and must not diverge', () => {
+    // The load-bearing consistency claim in the guard's comment. If these two
+    // ever disagree, the dashboard's `session_list` resync (#4639) reverts the
+    // heal the guard just allowed.
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/authority', createdAt: Date.now() })
+    try {
+      session.trackBackgroundShell({ shellId: 'brk1', command: 'x' })
+      const listed = mgr.listSessions().find(s => s.sessionId === 's1')
+      assert.equal(listed.isBusy, true, 'precondition: the broadcast reports busy in this state')
+      assert.equal(mgr.isSessionBusy('s1'), listed.isBusy)
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
+  })
+
+  it('skips a _destroying entry, like getSession() and listSessions() do', () => {
+    // #7507 "also noticed" (N1): `isSessionBusy` read `this._sessions.get()` raw
+    // while every sibling reader skips teardown. Unreachable from the current
+    // call site — `handleRequestFullHistory` gates on `resolveSession` →
+    // `getSession()`, which already returns null — but latent for the next
+    // caller, and a session being torn down is not one to make claims about.
+    const mgr = newManager()
+    const session = realSession()
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/repo/destroying', _destroying: true })
+    try {
+      session._isBusy = true
+      assert.equal(session.isRunning, true, 'precondition: the underlying session really does read busy')
+      assert.equal(mgr.getSession('s1'), null, 'precondition: the sibling readers already hide it')
+      assert.equal(mgr.listSessions().length, 0)
+
+      assert.equal(mgr.isSessionBusy('s1'), false)
+    } finally {
+      session._destroyPendingBackgroundShells()
+    }
   })
 })

@@ -2994,19 +2994,41 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Is this session's provider mid-turn right now? (#7484)
+   * Is this session LIVE right now — mid-turn, OR still waiting on background
+   * work? (#7484; the name's "busy" is corrected to liveness here by #7507.)
    *
    * The full-history replay needs this to decide whether a synthesized
    * `agent_idle` would be TRUE. `agent_idle` sets `isIdle`, clears
    * `streamingMessageId` (hiding the stop button) and clears `activeTools` —
-   * all correct after a finished turn, all wrong while one is running.
+   * all correct after a finished turn, all wrong while the session is live.
+   *
+   * This is `entry.session.isRunning`, and that is deliberately WIDER than
+   * "mid-turn": BaseSession defines it as
+   * `_isBusy || _backgroundShellTracker.size > 0`, so a session whose turn has
+   * ENDED but which still holds an un-polled `Bash(run_in_background: true)`
+   * shell reads busy here (#4307 — `_clearMessageState` preserves that map by
+   * design, and the 60s advisory sweep must not flip liveness, #5247).
+   *
+   * Do NOT narrow it to `_isBusy`. `listSessions()` publishes this very same
+   * `isRunning` as each entry's `isBusy`, and the dashboard re-derives `isIdle`
+   * from that on every `session_list` / `session_activity` broadcast (#4639).
+   * Two readings of one authority that disagree means whichever side this method
+   * feeds gets reverted by the next broadcast. Pinned in
+   * tests/session-manager-full-history-source.test.js against a REAL BaseSession,
+   * because a stub with an own `isRunning` property cannot tell the two apart.
+   *
+   * `_destroying` entries are skipped, matching `getSession()` and
+   * `listSessions()` (#7507 N1). Unreachable from the current call site, which
+   * gates on `resolveSession` → `getSession()`, but a session being torn down is
+   * not one any future caller should be answered about.
    *
    * @param {string} sessionId
    * @returns {boolean}
    */
   isSessionBusy(sessionId) {
     const entry = this._sessions.get(sessionId)
-    return !!(entry && entry.session && entry.session.isRunning)
+    if (!entry || entry._destroying) return false
+    return !!(entry.session && entry.session.isRunning)
   }
 
   /**

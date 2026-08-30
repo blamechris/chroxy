@@ -419,11 +419,43 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       // MID-replay. Before `history_replay_end`, so it stays inside the window
       // where the #4466 reasoning holds.
       //
-      // NOT while the session is mid-turn: `agent_idle` sets isIdle, clears
-      // streamingMessageId (hiding the stop button) and clears activeTools —
-      // all true after a finished turn, all false during a running one, and no
-      // `agent_busy` is coming to undo it before the next turn starts. A
-      // manager that cannot answer is treated as idle: "cannot tell" must not
+      // NOT while `isSessionBusy` reports the session LIVE. `agent_idle` sets
+      // isIdle, clears streamingMessageId (hiding the stop button) and clears
+      // activeTools — all true after a finished turn, and no `agent_busy` is
+      // coming to undo it before the next turn starts.
+      //
+      // #7507 — "live" here is deliberately WIDER than mid-turn, and the comment
+      // this replaced described only the narrow half. `isSessionBusy` is
+      // `entry.session.isRunning`, which BaseSession defines as
+      // `_isBusy || _backgroundShellTracker.size > 0`: a session whose turn has
+      // ENDED but which still holds an un-polled `Bash(run_in_background: true)`
+      // shell reads busy (#4307; the 60s advisory sweep must not flip liveness,
+      // #5247, so release comes only from BashOutput / destroy / the 4h hard
+      // quiesce). Do NOT "simplify" this to `_isBusy`.
+      //
+      // The reason is CONSISTENCY WITH THE SERVER'S SINGLE BUSY AUTHORITY, not
+      // mid-turn correctness. `listSessions()` publishes that same `isRunning` as
+      // each entry's `isBusy`, and the dashboard re-derives `isIdle` from it on
+      // every `session_list` and `session_activity` (#4639). A narrower `_isBusy`
+      // guard would emit an `agent_idle` that the very next broadcast reverts —
+      // a flicker, not a heal. Pinned by behaviour in
+      // tests/conversation-full-history-replay.test.js (a real SessionManager +
+      // BaseSession) and at the producer in
+      // tests/session-manager-full-history-source.test.js.
+      //
+      // Two consequences, recorded rather than hidden:
+      //   - On MOBILE the suppression is a pure false negative. The app has no
+      //     `session_activity` case and never derives `isIdle` from `isBusy`, so
+      //     nothing there would revert a narrower heal — and this synthesized
+      //     `agent_idle` is the ONLY thing that can clear a stale chip on that
+      //     client (#7479 N2). Fixing it belongs on the app side (give it the
+      //     #4639 resync), not by forking this guard per client: tracked in #7518.
+      //   - The LIVE path is LESS conservative than this. event-normalizer.js
+      //     appends `agent_idle` to every `result` unconditionally, without
+      //     consulting `isRunning`; the replay heal mirrors that fan-out
+      //     (ws-history.js) everywhere except this state.
+      //
+      // A manager that cannot answer is treated as idle: "cannot tell" must not
       // silently become "never heal", which is the defect this fixes.
       const busy = typeof sessionManager.isSessionBusy === 'function'
         ? sessionManager.isSessionBusy(targetId)
