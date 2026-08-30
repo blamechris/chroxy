@@ -273,3 +273,27 @@ export function findSchemaComment(src, block) {
 export function wordTokens(text) {
   return new Set(text.split(/[^A-Za-z0-9_]+/).filter(Boolean))
 }
+
+/**
+ * Backticked tokens in a doc region that READ AS sub-key claims (#7514).
+ *
+ * The reverse-containment check ("everything the prose cites as a key must
+ * still exist on the producer") cannot run over every backticked token — a
+ * region legitimately backticks paths, env vars, dotted config addresses,
+ * JSON examples and literal values. A token counts as a KEY CLAIM only when
+ * it is a bare lower-camel identifier, which is exactly the shape every
+ * *_SUPPORTED_KEYS member has and none of the other backtick uses do.
+ * Generic literals that share the shape are excluded by the roster below —
+ * grow it deliberately, with the doc line in hand, never pre-emptively.
+ */
+const GENERIC_BACKTICK_LITERALS = new Set([
+  'true', 'false', 'null', 'undefined', 'auto', 'npm', 'node', 'ms', 'gh',
+])
+
+export function claimedSubKeyTokens(regionText) {
+  const out = new Set()
+  for (const m of regionText.matchAll(/`([a-z][a-zA-Z0-9]*)`/g)) {
+    if (!GENERIC_BACKTICK_LITERALS.has(m[1])) out.add(m[1])
+  }
+  return out
+}

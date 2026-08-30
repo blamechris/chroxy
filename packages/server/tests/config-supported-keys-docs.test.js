@@ -6,6 +6,7 @@ import * as providersModule from '../src/anthropic-compatible-config.js'
 import {
   extractTypeShapes,
   findConfigTableRow,
+  claimedSubKeyTokens,
   findSchemaComment,
   findSection,
   parseRecognisedSubKeys,
@@ -326,6 +327,54 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       sorted(BLOCKS_WITH_NO_PROSE_REGION),
       'the set of blocks with no prose doc region changed — a lost region drops its containment check'
     )
+  })
+
+  // ---- roster 3b: the REVERSE direction (#7514) ----
+
+  // Tokens that share the bare-identifier shape but are NOT key claims, per
+  // region: enum VALUES and similar prose. Every entry must actually appear in
+  // its region (stale entries fail — the #7489 allowlist discipline), and the
+  // block's own name is excluded structurally for all blocks.
+  const REGION_NON_KEY_TOKENS = new Map([
+    // billing plan classes are values of `class`, not sub-keys
+    ['billing', ['pro', 'max5x', 'max20x']],
+    // entry-level keys of the provider lists (one nesting level BELOW this
+    // roster, validated by the per-entry schema in anthropic-compatible-config)
+    ['providers', ['provider', 'apiKeyEnv', 'credentialsKey', 'baseUrl']],
+  ])
+
+  it('every key the prose CLAIMS exists on the producer', () => {
+    // The forward check above proves supported keys are documented; this one
+    // proves the doc cannot keep describing a key the producer has DROPPED
+    // (#7514 — the half #7449 deliberately left loose). Key claims are the
+    // bare lower-camel backticked tokens; see claimedSubKeyTokens for why
+    // paths/env vars/examples are structurally outside the claim shape.
+    let claimedTotal = 0
+    for (const block of BLOCK_TO_SET_NAME.keys()) {
+      const region = findConfigTableRow(md, block) ?? findSection(md, block)
+      if (!region) continue
+      const nonKeys = new Set(REGION_NON_KEY_TOKENS.get(block) ?? [])
+      for (const t of nonKeys) {
+        assert.ok(
+          region.includes('\`' + t + '\`'),
+          `REGION_NON_KEY_TOKENS entry '${t}' for \`${block}\` no longer appears in its region — stale exclusion`
+        )
+      }
+      const ownName = block.split('.').pop()
+      const claimed = [...claimedSubKeyTokens(region)]
+        .filter(k => k !== ownName && !nonKeys.has(k))
+      const supported = new Set(runtime.get(block))
+      const phantom = claimed.filter(k => !supported.has(k))
+      claimedTotal += claimed.length
+      assert.deepEqual(
+        phantom,
+        [],
+        `CONFIG.md's prose for \`${block}\` cites ${phantom.join(', ')} as sub-keys the producer no longer supports`
+      )
+    }
+    // Positive control: an extractor that stops matching would pass the loop
+    // over empty claim sets and report a clean green.
+    assert.ok(claimedTotal >= 10, `expected >=10 claimed sub-key tokens across regions, got ${claimedTotal}`)
   })
 
   // ---- the #7445 incident itself, pinned by name ----
