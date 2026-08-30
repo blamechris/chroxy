@@ -387,10 +387,14 @@ export class EnvironmentManager extends EventEmitter {
    *
    * #7562: REFUSES when sessions are still attached (`env.sessions` non-empty)
    * unless `force` is set. This is the server-side half of a guard that lived
-   * only in the dashboard (`EnvironmentPanel`'s disabled Destroy button), so
-   * every other client — the mobile app, a stale tab, a script, the Control
-   * Room's `containers_action` — could `docker rm -f` the container out from
-   * under running sessions. The check sits HERE, at the one chokepoint every
+   * only in the dashboard (`EnvironmentPanel`'s disabled Destroy button), so any
+   * OTHER sender of the message — a stale dashboard tab, the Control Room's
+   * `containers_action` (no UI guard at all), a script, any future client —
+   * could `docker rm -f` the container out from under running sessions. (The
+   * mobile app is not one of them today: it can put a session INTO an
+   * environment via `create_session`'s `environmentId`, but it has no
+   * environment-destroy surface. It is a potential victim of this, not a
+   * perpetrator.) The check sits HERE, at the one chokepoint every
    * caller reaches, rather than in each handler: a per-caller check is the
    * "guard wired to only some of its callers" shape in
    * docs/false-safety-guards.md, which is precisely how `containers_action`

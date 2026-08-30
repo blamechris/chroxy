@@ -21,9 +21,15 @@ finally disable itself while an environment had live sessions. That guard is
 - `containers_action` with `action: 'destroy'` (control-room-handlers) → same,
   and the Control Room has no UI guard at all
 
-`EnvironmentManager.destroy()` never looked at `env.sessions`. So the mobile app,
-a stale dashboard tab, a script or the Control Room could `docker rm -f` the
-container out from under running sessions.
+`EnvironmentManager.destroy()` never looked at `env.sessions`. So any sender of
+either message — a stale dashboard tab whose `environment_list` predates the
+session, the Control Room (no UI guard at all), a script, any future client —
+could `docker rm -f` the container out from under running sessions.
+
+The mobile app is deliberately **not** in that list: it can put a session into an
+environment (`create_session` forwards `environmentId`,
+`packages/app/src/store/connection.ts`) but ships no environment-destroy surface
+at all, so it is a potential victim of this rather than a way to trigger it.
 
 Measured before the fix (`/tmp` probe against both handlers, one session attached
 to each environment): both replied success (`environment_destroyed`,
@@ -103,8 +109,8 @@ sessions.
 
 **No UI for the escalation yet.** The dashboard's Destroy button is already
 disabled while `env.sessions` is non-empty, so its happy path never reaches the
-refusal; what changes today is that a *stale* tab, the mobile app, a script and
-the Control Room get a real refusal instead of a destroyed container. Adding the
+refusal; what changes today is that a *stale* tab, the Control Room, a script and
+any other sender get a real refusal instead of a destroyed container. Adding the
 "N sessions are running — destroy them too?" confirm row (and the Control Room
 equivalent) is a UI change with its own review surface and is filed separately
 rather than folded in. Until then `force` is reachable from any client that sends

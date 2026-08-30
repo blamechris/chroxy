@@ -1516,9 +1516,12 @@ server paths never looked at `env.sessions` at all:
   the same call, from a surface with **no UI guard whatsoever**
 
 and `EnvironmentManager.destroy()` — the one function both reach — had no check
-either. So the mobile app, a stale dashboard tab, a script, or the Control Room's
-own container controls could `docker rm -f` the container while sessions were
-running inside it. Measured on both paths before the fix: `environment_destroyed`
+either. So a stale dashboard tab, a script, or the Control Room's own container
+controls could `docker rm -f` the container while sessions were running inside
+it. (Not the mobile app — it can create a session INTO an environment but ships
+no destroy surface. Naming it here in an earlier draft was the ordinary way an
+impact claim inflates: the reachable-caller set is the one you can enumerate in
+the code, not the one that sounds complete.) Measured on both paths before the fix: `environment_destroyed`
 / `containers_action_ack status:"destroyed"` returned, `docker rm -f` ran, and the
 session was **still live in `SessionManager._sessions`** — pointing at a container
 that no longer existed.

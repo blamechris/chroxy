@@ -6,8 +6,10 @@
  * went straight to `EnvironmentManager.destroy()` with no check at all —
  * `destroy_environment` (feature-handlers) and `containers_action` with
  * `action: 'destroy'` (control-room-handlers, which has no UI guard either) —
- * so the mobile app, a stale dashboard tab, a script or the Control Room could
- * `docker rm -f` the container while sessions were running inside it.
+ * so any other sender — a stale dashboard tab, a script, or the Control Room —
+ * could `docker rm -f` the container while sessions were running inside it. (Not
+ * the mobile app: it can create a session INTO an environment but has no
+ * environment-destroy surface.)
  *
  * POLICY (adjudicated, recorded in docs/decisions/2026-08-destroy-environment-live-sessions.md):
  *   REFUSE by default on BOTH paths, with an explicit `force: true` escape, and
@@ -37,6 +39,7 @@ import { SessionManager } from '../src/session-manager.js'
 import { EnvironmentManager } from '../src/environment-manager.js'
 import { featureHandlers } from '../src/handlers/feature-handlers.js'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
+import { sessionHandlers } from '../src/handlers/session-handlers.js'
 import {
   destroyEnvironmentWithSessions,
   ENVIRONMENT_HAS_LIVE_SESSIONS,
@@ -202,6 +205,37 @@ describe('#7562 destroy guard', () => {
     assert.equal(envManager.get(env.id), null)
   })
 
+  it('one deterministically-throwing session does not starve the others (#7571 S2)', async () => {
+    // The input that justifies pushing to `destroyedSessions` BEFORE the destroy
+    // rather than after. With push-after, a session whose teardown always throws
+    // never leaves `pending`, so it is retried on every pass and eats the whole
+    // MAX_CASCADE_PASSES budget — the sessions behind it never get a clean
+    // teardown and die with the container instead. Without this cell the comment
+    // at that line is an unfalsifiable claim (a mutant that swaps the order
+    // survives), which is the shape docs/false-safety-guards.md is about.
+    const env = await makeEnv()
+    const bad = createInto(env)
+    const good1 = createInto(env)
+    const good2 = createInto(env)
+
+    let badAttempts = 0
+    const realDestroy = mgr.destroySession.bind(mgr)
+    mgr.destroySession = (id) => {
+      if (id === bad) { badAttempts++; throw new Error('teardown always fails') }
+      return realDestroy(id)
+    }
+
+    const result = await destroyEnvironmentWithSessions({
+      environmentManager: envManager, sessionManager: mgr, environmentId: env.id, force: true,
+    })
+
+    assert.equal(badAttempts, 1, 'the failing session is attempted ONCE, not once per pass')
+    assert.deepEqual(result.destroyedSessions, [bad, good1, good2])
+    assert.equal(mgr.getSession(good1), null, 'the sessions behind it were still torn down')
+    assert.equal(mgr.getSession(good2), null)
+    assert.equal(envManager.get(env.id), null, 'and the environment still went away')
+  })
+
   it('force with no SessionManager still destroys (degraded, nothing to cascade to)', async () => {
     const env = await makeEnv()
     createInto(env)
@@ -348,6 +382,115 @@ describe('#7562 destroy guard', () => {
     assert.equal(payload.type, 'session_error')
     assert.equal(payload.reason, 'live-sessions')
     assert.ok(mgr.getSession(s1))
+    assert.ok(envManager.get(env.id))
+  })
+
+  // ---- authority: a pairing-BOUND token must not reach this at all ---------
+  //
+  // B1, review of #7571. `handleDestroyEnvironment` took `_client` and never
+  // looked at it. With #7562's `force` cascade added, that turned an ungated
+  // host-level action into a way for a share-a-session token to destroy SIBLING
+  // sessions it has no authority over — the exact thing
+  // docs/security/bearer-token-authority.md forbids ("Bound tokens cannot
+  // create, destroy, switch, or list sibling sessions"), and which the sibling
+  // handler for the IDENTICAL operation (`containers_action destroy`) already
+  // rejected. Unifying the destroy POLICY across both paths while leaving the
+  // AUTHORITY check on only one of them is the same one-caller-guarded shape
+  // this PR is otherwise about.
+
+  const boundClient = (sessionId) => ({ id: 'paired-phone', boundSessionId: sessionId })
+
+  it('B1 repro — a token bound to session A cannot destroy the environment (or sibling B)', async () => {
+    const env = await makeEnv()
+    const sA = createInto(env)
+    const sB = createInto(env)
+    const ctx = makeCtx()
+
+    await featureHandlers.destroy_environment({}, boundClient(sA),
+      { type: 'destroy_environment', environmentId: env.id, force: true }, ctx)
+    await flush()
+
+    const [msg] = ctx._sent
+    assert.equal(msg.type, 'environment_error')
+    assert.equal(msg.code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+    const parsed = ServerEnvironmentErrorSchema.safeParse(msg)
+    assert.ok(parsed.success, JSON.stringify(parsed.error?.issues))
+    // The sibling is the whole point: A had no authority over B.
+    assert.ok(mgr.getSession(sA), 'the bound session itself survives')
+    assert.ok(mgr.getSession(sB), 'the SIBLING session survives')
+    assert.ok(envManager.get(env.id), 'the environment survives')
+    assert.deepEqual(removedContainers(), [], 'no container was torn down')
+  })
+
+  it('positive control — the same bound client IS refused by destroy_session on the sibling', async () => {
+    const env = await makeEnv()
+    const sA = createInto(env)
+    const sB = createInto(env)
+    const ctx = makeCtx()
+
+    await sessionHandlers.destroy_session({}, boundClient(sA), { type: 'destroy_session', sessionId: sB }, ctx)
+
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'session_error')
+    assert.equal(payload.code, 'SESSION_TOKEN_MISMATCH')
+    assert.ok(mgr.getSession(sB))
+  })
+
+  it('positive control — the same bound client IS refused by containers_action destroy', async () => {
+    const env = await makeEnv()
+    const sA = createInto(env)
+    const ctx = makeCtx()
+
+    await controlRoomHandlers.containers_action({}, boundClient(sA),
+      { type: 'containers_action', action: 'destroy', environmentId: env.id }, ctx)
+
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'CONTAINER_ACTION_FAILED')
+    assert.equal(payload.reason, 'forbidden')
+    assert.ok(envManager.get(env.id))
+  })
+
+  it('negative control — an UNBOUND client still force-destroys', async () => {
+    const env = await makeEnv()
+    const s1 = createInto(env)
+    const ctx = makeCtx()
+
+    await featureHandlers.destroy_environment({}, { id: 'primary' },
+      { type: 'destroy_environment', environmentId: env.id, force: true }, ctx)
+    await flush()
+
+    assert.equal(ctx._sent[0].type, 'environment_destroyed')
+    assert.equal(mgr.getSession(s1), null)
+    assert.equal(envManager.get(env.id), null)
+  })
+
+  it('the authority gate runs BEFORE the live-session refusal (not after)', async () => {
+    // Without ordering, a bound client would learn "this environment has N live
+    // sessions, here are their ids" from a refusal it was never entitled to ask
+    // for. The forbidden code must win.
+    const env = await makeEnv()
+    const sA = createInto(env)
+    const ctx = makeCtx()
+
+    await featureHandlers.destroy_environment({}, boundClient(sA),
+      { type: 'destroy_environment', environmentId: env.id }, ctx)
+    await flush()
+
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+    assert.equal(ctx._sent[0].sessions, undefined, 'no session ids leak to an unauthorised client')
+  })
+
+  it('the refusal is not an existence oracle — an unknown env id reads identically', async () => {
+    const env = await makeEnv()
+    const sA = createInto(env)
+    const ctx = makeCtx()
+
+    await featureHandlers.destroy_environment({}, boundClient(sA),
+      { type: 'destroy_environment', environmentId: 'env-does-not-exist' }, ctx)
+    await flush()
+
+    assert.equal(ctx._sent[0].type, 'environment_error')
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
     assert.ok(envManager.get(env.id))
   })
 

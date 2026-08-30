@@ -316,23 +316,124 @@ describe('#7561 container binding survives a restart', () => {
 
   // ---- the boot ordering the re-attach depends on -------------------------
 
-  it('server-cli reconnects the EnvironmentManager BEFORE restoring sessions', () => {
-    // `reconnect()` clears `env.sessions` unconditionally. With the binding now
-    // persisted, `restoreState()` re-tags — so a reconnect AFTER a restore would
-    // silently un-tag every restored session and put #7562's destroy guard back
-    // to sleep with a completely green suite. The production order holds today
-    // (the manager is constructed and reconnect()ed before the SessionManager
-    // even exists); this pins it so a reordering goes red instead of quiet.
+  it('restore BEFORE reconnect fails every env-backed session (the order is load-bearing)', async () => {
+    // The EXECUTION-order pin (#7571 review N2). The source-position check below
+    // is a proxy; these two drive the real managers in each order and show the
+    // difference.
+    //
+    // `reconnect()` is also what LOADS environments.json (`_restore()` runs
+    // inside it), so running the session restore first doesn't merely lose the
+    // tag — the environment registry is still empty, every persisted
+    // environmentId resolves to nothing, and every env-backed session refuses to
+    // restore. Loud rather than silent, which is the #7561 posture working, but
+    // wrong: the sessions should have come back.
+    const { env, sessionId } = await seedEnvAndSession()
+    readSaved()
+    mgr.destroyAll()
+
+    const envManager2 = makeEnvManager()
+    mgr = makeManager({ environmentManager: envManager2 })
+
+    const events = []
+    mgr.on('session_restore_failed', (e) => events.push(e))
+    const restoredId = mgr.restoreState()
+
+    assert.equal(restoredId, null)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].sessionId, sessionId)
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE')
+
+    // Control: the SAME state file restores fine once reconnect has run — so the
+    // failure above is the ordering, not the fixture.
+    const envManager3 = makeEnvManager()
+    await envManager3.reconnect()
+    const mgr3 = makeManager({ environmentManager: envManager3 })
+    try {
+      assert.equal(mgr3.restoreState(), sessionId)
+      assert.deepEqual(envManager3.get(env.id).sessions, [sessionId])
+    } finally {
+      mgr3.destroyAll()
+    }
+  })
+
+  it('a reconnect after a successful restore silently un-tags a LIVE session', async () => {
+    // The other half of the hazard, and the one that would be silent. Today
+    // loading and reconnecting are the same call, so this shape needs the
+    // registry loaded by hand — it is what a future split of `_restore()` from
+    // `reconnect()`, or any second reconnect (a re-scan, a health sweep), would
+    // do to a session that is still running.
+    const { env, sessionId } = await seedEnvAndSession()
+    readSaved()
+    mgr.destroyAll()
+
+    const envManager2 = makeEnvManager()
+    await envManager2.reconnect()
+    mgr = makeManager({ environmentManager: envManager2 })
+    const restoredId = mgr.restoreState()
+    assert.equal(restoredId, sessionId)
+    assert.deepEqual(envManager2.get(env.id).sessions, [restoredId],
+      'positive control: the restore DID re-tag, so the loss below is reconnect\'s doing')
+
+    await envManager2.reconnect()
+
+    assert.deepEqual(envManager2.get(env.id).sessions, [],
+      'a second reconnect wipes the tag of a session that is still live')
+    assert.ok(mgr.getSession(restoredId), 'and the session it belongs to is still running')
+    // Which is exactly what makes the environment destroyable out from under it:
+    // #7562's refusal reads `env.sessions`, and it is now empty.
+    await envManager2.destroy(env.id)
+    assert.equal(envManager2.get(env.id), null,
+      'the destroy guard cannot engage — the live session is invisible to it')
+  })
+
+  it('reconnect BEFORE restore keeps the tag (the production order) — the control', async () => {
+    const { env, sessionId } = await seedEnvAndSession()
+    readSaved()
+    mgr.destroyAll()
+
+    const envManager2 = makeEnvManager()
+    // RIGHT order: reconnect first, then restore.
+    await envManager2.reconnect()
+    mgr = makeManager({ environmentManager: envManager2 })
+    const restoredId = mgr.restoreState()
+
+    assert.equal(restoredId, sessionId)
+    assert.deepEqual(envManager2.get(env.id).sessions, [restoredId])
+    // And now the guard DOES engage.
+    const err = await envManager2.destroy(env.id).then(() => null, (e) => e)
+    assert.ok(err, 'the destroy is refused')
+    assert.equal(err.code, 'ENVIRONMENT_HAS_LIVE_SESSIONS')
+  })
+
+  it('server-cli.js orders the two call sites reconnect-then-restore (source pin)', () => {
+    // N2: this checks SOURCE ORDER, not execution order, and says so. It is a
+    // proxy, and it is worth keeping alongside the behavioural pair above
+    // because those two prove the hazard is real while this one is what actually
+    // goes red if someone moves the production call sites.
+    //
+    // Source order implies execution order HERE specifically: both call sites
+    // are straight-line statements inside the single `startCliServer` function
+    // (the reconnect inside the `config.environments.enabled` block, the restore
+    // at the function's top level), with no loop, no early return and no
+    // scheduling between them — so whenever both run, they run in written order.
+    // That inference is the part a reader must re-check if either site moves
+    // into a callback, a promise chain or another function, which is why it is
+    // written down rather than assumed.
     //
     // Boolean-collapsed rather than assert.match: a failing match against this
     // source would dump the whole file as `actual` (catalogue entry 17, #7340).
     const src = readFileSync(new URL('../src/server-cli.js', import.meta.url), 'utf-8')
+    const fnAt = src.indexOf('export async function startCliServer(')
     const reconnectAt = src.indexOf('logEnvironmentManagerReconnectResult(environmentManager, log)')
     const restoreAt = src.indexOf('sessionManager.restoreState()')
+    assert.ok(fnAt > 0, 'startCliServer moved — re-anchor this pin')
     assert.ok(reconnectAt > 0, 'the reconnect call site moved — re-anchor this pin')
     assert.ok(restoreAt > 0, 'the restoreState call site moved — re-anchor this pin')
+    assert.ok(fnAt < reconnectAt,
+      'both call sites must still live inside startCliServer — if one moved out, the '
+      + 'source-order-implies-execution-order inference above no longer holds')
     assert.ok(reconnectAt < restoreAt,
-      'EnvironmentManager.reconnect() must run BEFORE SessionManager.restoreState()')
+      'EnvironmentManager.reconnect() must be written BEFORE SessionManager.restoreState()')
   })
 
   it('a containerId with NO environmentId round-trips verbatim (no manager lookup)', async () => {

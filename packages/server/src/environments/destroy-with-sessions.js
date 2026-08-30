@@ -98,6 +98,21 @@ export async function destroyEnvironmentWithSessions({
         const pending = live.filter((id) => !destroyedSessions.includes(id))
         if (pending.length === 0) break
         for (const sessionId of pending) {
+          // Push BEFORE the destroy, deliberately (#7571 review S2). This list
+          // is two things at once: the caller's report, and — via the `pending`
+          // filter above — the loop's own record of what it has already
+          // attempted. Pushing after a successful destroy would make a session
+          // whose `destroySession` throws deterministically re-enter `pending`
+          // on every pass, so ONE broken session could consume all
+          // MAX_CASCADE_PASSES and starve the sessions behind it of a clean
+          // teardown — the exact outcome the cascade exists to prevent.
+          //
+          // The cost is that `destroyedSessions` can name a session whose
+          // teardown threw, so it is "attempted", not "confirmed". That
+          // misreport is confined to the handlers' `log.warn` summary; nothing
+          // branches on the list, and the environment goes away regardless.
+          // Attempted-once-each is the right trade against
+          // starve-the-rest-for-one-bad-session.
           destroyedSessions.push(sessionId)
           try {
             sessionManager.destroySession(sessionId)
