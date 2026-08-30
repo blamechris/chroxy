@@ -1421,6 +1421,15 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
    * letting it in is how the trailing-comment hole worked. Without the strip,
    * `sessionAgentRuns: AgentRunRecord[]; // a => b` would be misread as
    * function-typed and excused from the residual — the hole one level up.
+   *
+   * KNOWN BOUNDARY, stated rather than implied (#7551 review): an ARRAY OF
+   * FUNCTIONS — `handlers: (() => void)[]` — contains `=>` in its type, so this
+   * classifies it as function-typed and excuses it from the residual. It is a
+   * real collection and would be missed. No such member is declared today, and
+   * the alternative (parsing TS types properly, in a regex) buys a shape nobody
+   * has written for a large increase in the ways this can go wrong. A member
+   * declared that way needs the extraction widened, not the residual loosened —
+   * which is the same instruction the residual's own failure message gives.
    */
   function arrayResidual(src: string): string[] {
     const body = sliceInterface(src)
@@ -1695,6 +1704,50 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     ).toBe(false)
   })
 
+  /**
+   * Every production call site of `environmentManager.addSession` in `sources`.
+   *
+   * A FUNCTION over arbitrary sources, not an expression over the real tree, so
+   * the cell below can drive the REAL detector against synthetic files — the
+   * same move `declaredMembers` makes, and for the same reason: a detector that
+   * only ever runs against a tree where the answer is `[]` cannot be shown to
+   * detect anything at all.
+   */
+  function addSessionCallers(sources: [string, string][]): string[] {
+    return sources.flatMap(([file, src]) =>
+      [...src.matchAll(/[A-Za-z0-9_$)\]]\s*\??\.\s*addSession\s*\(/g)].map(
+        (m) => `${file}:${src.slice(0, m.index).split('\n').length}`,
+      ),
+    )
+  }
+
+  it('the addSession detector sees both spellings of a call, and neither definition', () => {
+    // #7551 review, M15b — kept as a permanent cell rather than a mutant run
+    // once, because the gap it closes was invisible in exactly the way the cell
+    // above is designed to be reassuring: the real tree answers `[]` whether the
+    // detector works or not.
+    //
+    // The first version required the receiver to be immediately followed by `.`,
+    // so an OPTIONAL-CHAINED call went straight through it. The server tree has
+    // 88 optional-chaining call sites and already writes `environmentManager?.`
+    // (http-routes.js:225), so this was one refactor away from a silent hole in
+    // the premise the `environments` classification rests on.
+    expect(addSessionCallers([['a.js', 'ctx.services.environmentManager.addSession(envId, sid)']]))
+      .toEqual(['a.js:1'])
+    expect(addSessionCallers([['b.js', 'ctx.services.environmentManager?.addSession(envId, sid)']]))
+      .toEqual(['b.js:1'])
+    expect(addSessionCallers([['c.js', 'const m = get(); m ?. addSession(envId, sid)']]))
+      .toEqual(['c.js:1'])
+    // …and the DEFINITION is still not a caller, which is the property that lets
+    // environment-manager.js stay IN the scanned tree instead of being excluded
+    // from the guard that is about it.
+    expect(addSessionCallers([['environment-manager.js', '  addSession(envId, sessionId) {\n    ...\n  }']]))
+      .toEqual([])
+    // Nor is an unrelated method that merely ends in the same letters.
+    expect(addSessionCallers([['d.js', 'ctx.timeouts.removeSession(sid)\nctx.x.readdSession(sid)']]))
+      .toEqual([])
+  })
+
   it('EnvironmentInfo.sessions has no production writer', () => {
     // #7551 review, Critical. `environments` was classified SESSION_TAGGED_BY_DESIGN
     // with a reason that described a mechanism which does not exist — an
@@ -1724,12 +1777,19 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // excluded by requiring a receiver (`x.addSession(`) — otherwise
     // environment-manager.js would flag itself and the escape would be to
     // exclude the file, which is how a guard stops covering the thing it names.
-    const callers = serverProductionSources
-      .flatMap(([file, src]) =>
-        [...src.matchAll(/[A-Za-z0-9_$)\]]\s*\.\s*addSession\s*\(/g)].map(
-          (m) => `${file}:${src.slice(0, m.index).split('\n').length}`,
-        ),
-      )
+    //
+    // `\??\.` because OPTIONAL CHAINING is a call (#7551 review, M15b). The
+    // first version's receiver class `[A-Za-z0-9_$)\]]` is immediately followed
+    // by `\.`, so `environmentManager?.addSession(envId, sid)` did not match —
+    // the `?` sits between the receiver and the dot. That is not hypothetical
+    // here: the server tree has 88 optional-chaining call sites, and
+    // `environmentManager?.` is one of the spellings already in use
+    // (http-routes.js:225). A guard against "a production caller appears" that
+    // is blind to one of the two ways this codebase writes a call is the
+    // "guard whose comment describes a stronger check than its code performs"
+    // family, again. `\s*` on both sides so ` ?. ` is caught too, and the
+    // DEFINITION line still does not match — it has no receiver at all.
+    const callers = addSessionCallers(serverProductionSources)
     expect(
       callers,
       'production call site(s) of environmentManager.addSession. `EnvironmentInfo.sessions` is no ' +
