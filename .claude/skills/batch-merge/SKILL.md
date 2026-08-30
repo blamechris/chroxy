@@ -72,17 +72,118 @@ Process PRs in order. For each PR:
 
 #### Step 2a: Check CI
 
-```bash
-# Required check names that must pass
-REQUIRED_CHECKS=("Run Tests" "Validate Project")
+The required-check roster is **derived here, never typed here.**
+`scripts/lib/contributing-roster.mjs` is this repo's one parse of
+CONTRIBUTING.md's required-checks bullet — the same implementation
+`packages/server/tests/contributing-required-checks.test.js` pins against
+`ci.yml`'s job names and `scripts/check-required-contexts.sh` diffs against the
+live branch protection. A list typed into this file instead is the "hardcoded
+list beside a growing set" entry in `docs/false-safety-guards.md`, and this step
+had already failed exactly that way (#7503): the names it carried — `Run Tests`
+and `Validate Project` — matched **zero** of the 23 contexts a real chroxy PR
+produces, so the filter selected no rows, "nothing failing" read as "all green",
+and the gate passed on a red PR.
 
-CHECKS=$(gh pr checks ${PR_NUM} --json name,state)
+```bash
+# One required context per line. Run from the repo root: only the PATH to the
+# parser is relative - it resolves CONTRIBUTING.md against its own module URL.
+# REFUSE rather than gate on a guess.
+REQUIRED_CHECKS=$(node scripts/lib/contributing-roster.mjs) || {
+  echo "REFUSE: cannot read the required-checks roster - not gating blind" >&2
+  exit 2
+}
+
+# Extraction runs through gh's BUILT-IN `--jq` (gojq, compiled into gh), like
+# every other extraction in this playbook - never an external `jq` binary.
+# macOS ships no jq, and a classifier whose failure yields an empty blocker list
+# is fail-open: #7503's own shape one layer down, with "cannot check" reading as
+# "nothing to check" (#7540 review, and Copilot's thread on the same lines).
+#
+# `gh pr checks` exits non-zero when a check is red or still running. The rows
+# are still on stdout and classifying them is this step's whole job, so gh's
+# exit code is deliberately not the gate. An EMPTY stdout is: no rows must never
+# read as nothing wrong, and it is equally what a gh auth failure, a network
+# error and a broken --jq program produce.
+ROWS=$(gh pr checks "${PR_NUM}" --json name,state --jq '.[] | [.name, .state] | @tsv')
+[ -n "$ROWS" ] || {
+  echo "REFUSE: no check rows for #${PR_NUM} - not gating blind" >&2
+  exit 2
+}
+
+# Classification is pure shell: there is no third binary here whose failure
+# could empty the blocker list. It counts what it classified, so "examined
+# nothing" cannot report clean either.
+#
+# A required context MISSING from the payload BLOCKS. Absence is what a stale or
+# misspelled roster entry produces, and it is equally what a renamed ci.yml job
+# produces (#7191) - branch protection wedges on both, so neither may pass here.
+BLOCKERS=""
+GATED=0
+TAB=$(printf '\t')
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  GATED=$((GATED + 1))
+  seen=0
+  bad=""
+  while IFS="$TAB" read -r rname rstate; do
+    [ "$rname" = "$name" ] || continue
+    seen=1
+    # SUCCESS and SKIPPED are the ONLY accepted states. FAILURE, ERROR,
+    # CANCELLED, TIMED_OUT, PENDING, QUEUED, IN_PROGRESS and any state GitHub
+    # adds later all fall to the else arm and block. Listing what passes, not
+    # what fails, is what keeps a new state from being accepted by default.
+    case "$rstate" in
+      SUCCESS|SKIPPED) ;;
+      *) bad="${bad}${bad:+,}${rstate}" ;;
+    esac
+  done <<<"$ROWS"
+  if [ "$seen" -eq 0 ]; then
+    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=MISSING"
+  elif [ -n "$bad" ]; then
+    BLOCKERS="${BLOCKERS}${BLOCKERS:+; }${name}=${bad}"
+  fi
+done <<<"$REQUIRED_CHECKS"
+
+# Classifying nothing is not a pass.
+[ "$GATED" -gt 0 ] || {
+  echo "REFUSE: classified 0 required contexts - not gating blind" >&2
+  exit 2
+}
 ```
 
-All required checks must be `SUCCESS` or `SKIPPED`. If any are failing or pending:
+An empty `BLOCKERS` **after a non-zero `GATED`** is the only pass — the count is
+the positive signal, and every way of failing to look reaches a `REFUSE` above
+rather than an empty list. A non-empty `BLOCKERS` names every required context
+that is missing, red, or still running:
 
-- **Pending/Queued:** Poll every 30s for up to 3 minutes.
-- **Failed:** Run `/fix-ci ${PR_NUM}`. If fixed, continue. If escalated, mark PR as `Skipped` and continue to next PR.
+- **`=PENDING` / `=QUEUED` / `=IN_PROGRESS`** — poll every 30s for up to 3
+  minutes, re-running the block each time.
+- **`=FAILURE` / `=ERROR` / any other state** — run `/fix-ci ${PR_NUM}`. If
+  fixed, continue. If escalated, mark the PR `Skipped` and continue to the next.
+- **`=MISSING`** — **re-poll once** after the pending window before treating it
+  as final, then mark the PR `Skipped` with the reason and continue to the next
+  (Critical Rule 6: one stale PR must not stop the batch). Absence is not
+  automatically terminal — a push can produce **no workflow run at all** for the
+  new head, and every tool renders that as pending rather than absent. This repo
+  has an instance: on PR #7023 the concurrency group was never freed by a
+  run stuck on an offline runner, the next push created zero runs, and
+  `gh pr checks` reported "no checks reported" indefinitely. So assert a run
+  exists for the head before concluding:
+
+  ```bash
+  gh run list --branch "$(gh pr view ${PR_NUM} --json headRefName -q .headRefName)" \
+    --limit 5 --json headSha,name,status,conclusion
+  ```
+
+  If the newest run's `headSha` is not the PR's head, nothing is running and
+  waiting longer cannot help. If a run *does* exist for the head and the context
+  is still absent, it is terminal: a `ci.yml` job was renamed without updating
+  CONTRIBUTING.md and the live protection, and branch protection will refuse the
+  merge however long you wait.
+
+Note that Phase 1's pre-flight count is a *different* expression on purpose — it
+quantifies over every check the PR has, required or not, and is explicitly
+informational. This step is the gate.
 
 #### Step 2b: Check Copilot Review
 
@@ -155,7 +256,27 @@ fi
 
 #### Step 2e: Update Next PR Branch
 
-After merging PR N, PR N+1 is stale (`strict: true` branch protection). Update it:
+This step and 2f apply only under `strict: true` branch protection ("Require
+branches to be up to date before merging"). Under `strict: false` a merge does
+not make the remaining PRs unmergeable, and updating each one just spends a CI
+run. **chroxy main is `strict: false`** — recorded in
+`docs/decisions/2026-06-02-overnight-marathon.md`, where a 12-PR batch skipped
+2e and 2f on exactly that basis. Derive the setting rather than trusting that
+sentence: it is per-repo and per-branch, and this playbook is installed in more
+than one repo.
+
+```bash
+# Fail CLOSED: anything other than a definite `false` is treated as strict.
+# Reading protection needs repo-admin scope, so an operator without it gets the
+# safe answer - a needless update-branch costs a CI run, a skipped necessary one
+# wedges the merge.
+STRICT=$(gh api "repos/${REPO}/branches/main/protection" \
+  --jq '.required_status_checks.strict' 2>/dev/null) || STRICT=true
+[ "$STRICT" = "false" ] || STRICT=true
+```
+
+If `STRICT` is `false`, skip the rest of this step and Step 2f, and go straight
+to the next PR. Otherwise PR N+1 is now stale — update it:
 
 ```bash
 NEXT_PR=${PR_NUMS[$((current_index + 1))]}
@@ -169,6 +290,9 @@ fi
 If `update-branch` fails with a conflict, mark the next PR as `Blocked` and try the PR after that (it still needs updating since main changed).
 
 #### Step 2f: Wait for CI on Updated Branch
+
+Skipped together with 2e when `STRICT` is `false` — there is no updated branch
+to wait on.
 
 ```bash
 MAX_WAIT=180  # 3 minutes
@@ -275,7 +399,7 @@ After all PRs processed:
 | 3 | #1572 | test(autoload): Add Statistics... | Skipped | CI timeout |
 
 ### Skipped/Blocked PRs
-- **#1572**: Run Tests timed out after update-branch. Needs manual investigation.
+- **#1572**: `Server Tests` timed out after update-branch. Needs manual investigation.
 
 ### Copilot Comments Addressed During Merge
 - **#1571**: 1 comment → FIX in `abc1234` (added null guard)
@@ -296,7 +420,11 @@ After all PRs processed:
 
 ## Critical Rules
 
-1. **Sequential only** — Branch protection `strict: true` requires each PR to be up-to-date. One at a time.
+1. **Sequential only** — one PR at a time, so each PR's gate is evaluated against
+   the `main` it will actually land on. Where branch protection sets `strict: true`
+   the order is additionally *mandatory* (PR N+1 goes stale the instant PR N lands);
+   chroxy main is `strict: false`, so Steps 2e/2f are normally a no-op here. Step 2e
+   derives `STRICT` rather than assuming either way.
 2. **Never run reviews** — Reviews happen BEFORE this skill. This skill only merges.
 3. **Never use `--admin`** — Respect branch protections.
 4. **Progress table after every merge** — User can check in anytime.
