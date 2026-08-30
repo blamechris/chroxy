@@ -54,10 +54,14 @@
  *
  *   WRITE  the reference is the TARGET of an assignment — `=` (not `==`, `===`
  *          or `=>`), any compound assignment (`+=`, `??=`, `>>>=`, …), a
- *          `++`/`--` in either position, or a `delete`.
+ *          `++`/`--` in either position, or a `delete`. On a target that
+ *          enables IN-PLACE MUTATION (below), also a mutator call or an index
+ *          or property assignment THROUGH it at statement position —
+ *          `m.set(k, v);`, `o[k] = v;`, `o.field = v;`.
  *   READ   anything else — a condition, a right-hand side, a property or method
- *          access through it (`_ctx.set.clear()` must read `_ctx.set` first), a
- *          template interpolation, an argument.
+ *          access through it (on a target without in-place mutation,
+ *          `_ctx.set.clear()` and `_ctx.map[k] = v` must read `_ctx.set` /
+ *          `_ctx.map` first), a template interpolation, an argument.
  *
  * A name with at least one WRITE and zero READs FAILS the lint, naming it and
  * every write site.
@@ -83,16 +87,34 @@
  * rather than an assumption about what the regex does.
  *
  * A `const` module-level binding cannot be reassigned, so for the
- * module-bindings kind a MUTATOR CALL at statement position — `m.set(k, v);`,
- * `m.clear();`, `arr.push(x);` — is its write. Without that rule every
- * `const _x = new Map()` in the roster would have zero writes by construction
- * and could never reach the failure bucket: a guard reporting clean on state
- * it structurally cannot fail. Statement position is what keeps
- * `if (m.delete(k))` and `const last = arr.pop()` reads.
+ * module-bindings kind IN-PLACE MUTATION is the only write shape it has, and
+ * there are exactly two of those. A MUTATOR CALL at statement position —
+ * `m.set(k, v);`, `m.clear();`, `arr.push(x);` (#7467) — and an INDEX or
+ * PROPERTY ASSIGNMENT at statement position — `o[k] = v;`, `o.field = v;`,
+ * `o[k] += v;` (#7537). Without both, every `const _x = new Map()` AND every
+ * `const o: Record<string, T> = {}` in the roster would have zero writes by
+ * construction and could never reach the failure bucket: a guard reporting
+ * clean on state it structurally cannot fail. Statement position is what keeps
+ * `if (m.delete(k))`, `const last = arr.pop()` and `const x = (o[k] = v)`
+ * reads.
  *
- * It recovers that bucket for METHOD-mutated containers ONLY. A `const` object
- * or `Record` mutated by index or property assignment is still unfailable —
- * see the next section, and #7537.
+ * The second shape landed after the first shipped without it, and the hole it
+ * left was not theoretical. `gitOneshotTimers` (connection.ts) reported SIX reads and
+ * ZERO writes, four of those six references being `gitOneshotTimers[key] = …`;
+ * deleting both of its genuine readers on the real file left this lint green at
+ * exit 0. It reports 2r/4w now, and that same mutation fails.
+ *
+ * ONE ACCESSOR STEP counts, which is the adjudication the mutator rule already
+ * makes for `m.get(k).push(x)`: `o.a.b = v` and `o[i][j] = v` store into the
+ * object held in `o.a` / `o[i]`, so `o` itself is genuinely read there.
+ *
+ * Both shapes ride ONE per-target flag, `inPlaceMutationIsWrite` — on for the
+ * dashboard's module bindings, off for the app's interface target, where a
+ * context field IS reassignable and the failure bucket is therefore reachable
+ * without either rule. Turning it on there is #7532, which now decides both
+ * shapes together; measured while #7537 landed, doing so reclassifies SEVEN app
+ * fields — six of them purely from the new index/property rule — and leaves
+ * that target green.
  *
  * A field with NO reference at all is a WARNING, not a failure — and the
  * distinction is load-bearing rather than squeamish. Zero references is the
@@ -174,21 +196,68 @@
  *     a false green on something already in the roster.
  *   - A mutator call in a concise arrow body (`() => m.clear()`) is not at
  *     statement position and reads as a READ — safe direction, still a gap.
- *   - INDEX AND PROPERTY ASSIGNMENT THROUGH A BINDING IS A READ, NOT A WRITE.
- *     `o[k] = v;` and `o.k = v;` classify as reads of `o`, because the
- *     assignment's target is the ELEMENT, not the binding. The MUTATORS rule
- *     therefore recovers the failure bucket for method-mutated containers
- *     only: a `const` object, `Record` or array populated and cleared solely
- *     by index assignment can never fail, however dead it becomes. This is not
- *     hypothetical. Of the 78 bindings on the live roster 51 are `const`, 34
- *     of those have ZERO writes under these rules, and four are mutated by
- *     index assignment today: `gitOneshotTimers` and `_prevMessageCounts`
- *     (connection.ts), `messageQueue` (message-handler.ts) and
- *     `_messagePersisters` (persistence.ts). `gitOneshotTimers` is the
- *     sharpest: six references, four of them `gitOneshotTimers[key] = …`, and
- *     it reports 6 reads / 0 writes — so if its two genuine readers were
- *     deleted tomorrow this lint would stay green. Widening the rule is #7537;
- *     naming the gap here is so a green run is not read as more than it is.
+ *   - IN-PLACE MUTATION IS SEEN ONE STEP DEEP. `o[k] = v;` and `o.field = v;`
+ *     are writes of `o` (#7537), but `o.a.b = v;` and `o[i][j] = v;` are
+ *     READS: what they store into is the object held in `o.a` / `o[i]`, not
+ *     `o` — the same adjudication that makes `m.get(k).push(x)` a read of `m`.
+ *     A binding mutated ONLY through a deeper chain is invisible. Rescue-only,
+ *     so it cannot produce a false accusation; pinned in both directions.
+ *   - …AND ONLY AT STATEMENT POSITION. `const x = (o[k] = v)` and
+ *     `if ((o[k] = v))` mutate and are still READS, exactly as
+ *     `const x = m.set(k, v)` is. Same rescue-only direction as the `++` rule
+ *     above, and the same gap. The boundary set that decides this loses
+ *     in-place writes in a semicolon-free file and after a braceless `else`
+ *     (#7554, pre-dating both in-place rules; #7537 routed a second predicate
+ *     through the same gate, so it now decides twice as many classifications).
+ *   - A POSTFIX INCREMENT THROUGH AN ACCESSOR IS A READ (#7553). This is the
+ *     bug #7537 fixed, surviving one operator over: `INCDEC_AHEAD` is tested
+ *     against the same text that starts with `[` or `.`, so it never sees the
+ *     `++`. After #7537 one mutation has THREE spellings and TWO
+ *     classifications, on the same binding:
+ *
+ *         o[k] = v;   WRITE      o.f = v;    WRITE
+ *         o[k] += 1;  WRITE      o.f += 1;   WRITE
+ *         ++o[k];     WRITE      ++o.f;      WRITE
+ *         o[k]++;     read       o.f++;      read     <- the gap
+ *
+ *     So a `const counts: Record<string, number> = {}` whose only mutation is
+ *     `counts[k]++` is STILL unfailable by construction — the exact property
+ *     #7537 exists to remove, for one remaining spelling. The live instance is
+ *     `_encryptionState.sendNonce++` (message-handler.ts:680), masked today by
+ *     that binding's five other writes (7r/5w) rather than by anything the
+ *     lint understands. All four spellings are pinned, so #7553 landing turns
+ *     the two `read` rows red alongside this bullet — the same arrangement
+ *     #7530 made for #7537, which is why this gap is written down at all.
+ *   - A PARENTHESISED OR ASSERTED BASE IS A READ. `(o)[k] = v`, `o![k] = v`,
+ *     `o!.field = v`, `(o as T)[k] = v` and `(<T>o)[k] = v` all classify as
+ *     reads, because the accessor scan starts at the character after the
+ *     IDENTIFIER and finds `)`, `!` or ` as`. The TS non-null assertion is the
+ *     plausible one in a TypeScript store; none occurs on the roster today.
+ *     Rescue-only (#7548 F3).
+ *   - THE READ-SIDE GAPS BELOW GREW TEETH WITH #7537. While `gitOneshotTimers`
+ *     and `_prevMessageCounts` had ZERO writes they were unfailable, so a read
+ *     this classifier cannot count was harmless for them; now that they have
+ *     writes, an uncounted read puts them in the FAILURE bucket — a false
+ *     accusation rather than a rescue. The sharpest uncounted read is the
+ *     SPREAD: `{ ...o }` and `[...o]` yield ZERO references, because the
+ *     `(?<![\w$.])` lookbehind rejects the `.` of `...`. Not live — all four
+ *     moved bindings keep 1-5 direct reads (2, 1, 5 and 5) — but the ALIASING
+ *     and DESTRUCTURING bullets above are now load-bearing for the binding
+ *     kind in a way they were not (#7548 F5).
+ *   - AN INDEX EXPRESSION LONGER THAN THE ACCESSOR WINDOW hides its own `=`.
+ *     The scan reads a fixed 256 bytes past the reference — wider than the
+ *     64-byte operator windows, because an index expression is arbitrary
+ *     source rather than a stripped comment. Nothing in the tree is close;
+ *     something longer would classify as a read. Pinned on both sides of 256.
+ *   - THE INTERFACE KIND CLASSIFIES NEITHER IN-PLACE SHAPE AS A WRITE.
+ *     `_ctx.map[k] = v` and `_ctx.set.clear()` are reads of `_ctx.map` /
+ *     `_ctx.set`, because both rules ride the one per-target flag and it is
+ *     off there. A decision, not an oversight: a context field is a
+ *     reassignable property, so `_ctx.field = …` already reaches the failure
+ *     bucket for it, which is the argument that forced the rule on `const`
+ *     bindings. #7532 owns turning it on, and now owns both shapes.
+ *     `delete _ctx.map[k]` IS a write on BOTH kinds — the `delete` rule is
+ *     older than either, and consults neither the flag nor statement position.
  *
  * ALLOWLIST
  * ---------
@@ -287,13 +356,13 @@ export const TARGETS = [
     scanDirs: ['packages/dashboard/src'],
     // Mutating a `const` container in place is the only WRITE shape a `const`
     // binding has — it can never be reassigned. Without this the write-only
-    // class would be UNREACHABLE for every `const _x = new Map()` in the
-    // roster. It recovers that class for METHOD-mutated containers only:
-    // `o[k] = v` is still a read of `o`, so a `const` object or `Record`
-    // mutated only that way stays unfailable (#7537 — the gap is enumerated in
-    // the header). See MUTATORS below for the statement-position rule that
-    // keeps `if (m.delete(k))` a read.
-    mutatorsAreWrites: true,
+    // class would be UNREACHABLE for every `const _x = new Map()` (#7467) and
+    // every `const o: Record<string, T> = {}` (#7537) in the roster. Both
+    // shapes ride this one flag: a MUTATOR CALL (`m.set(k, v);`) and an INDEX
+    // or PROPERTY ASSIGNMENT (`o[k] = v;`, `o.field = v;`), each at statement
+    // position — see MUTATORS and assignsThroughAccessor below for the rule
+    // that keeps `if (m.delete(k))` and `const x = (o[k] = v)` reads.
+    inPlaceMutationIsWrite: true,
     // '<declaring file>::<binding>': 'why it is legitimately unreferenced'
     allow: {
       'packages/dashboard/src/store/message-handler.ts::_testQueueInternals':
@@ -536,13 +605,12 @@ const DELETE_BEHIND = /\bdelete\s+$/
  * could never reach the failure bucket at all.
  *
  * SCOPE, stated precisely because the first draft of this comment overclaimed
- * it (#7530 F1): this recovers the failure bucket for containers mutated by a
- * METHOD CALL — `Map`, `Set`, `Array`. It does NOT recover it for a container
- * mutated by INDEX or PROPERTY ASSIGNMENT (`o[k] = v`, `o.k = v`), which still
- * classifies as a read of `o`. A plain object or `Record` populated and
- * cleared only that way remains unfailable, and the live tree contains such a
- * case — see WHAT IT CANNOT SEE in the header, and #7537 for the behaviour
- * half.
+ * it (#7530 F1): THIS list recovers the failure bucket for containers mutated
+ * by a METHOD CALL — `Map`, `Set`, `Array`. The other half of in-place
+ * mutation, INDEX and PROPERTY ASSIGNMENT (`o[k] = v`, `o.field = v`), is
+ * `assignsThroughAccessor` below (#7537); a plain object or `Record` populated
+ * only that way was unfailable until it landed. The two are separate
+ * predicates behind the same per-target flag, so neither is the whole rule.
  *
  * The return values (`Map.prototype.delete`'s boolean, `push`'s new length,
  * `pop`'s element) are exactly why the statement-position rule below applies:
@@ -551,6 +619,81 @@ const DELETE_BEHIND = /\bdelete\s+$/
  */
 const MUTATORS = ['set', 'add', 'clear', 'delete', 'push', 'unshift', 'pop', 'shift', 'splice']
 const MUTATOR_AHEAD = new RegExp(`^\\s*\\??\\s*\\.\\s*(?:${MUTATORS.join('|')})\\s*\\(`)
+
+/**
+ * How far past a reference to look for the `=` of an INDEX or PROPERTY
+ * assignment — `o[k] = v`, `o.field = v`.
+ *
+ * The operator windows in `isWriteAt` are 64 bytes because the only thing that
+ * can widen the gap between a reference and its operator there is a stripped
+ * comment (#7464 C1). This one is different in kind: an index EXPRESSION is
+ * arbitrary source, so `o[session.id ?? FALLBACK_SESSION_ID] = v` puts as much
+ * text as it likes between `o` and its `=`, and 64 would be a window chosen for
+ * a reason that does not apply. 256 clears every index expression in the tree
+ * several times over; one longer than that reads as a READ, which is the
+ * rescue direction. Both sides are pinned.
+ */
+const ACCESSOR_ASSIGN_WINDOW = 256
+
+/**
+ * Is the text immediately after a reference `[...] <assign>` or `.name
+ * <assign>` — i.e. is the reference the BASE of an index or property
+ * assignment (#7537)?
+ *
+ * `after` is the already comment-stripped text following the reference,
+ * normally `ACCESSOR_ASSIGN_WINDOW` bytes of it.
+ *
+ * EXACTLY ONE accessor step counts, and that is the same adjudication the
+ * mutator rule already makes for `m.get(k).push(x)` — a READ of `m`, because
+ * what gets mutated is the object `m.get(k)` returned, not `m`. By the same
+ * reasoning `o.a.b = v` and `o[i][j] = v` store into the object held in `o.a` /
+ * `o[i]`; `o` itself is only read to reach it. Only the single step that stores
+ * INTO `o` is a write of `o`.
+ *
+ * `?.` is deliberately not accepted: assigning through an optional chain
+ * (`o?.k = v`) is a SyntaxError, so a branch for it could never be exercised by
+ * any input — an untestable refinement is worse than no refinement.
+ *
+ * A window that runs out mid-index (an unbalanced `[`) returns false: the shape
+ * is unproven, and unproven must not read as a write.
+ */
+export function assignsThroughAccessor(after) {
+  let i = 0
+  const skipSpace = () => { while (i < after.length && /\s/.test(after[i])) i++ }
+  skipSpace()
+  if (i >= after.length) return false
+  if (after[i] === '.') {
+    i++
+    skipSpace()
+    if (!/[A-Za-z_$]/.test(after[i] ?? '')) return false
+    i++
+    while (i < after.length && /[\w$]/.test(after[i])) i++
+  } else if (after[i] === '[') {
+    i++
+    let depth = 1
+    while (i < after.length && depth > 0) {
+      const c = after[i]
+      // A `]` inside a string is not a closing bracket: `o['a]b'] = v`.
+      if (c === '"' || c === "'" || c === '`') {
+        const quote = c
+        i++
+        while (i < after.length) {
+          if (after[i] === '\\') { i += 2; continue }
+          if (after[i] === quote) { i++; break }
+          i++
+        }
+        continue
+      }
+      if (c === '[') depth++
+      else if (c === ']') depth--
+      i++
+    }
+    if (depth !== 0) return false
+  } else {
+    return false
+  }
+  return ASSIGN_AHEAD.test(after.slice(i))
+}
 
 // A statement's left edge: the last significant character before the reference
 // closed the previous statement (or there is none). `)` is in the set for
@@ -597,8 +740,13 @@ function lineOf(text, index) {
  * whole write-only field, demonstrated on the real #7421 regression by adding
  * a single inline comment. 64 covers any stripped span this repo produces, and
  * both windows are pinned by tests.
+ *
+ * The accessor-assignment rule below reads its own, wider window
+ * (`ACCESSOR_ASSIGN_WINDOW`) rather than `after`: what separates `o` from its
+ * `=` there is an index EXPRESSION, not a stripped comment, so the reason for
+ * 64 does not apply to it. That window is pinned on both sides too.
  */
-function isWriteAt(text, index, end, { mutatorsAreWrites = false } = {}) {
+function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
   const after = text.slice(end, end + 64)
   const before = text.slice(Math.max(0, index - 64), index)
   if (ASSIGN_AHEAD.test(after)) return true
@@ -613,7 +761,22 @@ function isWriteAt(text, index, end, { mutatorsAreWrites = false } = {}) {
   if (INCDEC_AHEAD.test(after) || INCDEC_BEHIND.test(before)) {
     return atStatementStart(text, index)
   }
-  if (mutatorsAreWrites && MUTATOR_AHEAD.test(after)) return atStatementStart(text, index)
+  if (inPlaceMutationIsWrite && MUTATOR_AHEAD.test(after)) return atStatementStart(text, index)
+  // INDEX / PROPERTY ASSIGNMENT (#7537). `o[k] = v;` and `o.field = v;` store
+  // into the object the binding holds — the second in-place mutation shape, and
+  // the ONLY one a `const` bound to a plain object or `Record` has. Without it
+  // such a binding had zero writes by construction and could never reach the
+  // failure bucket, however dead it became: `gitOneshotTimers` reported 6r/0w
+  // with four of its six references being `gitOneshotTimers[key] = …`, and
+  // deleting both of its genuine readers left the lint green (proved on the
+  // real file). Statement position is the same gate the mutator rule uses, so
+  // `const x = (o[k] = v)` and `if ((o[k] = v))` stay reads.
+  if (
+    inPlaceMutationIsWrite &&
+    assignsThroughAccessor(text.slice(end, end + ACCESSOR_ASSIGN_WINDOW))
+  ) {
+    return atStatementStart(text, index)
+  }
   return false
 }
 
@@ -652,7 +815,7 @@ export function classifyReferences(strippedText, field, receivers) {
  * The `(?<![\w$.])` lookbehind keeps `obj.name` from matching, so a property
  * that happens to share a binding's name is not a reference to it.
  */
-export function classifyBindingReferences(strippedText, name, { skipIndex = -1, mutatorsAreWrites = false } = {}) {
+export function classifyBindingReferences(strippedText, name, { skipIndex = -1, inPlaceMutationIsWrite = false } = {}) {
   const re = new RegExp(`(?<![\\w$.])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`, 'g')
   const reads = []
   const writes = []
@@ -660,7 +823,7 @@ export function classifyBindingReferences(strippedText, name, { skipIndex = -1, 
   while ((m = re.exec(strippedText)) !== null) {
     if (m.index === skipIndex) continue
     const end = m.index + m[0].length
-    const isWrite = isWriteAt(strippedText, m.index, end, { mutatorsAreWrites })
+    const isWrite = isWriteAt(strippedText, m.index, end, { inPlaceMutationIsWrite })
     ;(isWrite ? writes : reads).push(lineOf(strippedText, m.index))
   }
   return { reads, writes }
@@ -874,7 +1037,7 @@ function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedT
  * kind 'interface' (the default) takes `{declText, interfaceName, followExtends,
  * receivers, sources, allow}`.
  *
- * kind 'module-bindings' takes `{declSources, sources, mutatorsAreWrites, allow}`,
+ * kind 'module-bindings' takes `{declSources, sources, inPlaceMutationIsWrite, allow}`,
  * where `declSources` are the files whose module-level state forms the roster
  * and `sources` is the full non-test scan set (which normally CONTAINS them).
  *
@@ -923,7 +1086,7 @@ function analyzeInterfaceTarget({ declText, interfaceName, followExtends = false
   })
 }
 
-function analyzeModuleBindings({ declSources, sources, mutatorsAreWrites = false, allow = {} }) {
+function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = false, allow = {} }) {
   if (!sources || sources.length === 0) {
     throw new CannotCheckError(
       'module bindings: no source files to scan. An empty scan set reports every binding clean, ' +
@@ -968,7 +1131,7 @@ function analyzeModuleBindings({ declSources, sources, mutatorsAreWrites = false
       const key = `${decl.path}::${b.name}`
       const own = classifyBindingReferences(decl.text, b.name, {
         skipIndex: b.index,
-        mutatorsAreWrites,
+        inPlaceMutationIsWrite,
       })
       const reads = own.reads.map((l) => `${decl.path}:${l}`)
       const writes = own.writes.map((l) => `${decl.path}:${l}`)
@@ -979,7 +1142,7 @@ function analyzeModuleBindings({ declSources, sources, mutatorsAreWrites = false
       if (b.exported) {
         for (const s of sources) {
           if (s.path === decl.path) continue
-          const r = classifyBindingReferences(byPath.get(s.path), b.name, { mutatorsAreWrites })
+          const r = classifyBindingReferences(byPath.get(s.path), b.name, { inPlaceMutationIsWrite })
           for (const line of r.reads) reads.push(`${s.path}:${line}`)
           for (const line of r.writes) writes.push(`${s.path}:${line}`)
         }
@@ -1069,7 +1232,7 @@ export function runCli(argv = process.argv.slice(2)) {
           kind,
           declSources: target.declDirs.flatMap((d) => listSources(root, d)).map(readSource),
           sources: paths.map(readSource),
-          mutatorsAreWrites: target.mutatorsAreWrites,
+          inPlaceMutationIsWrite: target.inPlaceMutationIsWrite,
           allow: target.allow,
         })
         : analyzeTarget({

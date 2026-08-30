@@ -1335,3 +1335,58 @@ with a real baseline behind it.
 pass" but "which job runs it, and have I seen that job's log?" For a directory
 of them, put the answer in a guard that reads the directory, because the step
 list in CI config is a hand-maintained roster and rosters stop growing.
+
+### 24. The rule that recovered its bucket for half the members — `#7537`
+
+`scripts/lint-write-only-ctx-fields.mjs` fails module-level state that is
+written and never read. Its `module-bindings` target ran into a problem the
+author saw and solved: a `const` binding cannot be reassigned, so with only
+`=`, `++` and `delete` as write shapes, **every `const` in the roster has zero
+writes by construction** and can never reach the failure bucket — clean, on
+state the lint structurally cannot judge. The fix (#7467, PR #7530) was a
+MUTATOR rule: `m.set(k, v);`, `m.clear();`, `arr.push(x);` at statement
+position count as writes.
+
+That rule is correct, and it recovered the bucket for containers mutated by a
+METHOD CALL. It did not recover it for the other in-place mutation shape:
+
+```ts
+const o: Record<string, number> = {};
+o[k] = v;      // classified as a READ of `o`
+o.field = v;   // classified as a READ of `o`
+```
+
+`isWriteAt()` tested its assignment regex against the text immediately
+following the identifier, which for these starts with `[` or `.`, so the `=`
+was never seen. Every mutation contributed a READ — so a `const` object or
+`Record` could only ever be reported **clean**, which is the exact property the
+mutator rule had been added to eliminate, surviving for a different mutation
+shape. Mode: *checked a subset* — but the subset is a shape of syntax, not a
+hardcoded list, which is why reading the rule cannot reveal it. 34 of the 78
+roster members were `const` with zero writes at the time.
+
+The live instance, on the real file: `gitOneshotTimers`
+(`packages/dashboard/src/store/connection.ts`) had six references, four of them
+`gitOneshotTimers[key] = …`, and reported **6 reads / 0 writes**. Replacing its
+two genuine readers with locals — the #7421 regression verbatim, a guard
+deleted and its writes left behind — left the lint at `4r 0w`, no error, no
+warning, **exit 0**. It reports `2r/4w` now, and that same mutation exits 1 and
+names all four write sites.
+
+What makes this entry worth reading is that **the gap was documented before it
+was fixed**. PR #7530's review pinned both shapes as deliberate READs, in a test
+whose comment said in as many words that widening the rule would turn the pin
+red and that the header must be updated with it. When #7537 landed, exactly
+those two pins went red and nothing else did — running the old suite against the
+new classifier failed 2 of 125, both of them the pins. That is what a documented
+limit is for: a written-down gap costs one comment and turns the next change
+into a *conversation with the pin*, where an undocumented one is rediscovered by
+someone auditing a green run.
+
+**Guard against it:** when you add a rule because a class of subject was
+otherwise unfailable, the question is not "does the rule work" but **"which
+members of that class does it reach, and what do the rest look like?"** Count
+them. `const` bindings with zero writes was a number the lint could already
+print; nobody had asked it. And when the answer is "not all of them", pin the
+remainder as an explicit decision — a limit that cannot change silently is worth
+more than a limit that does not exist.
