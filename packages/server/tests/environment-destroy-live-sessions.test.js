@@ -256,14 +256,17 @@ describe('#7562 destroy guard', () => {
 
   // ---- layer 3: both wire paths ------------------------------------------
 
-  function makeCtx() {
+  function makeCtx(overrides = {}) {
     const sent = []
     const broadcasts = []
     const sendSpy = createSpy((_ws, msg) => sent.push(msg))
+    // Distinguish "not provided" (default the real manager) from an explicit
+    // `null` (the environments-feature-off case under test).
+    const mgrOverride = 'environmentManager' in overrides ? overrides.environmentManager : envManager
     return nsCtx({
       send: sendSpy,
       broadcast: (msg) => broadcasts.push(msg),
-      environmentManager: envManager,
+      environmentManager: mgrOverride,
       sessionManager: mgr,
       _sent: sent,
       _broadcasts: broadcasts,
@@ -492,6 +495,79 @@ describe('#7562 destroy guard', () => {
     assert.equal(ctx._sent[0].type, 'environment_error')
     assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
     assert.ok(envManager.get(env.id))
+  })
+
+  // N3 (#7571 review). The two cells above pin only the load-bearing half of the
+  // handler comment's claim — that the gate precedes the LOOKUP. The comment
+  // also claims it precedes the feature-enabled check and the `environmentId`
+  // validation, and a mutant relocating the gate below both of those SURVIVED
+  // the suite (24 pass, exit 0): no cell fed a bound client either of those
+  // inputs. An unfalsifiable third of a sentence, which is exactly the S2 shape
+  // fixed one file over — so the missing inputs become cells rather than the
+  // claim being softened.
+  //
+  // It matters beyond tidiness: each earlier branch is a distinguishable reply,
+  // so a gate placed after them answers "are container environments enabled on
+  // this host?" for a client with no host authority at all.
+
+  it('a bound client gets the authority refusal even when environments are DISABLED', async () => {
+    const ctx = makeCtx({ environmentManager: null })
+
+    await featureHandlers.destroy_environment({}, boundClient('sess-a'),
+      { type: 'destroy_environment', environmentId: 'env-anything' }, ctx)
+    await flush()
+
+    assert.equal(ctx._sent.length, 1)
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+    assert.ok(!/not enabled/.test(ctx._sent[0].error),
+      'the feature-enabled branch must not answer an unauthorised client')
+  })
+
+  it('a bound client gets the authority refusal even with NO environmentId', async () => {
+    const ctx = makeCtx()
+
+    await featureHandlers.destroy_environment({}, boundClient('sess-a'),
+      { type: 'destroy_environment' }, ctx)
+    await flush()
+
+    assert.equal(ctx._sent.length, 1)
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+    assert.ok(!/required/.test(ctx._sent[0].error),
+      'the validation branch must not answer an unauthorised client')
+  })
+
+  it('the refusal is BYTE-IDENTICAL across every input a bound client can vary', async () => {
+    // The whole comment sentence, as one property: nothing a bound client puts
+    // in the message, and nothing about the host it is talking to, changes the
+    // reply by a single byte. Anything that did would be an oracle.
+    const env = await makeEnv()
+    createInto(env)
+
+    const replies = []
+    for (const [label, ctx, msg] of [
+      ['live-sessions env', makeCtx(), { type: 'destroy_environment', environmentId: env.id }],
+      ['unknown env id', makeCtx(), { type: 'destroy_environment', environmentId: 'env-does-not-exist' }],
+      ['environments disabled', makeCtx({ environmentManager: null }), { type: 'destroy_environment', environmentId: env.id }],
+      ['no environmentId', makeCtx(), { type: 'destroy_environment' }],
+    ]) {
+      await featureHandlers.destroy_environment({}, boundClient('sess-a'), msg, ctx)
+      await flush()
+      assert.equal(ctx._sent.length, 1, `${label}: exactly one reply`)
+      replies.push([label, JSON.stringify(ctx._sent[0])])
+    }
+
+    // Positive control: the fixtures really did differ — one of them names a
+    // live environment with a session in it, so a leaky handler HAS something
+    // to leak.
+    assert.deepEqual(envManager.get(env.id).sessions.length, 1)
+
+    const [first] = replies
+    for (const [label, body] of replies.slice(1)) {
+      assert.equal(body, first[1], `${label} differs from "${first[0]}" — the reply is an oracle`)
+    }
+    assert.equal(JSON.parse(first[1]).code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+    assert.equal(JSON.parse(first[1]).environmentId, undefined, 'the refusal echoes no id back')
+    assert.equal(JSON.parse(first[1]).sessions, undefined, 'and no session ids')
   })
 
   it('containers_action stop/restart are unaffected by live sessions', async () => {
