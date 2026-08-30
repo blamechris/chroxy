@@ -371,13 +371,21 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
    * The constructor NAME, interpolated rather than written literally in the
    * synthetic sources below.
    *
-   * `scripts/lint-tests-state-file-path.sh` (#4633) greps test files for
+   * `scripts/lint-tests-state-file-path.sh` (#4633) scans test files for
    * `new SessionManager(` and demands an explicit `stateFilePath` on every hit —
    * correctly, because a bare one clobbers the developer's real
    * `~/.chroxy/session-state.json`. These fixtures are TEXT that a detector
-   * scans, not constructions, so the lint has nothing to protect here and the
-   * literal would be a false positive. Interpolating keeps the lint's grep
-   * honest for the real thing. Do NOT inline it back.
+   * scans, not constructions, so the lint has nothing to protect here.
+   *
+   * Do NOT inline the literal back, and the reason is NOT "the lint goes red"
+   * (#7552 review). It is that the lint's outcome becomes UNRELIABLE: its
+   * `findMatchingParen` starts at the `(` INSIDE the fixture string, so its own
+   * quote tracking begins inverted, and what happens next depends on which quote
+   * character the fixture uses. Both measured on this file: single quotes → the
+   * two sites are reported (exit 1); BACKTICKS → the scan runs to EOF, returns
+   * -1, `continue`s, and the lint exits 0 with nothing said. A fixture that can
+   * silently consume a real guard's attention is worse than one that trips it,
+   * which is why the name is interpolated rather than the sites suppressed.
    */
   const SM = 'SessionManager'
 
@@ -402,6 +410,55 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
     assert.equal(ctorArgSlice(synthetic, 'Gamma'), null)
   })
 
+  it('the extractor OVER-RUNS on an unbalanced brace in a string, and the control catches it', () => {
+    // #7552 review, F5, as a permanent probe rather than a mutant run once.
+    //
+    // This asserts the extractor's KNOWN LIMIT rather than pretending it does
+    // not exist: `ctorArgSlice` counts braces and does not parse string
+    // literals, so `'Session {'` as an option value opens a depth the closing
+    // brace never balances and the slice runs on into the next constructor.
+    // A documented limit that goes red when it changes beats an undocumented one
+    // rediscovered by someone auditing a green run.
+    const unbalanced = [
+      `const sessionManager = new ${SM}({`,
+      '  maxSessions: 5,',
+      "  sessionNameTemplate: 'Session {',",   // <- the unbalanced brace, in a string
+      '  environmentManager,',
+      '  sweepOrphanWorktrees: false,',
+      '})',
+      'const server = new WsServer({',
+      '  serverIdentity,',
+      '  environmentManager,',
+      '})',
+      // The ENCLOSING scope's closing brace. Without one the extra depth never
+      // returns to zero and the matcher returns null (which the tree cell's
+      // `assert.ok(slice, …)` would catch) — the interesting case is the one the
+      // real file has, where the stray `{` is balanced by an OUTER `}` much
+      // later, so a plausible-looking slice comes back and every under-run
+      // control passes. That is what this fixture reproduces.
+      '}',
+    ].join('\n')
+    const overRun = ctorArgSlice(unbalanced, SM)
+    assert.ok(overRun, 'the extractor returned nothing on the unbalanced source')
+    // The limit, stated as an assertion: it really does over-run…
+    assert.ok(overRun.includes('new WsServer('),
+      'the extractor no longer over-runs on an unbalanced string brace — if it became ' +
+      'string-aware, this probe should be replaced by a cell asserting the slice STOPS, and the ' +
+      'over-run control in the tree cell can stay as defence in depth')
+    // …and the two under-run controls do NOT notice, which is why a third was needed.
+    assert.ok(/^\s*maxSessions:/m.test(overRun), 'under-run control passes on an over-run slice')
+    assert.ok(/^\s*sweepOrphanWorktrees:/m.test(overRun), 'under-run control passes on an over-run slice')
+    // The full evasion: delete the argument the whole cell is about, and the
+    // decoy in the swallowed WsServer block satisfies the check anyway.
+    const evaded = unbalanced.replace('  environmentManager,\n  sweepOrphanWorktrees: false,', '  sweepOrphanWorktrees: false,')
+    assert.notEqual(evaded, unbalanced, 'the evasion mutation did not apply')
+    assert.ok(/^\s*environmentManager,\s*$/m.test(ctorArgSlice(evaded, SM)),
+      'the evasion no longer reproduces — re-derive this probe before relaxing the control below')
+    // …and the over-run control catches exactly that.
+    assert.ok(ctorArgSlice(evaded, SM).includes('new WsServer('),
+      'the over-run control would not fire on the evaded source — it is not closing the hole')
+  })
+
   it('the SessionManager construction block passes environmentManager', () => {
     // Positive controls first: the file loaded, and the slice is the block this
     // cell is about — otherwise a rename could make the assertion below vacuous
@@ -415,6 +472,31 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
     // is the SessionManager one and is not truncated to nothing.
     assert.ok(/^\s*maxSessions:/m.test(slice), 'slice is not the SessionManager block (no maxSessions)')
     assert.ok(/^\s*sweepOrphanWorktrees:/m.test(slice), 'slice looks truncated (no sweepOrphanWorktrees)')
+    // …and the OVER-run control (#7552 review, F5). The two above only detect a
+    // slice that stopped too EARLY. `ctorArgSlice` counts braces without
+    // tracking string literals, so a single unbalanced `{` inside a string
+    // anywhere in this block makes the slice run past its own closing brace,
+    // swallow `new WsServer({…})`, and be satisfied by the DECOY — the anchoring
+    // silently undone by a brace in a name template. Measured: the slice grows
+    // 94 → 712 lines, and the block with its `environmentManager,` argument
+    // DELETED still passes 18/18.
+    //
+    // The close is content-based rather than a length bound on purpose: a
+    // hardcoded line count sitting next to a block that grows is the failure
+    // this repo catalogues, and it would also have to be re-tuned by anyone
+    // adding an option. "The next constructor is not in my slice" cannot rot,
+    // and it holds no matter WHY the matcher over-ran — a brace in a string
+    // today, a regex literal or a template interpolation tomorrow. Making the
+    // matcher string-aware was the alternative and is not obviously better: the
+    // repo's own `lint-tests-state-file-path.mjs` tracks strings in exactly that
+    // way and has its own inverted-parity failure (see the SM note below).
+    assert.ok(
+      !slice.includes('new WsServer('),
+      'the SessionManager slice swallowed the `new WsServer({…})` constructor — the brace matcher ' +
+      'over-ran (an unbalanced `{` inside a string literal will do it), so the WsServer\'s own ' +
+      '`environmentManager,` argument now satisfies the check about the SessionManager one and the ' +
+      'anchoring is gone.',
+    )
 
     assert.ok(
       /^\s*environmentManager,\s*$/m.test(slice),
