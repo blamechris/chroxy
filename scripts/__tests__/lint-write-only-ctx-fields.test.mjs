@@ -38,7 +38,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 125
+const MIN_CASES = 175
 
 let pass = 0
 let fail = 0
@@ -183,6 +183,7 @@ const {
   CannotCheckError,
   TARGETS,
   analyzeTarget,
+  assignsThroughAccessor,
   atStatementStart,
   blankModuleClauses,
   classifyBindingReferences,
@@ -569,7 +570,7 @@ const analyzeBindings = (text, opts = {}) =>
     kind: 'module-bindings',
     declSources: [{ path: 'store/mod.ts', text }],
     sources: [{ path: 'store/mod.ts', text }],
-    mutatorsAreWrites: true,
+    inPlaceMutationIsWrite: true,
     ...opts,
   })
 
@@ -618,14 +619,73 @@ export function reset(): void { pending.clear(); }
 })
 
 test('the mutator rule is what makes that case reachable (control)', () => {
-  // With mutatorsAreWrites off, the SAME source has zero writes and can never
+  // With inPlaceMutationIsWrite off, the SAME source has zero writes and can never
   // reach the failure bucket. Pinned so the flag cannot be dropped silently.
   const src = 'const pending = new Map();\nexport function add(k) { pending.set(k, 1); }\n'
-  const off = analyzeBindings(src, { mutatorsAreWrites: false })
+  const off = analyzeBindings(src, { inPlaceMutationIsWrite: false })
   assert(off.failures.length === 0 && off.warnings.length === 0, 'expected a plain read')
   assert(off.perName.get(K('pending')).writes.length === 0, 'a mutator was still a write')
   const on = analyzeBindings(src)
   assert(on.perName.get(K('pending')).writes.length === 1, 'the mutator was not a write')
+})
+
+test('a CONST Record populated only by INDEX ASSIGNMENT FAILS (#7537)', () => {
+  // The #7467 shape for a plain object. `const` cannot be reassigned and a
+  // Record has no mutator METHOD, so index assignment is its ONLY write shape:
+  // without the rule this binding had 2 reads / 0 writes and could never reach
+  // the failure bucket, however dead it became. The live instance was
+  // `gitOneshotTimers` — see the CLI case below.
+  const src = `
+const counts: Record<string, number> = {};
+export function record(k: string, n: number): void { counts[k] = n; }
+export function forget(k: string): void { counts[k] = 0; }
+`
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 1, `expected 1, got ${JSON.stringify(r.failures)}`)
+  assert(/counts is WRITE-ONLY: 2 write site\(s\)/.test(r.failures[0]), r.failures[0])
+})
+
+test('a CONST object mutated only by PROPERTY assignment FAILS (#7537)', () => {
+  const src = `
+const state = { count: 0, at: 0 };
+export function bump(n: number): void { state.count = n; }
+export function stamp(t: number): void { state.at = t; }
+`
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 1, `expected 1, got ${JSON.stringify(r.failures)}`)
+  assert(/state is WRITE-ONLY: 2 write site\(s\)/.test(r.failures[0]), r.failures[0])
+})
+
+test('the index-assignment rule is what makes those reachable (control)', () => {
+  // Two-sided: with the flag off the SAME source is silently clean — 2 reads,
+  // 0 writes, no failure AND no warning, which is the exact observable #7537
+  // reproduced on `_prevMessageCounts` in the live tree.
+  const src = 'const counts = {};\nexport function record(k, n) { counts[k] = n; }\n'
+  const off = analyzeBindings(src, { inPlaceMutationIsWrite: false })
+  assert(off.failures.length === 0 && off.warnings.length === 0, 'expected a plain read')
+  assert(off.perName.get(K('counts')).writes.length === 0, 'an index assignment was still a write')
+  const on = analyzeBindings(src)
+  assert(on.perName.get(K('counts')).writes.length === 1, 'the index assignment was not a write')
+  assert(on.failures.length === 1, `expected the failure to become reachable: ${JSON.stringify(on.failures)}`)
+})
+
+test('a genuine reader still rescues an index-assigned binding (no false positive)', () => {
+  // The shape `gitOneshotTimers` actually has: index-assigned in four places
+  // AND read in two. It must stay clean — the rule reclassifies references, it
+  // does not manufacture failures.
+  const src = `
+const timers: Record<string, number | undefined> = {};
+export function arm(k: string): void {
+  const prev = timers[k];
+  if (prev !== undefined) { timers[k] = undefined; }
+  timers[k] = 1;
+}
+export function read(k: string): number | undefined { return timers[k]; }
+`
+  const r = analyzeBindings(src)
+  assert(r.failures.length === 0, `false positive: ${JSON.stringify(r.failures)}`)
+  const { reads, writes } = r.perName.get(K('timers'))
+  assert(reads.length === 2 && writes.length === 2, `got ${reads.length}r ${writes.length}w`)
 })
 
 test('a COMMENTED-OUT reader does not rescue a write-only binding', () => {
@@ -703,25 +763,154 @@ const mutatorCases = [
   // own pin: `m?.set(...)` at statement position must classify exactly as
   // `m.set(...)` does.
   ['m?.set(k, v); is a WRITE — optional chaining is the same mutation', 'm?.set(k, v);', 'm', 0, 1],
-  // #7530 F1 — a DELIBERATE, DOCUMENTED gap, pinned so it cannot change
-  // silently. The assignment's target is the element, not the binding, so
-  // index/property assignment classifies as a READ of the binding and a
-  // `const` object populated only that way can never fail. `gitOneshotTimers`
-  // in connection.ts is the live instance (6 reads / 0 writes, four of the six
-  // references being `gitOneshotTimers[key] = …`). Widening this is #7537; if
-  // that lands, this pin goes red and the header must be updated with it.
-  ['o[k] = v; is a READ of o — index assignment targets the element (#7537)', 'o[k] = v;', 'o', 1, 0],
-  ['o.k = v; is a READ of o — property assignment targets the element (#7537)', 'o.k = v;', 'o', 1, 0],
+  // #7530 F1 pinned these two as deliberate READS and said, in as many words,
+  // that if #7537 landed the pin would go red and the header must be updated
+  // with it. #7537 landed; both were flipped in the same commit as the header,
+  // exactly as that comment instructed. `gitOneshotTimers` in connection.ts
+  // was the live instance — 6r/0w, four of its six references being
+  // `gitOneshotTimers[key] = …` — and reports 2r/4w now.
+  ['o[k] = v; is a WRITE of o — the only mutation shape a const Record has (#7537)', 'o[k] = v;', 'o', 0, 1],
+  ['o.k = v; is a WRITE of o (#7537)', 'o.k = v;', 'o', 0, 1],
 ]
 for (const [label, stmt, name, wantReads, wantWrites] of mutatorCases) {
   test(`binding: ${label}`, () => {
-    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { mutatorsAreWrites: true })
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, { inPlaceMutationIsWrite: true })
     assert(
       reads.length === wantReads && writes.length === wantWrites,
       `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
     )
   })
 }
+
+// --- 10c-2. Index and property assignment (#7537) --------------------------
+//
+// The second in-place mutation shape, and the ONLY one a `const` bound to a
+// plain object or `Record` has. Before it landed, such a binding had zero
+// writes BY CONSTRUCTION: the failure bucket was unreachable however dead the
+// state became, which is the "guard that cannot fail" class in
+// docs/false-safety-guards.md. Every case below is either the new WRITE or one
+// of the deliberate limits around it — the limits are all the rescue direction
+// (a missed write), so none of them can produce a false accusation, and each
+// is pinned so it stays a decision rather than an assumption.
+
+const accessorAssignCases = [
+  // The write itself, in every operator form.
+  ['o[k] = v; is a WRITE', 'o[k] = v;', 'o', true, 0, 1],
+  ['o.field = v; is a WRITE', 'o.field = v;', 'o', true, 0, 1],
+  ['o[k] += v; is a WRITE — every compound operator counts', 'o[k] += v;', 'o', true, 0, 1],
+  ['o.field ??= v; is a WRITE', 'o.field ??= v;', 'o', true, 0, 1],
+  ['o [ k ] = v; is a WRITE — whitespace between the steps is not a shape', 'o [ k ] = v;', 'o', true, 0, 1],
+  ['o.length = 0; is a WRITE — truncating an array is a mutation', 'o.length = 0;', 'o', true, 0, 1],
+  // The index expression is arbitrary source, so the scan must actually parse
+  // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
+  // as reads — one rescued write silences a whole binding.
+  ['o[arr[i]] = v; is a WRITE — the index nests', 'o[arr[i]] = v;', 'o', true, 0, 1],
+  ["o['a]b'] = v; is a WRITE — a `]` inside a string is not the bracket", "o['a]b'] = v;", 'o', true, 0, 1],
+  // NOT an assignment at all.
+  ['o[k] === v is a READ — `=` must not be an equality', 'if (o[k] === v) f();', 'o', true, 1, 0],
+  ['o[k] is a READ — a bare index access', 'const x = o[k];', 'o', true, 1, 0],
+  ['o.field is a READ — a bare property access', 'const x = o.field;', 'o', true, 1, 0],
+  // ONE STEP DEEP, the same adjudication that keeps `m.get(k).push(x)` a read
+  // of `m`: what these store into is the object held in `o.a` / `o[i]`.
+  ['o.a.b = v; is a READ of o — the write lands in o.a', 'o.a.b = v;', 'o', true, 1, 0],
+  ['o[i][j] = v; is a READ of o — the write lands in o[i]', 'o[i][j] = v;', 'o', true, 1, 0],
+  // STATEMENT POSITION, the same gate the mutator rule uses. Both of these
+  // genuinely mutate and are still reads — the documented rescue-only gap.
+  ['const x = (o[k] = v) is a READ — the value is consumed', 'const x = (o[k] = v);', 'o', true, 1, 0],
+  ['if ((o[k] = v)) is a READ — not at statement position', 'if ((o[k] = v)) f();', 'o', true, 1, 0],
+  ['a concise arrow body `() => o.k = v` is a READ', 'const f = () => o.k = v;', 'o', true, 1, 0],
+  // The BASE is what matters. In all three of these `o` is the key, the
+  // aliased source or a destructuring target, never the assignment's base.
+  ['obj[o] = v; is a READ of o — o is the computed KEY, not the base', 'obj[o] = v;', 'o', true, 1, 0],
+  ['const c = { [o]: 1 } is a READ of o — a computed property key', 'const c = { [o]: 1 };', 'o', true, 1, 0],
+  ['const alias = o; is a READ — assignment through an ALIAS is out of model', 'const alias = o;\nalias[k] = v;', 'o', true, 1, 0],
+  ['({ x: o.k } = obj); is a READ — destructuring writes are the #7464 S2 gap', '({ x: o.k } = obj);', 'o', true, 1, 0],
+  ['[o[k]] = arr; is a READ — same S2 gap, array form', '[o[k]] = arr;', 'o', true, 1, 0],
+  // DELETE was already a write before #7537 and still is — on BOTH kinds, and
+  // regardless of the flag or of statement position, because DELETE_BEHIND is
+  // checked before either. `delete o[k]` IS a mutation of `o`, so the answer is
+  // right; it is pinned here because #7537 asked for it to be adjudicated
+  // rather than assumed, and because the asymmetry with `o[k] = v` (which does
+  // consult both) is a real one a reader should not have to rediscover.
+  ['delete o[k]; is a WRITE — and was before #7537', 'delete o[k];', 'o', true, 0, 1],
+  ['delete o[k] is a WRITE with the flag OFF too — it predates the flag', 'delete o[k];', 'o', false, 0, 1],
+  ['if (delete o[k]) is STILL a WRITE — delete ignores statement position', 'if (delete o[k]) f();', 'o', true, 0, 1],
+  // The two-sided control. With the flag off the SAME source has zero writes,
+  // which is what made the bucket unreachable in the first place.
+  ['o[k] = v; is a READ with the flag OFF (control)', 'o[k] = v;', 'o', false, 1, 0],
+  ['o.field = v; is a READ with the flag OFF (control)', 'o.field = v;', 'o', false, 1, 0],
+]
+for (const [label, stmt, name, flag, wantReads, wantWrites] of accessorAssignCases) {
+  test(`binding: ${label}`, () => {
+    const { reads, writes } = classifyBindingReferences(stripComments(stmt), name, {
+      inPlaceMutationIsWrite: flag,
+    })
+    assert(
+      reads.length === wantReads && writes.length === wantWrites,
+      `got ${reads.length}r ${writes.length}w, wanted ${wantReads}r ${wantWrites}w`,
+    )
+  })
+}
+
+test('an index expression inside the 256-byte accessor window is a WRITE', () => {
+  // The operator windows are 64 bytes because a stripped COMMENT is all that
+  // can widen them (#7464 C1). An index expression is arbitrary source, so it
+  // gets its own, wider window — pinned on both sides so neither number can
+  // drift silently.
+  const key = 'k'.repeat(200)
+  const { reads, writes } = classifyBindingReferences(stripComments(`o[${key}] = v;`), 'o', {
+    inPlaceMutationIsWrite: true,
+  })
+  assert(writes.length === 1 && reads.length === 0, `got ${reads.length}r ${writes.length}w`)
+})
+
+test('an index expression LONGER than the window is a READ — unproven is not a write', () => {
+  const key = 'k'.repeat(300)
+  const { reads, writes } = classifyBindingReferences(stripComments(`o[${key}] = v;`), 'o', {
+    inPlaceMutationIsWrite: true,
+  })
+  assert(reads.length === 1 && writes.length === 0, `got ${reads.length}r ${writes.length}w`)
+})
+
+const accessorPredicateCases = [
+  ['[k] =', true],
+  ['.field =', true],
+  ['[k] +=', true],
+  ['.field ??=', true],
+  ['[k] ==', false],
+  ['[k] ===', false],
+  ['[k] =>', false],
+  ['.a.b =', false],
+  ['[i][j] =', false],
+  ['?.[k] =', false],
+  ['?.field =', false],
+  ['[k', false],
+  ['.0 =', false],
+  ['', false],
+  ['(k) =', false],
+]
+for (const [after, want] of accessorPredicateCases) {
+  test(`assignsThroughAccessor(${JSON.stringify(after)}) === ${want}`, () => {
+    assert(assignsThroughAccessor(after) === want, `got ${assignsThroughAccessor(after)}`)
+  })
+}
+
+test('the INTERFACE kind still classifies _ctx.map[k] = v as a READ (#7532 owns that)', () => {
+  // Both in-place rules ride one per-target flag, and classifyReferences never
+  // passes it. That is a decision: a context field is a REASSIGNABLE property,
+  // so `_ctx.map = new Map()` already reaches the failure bucket for it — the
+  // argument that forced the rule onto `const` bindings does not apply here.
+  const stripped = stripComments('_ctx.map[k] = v; _ctx.set.clear(); _ctx.map.field = v;')
+  const { reads, writes } = classifyReferences(stripped, 'map', RECEIVERS)
+  assert(reads.length === 2 && writes.length === 0, `map: ${reads.length}r ${writes.length}w`)
+  const set = classifyReferences(stripped, 'set', RECEIVERS)
+  assert(set.reads.length === 1 && set.writes.length === 0, `set: ${set.reads.length}r`)
+})
+
+test('delete _ctx.map[k] IS a write on the interface kind — the asymmetry is real', () => {
+  const { reads, writes } = classifyReferences(stripComments('delete _ctx.map[k];'), 'map', RECEIVERS)
+  assert(writes.length === 1 && reads.length === 0, `got ${reads.length}r ${writes.length}w`)
+})
 
 test('a comment-padded increment still classifies as a WRITE (C1 window, binding side)', () => {
   // atStatementStart scans back over the BLANKS a stripped comment leaves, so
@@ -825,7 +1014,7 @@ test('a PRIVATE binding is scanned in its own module only', () => {
       { path: 'store/mod.ts', text: decl },
       { path: 'other/thing.ts', text: 'function b() { const _store = mk(); return _store; }\n' },
     ],
-    mutatorsAreWrites: true,
+    inPlaceMutationIsWrite: true,
   })
   assert(r.failures.length === 1, `an unrelated local rescued a private binding: ${JSON.stringify(r.failures)}`)
 })
@@ -839,7 +1028,7 @@ test('an EXPORTED binding IS scanned across the target', () => {
       { path: 'store/mod.ts', text: decl },
       { path: 'ui/panel.ts', text: "import { n } from '../store/mod';\nexport const show = () => String(n);\n" },
     ],
-    mutatorsAreWrites: true,
+    inPlaceMutationIsWrite: true,
   })
   assert(r.failures.length === 0, `a cross-file reader was not seen: ${JSON.stringify(r.failures)}`)
 })
@@ -895,7 +1084,7 @@ test('two PRIVATE bindings sharing a name are FINE — the live tree has a pair'
     kind: 'module-bindings',
     declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
     sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
-    mutatorsAreWrites: true,
+    inPlaceMutationIsWrite: true,
   })
   assert(r.failures.length === 0 && r.fields.length === 2, JSON.stringify({ f: r.failures, k: r.fields }))
 })
@@ -961,6 +1150,18 @@ test('CLI exits 2 when the dashboard store declares no state at all — never 0'
   assert(/ZERO module-level bindings/.test(r.stderr), r.stderr)
 })
 
+test('CLI exits 1 on a dashboard Record mutated only by index assignment (#7537)', () => {
+  // End to end through the SHIPPED target config, not just the classifier: the
+  // dashboard target's flag has to actually reach isWriteAt for this to fail.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const counts: Record<string, number> = {};\n` +
+      'export function record(k: string, n: number): void { counts[k] = n; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
 test('CLI reports the binding target with its own noun', () => {
   const r = runCliOn(fixtureRoot(CLEAN_DECL))
   assert(/dashboard\/store-module-state: \d+ binding\(s\)/.test(r.stdout), r.stdout)
@@ -973,7 +1174,17 @@ test('the SHIPPED TARGETS table still covers both kinds', () => {
   assert(kinds.includes('interface'), `no interface target: ${JSON.stringify(kinds)}`)
   assert(kinds.includes('module-bindings'), `no module-bindings target: ${JSON.stringify(kinds)}`)
   const dash = TARGETS.find((t) => t.kind === 'module-bindings')
-  assert(dash.mutatorsAreWrites === true, 'the dashboard target must treat mutators as writes')
+  assert(
+    dash.inPlaceMutationIsWrite === true,
+    'the dashboard target must treat in-place mutation — mutator calls AND index/property ' +
+    'assignment — as writes; without it every const binding is unfailable by construction',
+  )
+  const app = TARGETS.find((t) => t.kind === 'interface')
+  assert(
+    app.inPlaceMutationIsWrite === undefined,
+    'the app target deliberately leaves in-place mutation as a READ — #7532 owns changing that, ' +
+    'and both shapes ride this one flag',
+  )
   assert(
     dash.declDirs.includes('packages/dashboard/src/store'),
     `declDirs drifted: ${JSON.stringify(dash.declDirs)}`,
