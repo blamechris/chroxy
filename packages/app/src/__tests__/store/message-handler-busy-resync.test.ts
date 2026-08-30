@@ -79,20 +79,27 @@ function createMockStore(initialState: Partial<ConnectionState>) {
 }
 
 /**
- * The transcript shape ActivityIndicator's `inFlight` walk reads: a `tool_call`
- * message with no `toolResult` attached is what renders "Running Bash · 12s".
- * The chip is gated on `!isIdle`, so healing `isIdle` is what clears it — the
- * transcript itself is left alone on purpose.
+ * The exact transcript shape ActivityIndicator's `inFlight` walk reads
+ * (`packages/app/src/components/ActivityIndicator.tsx`): it scans `messages`
+ * backwards, skips anything whose `type !== 'tool_use'`, and returns the first
+ * entry with no `toolResult` and no `toolResultImages` — that is what renders
+ * "Running Bash · 12s". The chip is gated on `!isIdle`, so healing `isIdle` is
+ * what clears it; the transcript itself is left alone on purpose.
+ *
+ * Typed as `ChatMessage` with NO cast, deliberately. The first draft used
+ * `type: 'tool_call'` behind an `as unknown as ChatMessage` — not a member of
+ * the union, and a value the walk skips outright, so the fidelity this
+ * doc-comment claims was unbacked and the cast is what hid it.
  */
 const UNRESOLVED_TOOL: ChatMessage = {
   id: 'm-tool-1',
-  type: 'tool_call',
+  type: 'tool_use',
   content: 'Bash',
   timestamp: 1_800_000_000_000,
   tool: 'Bash',
   toolUseId: 'tu-1',
   toolInput: { command: 'npm test &', run_in_background: true },
-} as unknown as ChatMessage;
+};
 
 /** A session stuck busy with a phantom in-flight tool — the #7518 symptom. */
 function staleBusySession() {
@@ -248,6 +255,14 @@ describe('#7518 — session_list resyncs isIdle from the server isBusy', () => {
     expect(ss.activeTools).toHaveLength(1);
     expect(ss.streamingMessageId).toBe('m-stream-1');
     expect(ss.messages).toHaveLength(1);
+    // Observation B, recorded rather than left to be rediscovered: keeping the
+    // write narrow makes `isIdle: true` alongside a LIVE `streamingMessageId`
+    // reachable for the first time on this client, and `deriveChatActivity`
+    // ranks `streamingMessageId` above `isIdle`, so the session lands
+    // 'thinking' rather than 'idle'. That is the deliberate trade — matching
+    // the dashboard, which has held exactly this state since #4639, beats
+    // inventing a mobile-only widening that would clear state #7500/#7508 own.
+    expect(ss.activityState.state).toBe('thinking');
   });
 });
 
@@ -325,5 +340,7 @@ describe('#7518 — session_activity resyncs isIdle from the server isBusy', () 
     expect(ss.activeTools).toHaveLength(1);
     expect(ss.streamingMessageId).toBe('m-stream-1');
     expect(ss.messages).toHaveLength(1);
+    // Observation B again — same reachable state, same dashboard-parity trade.
+    expect(ss.activityState.state).toBe('thinking');
   });
 });

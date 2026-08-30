@@ -439,21 +439,26 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
       //
       // The reason is CONSISTENCY WITH THE SERVER'S SINGLE BUSY AUTHORITY, not
       // mid-turn correctness. `listSessions()` publishes that same `isRunning` as
-      // each entry's `isBusy`, and the dashboard re-derives `isIdle` from it on
-      // every `session_list` and `session_activity` (#4639). A narrower `_isBusy`
-      // guard would emit an `agent_idle` that the very next broadcast reverts —
-      // a flicker, not a heal. Pinned by behaviour in
+      // each entry's `isBusy`, and BOTH clients re-derive `isIdle` from it on
+      // every `session_list` and `session_activity` (#4639 for the dashboard;
+      // #7518 gave the mobile app the same two paths, via the shared store-core
+      // `isIdlePatches` derivation and the shared `session_activity` dispatch
+      // entry). A narrower `_isBusy` guard would emit an `agent_idle` that the
+      // very next broadcast reverts — a flicker, not a heal, on either client.
+      // Pinned by behaviour in
       // tests/conversation-full-history-replay.test.js (a real SessionManager +
       // BaseSession) and at the producer in
       // tests/session-manager-full-history-source.test.js.
       //
-      // Two consequences, recorded rather than hidden:
-      //   - On MOBILE the suppression is a pure false negative. The app has no
-      //     `session_activity` case and never derives `isIdle` from `isBusy`, so
-      //     nothing there would revert a narrower heal — and this synthesized
-      //     `agent_idle` is the ONLY thing that can clear a stale chip on that
-      //     client (#7479 N2). Fixing it belongs on the app side (give it the
-      //     #4639 resync), not by forking this guard per client: tracked in #7518.
+      // Until #7518 that argument held for the dashboard ALONE: the app had
+      // neither path, so the suppression was a pure false negative there — this
+      // synthesized `agent_idle` was the only thing that could clear a stale
+      // chip (#7479 N2), and a session holding an un-polled background shell
+      // kept one. That is why the fix went to the CLIENT rather than forking
+      // this guard per client, and why the guard did not change: with both
+      // clients consuming the same authority, one rule is now right on both.
+      //
+      // One consequence still worth recording:
       //   - The LIVE path is LESS conservative than this. event-normalizer.js
       //     appends `agent_idle` to every `result` unconditionally, without
       //     consulting `isRunning`; the replay heal mirrors that fan-out

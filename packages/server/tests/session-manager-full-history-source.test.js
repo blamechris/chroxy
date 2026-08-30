@@ -230,11 +230,12 @@ describe('#7484 — isSessionBusy gates the JSONL heal', () => {
  * The DECISION being pinned, rather than left incidental: that state counts as
  * BUSY, so the #7484 JSONL heal is suppressed in it. The reason is consistency
  * with the server's single busy authority — `listSessions()` publishes this same
- * `isRunning` as `isBusy`, and the dashboard re-derives `isIdle` from it on
- * every `session_list` / `session_activity` (#4639), so a narrower `_isBusy`
- * guard would emit an `agent_idle` the next broadcast reverts. The mobile
- * residual (no such resync there, so the suppression is a pure false negative)
- * is tracked in #7518, not papered over here.
+ * `isRunning` as `isBusy`, and BOTH clients re-derive `isIdle` from it on every
+ * `session_list` / `session_activity` (#4639 for the dashboard, #7518 for the
+ * mobile app), so a narrower `_isBusy` guard would emit an `agent_idle` the next
+ * broadcast reverts. Until #7518 the app had neither path, which made the
+ * suppression a pure false negative there; that was fixed on the CLIENT, so this
+ * guard is unchanged and now correct on both.
  */
 describe('#7507 — isSessionBusy is LIVENESS (isRunning), not mid-turn (_isBusy)', () => {
   /** A REAL BaseSession — the point is the getter, which a stub cannot have. */
