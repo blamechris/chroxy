@@ -38,7 +38,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 175
+const MIN_CASES = 179
 
 let pass = 0
 let fail = 0
@@ -801,6 +801,22 @@ const accessorAssignCases = [
   ['o.field ??= v; is a WRITE', 'o.field ??= v;', 'o', true, 0, 1],
   ['o [ k ] = v; is a WRITE — whitespace between the steps is not a shape', 'o [ k ] = v;', 'o', true, 0, 1],
   ['o.length = 0; is a WRITE — truncating an array is a mutation', 'o.length = 0;', 'o', true, 0, 1],
+  // #7548 F1 / #7553 — the SAME accessor blindness #7537 fixed, one operator
+  // over: INCDEC_AHEAD is tested against the text that starts with `[` or `.`,
+  // so it never sees the `++`. The result is one mutation with THREE spellings
+  // and TWO classifications on the same binding, and a `const counts: Record<
+  // string, number> = {}` mutated only by `counts[k]++` is still unfailable by
+  // construction. The live instance is `_encryptionState.sendNonce++`
+  // (message-handler.ts:680), masked only by that binding's five other writes.
+  //
+  // All four spellings are pinned at their CURRENT classification, which is the
+  // arrangement #7530 made for #7537 and which just paid off: when #7553 lands,
+  // the two `read` rows go red and the WHAT IT CANNOT SEE bullet must be
+  // updated with them. A gap that is only prose is a gap that changes silently.
+  ['++o[k]; is a WRITE — the prefix form is seen (INCDEC_BEHIND)', '++o[k];', 'o', true, 0, 1],
+  ['++o.field; is a WRITE — same, property form', '++o.field;', 'o', true, 0, 1],
+  ['o[k]++; is a READ — the postfix form is NOT seen (#7553)', 'o[k]++;', 'o', true, 1, 0],
+  ['o.field++; is a READ — same gap, property form (#7553)', 'o.field++;', 'o', true, 1, 0],
   // The index expression is arbitrary source, so the scan must actually parse
   // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
   // as reads — one rescued write silences a whole binding.

@@ -112,8 +112,9 @@
  * dashboard's module bindings, off for the app's interface target, where a
  * context field IS reassignable and the failure bucket is therefore reachable
  * without either rule. Turning it on there is #7532, which now decides both
- * shapes together; measured while #7537 landed, doing so reclassifies six app
- * fields and leaves that target green.
+ * shapes together; measured while #7537 landed, doing so reclassifies SEVEN app
+ * fields — six of them purely from the new index/property rule — and leaves
+ * that target green.
  *
  * A field with NO reference at all is a WARNING, not a failure — and the
  * distinction is load-bearing rather than squeamish. Zero references is the
@@ -204,7 +205,45 @@
  *   - …AND ONLY AT STATEMENT POSITION. `const x = (o[k] = v)` and
  *     `if ((o[k] = v))` mutate and are still READS, exactly as
  *     `const x = m.set(k, v)` is. Same rescue-only direction as the `++` rule
- *     above, and the same gap.
+ *     above, and the same gap. The boundary set that decides this loses
+ *     in-place writes in a semicolon-free file and after a braceless `else`
+ *     (#7554, pre-dating both in-place rules; #7537 routed a second predicate
+ *     through the same gate, so it now decides twice as many classifications).
+ *   - A POSTFIX INCREMENT THROUGH AN ACCESSOR IS A READ (#7553). This is the
+ *     bug #7537 fixed, surviving one operator over: `INCDEC_AHEAD` is tested
+ *     against the same text that starts with `[` or `.`, so it never sees the
+ *     `++`. After #7537 one mutation has THREE spellings and TWO
+ *     classifications, on the same binding:
+ *
+ *         o[k] = v;   WRITE      o.f = v;    WRITE
+ *         o[k] += 1;  WRITE      o.f += 1;   WRITE
+ *         ++o[k];     WRITE      ++o.f;      WRITE
+ *         o[k]++;     read       o.f++;      read     <- the gap
+ *
+ *     So a `const counts: Record<string, number> = {}` whose only mutation is
+ *     `counts[k]++` is STILL unfailable by construction — the exact property
+ *     #7537 exists to remove, for one remaining spelling. The live instance is
+ *     `_encryptionState.sendNonce++` (message-handler.ts:680), masked today by
+ *     that binding's five other writes (7r/5w) rather than by anything the
+ *     lint understands. All four spellings are pinned, so #7553 landing turns
+ *     the two `read` rows red alongside this bullet — the same arrangement
+ *     #7530 made for #7537, which is why this gap is written down at all.
+ *   - A PARENTHESISED OR ASSERTED BASE IS A READ. `(o)[k] = v`, `o![k] = v`,
+ *     `o!.field = v`, `(o as T)[k] = v` and `(<T>o)[k] = v` all classify as
+ *     reads, because the accessor scan starts at the character after the
+ *     IDENTIFIER and finds `)`, `!` or ` as`. The TS non-null assertion is the
+ *     plausible one in a TypeScript store; none occurs on the roster today.
+ *     Rescue-only (#7548 F3).
+ *   - THE READ-SIDE GAPS BELOW GREW TEETH WITH #7537. While `gitOneshotTimers`
+ *     and `_prevMessageCounts` had ZERO writes they were unfailable, so a read
+ *     this classifier cannot count was harmless for them; now that they have
+ *     writes, an uncounted read puts them in the FAILURE bucket — a false
+ *     accusation rather than a rescue. The sharpest uncounted read is the
+ *     SPREAD: `{ ...o }` and `[...o]` yield ZERO references, because the
+ *     `(?<![\w$.])` lookbehind rejects the `.` of `...`. Not live — all four
+ *     moved bindings keep 1-5 direct reads (2, 1, 5 and 5) — but the ALIASING
+ *     and DESTRUCTURING bullets above are now load-bearing for the binding
+ *     kind in a way they were not (#7548 F5).
  *   - AN INDEX EXPRESSION LONGER THAN THE ACCESSOR WINDOW hides its own `=`.
  *     The scan reads a fixed 256 bytes past the reference — wider than the
  *     64-byte operator windows, because an index expression is arbitrary
