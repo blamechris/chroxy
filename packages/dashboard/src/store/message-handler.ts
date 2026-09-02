@@ -6698,8 +6698,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // error) was invisible in the UI, so the operator saw nothing and could
       // not escalate.
       const { error, code, sessions } = sharedEnvironmentError(msg);
-      console.error('[ws] Environment error:', error);
-      if (code === 'ENVIRONMENT_HAS_LIVE_SESSIONS') {
+      const isLiveSessions = code === 'ENVIRONMENT_HAS_LIVE_SESSIONS';
+      // #7568 review: the live-sessions destroy refusal is a WARNING — the guard
+      // did its job and nothing broke — so log it at warn level to match the UI
+      // severity and keep error-level telemetry for real failures.
+      (isLiveSessions ? console.warn : console.error)('[ws] Environment error:', error);
+      if (isLiveSessions) {
         // #7562/#7568: the live-session destroy refusal is the actionable case.
         // NAME the sessions still running inside the environment so the operator
         // knows what the `force` escalation (offered in the EnvironmentPanel /

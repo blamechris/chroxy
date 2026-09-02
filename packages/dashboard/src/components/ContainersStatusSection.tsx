@@ -213,7 +213,7 @@ function ContainerActionsCell({
               {result.error}{' '}
               <button
                 type="button"
-                className="cr-action cr-action-danger"
+                className="cr-action cr-action-danger cr-action-force"
                 data-testid={`container-force-destroy-${container.id}`}
                 disabled={!connected || pending}
                 onClick={onForceDestroy}

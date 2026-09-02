@@ -13139,6 +13139,14 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-red);
   background: var(--accent-red-subtle);
 }
+/* #7568 review — the "Force destroy" escalation is a single, deliberate action
+ * shown only inside a live-session refusal alert (not the dense Stop/Restart
+ * row), so it takes the full 44px tap-target floor the compact .cr-action
+ * geometry does not. */
+.cr-action-force {
+  min-height: 44px;
+  padding: 6px 12px;
+}
 
 /* #6134 — disabled row actions (in-flight, socket down, or not applicable). */
 .cr-action:disabled {
