@@ -150,6 +150,101 @@ export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionFi
 }
 
 /**
+ * #7559 / #7557 — the CONNECTION-scoped roster: the fields whose correct
+ * lifetime is "this connection to this daemon", in ONE place because there is
+ * more than one site that ends a connection.
+ *
+ * ## Why it is a roster and not sixteen literals
+ *
+ * These were spelled out inside `disconnect()` alone, and `disconnect()` is not
+ * the only way a connection ends. `switchServer` / `connectLocal` call it only
+ * `if (get().connectionPhase !== 'disconnected')`, so a switch made from a tab
+ * that is ALREADY at `'disconnected'` — the state a FAILED CONNECT leaves
+ * behind, with server A's values fully populated — ran `_resetSessionMemory()`
+ * alone and every one of these survived into server B's UI (#7559).
+ *
+ * The fix is this function, spread into BOTH `disconnect()` and
+ * `_resetSessionMemory()`. Copying the sixteen assignments into the second site
+ * would have been the same defect one file over: a hardcoded list beside a set
+ * that grows (`docs/false-safety-guards.md`). Adding a field here now clears it
+ * on every connection boundary at once, and `session-destroy-prunes-pr-maps.
+ * test.ts` resolves this roster when it checks where a field dies, so the two
+ * cannot disagree about what the spread contains.
+ *
+ * ## The two members worth naming
+ *
+ * `serverCapabilities` is the FAIL-OPEN one: an empty map is the "fail-closed
+ * for any capability-gated affordance" state (#3272 review), so server A's
+ * advertised capabilities gating server B's UI is the failure this clear
+ * prevents. `availablePermissionModes` is the SHARP one: `auth_ok` re-sets it
+ * only CONDITIONALLY (`message-handler.ts`, `if (auth.availablePermissionModes)`),
+ * so an older server B that omits the field leaves server A's mode list driving
+ * the permission-mode picker — nothing else overwrites it (#7564 review).
+ *
+ * A fresh object per call: these are mutable collections handed to the store.
+ */
+export function createEmptyConnectionScope() {
+  return {
+    // A half-typed permission reply is dead with the socket. #6559 — this also
+    // drops any pulled pre-write-diff inputs; a resolved/expired/timed-out
+    // prompt already self-prunes.
+    permissionInputs: {},
+    // The requestIds belong to the dropped connection.
+    resolvedPermissions: {},
+    // #3272 review: a reconnect against a different (or older) server must not
+    // have its UI gates left enabled by stale state. Empty map = fail-closed
+    // for any capability-gated affordance.
+    serverCapabilities: {},
+    // The provider registry is per daemon.
+    availableProviders: [],
+    // The model list is per daemon/provider.
+    availableModels: [],
+    // The mode enum is advertised per daemon, and `auth_ok` re-sets it only
+    // when the server sends it — see the docstring above.
+    availablePermissionModes: [],
+    // The presence roster belongs to the dropped socket.
+    connectedClients: [],
+    // Web-task list is per daemon.
+    webTasks: [],
+    // Project commands differ per daemon and per session cwd.
+    slashCommands: [],
+    // A listing of the OLD daemon's filesystem.
+    filePickerFiles: null,
+    // The MCP resource list is per daemon.
+    mcpResources: null,
+    // Project agents differ per daemon and per session cwd.
+    customAgents: [],
+    // Transcripts pulled from the OLD daemon.
+    conversationHistory: [],
+    // A search over the OLD daemon's transcripts.
+    searchResults: [],
+    // Checkpoints belong to a session on the old daemon.
+    checkpoints: [],
+    // Container/worktree environments are per daemon — and since #7552
+    // `EnvironmentInfo.sessions` carries LIVE session ids from one daemon, which
+    // the panel renders ("{n} connected") and gates its Destroy button on.
+    environments: [],
+    // #7557 — the twelfth never-cleared field, adjudicated onto THIS roster
+    // rather than onto the two full-reset sites. Its two siblings in the same
+    // banner list, `serverErrors` and `sessionNotifications`, are both cleared
+    // by `disconnect()` and by neither full-reset site, so the connection is
+    // already where host-level notice history dies. #7528's precedent (a
+    // notification row is a RECORD and must survive the SESSION it describes)
+    // is about session death, not connection death, and is untouched: nothing
+    // here is pruned by a roster wipe.
+    infoNotifications: [],
+  } satisfies Partial<ConnectionState>;
+}
+
+/**
+ * The roster's field NAMES are deliberately not exported: the two test files
+ * that need them derive them with `Object.keys(createEmptyConnectionScope())`,
+ * from this one factory, so there is nothing for a second declaration to drift
+ * from — and no production-unreferenced export for
+ * `scripts/lint-write-only-ctx-fields.mjs` to warn about.
+ */
+
+/**
  * #7470 — drop every id in `removedIds` from a session-keyed map, returning a
  * NEW object only when something was actually removed.
  *
