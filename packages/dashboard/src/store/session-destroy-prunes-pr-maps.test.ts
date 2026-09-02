@@ -2835,14 +2835,29 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
  *
  * ## Known limit, stated rather than implied
  *
- * Two spellings are recognised — a `sessionStates: {}` wipe, and a `delete`
- * against a spread COPY of the roster — because those are the two all five real
- * sites use. A future site that removed a session by rest-destructuring
- * (`const { [id]: _, ...rest } = sessionStates`) or by
- * `Object.fromEntries(Object.entries(...).filter(...))` would not be seen. That
- * is a narrower hole than "no site detector at all", and the control below
- * asserts the detector still sees a removal inside every marked site — so the
- * two shapes it does claim cannot quietly stop matching.
+ * FOUR spellings are recognised (see `findRosterRemovals`): a `sessionStates:
+ * {}` wipe; a `delete` against a spread COPY of the roster; a rest-destructure
+ * `const { [id]: _, ...rest } = <roster|copy>` (#7506); and an
+ * `Object.fromEntries(Object.entries(<roster|copy>).filter(...))` filter-out
+ * (#7506). The first two are what all five real sites use; the last two are
+ * forward-looking. The control below asserts the detector still sees a removal
+ * inside every marked site, so none of the shapes it claims can quietly stop
+ * matching.
+ *
+ * It is still a source-text scan, not a parser, so a removal written in one of
+ * these shapes is a KNOWN blind spot rather than a silent one — a future site
+ * written this way must be spelled a fifth way or added deliberately:
+ *   - a chain BETWEEN `Object.entries(...)` and `.filter(`, e.g.
+ *     `Object.fromEntries(Object.entries(SRC).map(f).filter(g))`;
+ *   - other functional rebuilds — `Object.keys(SRC).filter(...).reduce(...)`,
+ *     `Object.entries(SRC).filter(...).reduce(...)`;
+ *   - an inline-arrow rest-destructure, `(({ [id]: _, ...rest }) => rest)(SRC)`;
+ *   - a rest-destructure whose prefix before the computed key is itself a
+ *     computed key, a default value (`x = 1`) or a nested pattern (only plain
+ *     shorthand / `a: b` renames are matched before the `[id]` key).
+ * Each is left to documentation on purpose: chasing every idiom by regex is the
+ * brittle, endless path, and "cannot check this" must not silently read as
+ * "nothing to check" (docs/false-safety-guards.md).
  */
 describe('#7495 roster removal sites: every site that drops a session is accounted for', () => {
   interface Removal {
@@ -2925,12 +2940,23 @@ describe('#7495 roster removal sites: every site that drops a session is account
     const copyAlt = [...copies].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
     const rosterSource = copyAlt ? `(?:${rosterAccess}|${copyAlt})` : `(?:${rosterAccess})`
 
+    // A leading `(?<![A-Za-z0-9_$.])` on shapes 3 and 4 is the same boundary
+    // shape 2's `(^|[^A-Za-z0-9_$.])delete` carries: without it `myconst {…}`
+    // matches the embedded `const` and `fooObject.fromEntries(…)` the embedded
+    // `Object`. A lookbehind rather than a captured char so `m.index` still
+    // points at the keyword and the derived line number stays true.
+    const notIdentTail = '(?<![A-Za-z0-9_$.])'
+
     // 3. Rest-destructure removal: `const { [id]: _, ...rest } = <roster|copy>`.
     //    The computed key `[…]` is required — a session id is dynamic — which
     //    also keeps benign `const { messages, ...rest } = ss` off the radar.
+    //    Plain fields may precede the computed key (`const { activeSessionId,
+    //    [id]: _, ...rest }`); shorthand and `a: b` renames only — a leading
+    //    computed key, default value or nested pattern is a documented gap.
+    const leadingFields = '(?:[A-Za-z0-9_$]+(?:\\s*:\\s*[A-Za-z0-9_$]+)?\\s*,\\s*)*'
     for (const m of src.matchAll(
       new RegExp(
-        `(?:const|let)\\s*\\{\\s*\\[[^\\]]+\\]\\s*:\\s*[A-Za-z0-9_$]+\\s*,\\s*\\.\\.\\.\\s*([A-Za-z0-9_$]+)\\s*\\}\\s*=\\s*(${rosterSource})(?![A-Za-z0-9_$.])`,
+        `${notIdentTail}(?:const|let)\\s*\\{\\s*${leadingFields}\\[[^\\]]+\\]\\s*:\\s*[A-Za-z0-9_$]+\\s*,\\s*\\.\\.\\.\\s*([A-Za-z0-9_$]+)\\s*\\}\\s*=\\s*(${rosterSource})(?![A-Za-z0-9_$.])`,
         'g',
       ),
     )) {
@@ -2938,10 +2964,12 @@ describe('#7495 roster removal sites: every site that drops a session is account
     }
 
     // 4. Object.fromEntries filter-out: rebuild the map without one entry. The
-    //    `.filter(` is what makes it a removal rather than a plain copy.
+    //    `.filter(` is what makes it a removal rather than a plain copy; it must
+    //    sit DIRECTLY on the `Object.entries(…)` call (a `.map(…).filter(…)`
+    //    chain between them is a documented gap, not a match).
     for (const m of src.matchAll(
       new RegExp(
-        `Object\\.fromEntries\\(\\s*Object\\.entries\\(\\s*(${rosterSource})\\s*\\)\\s*\\.filter\\(`,
+        `${notIdentTail}Object\\.fromEntries\\(\\s*Object\\.entries\\(\\s*(${rosterSource})\\s*\\)\\s*\\.filter\\(`,
         'g',
       ),
     )) {
@@ -3212,6 +3240,9 @@ describe('#7495 roster removal sites: every site that drops a session is account
       'const { [id]: _, ...rest } = get().sessionStates;',
       'const { [id]: _, ...rest } = state.sessionStates;',
       'const copy = { ...get().sessionStates };\nconst { [id]: _, ...rest } = copy;',
+      // leading plain fields before the computed key (#7506 review F3)
+      'const { activeSessionId, [id]: _, ...rest } = sessionStates;',
+      'const { a: renamed, [id]: _, ...rest } = get().sessionStates;',
     ]
     for (const src of restSpellings) {
       const hits = findRosterRemovals(src)
@@ -3247,5 +3278,35 @@ describe('#7495 roster removal sites: every site that drops a session is account
       '    // Object.fromEntries(Object.entries(sessionStates).filter(([k]) => k !== id)) — prose, not code',
     ].join('\n')
     expect(findRosterRemovals(unrelated)).toEqual([])
+  })
+
+  it('flags a rest-destructure whose computed key is not the first field', () => {
+    // #7506 review F3 — a plain field (`activeSessionId`) before the computed
+    // key. The pre-review regex required the computed key to be first, so this
+    // real-shaped spelling was missed.
+    const phantom = [
+      "    case 'session_purged': {",
+      '      const { activeSessionId, [purgedId]: _dropped, ...rest } = get().sessionStates;',
+      '      set({ sessionStates: rest });',
+      '      break;',
+      '    }',
+    ].join('\n')
+    const found = unaccountedRemovals(phantom, PHANTOM_MARKERS)
+    expect(found.map((h) => h.label)).toEqual(['rest-destructure ...rest (from get().sessionStates)'])
+    expect(found[0]!.line).toBe(2)
+  })
+
+  it('does not flag an embedded const/let/Object keyword (leading-identifier boundary)', () => {
+    // #7506 review F4 — shapes 3 and 4 begin with `const|let` / `Object`, so
+    // without a leading boundary an embedded keyword matched: `myconst { … }`
+    // hit the `const`, and `fooObject.fromEntries(…)` hit the `Object`. The
+    // negative lookbehind (like shape 2's `delete` guard) closes both.
+    const embedded = [
+      'myconst { [id]: _, ...rest } = sessionStates;',
+      'somelet { [id]: _, ...rest } = get().sessionStates;',
+      'fooObject.fromEntries(Object.entries(sessionStates).filter(([k]) => k !== id));',
+      'app.Object.fromEntries(Object.entries(sessionStates).filter(([k]) => k !== id));',
+    ].join('\n')
+    expect(findRosterRemovals(embedded)).toEqual([])
   })
 })
