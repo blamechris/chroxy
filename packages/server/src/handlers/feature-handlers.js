@@ -14,7 +14,7 @@ import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError 
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
-import { environmentsForClient, environmentForClient, broadcastEnvironmentList } from '../environments/redact.js'
+import { isBoundClient, broadcastEnvironmentList } from '../environments/authority.js'
 
 const log = createLogger('ws')
 
@@ -275,9 +275,8 @@ function handleCreateEnvironment(ws, client, msg, ctx) {
         name: env.name,
         status: env.status,
       })
-      // #7576: redact the sibling-session roster per recipient — a plain
-      // broadcast would hand every bound listener the roster the list/get gate
-      // strips.
+      // #7596: fan the list to unbound (host) clients only — bound clients are
+      // refused the environment surface, on a push as on a pull.
       broadcastEnvironmentList(ctx.transport.broadcast, ctx.services.environmentManager.list())
     })
     .catch((err) => {
@@ -287,17 +286,29 @@ function handleCreateEnvironment(ws, client, msg, ctx) {
 }
 
 function handleListEnvironments(ws, client, _msg, ctx) {
+  // #7596 authority gate: the environment list is host-level (host paths,
+  // container ids, the #7552 sibling-session roster). A pairing-bound
+  // (share-a-session) token learns nothing host-level — mirrors
+  // `destroy_environment` and the Control Room host surveys, which all refuse
+  // bound clients. Runs FIRST — before the feature-enabled check — so the
+  // refusal is not an existence/feature-state oracle.
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'environment_error',
+      error: 'Pairing-issued session tokens cannot list container environments — this requires a host-level (unbound) client, such as the primary token or the app\'s own device.',
+      code: 'ENVIRONMENT_LIST_FORBIDDEN_BOUND_CLIENT',
+    })
+    return
+  }
+
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_list', environments: [] })
     return
   }
 
-  // #7576: a pairing-bound (share-a-session) token cannot list sibling sessions,
-  // so blank the `sessions` roster on each descriptor for a bound caller. The
-  // env ids/names remain for a legitimate picker.
   ctx.transport.send(ws, {
     type: 'environment_list',
-    environments: environmentsForClient(ctx.services.environmentManager.list(), client),
+    environments: ctx.services.environmentManager.list(),
   })
 }
 
@@ -337,8 +348,10 @@ function handleListEnvironments(ws, client, _msg, ctx) {
  * of sessions it was never entitled to ask about.
  */
 function handleDestroyEnvironment(ws, client, msg, ctx) {
-  // Authority gate (#1): host-level (unbound) clients only.
-  if (client?.boundSessionId) {
+  // Authority gate (#1): host-level (unbound) clients only. #7596 — fail-safe
+  // bound check (isBoundClient) so an empty-string boundSessionId is refused too,
+  // matching list/get and the #4787 canonical `== null` check.
+  if (isBoundClient(client)) {
     loggerForSession('ws', client.boundSessionId).warn(
       `Client ${client.id} (bound to ${client.boundSessionId}) attempted destroy_environment — rejected (bound tokens cannot run host lifecycle actions or destroy sibling sessions)`,
     )
@@ -378,7 +391,7 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
         log.warn(`Force-destroyed environment ${environmentId} with ${destroyedSessions.length} live session(s): ${destroyedSessions.join(', ')}`)
       }
       ctx.transport.send(ws, { type: 'environment_destroyed', environmentId })
-      // #7576: redact the sibling-session roster per recipient (see create).
+      // #7596: fan the list to unbound (host) clients only (see create).
       broadcastEnvironmentList(ctx.transport.broadcast, ctx.services.environmentManager.list())
     })
     .catch((err) => {
@@ -400,6 +413,17 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
 }
 
 function handleGetEnvironment(ws, client, msg, ctx) {
+  // #7596 authority gate (see handleListEnvironments): host-level surface,
+  // refused for bound clients before any lookup so it is not an existence oracle.
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'environment_error',
+      error: 'Pairing-issued session tokens cannot inspect container environments — this requires a host-level (unbound) client, such as the primary token or the app\'s own device.',
+      code: 'ENVIRONMENT_GET_FORBIDDEN_BOUND_CLIENT',
+    })
+    return
+  }
+
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -419,9 +443,7 @@ function handleGetEnvironment(ws, client, msg, ctx) {
     return
   }
 
-  // #7576: blank the `sessions` roster for a pairing-bound (share-a-session)
-  // caller — get() returns the live object, so environmentForClient copies it.
-  ctx.transport.send(ws, { type: 'environment_info', environment: environmentForClient(env, client) })
+  ctx.transport.send(ws, { type: 'environment_info', environment: env })
 }
 
 export const featureHandlers = {

@@ -102,12 +102,10 @@ describe('create_environment handler', () => {
     assert.equal(ctx._sent[0].name, 'test-env')
     assert.ok(ctx._sent[0].environmentId)
 
-    // Should broadcast environment_list. #7576 fans it out as TWO filtered
-    // broadcasts (full roster to unbound clients, redacted to bound), so both
-    // carry type environment_list.
-    assert.equal(ctx._broadcasts.length, 2)
+    // Should broadcast environment_list once. #7596 fans it out to unbound
+    // (host) clients only, so it is a single filtered broadcast.
+    assert.equal(ctx._broadcasts.length, 1)
     assert.equal(ctx._broadcasts[0].type, 'environment_list')
-    assert.equal(ctx._broadcasts[1].type, 'environment_list')
   })
 
   it('rejects when name is missing', () => {
@@ -149,6 +147,16 @@ describe('list_environments handler', () => {
     environmentHandlers.list_environments(createMockWs(), createMockClient(), { type: 'list_environments' }, ctx)
     assert.equal(ctx._sent[0].type, 'environment_list')
     assert.deepEqual(ctx._sent[0].environments, [])
+  })
+
+  it('#7596 refuses a pairing-bound client', () => {
+    const ctx = createMockCtx({ environmentManager: createMockEnvManager() })
+    environmentHandlers.list_environments(
+      createMockWs(), { ...createMockClient(), boundSessionId: 'sess-1', isPrimaryToken: false },
+      { type: 'list_environments' }, ctx
+    )
+    assert.equal(ctx._sent[0].type, 'environment_error')
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_LIST_FORBIDDEN_BOUND_CLIENT')
   })
 })
 
@@ -224,5 +232,17 @@ describe('get_environment handler', () => {
     )
     assert.equal(ctx._sent[0].type, 'environment_error')
     assert.ok(ctx._sent[0].error.includes('not enabled'))
+  })
+
+  it('#7596 refuses a pairing-bound client', () => {
+    const envs = new Map()
+    envs.set('env-info', { id: 'env-info', name: 'info', status: 'running' })
+    const ctx = createMockCtx({ environmentManager: createMockEnvManager({ environments: envs }) })
+    environmentHandlers.get_environment(
+      createMockWs(), { ...createMockClient(), boundSessionId: 'sess-1', isPrimaryToken: false },
+      { type: 'get_environment', environmentId: 'env-info' }, ctx
+    )
+    assert.equal(ctx._sent[0].type, 'environment_error')
+    assert.equal(ctx._sent[0].code, 'ENVIRONMENT_GET_FORBIDDEN_BOUND_CLIENT')
   })
 })
