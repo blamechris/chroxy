@@ -183,9 +183,10 @@ export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionFi
  *
  * ## This roster is the STORE-STATE portion, not all connection-scoped state
  *
- * Connection-scoped state whose home is NOT the store lives in `message-handler.
- * ts` / store-core as module-level trackers — the outgoing message queue, the
- * replay history cursors, the in-flight transcript-fetch tracking, the un-flushed
+ * Connection-scoped state whose home is NOT the store lives in
+ * `message-handler.ts` / store-core as module-level trackers — the outgoing
+ * message queue, the replay history cursors, the in-flight transcript-fetch
+ * tracking, the un-flushed
  * streaming delta buffers, and the batched terminal writes. Those have the same
  * "this connection to this daemon" lifetime as the fields here, but a store
  * spread cannot reach them, so `disconnect()` and `_resetSessionMemory()` clear
