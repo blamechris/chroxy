@@ -5002,6 +5002,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
+            // #5731 T2 / #7546 review — the flat `primaryClientId` (the
+            // presence / "who is driving" badge) is the SAME adjacent-field
+            // bleed as the panels below, one field over: `switchSession`
+            // mirrors it on every active-session change, but this death path
+            // synced the other flat fields without it, so the DEAD session's
+            // owner survived onto the session that became active next. Mirror
+            // switchSession's cached branch exactly — the next session's own
+            // owner.
+            patch.primaryClientId = ss.primaryClientId;
           } else {
             patch.messages = [];
             patch.streamingMessageId = null;
@@ -5013,7 +5022,25 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;
+            // #5731 T2 / #7546 review — no session remains, so clear the flat
+            // owner (switchSession's else branch sets `primaryClientId: null`).
+            patch.primaryClientId = null;
           }
+          // #7546 — the memory-stack + permission-audit panels are FLAT,
+          // per-active-session pulls (#6996 / #6772). `switchSession` resets both
+          // groups on every active-session change so the panel never renders the
+          // PREVIOUS session's data against the new one; the active session
+          // dying here is that same change, so mirror switchSession's reset
+          // values exactly. CONDITIONAL by construction — this branch only runs
+          // when the removed id WAS the active session, so a background-session
+          // prune leaves the panel the user is looking at untouched.
+          patch.permissionAudit = null;
+          patch.permissionAuditLoading = false;
+          patch.permissionAuditError = false;
+          patch.memoryStackEntries = null;
+          patch.memoryStackFile = null;
+          patch.memoryStackError = null;
+          patch.memoryStackLoading = false;
         }
         set(patch);
       }
@@ -6601,6 +6628,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
+            // #5731 T2 / #7546 review — mirror switchSession's cached branch:
+            // the flat `primaryClientId` (presence / "who is driving" badge) is
+            // the same adjacent-field bleed as the panels below. Without this
+            // the timed-out session's owner survived onto the next session.
+            patch.primaryClientId = ss.primaryClientId;
           } else {
             // No sessions remain — clear flat fields
             patch.messages = [];
@@ -6613,7 +6645,24 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;
+            // #5731 T2 / #7546 review — clear the flat owner too (switchSession's
+            // else branch sets `primaryClientId: null`).
+            patch.primaryClientId = null;
           }
+          // #7546 — reset the FLAT memory-stack + permission-audit panels, the
+          // same groups `switchSession` clears on any active-session change
+          // (#6996 / #6772), so a timed-out session's memory stack / permission
+          // history does not bleed onto the session that becomes active next.
+          // CONDITIONAL by construction: only reached when the timed-out id WAS
+          // the active session, so a background-session timeout leaves the
+          // active panel alone. Values mirror switchSession exactly.
+          patch.permissionAudit = null;
+          patch.permissionAuditLoading = false;
+          patch.permissionAuditError = false;
+          patch.memoryStackEntries = null;
+          patch.memoryStackFile = null;
+          patch.memoryStackError = null;
+          patch.memoryStackLoading = false;
         }
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
