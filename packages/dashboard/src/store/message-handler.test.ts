@@ -25,6 +25,7 @@ vi.mock('./persistence', () => ({
 
 import {
   handleMessage,
+  updateSession,
   setStore,
   clearDeltaBuffers,
   clearPermissionSplits,
@@ -4172,6 +4173,141 @@ describe('dashboard message-handler dispatch', () => {
       expect(answeredOf(1)).toBeUndefined()
       expect(answeredOf(2)).toBeUndefined()
       expect(getReplayWindowDepth('s1')).toBe(0)
+    })
+
+    // #7519 — the ORDERING artifact the #7492 interleave left behind, at the wire
+    // level. When the outermost DELTA has already APPENDED before the nested full
+    // start, its entries sit inside the preserved tail; `replayDedupCache` is
+    // scoped at the same baseline, so the full replay's re-delivery of them is
+    // suppressed and they keep their early position while the OLDER history the
+    // full replay delivers lands after them. Nothing lost, transcript mis-ordered.
+    // Measured on the branch point through exactly these frames:
+    // ['h-2','racer','h-1'] where ['h-1','h-2','racer'] is the truth.
+    //
+    // The fix is per-append provenance: `handleMessage` scopes each dispatched
+    // frame (its `historySeq` is the replayed-vs-live discriminator) and
+    // `updateSession` reports every session-messages write, so the swap returns
+    // (replayed, in the server's history order) ++ (live, in arrival order).
+    it('swaps in HISTORY order when the delta appended before the nested full start (#7519)', () => {
+      seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      const entry = (messageId: string, extra: Record<string, unknown> = {}) => ({
+        type: 'message',
+        messageType: 'response',
+        content: messageId,
+        messageId,
+        sessionId: 's1',
+        timestamp: 100,
+        ...extra,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(entry('h-2', { historySeq: 2 }) as any, ctx() as any) // the delta replays the newest entry
+      handleMessage(entry('racer') as any, ctx() as any) // a LIVE broadcast — no historySeq
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(entry('h-1', { historySeq: 1 }) as any, ctx() as any) // full replay, oldest first
+      handleMessage(entry('h-2', { historySeq: 2 }) as any, ctx() as any) // ...re-delivered, deduped
+      // The array really is in the mis-ordered shape before the swap resolves it —
+      // otherwise this passes on a fixture that never took effect.
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual([
+        'old-1',
+        'h-2',
+        'racer',
+        'h-1',
+      ])
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      // Nothing lost, the pre-window prefix gone (so the swap really happened)...
+      expect(msgs.map((m: any) => m.id).slice().sort()).toEqual(['h-1', 'h-2', 'racer'])
+      // ...and in history order, with the live racer after both.
+      expect(msgs.map((m: any) => m.id)).toEqual(['h-1', 'h-2', 'racer'])
+      expect(getReplayWindowDepth('s1')).toBe(0)
+    })
+
+    it('the observation point covers the SHARED dispatch table too, not just `case message` (#7519)', () => {
+      // The hook is on `updateSession`, the one funnel every session-messages
+      // write goes through — including store-core's dispatch table, which reaches
+      // it via the store adapter. Same interleave, but the live racer arrives as a
+      // `user_question` (a different handler in a different package) and is still
+      // classified live and still ordered last.
+      seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      const entry = (messageId: string, extra: Record<string, unknown> = {}) => ({
+        type: 'message',
+        messageType: 'response',
+        content: messageId,
+        messageId,
+        sessionId: 's1',
+        timestamp: 100,
+        ...extra,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(entry('h-2', { historySeq: 2 }) as any, ctx() as any)
+      handleMessage(question({ toolUseId: 'q-live' }) as any, ctx() as any) // LIVE, via the dispatch table
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      handleMessage(entry('h-1', { historySeq: 1 }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      expect(msgs.map((m: any) => m.type)).toEqual(['response', 'response', 'prompt'])
+      expect(msgs.map((m: any) => m.content)).toEqual(['h-1', 'h-2', 'Which approach?'])
+      // ...and the racer is still a racer: the sweep left it alone (#7420).
+      expect(answeredOf(2)).toBeUndefined()
+    })
+
+    // KNOWN LIMIT (#7577), pinned at the wire level in both clients because it
+    // lands on the exact path this family exists to protect: the optimistic bubble
+    // a user types mid-replay.
+    //
+    // `sendMessage` appends the user's bubble AND a `{ id: 'thinking' }`
+    // placeholder in ONE update, and every `message` frame — every replayed
+    // history entry included — STRIPS that placeholder while appending. The next
+    // replayed entry is therefore a remove-then-append, which is neither an append
+    // at the end nor an untouched run, so the provenance record is dropped and the
+    // swap falls back to array order for the rest of the window.
+    //
+    // Nothing is lost, duplicated or moved: the result is byte-for-byte pre-#7519.
+    // This asserts the CURRENT degraded behaviour — a `go red with the docs` pin
+    // rather than a red-first one — and it REACHES red: the naive repair (treat a
+    // single removal plus a single trailing append as remove-then-append) flips
+    // it, measured as mutant 13 in store-core. When #7577 lands, this is the test
+    // that says so.
+    it('KNOWN LIMIT: a user typing mid-replay loses the reorder for that window (#7577)', () => {
+      seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
+      const entry = (messageId: string, extra: Record<string, unknown> = {}) => ({
+        type: 'message',
+        messageType: 'response',
+        content: messageId,
+        messageId,
+        sessionId: 's1',
+        timestamp: 100,
+        ...extra,
+      })
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false }, ctx() as any)
+      handleMessage(entry('h-2', { historySeq: 2 }) as any, ctx() as any)
+      handleMessage(entry('racer') as any, ctx() as any)
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any)
+      // `sendMessage`'s exact optimistic write (connection.ts:3550) — user bubble
+      // AND placeholder, one `updateSession`, which is the funnel the hook is on.
+      updateSession('s1', ((ss: any) => ({
+        messages: [
+          ...ss.messages.filter((m: any) => m.id !== 'thinking'),
+          { id: 'u-1', type: 'user_input', content: 'typed mid-replay', timestamp: 200 },
+          { id: 'thinking', type: 'thinking', content: '', timestamp: 200 },
+        ],
+      })) as any)
+      // The next replayed entry strips the placeholder while appending.
+      handleMessage(entry('h-1', { historySeq: 1 }) as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
+
+      const msgs = (store.getState() as any).sessionStates.s1.messages
+      // Nothing lost, prefix gone — the swap really happened...
+      expect(msgs.map((m: any) => m.id).slice().sort()).toEqual(['h-1', 'h-2', 'racer', 'u-1'])
+      // ...but in ARRAY order, with the oldest history entry last. The truth is
+      // ['h-1','h-2','racer','u-1'], and the control two tests up shows the fix
+      // delivering exactly that when nobody types.
+      expect(msgs.map((m: any) => m.id)).toEqual(['h-2', 'racer', 'u-1', 'h-1'])
     })
 
     // #7524 — the same nested DELTA -> FULL interleave, plus the one extra user
