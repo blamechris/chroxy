@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  isBoundClient,
   redactEnvironmentSessions,
   environmentsForClient,
   environmentForClient,
@@ -22,6 +23,28 @@ function env(id, sessions) {
 }
 
 describe('#7576 environment session-roster redaction', () => {
+  describe('isBoundClient (fail-safe bound check)', () => {
+    it('an unbound host client (boundSessionId null/undefined) is NOT bound', () => {
+      assert.equal(isBoundClient({ id: 'h', isPrimaryToken: true }), false)
+      assert.equal(isBoundClient({ id: 'h', boundSessionId: null }), false)
+      assert.equal(isBoundClient({ id: 'h', boundSessionId: undefined }), false)
+    })
+
+    it('a real session id is bound', () => {
+      assert.equal(isBoundClient({ id: 'b', boundSessionId: 'sess-a' }), true)
+    })
+
+    it('an EMPTY-STRING boundSessionId is bound (fail-safe, Copilot #7595 review)', () => {
+      // A truthy check would misclassify '' as unbound and leak the full roster.
+      assert.equal(isBoundClient({ id: 'b', boundSessionId: '' }), true)
+    })
+
+    it('a nullish client is bound (fails CLOSED)', () => {
+      assert.equal(isBoundClient(null), true)
+      assert.equal(isBoundClient(undefined), true)
+    })
+  })
+
   describe('redactEnvironmentSessions', () => {
     it('blanks the sessions roster on every descriptor', () => {
       const out = redactEnvironmentSessions([env('e1', ['s1', 's2']), env('e2', ['s3'])])
@@ -63,6 +86,11 @@ describe('#7576 environment session-roster redaction', () => {
       const out = environmentsForClient(input, UNBOUND)
       assert.equal(out, input, 'unbound is the fast path — no copy')
       assert.deepEqual(out[0].sessions, ['s1', 's2'])
+    })
+
+    it('redacts for an EMPTY-STRING bound id (does not leak via a truthy hole)', () => {
+      const out = environmentsForClient([env('e1', ['s1', 's2'])], { id: 'b', boundSessionId: '' })
+      assert.deepEqual(out[0].sessions, [])
     })
   })
 
