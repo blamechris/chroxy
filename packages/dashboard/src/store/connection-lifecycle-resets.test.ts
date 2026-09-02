@@ -74,6 +74,8 @@ const { createEmptyConnectionScope } = await import('./utils')
 const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmptyConnectionScope())
 const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags } =
   await import('./message-handler')
+const { resetSchedulerRequestsForTest, hasPendingSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } =
+  await import('./scheduledTaskRequests')
 
 type State = ReturnType<typeof useConnectionStore.getState>
 
@@ -94,6 +96,51 @@ const ELEVEN = [
   'pendingPairRequests',
   'serverStartupLogs',
 ] as const
+
+/**
+ * #7572 — two of the eleven are TRANSIENT in-flight request markers, not records
+ * of the daemon: an `orchestration_run_detail` request whose reply can never
+ * arrive on the dropped socket (a stuck spinner) and a pending mutating action
+ * awaiting an ack that will never come. The socket's `onclose` handler already
+ * clears them on a transport drop (#6691 S-3), but a USER-initiated `disconnect()`
+ * nulls `socket.onclose` first to suppress auto-reconnect, so `onclose` never
+ * runs — and neither `auth_ok`'s non-reconnect branch nor `connect()` touches
+ * them on a same-server Disconnect → Connect. So `disconnect()` clears them with
+ * an explicit `set()` literal in its own payload.
+ */
+const DISCONNECT_CLEARS_VIA_SET = [
+  'orchestrationRunDetailLoading',
+  'orchestrationPendingActions',
+] as const
+
+/**
+ * `scheduledTaskPendingActions` is ALSO emptied by a user `disconnect()`, but by
+ * a DIFFERENT mechanism than the two above: `disconnect()` calls
+ * `failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR)`, which sweeps the
+ * MODULE-LEVEL scheduler registry and fires each armed request's onFail →
+ * `releaseScheduledTaskRequest`, deleting the id from this map (and recording a
+ * failure reason in `scheduledTaskActionResults`). It has no explicit `set()`
+ * literal in `disconnect()`'s payload, so it is verified in its own describe
+ * below — and that describe must ARM the registry, because the sweep early-returns
+ * on an empty registry and a map-only seed would pass VACUOUSLY (#7573 review).
+ */
+const DISCONNECT_DRAINS_VIA_REGISTRY = ['scheduledTaskPendingActions'] as const
+
+const CLEARED_BY_DISCONNECT = new Set<string>([
+  ...DISCONNECT_CLEARS_VIA_SET,
+  ...DISCONNECT_DRAINS_VIA_REGISTRY,
+])
+
+/**
+ * The eight that stay TRUE of the same daemon across a Disconnect → Connect to
+ * the SAME server (records, not in-flight markers) — a credential verdict, a held
+ * run detail and its error/stale flags, the orchestration and scheduler action
+ * RESULTS (terminal outcomes the panel renders), a pairing request the daemon
+ * still has open, the startup log the operator is reading. `disconnect()` never
+ * EMPTIES any of these (the scheduler drain only ADDS a failure result); only the
+ * three in the two sets above are cleared (#7572).
+ */
+const DISCONNECT_PRESERVES = ELEVEN.filter((f) => !CLEARED_BY_DISCONNECT.has(f))
 
 /**
  * #7559's sixteen, quoted from the issue body, plus `infoNotifications` (#7557).
@@ -197,10 +244,11 @@ function resetSlice() {
 
 beforeEach(() => {
   clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
+  resetSchedulerRequestsForTest()
   for (const k of Object.keys(lsStore)) delete lsStore[k]
   resetSlice()
 })
-afterEach(() => { stopHeartbeat(); resetSlice(); vi.restoreAllMocks() })
+afterEach(() => { stopHeartbeat(); resetSlice(); resetSchedulerRequestsForTest(); vi.restoreAllMocks() })
 
 // ---------------------------------------------------------------------------
 // #7557 — the eleven, per field, per full-reset site.
@@ -237,13 +285,30 @@ describe.each([
   })
 })
 
-describe('#7557 the adjudication: the eleven are NOT cleared by disconnect()', () => {
+describe('#7557/#7572 the adjudication: disconnect() clears the in-flight markers, keeps the record fields', () => {
   // Decided per field rather than by analogy, which is what #7557 asked for.
-  // Every one of these is still TRUE of the SAME daemon across a
-  // Disconnect → Connect: a credential verdict, a held run detail, a pairing
+  // EIGHT of the eleven are still TRUE of the SAME daemon across a
+  // Disconnect → Connect: a credential verdict, a held run detail and its
+  // error/stale flags, the orchestration + scheduler action RESULTS, a pairing
   // request the daemon still has open, the startup log the operator is reading
-  // to find out why the daemon died. `disconnect()` is not a server change, so
-  // it is not where they die — the two full-reset sites are.
+  // to find out why the daemon died. `disconnect()` never EMPTIES those, so it
+  // is not where they die — the two full-reset sites are.
+  //
+  // Two of the exceptions are #7572: `orchestrationRunDetailLoading` and
+  // `orchestrationPendingActions` are TRANSIENT in-flight markers (a reply that
+  // can never arrive on the dropped socket), not records of the daemon. The
+  // socket's `onclose` clears them on a transport drop (#6691 S-3), but a USER
+  // disconnect nulls `socket.onclose` first, so `disconnect()` must clear them
+  // itself or a stuck spinner / stale pending-action survives a same-server
+  // reconnect. They are still cleared at BOTH full-reset sites too — the
+  // describe.each above proves that — so this is an ADDITIONAL clear, not a move
+  // out of that set.
+  //
+  // The THIRD field emptied by disconnect(), `scheduledTaskPendingActions`, is
+  // NOT iterated here: it is drained by the scheduler-registry sweep rather than
+  // an explicit `set()` literal, and asserting it here would be VACUOUS because
+  // `seedServerA` seeds the store map without arming the registry the sweep
+  // iterates. Its own describe below arms the registry and proves the drain.
   //
   // serverStartupLogs has a same-server wrinkle worth stating precisely (#7573
   // review, C3): the Tauri `server_error` listener calls disconnect() and THEN
@@ -253,22 +318,121 @@ describe('#7557 the adjudication: the eleven are NOT cleared by disconnect()', (
   // LATER `server_stopped` → disconnect() (no accompanying fetch), which would
   // erase logs already on screen.
   //
-  // This is also the mutant-detector for the opposite mistake: moving the eleven
+  // This is also the mutant-detector for the opposite mistake: moving the NINE
   // into `createEmptyConnectionScope()` (where the #7559 roster lives) would
-  // clear them here and turn every cell in this describe red.
+  // clear them here and turn every PRESERVES cell in this describe red.
   beforeEach(() => { seedServerA({ connectionPhase: 'connected' } as Partial<State>) })
 
-  it.each(ELEVEN)('disconnect() leaves %s alone', (field) => {
+  it('control: the fixture populated all eleven first', () => {
+    // Without this, every "empty afterwards" / "still here afterwards" cell below
+    // passes for free against a fixture that never landed.
+    const unpopulated = ELEVEN.filter((f) => !populated(f))
+    expect(unpopulated, 'the fixture did not populate these, so the cells below prove nothing').toEqual([])
+  })
+
+  it.each(DISCONNECT_PRESERVES)('disconnect() leaves %s alone', (field) => {
     expect(populated(field), 'control: populated before the disconnect').toBe(true)
     useConnectionStore.getState().disconnect()
     expect(populated(field), `${field} is now cleared by disconnect() — re-read the #7557 adjudication`).toBe(true)
   })
 
+  it.each(DISCONNECT_CLEARS_VIA_SET)('disconnect() CLEARS %s (#7572)', (field) => {
+    expect(populated(field), 'control: populated before the disconnect').toBe(true)
+    useConnectionStore.getState().disconnect()
+    expect(
+      isEmptyValue(readField(field)),
+      `${field} survived a USER disconnect() — a stuck orchestration spinner / stale pending-action ` +
+      'persists across a same-server Disconnect → Connect because disconnect() nulls socket.onclose ' +
+      'before the #6691 onclose reset can run (#7572)',
+    ).toBe(true)
+  })
+
   it('POSITIVE CONTROL: the same disconnect() DOES clear a roster member', () => {
-    // Otherwise the cells above would pass against a `disconnect()` that had
-    // stopped clearing anything at all.
+    // Otherwise the CLEARS cells above would pass against a `disconnect()` that
+    // had stopped clearing anything at all.
     useConnectionStore.getState().disconnect()
     expect(useConnectionStore.getState().serverCapabilities).toEqual({})
+  })
+
+  it('POSITIVE CONTROL (#7557): the fix did NOT become a blanket wipe of the eleven', () => {
+    // The counterpart of the CLEARS cells: a representative #7557 RECORD survives
+    // the same disconnect(), so clearing the in-flight markers cannot have
+    // regressed into clearing the eight records that must persist (#7557/#7559).
+    useConnectionStore.getState().disconnect()
+    const s = useConnectionStore.getState()
+    expect(s.orchestrationRunDetails, 'a held run detail is a record and must survive disconnect()')
+      .toEqual({ 'run-a': { detail: { runId: 'run-a', status: 'running' }, seq: 7 } })
+    expect(s.credentialTestResults, 'a credential verdict is a record and must survive disconnect()')
+      .not.toEqual({})
+  })
+})
+
+describe('#7572/#6871 the scheduler drain: disconnect() empties scheduledTaskPendingActions via the registry sweep', () => {
+  // `scheduledTaskPendingActions` is emptied by a user `disconnect()`, but NOT by
+  // an explicit `set()` literal like the two orchestration markers above. It is
+  // DRAINED: `disconnect()` calls `failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR)`
+  // (connection.ts), which sweeps the MODULE-LEVEL scheduler registry and fires
+  // each armed request's onFail → `releaseScheduledTaskRequest`, DELETING the id
+  // from this map and recording a terminal failure reason in
+  // `scheduledTaskActionResults`.
+  //
+  // The sweep EARLY-RETURNS on an empty registry, so seeding the store map alone
+  // — the way `seedServerA` does — makes any "cleared afterwards" assertion
+  // VACUOUS: it would stay green even if the real drain regressed (#7573 review,
+  // finding #2). Every PRODUCTION pending action is armed at the same moment it
+  // is written to the map (`sendScheduledTaskAction` / `setSchedulerEnabled`), so
+  // this drives the REAL sender to re-create that invariant before disconnecting,
+  // rather than hand-seeding an unarmed entry that cannot occur in production.
+  let openSocket: WebSocket
+
+  beforeEach(() => {
+    resetSchedulerRequestsForTest()
+    openSocket = { send: vi.fn(), close: vi.fn(), readyState: 1, onclose: null } as unknown as WebSocket
+    useConnectionStore.setState({
+      connectionPhase: 'connected',
+      socket: openSocket,
+      scheduledTaskPendingActions: {},
+      // A PRE-EXISTING terminal result, to prove the drain ADDS to this map rather
+      // than replacing it (the drain writes results; it must not erase records).
+      scheduledTaskActionResults: { 'req-old': { ok: true, error: null, at: 4 } },
+    } as unknown as Partial<State>)
+  })
+
+  afterEach(() => { resetSchedulerRequestsForTest() })
+
+  it('control: the real sender ARMS the registry and writes the pending action', () => {
+    // Without this the drain cell below is vacuous — it must be draining a genuinely
+    // armed request, not an empty registry.
+    const reqId = useConnectionStore.getState().sendScheduledTaskAction('create', { task: { name: 'nightly' } as never })
+    expect(reqId, 'the real sender rejected the open socket — check the WebSocket.OPEN readyState').toBeTruthy()
+    expect(hasPendingSchedulerRequests(), 'the request was not armed in the scheduler registry').toBe(true)
+    expect(Object.keys(useConnectionStore.getState().scheduledTaskPendingActions)).toEqual([reqId])
+  })
+
+  it('disconnect() drains the ARMED pending action and sweeps the registry (non-vacuous)', () => {
+    const reqId = useConnectionStore.getState().sendScheduledTaskAction('create', { task: { name: 'nightly' } as never })
+    expect(reqId).toBeTruthy()
+    expect(hasPendingSchedulerRequests(), 'armed precondition').toBe(true)
+
+    useConnectionStore.getState().disconnect()
+
+    const s = useConnectionStore.getState()
+    // The pending action is GONE — otherwise it is a "Saving…" row stuck across a
+    // same-server reconnect. This fails RED if disconnect() stops calling
+    // failAllSchedulerRequests: the armed onFail never fires and the entry survives.
+    expect(
+      s.scheduledTaskPendingActions,
+      'the armed scheduler pending action survived disconnect() — the registry sweep did not run',
+    ).toEqual({})
+    // …and the registry itself was swept, so no 30s watchdog fires later.
+    expect(hasPendingSchedulerRequests(), 'the scheduler registry was not swept by disconnect()').toBe(false)
+    // The drain ADDS a terminal failure keyed by the drained requestId…
+    expect(s.scheduledTaskActionResults[reqId!]).toMatchObject({ ok: false, error: SCHEDULER_DISCONNECT_ERROR })
+    // …and does NOT erase the pre-existing record (it adds; it does not clear).
+    expect(
+      s.scheduledTaskActionResults['req-old'],
+      'the drain erased a pre-existing scheduler result — it must only ADD to this map',
+    ).toMatchObject({ ok: true })
   })
 })
 

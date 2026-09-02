@@ -3169,6 +3169,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // from an ALREADY-disconnected tab clears them too. These were sixteen literals
       // here; the reasons for each moved with them into `createEmptyConnectionScope()`.
       ...createEmptyConnectionScope(),
+      // #7572 — the two #6691 (S-3) orchestration in-flight markers. The socket's
+      // `onclose` handler clears these on a transport drop (see ~L2895) because
+      // the reply can never arrive on the dead socket; but a USER-initiated
+      // disconnect nulls `socket.onclose` above to suppress auto-reconnect, so
+      // onclose never runs. Unlike the other nine #7557 collections (records that
+      // stay TRUE of the same daemon across a Disconnect → Connect), these are
+      // transient request markers — a held detail spinner and a pending mutating
+      // action awaiting an ack — so a same-server reconnect must not inherit them.
+      // They remain cleared at both full-reset sites too; this is an additional
+      // clear, not a move out of that set.
+      orchestrationRunDetailLoading: new Set<string>(),
+      orchestrationPendingActions: {},
       pairingRefreshedCount: 0,
       availableModelsProvider: null,
       defaultModelId: null,
