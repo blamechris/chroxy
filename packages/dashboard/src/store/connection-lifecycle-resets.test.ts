@@ -96,6 +96,33 @@ const ELEVEN = [
 ] as const
 
 /**
+ * #7572 — two of the eleven are TRANSIENT in-flight request markers, not records
+ * of the daemon: an `orchestration_run_detail` request whose reply can never
+ * arrive on the dropped socket (a stuck spinner) and a pending mutating action
+ * awaiting an ack that will never come. The socket's `onclose` handler already
+ * clears them on a transport drop (#6691 S-3), but a USER-initiated `disconnect()`
+ * nulls `socket.onclose` first to suppress auto-reconnect, so `onclose` never
+ * runs — and neither `auth_ok`'s non-reconnect branch nor `connect()` touches
+ * them on a same-server Disconnect → Connect. So `disconnect()` must clear them
+ * itself, or the stuck spinner / stale pending-action survives the reconnect.
+ */
+const DISCONNECT_CLEARS = [
+  'orchestrationRunDetailLoading',
+  'orchestrationPendingActions',
+] as const
+
+/**
+ * The nine that stay TRUE of the same daemon across a Disconnect → Connect to the
+ * SAME server (records, not in-flight markers) — a credential verdict, a held run
+ * detail and its error/stale flags, the drained scheduler queue and its results,
+ * a pairing request the daemon still has open, the startup log the operator is
+ * reading. These must SURVIVE `disconnect()`; only the two above move (#7572).
+ */
+const DISCONNECT_PRESERVES = ELEVEN.filter(
+  (f) => !(DISCONNECT_CLEARS as readonly string[]).includes(f),
+)
+
+/**
  * #7559's sixteen, quoted from the issue body, plus `infoNotifications` (#7557).
  * The roster in `utils.ts` is what the fix actually spreads; this list is the
  * independent statement of what it must contain, so a field DELETED from the
@@ -237,13 +264,23 @@ describe.each([
   })
 })
 
-describe('#7557 the adjudication: the eleven are NOT cleared by disconnect()', () => {
+describe('#7557/#7572 the adjudication: disconnect() clears the two in-flight markers, keeps the nine', () => {
   // Decided per field rather than by analogy, which is what #7557 asked for.
-  // Every one of these is still TRUE of the SAME daemon across a
+  // Nine of the eleven are still TRUE of the SAME daemon across a
   // Disconnect → Connect: a credential verdict, a held run detail, a pairing
   // request the daemon still has open, the startup log the operator is reading
   // to find out why the daemon died. `disconnect()` is not a server change, so
-  // it is not where they die — the two full-reset sites are.
+  // it is not where those die — the two full-reset sites are.
+  //
+  // The two exceptions are #7572: `orchestrationRunDetailLoading` and
+  // `orchestrationPendingActions` are TRANSIENT in-flight markers (a reply that
+  // can never arrive on the dropped socket), not records of the daemon. The
+  // socket's `onclose` clears them on a transport drop (#6691 S-3), but a USER
+  // disconnect nulls `socket.onclose` first, so `disconnect()` must clear them
+  // itself or a stuck spinner / stale pending-action survives a same-server
+  // reconnect. They are still cleared at BOTH full-reset sites too — the
+  // describe.each above proves that — so this is an ADDITIONAL clear, not a move
+  // out of that set.
   //
   // serverStartupLogs has a same-server wrinkle worth stating precisely (#7573
   // review, C3): the Tauri `server_error` listener calls disconnect() and THEN
@@ -253,22 +290,52 @@ describe('#7557 the adjudication: the eleven are NOT cleared by disconnect()', (
   // LATER `server_stopped` → disconnect() (no accompanying fetch), which would
   // erase logs already on screen.
   //
-  // This is also the mutant-detector for the opposite mistake: moving the eleven
+  // This is also the mutant-detector for the opposite mistake: moving the NINE
   // into `createEmptyConnectionScope()` (where the #7559 roster lives) would
-  // clear them here and turn every cell in this describe red.
+  // clear them here and turn every PRESERVES cell in this describe red.
   beforeEach(() => { seedServerA({ connectionPhase: 'connected' } as Partial<State>) })
 
-  it.each(ELEVEN)('disconnect() leaves %s alone', (field) => {
+  it('control: the fixture populated all eleven first', () => {
+    // Without this, every "empty afterwards" / "still here afterwards" cell below
+    // passes for free against a fixture that never landed.
+    const unpopulated = ELEVEN.filter((f) => !populated(f))
+    expect(unpopulated, 'the fixture did not populate these, so the cells below prove nothing').toEqual([])
+  })
+
+  it.each(DISCONNECT_PRESERVES)('disconnect() leaves %s alone', (field) => {
     expect(populated(field), 'control: populated before the disconnect').toBe(true)
     useConnectionStore.getState().disconnect()
     expect(populated(field), `${field} is now cleared by disconnect() — re-read the #7557 adjudication`).toBe(true)
   })
 
+  it.each(DISCONNECT_CLEARS)('disconnect() CLEARS %s (#7572)', (field) => {
+    expect(populated(field), 'control: populated before the disconnect').toBe(true)
+    useConnectionStore.getState().disconnect()
+    expect(
+      isEmptyValue(readField(field)),
+      `${field} survived a USER disconnect() — a stuck orchestration spinner / stale pending-action ` +
+      'persists across a same-server Disconnect → Connect because disconnect() nulls socket.onclose ' +
+      'before the #6691 onclose reset can run (#7572)',
+    ).toBe(true)
+  })
+
   it('POSITIVE CONTROL: the same disconnect() DOES clear a roster member', () => {
-    // Otherwise the cells above would pass against a `disconnect()` that had
-    // stopped clearing anything at all.
+    // Otherwise the CLEARS cells above would pass against a `disconnect()` that
+    // had stopped clearing anything at all.
     useConnectionStore.getState().disconnect()
     expect(useConnectionStore.getState().serverCapabilities).toEqual({})
+  })
+
+  it('POSITIVE CONTROL (#7557): the fix did NOT become a blanket wipe of the eleven', () => {
+    // The counterpart of the CLEARS cells: a representative #7557 RECORD survives
+    // the same disconnect(), so clearing the two in-flight markers cannot have
+    // regressed into clearing the nine that must persist (#7557/#7559).
+    useConnectionStore.getState().disconnect()
+    const s = useConnectionStore.getState()
+    expect(s.orchestrationRunDetails, 'a held run detail is a record and must survive disconnect()')
+      .toEqual({ 'run-a': { detail: { runId: 'run-a', status: 'running' }, seq: 7 } })
+    expect(s.credentialTestResults, 'a credential verdict is a record and must survive disconnect()')
+      .not.toEqual({})
   })
 })
 
