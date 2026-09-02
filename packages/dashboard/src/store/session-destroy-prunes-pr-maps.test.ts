@@ -2281,14 +2281,18 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * The fix did NOT touch the phase guard. What that guard protects is the SOCKET
  * teardown — `socket.close()`, the attempt-id bump and the request correlations
  * — which a tab with no socket does not need. It skips MORE than the socket,
- * though: the module-level connection-scoped trackers `disconnect()` also clears
- * — the outgoing MESSAGE QUEUE, the replay CURSORS, the transcript-fetch tracking
- * — were skipped too, so a prompt queued while disconnected survived a server
- * switch and drained onto server B (the same wrong-value class, one indirection
- * over: these are not store fields). That was #7578, now fixed alongside this
- * one: `_resetSessionMemory()` calls `clearMessageQueue()` /
- * `resetReplayReconcile({ clearCursors: true })` / `resetTranscriptFetchTracking()`
- * at its top, mirroring `disconnect()`. The sixteen store-field clears were the
+ * though: the FIVE module-level connection-scoped buffers `disconnect()` also
+ * clears — the outgoing MESSAGE QUEUE, the replay CURSORS, the transcript-fetch
+ * tracking, the un-flushed streaming DELTA buffers and the batched TERMINAL
+ * writes — were skipped too, so a prompt queued while disconnected survived a
+ * server switch and drained onto server B (the same wrong-value class, one
+ * indirection over: these are not store fields). That was #7578, now fixed
+ * alongside this one: `_resetSessionMemory()` calls all five at its top
+ * (`clearMessageQueue()` / `resetReplayReconcile({ clearCursors: true })` /
+ * `resetTranscriptFetchTracking()` / `clearDeltaBuffers()` /
+ * `clearTerminalWriteBatching()`), plus the `transcriptViewer` store slice,
+ * genuinely mirroring `disconnect()` — the hand-kept lockstep that follow-on
+ * #7592 replaces with one shared helper. The sixteen store-field clears were the
  * other part that was wrong to skip, so they moved into
  * `createEmptyConnectionScope()` (`utils.ts`) and are spread by BOTH
  * `disconnect()` and `_resetSessionMemory()`, the action every switch path runs

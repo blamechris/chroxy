@@ -3419,11 +3419,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     // #7578 — the module-level connection-scoped trackers that live in
     // message-handler.ts / store-core, not in the store roster spread below.
-    // `disconnect()` clears all three (~L3124-3141), but `switchServer` /
+    // `disconnect()` clears ALL FIVE (~L3120-3141), but `switchServer` /
     // `connectLocal` run `disconnect()` only `if (connectionPhase !==
     // 'disconnected')`, and a FAILED CONNECT rests at exactly that phase with the
     // previous server's values intact — so a switch made from there reached
-    // `_resetSessionMemory` alone and all three crossed into the next server.
+    // `_resetSessionMemory` alone and every one crossed into the next server.
     //   - The outgoing MESSAGE QUEUE is the filed leak: a prompt queued while
     //     disconnected (input / interrupt / permission_response / …) drained onto
     //     server B, executing one daemon's command against another's session.
@@ -3433,12 +3433,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //   - The in-flight TRANSCRIPT-FETCH tracking, likewise: a stale
     //     conversationId left armed would intercept a later, unrelated
     //     connection's frames (the reason `disconnect()` drops it, #6863).
-    // Cursors stay RETAINED on the reconnect paths — `connectToServer` /
-    // `retryConnection` do NOT run this action — so tunnel-blip delta replay is
-    // unaffected; only the context-SWITCH paths reach here.
+    //   - The DELTA BUFFERS (un-flushed streaming deltas + their latency stamps)
+    //     and the batched TERMINAL WRITES: server A's partial bytes, held on a
+    //     ~tens-of-ms coalescing timer, would otherwise flush into server B's
+    //     session. Narrow, but `disconnect()` tears them down for this exact
+    //     reason and this action must mirror it (#7578 review; helper follow-on
+    //     #7592).
+    // This is the streaming/queue class only. `disconnect()` clears MORE than
+    // these five — the pending-operation revert markers (trust grants, model /
+    // permission-mode / thinking reverts, git one-shots, MCP ops, permission
+    // splits) are the broader in-flight-marker class tracked by #7586, NOT this
+    // one; and `clearPersistedState()` is deliberately NOT mirrored here because
+    // `switchServer` KEEPS the old server's cached data on purpose. (`resetReplay
+    // Flags()` in `disconnect()` is subsumed by the cursor reset above.)
+    // These do NOT propagate to the reconnect paths — `connectToServer` /
+    // `retryConnection` do NOT run this action — so cursors stay retained and
+    // tunnel-blip delta replay is unaffected; only the context-SWITCH paths reach
+    // here. Keeping this set in lockstep with `disconnect()`'s teardown by hand is
+    // what #7592 (extract a shared helper) exists to remove.
     clearMessageQueue();
     resetReplayReconcile({ clearCursors: true });
     resetTranscriptFetchTracking();
+    clearDeltaBuffers();
+    clearTerminalWriteBatching();
     set({
       // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
       // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
@@ -3565,12 +3582,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // a switch made from there ran this action alone and all seventeen survived
       // into the next server's UI. Spreading the roster here is what makes the
       // clear unconditional on the switch paths; the phase guard is left alone,
-      // because what it protects is the SOCKET teardown, not this. The one
-      // exception the #7573 review (C1) named — the outgoing message queue, ALSO
-      // skipped on a socketless tab — is now cleared at the top of this action
-      // (#7578), together with the replay cursors and the transcript-fetch
-      // tracking that leak the same way; so the switch path now mirrors
-      // `disconnect()`'s teardown for everything the guard skips.
+      // because what it protects is the SOCKET teardown, not this. The module-
+      // level buffers the guard ALSO skipped on a socketless tab — the outgoing
+      // message queue (the #7573 review's C1), the replay cursors, the
+      // transcript-fetch tracking, the delta buffers and the batched terminal
+      // writes — are now all cleared at the top of this action (#7578), and the
+      // transcript-viewer store slice below it; so the switch path now mirrors
+      // `disconnect()`'s teardown for everything the guard skips. Keeping those
+      // two lists in lockstep by hand is what follow-on #7592 removes.
       ...createEmptyConnectionScope(),
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it

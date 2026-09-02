@@ -80,6 +80,12 @@ const {
   enqueueMessage, clearMessageQueue, _testQueueInternals,
   resetTranscriptFetchTracking, beginTranscriptFetch, endTranscriptFetch,
 } = await import('./message-handler')
+// #7578 fold — the namespace, so `vi.spyOn(mh, 'clearDeltaBuffers')` intercepts
+// the call `connection.ts` makes through the SAME live module binding (verified:
+// a spy set here is observed by `disconnect()` / `_resetSessionMemory`). Used for
+// the delta buffers, which expose no state getter; the terminal buffer is
+// observed by its flush effect instead.
+const mh = await import('./message-handler')
 // Cursors live in store-core; `resetReplayReconcile` is shared by both clients.
 const { recordHistorySeq, getHistoryCursors, resetReplayReconcile } =
   await import('@chroxy/store-core')
@@ -590,6 +596,8 @@ describe.each([
     clearMessageQueue()
     resetReplayReconcile({ clearCursors: true })
     resetTranscriptFetchTracking()
+    clearDeltaBuffers()
+    mh.clearTerminalWriteBatching()
   })
 
   it('control: the trackers really are populated as server A before the switch', () => {
@@ -656,6 +664,47 @@ describe.each([
       "server A's open transcript stayed on screen after a switch made from the disconnected " +
         "phase — its conversationId is meaningless on server B (#7578)",
     ).toEqual({ conversationId: null, status: 'idle', messages: [], error: null })
+  })
+
+  it('the un-flushed streaming DELTA buffers are torn down on the switch (#7578)', () => {
+    // No state getter is exported for `deltaFlusher.pendingDeltas` /
+    // `_deltaServerTs`, so observe the teardown the way the module allows: spy
+    // the exact function `disconnect()` uses (call-through), and assert the
+    // switch invokes it. Installed AFTER the top-level beforeEach's own
+    // `clearDeltaBuffers()`, so the pre-run count is a true zero.
+    const spy = vi.spyOn(mh, 'clearDeltaBuffers')
+    expect(spy, 'control: not called before the switch').not.toHaveBeenCalled()
+    run(serverBId)
+    expect(
+      spy,
+      "server A's un-flushed streaming deltas were not torn down on the switch — they could flush " +
+        'into server B (#7578)',
+    ).toHaveBeenCalled()
+  })
+
+  it("server A's batched TERMINAL writes do not flush into server B (#7578)", () => {
+    // The observable proof: `clearTerminalWriteBatching()` drops the buffered
+    // bytes AND the ~50ms coalescing timer. Seed server A's partial bytes, run
+    // the switch, then let the timer fire — a flush would deliver them through
+    // `_terminalWriteCallback` (which `_resetSessionMemory` does NOT null, so it
+    // survives the switch and the observation is real, not masked).
+    vi.useFakeTimers()
+    try {
+      const flushed: string[] = []
+      useConnectionStore.setState({
+        _terminalWriteCallback: (d: string) => { flushed.push(d) },
+      } as unknown as Partial<State>)
+      mh.appendPendingTerminalWrite('server A partial terminal bytes')
+      run(serverBId)
+      vi.advanceTimersByTime(200) // well past the 50ms window
+      expect(
+        flushed,
+        "server A's batched terminal bytes flushed after the switch — they would land in server " +
+          "B's terminal (#7578)",
+      ).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('POSITIVE CONTROL: the switch from a CONNECTED tab still clears the trackers (the path disconnect() covered)', () => {
