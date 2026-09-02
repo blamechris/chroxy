@@ -1882,7 +1882,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the live EnvironmentManager set before any exec. The row's previous inline
   // result is dropped so a stale outcome can't sit next to the pending state.
   // Destroy confirmation lives in the UI — this just sends.
-  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy'): boolean => {
+  // #7568: `force` (destroy only) cascades — tear the live sessions down first,
+  // then destroy the environment (the #7562 server policy). Only the Containers
+  // row's live-session escalation sets it; the plain destroy sends NO `force`
+  // field, so the initial destroy still hits the refusal and the operator makes
+  // an explicit choice.
+  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy', force = false): boolean => {
     const { socket } = get();
     if (!environmentId) return false;
     if (action !== 'stop' && action !== 'restart' && action !== 'destroy') return false;
@@ -1893,7 +1898,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const results = { ...get().containerActionResults };
     delete results[environmentId];
     set({ containerActioningIds: pending, containerActionResults: results });
-    wsSend(socket, { type: 'containers_action', action, environmentId, requestId });
+    const msg: Record<string, unknown> = { type: 'containers_action', action, environmentId, requestId };
+    if (force && action === 'destroy') msg.force = true;
+    wsSend(socket, msg);
     return true;
   },
 
@@ -5336,10 +5343,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  destroyEnvironment: (environmentId: string) => {
+  // #7568: `force` cascades — destroy the live sessions attached to this
+  // environment, then the environment (the #7562 server policy). Only the
+  // explicit force path (the EnvironmentPanel's live-session confirm) sets it;
+  // the plain destroy sends NO `force` field, so an accidental caller cannot
+  // wipe out running sessions.
+  destroyEnvironment: (environmentId: string, force = false) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'destroy_environment', environmentId });
+      const msg: Record<string, unknown> = { type: 'destroy_environment', environmentId };
+      if (force) msg.force = true;
+      wsSend(socket, msg);
     }
   },
 

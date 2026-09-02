@@ -292,6 +292,59 @@ describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
     expect(err.textContent).toContain('docker stop failed')
     expect(err.getAttribute('role')).toBe('alert')
   })
+
+  describe('live-session force-destroy escalation (#7568)', () => {
+    const refusal = {
+      'env-1': {
+        action: 'destroy',
+        status: null,
+        error: 'Environment "web" has 1 live session(s) running (sess-a).',
+        liveSessions: true,
+        at: 1,
+      },
+    }
+
+    it('a live-session destroy refusal offers a Force destroy button', () => {
+      renderWith({ actionResults: refusal })
+      expect(screen.getByTestId('container-force-destroy-env-1')).toBeTruthy()
+    })
+
+    it('an ordinary failure does NOT offer Force destroy (negative control)', () => {
+      // Without liveSessions, a plain destroy failure must not surface the
+      // cascade — otherwise the escalation would appear for every docker error.
+      renderWith({
+        actionResults: { 'env-1': { action: 'destroy', status: null, error: 'permission denied', liveSessions: false, at: 1 } },
+      })
+      expect(screen.queryByTestId('container-force-destroy-env-1')).toBeNull()
+    })
+
+    it('Force destroy opens a confirm and only then dispatches destroy with force:true', () => {
+      const onAction = renderWith({ actionResults: refusal })
+      fireEvent.click(screen.getByTestId('container-force-destroy-env-1'))
+      // Confirm dialog is shown; nothing dispatched yet.
+      expect(screen.getByTestId('confirm-dialog')).toBeTruthy()
+      expect(onAction).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+      expect(onAction).toHaveBeenCalledWith('env-1', 'destroy', true)
+    })
+
+    it('cancelling the force confirm dispatches nothing', () => {
+      const onAction = renderWith({ actionResults: refusal })
+      fireEvent.click(screen.getByTestId('container-force-destroy-env-1'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-cancel'))
+      expect(onAction).not.toHaveBeenCalled()
+      expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+    })
+
+    it('the plain Destroy confirm still dispatches WITHOUT force (negative control)', () => {
+      const onAction = renderWith()
+      fireEvent.click(screen.getByTestId('container-destroy-env-1'))
+      fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+      // Exactly ('env-1', 'destroy') — no third force argument.
+      expect(onAction).toHaveBeenCalledTimes(1)
+      expect(onAction.mock.calls[0]).toEqual(['env-1', 'destroy'])
+    })
+  })
 })
 
 describe('ContainersStatusSection — environment management (#6141)', () => {

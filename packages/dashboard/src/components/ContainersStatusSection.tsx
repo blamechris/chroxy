@@ -148,12 +148,15 @@ function ContainerActionsCell({
   result,
   connected,
   onAction,
+  onForceDestroy,
 }: {
   container: ContainerEntry
   pending: boolean
   result: ContainerActionResult | undefined
   connected: boolean
   onAction: (action: ContainerAction) => void
+  /** #7568: open the force-destroy escalation for this row (live-session refusal). */
+  onForceDestroy: () => void
 }) {
   const lifecycleSupported = Boolean(container.containerId) && !container.composeProject
   const isRunning = container.status === 'running'
@@ -202,9 +205,28 @@ function ContainerActionsCell({
         </span>
       ) : result ? (
         result.error ? (
-          <span className="cr-bad" data-testid={`container-action-error-${container.id}`} role="alert">
-            {result.error}
-          </span>
+          // #7568: the #7562 live-session destroy refusal is recoverable — the
+          // operator can cascade past it. Surface the reason AND a "Force
+          // destroy" escalation; every other failure stays a plain error.
+          result.liveSessions ? (
+            <span className="cr-bad" data-testid={`container-action-error-${container.id}`} role="alert">
+              {result.error}{' '}
+              <button
+                type="button"
+                className="cr-action cr-action-danger cr-action-force"
+                data-testid={`container-force-destroy-${container.id}`}
+                disabled={!connected || pending}
+                onClick={onForceDestroy}
+                title="Destroy the live sessions too, then the environment"
+              >
+                Force destroy
+              </button>
+            </span>
+          ) : (
+            <span className="cr-bad" data-testid={`container-action-error-${container.id}`} role="alert">
+              {result.error}
+            </span>
+          )
         ) : (
           <span className="cr-ok" data-testid={`container-action-ok-${container.id}`}>
             {actionResultLabel(result)}
@@ -221,12 +243,14 @@ function ContainerRow({
   result,
   connected,
   onAction,
+  onForceDestroy,
 }: {
   container: ContainerEntry
   pending: boolean
   result: ContainerActionResult | undefined
   connected: boolean
   onAction: (environmentId: string, action: ContainerAction) => void
+  onForceDestroy: (environmentId: string) => void
 }) {
   return (
     <tr data-testid={`container-row-${container.id}`}>
@@ -251,6 +275,7 @@ function ContainerRow({
         result={result}
         connected={connected}
         onAction={(action) => onAction(container.id, action)}
+        onForceDestroy={() => onForceDestroy(container.id)}
       />
     </tr>
   )
@@ -282,12 +307,14 @@ function CwdGroupRows({
   actionResults,
   connected,
   onAction,
+  onForceDestroy,
 }: {
   group: CwdGroup
   actioningIds: Set<string>
   actionResults: Record<string, ContainerActionResult>
   connected: boolean
   onAction: (environmentId: string, action: ContainerAction) => void
+  onForceDestroy: (environmentId: string) => void
 }) {
   return (
     <>
@@ -305,6 +332,7 @@ function CwdGroupRows({
           result={actionResults[c.id]}
           connected={connected}
           onAction={onAction}
+          onForceDestroy={onForceDestroy}
         />
       ))}
     </>
@@ -327,9 +355,11 @@ export interface ContainersStatusSectionProps {
   /**
    * Dispatch a container lifecycle action. Defaults to the store's
    * sendContainersAction. Destroy is always routed through the confirmation
-   * dialog before this is called.
+   * dialog before this is called. #7568: the optional `force` (destroy only)
+   * escalates past the live-session refusal — set only by the force-destroy
+   * confirm, never the plain destroy.
    */
-  onAction?: (environmentId: string, action: ContainerAction) => void
+  onAction?: (environmentId: string, action: ContainerAction, force?: boolean) => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
   now?: () => number
 }
@@ -364,6 +394,12 @@ export function ContainersStatusSection({
   // never straight to onAction. Holds the container awaiting confirmation
   // (null = dialog closed). Stop/Restart dispatch immediately.
   const [confirmDestroy, setConfirmDestroy] = useState<ContainerEntry | null>(null)
+  // #7568: the live-session force-destroy escalation. When the server refuses a
+  // destroy with `reason: 'live-sessions'`, the row shows a "Force destroy"
+  // button; clicking it opens THIS confirm (separate from the plain one so the
+  // heavier cascade gets its own explicit acknowledgement). onConfirm sends
+  // destroy with force:true.
+  const [confirmForceDestroy, setConfirmForceDestroy] = useState<ContainerEntry | null>(null)
   // #6141 (epic #5530): the converged deep-management view. The standalone
   // "Envs" view-tab is gone — environment create/list/destroy now lives here,
   // behind a disclosure so the read-only survey above stays the overview.
@@ -375,6 +411,10 @@ export function ContainersStatusSection({
       return
     }
     onAction(environmentId, action)
+  }
+  const handleForceDestroy = (environmentId: string) => {
+    const target = snapshot?.containers.find((c) => c.id === environmentId) ?? null
+    setConfirmForceDestroy(target)
   }
 
   const refreshDisabled = loading || !connected
@@ -492,6 +532,7 @@ export function ContainersStatusSection({
                       actionResults={actionResults}
                       connected={connected}
                       onAction={handleRowAction}
+                      onForceDestroy={handleForceDestroy}
                     />
                   ))
                 )}
@@ -539,6 +580,32 @@ export function ContainersStatusSection({
           setConfirmDestroy(null)
         }}
         onCancel={() => setConfirmDestroy(null)}
+      />
+
+      {/* #7568: the live-session force-destroy escalation dialog. Distinct from
+          the plain confirm above; only this path passes force:true (cascade). */}
+      <ConfirmDialog
+        open={confirmForceDestroy !== null}
+        title="Force destroy environment?"
+        danger
+        confirmLabel="Force destroy"
+        message={
+          confirmForceDestroy ? (
+            <>
+              <b>{confirmForceDestroy.name || confirmForceDestroy.id}</b> still has{' '}
+              {confirmForceDestroy.sessionCount > 0
+                ? `${confirmForceDestroy.sessionCount} live session${confirmForceDestroy.sessionCount === 1 ? '' : 's'}`
+                : 'live sessions'}{' '}
+              running inside it. Force destroy ends {confirmForceDestroy.sessionCount === 1 ? 'it' : 'them'} first, then
+              removes the container. Any unsaved work in {confirmForceDestroy.sessionCount === 1 ? 'that session' : 'those sessions'} is lost.
+            </>
+          ) : null
+        }
+        onConfirm={() => {
+          if (confirmForceDestroy) onAction(confirmForceDestroy.id, 'destroy', true)
+          setConfirmForceDestroy(null)
+        }}
+        onCancel={() => setConfirmForceDestroy(null)}
       />
     </div>
   )

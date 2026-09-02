@@ -3911,7 +3911,7 @@ function resolveContainerAction(
   get: MsgGet,
   set: MsgSet,
   environmentId: string,
-  result: { action: string; status: string | null; error: string | null },
+  result: { action: string; status: string | null; error: string | null; liveSessions?: boolean },
 ): void {
   const pending = new Set(get().containerActioningIds);
   pending.delete(environmentId);
@@ -5363,10 +5363,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // (and action) — clear that row's pending state and surface the reason
         // inline (the generic branch below still raises the toast, matching the
         // INTEGRATION_ACTION_FAILED precedent). status is null on failure.
+        //
+        // #7568: the #7562 live-session destroy refusal carries `reason:
+        // 'live-sessions'` (LIVE_SESSIONS_REASON on the server). Record it on
+        // the result so the Containers row can offer the `force` escalation
+        // instead of a dead-end error — distinct from an operational
+        // destroy-failed, which stays a plain error.
         resolveContainerAction(get, set, msg.environmentId, {
           action: typeof msg.action === 'string' ? msg.action : '',
           status: null,
           error: parsed.message || 'Container action failed.',
+          liveSessions: msg.reason === 'live-sessions',
         });
       } else if (parsed.code === 'BYOK_POOL_ACTION_FAILED' && typeof msg.action === 'string') {
         // #6135: a failed byok_pool_action echoes the exact action (+ key for
@@ -6685,8 +6692,47 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Handled implicitly via the environment_list broadcast that follows
       break;
     case 'environment_error': {
-      const { error } = sharedEnvironmentError(msg);
-      console.error('[ws] Environment error:', error);
+      // #7568: surface the failure to the operator instead of only logging it.
+      // Before this, `environment_error` was a bare `console.error` — an
+      // environment op that failed (image not allowed, destroy refused, backend
+      // error) was invisible in the UI, so the operator saw nothing and could
+      // not escalate.
+      const { error, code, sessions } = sharedEnvironmentError(msg);
+      const isLiveSessions = code === 'ENVIRONMENT_HAS_LIVE_SESSIONS';
+      // #7568 review: the live-sessions destroy refusal is a WARNING — the guard
+      // did its job and nothing broke — so log it at warn level to match the UI
+      // severity and keep error-level telemetry for real failures.
+      (isLiveSessions ? console.warn : console.error)('[ws] Environment error:', error);
+      if (isLiveSessions) {
+        // #7562/#7568: the live-session destroy refusal is the actionable case.
+        // NAME the sessions still running inside the environment so the operator
+        // knows what the `force` escalation (offered in the EnvironmentPanel /
+        // Containers destroy affordance) would tear down. A warning, not a red
+        // error: the guard did its job, nothing broke, and the destroy simply
+        // did not happen. The server's `error` message already lists the ids in
+        // prose; the explicit `sessions` line is a belt-and-braces surface for a
+        // future server that trims the prose.
+        const ids = sessions ?? [];
+        const namedLine =
+          ids.length > 0
+            ? ` Live session${ids.length === 1 ? '' : 's'}: ${ids.join(', ')}.`
+            : '';
+        get().addServerError(
+          (error || 'This environment still has live sessions and was not destroyed.') + namedLine,
+          undefined,
+          'warning',
+        );
+      } else if (error || code) {
+        // Every other environment failure (validation, image allowlist, backend
+        // error) surfaces as a normal red error toast. Fall back to the `code`
+        // when the server sends a coded refusal with NO prose `error`, so the
+        // "surface instead of only log" intent holds for every shape — a
+        // coded-but-messageless error must not silently vanish the way the
+        // pre-#7568 console.error did (#7568 review). A truly empty payload (no
+        // error AND no code — a malformed message with nothing to show) still
+        // only logs.
+        get().addServerError(error || `Environment operation failed (${code}).`);
+      }
       break;
     }
 

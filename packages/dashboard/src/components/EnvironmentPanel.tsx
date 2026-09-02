@@ -25,9 +25,15 @@ function EnvironmentCard({
   onDestroy,
 }: {
   env: EnvironmentInfo
-  onDestroy: (id: string) => void
+  /**
+   * #7568: `force` cascades — the plain path (`force` omitted) sends a normal
+   * destroy that the server refuses when sessions are live; only the
+   * live-session confirm below passes `force: true`.
+   */
+  onDestroy: (id: string, force?: boolean) => void
 }) {
   const [confirming, setConfirming] = useState(false)
+  const liveSessions = env.sessions.length > 0
 
   return (
     <div className="env-card">
@@ -61,14 +67,34 @@ function EnvironmentCard({
       </div>
       <div className="env-card-actions">
         {!confirming ? (
+          // #7568: no longer flatly disabled while sessions are live (the old
+          // `disabled={env.sessions.length > 0}` was a dead end — the operator
+          // could not escalate, and the server refuses the send anyway). Destroy
+          // now always opens a confirm; the live-session branch offers the
+          // `force` cascade.
           <button
             className="btn-env-destroy"
             onClick={() => setConfirming(true)}
-            disabled={env.sessions.length > 0}
-            title={env.sessions.length > 0 ? 'Disconnect all sessions first' : 'Destroy environment'}
+            title={liveSessions ? 'Destroy — will prompt to force-close live sessions' : 'Destroy environment'}
           >
             Destroy
           </button>
+        ) : liveSessions ? (
+          // Live-session refusal path: NAME the sessions and offer the cascade.
+          <div className="env-confirm-row" data-testid={`env-force-confirm-${env.id}`}>
+            <span>
+              {env.sessions.length} live session{env.sessions.length === 1 ? '' : 's'} running
+              {' '}({env.sessions.join(', ')}). Force destroy will end {env.sessions.length === 1 ? 'it' : 'them'} first.
+            </span>
+            <button
+              className="btn-env-force"
+              data-testid={`env-force-destroy-${env.id}`}
+              onClick={() => { onDestroy(env.id, true); setConfirming(false) }}
+            >
+              Force destroy
+            </button>
+            <button className="btn-env-confirm-no" onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
         ) : (
           <div className="env-confirm-row">
             <span>Destroy this environment?</span>

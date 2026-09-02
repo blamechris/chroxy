@@ -801,6 +801,14 @@ export interface ContainerActionResult {
   action: string;
   status: string | null;
   error: string | null;
+  /**
+   * #7568: true when this failure is the #7562 live-session destroy refusal
+   * (`session_error` CONTAINER_ACTION_FAILED with `reason: 'live-sessions'`).
+   * The Containers row reads it to offer the `force` escalation instead of a
+   * dead-end error; undefined/false for every other outcome (success, or an
+   * operational destroy/stop/restart failure).
+   */
+  liveSessions?: boolean;
   at: number;
 }
 
@@ -2394,7 +2402,10 @@ export interface ConnectionState {
   // (or an empty environmentId / unknown action) returns false without
   // queuing, so the row can't strand mid-action. Destroy confirmation is the
   // caller's responsibility (the UI gates it behind a ConfirmDialog).
-  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy') => boolean;
+  // #7568: `force` (destroy only) escalates past the #7562 live-session
+  // refusal — cascade-destroy the attached sessions, then the environment.
+  // Only the Containers row's live-session escalation passes it.
+  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy', force?: boolean) => boolean;
 
   // #6135 slice 3 (epic #5530): run a BYOK pool mutating action. The pool is a
   // single process-wide singleton, so the actions differ by shape:
@@ -2589,7 +2600,11 @@ export interface ConnectionState {
   // Environment actions
   requestEnvironments: () => void;
   createEnvironment: (opts: { name: string; cwd: string; image?: string; memoryLimit?: string; cpuLimit?: string }) => void;
-  destroyEnvironment: (environmentId: string) => void;
+  // #7568: `force` cascades past the #7562 live-session destroy refusal —
+  // destroy the attached sessions, then the environment. Only the
+  // EnvironmentPanel's live-session confirm passes it; the plain destroy omits
+  // it so an accidental caller cannot wipe out running sessions.
+  destroyEnvironment: (environmentId: string, force?: boolean) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

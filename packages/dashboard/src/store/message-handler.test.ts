@@ -95,6 +95,9 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
   // an actionable INVALID_AUTHOR toast carries a label + click handler.
   // Existing tests still read `serverErrors` as the message-string list.
   const serverErrorActions: Array<unknown> = []
+  // #7568: capture the optional `severity` arg so the environment_error test
+  // can assert the live-session refusal surfaces as a 'warning', not a red error.
+  const serverErrorSeverities: Array<unknown> = []
   // #4878: capture info-level notifications (addInfoNotification) so the
   // session_stopped dispatch test can assert the toast text without
   // having to wire the full Zustand store.
@@ -149,9 +152,10 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     slashCommands: [],
     connectedClients: [],
     serverErrors,
-    addServerError: (e: unknown, action?: unknown) => {
+    addServerError: (e: unknown, action?: unknown, severity?: unknown) => {
       serverErrors.push(e)
       serverErrorActions.push(action)
+      serverErrorSeverities.push(severity)
     },
     addInfoNotification: (e: unknown) => {
       infoNotifications.push(e)
@@ -179,6 +183,7 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     _terminalWrites: terminalWrites,
     _terminalSizeCalls: terminalSizeCalls,
     _serverErrorActions: serverErrorActions,
+    _serverErrorSeverities: serverErrorSeverities,
     _infoNotifications: infoNotifications,
     _grantCalls: grantCalls,
     _sessionNotFoundCalls: sessionNotFoundCalls,
@@ -519,6 +524,73 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: Infinity, rows: 24 }, ctx() as any)
       handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 80.5, rows: 24 }, ctx() as any)
       expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
+  })
+
+  describe('environment_error dispatch (#7568)', () => {
+    it('surfaces the live-session destroy refusal as a warning naming the sessions', () => {
+      // The exact server wire shape from feature-handlers.js handleDestroyEnvironment.
+      handleMessage(
+        {
+          type: 'environment_error',
+          environmentId: 'env-1',
+          error: 'Environment "my-project" has 2 live session(s) running in it (sess-a, sess-b). Destroying the container would kill them.',
+          code: 'ENVIRONMENT_HAS_LIVE_SESSIONS',
+          sessions: ['sess-a', 'sess-b'],
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toHaveLength(1)
+      const surfaced = state.serverErrors[0] as string
+      // Names the sessions (both from the server prose AND the explicit line).
+      expect(surfaced).toContain('sess-a')
+      expect(surfaced).toContain('sess-b')
+      // Non-destructive register — a policy notice, not a red error.
+      expect(state._serverErrorSeverities[0]).toBe('warning')
+    })
+
+    it('appends the explicit session line even if a future server trims the prose', () => {
+      handleMessage(
+        {
+          type: 'environment_error',
+          environmentId: 'env-1',
+          error: 'Cannot destroy: sessions attached.',
+          code: 'ENVIRONMENT_HAS_LIVE_SESSIONS',
+          sessions: ['abc123'],
+        },
+        ctx() as any,
+      )
+      const surfaced = (store.getState() as any).serverErrors[0] as string
+      expect(surfaced).toContain('Live session: abc123.')
+    })
+
+    it('surfaces a non-live-session environment error as a plain red error', () => {
+      handleMessage(
+        { type: 'environment_error', error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED' },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toEqual(['image not allowed'])
+      // Default severity (undefined → red), NOT the warning register.
+      expect(state._serverErrorSeverities[0]).toBeUndefined()
+    })
+
+    it('does not surface a toast when there is no error string and no code', () => {
+      handleMessage({ type: 'environment_error' }, ctx() as any)
+      expect((store.getState() as any).serverErrors).toHaveLength(0)
+    })
+
+    it('surfaces a coded error even when the server sends no prose message (#7568 review)', () => {
+      // A coded refusal with no `error` string must NOT vanish into console.error
+      // the way the pre-#7568 handler let it — that is the exact invisibility this
+      // feature closes. Fall back to the code so the operator sees something.
+      handleMessage({ type: 'environment_error', code: 'DOCKER_IMAGE_NOT_ALLOWED' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.serverErrors).toHaveLength(1)
+      expect(state.serverErrors[0]).toContain('DOCKER_IMAGE_NOT_ALLOWED')
+      // Not the live-sessions warning register — a plain red error.
+      expect(state._serverErrorSeverities[0]).toBeUndefined()
     })
   })
 

@@ -1,19 +1,19 @@
 /**
- * EnvironmentPanel — the Destroy guard (#7552).
+ * EnvironmentPanel — the Destroy affordance: live-session escalation (#7568,
+ * building on the #7552 count + the #7562 server refusal).
  *
- * `EnvironmentPanel` renders `{env.sessions.length} connected` and gates its
- * Destroy button on `disabled={env.sessions.length > 0}` with the tooltip
- * "Disconnect all sessions first". Before #7552 nothing on the server ever put
- * a session id into `EnvironmentInfo.sessions`, so that gate could never engage:
- * an environment was ALWAYS destroyable, including out from under the live
- * sessions running inside it — docs/false-safety-guards.md's class ("a
- * precondition that is false, so the body never runs") rendered as UI.
+ * #7552 first wired `{env.sessions.length} connected` and flatly DISABLED the
+ * Destroy button while sessions were live ("Disconnect all sessions first").
+ * That was a dead end: the operator could see there were sessions but had no
+ * way to act, and the server refuses the send regardless (#7562). #7568
+ * replaces the flat disable with an escalation — Destroy is always clickable,
+ * and the live-session branch NAMES the attached sessions and offers a "Force
+ * destroy" that cascades (`destroyEnvironment(id, true)`).
  *
- * The server half is fixed and pinned in
- * packages/server/tests/environment-session-wiring.test.js. This file pins the
- * UI half against the SERVER-SHAPED payload, so the guard cannot be quietly
- * neutered from the dashboard side either — e.g. by dropping the `disabled`
- * prop, or by rendering a hardcoded count.
+ * This file pins the UI half against the SERVER-SHAPED payload (so the count
+ * cannot be neutered to a hardcode), and — critically — that ONLY the force
+ * path sends `force: true`; the empty-env plain path sends none. The server
+ * half is pinned in packages/server/tests/environment-destroy-live-sessions.test.js.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
@@ -76,21 +76,37 @@ beforeEach(() => {
   environments = []
 })
 
-describe('EnvironmentPanel Destroy guard (#7552)', () => {
-  it('an environment with a LIVE session cannot be destroyed', () => {
-    environments = [serverEnv(['4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a88'])]
+describe('EnvironmentPanel Destroy escalation (#7568)', () => {
+  it('a LIVE-session environment offers a force-destroy naming the sessions', () => {
+    const sessId = '4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a88'
+    environments = [serverEnv([sessId])]
     render(<EnvironmentPanel />)
 
     const destroy = screen.getByRole('button', { name: 'Destroy' })
-    expect(destroy).toBeDisabled()
-    expect(destroy).toHaveAttribute('title', 'Disconnect all sessions first')
+    // #7568: no longer flatly disabled — the operator can escalate.
+    expect(destroy).toBeEnabled()
     expect(screen.getByText('1 connected')).toBeInTheDocument()
 
-    // The gate is real, not just an attribute: clicking must not open the
-    // confirm row that leads to `destroyEnvironment`.
+    // Clicking opens the live-session confirm — NOT the plain one — and names
+    // the session so the operator knows what force would tear down.
     fireEvent.click(destroy)
     expect(screen.queryByText('Destroy this environment?')).not.toBeInTheDocument()
+    expect(screen.getByTestId('env-force-confirm-env-1')).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(sessId))).toBeInTheDocument()
+    // Nothing sent until the operator confirms the cascade.
     expect(destroyEnvironment).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Force destroy' }))
+    expect(destroyEnvironment).toHaveBeenCalledWith('env-1', true)
+  })
+
+  it('cancelling the force confirm sends nothing', () => {
+    environments = [serverEnv(['sess-a'])]
+    render(<EnvironmentPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Destroy' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(destroyEnvironment).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
   })
 
   it('the count is the real length, not a boolean or a hardcode', () => {
@@ -99,10 +115,11 @@ describe('EnvironmentPanel Destroy guard (#7552)', () => {
     expect(screen.getByText('3 connected')).toBeInTheDocument()
   })
 
-  it('an EMPTY environment is destroyable — the negative control', () => {
-    // Without this, every assertion above would still pass on a build that
-    // disabled Destroy unconditionally, which is a different bug wearing the
-    // same green ("a check that denies everything").
+  it('an EMPTY environment destroys WITHOUT force — the negative control', () => {
+    // The critical assertion: the plain path must NOT pass force:true. Without
+    // this, a build that sent force unconditionally would still pass the
+    // live-session test above (the "check that denies everything" inverse —
+    // here, a force that escalates everything).
     environments = [serverEnv([])]
     render(<EnvironmentPanel />)
 
@@ -112,7 +129,13 @@ describe('EnvironmentPanel Destroy guard (#7552)', () => {
     expect(screen.getByText('0 connected')).toBeInTheDocument()
 
     fireEvent.click(destroy)
+    // The plain confirm, not the force one.
+    expect(screen.getByText('Destroy this environment?')).toBeInTheDocument()
+    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
     expect(destroyEnvironment).toHaveBeenCalledWith('env-1')
+    // Not force:true — the mock recorded exactly one arg.
+    expect(destroyEnvironment).toHaveBeenCalledTimes(1)
+    expect(destroyEnvironment.mock.calls[0]).toEqual(['env-1'])
   })
 })
