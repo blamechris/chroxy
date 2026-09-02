@@ -5,7 +5,7 @@ import { createSpy, nsCtx } from '../test-helpers.js'
 
 function makeCtx(overrides = {}) {
   const sent = []
-  const broadcasts = [] // { msg, filter } — the #7576 env broadcast passes a per-client filter
+  const broadcasts = [] // { msg, filter } — the env broadcast passes an unbound-only filter (#7596)
 
   return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
@@ -18,12 +18,12 @@ function makeCtx(overrides = {}) {
 }
 
 function makeWs() { return {} }
-// Default: a host-level PRIMARY, unbound client — passes the #7576 create gate
-// and receives unredacted rosters. Override for the bound / non-primary cases.
+// Default: a host-level PRIMARY, unbound client — passes the create gate (#7576)
+// and the list/get bound gate (#7596). Override for the bound / non-primary cases.
 function makeClient(overrides = {}) { return { id: 'client-1', isPrimaryToken: true, ...overrides } }
 
-// The env_list messages a given client actually receives from a #7576 broadcast:
-// the ones whose per-client filter accepts it.
+// The env_list messages a given client actually receives from a broadcast:
+// the ones whose filter accepts it.
 function deliveredTo(broadcasts, client) {
   return broadcasts.filter((b) => b.filter(client)).map((b) => b.msg)
 }
@@ -124,28 +124,30 @@ describe('environment-handlers', () => {
       assert.equal(ctx._sent[0].environments[0].id, 'env-1')
     })
 
-    // ---- #7576 roster redaction ---------------------------------------------
+    // ---- #7596 authority gate: refuse bound clients --------------------------
 
-    it('#7576 blanks the sessions roster for a BOUND client', () => {
-      const ctx = makeCtx({
-        environmentManager: {
-          list: createSpy(() => [{ id: 'env-1', name: 'dev', status: 'running', sessions: ['s1', 's2'] }]),
-        },
-      })
+    it('#7596 refuses a BOUND client before any manager lookup', () => {
+      const listed = createSpy(() => [{ id: 'env-1', name: 'dev', status: 'running', sessions: ['s1'] }])
+      const ctx = makeCtx({ environmentManager: { list: listed } })
       environmentHandlers.list_environments(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: 'sess-1' }), {}, ctx)
-      assert.equal(ctx._sent[0].type, 'environment_list')
-      assert.deepEqual(ctx._sent[0].environments[0].sessions, [], 'bound client received the sibling roster')
-      // The rest of the descriptor is intact — the picker still works.
-      assert.equal(ctx._sent[0].environments[0].id, 'env-1')
+      assert.equal(ctx._sent[0].type, 'environment_error')
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_LIST_FORBIDDEN_BOUND_CLIENT')
+      // Gate runs before the lookup — no manager read, no oracle.
+      assert.equal(listed.calls.length, 0, 'a bound client must not reach the manager')
     })
 
-    it('#7576 sends the FULL roster to an unbound (host) client', () => {
+    it('#7596 refuses an EMPTY-STRING bound id (fail-safe)', () => {
+      const ctx = makeCtx({ environmentManager: { list: createSpy(() => []) } })
+      environmentHandlers.list_environments(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: '' }), {}, ctx)
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_LIST_FORBIDDEN_BOUND_CLIENT')
+    })
+
+    it('#7596 sends the full list to an unbound (host) client', () => {
       const live = [{ id: 'env-1', name: 'dev', status: 'running', sessions: ['s1', 's2'] }]
       const ctx = makeCtx({ environmentManager: { list: createSpy(() => live) } })
       environmentHandlers.list_environments(makeWs(), makeClient(), {}, ctx)
+      assert.equal(ctx._sent[0].type, 'environment_list')
       assert.deepEqual(ctx._sent[0].environments[0].sessions, ['s1', 's2'])
-      // Positive control: the redaction did not mutate the manager's live objects.
-      assert.deepEqual(live[0].sessions, ['s1', 's2'])
     })
   })
 
@@ -182,7 +184,23 @@ describe('environment-handlers', () => {
       assert.equal(destroyed.environmentId, 'env-1')
     })
 
-    it('#7576 the post-destroy broadcast redacts the roster for bound listeners', async () => {
+    it('#7597 refuses an EMPTY-STRING bound id cleanly (no logger throw)', () => {
+      // isBoundClient admits '' as bound, so it now enters the refuse branch —
+      // whose warn log must NOT throw on an empty sessionId (loggerForSession
+      // does; sessionLogger falls back to unscoped). A throw here would turn the
+      // refusal into a handler crash for the exact case the fail-safe check exists
+      // to catch.
+      const destroyed = createSpy(async () => {})
+      const ctx = makeCtx({ environmentManager: { destroy: destroyed, list: createSpy(() => []) } })
+      assert.doesNotThrow(() => {
+        environmentHandlers.destroy_environment(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: '' }), { environmentId: 'env-1' }, ctx)
+      })
+      assert.equal(ctx._sent[0].type, 'environment_error')
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+      assert.equal(destroyed.calls.length, 0, 'the environment must not be destroyed')
+    })
+
+    it('#7596 the post-destroy broadcast reaches unbound listeners only', async () => {
       const ctx = makeCtx({
         environmentManager: {
           destroy: createSpy(async () => {}),
@@ -194,9 +212,8 @@ describe('environment-handlers', () => {
 
       const forBound = deliveredTo(ctx._broadcasts, { id: 'b', boundSessionId: 'sess-x' })
       const forUnbound = deliveredTo(ctx._broadcasts, { id: 'h', isPrimaryToken: true })
-      assert.equal(forBound.length, 1, 'a bound listener must receive exactly one environment_list')
+      assert.equal(forBound.length, 0, 'a bound listener must receive NO environment_list')
       assert.equal(forUnbound.length, 1, 'an unbound listener must receive exactly one environment_list')
-      assert.deepEqual(forBound[0].environments[0].sessions, [], 'bound listener received the sibling roster over a broadcast')
       assert.deepEqual(forUnbound[0].environments[0].sessions, ['s1', 's2'])
     })
   })
@@ -235,22 +252,29 @@ describe('environment-handlers', () => {
       assert.deepEqual(ctx._sent[0].environment, envData)
     })
 
-    // ---- #7576 roster redaction ---------------------------------------------
+    // ---- #7596 authority gate: refuse bound clients --------------------------
 
-    it('#7576 blanks the roster for a BOUND client, without mutating the live object', () => {
-      const live = { id: 'env-1', name: 'dev', status: 'running', sessions: ['s1', 's2'] }
-      const ctx = makeCtx({ environmentManager: { get: createSpy(() => live) } })
+    it('#7596 refuses a BOUND client before any lookup', () => {
+      const got = createSpy(() => ({ id: 'env-1', name: 'dev', status: 'running', sessions: ['s1'] }))
+      const ctx = makeCtx({ environmentManager: { get: got } })
       environmentHandlers.get_environment(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: 'sess-1' }), { environmentId: 'env-1' }, ctx)
-      assert.equal(ctx._sent[0].type, 'environment_info')
-      assert.deepEqual(ctx._sent[0].environment.sessions, [], 'bound client received the sibling roster')
-      assert.equal(ctx._sent[0].environment.id, 'env-1')
-      assert.deepEqual(live.sessions, ['s1', 's2'], 'the manager\'s live object was mutated')
+      assert.equal(ctx._sent[0].type, 'environment_error')
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_GET_FORBIDDEN_BOUND_CLIENT')
+      // Gate before lookup — not an existence oracle.
+      assert.equal(got.calls.length, 0, 'a bound client must not reach get()')
     })
 
-    it('#7576 sends the full roster to an unbound (host) client', () => {
+    it('#7596 refuses an EMPTY-STRING bound id (fail-safe)', () => {
+      const ctx = makeCtx({ environmentManager: { get: createSpy(() => null) } })
+      environmentHandlers.get_environment(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: '' }), { environmentId: 'env-1' }, ctx)
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_GET_FORBIDDEN_BOUND_CLIENT')
+    })
+
+    it('#7596 sends the full descriptor to an unbound (host) client', () => {
       const live = { id: 'env-1', name: 'dev', status: 'running', sessions: ['s1', 's2'] }
       const ctx = makeCtx({ environmentManager: { get: createSpy(() => live) } })
       environmentHandlers.get_environment(makeWs(), makeClient(), { environmentId: 'env-1' }, ctx)
+      assert.equal(ctx._sent[0].type, 'environment_info')
       assert.deepEqual(ctx._sent[0].environment.sessions, ['s1', 's2'])
     })
   })

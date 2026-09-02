@@ -26,12 +26,13 @@ class WsServer extends _WsServer {
  * decide from a stale count. That is the same false safety by a different route,
  * which is why the re-broadcast is part of the fix and not a follow-up.
  *
- * #7576 — this is ALSO the most frequent leak path for the sibling-session
- * roster: it fires on every session open/close, so it fans out PER CLIENT with
- * the roster redacted for pairing-bound (share-a-session) tokens. The spy is on
- * `_broadcast(msg, filter)` (the filtered workhorse the redaction splits over),
- * and each cell drives the two filters against a bound and an unbound client to
- * prove who receives which shape.
+ * #7596 — this is ALSO the most frequent leak path for the host-level
+ * environment surface: it fires on every session open/close, so it fans out to
+ * UNBOUND (host) clients only — a pairing-bound (share-a-session) token is
+ * refused the surface, on this push as on a list/get pull. The spy is on
+ * `_broadcast(msg, filter)` (the filtered workhorse), and each cell drives the
+ * filter against a bound and an unbound client to prove the bound one gets
+ * nothing.
  */
 function makeEnvManager(environments = []) {
   const mgr = new EventEmitter()
@@ -57,7 +58,7 @@ describe('WsServer re-broadcasts environment_list on a session-tag change (#7552
     }
   })
 
-  it('re-broadcasts the CURRENT list, redacted per client (#7576)', () => {
+  it('re-broadcasts the CURRENT list to unbound clients only (#7596)', () => {
     const environments = [{ id: 'env-1', name: 'e', sessions: [] }]
     const envManager = makeEnvManager(environments)
     const { manager } = createMockSessionManager([])
@@ -74,11 +75,9 @@ describe('WsServer re-broadcasts environment_list on a session-tag change (#7552
     const forUnbound = deliveredTo(calls, UNBOUND)
     const forBound = deliveredTo(calls, BOUND)
     assert.equal(forUnbound.length, 1, 'an unbound (host) client must receive exactly one environment_list')
-    assert.equal(forBound.length, 1, 'a bound client must receive exactly one environment_list')
+    assert.equal(forBound.length, 0, 'a bound client must receive NO environment_list')
     assert.equal(forUnbound[0].type, 'environment_list')
-    // Unbound sees the real "N connected"; bound sees the roster blanked.
     assert.deepEqual(forUnbound[0].environments[0].sessions, ['sess-1'])
-    assert.deepEqual(forBound[0].environments[0].sessions, [], 'the sibling roster leaked to a bound listener')
   })
 
   it('unsubscribes on close() so a torn-down server stops broadcasting', () => {
@@ -91,14 +90,14 @@ describe('WsServer re-broadcasts environment_list on a session-tag change (#7552
 
     // Positive control: the subscription is live BEFORE close, so the zero
     // after it is a real unsubscribe and not a listener that never attached.
-    // (Two calls per event now — the full + redacted split.)
+    // (One call per event now — a single unbound-only broadcast.)
     envManager.emit('environment_sessions_changed', { id: 'env-1', sessions: ['a'] })
-    assert.equal(calls.length, 2)
+    assert.equal(calls.length, 1)
 
     server.close()
     server = null
     envManager.emit('environment_sessions_changed', { id: 'env-1', sessions: [] })
-    assert.equal(calls.length, 2, 'a closed WsServer must not broadcast')
+    assert.equal(calls.length, 1, 'a closed WsServer must not broadcast')
     assert.equal(envManager.listenerCount('environment_sessions_changed'), 0)
   })
 
