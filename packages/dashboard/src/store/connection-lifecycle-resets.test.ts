@@ -245,6 +245,14 @@ describe('#7557 the adjudication: the eleven are NOT cleared by disconnect()', (
   // to find out why the daemon died. `disconnect()` is not a server change, so
   // it is not where they die — the two full-reset sites are.
   //
+  // serverStartupLogs has a same-server wrinkle worth stating precisely (#7573
+  // review, C3): the Tauri `server_error` listener calls disconnect() and THEN
+  // fetches the logs (`useTauriEvents.ts` server_error handler), so a clear at
+  // disconnect() would be OVERWRITTEN by that fetch, not raced by it — there is
+  // no race in that direction. The real reason it must survive disconnect() is a
+  // LATER `server_stopped` → disconnect() (no accompanying fetch), which would
+  // erase logs already on screen.
+  //
   // This is also the mutant-detector for the opposite mistake: moving the eleven
   // into `createEmptyConnectionScope()` (where the #7559 roster lives) would
   // clear them here and turn every cell in this describe red.

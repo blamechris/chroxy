@@ -3531,7 +3531,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // a switch made from there ran this action alone and all seventeen survived
       // into the next server's UI. Spreading the roster here is what makes the
       // clear unconditional on the switch paths; the phase guard is left alone,
-      // because what it protects is the SOCKET teardown, not this.
+      // because what it protects is the SOCKET teardown, not this — with one
+      // exception the #7573 review (C1) named: the outgoing message queue is ALSO
+      // skipped on a socketless tab and does leak across the switch (#7578, out of
+      // scope here), so "SOCKET teardown" is not a clean bill for everything the
+      // guard skips.
       ...createEmptyConnectionScope(),
       wsUrl: null,
       apiToken: null,

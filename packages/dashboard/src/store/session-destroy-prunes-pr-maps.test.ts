@@ -1386,6 +1386,16 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
    * member is red until classified" from a mutant someone ran once into a
    * permanent cell — the same move the `roster removal sites` describe already
    * makes for its site detector.
+   *
+   * SHAPE is the boundary, and #7573 review (C2 → #7579) names the gap it leaves:
+   * a daemon snapshot typed as a plain object or a named message type is none of
+   * `Record<string,` / `Set<string>` / `[]`, so it is never extracted here,
+   * never classified, and never asked the lifetime question. `credentialsStatus`,
+   * `byokCredentialsStatus`, `orchestrationRuns`, `scheduledTasks` and the Control
+   * Room survey family sit in exactly that blind spot. So "the deferred bucket is
+   * EMPTY" is acceptance for every Record/Set/Array-shaped member — NOT for
+   * "every connection-scoped collection", the stronger claim the PR title reads
+   * as. #7579 widens the extraction to reach the object-shaped members.
    */
   /** The `ConnectionState` interface body in `src`, or `''` when it is absent. */
   const sliceInterface = (src: string): string =>
@@ -2269,8 +2279,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * `if (auth.availablePermissionModes)`).
  *
  * The fix did NOT touch the phase guard. What that guard protects is the SOCKET
- * teardown — `socket.close()`, the attempt-id bump, the message queue and the
- * request correlations — none of which a tab with no socket needs. The sixteen
+ * teardown — `socket.close()`, the attempt-id bump and the request correlations
+ * — which a tab with no socket does not need. The outgoing MESSAGE QUEUE is the
+ * exception this comment must NOT lump in: the guard skips it on a socketless
+ * tab, so a prompt queued while disconnected survives a server switch and drains
+ * onto server B — the same wrong-value class this PR fixes, one field over. It is
+ * pre-existing and out of scope; filed as #7578 and named here only so this trace
+ * stops presenting the queue as something the guard makes safe. The sixteen
  * field clears were the part that was wrong to skip, so they moved into
  * `createEmptyConnectionScope()` (`utils.ts`) and are spread by BOTH
  * `disconnect()` and `_resetSessionMemory()`, the action every switch path runs
@@ -2323,26 +2338,37 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
   ]
 
   /**
-   * Does `block` really SPREAD `call`, on a line that is code?
+   * Strip line comments (`//…`, including a TRAILING one on a code line) and
+   * block comments, so neither `assigns`'s token match nor `spreadsRoster` can
+   * be satisfied by a field named only in prose.
    *
-   * The line filter is not decoration. `assigns` is satisfiable by a COMMENT
-   * (#7566, pre-existing and out of scope here), and resolving a spread makes
-   * that worse by a factor of the roster's length: ONE sentence mentioning
-   * `...createEmptyConnectionScope()` in prose would otherwise light up all
-   * seventeen fields at once. This narrows the new surface to a real statement;
-   * the pre-existing per-field surface is #7566's.
+   * #7566 / #7573 review (S1): the earlier filter rejected a line whose
+   * `trimStart()` began `//`, `*` or `/*`, but a trailing comment on a code line
+   * slipped through — `pairingRefreshedCount: 0, // ...createEmptyConnectionScope()`
+   * resolved all seventeen fields at once, and the per-field token surface had
+   * the same hole. Resolving a spread multiplies that surface by the roster's
+   * length, which is why one prose mention could light up all seventeen. Copilot's
+   * open thread on this PR asked for exactly this; stripping first closes both
+   * surfaces in one place rather than filtering line-by-line.
    */
-  const spreadsRoster = (block: string, call: string): boolean =>
-    block.split('\n').some((line) => {
-      const code = line.trimStart()
-      if (code.startsWith('//') || code.startsWith('*') || code.startsWith('/*')) return false
-      return code.includes(`...${call}`)
-    })
+  const stripComments = (block: string): string =>
+    block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+
+  /**
+   * Does `block` really SPREAD `call`, in code? Comments are already stripped by
+   * `assigns` before this runs (this is its only caller), so a prose mention of
+   * `...createEmptyConnectionScope()` is no longer present to match.
+   */
+  const spreadsRoster = (code: string, call: string): boolean => code.includes(`...${call}`)
 
   /** Token match, not substring — `reindexResults` contains `reindex`. */
-  const assigns = (block: string, field: string): boolean =>
-    new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`).test(block) ||
-    SPREAD_ROSTERS.some(([call, fields]) => fields.includes(field) && spreadsRoster(block, call))
+  const assigns = (block: string, field: string): boolean => {
+    const code = stripComments(block)
+    return (
+      new RegExp(`(^|[^A-Za-z0-9_$])${field}\\s*[:=][^=]`).test(code) ||
+      SPREAD_ROSTERS.some(([call, fields]) => fields.includes(field) && spreadsRoster(code, call))
+    )
+  }
 
   /**
    * Answer 2: cleared by `disconnect()`, not by the two full-reset sites.
@@ -2530,6 +2556,12 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // The acceptance #7557 wrote for itself: "the guard is already derived, so
     // the deferral disappearing IS the acceptance". Asserted two ways, because
     // an empty object is also what a DELETED bucket looks like.
+    //
+    // SCOPE (#7573 review, C2 → #7579): "empty" is acceptance for every
+    // Record/Set/Array-SHAPED member — the shapes `declaredMembers` extracts —
+    // not for every connection-scoped collection. Object-typed daemon snapshots
+    // (`credentialsStatus`, `orchestrationRuns`, …) are never extracted, so this
+    // cell is silent about them until #7579 widens the extraction.
     expect(
       Object.keys(CONNECTION_LIFECYCLE_DEFERRED),
       'a field was deferred again. That is allowed — but say which, cite the issue, and expect ' +
