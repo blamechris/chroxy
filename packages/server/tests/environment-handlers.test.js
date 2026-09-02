@@ -13,7 +13,7 @@ function createMockWs() {
 
 /**
  * Mock client object. Primary + unbound by default so it clears the #7576
- * create_environment gate and receives unredacted rosters.
+ * create_environment gate and the #7596 list/get bound gate.
  */
 function createMockClient() {
   return { activeSessionId: null, subscribedSessionIds: new Set(), isPrimaryToken: true }
