@@ -148,40 +148,47 @@ on a zero-session snapshot. This is the classic TOCTOU on the check the decision
 above installed — `docs/false-safety-guards.md`'s "a precondition read outside
 the lock the mutation holds."
 
-**The fix — a transient `destroying` status, flipped before the first `await`.**
-Inside `destroy`'s existing lock, immediately after the #7562 refusal and
-**before** any teardown `await`, set `env.status = 'destroying'` (persisted like
-every other status change, and announced via a new `environment_destroying`
-event mirroring `environment_stopped`/`environment_restarted`). The existing
-`getContainerInfo` throw then refuses a racing create — **no new wire shape**,
-the same NOT_RUNNING refusal the handler already surfaces. On a teardown failure
-the `catch` restores the prior status and rethrows, so a failed destroy leaves a
-registered, re-enterable environment rather than one wedged in `destroying`
-(reconnect() also re-derives status from a container inspect on the next boot, so
-a crash mid-destroy self-heals — `destroying` is never sticky).
+**The fix — an internal, non-persisted `_destroying` marker set before the first
+`await`.** Inside `destroy`'s existing lock, immediately after the #7562 refusal
+and **before** any teardown `await`, add the env id to a manager-level
+`this._destroying` Set, and clear it in a `finally` so it clears on both the
+success and the failure paths. `getContainerInfo` refuses whenever the id is in
+that Set (in addition to its existing `status !== 'running'` throw) with the same
+NOT_RUNNING-style message — **no new wire shape**, the same refusal the handler
+already surfaces.
 
-**Why flipping the status synchronously is sufficient — and why `addSession` is
-deliberately NOT also gated.** The create path reads the status
+**Why a Set and not an `env.status = 'destroying'` value** (the shape reached for
+first, and rejected in review): `EnvironmentStatusSchema` in
+`packages/protocol/src/schemas/server/environment.ts` is a **closed**
+`z.enum(['running', 'stopped', 'error'])`. A fourth value would (a) fail Zod
+validation on any environment snapshot broadcast to a client during the teardown
+window, and (b) — because status is persisted — leave a crashed daemon restarting
+into a stuck `destroying` env. The `_destroying` Set is never serialized (nothing
+in `_persist()`'s shape references it) and is reconstructed empty on every start,
+so it cannot leak onto the wire and a crash mid-teardown clears it for free.
+`env.status` is never touched by this fix.
+
+**Why marking synchronously is sufficient — and why `addSession` is deliberately
+NOT also gated.** The create path reads the container info
 (`getContainerInfo`, `handlers/session-handlers.js`) and tags the environment
 (`addSession`, called from the synchronous `SessionManager.createSession`) in
 **one synchronous run** — there is no `await` between the read and the tag — so
 that read→tag pair is atomic with respect to `destroy`'s yields. Every
-interleaving then resolves safely: a create that completed **before** the flip
+interleaving then resolves safely: a create that completed **before** the mark
 tagged the env, so the #7562 sessions-check refuses the destroy; a create that
-begins **at or after** the flip sees `destroying` at `getContainerInfo` and is
-refused. There is no interleaving where `getContainerInfo` observes `running`
-**and** `addSession` lands during teardown.
+begins **at or after** the mark sees the id in `_destroying` at `getContainerInfo`
+and is refused. There is no interleaving where `getContainerInfo` observes a
+usable env **and** `addSession` lands during teardown.
 
 **Residual window, stated honestly.** That closure rests on the create path's
 read→tag atomicity. If a future change inserts an `await` between
-`getContainerInfo` and `addSession`, a create whose read already passed
-`running` could still `addSession` while `destroy` is parked at teardown,
-reopening the strand. That invariant is called out in a `LOAD-BEARING INVARIANT`
-comment at the flip site, with the remedy named: re-validate the status inside
-`addSession` (which runs synchronously and would observe the `destroying` flip).
-It is not added pre-emptively because, with `addSession` reached only after
-`createSession` has already inserted the entry into `_sessions`, making it
-*throw* would strand a half-built entry, and making it *silently skip* would
-recreate the very strand this fixes — so the correct closure is a guard in the
-create path, not in `addSession`, and it is only warranted once such an `await`
-actually exists.
+`getContainerInfo` and `addSession`, a create whose read already passed could
+still `addSession` while `destroy` is parked at teardown, reopening the strand.
+That invariant is called out in a `LOAD-BEARING INVARIANT` comment at the mark
+site, with the remedy named: re-check `_destroying` inside `addSession` (which
+runs synchronously and would observe the mark). It is not added pre-emptively
+because, with `addSession` reached only after `createSession` has already
+inserted the entry into `_sessions`, making it *throw* would strand a half-built
+entry, and making it *silently skip* would recreate the very strand this fixes —
+so the correct closure is a guard in the create path, not in `addSession`, and it
+is only warranted once such an `await` actually exists.

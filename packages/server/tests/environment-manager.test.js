@@ -483,20 +483,21 @@ describe('EnvironmentManager.destroy()', () => {
 //
 // The unforced `destroy` path checks `env.sessions` (empty → proceed), then
 // AWAITS the backend teardown (`docker rm -f`). A `create_session` that begins
-// during that await runs the handler's synchronous `getContainerInfo` (status
-// read) → `SessionManager.createSession` → `addSession` (tag) sequence with no
+// during that await runs the create handler's synchronous getContainerInfo read
+// → SessionManager.createSession → its synchronous addSession tag, with no
 // `await` between the read and the tag. Before the fix, that create's
-// `getContainerInfo` saw `status: 'running'` (the env is still registered, only
-// its container is being removed), passed, and `addSession` attached a session
-// to an environment the destroy then deleted — stranding it on a torn-down
-// container while the #7562 guard had already waved the destroy through with
-// zero sessions.
+// getContainerInfo saw a `running` environment (still registered, only its
+// container being removed), passed, and addSession attached a session to an
+// environment the destroy then deleted — stranding it on a torn-down container
+// while the #7562 guard had already waved the destroy through with zero sessions.
 //
-// The fix flips `env.status = 'destroying'` synchronously, BEFORE the first
-// `await`, inside the same lock, so a racing `getContainerInfo` is refused. These
-// tests drive the manager directly, reproducing the handler's read→tag sequence
-// from INSIDE the mocked backend teardown (i.e. exactly while `destroy` is
-// parked at its `await`).
+// The fix records the env id in an INTERNAL `_destroying` Set synchronously,
+// BEFORE the first `await`, inside the same lock (and clears it in a `finally`),
+// so a racing getContainerInfo is refused. The marker is NOT an `env.status`
+// value — the wire enum is closed to running/stopped/error — and is never
+// persisted. These tests drive the manager directly, reproducing the create
+// handler's read→tag sequence from INSIDE the mocked backend teardown (i.e.
+// exactly while `destroy` is parked at its `await`).
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () => {
@@ -523,12 +524,13 @@ describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () =>
       },
       async destroyEnvironment() {
         // We are now INSIDE destroy()'s `await` — the exact window a concurrent
-        // create_session would run in. Reproduce the handler's synchronous
-        // getContainerInfo -> addSession sequence against the SAME environment.
+        // create_session would run in. Reproduce the create handler's synchronous
+        // getContainerInfo read → SessionManager.createSession's addSession tag
+        // against the SAME environment.
         statusAtTeardown = manager.get(envId)?.status
         try {
-          manager.getContainerInfo(envId) // handler L202 — the TOCTOU status read
-          manager.addSession(envId, 'racing-session') // createSession's tag (L1616)
+          manager.getContainerInfo(envId) // the create handler's getContainerInfo read
+          manager.addSession(envId, 'racing-session') // createSession's synchronous tag
           raceOutcome = 'attached'
         } catch {
           raceOutcome = 'refused'
@@ -542,13 +544,15 @@ describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () =>
 
     await manager.destroy(envId)
 
-    // Pre-fix: status is still 'running' at teardown, getContainerInfo returns,
-    //          addSession tags a session onto an env being torn down -> 'attached'.
-    // Post-fix: status is 'destroying' at teardown, getContainerInfo throws -> 'refused'.
-    assert.equal(statusAtTeardown, 'destroying',
-      'the environment must be marked destroying BEFORE the backend teardown await')
+    // Pre-fix: no marker, getContainerInfo returns, addSession tags a session
+    //          onto an env being torn down -> 'attached'.
+    // Post-fix: env id is in `_destroying`, getContainerInfo throws -> 'refused'.
     assert.equal(raceOutcome, 'refused',
       'a create racing an in-flight destroy must be refused at getContainerInfo, not stranded')
+    // The refusal must NOT come from a leaked status: env.status stays 'running'
+    // throughout teardown (the marker is a Set, not a fourth enum value).
+    assert.equal(statusAtTeardown, 'running',
+      'the fix must NOT overload env.status — it stays running (marker is the internal _destroying Set)')
     // The environment is gone and no session was left stranded on it.
     assert.equal(manager.get(envId), null)
   })
@@ -576,7 +580,7 @@ describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () =>
     assert.equal(manager.get(env.id), null)
   })
 
-  it('restores the prior status and leaves the env usable when backend teardown fails', async () => {
+  it('a failed teardown leaves a usable env and CLEARS the _destroying marker', async () => {
     const backend = {
       async createEnvironment() {
         return { containerId: 'ctr-fail', containerCliPath: '/usr/local/lib/cli.js' }
@@ -591,37 +595,52 @@ describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () =>
 
     await assert.rejects(() => manager.destroy(env.id), /docker rm failed/)
 
-    // A failed destroy must NOT wedge the env in 'destroying' — it must be
-    // registered and re-enterable again.
+    // A failed destroy must leave the env registered and untouched.
     const after = manager.get(env.id)
     assert.ok(after, 'a failed destroy must leave the environment registered')
     assert.equal(after.status, 'running',
-      'a failed destroy must restore the prior status, not leave it destroying')
+      'a failed destroy must leave env.status untouched (never a "destroying" value)')
 
-    // And a fresh create can attach again — getContainerInfo no longer throws.
+    // And — the crux of the marker being cleared in `finally` — a subsequent
+    // create is NOT refused: getContainerInfo works again and a session can attach.
+    // If the marker leaked, this getContainerInfo would throw.
     const info = manager.getContainerInfo(env.id)
     assert.equal(info.containerId, 'ctr-fail')
+    manager.addSession(env.id, 's-after-fail')
+    assert.deepEqual(manager.get(env.id).sessions, ['s-after-fail'])
   })
 
-  it('emits environment_destroying before the backend teardown runs', async () => {
-    const seen = []
+  it('never persists a "destroying" status at any point of a teardown', async () => {
+    // Capture the persisted status field WHILE destroy is parked mid-teardown.
+    // (Checked on the parsed `status` field, not a naive substring — an env name
+    // could legitimately contain the word.)
+    let statusOnDiskDuringTeardown
+    const readPersistedStatus = () => {
+      if (!existsSync(statePath)) return undefined
+      const data = JSON.parse(readFileSync(statePath, 'utf-8'))
+      return data.environments?.[0]?.status
+    }
     const backend = {
       async createEnvironment() {
-        return { containerId: 'ctr-ev', containerCliPath: '/usr/local/lib/cli.js' }
+        return { containerId: 'ctr-persist', containerCliPath: '/usr/local/lib/cli.js' }
       },
       async destroyEnvironment() {
-        seen.push('teardown')
+        statusOnDiskDuringTeardown = readPersistedStatus()
       },
     }
 
     const manager = new EnvironmentManager({ statePath, backend })
-    const env = await manager.create({ name: 'ev', cwd: '/tmp' })
-    manager.on('environment_destroying', (e) => seen.push(`destroying:${e.id}`))
+    const env = await manager.create({ name: 'persist-check', cwd: '/tmp' })
 
     await manager.destroy(env.id)
 
-    assert.deepEqual(seen, [`destroying:${env.id}`, 'teardown'],
-      'environment_destroying must be emitted before the backend teardown begins')
+    // The marker is a non-persisted Set — the persisted `status` must never carry
+    // a 'destroying' value, so a crash mid-teardown can't restart into a stuck
+    // state. Mid-teardown the env is still 'running' on disk; after, it is gone.
+    assert.equal(statusOnDiskDuringTeardown, 'running',
+      'the persisted status must stay running mid-teardown — never a "destroying" value')
+    const data = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(data.environments.length, 0, 'the env is deleted from disk after a clean destroy')
   })
 })
 

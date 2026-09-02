@@ -64,6 +64,15 @@ export class EnvironmentManager extends EventEmitter {
     this._environments = new Map()
     // Per-environment mutex: Map<envId, Promise> — serializes operations
     this._locks = new Map()
+    // #7575 — ids of environments currently mid-teardown. An INTERNAL, never-
+    // persisted marker (a Set, not an `env.status` value): `destroy()` adds an id
+    // before its first teardown `await` and clears it in a `finally`, and
+    // `getContainerInfo()` refuses a create while an id is present. It is NOT a
+    // fourth `status` — the wire enum (`EnvironmentStatusSchema`) is closed to
+    // running/stopped/error, and this marker is never serialized, so a client
+    // snapshot never carries it and a crash mid-teardown clears it for free
+    // (the Set is reconstructed empty on restart).
+    this._destroying = new Set()
     // Injected for testing — falls back to real execFile.
     // _execFile is forwarded to DockerBackend so existing tests that inject a
     // mock execFile continue to work without modification.
@@ -429,32 +438,29 @@ export class EnvironmentManager extends EventEmitter {
       // begins during that yield would otherwise attach a session to a container
       // we are about to `docker rm -f` and an environment record we are about to
       // delete — a TOCTOU on the #7562 live-sessions guard, which saw zero
-      // sessions and proceeded. Flipping the status here means such a create's
-      // `getContainerInfo` sees `status: 'destroying'` (≠ 'running') and is
-      // refused — no new wire shape, the existing NOT_RUNNING refusal does it.
+      // sessions and proceeded. Adding the id to `_destroying` here means such a
+      // create's `getContainerInfo` is refused with the existing NOT_RUNNING-style
+      // error — no new wire shape, and (unlike overloading `env.status`) no value
+      // that could leak into the closed `EnvironmentStatusSchema` enum or persist.
       //
       // Why marking synchronously here is SUFFICIENT (and `addSession` is not
-      // also gated): the create path reads the status (`getContainerInfo`,
-      // session-handlers.js) and tags the env (`addSession`, via the synchronous
-      // `SessionManager.createSession`) in ONE synchronous run — there is no
-      // `await` between them — so that whole read→tag sequence is atomic with
-      // respect to this method's yields. Every interleaving therefore resolves
-      // safely: a create that ran entirely BEFORE this flip tagged the env, so
-      // the #7562 check below sees the session and refuses; a create that starts
-      // AT OR AFTER this flip sees 'destroying' at `getContainerInfo` and is
-      // refused. There is no interleaving where `getContainerInfo` passes
-      // 'running' AND `addSession` lands during teardown.
+      // also gated): the create path reads the container info (the create
+      // handler's `getContainerInfo`) and tags the env (`addSession`, via the
+      // synchronous `SessionManager.createSession`) in ONE synchronous run — there
+      // is no `await` between them — so that whole read→tag sequence is atomic
+      // with respect to this method's yields. Every interleaving therefore
+      // resolves safely: a create that ran entirely BEFORE this mark tagged the
+      // env, so the #7562 check above saw the session and refused this destroy; a
+      // create that starts AT OR AFTER this mark sees the env in `_destroying` at
+      // `getContainerInfo` and is refused. There is no interleaving where
+      // `getContainerInfo` passes AND `addSession` lands during teardown.
       //
       // LOAD-BEARING INVARIANT: that atomicity. If a future change inserts an
       // `await` between `getContainerInfo` and `addSession`, a create whose read
-      // already passed 'running' could still `addSession` during this teardown,
-      // reopening the window — close it then by re-validating the status inside
-      // `addSession` (which runs synchronously and would observe this flip).
-      const priorStatus = env.status
-      env.status = 'destroying'
-      this._persist()
-      this.emit('environment_destroying', { id: envId, name: env.name })
-
+      // already passed could still `addSession` during this teardown, reopening
+      // the window — close it then by re-checking `_destroying` inside
+      // `addSession` (which runs synchronously and would observe this mark).
+      this._destroying.add(envId)
       try {
         if (env.compose && env.composeProject) {
           await this._backend.destroyComposeEnvironment({
@@ -478,21 +484,19 @@ export class EnvironmentManager extends EventEmitter {
             await this._backend.removeImage(snap.image)
           }
         }
-      } catch (err) {
-        // #7575 — a failed teardown must leave a USABLE environment, not one
-        // wedged in 'destroying' forever. Restore the pre-destroy status so
-        // `getContainerInfo` (and the dashboard) treat it as live again, persist,
-        // and rethrow so the caller surfaces the failure. Nothing was deleted
-        // yet, so the environment is still registered and re-enterable.
-        env.status = priorStatus
-        this._persist()
-        throw err
-      }
 
-      this._environments.delete(envId)
-      this._persist()
-      this.emit('environment_destroyed', { id: envId, name: env.name })
-      log.info(`Environment "${env.name}" destroyed`)
+        this._environments.delete(envId)
+        this._persist()
+        this.emit('environment_destroyed', { id: envId, name: env.name })
+        log.info(`Environment "${env.name}" destroyed`)
+      } finally {
+        // Clear the marker on BOTH paths. On success the env is already gone, so
+        // this only matters on failure: a teardown that threw left the env
+        // registered and unchanged (nothing was deleted, `env.status` was never
+        // touched), and clearing the mark makes it immediately re-enterable —
+        // `getContainerInfo` stops refusing and a subsequent create succeeds.
+        this._destroying.delete(envId)
+      }
     } finally {
       release()
     }
@@ -578,6 +582,14 @@ export class EnvironmentManager extends EventEmitter {
    */
   getContainerInfo(envId) {
     const env = this._getEnvironmentOrThrow(envId)
+    // #7575 — refuse a create against an environment whose teardown is already
+    // in flight. `destroy()` adds the id to `_destroying` before its first
+    // `await` (and clears it in a `finally`), so this closes the TOCTOU window
+    // where `destroy` had passed the #7562 sessions check and was mid-`docker
+    // rm -f`: without this, `getContainerInfo` returned live details and the
+    // session attached to a container about to vanish. Same NOT_RUNNING-style
+    // refusal — no new wire shape.
+    if (this._destroying.has(envId)) throw new Error(`Environment "${env.name}" is not running (status: destroying)`)
     if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
     return {
       containerId: env.containerId,
