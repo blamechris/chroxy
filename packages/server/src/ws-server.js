@@ -26,6 +26,7 @@ import { createHttpHandler } from './http-routes.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
+import { broadcastEnvironmentList } from './environments/redact.js'
 import { WebTaskManager } from './web-task-manager.js'
 import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
 import { isUserShellApprovalRequired } from './config.js'
@@ -1141,7 +1142,14 @@ export class WsServer {
     if (this.environmentManager && typeof this.environmentManager.on === 'function') {
       this._environmentSessionsChangedHandler = () => {
         try {
-          this.broadcast({ type: 'environment_list', environments: this.environmentManager.list() })
+          // #7576: redact the sibling-session roster per recipient. This is the
+          // most frequent leak path — it fires on every session open/close — so
+          // a plain broadcast would push the full roster to every bound
+          // (share-a-session) listener continuously.
+          broadcastEnvironmentList(
+            (msg, filter) => this._broadcast(msg, filter),
+            this.environmentManager.list(),
+          )
         } catch (err) {
           log.warn(`environment_list re-broadcast failed: ${err?.message || err}`)
         }

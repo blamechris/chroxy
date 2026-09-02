@@ -14,6 +14,7 @@ import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError 
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
+import { environmentsForClient, environmentForClient, broadcastEnvironmentList } from '../environments/redact.js'
 
 const log = createLogger('ws')
 
@@ -200,7 +201,35 @@ function handleCloseDevPreview(ws, client, msg, ctx) {
 
 // -- Environment management --
 
-function handleCreateEnvironment(ws, _client, msg, ctx) {
+/**
+ * #7576 — create a host container environment.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md): `create_environment`
+ * spawns a HOST container the daemon will run. The image, cwd, name, and
+ * resource limits are all caller-chosen — `validateDockerImage` constrains the
+ * image to an allowlist, but per the doc's §9 step 4 ("can a caller choose a
+ * binary, argv, or environment this daemon will spawn?") this is the creation of
+ * new host state, not an action on an existing session, so it takes the STRICT
+ * PRIMARY bar (`client.isPrimaryToken === true`) — stricter than
+ * `destroy_environment`'s unbound check. A pairing-issued (share-a-session)
+ * token is never primary and is refused. The gate runs FIRST — before the
+ * feature-enabled check and any input validation — so an unauthorised caller
+ * gets one identical refusal regardless of feature state or arguments (no oracle
+ * on whether the manager is wired).
+ */
+function handleCreateEnvironment(ws, client, msg, ctx) {
+  if (client?.isPrimaryToken !== true) {
+    log.warn(
+      `Client ${client?.id} attempted create_environment without a primary token — rejected (spawning a host container requires the primary/host token)`,
+    )
+    ctx.transport.send(ws, {
+      type: 'environment_error',
+      error: 'Creating a container environment requires the primary (host) token — pairing-issued session tokens cannot spawn host containers.',
+      code: 'ENVIRONMENT_CREATE_FORBIDDEN_NON_PRIMARY',
+    })
+    return
+  }
+
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -246,10 +275,10 @@ function handleCreateEnvironment(ws, _client, msg, ctx) {
         name: env.name,
         status: env.status,
       })
-      ctx.transport.broadcast({
-        type: 'environment_list',
-        environments: ctx.services.environmentManager.list(),
-      })
+      // #7576: redact the sibling-session roster per recipient — a plain
+      // broadcast would hand every bound listener the roster the list/get gate
+      // strips.
+      broadcastEnvironmentList(ctx.transport.broadcast, ctx.services.environmentManager.list())
     })
     .catch((err) => {
       log.error(`Failed to create environment: ${err.message}`)
@@ -257,15 +286,18 @@ function handleCreateEnvironment(ws, _client, msg, ctx) {
     })
 }
 
-function handleListEnvironments(ws, _client, _msg, ctx) {
+function handleListEnvironments(ws, client, _msg, ctx) {
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_list', environments: [] })
     return
   }
 
+  // #7576: a pairing-bound (share-a-session) token cannot list sibling sessions,
+  // so blank the `sessions` roster on each descriptor for a bound caller. The
+  // env ids/names remain for a legitimate picker.
   ctx.transport.send(ws, {
     type: 'environment_list',
-    environments: ctx.services.environmentManager.list(),
+    environments: environmentsForClient(ctx.services.environmentManager.list(), client),
   })
 }
 
@@ -346,10 +378,8 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
         log.warn(`Force-destroyed environment ${environmentId} with ${destroyedSessions.length} live session(s): ${destroyedSessions.join(', ')}`)
       }
       ctx.transport.send(ws, { type: 'environment_destroyed', environmentId })
-      ctx.transport.broadcast({
-        type: 'environment_list',
-        environments: ctx.services.environmentManager.list(),
-      })
+      // #7576: redact the sibling-session roster per recipient (see create).
+      broadcastEnvironmentList(ctx.transport.broadcast, ctx.services.environmentManager.list())
     })
     .catch((err) => {
       if (err?.code === ENVIRONMENT_HAS_LIVE_SESSIONS) {
@@ -369,7 +399,7 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
     })
 }
 
-function handleGetEnvironment(ws, _client, msg, ctx) {
+function handleGetEnvironment(ws, client, msg, ctx) {
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -389,7 +419,9 @@ function handleGetEnvironment(ws, _client, msg, ctx) {
     return
   }
 
-  ctx.transport.send(ws, { type: 'environment_info', environment: env })
+  // #7576: blank the `sessions` roster for a pairing-bound (share-a-session)
+  // caller — get() returns the live object, so environmentForClient copies it.
+  ctx.transport.send(ws, { type: 'environment_info', environment: environmentForClient(env, client) })
 }
 
 export const featureHandlers = {
