@@ -6718,10 +6718,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           undefined,
           'warning',
         );
-      } else if (error) {
+      } else if (error || code) {
         // Every other environment failure (validation, image allowlist, backend
-        // error) surfaces as a normal red error toast.
-        get().addServerError(error);
+        // error) surfaces as a normal red error toast. Fall back to the `code`
+        // when the server sends a coded refusal with NO prose `error`, so the
+        // "surface instead of only log" intent holds for every shape — a
+        // coded-but-messageless error must not silently vanish the way the
+        // pre-#7568 console.error did (#7568 review). A truly empty payload (no
+        // error AND no code — a malformed message with nothing to show) still
+        // only logs.
+        get().addServerError(error || `Environment operation failed (${code}).`);
       }
       break;
     }

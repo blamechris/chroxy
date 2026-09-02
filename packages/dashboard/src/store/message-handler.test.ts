@@ -580,6 +580,18 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'environment_error' }, ctx() as any)
       expect((store.getState() as any).serverErrors).toHaveLength(0)
     })
+
+    it('surfaces a coded error even when the server sends no prose message (#7568 review)', () => {
+      // A coded refusal with no `error` string must NOT vanish into console.error
+      // the way the pre-#7568 handler let it — that is the exact invisibility this
+      // feature closes. Fall back to the code so the operator sees something.
+      handleMessage({ type: 'environment_error', code: 'DOCKER_IMAGE_NOT_ALLOWED' }, ctx() as any)
+      const state = store.getState() as any
+      expect(state.serverErrors).toHaveLength(1)
+      expect(state.serverErrors[0]).toContain('DOCKER_IMAGE_NOT_ALLOWED')
+      // Not the live-sessions warning register — a plain red error.
+      expect(state._serverErrorSeverities[0]).toBeUndefined()
+    })
   })
 
   describe('error dispatch', () => {
