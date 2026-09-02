@@ -6,12 +6,20 @@
  * is the list of session ids running inside each environment.
  * docs/security/bearer-token-authority.md's rule is "bound tokens cannot create,
  * destroy, switch, or LIST sibling sessions", so a bound token must not receive
- * that roster. The environment ids/names stay visible because a bound client may
- * legitimately need them for a picker (`create_session` takes an
- * `environmentId`); only the `sessions` array is blanked. We blank to `[]`
+ * that roster; only the `sessions` array is blanked here. We blank to `[]`
  * rather than dropping the field: the protocol schema
  * (schemas/server/environment.ts) makes `sessions` REQUIRED, and an empty roster
  * is the honest redacted shape.
+ *
+ * SCOPE (#7576 decision, refined by #7596): this redacts the sibling-session
+ * ROSTER specifically and leaves the rest of the descriptor intact — narrowing
+ * the pre-#7576 behaviour where a bound token received the FULL descriptor,
+ * roster included. It does NOT yet blank the host metadata a bound token also
+ * receives (`cwd`, `image`, `containerId`, ...), nor refuse the surface the way
+ * `destroy_environment` and the Control Room host surveys do; that posture call
+ * is #7596. Note a bound client cannot itself `create_session` (that handler
+ * refuses bound tokens), so the issue's original "keep the ids for a picker"
+ * rationale does NOT hold — do not re-derive it from this file.
  *
  * Redaction always returns SHALLOW COPIES. EnvironmentManager.list()/get() hand
  * out the live internal objects by reference, so mutating `sessions` in place
@@ -20,7 +28,10 @@
  *
  * A client is "bound" iff it carries a `boundSessionId` — the same property the
  * `destroy_environment` authority gate keys on (#7571). Unbound (host-authority)
- * clients pass through unredacted.
+ * clients pass through unredacted. The per-client helpers treat a nullish client
+ * as unbound (full roster) — a deliberate fail-OPEN that is safe ONLY because WS
+ * dispatch guarantees an authenticated client object here; the create gate, by
+ * contrast, fails CLOSED. Never call these with an unauthenticated client.
  */
 
 /** Blank the `sessions` roster on every descriptor (shallow copies). */
