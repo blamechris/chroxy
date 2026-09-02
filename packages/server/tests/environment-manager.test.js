@@ -478,6 +478,153 @@ describe('EnvironmentManager.destroy()', () => {
   })
 })
 
+// ──────────────────────────────────────────────────────────────────────────────
+// #7575 — create/destroy TOCTOU on the #7562 live-sessions guard.
+//
+// The unforced `destroy` path checks `env.sessions` (empty → proceed), then
+// AWAITS the backend teardown (`docker rm -f`). A `create_session` that begins
+// during that await runs the handler's synchronous `getContainerInfo` (status
+// read) → `SessionManager.createSession` → `addSession` (tag) sequence with no
+// `await` between the read and the tag. Before the fix, that create's
+// `getContainerInfo` saw `status: 'running'` (the env is still registered, only
+// its container is being removed), passed, and `addSession` attached a session
+// to an environment the destroy then deleted — stranding it on a torn-down
+// container while the #7562 guard had already waved the destroy through with
+// zero sessions.
+//
+// The fix flips `env.status = 'destroying'` synchronously, BEFORE the first
+// `await`, inside the same lock, so a racing `getContainerInfo` is refused. These
+// tests drive the manager directly, reproducing the handler's read→tag sequence
+// from INSIDE the mocked backend teardown (i.e. exactly while `destroy` is
+// parked at its `await`).
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)', () => {
+  let tmpDir, statePath
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-env-test-'))
+    statePath = join(tmpDir, 'environments.json')
+  })
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('refuses a create racing an in-flight destroy — getContainerInfo throws mid-teardown', async () => {
+    let raceOutcome = null
+    let statusAtTeardown = null
+    let manager
+    let envId
+
+    const backend = {
+      async createEnvironment() {
+        return { containerId: 'ctr-toctou', containerCliPath: '/usr/local/lib/cli.js' }
+      },
+      async destroyEnvironment() {
+        // We are now INSIDE destroy()'s `await` — the exact window a concurrent
+        // create_session would run in. Reproduce the handler's synchronous
+        // getContainerInfo -> addSession sequence against the SAME environment.
+        statusAtTeardown = manager.get(envId)?.status
+        try {
+          manager.getContainerInfo(envId) // handler L202 — the TOCTOU status read
+          manager.addSession(envId, 'racing-session') // createSession's tag (L1616)
+          raceOutcome = 'attached'
+        } catch {
+          raceOutcome = 'refused'
+        }
+      },
+    }
+
+    manager = new EnvironmentManager({ statePath, backend })
+    const env = await manager.create({ name: 'toctou', cwd: '/tmp' })
+    envId = env.id
+
+    await manager.destroy(envId)
+
+    // Pre-fix: status is still 'running' at teardown, getContainerInfo returns,
+    //          addSession tags a session onto an env being torn down -> 'attached'.
+    // Post-fix: status is 'destroying' at teardown, getContainerInfo throws -> 'refused'.
+    assert.equal(statusAtTeardown, 'destroying',
+      'the environment must be marked destroying BEFORE the backend teardown await')
+    assert.equal(raceOutcome, 'refused',
+      'a create racing an in-flight destroy must be refused at getContainerInfo, not stranded')
+    // The environment is gone and no session was left stranded on it.
+    assert.equal(manager.get(envId), null)
+  })
+
+  it('positive control — a non-racing create succeeds and a clean destroy tears down', async () => {
+    const backend = {
+      async createEnvironment() {
+        return { containerId: 'ctr-ok', containerCliPath: '/usr/local/lib/cli.js' }
+      },
+      async destroyEnvironment() {},
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const env = await manager.create({ name: 'ok', cwd: '/tmp' })
+
+    // A normal (non-racing) create against a running env still works end-to-end.
+    const info = manager.getContainerInfo(env.id)
+    assert.equal(info.containerId, 'ctr-ok')
+    manager.addSession(env.id, 's1')
+    assert.deepEqual(manager.get(env.id).sessions, ['s1'])
+
+    // Detach, then destroy cleanly with no concurrent create — tears down fully.
+    manager.removeSession(env.id, 's1')
+    await manager.destroy(env.id)
+    assert.equal(manager.get(env.id), null)
+  })
+
+  it('restores the prior status and leaves the env usable when backend teardown fails', async () => {
+    const backend = {
+      async createEnvironment() {
+        return { containerId: 'ctr-fail', containerCliPath: '/usr/local/lib/cli.js' }
+      },
+      async destroyEnvironment() {
+        throw new Error('docker rm failed')
+      },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const env = await manager.create({ name: 'fail-teardown', cwd: '/tmp' })
+
+    await assert.rejects(() => manager.destroy(env.id), /docker rm failed/)
+
+    // A failed destroy must NOT wedge the env in 'destroying' — it must be
+    // registered and re-enterable again.
+    const after = manager.get(env.id)
+    assert.ok(after, 'a failed destroy must leave the environment registered')
+    assert.equal(after.status, 'running',
+      'a failed destroy must restore the prior status, not leave it destroying')
+
+    // And a fresh create can attach again — getContainerInfo no longer throws.
+    const info = manager.getContainerInfo(env.id)
+    assert.equal(info.containerId, 'ctr-fail')
+  })
+
+  it('emits environment_destroying before the backend teardown runs', async () => {
+    const seen = []
+    const backend = {
+      async createEnvironment() {
+        return { containerId: 'ctr-ev', containerCliPath: '/usr/local/lib/cli.js' }
+      },
+      async destroyEnvironment() {
+        seen.push('teardown')
+      },
+    }
+
+    const manager = new EnvironmentManager({ statePath, backend })
+    const env = await manager.create({ name: 'ev', cwd: '/tmp' })
+    manager.on('environment_destroying', (e) => seen.push(`destroying:${e.id}`))
+
+    await manager.destroy(env.id)
+
+    assert.deepEqual(seen, [`destroying:${env.id}`, 'teardown'],
+      'environment_destroying must be emitted before the backend teardown begins')
+  })
+})
+
 describe('EnvironmentManager.list() and .get()', () => {
   let tmpDir, statePath
 

@@ -125,3 +125,63 @@ environment still exist afterwards, so the failure is recoverable in a way a
 destroy is not, and gating them is a separate policy question with its own UI
 consequences (the Control Room's stop/restart controls exist precisely to bounce
 a wedged container). Filed as a follow-up rather than folded in here.
+
+## Follow-on (#7575) — the TOCTOU window on the guard is now closed
+
+**Date**: 2026-09-01
+**Issue**: #7575 (follow-on from #7562)
+**Touches**: `packages/server/src/environment-manager.js` (`destroy`)
+**Pinned by**: `packages/server/tests/environment-manager.test.js`
+(`EnvironmentManager.destroy() — create/destroy TOCTOU (#7575)`)
+
+The #7562 refusal above is a check-then-act, and its "act" is not synchronous:
+`destroy` checks `env.sessions` (empty → proceed), then `await`s the backend
+teardown (`docker rm -f` / `docker compose down`) before deleting the
+environment record. That `await` is a yield point. A `create_session` scheduled
+during it ran the handler's `getContainerInfo(environmentId)` — a **lockless,
+synchronous** status read that only throws when `status !== 'running'` — while
+the environment was still registered and still `running` (only its *container*
+was mid-removal). The read passed, `SessionManager.createSession` tagged the env
+via `addSession`, and `destroy` then deleted the record: a session stranded on a
+container that no longer exists, with the guard having waved the destroy through
+on a zero-session snapshot. This is the classic TOCTOU on the check the decision
+above installed — `docs/false-safety-guards.md`'s "a precondition read outside
+the lock the mutation holds."
+
+**The fix — a transient `destroying` status, flipped before the first `await`.**
+Inside `destroy`'s existing lock, immediately after the #7562 refusal and
+**before** any teardown `await`, set `env.status = 'destroying'` (persisted like
+every other status change, and announced via a new `environment_destroying`
+event mirroring `environment_stopped`/`environment_restarted`). The existing
+`getContainerInfo` throw then refuses a racing create — **no new wire shape**,
+the same NOT_RUNNING refusal the handler already surfaces. On a teardown failure
+the `catch` restores the prior status and rethrows, so a failed destroy leaves a
+registered, re-enterable environment rather than one wedged in `destroying`
+(reconnect() also re-derives status from a container inspect on the next boot, so
+a crash mid-destroy self-heals — `destroying` is never sticky).
+
+**Why flipping the status synchronously is sufficient — and why `addSession` is
+deliberately NOT also gated.** The create path reads the status
+(`getContainerInfo`, `handlers/session-handlers.js`) and tags the environment
+(`addSession`, called from the synchronous `SessionManager.createSession`) in
+**one synchronous run** — there is no `await` between the read and the tag — so
+that read→tag pair is atomic with respect to `destroy`'s yields. Every
+interleaving then resolves safely: a create that completed **before** the flip
+tagged the env, so the #7562 sessions-check refuses the destroy; a create that
+begins **at or after** the flip sees `destroying` at `getContainerInfo` and is
+refused. There is no interleaving where `getContainerInfo` observes `running`
+**and** `addSession` lands during teardown.
+
+**Residual window, stated honestly.** That closure rests on the create path's
+read→tag atomicity. If a future change inserts an `await` between
+`getContainerInfo` and `addSession`, a create whose read already passed
+`running` could still `addSession` while `destroy` is parked at teardown,
+reopening the strand. That invariant is called out in a `LOAD-BEARING INVARIANT`
+comment at the flip site, with the remedy named: re-validate the status inside
+`addSession` (which runs synchronously and would observe the `destroying` flip).
+It is not added pre-emptively because, with `addSession` reached only after
+`createSession` has already inserted the entry into `_sessions`, making it
+*throw* would strand a half-built entry, and making it *silently skip* would
+recreate the very strand this fixes — so the correct closure is a guard in the
+create path, not in `addSession`, and it is only warranted once such an `await`
+actually exists.

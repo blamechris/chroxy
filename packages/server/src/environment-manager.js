@@ -423,27 +423,70 @@ export class EnvironmentManager extends EventEmitter {
       }
       log.info(`Destroying environment "${env.name}" (${envId})`)
 
-      if (env.compose && env.composeProject) {
-        await this._backend.destroyComposeEnvironment({
-          composeFile: env.compose,
-          composeProject: env.composeProject,
-          cwd: env.cwd,
-        })
-      } else if (env.containerId) {
-        // #6134: remove the container whenever one exists — NOT only when
-        // status==='running'. Now that stop() makes 'stopped' a reachable state,
-        // gating on 'running' would orphan a stopped container (the manager
-        // entry is deleted but `docker rm -f` never runs). `docker rm -f` works
-        // on stopped/exited containers too, and _removeContainer swallows a
-        // "no such container" for one that never started.
-        await this._backend.destroyEnvironment(env.containerId)
-      }
+      // #7575 — mark the environment mid-teardown BEFORE the first `await`, while
+      // this method still holds the lock and no other task can run. `destroy` is
+      // async and YIELDS at the backend teardown below; a `create_session` that
+      // begins during that yield would otherwise attach a session to a container
+      // we are about to `docker rm -f` and an environment record we are about to
+      // delete — a TOCTOU on the #7562 live-sessions guard, which saw zero
+      // sessions and proceeded. Flipping the status here means such a create's
+      // `getContainerInfo` sees `status: 'destroying'` (≠ 'running') and is
+      // refused — no new wire shape, the existing NOT_RUNNING refusal does it.
+      //
+      // Why marking synchronously here is SUFFICIENT (and `addSession` is not
+      // also gated): the create path reads the status (`getContainerInfo`,
+      // session-handlers.js) and tags the env (`addSession`, via the synchronous
+      // `SessionManager.createSession`) in ONE synchronous run — there is no
+      // `await` between them — so that whole read→tag sequence is atomic with
+      // respect to this method's yields. Every interleaving therefore resolves
+      // safely: a create that ran entirely BEFORE this flip tagged the env, so
+      // the #7562 check below sees the session and refuses; a create that starts
+      // AT OR AFTER this flip sees 'destroying' at `getContainerInfo` and is
+      // refused. There is no interleaving where `getContainerInfo` passes
+      // 'running' AND `addSession` lands during teardown.
+      //
+      // LOAD-BEARING INVARIANT: that atomicity. If a future change inserts an
+      // `await` between `getContainerInfo` and `addSession`, a create whose read
+      // already passed 'running' could still `addSession` during this teardown,
+      // reopening the window — close it then by re-validating the status inside
+      // `addSession` (which runs synchronously and would observe this flip).
+      const priorStatus = env.status
+      env.status = 'destroying'
+      this._persist()
+      this.emit('environment_destroying', { id: envId, name: env.name })
 
-      // Clean up snapshot images
-      if (Array.isArray(env.snapshots)) {
-        for (const snap of env.snapshots) {
-          await this._backend.removeImage(snap.image)
+      try {
+        if (env.compose && env.composeProject) {
+          await this._backend.destroyComposeEnvironment({
+            composeFile: env.compose,
+            composeProject: env.composeProject,
+            cwd: env.cwd,
+          })
+        } else if (env.containerId) {
+          // #6134: remove the container whenever one exists — NOT only when
+          // status==='running'. Now that stop() makes 'stopped' a reachable state,
+          // gating on 'running' would orphan a stopped container (the manager
+          // entry is deleted but `docker rm -f` never runs). `docker rm -f` works
+          // on stopped/exited containers too, and _removeContainer swallows a
+          // "no such container" for one that never started.
+          await this._backend.destroyEnvironment(env.containerId)
         }
+
+        // Clean up snapshot images
+        if (Array.isArray(env.snapshots)) {
+          for (const snap of env.snapshots) {
+            await this._backend.removeImage(snap.image)
+          }
+        }
+      } catch (err) {
+        // #7575 — a failed teardown must leave a USABLE environment, not one
+        // wedged in 'destroying' forever. Restore the pre-destroy status so
+        // `getContainerInfo` (and the dashboard) treat it as live again, persist,
+        // and rethrow so the caller surfaces the failure. Nothing was deleted
+        // yet, so the environment is still registered and re-enterable.
+        env.status = priorStatus
+        this._persist()
+        throw err
       }
 
       this._environments.delete(envId)
