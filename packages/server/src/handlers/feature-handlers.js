@@ -13,6 +13,7 @@ import { createLogger, loggerForSession } from '../logger.js'
 import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
+import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
 
 const log = createLogger('ws')
 
@@ -268,7 +269,55 @@ function handleListEnvironments(ws, _client, _msg, ctx) {
   })
 }
 
-function handleDestroyEnvironment(ws, _client, msg, ctx) {
+/**
+ * #7562 — destroy an environment, refusing while sessions are running inside
+ * it unless the client sets `force: true`.
+ *
+ * The refusal and the cascade both live in
+ * `environments/destroy-with-sessions.js` / `EnvironmentManager.destroy()`, so
+ * this handler and the Control Room's `containers_action` share ONE
+ * implementation. `force` cascades: the attached sessions are destroyed cleanly
+ * first, then the environment. The refusal reply carries
+ * `code: 'ENVIRONMENT_HAS_LIVE_SESSIONS'` and the session ids, so a client can
+ * name them (or offer the escalation) rather than showing a bare string.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — destroying an environment is a host-wide
+ *      lifecycle action, and with the `force` cascade above it also destroys
+ *      every session attached to it. A pairing-bound (share-a-session) client is
+ *      scoped to ONE session and must not reach it: the doc's rule is "bound
+ *      tokens cannot create, destroy, switch, or list sibling sessions", and a
+ *      bound client forcing this would destroy siblings it has no authority
+ *      over. Gated below, mirroring `containers_action`, which is the same
+ *      operation on the Control Room surface and has always gated (#7571 review
+ *      B1 — this handler took `_client` and never looked at it, so unifying the
+ *      destroy POLICY across both paths had left the AUTHORITY check on only one
+ *      of them: the same one-caller-guarded shape #7562 is otherwise about).
+ *   2. Environment membership — the client-supplied `environmentId` is a lookup
+ *      key into the manager's own registry, never a path or a host container id;
+ *      an unknown id resolves to nothing and `destroy()` throws.
+ *
+ * The authority gate runs FIRST — before the feature-enabled check, before
+ * `environmentId` validation and before any lookup — so an unauthorised client
+ * gets one identical refusal whether or not the environment exists and whether
+ * or not sessions are attached. Otherwise the reply is an existence oracle, and
+ * the `ENVIRONMENT_HAS_LIVE_SESSIONS` refusal would hand a bound client the ids
+ * of sessions it was never entitled to ask about.
+ */
+function handleDestroyEnvironment(ws, client, msg, ctx) {
+  // Authority gate (#1): host-level (unbound) clients only.
+  if (client?.boundSessionId) {
+    loggerForSession('ws', client.boundSessionId).warn(
+      `Client ${client.id} (bound to ${client.boundSessionId}) attempted destroy_environment — rejected (bound tokens cannot run host lifecycle actions or destroy sibling sessions)`,
+    )
+    ctx.transport.send(ws, {
+      type: 'environment_error',
+      error: 'Pairing-issued session tokens cannot destroy container environments — this requires a host-level (unbound) client, such as the primary token or the app\'s own device.',
+      code: 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT',
+    })
+    return
+  }
+
   if (!ctx.services.environmentManager) {
     ctx.transport.send(ws, { type: 'environment_error', error: 'Environment management is not enabled' })
     return
@@ -282,8 +331,20 @@ function handleDestroyEnvironment(ws, _client, msg, ctx) {
     return
   }
 
-  ctx.services.environmentManager.destroy(environmentId)
-    .then(() => {
+  // Strict boolean: only an explicit `true` escalates. A truthy string from a
+  // hand-rolled client must not silently destroy live sessions.
+  const force = msg.force === true
+
+  return destroyEnvironmentWithSessions({
+    environmentManager: ctx.services.environmentManager,
+    sessionManager: ctx.sessions.sessionManager,
+    environmentId,
+    force,
+  })
+    .then(({ destroyedSessions }) => {
+      if (destroyedSessions.length > 0) {
+        log.warn(`Force-destroyed environment ${environmentId} with ${destroyedSessions.length} live session(s): ${destroyedSessions.join(', ')}`)
+      }
       ctx.transport.send(ws, { type: 'environment_destroyed', environmentId })
       ctx.transport.broadcast({
         type: 'environment_list',
@@ -291,6 +352,18 @@ function handleDestroyEnvironment(ws, _client, msg, ctx) {
       })
     })
     .catch((err) => {
+      if (err?.code === ENVIRONMENT_HAS_LIVE_SESSIONS) {
+        // Not an operational failure — the guard doing its job. Info, not error.
+        log.info(`Refused destroy of environment ${environmentId}: ${err.message}`)
+        ctx.transport.send(ws, {
+          type: 'environment_error',
+          environmentId,
+          error: err.message,
+          code: ENVIRONMENT_HAS_LIVE_SESSIONS,
+          sessions: err.sessions || [],
+        })
+        return
+      }
       log.error(`Failed to destroy environment: ${err.message}`)
       ctx.transport.send(ws, { type: 'environment_error', environmentId, error: err.message })
     })

@@ -30,6 +30,7 @@ export declare const ServerEnvironmentErrorSchema: z.ZodObject<{
     error: z.ZodString;
     environmentId: z.ZodOptional<z.ZodString>;
     code: z.ZodOptional<z.ZodString>;
+    sessions: z.ZodOptional<z.ZodArray<z.ZodString>>;
 }, z.core.$strip>;
 export declare const ServerEnvironmentInfoSchema: z.ZodObject<{
     type: z.ZodLiteral<"environment_info">;

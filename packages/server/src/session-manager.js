@@ -1584,14 +1584,27 @@ export class SessionManager extends EventEmitter {
       // not persisted; a restart-reconcile re-establishes it (E-3 part 3).
       metadata: metadata || null,
       // #7552: the container environment this session was created INTO, or null.
-      // In-memory ONLY, deliberately: `_serializeSessionEntry` does not persist
-      // the container binding (containerId/containerUser/containerCliPath are
-      // absent from the saved shape), so a restored session is NOT in the
-      // container any more and must not claim to be. That is the same fact
-      // `EnvironmentManager.reconnect()` already encodes by clearing
-      // `env.sessions` unconditionally at boot. The read side is
-      // `_cleanupSessionMaps`, which is how the tag comes back off.
+      // The untag side is `_cleanupSessionMaps`, the single funnel every session
+      // takes out of `_sessions`.
+      //
+      // #7561: this and the three container fields below are now PERSISTED
+      // (`_serializeSessionEntry`) and re-resolved on restore
+      // (`_resolveRestoredContainerBinding`). They were in-memory only, which
+      // meant a restored `docker-sdk` session came back with no containerId —
+      // and `DockerSdkSession` reads that absence as "I own the container", so
+      // `start()` launched a BRAND NEW default `node:22-slim` container instead
+      // of re-entering the operator's configured one. Not a host escape, but an
+      // escape from the containment the operator configured (image, devcontainer
+      // mounts, sanitised env, resource limits), which is why the binding has to
+      // round-trip.
       environmentId: (typeof environmentId === 'string' && environmentId.length > 0) ? environmentId : null,
+      // The resolved container this session talks to. Recorded as PASSED (not
+      // read back off the provider, whose `_containerId` is mutated at runtime
+      // when it owns the container) so the persisted shape says what the session
+      // was created against.
+      containerId: (typeof containerId === 'string' && containerId.length > 0) ? containerId : null,
+      containerUser: (typeof containerUser === 'string' && containerUser.length > 0) ? containerUser : null,
+      containerCliPath: (typeof containerCliPath === 'string' && containerCliPath.length > 0) ? containerCliPath : null,
     }
 
     this._sessions.set(sessionId, entry)
@@ -2507,6 +2520,21 @@ export class SessionManager extends EventEmitter {
         // (pre-#5310) restore as null → treated as a non-worktree session.
         worktreePath: entry.worktreePath || null,
         worktreeRepoDir: entry.worktreeRepoDir || null,
+        // #7561: persist the container binding so an environment-backed session
+        // rebinds to ITS container on restore instead of silently launching a
+        // fresh default one (see the entry comment in createSession, and
+        // `_resolveRestoredContainerBinding` for what restore does with these).
+        // `environmentId` is the authority when present — the restore path
+        // re-resolves the container off the LIVE EnvironmentManager, because the
+        // environment may have been rebuilt while the daemon was down — and the
+        // three container fields carry the binding for a session created with a
+        // bare containerId and no environment. Null for every non-container
+        // session; older state files (no fields) restore as null, which is the
+        // pre-#7561 behaviour for exactly the sessions that had no binding.
+        environmentId: entry.environmentId || null,
+        containerId: entry.containerId || null,
+        containerUser: entry.containerUser || null,
+        containerCliPath: entry.containerCliPath || null,
         // Mailbox (#5914 follow-up): persist the registered AGENT_COMM_ID so a
         // session keeps its mailbox identity across a daemon restart (re-applied
         // via createSession on restore below). Null when the session never
@@ -2569,6 +2597,99 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #7561 — resolve the container binding a persisted session must come back
+   * with, or REFUSE the restore.
+   *
+   * The security property this enforces: **a session the operator created
+   * INSIDE a container must never come back running anywhere else.** Before
+   * this, the binding was not persisted at all, so a restored `docker-sdk`
+   * session had `containerId: null` — and `DockerSdkSession`'s constructor
+   * reads that as `_containerOwned = true`, so `start()` launched a fresh
+   * default `node:22-slim` container with the session's cwd bind-mounted,
+   * discarding the environment's image, its devcontainer mounts
+   * (`validateMounts`), its sanitised env (`sanitizeContainerEnv`) and its
+   * memory/cpu limits. Silent, and strictly weaker than what the operator asked
+   * for.
+   *
+   * The three outcomes:
+   *
+   *   1. Nothing persisted → `{}`. Non-container sessions and every state file
+   *      written before #7561 take the unchanged path.
+   *   2. `environmentId` persisted → the LIVE EnvironmentManager is the
+   *      authority. `getContainerInfo()` re-resolves the container (which may
+   *      have been rebuilt while the daemon was down) and throws when the
+   *      environment is gone or not running. Either way this method THROWS,
+   *      which lands the session in the #2954 failed-restore path: history is
+   *      preserved on disk, `session_restore_failed` fires, and the operator can
+   *      retry once the environment is back. Loud beats a silent respawn.
+   *   3. Only a bare `containerId` persisted (no environment — an internal
+   *      caller, never the wire) → forwarded verbatim. There is no registry to
+   *      revalidate against; `DockerSdkSession._verifyContainer` is the runtime
+   *      check and fails the session loudly if the container is gone. The
+   *      important part is that `containerId` is non-null, so the session cannot
+   *      take the `_containerOwned` spawn branch.
+   *
+   * Note the deliberate asymmetry with #7552's "restore must not half-tag" rule:
+   * that held while the binding was NOT persisted. With it persisted, a
+   * successful restore SHOULD re-tag — and does, via `createSession`'s existing
+   * `addSession` call, because `environmentId` is forwarded below.
+   *
+   * @param {object} saved - the persisted session payload
+   * @returns {{environmentId?: string, containerId?: string, containerUser?: string, containerCliPath?: string}}
+   * @throws {Error & {code: 'ENVIRONMENT_UNAVAILABLE'}} when a persisted environment cannot be re-entered
+   * @private
+   */
+  _resolveRestoredContainerBinding(saved) {
+    const str = (v) => (typeof v === 'string' && v.length > 0 ? v : undefined)
+    const environmentId = str(saved?.environmentId)
+    const containerId = str(saved?.containerId)
+
+    if (!environmentId) {
+      if (!containerId) return {}
+      return {
+        containerId,
+        containerUser: str(saved?.containerUser),
+        containerCliPath: str(saved?.containerCliPath),
+      }
+    }
+
+    const fail = (reason) => {
+      const err = new Error(
+        `Session was created inside container environment "${environmentId}", which cannot be re-entered: ${reason}. ` +
+        `Refusing to restore it outside that environment.`,
+      )
+      err.code = 'ENVIRONMENT_UNAVAILABLE'
+      throw err
+    }
+
+    if (!this._environmentManager || typeof this._environmentManager.getContainerInfo !== 'function') {
+      // Container environments were turned off (or this daemon never had them)
+      // since the session was created. Restoring would run it on the host side
+      // of the boundary it was created behind.
+      fail('container environments are not enabled on this server')
+    }
+
+    let info
+    try {
+      info = this._environmentManager.getContainerInfo(environmentId)
+    } catch (err) {
+      // Covers both "no such environment" and "not running (status: stopped |
+      // error)" — getContainerInfo throws for each.
+      fail(err?.message || String(err))
+    }
+    if (!info || typeof info.containerId !== 'string' || info.containerId.length === 0) {
+      fail('the environment reports no container')
+    }
+
+    return {
+      environmentId,
+      containerId: info.containerId,
+      containerUser: str(info.containerUser),
+      containerCliPath: str(info.containerCliPath),
+    }
+  }
+
+  /**
    * Restore session state from disk after a restart.
    * Creates new sessions using saved parameters. SdkSession can resume
    * via resumeSessionId; CliSession starts fresh (process state is ephemeral).
@@ -2606,6 +2727,12 @@ export class SessionManager extends EventEmitter {
     const oldToNew = new Map() // old serialized session ID → new session ID
     for (const saved of state.sessions) {
       try {
+        // #7561: resolve (and re-validate) the container binding FIRST, so a
+        // session whose environment is gone / stopped / disabled throws into the
+        // failed-restore catch below instead of being created host-side or into
+        // a freshly-spawned ad-hoc container. Nothing has been constructed at
+        // this point, which is what makes the refusal total.
+        const containerBinding = this._resolveRestoredContainerBinding(saved)
         // skipPersist: we rewrite the state file once at the end of
         // restoreState, after history and cost budget have been reseeded.
         // Flushing per-session here would overwrite the on-disk file with
@@ -2684,6 +2811,14 @@ export class SessionManager extends EventEmitter {
           agentCommId: typeof saved.agentCommId === 'string' && saved.agentCommId.length > 0
             ? saved.agentCommId
             : undefined,
+          // #7561: environmentId + containerId/containerUser/containerCliPath,
+          // re-resolved above. Empty for a non-container session, so this spread
+          // is a no-op on every path that had one before. Forwarding
+          // `environmentId` is also what re-tags `env.sessions` — createSession's
+          // existing `addSession` call does it, so the environment's live-session
+          // set (and the #7562 destroy guard that reads it) is true again after a
+          // restart.
+          ...containerBinding,
           skipPersist: true,
           // #5316 (WP-2.2) — mark this as a restore so an ASYNC provider
           // start() rejection (claude-tui PTY warmup death) preserves the

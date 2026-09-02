@@ -56,14 +56,18 @@ export const ServerEnvironmentDestroyedSchema = z.object({
     environmentId: z.string(),
 });
 // `error` is present at every emit site; `environmentId` only when an id is in
-// scope (destroy/get failures, not the validation early-returns); `code` only
-// for the Docker image-allowlist rejection (currently the literal
-// 'DOCKER_IMAGE_NOT_ALLOWED' — typed loosely so a new code can't make this stale).
+// scope (destroy/get failures, not the validation early-returns); `code` on the
+// Docker image-allowlist rejection ('DOCKER_IMAGE_NOT_ALLOWED') and the #7562
+// live-session destroy refusal ('ENVIRONMENT_HAS_LIVE_SESSIONS') — typed loosely
+// so a new code can't make this stale. `sessions` accompanies the latter: the
+// ids still running inside the environment, so a client can name them (and offer
+// the `force` escalation) instead of showing a bare string.
 export const ServerEnvironmentErrorSchema = z.object({
     type: z.literal('environment_error'),
     error: z.string(),
     environmentId: z.string().optional(),
     code: z.string().optional(),
+    sessions: z.array(z.string()).optional(),
 });
 export const ServerEnvironmentInfoSchema = z.object({
     type: z.literal('environment_info'),

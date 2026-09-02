@@ -1502,3 +1502,60 @@ healthy one. The generalisation of "prove the guard can fail" for data-driven
 guards is: **construct the state the guard is supposed to refuse, through the
 production path, and watch it refuse.** Setting the field by hand in a test
 proves the branch, not the wiring.
+
+### 26. The guard that only one client honoured — `#7562`, `#7561`
+
+Entry 25 fixed the Destroy button's precondition. It did not make the button
+**authoritative**, and nobody checked whether anything else needed to be.
+
+`EnvironmentPanel.tsx` disables Destroy while `env.sessions.length > 0`. Two
+server paths never looked at `env.sessions` at all:
+
+- `destroy_environment` (`feature-handlers.js`) → `EnvironmentManager.destroy()`
+- `containers_action` with `action: 'destroy'` (`control-room-handlers.js`) →
+  the same call, from a surface with **no UI guard whatsoever**
+
+and `EnvironmentManager.destroy()` — the one function both reach — had no check
+either. So a stale dashboard tab, a script, or the Control Room's own container
+controls could `docker rm -f` the container while sessions were running inside
+it. (Not the mobile app — it can create a session INTO an environment but ships
+no destroy surface. Naming it here in an earlier draft was the ordinary way an
+impact claim inflates: the reachable-caller set is the one you can enumerate in
+the code, not the one that sounds complete.) Measured on both paths before the fix: `environment_destroyed`
+/ `containers_action_ack status:"destroyed"` returned, `docker rm -f` ran, and the
+session was **still live in `SessionManager._sessions`** — pointing at a container
+that no longer existed.
+
+Mode: *ran, and was bypassable*. This is the sibling of entry 25 rather than a
+repeat of it. There the guard's precondition could never be true; here the
+precondition works perfectly and the guard is simply not in the path of most
+callers. Both present identically from the dashboard — the operator clicks
+Destroy, it is disabled, the system looks protected — because the only client
+that can *observe* the guard is the only client that *has* it.
+
+What kept it invisible is that the fix for entry 25 made the button start working,
+which is exactly the moment a reviewer stops asking about it. A guard that just
+went from broken to functional reads as *finished*.
+
+The related persistence half (`#7561`) is why the obvious lenient answer was not
+available. "Detach the sessions and let them keep running" sounds like the kind
+answer until you check what a detached `docker-sdk` session does: it was
+persisting `provider: 'docker-sdk'` with **no** `containerId`, and
+`DockerSdkSession`'s constructor reads that absence as `_containerOwned = true`,
+so `start()` launches a **fresh default `node:22-slim` container** with the cwd
+bind-mounted. Not an escape to the host — an escape from the containment the
+operator *configured* (image, devcontainer mounts, sanitised env, resource
+limits), reported as a successful restore. So the lenient branch was not lenient,
+it was a silent downgrade, and the policy had to be refuse-or-destroy-cleanly.
+
+**Guard against it:** when you fix a guard, ask **who else can perform the
+guarded action** before you call it done — enumerate the callers of the operation,
+not the renderers of the control. A client-side check is an affordance; only the
+server-side one is a guard. And put the server-side check at the **single**
+chokepoint every caller reaches (here `EnvironmentManager.destroy()`), because a
+copy per handler is how `containers_action` came to have none: the second caller
+was written after the first check and never learned about it. When an operator
+override is genuinely wanted, make it an **explicit field on the request**
+(`force: true`, strictly boolean) rather than a property of which handler the
+client happened to reach — an override you cannot see in the message is one you
+cannot audit, and one nobody can tell apart from a client that did not know.

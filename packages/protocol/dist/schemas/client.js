@@ -1243,9 +1243,15 @@ export const CreateEnvironmentSchema = z.object({
 export const ListEnvironmentsSchema = z.object({
     type: z.literal('list_environments'),
 });
+// #7562: `force` escalates past the live-session refusal — the server destroys
+// every session attached to the environment (cleanly, so clients see a
+// `session_destroyed` for each) and THEN the environment. Optional and strictly
+// boolean; absent/false means "refuse if anything is running in there", which is
+// the default the dashboard's Destroy button relies on.
 export const DestroyEnvironmentSchema = z.object({
     type: z.literal('destroy_environment'),
     environmentId: z.string().max(256),
+    force: z.boolean().optional(),
 });
 export const GetEnvironmentSchema = z.object({
     type: z.literal('get_environment'),
@@ -1513,6 +1519,12 @@ export const ContainersActionSchema = z.object({
     action: z.enum(['stop', 'restart', 'destroy']),
     environmentId: z.string().min(1).max(256),
     requestId: z.string().max(128).optional(),
+    // #7562: `destroy` refuses while sessions are running inside the environment;
+    // `force` cascades (destroy those sessions cleanly, then the environment).
+    // Ignored by stop/restart, which do not disturb attached sessions. Declared
+    // explicitly rather than relying on `.passthrough()` so the escalation is
+    // visible in the contract.
+    force: z.boolean().optional(),
 }).passthrough();
 // #6135 slice 2 (epic #5530) — BYOK warm-container pool mutating action. Host
 // authority (a session-bound token cannot run host actions, enforced server

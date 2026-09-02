@@ -13,6 +13,7 @@ import {
   validateMounts,
   sanitizeContainerEnv,
 } from './devcontainer-config.js'
+import { liveSessionsError } from './environments/destroy-with-sessions.js'
 
 const log = createLogger('environment-manager')
 
@@ -383,12 +384,43 @@ export class EnvironmentManager extends EventEmitter {
 
   /**
    * Destroy an environment and its container.
+   *
+   * #7562: REFUSES when sessions are still attached (`env.sessions` non-empty)
+   * unless `force` is set. This is the server-side half of a guard that lived
+   * only in the dashboard (`EnvironmentPanel`'s disabled Destroy button), so any
+   * OTHER sender of the message — a stale dashboard tab, the Control Room's
+   * `containers_action` (no UI guard at all), a script, any future client —
+   * could `docker rm -f` the container out from under running sessions. (The
+   * mobile app is not one of them today: it can put a session INTO an
+   * environment via `create_session`'s `environmentId`, but it has no
+   * environment-destroy surface. It is a potential victim of this, not a
+   * perpetrator.) The check sits HERE, at the one chokepoint every
+   * caller reaches, rather than in each handler: a per-caller check is the
+   * "guard wired to only some of its callers" shape in
+   * docs/false-safety-guards.md, which is precisely how `containers_action`
+   * came to have no guard at all.
+   *
+   * `force` does NOT clean the sessions up — this class has no handle on the
+   * SessionManager. The cascade (destroy the sessions cleanly, THEN the
+   * environment) is `environments/destroy-with-sessions.js`, which is what both
+   * handlers call. A direct `destroy(id, { force: true })` is the deliberate
+   * "I know, take it down anyway" escape.
+   *
    * @param {string} envId - Environment ID
+   * @param {{force?: boolean}} [opts]
+   * @throws {Error & {code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: string[]}}
+   *   when sessions are attached and `force` is not set. Nothing is torn down.
    */
-  async destroy(envId) {
+  async destroy(envId, { force = false } = {}) {
     const release = await this._acquireLock(envId)
     try {
       const env = this._getEnvironmentOrThrow(envId)
+      // #7562 — refuse BEFORE any teardown, so a refused destroy leaves the
+      // container running and the environment registered.
+      if (!force && Array.isArray(env.sessions) && env.sessions.length > 0) {
+        log.warn(`Refusing to destroy environment "${env.name}" (${envId}): ${env.sessions.length} live session(s) attached`)
+        throw liveSessionsError(env)
+      }
       log.info(`Destroying environment "${env.name}" (${envId})`)
 
       if (env.compose && env.composeProject) {
@@ -613,11 +645,22 @@ export class EnvironmentManager extends EventEmitter {
     let allHealthy = true
 
     for (const env of this._environments.values()) {
-      // Clear stale session references unconditionally — in-memory session
-      // state never survives a server restart, regardless of whether the
-      // environment's container is reachable, stopped, or has no containerId
-      // at all. (#3494: this used to live at the bottom of the loop body and
-      // was skipped by the no-containerId `continue` below.)
+      // Clear the PREVIOUS process's session references unconditionally,
+      // regardless of whether the environment's container is reachable,
+      // stopped, or has no containerId at all. (#3494: this used to live at the
+      // bottom of the loop body and was skipped by the no-containerId
+      // `continue` below.)
+      //
+      // #7561: this is no longer the last word on the tag. Sessions now persist
+      // their environment binding and RE-ATTACH on restore, so the sequence at
+      // boot is: reconnect() wipes the stale ids written by the process that
+      // died, then SessionManager.restoreState() re-tags the ones that actually
+      // came back. The ordering is load-bearing and holds in server-cli.js —
+      // the manager is constructed and reconnect()ed before the SessionManager
+      // exists, let alone restores — and is pinned in
+      // tests/environment-restore-binding.test.js. A reconnect() AFTER a
+      // restore would silently un-tag every restored session and put the
+      // destroy guard (#7562) back to sleep.
       env.sessions = []
 
       if (!env.containerId) {

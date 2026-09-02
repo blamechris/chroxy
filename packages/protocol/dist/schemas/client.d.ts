@@ -856,6 +856,7 @@ export declare const ListEnvironmentsSchema: z.ZodObject<{
 export declare const DestroyEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_environment">;
     environmentId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const GetEnvironmentSchema: z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
@@ -965,6 +966,7 @@ export declare const ContainersActionSchema: z.ZodObject<{
     }>;
     environmentId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>;
 export declare const ByokPoolActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"byok_pool_action">;
@@ -1614,6 +1616,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"destroy_environment">;
     environmentId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_environment">;
     environmentId: z.ZodString;
@@ -1700,6 +1703,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }>;
     environmentId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"byok_pool_action">;
     action: z.ZodEnum<{
