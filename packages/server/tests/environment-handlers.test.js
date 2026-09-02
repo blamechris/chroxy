@@ -12,10 +12,11 @@ function createMockWs() {
 }
 
 /**
- * Mock client object.
+ * Mock client object. Primary + unbound by default so it clears the #7576
+ * create_environment gate and receives unredacted rosters.
  */
 function createMockClient() {
-  return { activeSessionId: null, subscribedSessionIds: new Set() }
+  return { activeSessionId: null, subscribedSessionIds: new Set(), isPrimaryToken: true }
 }
 
 /**
@@ -101,9 +102,12 @@ describe('create_environment handler', () => {
     assert.equal(ctx._sent[0].name, 'test-env')
     assert.ok(ctx._sent[0].environmentId)
 
-    // Should broadcast environment_list
-    assert.equal(ctx._broadcasts.length, 1)
+    // Should broadcast environment_list. #7576 fans it out as TWO filtered
+    // broadcasts (full roster to unbound clients, redacted to bound), so both
+    // carry type environment_list.
+    assert.equal(ctx._broadcasts.length, 2)
     assert.equal(ctx._broadcasts[0].type, 'environment_list')
+    assert.equal(ctx._broadcasts[1].type, 'environment_list')
   })
 
   it('rejects when name is missing', () => {
