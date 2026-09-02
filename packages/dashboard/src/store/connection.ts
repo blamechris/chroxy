@@ -3417,6 +3417,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    *  Used by switchServer to preserve the old server's cached data. */
   _resetSessionMemory: () => {
     setLastConnectedUrl(null);
+    // #7578 — the module-level connection-scoped trackers that live in
+    // message-handler.ts / store-core, not in the store roster spread below.
+    // `disconnect()` clears all three (~L3124-3141), but `switchServer` /
+    // `connectLocal` run `disconnect()` only `if (connectionPhase !==
+    // 'disconnected')`, and a FAILED CONNECT rests at exactly that phase with the
+    // previous server's values intact — so a switch made from there reached
+    // `_resetSessionMemory` alone and all three crossed into the next server.
+    //   - The outgoing MESSAGE QUEUE is the filed leak: a prompt queued while
+    //     disconnected (input / interrupt / permission_response / …) drained onto
+    //     server B, executing one daemon's command against another's session.
+    //   - The replay CURSORS are the same class: keyed per session id, they ride
+    //     out in server B's `auth.historyCursors`, asserting "I have seen these
+    //     sessions up to seq N" to a daemon that never sent them (#5555.3).
+    //   - The in-flight TRANSCRIPT-FETCH tracking, likewise: a stale
+    //     conversationId left armed would intercept a later, unrelated
+    //     connection's frames (the reason `disconnect()` drops it, #6863).
+    // Cursors stay RETAINED on the reconnect paths — `connectToServer` /
+    // `retryConnection` do NOT run this action — so tunnel-blip delta replay is
+    // unaffected; only the context-SWITCH paths reach here.
+    clearMessageQueue();
+    resetReplayReconcile({ clearCursors: true });
+    resetTranscriptFetchTracking();
     set({
       // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
       // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
@@ -3543,12 +3565,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // a switch made from there ran this action alone and all seventeen survived
       // into the next server's UI. Spreading the roster here is what makes the
       // clear unconditional on the switch paths; the phase guard is left alone,
-      // because what it protects is the SOCKET teardown, not this — with one
-      // exception the #7573 review (C1) named: the outgoing message queue is ALSO
-      // skipped on a socketless tab and does leak across the switch (#7578, out of
-      // scope here), so "SOCKET teardown" is not a clean bill for everything the
-      // guard skips.
+      // because what it protects is the SOCKET teardown, not this. The one
+      // exception the #7573 review (C1) named — the outgoing message queue, ALSO
+      // skipped on a socketless tab — is now cleared at the top of this action
+      // (#7578), together with the replay cursors and the transcript-fetch
+      // tracking that leak the same way; so the switch path now mirrors
+      // `disconnect()`'s teardown for everything the guard skips.
       ...createEmptyConnectionScope(),
+      // #7578 — the transcript viewer slice, the store-field sibling of the
+      // transcript-fetch tracking cleared at the top. `disconnect()` resets it
+      // (~L3251); `_resetSessionMemory` did not, so an open transcript from
+      // server A stayed on screen after a disconnected-tab switch to server B —
+      // and its `conversationId` is minted per daemon, meaningless there. Not a
+      // Record/Set/array, so `createEmptyConnectionScope()`'s roster does not
+      // reach it (it is a single `TranscriptViewerState`); this explicit literal
+      // matches disconnect()'s value and mechanism.
+      transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       wsUrl: null,
       apiToken: null,
       serverMode: null,
