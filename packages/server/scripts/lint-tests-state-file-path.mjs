@@ -28,22 +28,31 @@
  * class `docs/false-safety-guards.md` catalogues, where "cannot check this"
  * and "nothing to check here" are the same observable outcome.
  *
- * Three changes close it:
+ * Four changes close it:
  *   1. Comments are blanked up front with the shared, parser-backed stripper
  *      (`./lib/strip-comments.mjs`, #7248 — it preserves every offset, so
  *      `file:line` stays exact). Quotes inside a comment can no longer toggle
  *      string state, and a `new SessionManager(` that lives inside a comment is
  *      no longer matched at all (which is what the old `isInsideComment` helper
  *      was for — now redundant).
- *   2. String / template / regex literals are blanked too (`blankStringLiterals`
- *      below, also parser-backed so a regex literal is never mistaken for a
- *      comment or division). The shared comment stripper deliberately leaves
- *      strings intact, but this lint must not: a `new SessionManager({` written
- *      inside an assertion-message STRING (there is one in
- *      environment-session-wiring.test.js) is prose, not a construction site,
- *      and matching the needle there both mis-reported it and — once (2) makes
- *      the walk loud — would fail the real tree.
- *   3. A site whose parens STILL cannot be balanced after (1) and (2) (a
+ *   2. String / template / regex literal VALUES are blanked too
+ *      (`blankStringLiterals` below, also parser-backed so a regex literal is
+ *      never mistaken for a comment or division). The shared comment stripper
+ *      deliberately leaves strings intact, but this lint must not: a
+ *      `new SessionManager({` written inside an assertion-message STRING (there
+ *      is one in environment-session-wiring.test.js) is prose, not a
+ *      construction site, and matching the needle there both mis-reported it
+ *      and — once (3) makes the walk loud — would fail the real tree. Property
+ *      KEYS are the exception and stay intact: blanking the quoted key in
+ *      `new SessionManager({ 'stateFilePath': … })` would erase the very
+ *      identifier the check looks for and falsely flag a correct site.
+ *   3. The construction site is found with a whitespace-tolerant regex
+ *      (`\bnew\s+${ctor}\b\s*\(`) rather than a fixed `new ${ctor}(` substring.
+ *      The substring demanded the `(` immediately after the name, so a legal
+ *      `new SessionManager (…)` or a `new SessionManager /* x *\/(…)` (the
+ *      comment blanked to spaces) was never found — again a missing option
+ *      silently skipped.
+ *   4. A site whose parens STILL cannot be balanced after (1) and (2) (a
  *      genuinely malformed construction the walker cannot verify) is collected
  *      into `unparseable` and reported LOUDLY with a distinct diagnostic and a
  *      non-zero exit — it is never silently skipped. "The lint could not check
@@ -118,19 +127,50 @@ function walk(dir, acc = []) {
   return acc
 }
 
+// A string/template literal that is a PROPERTY KEY, not a value. Blanking a
+// key erases the very identifier the offender check looks for: a legal
+// `new SessionManager({ 'stateFilePath': tmpStateFile() })` would have its
+// quoted key blanked to spaces and be FALSELY reported as an offender (#7567
+// review). Value/argument strings stay blanked — that is what keeps a
+// `new SessionManager({` written inside an assertion-message string from being
+// mis-detected as a construction site.
+function isPropertyKey(node) {
+  const p = node.parent
+  if (!p) return false
+  // `{ ['stateFilePath']: v }` — the literal is the computed name.
+  if (ts.isComputedPropertyName(p)) return true
+  // The literal is the `name` of a property-like member: `{ 'k': v }`,
+  // `{ 'k'() {} }`, class fields/accessors, enum members, TS signatures.
+  const nameHolders = [
+    ts.isPropertyAssignment,
+    ts.isPropertySignature,
+    ts.isPropertyDeclaration,
+    ts.isMethodDeclaration,
+    ts.isMethodSignature,
+    ts.isGetAccessorDeclaration,
+    ts.isSetAccessorDeclaration,
+    ts.isEnumMember,
+  ]
+  return nameHolders.some((is) => is(p)) && p.name === node
+}
+
 // Blank string / template / regex literal spans to spaces, preserving newlines
 // and every offset (same contract as stripComments). Parser-backed, so a `/`
 // that starts a regex literal is never confused with division or a comment —
 // the exact regex-blindness #7248 warned about. Template INTERPOLATION
 // expressions (`${ ... }`) are real code and stay intact; only the literal text
-// tokens (head/middle/tail and the surrounding backticks) are blanked.
+// tokens (head/middle/tail and the surrounding backticks) are blanked. Property
+// KEYS are left intact too (see isPropertyKey).
 function blankStringLiterals(src, fileName) {
-  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS)
+  // setParentNodes so isPropertyKey can inspect node.parent.
+  const sf = ts.createSourceFile(fileName, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
   const spans = []
   const visit = (node) => {
     switch (node.kind) {
       case ts.SyntaxKind.StringLiteral:
       case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+        if (!isPropertyKey(node)) spans.push([node.getStart(sf), node.getEnd()])
+        break
       case ts.SyntaxKind.RegularExpressionLiteral:
       case ts.SyntaxKind.TemplateHead:
       case ts.SyntaxKind.TemplateMiddle:
@@ -161,30 +201,24 @@ function blankStringLiterals(src, fileName) {
   return out
 }
 
-// Walk from an opening `(` to its matching `)`. Comments AND string literals are
-// already blanked by the caller before this sees the source, so a quote or a
-// paren inside either can no longer throw off the count. The residual string
-// tracking below is belt-and-suspenders. A -1 return therefore means the
-// construction is genuinely unbalanced, and the caller treats that as
-// loud-unparseable rather than a silent skip (#7567).
+// Walk from an opening `(` to its matching `)`. This is a PURE paren counter:
+// comments AND string/template/regex literals are already blanked to spaces by
+// the caller before this sees the source, so every `(` and `)` left standing is
+// real code. It deliberately does NOT track string state — the old quote
+// tracking was dead once blanking runs, and worse, a stray quote surviving a TS
+// regex-misparse edge could falsely open a phantom string and drive a SPURIOUS
+// exit-2 on valid code (#7567 review). A -1 return means the construction is
+// genuinely unbalanced, which the caller treats as loud-unparseable rather than
+// a silent skip.
 function findMatchingParen(src, openIdx) {
   let depth = 0
-  let i = openIdx
-  let inStr = null
-  while (i < src.length) {
+  for (let i = openIdx; i < src.length; i++) {
     const ch = src[i]
-    const prev = src[i - 1]
-    if (inStr) {
-      if (ch === inStr && prev !== '\\') inStr = null
-    } else if (ch === '"' || ch === "'" || ch === '`') {
-      inStr = ch
-    } else if (ch === '(') {
-      depth++
-    } else if (ch === ')') {
+    if (ch === '(') depth++
+    else if (ch === ')') {
       depth--
       if (depth === 0) return i
     }
-    i++
   }
   return -1
 }
@@ -200,6 +234,10 @@ const RULES = [
 const args = parseArgs(process.argv.slice(2))
 const TESTS_DIR = resolve(args.testsDir ?? DEFAULT_TESTS_DIR)
 if (!existsSync(TESTS_DIR)) usageError(`tests dir does not exist: ${TESTS_DIR}`)
+// A path that exists but is a FILE would sail past existsSync and then make
+// walk()'s readdirSync throw ENOTDIR uncaught — exit 1, i.e. "the tree is
+// dirty", when the truth is "you pointed me at a bad dir" (exit 2).
+if (!statSync(TESTS_DIR).isDirectory()) usageError(`--tests-dir is not a directory: ${TESTS_DIR}`)
 
 const offenders = []
 const unparseable = []
@@ -219,13 +257,19 @@ for (const file of walk(TESTS_DIR)) {
     usageError(`cannot pre-process ${file}: ${err.message}`)
   }
   for (const { ctor, requiredOpt } of RULES) {
-    const needle = `new ${ctor}(`
-    let i = 0
-    while (true) {
-      const idx = src.indexOf(needle, i)
-      if (idx === -1) break
-      i = idx + 1
-      const openParen = idx + needle.length - 1
+    // A plain `indexOf('new ${ctor}(')` demanded the `(` IMMEDIATELY after the
+    // class name, so a legal `new SessionManager (…)` (space) or
+    // `new SessionManager /* x */(…)` (comment blanked to spaces → several
+    // spaces before the paren) never matched — a site MISSING stateFilePath was
+    // silently skipped, "cannot even find it" reading as "nothing to check"
+    // (#7567 review). Tolerate whitespace between `new`, the name, and `(`. The
+    // `\b` on both sides of the name stop `renew SessionManager(` and
+    // `new SessionManagerFoo(` from matching.
+    const siteRe = new RegExp(`\\bnew\\s+${ctor}\\b\\s*\\(`, 'g')
+    let m
+    while ((m = siteRe.exec(src)) !== null) {
+      const idx = m.index
+      const openParen = idx + m[0].length - 1 // the matched `(`
       const closeParen = findMatchingParen(src, openParen)
       const before = src.slice(0, idx)
       const line = before.split('\n').length

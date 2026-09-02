@@ -153,6 +153,80 @@ const m = new SessionManager({
     })
   })
 
+  // #7567 review — the first fix matched sites with a fixed `new ${ctor}(`
+  // substring and blanked string PROPERTY KEYS, both of which reintroduced the
+  // false-safety class this PR closes. Each test below was verified to fail on
+  // the pre-review branch (misses / false-positives) and pass after.
+  describe('review findings: non-adjacent parens and quoted keys (#7567)', () => {
+    test('CATCHES a missing opt when a space sits before the paren', () => {
+      // `new SessionManager (…)` — a legal space. The old substring
+      // `new SessionManager(` never matched it, so the site was silently
+      // skipped (verified exit 0 on the branch).
+      const r = runLint({
+        'space.test.js': `
+import { SessionManager } from '../src/session-manager.js'
+const m = new SessionManager ({ cwd: '/tmp' })
+`,
+      })
+      assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`)
+      assert.match(r.stderr, /space\.test\.js:3\s+\(missing stateFilePath/)
+    })
+
+    test('CATCHES a missing opt when a comment sits before the paren', () => {
+      // `new SessionManager /* x */(…)` — the comment blanks to spaces, so the
+      // paren is not adjacent to the name. Old substring missed it (exit 0).
+      const r = runLint({
+        'comment.test.js': `
+import { SessionManager } from '../src/session-manager.js'
+const m = new SessionManager /* here */({ cwd: '/tmp' })
+`,
+      })
+      assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`)
+      assert.match(r.stderr, /comment\.test\.js:3\s+\(missing stateFilePath/)
+    })
+
+    test('CONTROL: a different class with the ctor as a prefix is NOT matched', () => {
+      // The `\b` word boundaries must stop `new SessionManagerHelper(` from
+      // matching the SessionManager rule — otherwise the whitespace-tolerant
+      // regex would over-match. This unrelated class has no required opt, so a
+      // spurious match would wrongly flag it.
+      const r = runLint({
+        'prefix.test.js': `
+const m = new SessionManagerHelper({ cwd: '/tmp' })
+`,
+      })
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
+    })
+
+    test('a quoted property KEY does NOT false-positive', () => {
+      // `{ 'stateFilePath': … }` is correctly written. Blanking the quoted key
+      // (the first fix did) erased the identifier the check looks for and
+      // reported a FALSE offender (verified exit 1 on the branch). Property keys
+      // are now left intact.
+      const r = runLint({
+        'quotedkey.test.js': `
+import { SessionManager } from '../src/session-manager.js'
+const m = new SessionManager({ 'stateFilePath': tmpStateFile(), cwd: '/tmp' })
+`,
+      })
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`)
+    })
+
+    test('CONTROL: a quoted VALUE string is still blanked (not a key)', () => {
+      // The key exemption must be surgical: a value/argument string is still
+      // blanked, so a call whose only `stateFilePath` mention is inside a
+      // string VALUE is still an offender.
+      const r = runLint({
+        'quotedval.test.js': `
+import { SessionManager } from '../src/session-manager.js'
+const m = new SessionManager({ cwd: 'stateFilePath goes here' })
+`,
+      })
+      assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`)
+      assert.match(r.stderr, /quotedval\.test\.js:3\s+\(missing stateFilePath/)
+    })
+  })
+
   describe('a needle inside a STRING literal is not a construction site (#7567)', () => {
     // The real shape that made this necessary: environment-session-wiring.test.js
     // has an assertion message containing the text `new SessionManager({`. Once
@@ -287,6 +361,19 @@ const m = new SessionManager({ cwd: '/tmp' })
       )
       assert.equal(res.status, 2)
       assert.match(res.stderr, /does not exist/)
+    })
+
+    test('--tests-dir pointed at a FILE fails (exit 2), not ENOTDIR/exit 1', () => {
+      // A path that exists but is a file passed the existsSync check and then
+      // made walk()'s readdirSync throw ENOTDIR uncaught → exit 1 ("the tree is
+      // dirty"), violating the exit-2-for-bad-dir contract (#7567 review).
+      const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-statefile-file-'))
+      tmpRoots.push(root)
+      const filePath = join(root, 'a-file.test.js')
+      writeFileSync(filePath, 'export const x = 1\n')
+      const res = spawnSync(process.execPath, [LINT_SCRIPT, '--tests-dir', filePath], { encoding: 'utf8' })
+      assert.equal(res.status, 2, `${res.stdout}\n${res.stderr}`)
+      assert.match(res.stderr, /not a directory/)
     })
 
     test('scanning zero .test.js files fails (exit 2), not reports clean', () => {
