@@ -72,8 +72,23 @@ const { createEmptyConnectionScope } = await import('./utils')
  * rather than turn one red.
  */
 const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmptyConnectionScope())
-const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags } =
-  await import('./message-handler')
+const {
+  handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags,
+  // #7578 — the module-level connection-scoped trackers `_resetSessionMemory`
+  // now clears. They are NOT store fields, so `CONNECTION_SCOPED_RESET_FIELDS`
+  // cannot reach them — they get their own describe below.
+  enqueueMessage, clearMessageQueue, _testQueueInternals,
+  resetTranscriptFetchTracking, beginTranscriptFetch, endTranscriptFetch,
+} = await import('./message-handler')
+// #7578 fold — the namespace, so `vi.spyOn(mh, 'clearDeltaBuffers')` intercepts
+// the call `connection.ts` makes through the SAME live module binding (verified:
+// a spy set here is observed by `disconnect()` / `_resetSessionMemory`). Used for
+// the delta buffers, which expose no state getter; the terminal buffer is
+// observed by its flush effect instead.
+const mh = await import('./message-handler')
+// Cursors live in store-core; `resetReplayReconcile` is shared by both clients.
+const { recordHistorySeq, getHistoryCursors, resetReplayReconcile } =
+  await import('@chroxy/store-core')
 const { resetSchedulerRequestsForTest, hasPendingSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } =
   await import('./scheduledTaskRequests')
 
@@ -538,6 +553,170 @@ describe.each([
     run(serverBId)
     const survivors = ELEVEN.filter((f) => populated(f))
     expect(survivors).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7578 — the MODULE-LEVEL connection-scoped trackers.
+//
+// `CONNECTION_SCOPED_RESET_FIELDS` above is store state; these three are not.
+// They live in `message-handler.ts` (the outgoing message queue, the
+// transcript-fetch tracking) and store-core (the replay history cursors), and
+// `disconnect()` clears all three — but a switch from an already-disconnected
+// tab skipped `disconnect()`, so they crossed into the next server. The
+// outgoing MESSAGE QUEUE is the leak #7578 filed: a prompt queued while
+// disconnected drained onto server B. Same shape as #7559, one indirection over.
+// ---------------------------------------------------------------------------
+describe.each([
+  ['switchServer', (id: string) => useConnectionStore.getState().switchServer(id)],
+  ['connectLocal', (_id: string) => useConnectionStore.getState().connectLocal()],
+])('#7578 %s from connectionPhase disconnected clears the module-level trackers', (_name, run) => {
+  let serverBId = ''
+  const TRANSCRIPT_ID = 'conv-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+
+  beforeEach(() => {
+    // #6063 — stub the network-touching `connect` so the switch never opens a
+    // real socket; the thing under test is the synchronous teardown that runs
+    // BEFORE `connect` is delegated to.
+    useConnectionStore.setState({ connect: vi.fn() } as unknown as Partial<State>)
+    const a = useConnectionStore.getState().addServer('A', 'wss://server-a/ws', 'tok-a')
+    const b = useConnectionStore.getState().addServer('B', 'wss://server-b/ws', 'tok-b')
+    serverBId = b.id
+    seedServerA({ activeServerId: a.id, connectionPhase: 'disconnected', socket: null } as unknown as Partial<State>)
+    // Server A's module-level trackers, each with a distinguishable marker.
+    clearMessageQueue()
+    enqueueMessage('input', { type: 'input', content: 'prompt meant for server A' })
+    resetReplayReconcile({ clearCursors: true })
+    recordHistorySeq('sess-a', 42)
+    resetTranscriptFetchTracking()
+    beginTranscriptFetch(TRANSCRIPT_ID)
+  })
+
+  afterEach(() => {
+    clearMessageQueue()
+    resetReplayReconcile({ clearCursors: true })
+    resetTranscriptFetchTracking()
+    clearDeltaBuffers()
+    mh.clearTerminalWriteBatching()
+  })
+
+  it('control: the trackers really are populated as server A before the switch', () => {
+    expect(useConnectionStore.getState().connectionPhase).toBe('disconnected')
+    expect(_testQueueInternals.getQueue()).toHaveLength(1)
+    expect(getHistoryCursors()).toEqual({ 'sess-a': 42 })
+  })
+
+  it('the outgoing message queue does not survive into server B (#7578)', () => {
+    expect(_testQueueInternals.getQueue(), 'control: queued before the switch').toHaveLength(1)
+    run(serverBId)
+    expect(
+      _testQueueInternals.getQueue(),
+      "server A's queued prompt survived a switch made from the disconnected phase and would " +
+        'drain onto server B (#7578)',
+    ).toEqual([])
+  })
+
+  it('the replay history cursors do not survive into server B', () => {
+    expect(getHistoryCursors(), 'control: cursor recorded before the switch').toEqual({ 'sess-a': 42 })
+    run(serverBId)
+    expect(
+      getHistoryCursors(),
+      "server A's replay cursor survived the switch and would be sent in server B's auth handshake",
+    ).toEqual({})
+  })
+
+  it('an in-flight transcript fetch does not keep intercepting frames after the switch', () => {
+    run(serverBId)
+    // The user opens that same transcript on server B. If server A's pending
+    // fetch survived, `isTranscriptFramePending` still returns true for this id,
+    // so a server-B frame is diverted into the transcript viewer.
+    useConnectionStore.setState({
+      transcriptViewer: { conversationId: TRANSCRIPT_ID, status: 'loading', messages: [], error: null },
+    } as unknown as Partial<State>)
+    handleMessage(
+      { type: 'message', messageType: 'user_input', content: 'a server B frame', sessionId: TRANSCRIPT_ID, timestamp: 100 },
+      { url: 'wss://server-b/ws', token: 'tok-b', socket: { readyState: 1 }, isReconnect: false, silent: true } as never,
+    )
+    expect(
+      useConnectionStore.getState().transcriptViewer.messages,
+      "server A's pending transcript fetch intercepted a server B frame (a stale conversationId " +
+        'that must not survive the switch)',
+    ).toHaveLength(0)
+    endTranscriptFetch(TRANSCRIPT_ID)
+  })
+
+  it('an open transcript VIEWER does not survive into server B (#7578)', () => {
+    // The STORE-FIELD sibling of the transcript-fetch tracking above: a past
+    // conversation left open on server A. Its `conversationId` is minted per
+    // daemon, so it renders meaningless content against server B. `disconnect()`
+    // resets this slice (connection.ts ~L3251); `_resetSessionMemory` must too.
+    useConnectionStore.setState({
+      transcriptViewer: {
+        conversationId: 'conv-server-a',
+        status: 'ready',
+        messages: [{ id: 'm-a', type: 'user_input', content: 'server A transcript', timestamp: 1 }],
+        error: null,
+      },
+    } as unknown as Partial<State>)
+    run(serverBId)
+    expect(
+      useConnectionStore.getState().transcriptViewer,
+      "server A's open transcript stayed on screen after a switch made from the disconnected " +
+        "phase — its conversationId is meaningless on server B (#7578)",
+    ).toEqual({ conversationId: null, status: 'idle', messages: [], error: null })
+  })
+
+  it('the un-flushed streaming DELTA buffers are torn down on the switch (#7578)', () => {
+    // No state getter is exported for `deltaFlusher.pendingDeltas` /
+    // `_deltaServerTs`, so observe the teardown the way the module allows: spy
+    // the exact function `disconnect()` uses (call-through), and assert the
+    // switch invokes it. Installed AFTER the top-level beforeEach's own
+    // `clearDeltaBuffers()`, so the pre-run count is a true zero.
+    const spy = vi.spyOn(mh, 'clearDeltaBuffers')
+    expect(spy, 'control: not called before the switch').not.toHaveBeenCalled()
+    run(serverBId)
+    expect(
+      spy,
+      "server A's un-flushed streaming deltas were not torn down on the switch — they could flush " +
+        'into server B (#7578)',
+    ).toHaveBeenCalled()
+  })
+
+  it("server A's batched TERMINAL writes do not flush into server B (#7578)", () => {
+    // The observable proof: `clearTerminalWriteBatching()` drops the buffered
+    // bytes AND the ~50ms coalescing timer. Seed server A's partial bytes, run
+    // the switch, then let the timer fire — a flush would deliver them through
+    // `_terminalWriteCallback` (which `_resetSessionMemory` does NOT null, so it
+    // survives the switch and the observation is real, not masked).
+    vi.useFakeTimers()
+    try {
+      const flushed: string[] = []
+      useConnectionStore.setState({
+        _terminalWriteCallback: (d: string) => { flushed.push(d) },
+      } as unknown as Partial<State>)
+      mh.appendPendingTerminalWrite('server A partial terminal bytes')
+      run(serverBId)
+      vi.advanceTimersByTime(200) // well past the 50ms window
+      expect(
+        flushed,
+        "server A's batched terminal bytes flushed after the switch — they would land in server " +
+          "B's terminal (#7578)",
+      ).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('POSITIVE CONTROL: the switch from a CONNECTED tab still clears the trackers (the path disconnect() covered)', () => {
+    const closed = vi.fn()
+    useConnectionStore.setState({
+      connectionPhase: 'connected',
+      socket: { close: closed, readyState: 1 } as unknown as WebSocket,
+    } as unknown as Partial<State>)
+    run(serverBId)
+    expect(_testQueueInternals.getQueue(), 'the connected-tab path still drops the queue').toEqual([])
+    expect(getHistoryCursors(), 'the connected-tab path still drops the cursors').toEqual({})
+    expect(closed, 'the phase guard still lets disconnect() tear the socket down').toHaveBeenCalled()
   })
 })
 

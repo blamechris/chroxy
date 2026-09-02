@@ -181,6 +181,23 @@ export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionFi
  * so an older server B that omits the field leaves server A's mode list driving
  * the permission-mode picker — nothing else overwrites it (#7564 review).
  *
+ * ## This roster is the STORE-STATE portion, not all connection-scoped state
+ *
+ * Connection-scoped state whose home is NOT the store lives in
+ * `message-handler.ts` / store-core as module-level trackers — the outgoing
+ * message queue, the replay history cursors, the in-flight transcript-fetch
+ * tracking, the un-flushed
+ * streaming delta buffers, and the batched terminal writes. Those have the same
+ * "this connection to this daemon" lifetime as the fields here, but a store
+ * spread cannot reach them, so `disconnect()` and `_resetSessionMemory()` clear
+ * them with explicit calls (`clearMessageQueue()` / `resetReplayReconcile({
+ * clearCursors: true })` / `resetTranscriptFetchTracking()` / `clearDeltaBuffers
+ * ()` / `clearTerminalWriteBatching()`) ALONGSIDE this spread (#7578). Adding a
+ * new module-level tracker of that class means adding its clear at BOTH sites,
+ * by hand and in lockstep — the drift that keeps having to be caught is why
+ * follow-on #7592 (extract one shared teardown helper) exists. This factory is
+ * not where it lands.
+ *
  * A fresh object per call: these are mutable collections handed to the store.
  */
 export function createEmptyConnectionScope() {
