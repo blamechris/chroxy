@@ -2464,9 +2464,14 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       }
       const trimmed = line.trimStart()
       if (trimmed === '' || trimmed.startsWith('//')) continue
-      // A line that OPENS or continues a block comment on its own is comment prose
-      // (a `/* … ` block is fine); track whether the block stays open past EOL.
-      if (trimmed.startsWith('/*') || trimmed.startsWith('*')) {
+      // A line that OPENS a block comment (`/* … `) is comment prose; track
+      // whether the block stays open past EOL. A `*`-leading CONTINUATION line
+      // is NOT special-cased here: if it is inside a real block comment the
+      // `inBlockComment` consume above already skipped it, and a `*`-leading
+      // line reached here with `inBlockComment` false is CODE (`* multiplier`, a
+      // wrapped expression), not prose — skipping it would let a hazard on it
+      // slip through (#7590 review).
+      if (trimmed.startsWith('/*')) {
         const open = line.indexOf('/*')
         if (open !== -1 && line.indexOf('*/', open + 2) === -1) inBlockComment = true
         continue
@@ -2756,6 +2761,24 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // benign edit. This asserts the old predicate would have fired, so the control
     // above is the thing that changed, not decoration.
     expect(trailingComment.includes('//'), 'the pre-fold `line.includes(\'//\')` would have flagged this').toBe(true)
+  })
+
+  it('a `*`-leading CODE line is scanned, not skipped as comment prose (#7590 review)', () => {
+    // The scanner used to skip any line whose trimStart() began with `*` as block-
+    // comment prose. But a `*`-leading CONTINUATION line that is NOT inside a real
+    // block comment (the `inBlockComment` consume already handles those) is CODE —
+    // a wrapped expression — and a hazard on it would slip through undetected. Here
+    // a wrapped `* 'ws://cdn'.length` carries a `//` INSIDE a string, exactly the
+    // stripComments-truncation class; it must be flagged, not skipped.
+    const wrappedCode = ['  size: base', "    * 'ws://cdn'.length, availableModels: [],"].join('\n')
+    expect(
+      stripCommentHazards(wrappedCode).length,
+      'a hazard on a `*`-leading code line must be caught',
+    ).toBeGreaterThan(0)
+    // A genuine `*` continuation INSIDE a block comment is still safe (handled by
+    // the inBlockComment consume, so it is skipped there, never reaching a scan).
+    const blockCont = ['  /* a wrapped', "   * note mentioning ws://x and // and /* delimiters", '   */', '  serverCapabilities: {},'].join('\n')
+    expect(stripCommentHazards(blockCont), 'a real block-comment continuation is not a hazard').toEqual([])
   })
 
   it('every CLEARED_ON_DISCONNECT entry is really cleared by disconnect()', () => {
