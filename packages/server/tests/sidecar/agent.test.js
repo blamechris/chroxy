@@ -163,6 +163,54 @@ function waitForDataMessages(ws, count, timeoutMs = 2000) {
   })
 }
 
+/**
+ * Wait for the FIRST frame whose `type` matches, ignoring every unrelated
+ * frame (session_started, the #3344 spawn sentinel stderr, real stdout/stderr,
+ * exit, …).  Unlike waitForDataMessages — which returns whichever
+ * non-session_started frame arrives first — this selects a control/error frame
+ * by type deterministically, so the sentinel stderr can no longer win the race
+ * against an expected error frame on a slow host (#7565).  Rejects on timeout,
+ * socket error, or a close before the frame arrives, so a missing frame is a
+ * hard failure rather than a hang or an uncaught 'error' (matching the
+ * waitForSessionStarted contract above).  The timeout names the frame types it
+ * DID see, so a wrong-type regression still fails legibly rather than as an
+ * opaque timeout ("red, legibly" — CLAUDE.md test doctrine).
+ */
+function waitForMessageOfType(ws, type, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    const seen = []
+    function cleanup() {
+      clearTimeout(timer)
+      ws.off('message', onMsg)
+      ws.off('error', onError)
+      ws.off('close', onClose)
+    }
+    function onMsg(data) {
+      let msg
+      try { msg = JSON.parse(data.toString()) } catch { return }
+      seen.push(msg.type)
+      if (msg.type !== type) return
+      cleanup()
+      resolve(msg)
+    }
+    function onError(err) {
+      cleanup()
+      reject(new Error(`socket error while waiting for '${type}' frame: ${err && err.message}`))
+    }
+    function onClose(code) {
+      cleanup()
+      reject(new Error(`socket closed (${code}) before '${type}' frame arrived (saw: ${seen.join(', ') || 'nothing'})`))
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error(`timeout waiting for '${type}' frame (saw: ${seen.join(', ') || 'nothing'})`))
+    }, timeoutMs)
+    ws.on('message', onMsg)
+    ws.on('error', onError)
+    ws.on('close', onClose)
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Mock spawn helper
 // ---------------------------------------------------------------------------
@@ -894,12 +942,14 @@ describe('PodAgent', () => {
       const firstEvent = firstMsgs.find((m) => m.type === 'event')
       assert.ok(firstEvent, `expected an event frame in first spawn ack, got ${JSON.stringify(firstMsgs)}`)
 
-      // Second spawn — must be rejected with an error frame, first child untouched.
-      const secondAck = waitForDataMessages(ws, 1)
+      // Second spawn — must be rejected with a 'child already running' error
+      // frame. Select the error frame by type so a stray frame from the
+      // still-running first child cannot be mistaken for the rejection (#7565).
+      const secondErr = waitForMessageOfType(ws, 'error')
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      const secondMsgs = await secondAck
-      assert.equal(secondMsgs[0].type, 'error')
-      assert.match(secondMsgs[0].message, /child already running/)
+      const err = await secondErr
+      assert.equal(err.type, 'error')
+      assert.match(err.message, /child already running/)
 
       ws.close()
     })
@@ -1869,15 +1919,23 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
+      // Wait for the actual session_started frame (attach BEFORE sending spawn
+      // so it is never missed) rather than a fixed sleep — the sleep was a
+      // settling proxy that raced the async spawn handling on slow hosts.
+      const started = waitForSessionStarted(ws)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await started
 
-      const msgsPromise = waitForDataMessages(ws, 1)
+      // Select the error frame by type: the spawn sentinel stderr frame (#3344)
+      // is still in flight and would otherwise win the race under
+      // waitForDataMessages, which returns whichever non-session_started frame
+      // arrives first (#7565).
+      const errPromise = waitForMessageOfType(ws, 'error')
       ws.send(JSON.stringify({ type: 'stdin', data: 42 }))
 
-      const msgs = await msgsPromise
-      assert.equal(msgs[0].type, 'error')
-      assert.match(msgs[0].message, /data must be a string/)
+      const err = await errPromise
+      assert.equal(err.type, 'error')
+      assert.match(err.message, /data must be a string/)
 
       ws.close()
     })
