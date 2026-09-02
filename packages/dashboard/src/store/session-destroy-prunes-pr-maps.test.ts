@@ -2355,53 +2355,105 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     block.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
 
   /**
-   * #7580 — `stripComments` above lexes NO string or regex literal. On a line
-   * that carries real CODE, a `://` (a `ws://` / `http://` URL), a regex literal,
-   * or any stray comment delimiter (a line `//`, or a block open / close) inside
-   * a literal is read as a comment: the `//…$` line strip TRUNCATES the line, and
-   * the block strip swallows every line through to the next block close. Either
-   * way `assigns()` / `spreadsRoster` — the predicates this file is built on — miss an
-   * assignment that IS present. That is a latent FALSE NEGATIVE in the guard: a
-   * field that IS cleared would read as not-cleared, or a real spread would be
-   * hidden. It is non-blocking TODAY only because no action body carries such a
-   * literal on a code line; a future edit that puts one there would defeat the
-   * guard SILENTLY.
+   * #7580 — `stripComments` above is LITERAL-BLIND: its two passes match `//`,
+   * `/*` and the block-close delimiter as RAW text, with no idea whether a given
+   * one sits inside a string or regex literal. A genuine comment is removed
+   * correctly — that is the point, and a plain trailing `// comment` on a
+   * tracked-field line is harmless (the field stays, only the comment goes). The
+   * hazard is a comment delimiter that lives INSIDE a string or regex literal on
+   * a code line: `reconnectHint: 'ws://x', field: {}` — the `//` is inside the
+   * STRING, so stripComments eats `//x', field: {}` and the real `field` clear
+   * with it (line strip); a `/*` inside a string or regex is worse still,
+   * swallowing every line through to the next block close (block strip).
+   * `assigns()` / `spreadsRoster` — the predicates this file is built on — then
+   * miss an assignment that IS present: a latent FALSE NEGATIVE (a cleared field
+   * read as not-cleared, or a real spread hidden). It is non-blocking TODAY only
+   * because no action body carries such a literal; a future edit that adds one
+   * would defeat the guard SILENTLY.
    *
-   * `stripCommentHazards` returns every code line in `block` on which that could
-   * happen (empty => safe). It is a source-text heuristic, in the same spirit as
-   * `stripComments` / `assigns` / `actionBody`, and deliberately NOT a lexer (the
-   * issue's option 1, not the full-lexing option 2). A `//`-only line and the
-   * interior of a block comment are comments and are handled correctly by
-   * stripComments, so they are NOT flagged — the hazard is one of these
-   * constructs on a line that ALSO holds code. The per-slice cell below asserts
-   * the four real action bodies produce NONE, converting the silent future
-   * false-negative into a loud failure that names this issue.
+   * `stripCommentHazards` returns every code line in `block` that carries such a
+   * literal (empty means safe). It is a source-text heuristic in the spirit of
+   * `stripComments` / `assigns`, deliberately NOT a full lexer (the issue's
+   * option 1, not option 2). It walks each code line tracking string- and
+   * regex-literal state and flags a `//` / `/*` / block-close found INSIDE one; a
+   * `//`-only line, the interior of a block comment, a GENUINE trailing
+   * `// comment`, and a GENUINE inline block comment that closes before code are
+   * all handled correctly by stripComments and are NOT flagged. The per-slice
+   * cell below asserts the four real action bodies produce NONE, turning the
+   * silent future false-negative into a loud failure that names this issue.
    */
   const REGEX_START_CTX = '([{=:,;!&|?+-*%^~<>'
-  const hasRegexLiteral = (line: string): boolean => {
+  const lineHazard = (line: string): { hazard: string | null; opensBlock: boolean } => {
+    const hit = (kind: string): { hazard: string; opensBlock: boolean } => ({
+      hazard: `a '//' / '/*' / '*/' inside a ${kind} (stripComments is literal-blind and eats the real code around it)`,
+      opensBlock: false,
+    })
+    let prevSig = ''
     for (let i = 0; i < line.length; i++) {
-      if (line[i] !== '/') continue
-      // Division (`a / b`) has an OPERAND before the slash; a regex literal has an
-      // opener (`(`, `,`, `=`, `:`, `return`, …) or the line start. So a slash
-      // whose preceding non-space token is an identifier / quote / close-bracket
-      // is division or a path string, not a regex, and is left alone.
-      let j = i - 1
-      while (j >= 0 && (line[j] === ' ' || line[j] === '\t')) j--
-      const prev = j < 0 ? '' : (line[j] ?? '')
-      if (prev !== '' && !REGEX_START_CTX.includes(prev)) continue
-      // …and it must actually CLOSE with another unescaped slash to be a literal.
-      for (let k = i + 1; k < line.length; k++) {
-        if (line[k] === '\\') { k++; continue }
-        if (line[k] === '/') return true
+      const c = line[i] ?? ''
+      const d = line[i + 1] ?? ''
+      // A string literal. Find its (escape-aware) end, then RAW-scan the span —
+      // stripComments sees `//` / `/*` / `*/` regardless of any escapes, so the
+      // span is checked as raw text.
+      if (c === '"' || c === "'" || c === '`') {
+        let k = i + 1
+        for (; k < line.length; k++) {
+          if (line[k] === '\\') { k++; continue }
+          if (line[k] === c) break
+        }
+        const span = line.slice(i + 1, k)
+        if (span.includes('//') || span.includes('/*') || span.includes('*/')) return hit(`${c}…${c} string literal`)
+        i = k
+        prevSig = c
+        continue
       }
+      // A genuine line comment: everything after is comment, and stripComments
+      // removes exactly it — the field before it survives. Safe; stop.
+      if (c === '/' && d === '/') return { hazard: null, opensBlock: false }
+      // A genuine block comment (in code position `/*` is ALWAYS a comment open,
+      // never a regex). Closes on this line -> its body is a comment, skip it;
+      // otherwise it opens a multi-line block the caller consumes.
+      if (c === '/' && d === '*') {
+        const close = line.indexOf('*/', i + 2)
+        if (close === -1) return { hazard: null, opensBlock: true }
+        i = close + 1
+        continue
+      }
+      // A lone `/`: a regex literal or division.
+      if (c === '/') {
+        // Regex-start vs division is decided by the SINGLE preceding non-space
+        // CHARACTER: a regex opens after punctuation (`(`, `,`, `=`, `:`, …, or
+        // line start); a `/` after an identifier / quote / close-bracket is
+        // division or a path and is left alone. KNOWN, ACCEPTED GAP: a regex
+        // opened directly after a KEYWORD (`return /re/`, `typeof /re/`) reads as
+        // division here — we inspect one char, not a preceding word — so that
+        // regex, and any `//` / `/*` in it, is NOT detected. Accepted because
+        // these bodies are object-literal `set({ … })` payloads: a regex value is
+        // written `field: /re/` (opener `:`), never after a bare keyword. Widen
+        // to a keyword scan if that stops holding.
+        if (prevSig === '' || REGEX_START_CTX.includes(prevSig)) {
+          let k = i + 1
+          for (; k < line.length; k++) {
+            if (line[k] === '\\') { k++; continue }
+            if (line[k] === '/') break
+          }
+          const span = line.slice(i + 1, k)
+          if (span.includes('//') || span.includes('/*') || span.includes('*/')) return hit('/…/ regex literal')
+          i = k
+          prevSig = '/'
+          continue
+        }
+        // division — fall through to the prevSig update
+      }
+      if (c !== ' ' && c !== '\t') prevSig = c
     }
-    return false
+    return { hazard: null, opensBlock: false }
   }
   const stripCommentHazards = (block: string): string[] => {
     const hazards: string[] = []
     let inBlockComment = false
-    for (const raw of block.split('\n')) {
-      let line = raw
+    for (const rawLine of block.split('\n')) {
+      let line = rawLine
       // Consume a block comment we are already inside; only CODE after its close
       // on this line can bite (matches how stripComments removes the whole span).
       if (inBlockComment) {
@@ -2413,24 +2465,16 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       const trimmed = line.trimStart()
       if (trimmed === '' || trimmed.startsWith('//')) continue
       // A line that OPENS or continues a block comment on its own is comment prose
-      // (a `/* … */` block is fine); track whether the block stays open past EOL.
+      // (a `/* … ` block is fine); track whether the block stays open past EOL.
       if (trimmed.startsWith('/*') || trimmed.startsWith('*')) {
         const open = line.indexOf('/*')
         if (open !== -1 && line.indexOf('*/', open + 2) === -1) inBlockComment = true
         continue
       }
-      // --- a code line ---
-      if (line.includes('//')) {
-        hazards.push(`a '//' (a ':// ' URL or a trailing comment) on a code line: ${raw.trim()}`)
-        continue
-      }
-      if (line.includes('/*') || line.includes('*/')) {
-        hazards.push(`a '/*' or '*/' on a code line: ${raw.trim()}`)
-        const open = line.indexOf('/*')
-        if (open !== -1 && line.indexOf('*/', open + 2) === -1) inBlockComment = true
-        continue
-      }
-      if (hasRegexLiteral(line)) hazards.push(`a regex literal on a code line: ${raw.trim()}`)
+      // A code line — flag a comment delimiter that sits inside a literal on it.
+      const { hazard, opensBlock } = lineHazard(line)
+      if (hazard) { hazards.push(`${hazard}: ${rawLine.trim()}`); continue }
+      if (opensBlock) inBlockComment = true
     }
     return hazards
   }
@@ -2594,12 +2638,14 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     expect(assigns(disconnectBody, 'reindexResults')).toBe(false)
   })
 
-  it('stripComments is trustworthy on all four action bodies — no literal on a code line (#7580)', () => {
-    // THE GUARD. stripComments lexes no string/regex literal, so a `://`, a regex
-    // literal, or a stray `//` / `/*` on a CODE line inside one of these bodies
-    // would truncate it and make `assigns`/`spreadsRoster` read a real clear as
-    // absent — a silent false negative in every cell above. Safe TODAY only
-    // because no body carries such a literal; this fails the day one does.
+  it('stripComments is trustworthy on all four action bodies — no delimiter inside a literal (#7580)', () => {
+    // THE GUARD. stripComments is literal-blind, so a `//` / `/*` / `*/` that sits
+    // INSIDE a string or regex literal on a code line (`hint: 'ws://x', field: {}`)
+    // is read as a comment and eats the real code around it — making
+    // `assigns`/`spreadsRoster` miss a real clear (a silent false negative in
+    // every cell above). Safe TODAY only because no body carries such a literal;
+    // this fails the day one does. A plain trailing `// comment` is NOT such a
+    // literal and is left alone.
     const authokBlock = handlerSrc.slice(
       handlerSrc.indexOf('#7470 authok-reset-start'),
       handlerSrc.indexOf('#7470 authok-reset-end'),
@@ -2612,10 +2658,11 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     ] as const) {
       expect(
         stripCommentHazards(body),
-        `${name} now carries a construct stripComments cannot lex on a code line (a '://' URL, a ` +
-        `regex literal, or a stray '//' / '/*'). stripComments can no longer be trusted on this ` +
-        `slice: assigns()/spreadsRoster can silently miss a real clear (a FALSE NEGATIVE). Move the ` +
-        `literal off the tracked-field line, or teach stripComments to lex it. #7580`,
+        `${name} now carries a '//' / '/*' / '*/' INSIDE a string or regex literal on a code line ` +
+        `(e.g. a 'ws://…' URL, or a regex whose body holds '/*'). stripComments is literal-blind, so ` +
+        `it treats that delimiter as a comment and eats the surrounding real code: ` +
+        `assigns()/spreadsRoster then silently miss a real clear (a FALSE NEGATIVE). Move the literal ` +
+        `off the tracked-field line, or teach stripComments to lex string/regex literals. #7580`,
       ).toEqual([])
     }
   })
@@ -2657,10 +2704,6 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     ).toBe(false)
     expect(assigns(regexFixture, 'serverCapabilities'), 'block-strip false negative').toBe(false)
     expect(stripCommentHazards(regexFixture).length, 'the detector must flag the regex line').toBeGreaterThan(0)
-
-    // and a PLAIN regex literal (no // or /*) is a landmine too — flag it before a
-    // future edit turns it hazardous. This is the "regex literal" construct itself.
-    expect(stripCommentHazards('  probe: /abc/,').length, 'a regex literal is flagged').toBeGreaterThan(0)
   })
 
   it('control: the #7580 detector ignores comments and non-hazard code (no false positive)', () => {
@@ -2686,6 +2729,33 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // division and a path string are code, but neither is a stripComments hazard.
     expect(stripCommentHazards('  ratio: total / count,'), 'division is not a regex').toEqual([])
     expect(stripCommentHazards("  cwd: '/workspace/app',"), 'a path string is not a regex').toEqual([])
+
+    // A plain regex with no // or /* inside it does NOT corrupt stripComments, so
+    // it is NOT a hazard and is not flagged (the issue's hazard is a regex whose
+    // BODY carries /* or //, covered by fixture 3 above).
+    expect(stripCommentHazards('  probe: /abc/,'), 'a bare regex is not a stripComments hazard').toEqual([])
+  })
+
+  it('control: a genuine trailing // comment on a tracked-field line is NOT a hazard (#7580 fold)', () => {
+    // FINDING #2 (code-review fold): a plain trailing comment is not a literal —
+    // stripComments' `//…$` pass removes only the comment, and `assigns` still
+    // sees the field. Flagging it would RED a maintainer's ordinary edit with a
+    // message about a literal that is not there. The detector must leave it alone.
+    const trailingComment = '  serverCapabilities: {}, // fail-closed on a stale server (#3272)'
+    const inlineBlock = '  serverCapabilities: {}, /* fail-closed */ availableModels: [],'
+
+    // The fix: neither is flagged, and each field still reads as really cleared.
+    expect(stripCommentHazards(trailingComment), 'a trailing // comment is not a literal').toEqual([])
+    expect(stripCommentHazards(inlineBlock), 'an inline /* */ that closes before code is not a literal').toEqual([])
+    expect(assigns(trailingComment, 'serverCapabilities'), 'the clear still reads present').toBe(true)
+    expect(assigns(inlineBlock, 'serverCapabilities'), 'the clear still reads present').toBe(true)
+    expect(assigns(inlineBlock, 'availableModels'), 'the field after the inline block still reads present').toBe(true)
+
+    // BEFORE the fold: the guard was `line.includes('//')`, which is TRUE for the
+    // trailing-comment line — so the pre-fold guard FALSE-POSITIVED on this exact
+    // benign edit. This asserts the old predicate would have fired, so the control
+    // above is the thing that changed, not decoration.
+    expect(trailingComment.includes('//'), 'the pre-fold `line.includes(\'//\')` would have flagged this').toBe(true)
   })
 
   it('every CLEARED_ON_DISCONNECT entry is really cleared by disconnect()', () => {
