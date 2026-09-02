@@ -4527,6 +4527,110 @@ describe('dashboard message-handler dispatch', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // #7546 review (finding #1) — the flat `primaryClientId` (presence /
+  // "who is driving" badge) is the SAME adjacent-field bleed as the panels
+  // above, one field over. `switchSession` mirrors it on every active-session
+  // change (#5731 T2: cached.primaryClientId in the cached branch, null in the
+  // else branch), but the two death paths synced the OTHER flat fields without
+  // it — so the DEAD session's owner survived onto the next active session.
+  // Conditional by construction, exactly like the panels: a background death
+  // must not touch the active session's owner.
+  // ---------------------------------------------------------------------------
+  describe('active-session death mirrors primaryClientId (#7546 review, #5731 T2)', () => {
+    // Active session s1 owned by c1; a next session s2 owned by a DIFFERENT
+    // client c2, so the assertion distinguishes "took s2's value" from both
+    // "kept c1" (the bug) and "went null by accident".
+    function seedOwnedPair() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          primaryClientId: 'c1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), primaryClientId: 'c1' },
+            s2: { ...createEmptySessionState(), primaryClientId: 'c2' },
+          },
+        }),
+      )
+      setStore(store)
+    }
+
+    // Only s1, active, owned by c1 — killing it leaves NO session (else branch).
+    function seedLoneOwned() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          primaryClientId: 'c1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), primaryClientId: 'c1' } },
+        }),
+      )
+      setStore(store)
+    }
+
+    describe('session_list active-removal branch', () => {
+      it('control: the fixture seeded the flat owner as the DEAD session owner c1', () => {
+        seedOwnedPair()
+        expect((store.getState() as any).primaryClientId).toBe('c1')
+      })
+
+      it("adopts the NEXT session's owner (cached branch → ss.primaryClientId), not the dead c1", () => {
+        seedOwnedPair()
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] } as any, ctx() as any)
+        expect((store.getState() as any).activeSessionId).toBe('s2')
+        expect((store.getState() as any).primaryClientId).toBe('c2')
+      })
+
+      it('clears the flat owner to null when NO session remains (else branch)', () => {
+        seedLoneOwned()
+        handleMessage({ type: 'session_list', sessions: [] } as any, ctx() as any)
+        expect((store.getState() as any).activeSessionId).toBeNull()
+        expect((store.getState() as any).primaryClientId).toBeNull()
+      })
+
+      it('POSITIVE CONTROL: a BACKGROUND session dropping out must NOT touch the active owner', () => {
+        seedOwnedPair()
+        // s2 (background) drops; s1 stays active and keeps its owner c1.
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1' }] } as any, ctx() as any)
+        expect((store.getState() as any).activeSessionId).toBe('s1')
+        expect((store.getState() as any).primaryClientId).toBe('c1')
+      })
+    })
+
+    describe('session_timeout', () => {
+      it("adopts the NEXT session's owner when the ACTIVE session times out", () => {
+        seedOwnedPair()
+        handleMessage(
+          { type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000 } as any,
+          ctx() as any,
+        )
+        expect((store.getState() as any).activeSessionId).toBe('s2')
+        expect((store.getState() as any).primaryClientId).toBe('c2')
+      })
+
+      it('clears the flat owner to null when the last session times out (else branch)', () => {
+        seedLoneOwned()
+        handleMessage(
+          { type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000 } as any,
+          ctx() as any,
+        )
+        expect((store.getState() as any).activeSessionId).toBeNull()
+        expect((store.getState() as any).primaryClientId).toBeNull()
+      })
+
+      it('POSITIVE CONTROL: a BACKGROUND session timing out must NOT touch the active owner', () => {
+        seedOwnedPair()
+        handleMessage(
+          { type: 'session_timeout', sessionId: 's2', name: 'S2', idleMs: 600000 } as any,
+          ctx() as any,
+        )
+        expect((store.getState() as any).activeSessionId).toBe('s1')
+        expect((store.getState() as any).primaryClientId).toBe('c1')
+      })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
   // #7497 — every replay-state reader derives from the ONE refcount
   // ---------------------------------------------------------------------------
   //

@@ -5002,6 +5002,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
+            // #5731 T2 / #7546 review — the flat `primaryClientId` (the
+            // presence / "who is driving" badge) is the SAME adjacent-field
+            // bleed as the panels below, one field over: `switchSession`
+            // mirrors it on every active-session change, but this death path
+            // synced the other flat fields without it, so the DEAD session's
+            // owner survived onto the session that became active next. Mirror
+            // switchSession's cached branch exactly — the next session's own
+            // owner.
+            patch.primaryClientId = ss.primaryClientId;
           } else {
             patch.messages = [];
             patch.streamingMessageId = null;
@@ -5013,6 +5022,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;
+            // #5731 T2 / #7546 review — no session remains, so clear the flat
+            // owner (switchSession's else branch sets `primaryClientId: null`).
+            patch.primaryClientId = null;
           }
           // #7546 — the memory-stack + permission-audit panels are FLAT,
           // per-active-session pulls (#6996 / #6772). `switchSession` resets both
@@ -6616,6 +6628,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = ss.lastResultCost;
             patch.lastResultDuration = ss.lastResultDuration;
             patch.isIdle = ss.isIdle;
+            // #5731 T2 / #7546 review — mirror switchSession's cached branch:
+            // the flat `primaryClientId` (presence / "who is driving" badge) is
+            // the same adjacent-field bleed as the panels below. Without this
+            // the timed-out session's owner survived onto the next session.
+            patch.primaryClientId = ss.primaryClientId;
           } else {
             // No sessions remain — clear flat fields
             patch.messages = [];
@@ -6628,6 +6645,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultCost = null;
             patch.lastResultDuration = null;
             patch.isIdle = true;
+            // #5731 T2 / #7546 review — clear the flat owner too (switchSession's
+            // else branch sets `primaryClientId: null`).
+            patch.primaryClientId = null;
           }
           // #7546 — reset the FLAT memory-stack + permission-audit panels, the
           // same groups `switchSession` clears on any active-session change
