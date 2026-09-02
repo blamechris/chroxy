@@ -4408,6 +4408,125 @@ describe('dashboard message-handler dispatch', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // #7546 — the memory-stack + permission-audit panels are FLAT, per-active-
+  // session pulls (see connection.ts switchSession, #6772 / #6996). switchSession
+  // resets both groups on every active-session change so the panel never renders
+  // the previous session's data against the new one. The two "the active session
+  // DIED" paths — the `session_list` active-removal branch and `session_timeout`
+  // — hand-sync the OTHER flat fields (messages, claudeReady, …) but historically
+  // left these two groups behind, so a dead session's memory stack / permission
+  // history bled onto whatever session became active next.
+  //
+  // The clear MUST be conditional on the active session being the one that died:
+  // a BACKGROUND session's death must not blank the panel the user is looking at.
+  // That is the whole reason for the positive control below.
+  // ---------------------------------------------------------------------------
+  describe('active-session death resets the memory + permission panels (#7546)', () => {
+    // The exact reset values switchSession uses (connection.ts). No more, no less.
+    const EXPECTED_RESET: Record<string, unknown> = {
+      memoryStackEntries: null,
+      memoryStackFile: null,
+      memoryStackError: null,
+      memoryStackLoading: false,
+      permissionAudit: null,
+      permissionAuditLoading: false,
+      permissionAuditError: false,
+    }
+    const PANEL_FIELDS = Object.keys(EXPECTED_RESET)
+
+    // A fully-dirtied panel: every field holds a non-reset value, so a clear that
+    // misses one is caught by that field's own assertion rather than passing on
+    // the strength of the others (the adjacent-field trap).
+    function dirtyPanel(): Record<string, unknown> {
+      return {
+        memoryStackEntries: [{ file: '/CLAUDE.md', content: 'stale', tokens: 10 }],
+        memoryStackFile: { path: '/CLAUDE.md', scope: 'project' },
+        memoryStackError: 'stale error',
+        memoryStackLoading: true,
+        permissionAudit: [{ tool: 'Bash', decision: 'allow', at: 1 }],
+        permissionAuditLoading: true,
+        permissionAuditError: true,
+      }
+    }
+
+    function seedTwoSessions() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+          sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() },
+          ...dirtyPanel(),
+        }),
+      )
+      setStore(store)
+    }
+
+    describe('session_list active-removal branch', () => {
+      it('control: the fixture dirtied every panel field', () => {
+        seedTwoSessions()
+        const s = store.getState() as unknown as Record<string, unknown>
+        for (const f of PANEL_FIELDS) {
+          expect(s[f], `${f} was not dirtied — its reset assertion would pass for free`)
+            .not.toEqual(EXPECTED_RESET[f])
+        }
+      })
+
+      // One cell per field so a clear that resets six of seven names the seventh.
+      it.each(PANEL_FIELDS)('resets %s when the active session drops from the roster', (field) => {
+        seedTwoSessions()
+        // s1 (active) drops out of the authoritative list; s2 survives and becomes active.
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's2', name: 'S2' }] } as any, ctx() as any)
+        expect((store.getState() as any).activeSessionId).toBe('s2')
+        const s = store.getState() as unknown as Record<string, unknown>
+        expect(s[field]).toEqual(EXPECTED_RESET[field])
+      })
+
+      it('POSITIVE CONTROL: a BACKGROUND session dropping out must NOT blank the active panel', () => {
+        seedTwoSessions()
+        const dirty = dirtyPanel()
+        // s2 (background) drops out; s1 stays active. The panel the user is
+        // looking at (s1) must survive — this is what forces the clear to be
+        // conditional rather than an unconditional wipe on any session death.
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1' }] } as any, ctx() as any)
+        expect((store.getState() as any).activeSessionId).toBe('s1')
+        const s = store.getState() as unknown as Record<string, unknown>
+        for (const f of PANEL_FIELDS) {
+          expect(s[f], `a background-session death must not reset the active session's ${f}`)
+            .toEqual(dirty[f])
+        }
+      })
+    })
+
+    describe('session_timeout', () => {
+      it.each(PANEL_FIELDS)('resets %s when the ACTIVE session times out', (field) => {
+        seedTwoSessions()
+        handleMessage(
+          { type: 'session_timeout', sessionId: 's1', name: 'S1', idleMs: 600000 } as any,
+          ctx() as any,
+        )
+        expect((store.getState() as any).activeSessionId).toBe('s2')
+        const s = store.getState() as unknown as Record<string, unknown>
+        expect(s[field]).toEqual(EXPECTED_RESET[field])
+      })
+
+      it('POSITIVE CONTROL: a BACKGROUND session timing out must NOT blank the active panel', () => {
+        seedTwoSessions()
+        const dirty = dirtyPanel()
+        handleMessage(
+          { type: 'session_timeout', sessionId: 's2', name: 'S2', idleMs: 600000 } as any,
+          ctx() as any,
+        )
+        expect((store.getState() as any).activeSessionId).toBe('s1')
+        const s = store.getState() as unknown as Record<string, unknown>
+        for (const f of PANEL_FIELDS) {
+          expect(s[f], `a background-session timeout must not reset the active session's ${f}`)
+            .toEqual(dirty[f])
+        }
+      })
+    })
+  })
+
+  // ---------------------------------------------------------------------------
   // #7497 — every replay-state reader derives from the ONE refcount
   // ---------------------------------------------------------------------------
   //

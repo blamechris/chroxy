@@ -5014,6 +5014,21 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultDuration = null;
             patch.isIdle = true;
           }
+          // #7546 — the memory-stack + permission-audit panels are FLAT,
+          // per-active-session pulls (#6996 / #6772). `switchSession` resets both
+          // groups on every active-session change so the panel never renders the
+          // PREVIOUS session's data against the new one; the active session
+          // dying here is that same change, so mirror switchSession's reset
+          // values exactly. CONDITIONAL by construction — this branch only runs
+          // when the removed id WAS the active session, so a background-session
+          // prune leaves the panel the user is looking at untouched.
+          patch.permissionAudit = null;
+          patch.permissionAuditLoading = false;
+          patch.permissionAuditError = false;
+          patch.memoryStackEntries = null;
+          patch.memoryStackFile = null;
+          patch.memoryStackError = null;
+          patch.memoryStackLoading = false;
         }
         set(patch);
       }
@@ -6614,6 +6629,20 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             patch.lastResultDuration = null;
             patch.isIdle = true;
           }
+          // #7546 — reset the FLAT memory-stack + permission-audit panels, the
+          // same groups `switchSession` clears on any active-session change
+          // (#6996 / #6772), so a timed-out session's memory stack / permission
+          // history does not bleed onto the session that becomes active next.
+          // CONDITIONAL by construction: only reached when the timed-out id WAS
+          // the active session, so a background-session timeout leaves the
+          // active panel alone. Values mirror switchSession exactly.
+          patch.permissionAudit = null;
+          patch.permissionAuditLoading = false;
+          patch.permissionAuditError = false;
+          patch.memoryStackEntries = null;
+          patch.memoryStackFile = null;
+          patch.memoryStackError = null;
+          patch.memoryStackLoading = false;
         }
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)
