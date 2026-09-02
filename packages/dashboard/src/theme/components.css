@@ -11314,8 +11314,10 @@ button.sidebar-token-view-session-row:hover {
   border-top: 1px solid var(--border-primary);
 }
 
+/* #7568: 44px min tap target (repo HIG/WCAG floor) on the destroy affordance. */
 .btn-env-destroy {
   padding: 4px 12px;
+  min-height: 44px;
   border-radius: 4px;
   border: 1px solid var(--status-error, #ef4444);
   background: transparent;
@@ -11344,6 +11346,7 @@ button.sidebar-token-view-session-row:hover {
 
 .btn-env-confirm-yes {
   padding: 2px 10px;
+  min-height: 44px;
   border-radius: 4px;
   border: 1px solid var(--status-error, #ef4444);
   background: var(--status-error, #ef4444);
@@ -11354,12 +11357,31 @@ button.sidebar-token-view-session-row:hover {
 
 .btn-env-confirm-no {
   padding: 2px 10px;
+  min-height: 44px;
   border-radius: 4px;
   border: 1px solid var(--border-primary);
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   font-size: 0.8em;
+}
+
+/* #7568: the live-session force-destroy escalation — filled danger, distinct
+   from the plain confirm so the cascade reads as the heavier action. */
+.btn-env-force {
+  padding: 2px 10px;
+  min-height: 44px;
+  border-radius: 4px;
+  border: 1px solid var(--status-error, #ef4444);
+  background: var(--status-error, #ef4444);
+  color: white;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.8em;
+}
+
+.btn-env-force:hover {
+  filter: brightness(1.1);
 }
 
 /* Create form */

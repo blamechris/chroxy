@@ -183,6 +183,47 @@ describe('container action dispatch (#6134)', () => {
     expect(s.containerActionResults[ENV]!.action).toBe('stop')
   })
 
+  it('records liveSessions:true when a destroy is refused for live sessions (#7568)', () => {
+    // The #7562 refusal wire shape from control-room-handlers.js (LIVE_SESSIONS_REASON).
+    store.setState({ addServerError: vi.fn() } as never)
+    handleMessage(
+      {
+        type: 'session_error',
+        code: 'CONTAINER_ACTION_FAILED',
+        message: 'Environment "web" has 1 live session(s) running in it (sess-a). …',
+        reason: 'live-sessions',
+        action: 'destroy',
+        environmentId: ENV,
+        requestId: 'ca-2',
+      },
+      ctx() as never,
+    )
+    const s = store.getState()
+    expect(s.containerActioningIds.has(ENV)).toBe(false)
+    expect(s.containerActionResults[ENV]!.liveSessions).toBe(true)
+    expect(s.containerActionResults[ENV]!.action).toBe('destroy')
+    expect(s.containerActionResults[ENV]!.error).toMatch(/live session/)
+  })
+
+  it('an operational destroy-failed does NOT set liveSessions — the negative control (#7568)', () => {
+    // Without this, a build that set liveSessions unconditionally would still pass
+    // the test above and offer a force escalation for an unrelated docker failure.
+    store.setState({ addServerError: vi.fn() } as never)
+    handleMessage(
+      {
+        type: 'session_error',
+        code: 'CONTAINER_ACTION_FAILED',
+        message: 'docker rm -f failed: permission denied',
+        reason: 'destroy-failed',
+        action: 'destroy',
+        environmentId: ENV,
+        requestId: 'ca-3',
+      },
+      ctx() as never,
+    )
+    expect(store.getState().containerActionResults[ENV]!.liveSessions).toBe(false)
+  })
+
   it('a CONTAINER_ACTION_FAILED without an environmentId leaves action state alone', () => {
     store.setState({ addServerError: vi.fn() } as never)
     handleMessage(

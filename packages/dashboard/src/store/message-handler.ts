@@ -3911,7 +3911,7 @@ function resolveContainerAction(
   get: MsgGet,
   set: MsgSet,
   environmentId: string,
-  result: { action: string; status: string | null; error: string | null },
+  result: { action: string; status: string | null; error: string | null; liveSessions?: boolean },
 ): void {
   const pending = new Set(get().containerActioningIds);
   pending.delete(environmentId);
@@ -5363,10 +5363,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // (and action) — clear that row's pending state and surface the reason
         // inline (the generic branch below still raises the toast, matching the
         // INTEGRATION_ACTION_FAILED precedent). status is null on failure.
+        //
+        // #7568: the #7562 live-session destroy refusal carries `reason:
+        // 'live-sessions'` (LIVE_SESSIONS_REASON on the server). Record it on
+        // the result so the Containers row can offer the `force` escalation
+        // instead of a dead-end error — distinct from an operational
+        // destroy-failed, which stays a plain error.
         resolveContainerAction(get, set, msg.environmentId, {
           action: typeof msg.action === 'string' ? msg.action : '',
           status: null,
           error: parsed.message || 'Container action failed.',
+          liveSessions: msg.reason === 'live-sessions',
         });
       } else if (parsed.code === 'BYOK_POOL_ACTION_FAILED' && typeof msg.action === 'string') {
         // #6135: a failed byok_pool_action echoes the exact action (+ key for
@@ -6685,8 +6692,37 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Handled implicitly via the environment_list broadcast that follows
       break;
     case 'environment_error': {
-      const { error } = sharedEnvironmentError(msg);
+      // #7568: surface the failure to the operator instead of only logging it.
+      // Before this, `environment_error` was a bare `console.error` — an
+      // environment op that failed (image not allowed, destroy refused, backend
+      // error) was invisible in the UI, so the operator saw nothing and could
+      // not escalate.
+      const { error, code, sessions } = sharedEnvironmentError(msg);
       console.error('[ws] Environment error:', error);
+      if (code === 'ENVIRONMENT_HAS_LIVE_SESSIONS') {
+        // #7562/#7568: the live-session destroy refusal is the actionable case.
+        // NAME the sessions still running inside the environment so the operator
+        // knows what the `force` escalation (offered in the EnvironmentPanel /
+        // Containers destroy affordance) would tear down. A warning, not a red
+        // error: the guard did its job, nothing broke, and the destroy simply
+        // did not happen. The server's `error` message already lists the ids in
+        // prose; the explicit `sessions` line is a belt-and-braces surface for a
+        // future server that trims the prose.
+        const ids = sessions ?? [];
+        const namedLine =
+          ids.length > 0
+            ? ` Live session${ids.length === 1 ? '' : 's'}: ${ids.join(', ')}.`
+            : '';
+        get().addServerError(
+          (error || 'This environment still has live sessions and was not destroyed.') + namedLine,
+          undefined,
+          'warning',
+        );
+      } else if (error) {
+        // Every other environment failure (validation, image allowlist, backend
+        // error) surfaces as a normal red error toast.
+        get().addServerError(error);
+      }
       break;
     }
 

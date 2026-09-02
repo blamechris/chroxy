@@ -107,7 +107,9 @@ sessions.
 
 ## What this deliberately does NOT do
 
-**No UI for the escalation yet.** The dashboard's Destroy button is already
+**No UI for the escalation yet.** *(Superseded by #7568 — see the follow-on
+below; the escalation UI now ships. This paragraph records the #7562 scope.)*
+The dashboard's Destroy button is already
 disabled while `env.sessions` is non-empty, so its happy path never reaches the
 refusal; what changes today is that a *stale* tab, the Control Room, a script and
 any other sender get a real refusal instead of a destroyed container. Adding the
@@ -192,3 +194,58 @@ inserted the entry into `_sessions`, making it *throw* would strand a half-built
 entry, and making it *silently skip* would recreate the very strand this fixes —
 so the correct closure is a guard in the create path, not in `addSession`, and it
 is only warranted once such an `await` actually exists.
+
+## Follow-on (#7568) — the client now SURFACES the refusal and offers the escalation
+
+**Date**: 2026-09-02
+**Issue**: #7568 (the "No UI for the escalation yet" item above, now closed)
+**Touches**: `packages/protocol/src/schemas/server/environment.ts`
+(`ServerEnvironmentErrorSchema` — `code` + `sessions`, landed with #7571),
+`packages/store-core/src/handlers/environment.ts` (`handleEnvironmentError`),
+`packages/dashboard/src/store/message-handler.ts` (`environment_error` +
+`CONTAINER_ACTION_FAILED`), `packages/dashboard/src/store/connection.ts`
+(`destroyEnvironment` / `sendContainersAction` gain `force`),
+`packages/dashboard/src/components/EnvironmentPanel.tsx`,
+`packages/dashboard/src/components/ContainersStatusSection.tsx`
+**Pinned by**: `EnvironmentPanel.destroyGuard.test.tsx`,
+`ContainersStatusSection.test.tsx`, `dispatch-containers-action.test.ts`,
+`message-handler.test.ts` (`environment_error dispatch`),
+`store-core/.../handlers.test.ts` (`handleEnvironmentError`).
+
+The server half above refuses correctly, but until #7568 the **client** dropped
+the refusal on the floor: `handleEnvironmentError` returned only `{ error }`, and
+the dashboard's `case 'environment_error'` was a bare `console.error` — the
+operator saw nothing and could not escalate. #7568 closes that:
+
+- **`handleEnvironmentError` now parses `code` and `sessions`** off the wire
+  (not just `error`), so both the notification and the panel can name the ids.
+- **The dashboard surfaces it.** `environment_error` now raises a real toast via
+  `addServerError`; the `ENVIRONMENT_HAS_LIVE_SESSIONS` case NAMES the sessions
+  and uses the non-destructive **warning** register (the guard did its job —
+  nothing broke). Every other environment failure stays a red error.
+- **The EnvironmentPanel Destroy affordance** drops the flat
+  `disabled={env.sessions.length > 0}` dead-end. Destroy always opens a confirm;
+  the live-session branch names the sessions and offers **Force destroy**, which
+  re-sends `destroy_environment` with `force: true`. The empty-environment path
+  sends **no** `force` field.
+- **The Control Room Containers row** reads the `reason: 'live-sessions'`
+  discriminator off the `CONTAINER_ACTION_FAILED` reply (recorded as
+  `liveSessions` on the inline result) and offers a **Force destroy** button that
+  routes through its own confirm and re-sends `containers_action destroy` with
+  `force: true`. An operational `destroy-failed` stays a plain error with no
+  escalation.
+
+**`force: true` is sent on exactly one path on each surface — the explicit
+force-confirm.** The plain destroy on both surfaces omits the field, so the
+initial attempt still hits the server refusal and the cascade is always an
+operator's explicit second choice, never an accident. This is the client mirror
+of the server's strict-boolean `force`.
+
+**Two sources of truth, deliberately.** The EnvironmentPanel pre-empts using the
+per-card `env.sessions` it already renders (same server-authoritative list the
+refusal carries), so the operator gets the escalation on the first click rather
+than after a round-trip; the async refusal toast still fires and covers the race
+where a session attached after the last `environment_list` broadcast. The
+Containers row reacts to the recorded refusal (`liveSessions`) because its inline
+per-row result cell is already the surface a failed action renders into. Both
+are correct; each matches the surface it lives on.
