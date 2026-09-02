@@ -9,7 +9,7 @@
  * web-task-handlers.js, and environment-handlers.js. Consolidated here to
  * reduce file fragmentation (each file had 1–4 small functions).
  */
-import { createLogger, loggerForSession } from '../logger.js'
+import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
@@ -352,7 +352,12 @@ function handleDestroyEnvironment(ws, client, msg, ctx) {
   // bound check (isBoundClient) so an empty-string boundSessionId is refused too,
   // matching list/get and the #4787 canonical `== null` check.
   if (isBoundClient(client)) {
-    loggerForSession('ws', client.boundSessionId).warn(
+    // sessionLogger (not loggerForSession) because isBoundClient now admits an
+    // empty-string boundSessionId, on which loggerForSession THROWS — that would
+    // turn the refusal into a handler crash for the exact '' case the fail-safe
+    // check exists to catch (#7597 review). sessionLogger falls back to the
+    // unscoped logger on a falsy id.
+    sessionLogger(client.boundSessionId, 'ws').warn(
       `Client ${client.id} (bound to ${client.boundSessionId}) attempted destroy_environment — rejected (bound tokens cannot run host lifecycle actions or destroy sibling sessions)`,
     )
     ctx.transport.send(ws, {

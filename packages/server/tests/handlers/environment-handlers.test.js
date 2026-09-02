@@ -184,6 +184,22 @@ describe('environment-handlers', () => {
       assert.equal(destroyed.environmentId, 'env-1')
     })
 
+    it('#7597 refuses an EMPTY-STRING bound id cleanly (no logger throw)', () => {
+      // isBoundClient admits '' as bound, so it now enters the refuse branch —
+      // whose warn log must NOT throw on an empty sessionId (loggerForSession
+      // does; sessionLogger falls back to unscoped). A throw here would turn the
+      // refusal into a handler crash for the exact case the fail-safe check exists
+      // to catch.
+      const destroyed = createSpy(async () => {})
+      const ctx = makeCtx({ environmentManager: { destroy: destroyed, list: createSpy(() => []) } })
+      assert.doesNotThrow(() => {
+        environmentHandlers.destroy_environment(makeWs(), makeClient({ isPrimaryToken: false, boundSessionId: '' }), { environmentId: 'env-1' }, ctx)
+      })
+      assert.equal(ctx._sent[0].type, 'environment_error')
+      assert.equal(ctx._sent[0].code, 'ENVIRONMENT_DESTROY_FORBIDDEN_BOUND_CLIENT')
+      assert.equal(destroyed.calls.length, 0, 'the environment must not be destroyed')
+    })
+
     it('#7596 the post-destroy broadcast reaches unbound listeners only', async () => {
       const ctx = makeCtx({
         environmentManager: {
