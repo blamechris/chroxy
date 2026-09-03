@@ -2145,6 +2145,41 @@ export class CliSession extends BaseSession {
       return
     }
 
+    // #7599: give a containerized subclass a chance to classify this exit as a
+    // vanished container (a distinct, non-respawnable-but-recoverable state)
+    // BEFORE the generic crash→respawn path. Reached only for a genuine
+    // unexpected exit — the intentional-stop and resume-unknown branches above
+    // have already returned. Base returns false synchronously (no behavior
+    // change for host sessions); DockerSession returns a Promise that PROBES the
+    // container, so the generic respawn is DEFERRED until the probe resolves and
+    // skipped entirely on a confirmed vanish.
+    const maybeVanish = this._handleContainerGoneOnClose(code)
+    if (maybeVanish && typeof maybeVanish.then === 'function') {
+      maybeVanish.then((handled) => {
+        if (!handled && !this._destroying) this._respawnAfterUnexpectedClose(code)
+      })
+      return
+    }
+    if (maybeVanish) return
+    this._respawnAfterUnexpectedClose(code)
+  }
+
+  /**
+   * #7599 — hook for a containerized subclass to intercept a child-close it can
+   * attribute to its container vanishing, before the generic respawn. The base
+   * host-CLI session has no container, so it never intercepts (returns false
+   * synchronously — the generic respawn then runs inline as before).
+   *
+   * @param {number} _code exit code of the closed child
+   * @returns {boolean|Promise<boolean>} true to suppress the generic crash→respawn
+   */
+  _handleContainerGoneOnClose(_code) {
+    return false
+  }
+
+  /** #7599 — the generic "exited unexpectedly → restart" tail, extracted so the
+   * container-vanish hook can defer or skip it. */
+  _respawnAfterUnexpectedClose(code) {
     // #4828: session-scoped if init had fired.
     ;(this._log || log).info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })

@@ -8,6 +8,20 @@ import { getChroxyHostEnv } from './chroxy-host-metadata.js'
 const log = createLogger('docker-session')
 
 /**
+ * #7599 — the error `code` a containerized session emits when it detects that
+ * its container has vanished underneath a live turn (stopped / restarted /
+ * killed, including a plain `docker stop` performed OUTSIDE chroxy). Distinct
+ * from a code crash (`cli_respawn_exhausted`) and from a dead daemon: the
+ * container is gone but the daemon and the session live on, so the session is
+ * kept (not dropped) for the reconnect that acts on it (#7602). Rides the
+ * existing error rails — it is emitted as an `error` event and the generic
+ * normalizer (event-normalizer.js) forwards its `code` to clients unchanged (the
+ * same path `cli_respawn_exhausted` / `stream_stall` / `resume_unknown` use), so
+ * no wire change is needed.
+ */
+export const CONTAINER_VANISHED = 'CONTAINER_VANISHED'
+
+/**
  * Classify a Docker error into a structured error with a specific code.
  *
  * Returns an object with `code` and `message` fields so callers can surface
@@ -43,6 +57,18 @@ export function classifyDockerError(err, stderrText = '') {
       : 'Docker image not found. Run: docker pull <image>'
     return { code: 'docker_image_not_found', message }
   }
+  // #7599: the container is gone — stopped, restarted, or removed. Docker reports
+  // `Container <id> is not running` for a stopped one and `No such container` for
+  // a removed one. `is not running` REQUIRES `container` alongside it so a generic
+  // "<daemon/service> is not running" can't false-match a vanished container
+  // (#7604 Copilot review). Checked AFTER the daemon + image buckets (whose
+  // patterns don't overlap these) and BEFORE the generic fallback.
+  if (
+    combined.includes('no such container') ||
+    (combined.includes('is not running') && combined.includes('container'))
+  ) {
+    return { code: 'container_gone', message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).' }
+  }
   if (
     combined.includes('permission denied') ||
     combined.includes('access denied')
@@ -50,6 +76,34 @@ export function classifyDockerError(err, stderrText = '') {
     return { code: 'docker_permission_denied', message: 'Permission denied connecting to Docker. Check your Docker group membership.' }
   }
   return { code: 'docker_error', message: err.message }
+}
+
+/**
+ * #7599 — actively probe whether a container is gone by running
+ * `docker exec <id> true` and classifying the PROBE's own stderr (pure
+ * docker-client output — never the session's application stderr). Resolves
+ * `true` only on a `container_gone` classification; a healthy probe, a dead
+ * daemon, or any other error resolves `false` (not a per-container vanish).
+ *
+ * This is the reliable container-liveness signal both exec-based session paths
+ * use — the docker-sdk path because the SDK's query rejection does not carry the
+ * docker stderr, and the docker-cli path because the exec child's merged stderr
+ * mixes docker-client errors with the app's own output (so trusting it produced
+ * both false positives and false negatives — #7599 review).
+ *
+ * @param {string} containerId
+ * @param {Function} [exec] injectable execFile-shaped fn (for tests)
+ * @returns {Promise<boolean>}
+ */
+export function probeContainerGone(containerId, exec = execFile) {
+  return new Promise((resolve) => {
+    if (!containerId) return resolve(false)
+    exec('docker', ['exec', containerId, 'true'], { encoding: 'utf-8', timeout: 10_000 }, (err, _stdout, stderr) => {
+      if (!err) return resolve(false)
+      const { code } = classifyDockerError(err, stderr || err.stderr || '')
+      resolve(code === 'container_gone')
+    })
+  })
 }
 
 /**
@@ -406,9 +460,71 @@ export class DockerSession extends CliSession {
   // lands first so `docker logs <ctr>` correlation by operators stays easy.
   _handleChildClose(code) {
     if (!this._destroying && !this._respawning) {
-      log.info(`Container exec exited (code ${code}), scheduling respawn`)
+      log.info(`Container exec exited (code ${code})`)
     }
     super._handleChildClose(code)
+  }
+
+  /**
+   * #7599 — container-vanish hook (overrides CliSession's no-op).
+   *
+   * Called by CliSession._handleChildClose for a genuine unexpected exit — i.e.
+   * AFTER the intentional-stop and resume-unknown branches have returned, and
+   * just BEFORE the generic "exited unexpectedly → respawn" tail. Returns a
+   * Promise, so the base defers the generic respawn until it resolves.
+   *
+   * It ACTIVELY PROBES the container (`docker exec <id> true`) rather than
+   * trusting the closed exec's merged stderr: that stream mixes docker-client
+   * errors with the app's own stderr, so a benign app line containing "is not
+   * running" would have falsely suppressed the respawn, and an in-flight kill
+   * (exit 137, no docker-client line) would have been missed on the first close
+   * (#7599 review). The probe classifies pure docker-client output and is the
+   * same signal the docker-sdk path uses.
+   *
+   * On a confirmed vanish it surfaces one coded CONTAINER_VANISHED session error
+   * and resolves `true` so the respawn is suppressed — respawning a `docker exec`
+   * into a stopped/removed container would only flap toward `cli_respawn_exhausted`.
+   * The session is deliberately NOT torn down and `_containerId` is NOT nulled
+   * (the #7561 trap: a null id reads as `_containerOwned` and would launch a fresh
+   * default container), so the reconnect path (#7602) can re-attach an env-backed
+   * container that returns.
+   *
+   * Returns a plain `false` synchronously when there is no container to probe
+   * (so a no-container close respawns inline, exactly as before), and a
+   * `Promise<boolean>` only when it actually probes.
+   *
+   * @param {number} code exit code of the closed exec child
+   * @returns {boolean|Promise<boolean>} true if handled as a vanish (suppress respawn)
+   */
+  _handleContainerGoneOnClose(code) {
+    if (!this._containerId) return false
+    return this._probeContainerGone().then((gone) => {
+      // Re-check teardown after the async probe: a destroy() that lands in the
+      // probe window has already removed listeners, so emitting here would fire
+      // on a dead EventEmitter (Node throws on an unhandled 'error') — #7599 review.
+      if (!gone || this._destroying) return this._destroying
+      ;(this._log || log).warn(
+        `Container for this session is gone (exec exit ${code}) — surfacing CONTAINER_VANISHED, not respawning`,
+      )
+      // Only `code` (and `message`) reach clients — the generic error normalizer
+      // (event-normalizer.js) forwards those but caps adjacent fields, so the CODE
+      // is the surfaced signal. Reconnectability is decided server-side (#7602),
+      // not carried as a wire flag here.
+      this.emit('error', {
+        code: CONTAINER_VANISHED,
+        message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
+      })
+      return true
+    })
+  }
+
+  /**
+   * Probe whether the bound container is gone. Extracted as an instance method
+   * so tests can stub it. Delegates to the shared `probeContainerGone` helper.
+   * @returns {Promise<boolean>}
+   */
+  _probeContainerGone() {
+    return probeContainerGone(this._containerId)
   }
 
   /**
