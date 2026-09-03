@@ -30,19 +30,25 @@ build on it.
 ## The invariant taxonomy
 
 1. **Fail visibly, never silently.** A vanished container surfaces exactly one coded
-   `CONTAINER_VANISHED` session error (per close / per failed turn) via the existing
-   `session_error` plumbing (`ServerSessionErrorSchema` already carries an optional
-   `code` + `recoverable` and is `.passthrough()` — no wire change).
+   `CONTAINER_VANISHED` error (per close / per failed turn). It is emitted as an `error`
+   event; the generic normalizer (`event-normalizer.js`) forwards its `code` to clients
+   unchanged — the same wire path `cli_respawn_exhausted` / `stream_stall` /
+   `resume_unknown` use — so **the `code` is the surfaced signal and no wire change is
+   needed.** (The normalizer caps adjacent fields, so a `recoverable` flag would be
+   silently dropped; it is deliberately not emitted here — see invariant 3.)
 2. **Never fall back to the host, never launch a fresh/default container.** The
    `DockerSdkSession` constructor reads an absent `containerId` as
    `_containerOwned = true`, so `start()` would launch a brand-new default
    `node:22-slim` (the #7561 trap). Therefore **`_containerId` is never nulled** on
    the live path, and the vanish never triggers `start()` / `_startContainer`. On the
    next turn a still-gone container simply re-detects and re-surfaces.
-3. **Recoverable ≠ terminal.** `CONTAINER_VANISHED` is emitted `recoverable: true` — it
-   is a container-lost state distinct from a code crash (`cli_respawn_exhausted`). The
-   session is **kept**, not dropped, so reconnect (#7602) has something to re-attach.
-   Whether a given container actually returns is a reconnect concern:
+3. **Recoverable ≠ terminal — as a server-side behavior, not a wire flag.**
+   `CONTAINER_VANISHED` is a container-lost state distinct from a code crash
+   (`cli_respawn_exhausted`). The session is **kept**, not dropped (no
+   `respawn_exhausted`, no `destroy`), so reconnect (#7602) has something to re-attach —
+   that "keep the session" behavior is the recoverability, decided and acted on
+   server-side, **not** carried as a wire flag. Whether a given container actually
+   returns is a reconnect concern:
    - **env-backed** containers are named (`chroxy-env-<id>`) and **not `--rm`**, so they
      survive a stop and keep their id → reconnectable (#7602).
    - **per-session** `DockerSdkSession` / `DockerSession` containers use `--rm` → removed
@@ -53,23 +59,35 @@ build on it.
 
 ## Mechanism (#7599)
 
+Both exec-based paths **actively probe** the container rather than trusting the closed
+exec's stderr. The shared `probeContainerGone(containerId)` helper runs
+`docker exec <id> true` and classifies the PROBE's own stderr (pure docker-client
+output) via `classifyDockerError`, resolving `true` only on a confirmed `container_gone`.
+This was a **review correction**: an earlier draft classified the docker-cli path's
+buffered exec stderr, which mixes docker-client errors with the app's own output — so a
+benign app line containing "is not running" produced a false vanish (and suppressed
+respawn → stuck session), and an in-flight kill with no docker-client line was missed on
+the first close. Probing removes both failure modes and makes the two paths symmetric.
+
 - **`classifyDockerError`** (`docker-session.js`) gains a `container_gone` bucket
   matching `No such container` / `is not running`, distinct from a dead daemon or a
-  missing image.
-- **docker-cli** (`DockerSession` → `CliSession`): the exec child's stderr is buffered
-  (`_recentContainerStderr`); `_handleContainerGoneOnClose(code)` — a hook called by
-  `CliSession._handleChildClose` just before the generic crash→respawn tail — classifies
-  it and, on a vanish, emits `CONTAINER_VANISHED` and returns `true` to **suppress the
-  respawn** (respawning a `docker exec` into a stopped/removed container only flaps).
+  missing image. The probe reuses it on its own (uncontaminated) stderr.
+- **docker-cli** (`DockerSession` → `CliSession`): `_handleContainerGoneOnClose(code)` —
+  called by `CliSession._handleChildClose` before the generic crash→respawn tail —
+  returns a Promise, so the base **defers** the generic respawn until the probe resolves.
+  On a confirmed vanish it emits `CONTAINER_VANISHED` and resolves `true` to **suppress
+  the respawn** (respawning a `docker exec` into a stopped/removed container only flaps);
+  otherwise the generic respawn runs. A healthy-container crash still respawns as before.
 - **docker-sdk** (`DockerSdkSession` → `SdkSession`): the SDK's query rejection does not
   carry the docker stderr, so `_classifyContainerFailure(err)` — a hook called in the
-  query catch before the generic surface — **probes** the container
-  (`docker exec <id> true`) and emits `CONTAINER_VANISHED` only on a confirmed
-  container-gone; an API/model error with a healthy container falls through to the
-  generic surface.
+  query catch before the generic surface — probes and emits `CONTAINER_VANISHED` only on
+  a confirmed container-gone.
+- **Teardown race:** both paths re-check `_destroying` **after** the (up-to-10s) probe
+  await before emitting — a `destroy()` landing in the probe window has already removed
+  listeners, and emitting `error` onto a dead `EventEmitter` throws in Node.
 
-Both base classes ship a no-op hook, so host-CLI and in-process SDK sessions are
-unaffected.
+Both base classes ship a no-op hook (`false` / `null`), so host-CLI and in-process SDK
+sessions are unaffected — the host CLI path stays fully synchronous.
 
 ## Consequences / follow-ups
 

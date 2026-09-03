@@ -1259,7 +1259,14 @@ export class SdkSession extends BaseSession {
           // generic query-error surface. Base returns null; DockerSdkSession
           // probes the container and returns a CONTAINER_VANISHED payload.
           const containerGone = await this._classifyContainerFailure(err)
-          if (containerGone) {
+          // #7599: _classifyContainerFailure can await a real `docker exec` probe
+          // (up to 10s). A destroy() landing in that window has already torn the
+          // session down and removed its listeners, so emitting here would fire
+          // on a dead EventEmitter (Node throws on an unhandled 'error'). Re-check
+          // teardown after the await before surfacing anything.
+          if (this._destroying) {
+            // fall through to _clearMessageState below; destroy() owns the UX
+          } else if (containerGone) {
             ;(this._log || log).warn(`Container vanished during turn: ${containerGone.message}`)
             this.emit('error', containerGone)
           } else {

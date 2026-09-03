@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
-import { classifyDockerError, CONTAINER_VANISHED } from './docker-session.js'
+import { classifyDockerError, CONTAINER_VANISHED, probeContainerGone } from './docker-session.js'
 import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
@@ -405,30 +405,25 @@ export class DockerSdkSession extends SdkSession {
     if (!this._containerId) return null
     const gone = await this._probeContainerGone()
     if (!gone) return null
+    // Only `code` (+ `message`) survives the generic error normalizer to the
+    // wire; the code is the surfaced signal (reconnectability is a #7602
+    // server-side decision, not a wire flag).
     return {
       code: CONTAINER_VANISHED,
-      recoverable: true,
       message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
     }
   }
 
   /**
    * Probe whether the bound container is gone via `docker exec <id> true`.
-   * Resolves true ONLY on a container-gone classification; a dead daemon or any
-   * other failure resolves false (not a per-container vanish), and a successful
-   * probe resolves false (the container is fine, so the turn failed for another
-   * reason).
+   * Delegates to the shared `probeContainerGone` helper (same probe the
+   * docker-cli path uses). Resolves true ONLY on a container-gone classification;
+   * a healthy probe, a dead daemon, or any other failure resolves false.
    *
    * @returns {Promise<boolean>}
    */
   _probeContainerGone() {
-    return new Promise((resolve) => {
-      this._verifyContainer((err) => {
-        if (!err) return resolve(false)
-        const { code } = classifyDockerError(err, err.stderr || '')
-        resolve(code === 'container_gone')
-      })
-    })
+    return probeContainerGone(this._containerId)
   }
 
   /**
