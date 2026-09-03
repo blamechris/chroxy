@@ -130,6 +130,45 @@ describe('#7601 SessionManager — monitor construction + lifecycle', () => {
     m.destroyAll()
   })
 
+  it('the manager-OWNED monitor surfaces a vanish via its wired enumerate seam (#7601 F4)', async () => {
+    // Constructs with containerInspect, so the manager builds its OWN monitor
+    // wired to the real _listContainerLivenessTargets — the production seam.
+    const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp', containerInspect: async () => 'gone' })
+    const session = realDockerSdkSession('ctr-own')
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    putEntry(m, 'own', { session })
+
+    await m._containerLivenessMonitor._tick()
+
+    assert.equal(errors.filter((e) => e.code === CONTAINER_VANISHED).length, 1, 'the manager-owned monitor surfaced the vanish')
+    session.destroy()
+    m.destroyAll()
+  })
+
+  it('a CONTAINER_VANISHED surface neither bills a turn nor resets the idle timer (WIRED session events)', () => {
+    // Drives the vanish through the REAL _wireSessionEvents forwarding path (not
+    // a direct session listener), so the billing + idle gates are actually
+    // witnessed — guarding against a future ACTIVITY_EVENTS / billing-gate edit
+    // silently regressing the neutrality the poll depends on.
+    const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp' })
+    const fake = new EventEmitter()
+    m._wireSessionEvents('s1', fake)
+    let touches = 0
+    const orig = m.touchActivity.bind(m)
+    m.touchActivity = (id) => { touches++; return orig(id) }
+
+    // Positive control: a real activity event DOES reset the idle timer.
+    fake.emit('message', { text: 'hi' })
+    assert.equal(touches, 1, 'control: an activity event touches')
+
+    // The vanish surface must NOT count as activity, and must NOT bill.
+    fake.emit('error', { code: CONTAINER_VANISHED, message: 'gone' })
+    assert.equal(touches, 1, 'a CONTAINER_VANISHED error is not activity — idle timer untouched')
+    assert.equal(m.getCumulativeUsage('s1'), null, 'no usage billed for the vanish surface')
+    m.destroyAll()
+  })
+
   it('a healthy poll pass does NOT surface, and clears a prior latch', async () => {
     const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp' })
     const session = realDockerSdkSession('ctr-ok')

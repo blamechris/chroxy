@@ -36,8 +36,13 @@ export const CONTAINER_VANISHED_MESSAGE =
  * vanish. Idempotent via the session's `_containerVanishedNotified` latch so the
  * proactive liveness poll (which re-checks the same container every interval)
  * and the reactive close path cannot double-emit for one vanish. The latch is
- * reset by `clearContainerVanished` when a poll later observes the container
- * running again, so a stop → start → stop cycle re-surfaces on the second stop.
+ * reset ONLY by `clearContainerVanished`, which the liveness poll calls when it
+ * observes the container running again — so a stop → start → stop cycle
+ * re-surfaces on the second stop. That reset is therefore poll-owned: the sole
+ * production entrypoint (server-cli) always wires the poll, but a hypothetical
+ * embedding that constructs a SessionManager WITHOUT a `containerInspect` seam
+ * would latch the docker-cli reactive close after the first stop and not clear
+ * it (the docker-sdk turn path is unaffected — it re-emits per turn regardless).
  *
  * Suppressed (returns false, emits nothing) when the session is tearing down
  * (emitting on a destroy()'d EventEmitter throws — #7599 review), when it has
