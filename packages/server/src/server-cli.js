@@ -793,6 +793,20 @@ export async function startCliServer(config) {
   // a single warning here at boot (not three on each tunable).
   const startupTimeouts = resolveStartupTimeouts(config, log)
 
+  // #7601: wire the proactive container-liveness poll's inspect seam. A dedicated
+  // DockerBackend (a stateless docker-CLI wrapper — same shape server-cli already
+  // constructs for the compose sweep above) inspects each live containerized
+  // session's container; `inspectContainerLiveness` classifies a rejection so a
+  // Docker-daemon outage can't false-surface a vanish across every session at
+  // once. Safe to wire unconditionally: the poll is a no-op when no containerized
+  // session exists, and docker-cli/docker-sdk sessions can be created even with
+  // the container-environments feature off.
+  const { DockerBackend: LivenessDockerBackend } = await import('./environments/backends/docker.js')
+  const { inspectContainerLiveness } = await import('./docker-session.js')
+  const livenessBackend = new LivenessDockerBackend()
+  const containerInspect = (containerId) =>
+    inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
+
   // 1. Create session manager
   const sessionManager = new SessionManager({
     maxSessions: config.maxSessions || 5,
@@ -809,6 +823,8 @@ export async function startCliServer(config) {
     // constructed AND `reconnect()`ed (which clears every stale session tag from
     // the previous process) above, before this line runs.
     environmentManager,
+    // #7601: the proactive container-liveness poll inspect seam (see above).
+    containerInspect,
     // #5859 (audit P1-7): reclaim orphaned chroxy session worktrees at boot when
     // the operator opted into worktree auto-reaping. Clean-tree-guarded.
     sweepOrphanWorktrees: config.worktreeGc?.autoReap === true,
@@ -1319,6 +1335,10 @@ export async function startCliServer(config) {
   // Wire session timeout to WsServer viewer checks
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
   sessionManager.startSessionTimeouts()
+  // #7601: begin the proactive container-liveness poll (no-op when no
+  // containerInspect seam was wired). Surfaces CONTAINER_VANISHED on an idle
+  // containerized session whose container was stopped/removed externally.
+  sessionManager.startContainerLiveness()
 
   // Advertise via mDNS/Bonjour for local network discovery. Suppressed on a
   // loopback bind and when auth is off — see maybeAdvertiseMdns (#5280).

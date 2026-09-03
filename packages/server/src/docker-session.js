@@ -22,6 +22,79 @@ const log = createLogger('docker-session')
 export const CONTAINER_VANISHED = 'CONTAINER_VANISHED'
 
 /**
+ * #7599/#7601 — the single message surfaced with a CONTAINER_VANISHED error, on
+ * every path that detects a vanish (reactive exec-close, reactive turn-reject,
+ * the proactive liveness poll, and the environment_stopped/restarted fast-path).
+ * One const so those four sites cannot drift on the wording (the
+ * adjacent-field-wire-cap lesson).
+ */
+export const CONTAINER_VANISHED_MESSAGE =
+  'The container for this session is no longer running (it may have been stopped, restarted, or removed).'
+
+/**
+ * #7601 — surface CONTAINER_VANISHED on a containerized session AT MOST ONCE per
+ * vanish. Idempotent via the session's `_containerVanishedNotified` latch so the
+ * proactive liveness poll (which re-checks the same container every interval)
+ * and the reactive close path cannot double-emit for one vanish. The latch is
+ * reset by `clearContainerVanished` when a poll later observes the container
+ * running again, so a stop → start → stop cycle re-surfaces on the second stop.
+ *
+ * Suppressed (returns false, emits nothing) when the session is tearing down
+ * (emitting on a destroy()'d EventEmitter throws — #7599 review), when it has
+ * already been notified, or when no container is bound. NEVER nulls
+ * `_containerId` (the #7561 trap: an absent id reads as owned → a fresh default
+ * container). Returns true only when it actually emitted.
+ *
+ * @param {import('events').EventEmitter & {_destroying?:boolean, _containerVanishedNotified?:boolean, _containerId?:string|null}} session
+ * @returns {boolean}
+ */
+export function surfaceContainerVanished(session) {
+  if (session._destroying || session._containerVanishedNotified || !session._containerId) return false
+  session._containerVanishedNotified = true
+  session.emit('error', { code: CONTAINER_VANISHED, message: CONTAINER_VANISHED_MESSAGE })
+  return true
+}
+
+/**
+ * #7601 — the liveness verdict the proactive poll acts on, derived from a
+ * `docker inspect` of a single container (backend.getEnvironmentStatus →
+ * _inspectContainer). Returns one of:
+ *   'running' — inspect reports `State.Running: true`
+ *   'gone'    — the container is STOPPED (`Running: false`) OR REMOVED (inspect
+ *               rejects with a container-missing error)
+ *   'unknown' — any OTHER failure (Docker daemon down, timeout, permission)
+ *
+ * The 'unknown' bucket is load-bearing: a naive "inspect rejected → gone" would
+ * turn a transient Docker-daemon outage into a CONTAINER_VANISHED surfaced on
+ * EVERY containerized session at once. So a rejection is classified with the
+ * SAME `classifyDockerError` the reactive probe uses — only a positively
+ * recognised container-missing error is 'gone'; `docker_not_running` and
+ * anything unrecognised are 'unknown' and the poll leaves the session untouched
+ * (the #7599 daemon-down guard, applied to the poll).
+ *
+ * `docker inspect` reports a removed container as `no such object` (verified
+ * against the CLI) — distinct from `docker exec`'s `No such container` that
+ * `classifyDockerError` already matches — so that phrasing is recognised here
+ * explicitly.
+ *
+ * @param {(containerId: string) => Promise<boolean>} getStatus backend.getEnvironmentStatus
+ * @param {string} containerId
+ * @returns {Promise<'running'|'gone'|'unknown'>}
+ */
+export async function inspectContainerLiveness(getStatus, containerId) {
+  try {
+    const running = await getStatus(containerId)
+    return running ? 'running' : 'gone'
+  } catch (err) {
+    const { code } = classifyDockerError(err, err?.stderr || '')
+    if (code === 'container_gone') return 'gone'
+    const combined = `${err?.message || ''} ${err?.stderr || ''}`.toLowerCase()
+    if (combined.includes('no such object') || combined.includes('no such container')) return 'gone'
+    return 'unknown'
+  }
+}
+
+/**
  * Classify a Docker error into a structured error with a specific code.
  *
  * Returns an object with `code` and `message` fields so callers can surface
@@ -250,6 +323,27 @@ export class DockerSession extends CliSession {
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
+    // #7601 — the CONTAINER_VANISHED idempotency latch (see surfaceContainerVanished).
+    this._containerVanishedNotified = false
+  }
+
+  /**
+   * #7601 — surface a CONTAINER_VANISHED error once for this session (idempotent).
+   * Called by the reactive exec-close path AND the proactive liveness poll /
+   * environment_stopped fast-path; the shared latch keeps them from double-emitting.
+   * @returns {boolean} true if it emitted
+   */
+  notifyContainerVanished() {
+    return surfaceContainerVanished(this)
+  }
+
+  /**
+   * #7601 — reset the CONTAINER_VANISHED latch after the container is observed
+   * running again, so a later vanish re-surfaces. Called by the liveness poll on
+   * a healthy inspect.
+   */
+  clearContainerVanished() {
+    this._containerVanishedNotified = false
   }
 
   /**
@@ -506,14 +600,14 @@ export class DockerSession extends CliSession {
       ;(this._log || log).warn(
         `Container for this session is gone (exec exit ${code}) — surfacing CONTAINER_VANISHED, not respawning`,
       )
-      // Only `code` (and `message`) reach clients — the generic error normalizer
-      // (event-normalizer.js) forwards those but caps adjacent fields, so the CODE
-      // is the surfaced signal. Reconnectability is decided server-side (#7602),
-      // not carried as a wire flag here.
-      this.emit('error', {
-        code: CONTAINER_VANISHED,
-        message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
-      })
+      // #7601: route through the shared idempotent surface so a proactive
+      // liveness-poll tick that already surfaced this vanish can't be
+      // double-emitted here (and vice-versa). Only `code` (+ `message`) reach
+      // clients — the generic error normalizer caps adjacent fields, so the CODE
+      // is the surfaced signal; reconnectability is a #7602 server-side decision.
+      // Suppress the respawn on a confirmed vanish regardless of whether the
+      // latch had already fired.
+      this.notifyContainerVanished()
       return true
     })
   }

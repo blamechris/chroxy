@@ -17,6 +17,7 @@ import { SessionLockManager } from './session-lock.js'
 import { CostBudgetManager } from './cost-budget-manager.js'
 import { SessionStatePersistence } from './session-state-persistence.js'
 import { SessionTimeoutManager, formatIdleDuration } from './session-timeout-manager.js'
+import { ContainerLivenessMonitor } from './container-liveness-monitor.js'
 import { SessionMessageHistory } from './session-message-history.js'
 import { generateSessionTitle, DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 // NB: the default one-shot title runner (defaultRunOneShot) lives in
@@ -432,6 +433,15 @@ export class SessionManager extends EventEmitter {
     // uses EnvironmentManager … when creating sessions with an environmentId").
     environmentManager = null,
 
+    // #7601: proactive container-liveness poll. `containerInspect` is a
+    // docker-agnostic `(containerId) => Promise<'running'|'gone'|'unknown'>`
+    // seam (server-cli wires it to a DockerBackend via inspectContainerLiveness;
+    // tests inject a fake). Null → the poll is not constructed, so a deployment
+    // that never wired it simply never polls. `containerLivenessIntervalMs`
+    // overrides the 30s default (tests drive it with fake timers).
+    containerInspect = null,
+    containerLivenessIntervalMs = undefined,
+
     // Test-only: skip preflight checks (binary + credential). Production must
     // leave this false so missing providers surface cleanly at createSession.
     skipPreflight = false,
@@ -813,6 +823,21 @@ export class SessionManager extends EventEmitter {
       const entry = this._sessions.get(sessionId)
       return entry ? entry.session.isRunning : false
     })
+
+    // #7601: proactive container-liveness poll — surfaces CONTAINER_VANISHED on
+    // an IDLE containerized session whose container was stopped externally
+    // (a plain `docker stop` fires no chroxy event, so a poll is the only
+    // detector). Constructed only when a `containerInspect` seam was wired
+    // (production always does when environments/docker are in play); left null
+    // otherwise so nothing polls. Started/stopped/destroyed alongside the
+    // timeout manager.
+    this._containerLivenessMonitor = containerInspect
+      ? new ContainerLivenessMonitor({
+        enumerate: () => this._listContainerLivenessTargets(),
+        inspect: containerInspect,
+        ...(containerLivenessIntervalMs != null ? { intervalMs: containerLivenessIntervalMs } : {}),
+      })
+      : null
 
     // Validate provider exists at construction time for fail-fast behavior
     getProvider(this._providerType)
@@ -2389,6 +2414,7 @@ export class SessionManager extends EventEmitter {
     }
     this._sessions.clear()
     this._timeoutManager.destroy()
+    this._containerLivenessMonitor?.destroy()
     this._history.clear()
     this._costBudget.clear()
     // #5554: persist any pending usage records on shutdown (best-effort).
@@ -3869,6 +3895,48 @@ export class SessionManager extends EventEmitter {
    */
   stopSessionTimeouts() {
     this._timeoutManager.stop()
+  }
+
+  /**
+   * #7601 — start / stop the proactive container-liveness poll. No-op when the
+   * monitor was not constructed (no `containerInspect` seam wired).
+   */
+  startContainerLiveness() {
+    this._containerLivenessMonitor?.start()
+  }
+
+  stopContainerLiveness() {
+    this._containerLivenessMonitor?.stop()
+  }
+
+  /**
+   * #7601 — the live containerized sessions the liveness poll should inspect.
+   *
+   * A target is included only when its provider exposes the #7599 vanish-surface
+   * contract (`notifyContainerVanished`) AND currently holds a container id.
+   * `docker-byok` advertises `containerized` but does NOT yet expose that surface,
+   * so it is excluded here until #7600 wires it — the feature-detect is the gate,
+   * not a hard-coded provider list. A session tearing down is skipped (its
+   * container is being removed deliberately). An environment with no sessions
+   * contributes no target, so nothing is inspected for it — the #7601 negative
+   * control falls out of this enumeration rather than a separate check.
+   *
+   * @returns {Array<{sessionId: string, containerId: string, session: object}>}
+   */
+  _listContainerLivenessTargets() {
+    const targets = []
+    for (const [sessionId, entry] of this._sessions) {
+      if (!entry || entry._destroying) continue
+      const session = entry.session
+      if (!session || typeof session.notifyContainerVanished !== 'function') continue
+      // The LIVE container id lives on the provider (mutated at runtime when it
+      // owns the container); the persisted `entry.containerId` is null for a
+      // per-session `--rm` container, so read the provider's.
+      const containerId = session._containerId
+      if (!containerId) continue
+      targets.push({ sessionId, containerId, session })
+    }
+    return targets
   }
 
   getSessionCost(sessionId) {
