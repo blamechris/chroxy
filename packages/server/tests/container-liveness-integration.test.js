@@ -8,6 +8,7 @@ import { SessionManager } from '../src/session-manager.js'
 import { ContainerLivenessMonitor } from '../src/container-liveness-monitor.js'
 import { DockerSession, CONTAINER_VANISHED } from '../src/docker-session.js'
 import { DockerSdkSession } from '../src/docker-sdk-session.js'
+import { DockerByokSession } from '../src/docker-byok-session.js'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSessionManager } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -40,6 +41,18 @@ function realDockerSdkSession(containerId) {
   s._fetchSupportedModels = () => {}
   return s
 }
+// #7600 — a docker-byok session: no long-lived in-container process, so the
+// poll is its only idle-time vanish detection. Docker is stubbed out.
+function realDockerByokSession(containerId) {
+  const s = new DockerByokSession({
+    cwd: '/tmp',
+    _execFile: (_cmd, _args, _opts, cb) => cb(null, '', ''),
+    _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+  })
+  s._containerId = containerId
+  s._containerReady = true
+  return s
+}
 // A non-containerized session: no vanish surface, but a destroy() so destroyAll()
 // tears it down quietly.
 function plainSession() {
@@ -51,10 +64,11 @@ describe('#7601 SessionManager._listContainerLivenessTargets — enumeration', (
     const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp' })
     putEntry(m, 'cli', { session: realDockerSession('ctr-cli') })
     putEntry(m, 'sdk', { session: realDockerSdkSession('ctr-sdk') })
+    putEntry(m, 'byok', { session: realDockerByokSession('ctr-byok') }) // #7600
 
     const targets = m._listContainerLivenessTargets()
     const byId = Object.fromEntries(targets.map((t) => [t.sessionId, t.containerId]))
-    assert.deepEqual(byId, { cli: 'ctr-cli', sdk: 'ctr-sdk' })
+    assert.deepEqual(byId, { cli: 'ctr-cli', sdk: 'ctr-sdk', byok: 'ctr-byok' })
     m.destroyAll()
   })
 
@@ -65,11 +79,12 @@ describe('#7601 SessionManager._listContainerLivenessTargets — enumeration', (
     m.destroyAll()
   })
 
-  it('excludes a container-bound session that lacks the vanish surface (docker-byok until #7600)', () => {
+  it('excludes a container-bound session that lacks the vanish surface', () => {
     const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp' })
     // Has a container id but NO notifyContainerVanished — isolates the
-    // feature-detect gate from the missing-container-id gate.
-    putEntry(m, 'byok', { session: Object.assign(new EventEmitter(), { _containerId: 'ctr-byok', destroy() {} }) })
+    // feature-detect gate from the missing-container-id gate. (docker-byok
+    // was this case until #7600 gave it the surface.)
+    putEntry(m, 'bare', { session: Object.assign(new EventEmitter(), { _containerId: 'ctr-bare', destroy() {} }) })
     assert.equal(m._listContainerLivenessTargets().length, 0)
     m.destroyAll()
   })

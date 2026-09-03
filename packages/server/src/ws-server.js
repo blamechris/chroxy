@@ -2599,7 +2599,8 @@ export class WsServer {
    * SAME surface the #7599 reactive paths and the #7601 poll use, so a stop the
    * poll also catches is deduped by the provider's latch. Does NOT inject a
    * SessionManager handle into EnvironmentManager, does NOT untag `env.sessions`,
-   * and does NOT touch a session lacking the surface (docker-byok until #7600).
+   * and does NOT touch a session lacking the surface (feature-detected, never a
+   * provider list — docker-byok gained the surface in #7600).
    *
    * @param {string} envId
    * @param {string} reason  the emitting event, for the log line

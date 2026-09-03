@@ -8,8 +8,8 @@ const log = createLogger('container-liveness')
  * DURING a turn (SDK query reject) or that closes a live exec child (CLI); this
  * poll is the ONLY thing that catches an IDLE session whose container was stopped
  * EXTERNALLY (a plain `docker stop`, which emits no chroxy event), and it is what
- * gives a no-long-lived-process session (docker-byok, once #7600 wires its
- * surface) any idle detection at all. 30s balances "surface before the user's
+ * gives a no-long-lived-process session (docker-byok, #7600) any idle
+ * detection at all. 30s balances "surface before the user's
  * next turn" against the cost of one `docker inspect` per distinct container.
  */
 export const DEFAULT_LIVENESS_INTERVAL_MS = 30_000
