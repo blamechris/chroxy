@@ -184,6 +184,13 @@ const CONFIG_SCHEMA = {
   // Defaults to off; the `chroxy worktree gc` CLI is always available for
   // manual/dry-run use.
   worktreeGc: 'object',
+  // #7606: orphaned-child reaper. `{ enabled?: boolean, sweepIntervalMs?:
+  // number, minAgeMs?: number }` — the daemon periodically SIGKILLs processes
+  // that are reparented to pid 1, owned by this uid, older than `minAgeMs`
+  // (default 10 min) and whose cwd is inside chroxy's own session-worktree
+  // root — work a dead session left behind. `enabled` defaults ON; sweeps
+  // every `sweepIntervalMs` (default 5 min). POSIX only.
+  orphanReap: 'object',
   // #7424: the session CI-completion watcher. `{ watch?: boolean, wakeAgent?:
   // boolean, intervalMs?: number, discoveryIntervalMs?: number,
   // maxSurveysPerTick?: number }` (#7436 added the per-tick cap). `watch`
@@ -541,6 +548,9 @@ export const BILLING_SUPPORTED_KEYS = new Set([
 ])
 export const WORKTREE_GC_SUPPORTED_KEYS = new Set([
   'autoReap', 'reapIntervalMs', 'maxLockAgeMs',
+])
+export const ORPHAN_REAP_SUPPORTED_KEYS = new Set([
+  'enabled', 'sweepIntervalMs', 'minAgeMs',
 ])
 export const SESSION_CI_SUPPORTED_KEYS = new Set([
   'watch', 'wakeAgent', 'intervalMs', 'discoveryIntervalMs', 'maxSurveysPerTick',
@@ -1456,6 +1466,36 @@ export function validateConfig(config, verbose = false) {
       }
       // #5878: typo-catch for the worktree-GC knobs.
       warnUnknownKeys(config.worktreeGc, WORKTREE_GC_SUPPORTED_KEYS, 'worktreeGc', warnings)
+    }
+  }
+
+  // #7606: orphaned-child reaper block. `enabled` boolean; `sweepIntervalMs`
+  // positive; `minAgeMs` non-negative. A bad value warns and the reaper falls
+  // back to its built-in default for that knob (fail-safe: a typo can only
+  // ever leave the defaults in place, never widen the predicate).
+  if (config.orphanReap !== undefined) {
+    if (typeof config.orphanReap !== 'object' || config.orphanReap === null || Array.isArray(config.orphanReap)) {
+      warnings.push(`Invalid type for 'orphanReap': expected object, got ${Array.isArray(config.orphanReap) ? 'array' : typeof config.orphanReap}`)
+    } else {
+      if (
+        Object.prototype.hasOwnProperty.call(config.orphanReap, 'enabled') &&
+        typeof config.orphanReap.enabled !== 'boolean'
+      ) {
+        warnings.push(`Invalid type for 'orphanReap.enabled': expected boolean, got ${typeof config.orphanReap.enabled}`)
+      }
+      if (Object.prototype.hasOwnProperty.call(config.orphanReap, 'sweepIntervalMs')) {
+        const v = config.orphanReap.sweepIntervalMs
+        if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+          warnings.push(`Invalid value for 'orphanReap.sweepIntervalMs': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(config.orphanReap, 'minAgeMs')) {
+        const v = config.orphanReap.minAgeMs
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+          warnings.push(`Invalid value for 'orphanReap.minAgeMs': expected a non-negative number, got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
+      warnUnknownKeys(config.orphanReap, ORPHAN_REAP_SUPPORTED_KEYS, 'orphanReap', warnings)
     }
   }
 

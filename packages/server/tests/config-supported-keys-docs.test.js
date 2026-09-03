@@ -64,6 +64,7 @@ import {
 const BLOCK_TO_SET_NAME = new Map([
   ['billing', 'BILLING_SUPPORTED_KEYS'],
   ['worktreeGc', 'WORKTREE_GC_SUPPORTED_KEYS'],
+  ['orphanReap', 'ORPHAN_REAP_SUPPORTED_KEYS'],
   ['sessionCi', 'SESSION_CI_SUPPORTED_KEYS'],
   ['userShell', 'USER_SHELL_SUPPORTED_KEYS'],
   ['environments.k8s', 'K8S_SUPPORTED_KEYS'],
@@ -89,8 +90,8 @@ const BLOCKS_WITH_NO_PROSE_REGION = ['environments.k8s', 'environments.rancher']
 // Blocks whose CONFIG.md row carries a `{ name?: type }` shape, and whose
 // config.js CONFIG_SCHEMA comment carries the same. Counted, not just iterated:
 // a deleted shape would otherwise drop its check with the suite still green.
-const BLOCKS_WITH_DOC_TYPE_SHAPE = ['worktreeGc', 'sessionCi', 'userShell']
-const BLOCKS_WITH_SCHEMA_COMMENT_SHAPE = ['worktreeGc', 'sessionCi', 'userShell']
+const BLOCKS_WITH_DOC_TYPE_SHAPE = ['worktreeGc', 'orphanReap', 'sessionCi', 'userShell']
+const BLOCKS_WITH_SCHEMA_COMMENT_SHAPE = ['worktreeGc', 'orphanReap', 'sessionCi', 'userShell']
 
 const sorted = it2 => [...it2].sort()
 
@@ -171,10 +172,10 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     // The count IS the subject on the first three: a block that vanishes from
     // any one side must force an edit here rather than shrinking the compared
     // set in silence.
-    assert.equal(BLOCK_TO_SET_NAME.size, 8, 'expected exactly 8 documented sub-key blocks')
-    assert.equal(declared.size, 8, `expected exactly 8 *_SUPPORTED_KEYS declarations, got ${sorted(declared.keys()).join(', ')}`)
-    assert.equal(docTable.size, 8, `expected exactly 8 Recognised sub-keys rows, got ${sorted(docTable.keys()).join(', ')}`)
-    assert.equal(callSites.length, 7, `expected exactly 7 warnUnknownKeys call sites, got ${callSites.length}`)
+    assert.equal(BLOCK_TO_SET_NAME.size, 9, 'expected exactly 9 documented sub-key blocks')
+    assert.equal(declared.size, 9, `expected exactly 9 *_SUPPORTED_KEYS declarations, got ${sorted(declared.keys()).join(', ')}`)
+    assert.equal(docTable.size, 9, `expected exactly 9 Recognised sub-keys rows, got ${sorted(docTable.keys()).join(', ')}`)
+    assert.equal(callSites.length, 8, `expected exactly 8 warnUnknownKeys call sites, got ${callSites.length}`)
     // Floor the NESTED files, not the total. A total floor reads like a guard
     // against a sweep that stopped recursing and is inert against exactly that:
     // src/ has 189 top-level .js files of 317, so deleting the recursive branch
@@ -384,7 +385,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     // lines above). Floors, not exact pins: the count is not the subject,
     // but losing any one region's extraction must trip its own row.
     const REGION_MIN_CLAIMS = new Map([
-      ['billing', 3], ['worktreeGc', 2], ['sessionCi', 3],
+      ['billing', 3], ['worktreeGc', 2], ['orphanReap', 2], ['sessionCi', 3],
       ['userShell', 1], ['notifications.discord', 8], ['providers', 0],
     ])
     for (const [block, min] of REGION_MIN_CLAIMS) {

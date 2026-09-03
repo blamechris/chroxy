@@ -423,31 +423,81 @@ export function writeFileRestricted(
 }
 
 /**
- * Terminate `child` — its whole descendant TREE on Windows (taskkill /T), or
- * just the DIRECT process on POSIX (see the per-platform notes below; callers
- * that need the whole POSIX group spawn `detached` and signal the negative pid).
- *
- * POSIX: `child.kill(force ? 'SIGKILL' : 'SIGTERM')` on the direct process —
- * the long-standing behaviour (callers that need the whole group spawn
- * `detached` and signal the negative pid themselves). `force:false` stays a
- * graceful SIGTERM so a caller's existing SIGTERM→SIGKILL escalation is
- * unchanged.
- *
- * Windows: there is no process-group signal and no graceful console-tree
- * termination — Node maps BOTH `SIGTERM` and `SIGKILL` to `TerminateProcess`
- * on the DIRECT pid, so descendants are orphaned. This is acute for Chroxy:
- * `.cmd`/`.bat` provider shims (claude, codex, gemini, …) run under
- * `cmd.exe /d /s /c`, so the real agent/node process is a GRANDCHILD of the
- * tracked pid. `cmd /c` waits for its child, so actively killing the wrapper
- * (respawn / model-switch / destroy) leaves node running — still editing files
- * and burning tokens — after Stop/teardown (#6643). Reap the whole tree with
- * `taskkill /PID <pid> /T /F`. The `force` flag is POSIX-only; on Windows the
- * kill is always forced (matching Node's existing TerminateProcess semantics,
- * where SIGTERM was never graceful anyway). Best-effort: an already-exited pid
- * or a taskkill failure falls back to a direct `child.kill()` — this never
- * throws, so it is safe to call from a teardown path.
+ * #7606: every descendant pid of `pid`, from a `ps -axo pid=,ppid=` table.
+ * Pure; exported for tests. Order is parents-before-children so a caller that
+ * wants to kill deepest-first reverses it. Cycles are impossible in a real
+ * process table but a corrupt/odd line could fake one, so `seen` guards it.
  */
-export function killProcessTree(child, { force = false } = {}) {
+export function parseDescendantPids(pid, psOutput) {
+  const childrenOf = new Map()
+  for (const line of String(psOutput || '').split('\n')) {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+    if (!m) continue
+    const p = Number(m[1])
+    const pp = Number(m[2])
+    if (!childrenOf.has(pp)) childrenOf.set(pp, [])
+    childrenOf.get(pp).push(p)
+  }
+  const out = []
+  const seen = new Set([pid])
+  const stack = [pid]
+  while (stack.length) {
+    const cur = stack.pop()
+    for (const c of childrenOf.get(cur) || []) {
+      if (seen.has(c)) continue
+      seen.add(c)
+      out.push(c)
+      stack.push(c)
+    }
+  }
+  return out
+}
+
+/**
+ * #7606: list every live descendant of `pid` on POSIX via one `ps` call.
+ * Best-effort and bounded (5s): an unavailable or wedged `ps` yields `[]`, so
+ * the caller degrades to the pre-#7606 direct-child kill rather than hanging a
+ * teardown path. `deps.ps` is the test seam (returns the raw table).
+ */
+export function listDescendantPids(pid, deps = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return []
+  let table
+  try {
+    table = deps.ps
+      ? deps.ps()
+      : execFileSync('ps', ['-axo', 'pid=,ppid='], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      })
+  } catch {
+    return []
+  }
+  return parseDescendantPids(pid, table)
+}
+
+/**
+ * Terminate `child` and its whole descendant TREE — `taskkill /T` on Windows,
+ * a `ps`-enumerated walk on POSIX (#7606).
+ *
+ * POSIX: the tree is enumerated with {@link listDescendantPids} BEFORE the
+ * direct child is signalled, because the moment the child dies its children
+ * are reparented to pid 1 and the ppid links this walk depends on are gone.
+ * Then `child.kill(signal)` on the direct process and `process.kill(pid,
+ * signal)` on every descendant, deepest-first. `force:false` stays a graceful
+ * SIGTERM so a caller's existing SIGTERM→SIGKILL escalation is unchanged.
+ *
+ * Why (#7606): before this, POSIX signalled ONLY the direct child. A provider
+ * CLI (claude) that had spawned `bash -c` → `node --test` was killed on
+ * respawn / destroy and its grandchildren survived, reparented to launchd —
+ * four of them ran 7.5 days at 91% CPU and ~50 GB each before macOS ran out
+ * of application memory. Enumerating first and signalling the whole tree is
+ * what `detached` + negative-pid signalling was supposed to give callers, and
+ * no caller had ever done it.
+ *
+ * `deps` — test seams: `ps` (raw table) and `kill` (`process.kill` shape).
+ */
+export function killProcessTree(child, { force = false, ...deps } = {}) {
   if (!child) return
   if (isWindows) {
     const pid = child.pid
@@ -470,14 +520,22 @@ export function killProcessTree(child, { force = false } = {}) {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
     return
   }
-  try { child.kill(force ? 'SIGKILL' : 'SIGTERM') } catch { /* already gone */ }
+  const signal = force ? 'SIGKILL' : 'SIGTERM'
+  const kill = deps.kill || process.kill
+  // Enumerate BEFORE signalling the parent (see the docstring): once it exits
+  // the ppid links are gone and the descendants are unreachable by walk.
+  const descendants = listDescendantPids(child.pid, deps)
+  try { child.kill(signal) } catch { /* already gone */ }
+  for (let i = descendants.length - 1; i >= 0; i--) {
+    try { kill(descendants[i], signal) } catch { /* already gone */ }
+  }
 }
 
 /**
- * Force-kill `child` and its whole descendant tree (#6643). POSIX sends
- * SIGKILL to the process; Windows reaps the tree via taskkill. See
- * {@link killProcessTree}.
+ * Force-kill `child` and its whole descendant tree (#6643, #7606). POSIX
+ * SIGKILLs the enumerated tree; Windows reaps it via taskkill. See
+ * {@link killProcessTree}. `deps` are the same test seams.
  */
-export function forceKill(child) {
-  killProcessTree(child, { force: true })
+export function forceKill(child, deps = {}) {
+  killProcessTree(child, { ...deps, force: true })
 }

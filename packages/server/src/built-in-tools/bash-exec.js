@@ -33,6 +33,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { forceKill, killProcessTree } from '../platform.js'
 
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000
 export const DEFAULT_BASH_MAX_OUTPUT_BYTES = 1_000_000 // 1 MB
@@ -104,11 +105,11 @@ export async function executeBash({
   let hardKillTimer = null
   const killChild = (sig, _reason) => {
     if (child.killed || child.exitCode !== null) return
-    try {
-      child.kill(sig)
-    } catch {
-      // ignore — process already gone
-    }
+    // #7606: signal the whole tree, not just bash. `bash -c` keeps itself as
+    // the parent of a compound command (`a && b`, `x | y`, `cmd &`), so a
+    // direct `child.kill()` here left the real work running — reparented to
+    // pid 1, unbounded — after the tool had already reported a timeout.
+    killProcessTree(child, { force: sig === 'SIGKILL' })
     if (sig === 'SIGTERM' && hardKillTimer === null) {
       hardKillTimer = setTimeout(() => {
         try {
@@ -119,7 +120,7 @@ export async function executeBash({
           // exit signal: exitCode set (normal exit) or signalCode set
           // (received a signal). Either means the process is gone.
           if (child.exitCode === null && child.signalCode === null) {
-            child.kill('SIGKILL')
+            forceKill(child)
           }
         } catch {}
       }, HARD_KILL_GRACE_MS)

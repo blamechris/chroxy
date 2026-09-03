@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync, existsSync,
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'node:url'
-import { defaultShell, writeFileRestricted, forceKill, isWindows, isMac, cloudflaredInstallHint } from '../src/platform.js'
+import { defaultShell, writeFileRestricted, forceKill, killProcessTree, parseDescendantPids, listDescendantPids, isWindows, isMac, cloudflaredInstallHint } from '../src/platform.js'
 
 // Production code in `platform.js` imports from `'fs'` etc. via ESM — the
 // subprocess shims below need to use `file:` URLs for both the `--import`
@@ -620,6 +620,136 @@ try {
         assert.strictEqual(existsSync(filePath), false, 'destination must not exist after a pre-rename fsync failure')
         assert.strictEqual(existsSync(`${filePath}.tmp`), false, 'orphaned .tmp must be cleaned up')
       })
+    })
+  })
+
+  describe('parseDescendantPids / listDescendantPids (#7606)', () => {
+    // pid ppid — the shape of `ps -axo pid=,ppid=`. 100 is the tracked child;
+    // 200/201 its children; 300 a grandchild; 400 an unrelated process.
+    const TABLE = `
+  100     1
+  200   100
+  201   100
+  300   200
+  400     1
+  401   400
+`
+    it('returns every descendant, parents before children, and nothing else', () => {
+      const got = parseDescendantPids(100, TABLE)
+      assert.deepEqual([...got].sort(), [200, 201, 300])
+      assert.ok(got.indexOf(200) < got.indexOf(300), 'parent 200 before its child 300')
+    })
+
+    it('returns [] for a pid with no children, and ignores malformed lines', () => {
+      assert.deepEqual(parseDescendantPids(300, TABLE), [])
+      assert.deepEqual(parseDescendantPids(100, 'PID PPID\nfoo bar\n'), [])
+      assert.deepEqual(parseDescendantPids(100, ''), [])
+    })
+
+    it('survives a cyclic table without looping forever', () => {
+      assert.deepEqual(parseDescendantPids(1, ' 1 2\n 2 1\n'), [2])
+    })
+
+    it('listDescendantPids uses the ps seam, and degrades to [] when ps throws or the pid is bogus', () => {
+      assert.deepEqual(listDescendantPids(100, { ps: () => TABLE }).sort(), [200, 201, 300])
+      assert.deepEqual(listDescendantPids(100, { ps: () => { throw new Error('no ps') } }), [])
+      let called = false
+      assert.deepEqual(listDescendantPids(undefined, { ps: () => { called = true; return TABLE } }), [])
+      assert.deepEqual(listDescendantPids(0, { ps: () => { called = true; return TABLE } }), [])
+      assert.equal(called, false, 'no ps call for a pid-less child')
+    })
+  })
+
+  describe('killProcessTree() POSIX tree walk (#7606)', { skip: isWindows }, () => {
+    const TABLE = '  100     1\n  200   100\n  300   200\n  400     1\n'
+    const harness = () => {
+      const events = []
+      const child = { pid: 100, kill(sig) { events.push(['child', sig]) } }
+      const kill = (pid, sig) => events.push([pid, sig])
+      return { events, child, kill }
+    }
+
+    it('enumerates BEFORE signalling the child, then signals descendants deepest-first', () => {
+      const { events, child, kill } = harness()
+      let psCalledBeforeChildKill = null
+      const ps = () => { psCalledBeforeChildKill = events.length === 0; return TABLE }
+      killProcessTree(child, { ps, kill })
+      assert.equal(psCalledBeforeChildKill, true, 'ps must run before the child is signalled — after it exits the ppid links are gone')
+      assert.deepEqual(events, [['child', 'SIGTERM'], [300, 'SIGTERM'], [200, 'SIGTERM']])
+    })
+
+    it('force:true / forceKill send SIGKILL to the whole tree', () => {
+      const a = harness()
+      killProcessTree(a.child, { ps: () => TABLE, kill: a.kill, force: true })
+      assert.deepEqual(a.events, [['child', 'SIGKILL'], [300, 'SIGKILL'], [200, 'SIGKILL']])
+      const b = harness()
+      forceKill(b.child, { ps: () => TABLE, kill: b.kill })
+      assert.deepEqual(b.events, [['child', 'SIGKILL'], [300, 'SIGKILL'], [200, 'SIGKILL']])
+    })
+
+    it('never signals a process outside the tree', () => {
+      const { events, child, kill } = harness()
+      killProcessTree(child, { ps: () => TABLE, kill })
+      assert.ok(!events.some(([pid]) => pid === 400 || pid === 1), JSON.stringify(events))
+    })
+
+    it('a descendant kill that throws (already gone) does not stop the rest', () => {
+      const { events, child } = harness()
+      const kill = (pid, sig) => { if (pid === 300) throw Object.assign(new Error('gone'), { code: 'ESRCH' }); events.push([pid, sig]) }
+      killProcessTree(child, { ps: () => TABLE, kill })
+      assert.deepEqual(events, [['child', 'SIGTERM'], [200, 'SIGTERM']])
+    })
+
+    it('with no ps seam and a pid-less fake child, behaves exactly as before (direct kill only)', () => {
+      const events = []
+      killProcessTree({ kill: (sig) => events.push(sig) })
+      assert.deepEqual(events, ['SIGTERM'])
+    })
+
+    // The real thing: sh -> node grandchild, kill the sh wrapper, the node
+    // grandchild must die. `sh -c 'cmd; :'` forces sh to fork rather than
+    // exec, so node really is a grandchild — the same shape as claude -> bash
+    // -> `node --test` that leaked four 50 GB orphans (#7606).
+    it('reaps the sh -> node grandchild on POSIX (#7606)', async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+      const isAlive = (pid) => {
+        try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' }
+      }
+      const stamp = `${process.pid}-${Date.now()}`
+      const pidFile = join(tmpdir(), `chroxy-treekill-${stamp}.pid`)
+      const script = join(tmpdir(), `chroxy-treekill-${stamp}.cjs`)
+      writeFileSync(
+        script,
+        `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1e9)`,
+      )
+      const child = spawn('sh', ['-c', `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}; :`], { stdio: 'ignore' })
+      let grandPid = null
+      try {
+        for (let i = 0; i < 150 && grandPid === null; i++) {
+          try {
+            const raw = readFileSync(pidFile, 'utf-8').trim()
+            if (raw) grandPid = parseInt(raw, 10)
+          } catch { /* not written yet */ }
+          if (grandPid === null) await sleep(100)
+        }
+        assert.ok(Number.isInteger(grandPid) && grandPid > 0, 'grandchild should report a pid')
+        assert.notEqual(grandPid, child.pid, 'sh must have forked, not exec\'d — otherwise this tests nothing')
+        assert.ok(isAlive(grandPid), 'grandchild should be alive before forceKill')
+
+        forceKill(child)
+
+        let dead = false
+        for (let i = 0; i < 80 && !dead; i++) {
+          if (!isAlive(grandPid)) { dead = true; break }
+          await sleep(100)
+        }
+        assert.ok(dead, 'forceKill must reap the node grandchild, not just the sh wrapper')
+      } finally {
+        try { forceKill(child) } catch {}
+        try { if (grandPid) process.kill(grandPid, 'SIGKILL') } catch {}
+        try { rmSync(script, { force: true }) } catch {}
+        try { rmSync(pidFile, { force: true }) } catch {}
+      }
     })
   })
 
