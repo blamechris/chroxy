@@ -59,11 +59,13 @@ export function classifyDockerError(err, stderrText = '') {
   }
   // #7599: the container is gone — stopped, restarted, or removed. Docker reports
   // `Container <id> is not running` for a stopped one and `No such container` for
-  // a removed one. Checked AFTER the image bucket (whose `not found`/`image`
+  // a removed one. `is not running` REQUIRES `container` alongside it so a generic
+  // "<daemon/service> is not running" can't false-match a vanished container
+  // (#7604 Copilot review). Checked AFTER the daemon + image buckets (whose
   // patterns don't overlap these) and BEFORE the generic fallback.
   if (
     combined.includes('no such container') ||
-    combined.includes('is not running')
+    (combined.includes('is not running') && combined.includes('container'))
   ) {
     return { code: 'container_gone', message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).' }
   }

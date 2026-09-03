@@ -163,4 +163,12 @@ describe('classifyDockerError — container gone (#7599)', () => {
     const result = classifyDockerError(err)
     assert.equal(result.code, 'docker_error')
   })
+
+  it('negative control — a generic "is not running" WITHOUT "container" is NOT container_gone (#7604)', () => {
+    // e.g. a daemon/service message that isn't the daemon-down bucket's phrasing
+    const err = new Error('the docker daemon is not running')
+    const result = classifyDockerError(err)
+    assert.notEqual(result.code, 'container_gone',
+      '"is not running" alone must not false-match a vanished container')
+  })
 })
