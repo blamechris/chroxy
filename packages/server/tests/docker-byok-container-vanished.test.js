@@ -120,13 +120,35 @@ describe('#7600 DockerByokSession — CONTAINER_VANISHED surface', () => {
     assert.equal(errors.length, 1)
   })
 
-  it('clearContainerVanished resets the latch so a later vanish re-surfaces — but does NOT restore readiness', () => {
-    const { session, errors } = buildSession()
+  it('clearContainerVanished resets the latch AND restores readiness — the byok re-attach — so a later vanish re-surfaces', () => {
+    const { session, pool, errors } = buildSession()
     session.notifyContainerVanished()
+    assert.equal(session._containerReady, false)
+
     session.clearContainerVanished()
-    assert.equal(session._containerReady, false, 're-attach is #7602, not the poll clearing a latch')
+    assert.equal(session._containerReady, true, 'same id running again: files intact, no process to rebind')
+    assert.equal(session._containerVanishedNotified, false)
+    assert.equal(pool.isSoiled(CTR), true, 'a container stopped underneath a session is still not offered to a successor')
+
     assert.equal(session.notifyContainerVanished(), true)
     assert.equal(errors.length, 2)
+    assert.equal(session._containerReady, false)
+  })
+
+  it("clearContainerVanished on a session that never vanished is a no-op — a 'running' verdict mid-start must not set readiness", () => {
+    const { session } = buildSession()
+    session._containerReady = false // start() has the id but has not finished the in-container setup
+    session.clearContainerVanished()
+    assert.equal(session._containerReady, false)
+  })
+
+  it('clearContainerVanished during teardown resets the latch but leaves readiness off', () => {
+    const { session } = buildSession()
+    session.notifyContainerVanished()
+    session._destroying = true
+    session.clearContainerVanished()
+    assert.equal(session._containerVanishedNotified, false)
+    assert.equal(session._containerReady, false)
   })
 
   it('works without a pool (compose stack / externally-owned container): emits + flips, no throw', () => {
@@ -178,10 +200,35 @@ describe('#7600 DockerByokSession — the #7601 liveness poll drives the surface
     verdict = 'running'
     await monitor._tick()
     assert.equal(session._containerVanishedNotified, false, 'poll-owned reset')
+    assert.equal(session._containerReady, true, 'the container came back under the same id: byok is re-attached')
+    const back = await session._dispatchBuiltinTool(BASH)
+    assert.equal(back.isError, false, 'tools dispatch into the returned container again')
 
     verdict = 'gone'
     await monitor._tick()
     assert.equal(errors.length, 2, 'a second vanish re-surfaces after the latch was cleared')
+    assert.equal(session._containerReady, false)
+  })
+
+  it('a Control Room restart of an env-backed container (fan-out, then the poll sees it running) self-heals', async () => {
+    // ws-server's environment_restarted fast-path calls notifyContainerVanished
+    // on a container that `docker restart` has already brought back under the
+    // SAME id. Pre-#7600 the next exec just worked; the poll's next 'running'
+    // verdict must return the session to that state rather than brick it.
+    const { session, errors } = buildSession({ pool: null })
+    session._containerOwned = false // env-backed: attached, not owned
+    assert.equal(session.notifyContainerVanished(), true) // the fast-path
+    assert.equal(session._containerReady, false)
+
+    const monitor = new ContainerLivenessMonitor({
+      enumerate: () => [{ sessionId: 's1', containerId: CTR, session }],
+      inspect: async () => 'running',
+      logger: { info() {}, warn() {} },
+    })
+    await monitor._tick()
+    assert.equal(session._containerReady, true)
+    assert.equal((await session._dispatchBuiltinTool(BASH)).isError, false)
+    assert.equal(errors.length, 1)
   })
 
   it("an 'unknown' verdict (daemon down) leaves a healthy byok session untouched", async () => {
@@ -236,7 +283,7 @@ describe('#7600 DockerByokSession — a tool dispatch confirms the vanish via in
     const execBefore = backend.execCalls.length
     const again = await session._dispatchBuiltinTool({ toolName: 'Read', input: { file_path: '/host/cwd/a.txt' } })
     assert.equal(again.isError, true)
-    assert.ok(again.content.includes('container not ready'), again.content)
+    assert.ok(again.content.includes(CONTAINER_VANISHED_MESSAGE), `every refused dispatch names the vanish, not a transient "not ready": ${again.content}`)
     assert.equal(backend.execCalls.length, execBefore)
     assert.equal(backend.statusCalls.length, 1)
     assert.deepEqual(hostCalls, [])
@@ -315,6 +362,57 @@ describe('#7600 DockerByokSession — a tool dispatch confirms the vanish via in
     assert.equal(result.isError, true)
     assert.equal(errors.length, 0)
     assert.equal(pool.isSoiled(CTR), false, 'teardown owns the container from here')
+  })
+
+  // The probe gate and the routing table are ONE map (#7607 review C1): every
+  // container-routed tool must reach the probe, and every host-side tool must
+  // not. Parameterised over the roster so a name dropped from the map goes red
+  // here rather than silently becoming a host-side tool.
+  const CONTAINER_TOOL_INPUTS = {
+    Read: { file_path: '/host/cwd/a.txt' },
+    Write: { file_path: '/host/cwd/a.txt', content: 'x' },
+    Edit: { file_path: '/host/cwd/a.txt', old_string: 'a', new_string: 'b' },
+    Bash: { command: 'true' },
+    Glob: { pattern: '*.js' },
+    Grep: { pattern: 'needle' },
+  }
+  for (const [toolName, input] of Object.entries(CONTAINER_TOOL_INPUTS)) {
+    it(`${toolName} is container-routed: its exec failure reaches the probe and a gone verdict is surfaced`, async () => {
+      const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER), running: false })
+      const { session, errors } = buildSession({ backend })
+      const hostCalls = spyHostDispatch()
+      const result = await session._dispatchBuiltinTool({ toolName, input })
+      assert.equal(result.isError, true)
+      assert.ok(backend.execCalls.length >= 1, `${toolName} went into the container`)
+      assert.deepEqual(backend.statusCalls, [CTR], `${toolName} failure probed`)
+      assert.deepEqual(hostCalls, [], `${toolName} never ran host-side`)
+      assert.equal(errors.length, 1)
+      assert.equal(session._containerReady, false)
+    })
+  }
+
+  for (const toolName of ['TodoWrite', 'AskUserQuestion', 'SomeFutureTool']) {
+    it(`${toolName} is host-side: its failure never probes the container`, async () => {
+      const backend = backendStub()
+      const { session, errors } = buildSession({ backend })
+      const hostCalls = spyHostDispatch(async () => { throw new Error('host tool failed') })
+      const result = await session._dispatchBuiltinTool({ toolName, input: {} })
+      assert.equal(result.isError, true)
+      assert.deepEqual(hostCalls, [toolName])
+      assert.deepEqual(backend.execCalls, [])
+      assert.deepEqual(backend.statusCalls, [])
+      assert.equal(errors.length, 0)
+      assert.equal(session._containerReady, true)
+    })
+  }
+
+  it('a probe that throws (an error emit with no listener) still yields an is_error tool_result, never a rejected dispatch', async () => {
+    const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER), running: false })
+    const { session } = buildSession({ backend })
+    session.removeAllListeners('error')
+    const result = await session._dispatchBuiltinTool(BASH)
+    assert.equal(result.isError, true)
+    assert.ok(result.content.includes('failed in docker-byok'), result.content)
   })
 
   it('a HOST-side tool failure never probes the container', async () => {
