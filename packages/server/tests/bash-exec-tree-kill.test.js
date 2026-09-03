@@ -30,8 +30,10 @@ describe('executeBash reaps the grandchild on timeout (#7606)', { skip: isWindow
     const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}; :`
     let grandPid = null
     try {
-      const resultP = executeBash({ command, timeoutMs: 1500 })
-      for (let i = 0; i < 100 && grandPid === null; i++) {
+      // The pid-file poll (<=3s) must finish well inside the tool timeout, or
+      // a slow runner lets the tool reap the grandchild before we observe it.
+      const resultP = executeBash({ command, timeoutMs: 5000 })
+      for (let i = 0; i < 60 && grandPid === null; i++) {
         try {
           const raw = readFileSync(pidFile, 'utf-8').trim()
           if (raw) grandPid = parseInt(raw, 10)

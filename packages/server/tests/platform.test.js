@@ -664,7 +664,7 @@ try {
     const TABLE = '  100     1\n  200   100\n  300   200\n  400     1\n'
     const harness = () => {
       const events = []
-      const child = { pid: 100, kill(sig) { events.push(['child', sig]) } }
+      const child = { pid: 100, exitCode: null, signalCode: null, kill(sig) { events.push(['child', sig]) } }
       const kill = (pid, sig) => events.push([pid, sig])
       return { events, child, kill }
     }
@@ -675,16 +675,28 @@ try {
       const ps = () => { psCalledBeforeChildKill = events.length === 0; return TABLE }
       killProcessTree(child, { ps, kill })
       assert.equal(psCalledBeforeChildKill, true, 'ps must run before the child is signalled — after it exits the ppid links are gone')
-      assert.deepEqual(events, [['child', 'SIGTERM'], [300, 'SIGTERM'], [200, 'SIGTERM']])
+      assert.deepEqual(events, [[300, 'SIGTERM'], [200, 'SIGTERM'], ['child', 'SIGTERM']], 'deepest-first, direct child LAST')
+    })
+
+    it('does NOT walk a child that has already exited — its pid may be recycled', () => {
+      const { events, kill } = harness()
+      let psCalls = 0
+      const ps = () => { psCalls++; return TABLE }
+      for (const exited of [{ pid: 100, exitCode: 0, signalCode: null }, { pid: 100, exitCode: null, signalCode: 'SIGTERM' }]) {
+        const child = { ...exited, kill(sig) { events.push(['child', sig]) } }
+        killProcessTree(child, { ps, kill })
+      }
+      assert.equal(psCalls, 0, 'no ps call for an exited child')
+      assert.deepEqual(events, [['child', 'SIGTERM'], ['child', 'SIGTERM']])
     })
 
     it('force:true / forceKill send SIGKILL to the whole tree', () => {
       const a = harness()
       killProcessTree(a.child, { ps: () => TABLE, kill: a.kill, force: true })
-      assert.deepEqual(a.events, [['child', 'SIGKILL'], [300, 'SIGKILL'], [200, 'SIGKILL']])
+      assert.deepEqual(a.events, [[300, 'SIGKILL'], [200, 'SIGKILL'], ['child', 'SIGKILL']])
       const b = harness()
       forceKill(b.child, { ps: () => TABLE, kill: b.kill })
-      assert.deepEqual(b.events, [['child', 'SIGKILL'], [300, 'SIGKILL'], [200, 'SIGKILL']])
+      assert.deepEqual(b.events, [[300, 'SIGKILL'], [200, 'SIGKILL'], ['child', 'SIGKILL']])
     })
 
     it('never signals a process outside the tree', () => {
@@ -697,7 +709,7 @@ try {
       const { events, child } = harness()
       const kill = (pid, sig) => { if (pid === 300) throw Object.assign(new Error('gone'), { code: 'ESRCH' }); events.push([pid, sig]) }
       killProcessTree(child, { ps: () => TABLE, kill })
-      assert.deepEqual(events, [['child', 'SIGTERM'], [200, 'SIGTERM']])
+      assert.deepEqual(events, [[200, 'SIGTERM'], ['child', 'SIGTERM']])
     })
 
     it('with no ps seam and a pid-less fake child, behaves exactly as before (direct kill only)', () => {

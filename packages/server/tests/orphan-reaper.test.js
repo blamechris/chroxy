@@ -10,6 +10,8 @@ import {
   parseProcessTable,
   parseLsofCwd,
   sweepOrphans,
+  resolveCwdsViaLsof,
+  resolveCwdsViaProcfs,
   maybeReapOrphans,
   startPeriodicOrphanReap,
   DEFAULT_MIN_AGE_MS,
@@ -43,6 +45,7 @@ function seams({ rows, cwds, uid = UID, selfPid = SELF, listCalls = null }) {
       uid,
       selfPid,
       platform: 'darwin',
+      realpath: (p) => p,
     },
   }
 }
@@ -130,11 +133,39 @@ describe('sweepOrphans predicate (#7606)', () => {
     assert.deepEqual(killed, [])
   })
 
-  it('skips (never guesses) a candidate whose cwd could not be resolved', () => {
+  it('skips (never guesses) a candidate whose cwd could not be resolved — counted, not warned', () => {
     const { killed, deps } = seams(leaked({ cwds: {} }))
     const r = sweepOrphans({ worktreeBase: BASE, deps })
     assert.deepEqual(killed, [])
-    assert.deepEqual(r.skipped, [{ pid: 11839, reason: 'cwd unresolved' }])
+    assert.deepEqual(r.skipped, [])
+    assert.equal(r.unresolved, 1)
+  })
+
+  it('refuses to sweep as root (uid 0 matches every process)', () => {
+    const { killed, deps } = seams(leaked({ uid: 0, rows: [[11839, 1, 0, OLD, 'node']] }))
+    const r = sweepOrphans({ worktreeBase: BASE, deps })
+    assert.deepEqual(killed, [])
+    assert.match(r.error, /running as root/)
+  })
+
+  it('compares against the REAL path of the base (lsof/procfs report resolved paths)', () => {
+    // Base is a symlink `/tmp/wt` -> `/private/tmp/wt`; the process cwd is the real path.
+    const { killed, deps } = seams(leaked({ cwds: { 11839: '/private/tmp/wt/abc' } }))
+    deps.realpath = (p) => (p === '/tmp/wt' ? '/private/tmp/wt' : p)
+    sweepOrphans({ worktreeBase: '/tmp/wt', deps })
+    assert.deepEqual(killed, [[11839, 'SIGKILL']])
+    // …and without resolution the same input would NOT match (proves the seam is load-bearing).
+    const again = seams(leaked({ cwds: { 11839: '/private/tmp/wt/abc' } }))
+    sweepOrphans({ worktreeBase: '/tmp/wt', deps: again.deps })
+    assert.deepEqual(again.killed, [])
+  })
+
+  it('a base that does not exist yet is used as-is (nothing can be under it)', () => {
+    const { killed, deps } = seams(leaked({ cwds: { 11839: '/nope/x' } }))
+    deps.realpath = () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) }
+    const r = sweepOrphans({ worktreeBase: '/nope', deps })
+    assert.deepEqual(killed, [[11839, 'SIGKILL']])
+    assert.equal(r.error, null)
   })
 
   it('treats an unavailable cwd mechanism as "cannot check": error, nothing killed', () => {
@@ -201,6 +232,44 @@ describe('sweepOrphans predicate (#7606)', () => {
   })
 })
 
+describe('cwd resolvers (#7608 review)', () => {
+  it('lsof: a nonzero exit WITH stdout is a partial result, not a failure', () => {
+    const err = Object.assign(new Error('Command failed: lsof'), { status: 1, stdout: 'p411\nfcwd\nn/a/b\n' })
+    const exec = () => { throw err }
+    assert.deepEqual([...resolveCwdsViaLsof([411, 999999], exec).entries()], [[411, '/a/b']])
+  })
+
+  it('lsof: ENOENT / timeout (no status, or no stdout) propagates as unavailable', () => {
+    for (const e of [Object.assign(new Error('spawn lsof ENOENT'), { code: 'ENOENT' }), Object.assign(new Error('timeout'), { status: null, signal: 'SIGTERM', stdout: null })]) {
+      assert.throws(() => resolveCwdsViaLsof([1], () => { throw e }))
+    }
+  })
+
+  it('lsof partial failure end-to-end: the resolvable orphan is still reaped', () => {
+    const killed = []
+    const err = Object.assign(new Error('lsof exit 1'), { status: 1, stdout: 'p11839\nn' + join(BASE, 'abc') + '\n' })
+    const r = sweepOrphans({
+      worktreeBase: BASE,
+      deps: {
+        listProcesses: () => table([[11839, 1, UID, '01:00:00', 'node --test'], [999999, 1, UID, '01:00:00', 'gone']]),
+        cwdOf: (pids) => resolveCwdsViaLsof(pids, () => { throw err }),
+        kill: (pid, sig) => killed.push([pid, sig]),
+        uid: UID, selfPid: SELF, platform: 'darwin', realpath: (p) => p,
+      },
+    })
+    assert.deepEqual(killed, [[11839, 'SIGKILL']])
+    assert.equal(r.error, null)
+    assert.equal(r.unresolved, 1)
+  })
+
+  it('procfs: one unreadable pid is skipped, but NOTHING readable is "cannot check"', () => {
+    const readlink = (p) => { if (p === '/proc/1/cwd') return '/x'; throw new Error('EACCES') }
+    assert.deepEqual([...resolveCwdsViaProcfs([1, 2], readlink).entries()], [[1, '/x']])
+    assert.throws(() => resolveCwdsViaProcfs([1, 2], () => { throw new Error('EACCES') }), /procfs unavailable/)
+    assert.deepEqual([...resolveCwdsViaProcfs([], () => { throw new Error('x') }).entries()], [])
+  })
+})
+
 describe('maybeReapOrphans / startPeriodicOrphanReap (#7606)', () => {
   const leakDeps = (killed) => ({
     listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test']]),
@@ -209,6 +278,7 @@ describe('maybeReapOrphans / startPeriodicOrphanReap (#7606)', () => {
     uid: UID,
     selfPid: SELF,
     platform: 'darwin',
+    realpath: (p) => p,
     worktreeBase: BASE,
   })
 

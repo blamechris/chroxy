@@ -866,11 +866,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    * #7379 — release a pending HTTP-hook permission whose asker is gone.
    *
    * Called when a session reports (via `permission_expired`) that the turn a
-   * prompt belonged to has died. The daemon cannot detect this itself: killing
-   * the CLI child does NOT kill the hook. POSIX `killProcessTree` is
-   * `child.kill('SIGTERM')` against the DIRECT child, while the hook is
-   * `bash permission-hook.sh` -> `curl --max-time 300` — both grandchildren,
-   * neither signalled, and on a crash nothing runs at all. So the socket stays
+   * prompt belonged to has died. The daemon cannot rely on the hook dying to
+   * learn this: since #7606 `killProcessTree` does signal the hook's
+   * `bash permission-hook.sh` -> `curl --max-time 300` grandchildren on a
+   * respawn/destroy, but on a crash nothing runs at all. So the socket can stay
    * open, `req 'aborted'` / `res 'close'` never fire, and the entry sits there
    * with time left on its clock until `resendPendingPermissions` hands it to
    * the next client that connects — a live Allow button for a turn that no

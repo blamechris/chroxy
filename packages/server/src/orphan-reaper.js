@@ -30,7 +30,7 @@
 // at the kill sites already reaps the tree there; the sweep is a no-op.
 
 import { execFileSync } from 'child_process'
-import { readlinkSync } from 'fs'
+import { readlinkSync, realpathSync } from 'fs'
 import { resolve, sep } from 'path'
 import { configPath } from './config-dir.js'
 
@@ -98,27 +98,55 @@ function defaultListProcesses() {
 }
 
 /**
- * Resolve the cwd of each pid. Linux reads `/proc/<pid>/cwd`; macOS (no
- * procfs) asks `lsof` once for the whole batch. Returns a Map; a pid whose
- * cwd cannot be read is simply absent. Throws only when the MECHANISM is
- * unavailable (no lsof), which the caller treats as "cannot check".
+ * Resolve cwds with one `lsof` call for the whole batch (macOS: no procfs).
+ * Exported for tests; `exec` is the `execFileSync` seam.
+ *
+ * `lsof` exits 1 whenever ANY pid in `-p <list>` has vanished or cannot be
+ * opened — even though it resolved and printed every other pid. With ~300
+ * ppid-1 candidates on a real Mac, one of them exiting between the `ps`
+ * listing and this call is routine, so a nonzero exit with stdout present is
+ * a PARTIAL result to parse, not a failure. Only a spawn failure (ENOENT), a
+ * timeout, or a signal death means the mechanism is unavailable (#7608 review).
+ */
+export function resolveCwdsViaLsof(pids, exec = execFileSync) {
+  const args = ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn']
+  const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }
+  let text
+  try {
+    text = exec('lsof', args, opts)
+  } catch (err) {
+    if (err && typeof err.status === 'number' && err.stdout != null) text = String(err.stdout)
+    else throw err
+  }
+  return parseLsofCwd(text)
+}
+
+/**
+ * Resolve cwds from procfs (Linux). Exported for tests; `readlink` is the
+ * seam. A single unreadable pid is skipped (it exited, or is not ours) — but
+ * if NOTHING resolved out of a non-empty batch, procfs itself is unavailable
+ * (`hidepid=2`, a minimal container) and that is "cannot check", which must
+ * be loud (docs/false-safety-guards.md), not a quiet empty sweep.
+ */
+export function resolveCwdsViaProcfs(pids, readlink = readlinkSync) {
+  const out = new Map()
+  for (const pid of pids) {
+    try { out.set(pid, readlink(`/proc/${pid}/cwd`)) } catch { /* gone or unreadable */ }
+  }
+  if (pids.length > 0 && out.size === 0) {
+    throw new Error('/proc/<pid>/cwd unreadable for every candidate (procfs unavailable or hidden)')
+  }
+  return out
+}
+
+/**
+ * Resolve the cwd of each pid. Returns a Map; a pid whose cwd cannot be read
+ * is absent. Throws only when the MECHANISM is unavailable, which the caller
+ * treats as "cannot check".
  */
 function defaultCwdOf(pids) {
-  const out = new Map()
-  if (pids.length === 0) return out
-  if (process.platform === 'linux') {
-    for (const pid of pids) {
-      try { out.set(pid, readlinkSync(`/proc/${pid}/cwd`)) } catch { /* gone or unreadable */ }
-    }
-    return out
-  }
-  const text = execFileSync('lsof', ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    timeout: 10_000,
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  return parseLsofCwd(text)
+  if (pids.length === 0) return new Map()
+  return process.platform === 'linux' ? resolveCwdsViaProcfs(pids) : resolveCwdsViaLsof(pids)
 }
 
 function isUnder(path, base) {
@@ -134,11 +162,11 @@ function isUnder(path, base) {
  * @param {string} args.worktreeBase - chroxy's session-worktree root
  * @param {number} [args.minAgeMs]
  * @param {object} [args.deps] - test seams: listProcesses (called twice: list, then
- *   re-verify before signalling), cwdOf, kill, uid, selfPid, platform
- * @returns {{ scanned: number, candidates: number, reaped: object[], skipped: object[], error: string|null }}
+ *   re-verify before signalling), cwdOf, kill, uid, selfPid, platform, realpath
+ * @returns {{ scanned: number, candidates: number, unresolved: number, reaped: object[], skipped: object[], error: string|null }}
  */
 export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps = {} } = {}) {
-  const report = { scanned: 0, candidates: 0, reaped: [], skipped: [], error: null }
+  const report = { scanned: 0, candidates: 0, unresolved: 0, reaped: [], skipped: [], error: null }
   const platform = deps.platform || process.platform
   if (platform === 'win32') return report
   if (!worktreeBase) { report.error = 'no worktree base'; return report }
@@ -148,6 +176,16 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   const kill = deps.kill || process.kill
   const uid = Number.isInteger(deps.uid) ? deps.uid : (typeof process.getuid === 'function' ? process.getuid() : -1)
   const selfPid = deps.selfPid || process.pid
+  // As root the uid predicate matches EVERY process, and inside a container
+  // pid 1 is a live entrypoint whose children are owned, not orphaned — the
+  // remaining cwd check would be the only guard. Refuse rather than widen.
+  if (uid === 0) { report.error = 'running as root: the uid predicate cannot distinguish orphans'; return report }
+  // lsof and /proc report REAL paths; compare against the real base, or a
+  // symlink anywhere in the chain (/tmp → /private/tmp, a linked $HOME) makes
+  // every comparison fail and the sweep a permanent silent no-op.
+  const realpath = deps.realpath || realpathSync
+  let base = worktreeBase
+  try { base = realpath(worktreeBase) } catch { /* base does not exist yet — nothing can be under it */ }
 
   let rows
   try { rows = parseProcessTable(listProcesses()) } catch (err) {
@@ -175,8 +213,10 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
 
   const targets = candidates.filter((r) => {
     const cwd = cwds.get(r.pid)
-    if (!cwd) { report.skipped.push({ pid: r.pid, reason: 'cwd unresolved' }); return false }
-    return isUnder(cwd, worktreeBase)
+    // Unresolvable is routine (exited since listing, or not ours to read) and
+    // most of these have nothing to do with chroxy — count, never warn per pid.
+    if (!cwd) { report.unresolved += 1; return false }
+    return isUnder(cwd, base)
   })
   if (targets.length === 0) return report
 
@@ -240,7 +280,7 @@ export function maybeReapOrphans(config, log, deps = {}) {
     log.warn(`orphan-reaper: skipped pid ${s.pid}: ${s.reason}`)
   }
   if (report.reaped.length > 0) {
-    log.info(`orphan-reaper: reaped ${report.reaped.length} orphan(s) under ${worktreeBase} (${report.candidates} candidate(s) of ${report.scanned} scanned)`)
+    log.info(`orphan-reaper: reaped ${report.reaped.length} orphan(s) under ${worktreeBase} (${report.candidates} candidate(s) of ${report.scanned} scanned, ${report.unresolved} cwd-unresolved)`)
   }
   return report
 }

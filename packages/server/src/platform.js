@@ -483,8 +483,8 @@ export function listDescendantPids(pid, deps = {}) {
  * POSIX: the tree is enumerated with {@link listDescendantPids} BEFORE the
  * direct child is signalled, because the moment the child dies its children
  * are reparented to pid 1 and the ppid links this walk depends on are gone.
- * Then `child.kill(signal)` on the direct process and `process.kill(pid,
- * signal)` on every descendant, deepest-first. `force:false` stays a graceful
+ * Then `process.kill(pid, signal)` on every descendant, deepest-first, and
+ * `child.kill(signal)` on the direct process last. `force:false` stays a graceful
  * SIGTERM so a caller's existing SIGTERM→SIGKILL escalation is unchanged.
  *
  * Why (#7606): before this, POSIX signalled ONLY the direct child. A provider
@@ -522,13 +522,25 @@ export function killProcessTree(child, { force = false, ...deps } = {}) {
   }
   const signal = force ? 'SIGKILL' : 'SIGTERM'
   const kill = deps.kill || process.kill
-  // Enumerate BEFORE signalling the parent (see the docstring): once it exits
-  // the ppid links are gone and the descendants are unreachable by walk.
+  // A child that has already exited is NOT walked: Node keeps `child.pid` set
+  // after exit while the OS may have recycled it, so a walk would enumerate —
+  // and signal — an unrelated process's children. `child.kill()` itself is
+  // safe here (Node drops the handle on exit and it becomes a no-op), which
+  // is why the pre-#7606 code never had this hazard. Force-kill escalation
+  // timers fire in exactly this window (#7608 review).
+  if (child.exitCode !== null && child.exitCode !== undefined || child.signalCode) {
+    try { child.kill(signal) } catch { /* already gone */ }
+    return
+  }
+  // Enumerate BEFORE signalling anything (see the docstring): once a process
+  // exits the ppid links below it are gone and its subtree is unreachable.
   const descendants = listDescendantPids(child.pid, deps)
-  try { child.kill(signal) } catch { /* already gone */ }
+  // Deepest-first, and the direct child LAST: killing a parent first frees
+  // its children's pids mid-loop and reopens the reuse window above.
   for (let i = descendants.length - 1; i >= 0; i--) {
     try { kill(descendants[i], signal) } catch { /* already gone */ }
   }
+  try { child.kill(signal) } catch { /* already gone */ }
 }
 
 /**
