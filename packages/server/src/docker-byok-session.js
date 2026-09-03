@@ -938,7 +938,12 @@ export class DockerByokSession extends ClaudeByokSession {
   /**
    * #7600 — after a container-routed tool dispatch throws, ask Docker whether
    * the container is still there. Resolves true ONLY on a confirmed vanish
-   * (inspect verdict 'gone'), having surfaced it via notifyContainerVanished.
+   * (inspect verdict 'gone') — i.e. "the container really is gone", which is
+   * what the caller's tool_result text reports. It calls
+   * notifyContainerVanished on the way, but that call is a no-op when the
+   * vanish was already surfaced (the poll got there first) or the session is
+   * tearing down, and the verdict is still true in both cases: the fact is
+   * real even when nothing new is emitted (#7607 Copilot review).
    *
    * The exec error text alone is not proof: a restart window reports
    * `container <id> is not running` for a container that is back a moment
