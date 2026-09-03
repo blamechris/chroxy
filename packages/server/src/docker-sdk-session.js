@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
-import { classifyDockerError } from './docker-session.js'
+import { classifyDockerError, CONTAINER_VANISHED } from './docker-session.js'
 import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
@@ -379,6 +379,56 @@ export class DockerSdkSession extends SdkSession {
       this._attachSidecarProcessListeners(proc)
       return proc
     }
+  }
+
+  /**
+   * #7599 — classify a turn failure as a vanished container (overrides the
+   * SdkSession no-op).
+   *
+   * A containerized turn runs `docker exec` into the session's container; when
+   * the container has been stopped / restarted / removed underneath the live
+   * session (including a plain `docker stop` performed OUTSIDE chroxy), that exec
+   * fails and the SDK's query() rejects. The rejection message does NOT carry the
+   * docker stderr, so we probe the container directly and treat only a confirmed
+   * container-gone as a vanish — an API/model error with a healthy container
+   * falls through to the generic surface.
+   *
+   * Never nulls `_containerId` (the #7561 fresh-container trap): the session
+   * stays bound so a returning env container can be reconnected (#7602). On the
+   * next turn a still-gone container re-detects and re-surfaces once more; it is
+   * never resurrected onto the host or a fresh default container.
+   *
+   * @param {Error} _err
+   * @returns {Promise<{code:string,message:string,recoverable:boolean}|null>}
+   */
+  async _classifyContainerFailure(_err) {
+    if (!this._containerId) return null
+    const gone = await this._probeContainerGone()
+    if (!gone) return null
+    return {
+      code: CONTAINER_VANISHED,
+      recoverable: true,
+      message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
+    }
+  }
+
+  /**
+   * Probe whether the bound container is gone via `docker exec <id> true`.
+   * Resolves true ONLY on a container-gone classification; a dead daemon or any
+   * other failure resolves false (not a per-container vanish), and a successful
+   * probe resolves false (the container is fine, so the turn failed for another
+   * reason).
+   *
+   * @returns {Promise<boolean>}
+   */
+  _probeContainerGone() {
+    return new Promise((resolve) => {
+      this._verifyContainer((err) => {
+        if (!err) return resolve(false)
+        const { code } = classifyDockerError(err, err.stderr || '')
+        resolve(code === 'container_gone')
+      })
+    })
   }
 
   /**

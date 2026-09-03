@@ -1254,10 +1254,20 @@ export class SdkSession extends BaseSession {
           ;(this._log || log).info('Query aborted after user stop')
           this.emit('stopped', {})
         } else {
-          // #4828: session-scoped when init has fired; falls back to module
-          // `log` for pre-init query failures (e.g. spawn refused).
-          ;(this._log || log).error(`Query error: ${err.message}`)
-          this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+          // #7599: let a containerized subclass classify this turn failure as a
+          // vanished container (a distinct, recoverable state) before the
+          // generic query-error surface. Base returns null; DockerSdkSession
+          // probes the container and returns a CONTAINER_VANISHED payload.
+          const containerGone = await this._classifyContainerFailure(err)
+          if (containerGone) {
+            ;(this._log || log).warn(`Container vanished during turn: ${containerGone.message}`)
+            this.emit('error', containerGone)
+          } else {
+            // #4828: session-scoped when init has fired; falls back to module
+            // `log` for pre-init query failures (e.g. spawn refused).
+            ;(this._log || log).error(`Query error: ${err.message}`)
+            this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+          }
         }
       }
       this._clearMessageState()
@@ -1308,6 +1318,20 @@ export class SdkSession extends BaseSession {
    */
   _callQuery(queryArgs) {
     return query(queryArgs)
+  }
+
+  /**
+   * #7599 — hook for a containerized subclass to classify a turn failure as a
+   * vanished container. Called from the query catch before the generic error
+   * surface. The base in-process SdkSession has no container, so it never
+   * classifies a failure this way.
+   *
+   * @param {Error} _err the error the query threw
+   * @returns {Promise<{code:string,message:string,recoverable?:boolean}|null>}
+   *   a session-error payload to emit instead of the generic one, or null
+   */
+  async _classifyContainerFailure(_err) {
+    return null
   }
 
   /**

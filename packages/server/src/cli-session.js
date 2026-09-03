@@ -2145,10 +2145,29 @@ export class CliSession extends BaseSession {
       return
     }
 
+    // #7599: give a containerized subclass a chance to classify this exit as a
+    // vanished container (a distinct, non-respawnable-but-recoverable state)
+    // BEFORE the generic crash→respawn path. Reached only for a genuine
+    // unexpected exit — the intentional-stop and resume-unknown branches above
+    // have already returned. Base is a no-op; DockerSession overrides it.
+    if (this._handleContainerGoneOnClose(code)) return
+
     // #4828: session-scoped if init had fired.
     ;(this._log || log).info(`Process exited (code ${code}), scheduling respawn`)
     this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
     this._scheduleRespawn()
+  }
+
+  /**
+   * #7599 — hook for a containerized subclass to intercept a child-close it can
+   * attribute to its container vanishing, before the generic respawn. The base
+   * host-CLI session has no container, so it never intercepts.
+   *
+   * @param {number} _code exit code of the closed child
+   * @returns {boolean} true to suppress the generic crash→respawn handling
+   */
+  _handleContainerGoneOnClose(_code) {
+    return false
   }
 
   /**

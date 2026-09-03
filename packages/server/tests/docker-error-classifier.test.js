@@ -121,3 +121,46 @@ describe('classifyDockerError', () => {
     assert.equal(result.code, 'docker_not_running')
   })
 })
+
+// #7599 — a vanished container (stopped/restarted/killed underneath a live
+// session, including an external `docker stop`) is a DISTINCT condition from a
+// dead daemon or a missing image. It is the docker-layer signal the session
+// paths translate into the CONTAINER_VANISHED session error.
+describe('classifyDockerError — container gone (#7599)', () => {
+  it('classifies "Container … is not running" as container_gone', () => {
+    const err = new Error('exit code 1')
+    const result = classifyDockerError(err, 'Error response from daemon: Container 3f2ab7c is not running')
+    assert.equal(result.code, 'container_gone')
+    assert.ok(result.message.length > 0)
+  })
+
+  it('classifies "No such container" as container_gone', () => {
+    const err = new Error('Error: No such container: 3f2ab7c')
+    const result = classifyDockerError(err)
+    assert.equal(result.code, 'container_gone')
+  })
+
+  it('classifies "No such container" from stderr as container_gone', () => {
+    const err = new Error('exit code 1')
+    const result = classifyDockerError(err, 'Error response from daemon: No such container: 3f2ab7c')
+    assert.equal(result.code, 'container_gone')
+  })
+
+  it('negative control — a dead daemon is NOT container_gone', () => {
+    const err = new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock')
+    const result = classifyDockerError(err)
+    assert.equal(result.code, 'docker_not_running')
+  })
+
+  it('negative control — a missing image is NOT container_gone', () => {
+    const err = new Error('Unable to find image: No such image: myimage:latest')
+    const result = classifyDockerError(err)
+    assert.equal(result.code, 'docker_image_not_found')
+  })
+
+  it('negative control — an unrelated failure stays generic docker_error', () => {
+    const err = new Error('some unexpected docker failure')
+    const result = classifyDockerError(err)
+    assert.equal(result.code, 'docker_error')
+  })
+})

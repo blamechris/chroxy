@@ -8,6 +8,18 @@ import { getChroxyHostEnv } from './chroxy-host-metadata.js'
 const log = createLogger('docker-session')
 
 /**
+ * #7599 — the session-error `code` a containerized session emits when it detects
+ * that its container has vanished underneath a live turn (stopped / restarted /
+ * killed, including a plain `docker stop` performed OUTSIDE chroxy). Distinct
+ * from a code crash (`cli_respawn_exhausted`) and from a dead daemon: the
+ * container is gone but the daemon and the session live on, so it is a
+ * recoverable condition (see #7602 for the reconnect that acts on it). Rides the
+ * existing `session_error` plumbing — `ServerSessionErrorSchema` already carries
+ * an optional `code` + `recoverable` and is `.passthrough()`, so no wire change.
+ */
+export const CONTAINER_VANISHED = 'CONTAINER_VANISHED'
+
+/**
  * Classify a Docker error into a structured error with a specific code.
  *
  * Returns an object with `code` and `message` fields so callers can surface
@@ -42,6 +54,16 @@ export function classifyDockerError(err, stderrText = '') {
       ? `Docker image '${imageName}' not found. Run: docker pull ${imageName}`
       : 'Docker image not found. Run: docker pull <image>'
     return { code: 'docker_image_not_found', message }
+  }
+  // #7599: the container is gone — stopped, restarted, or removed. Docker reports
+  // `Container <id> is not running` for a stopped one and `No such container` for
+  // a removed one. Checked AFTER the image bucket (whose `not found`/`image`
+  // patterns don't overlap these) and BEFORE the generic fallback.
+  if (
+    combined.includes('no such container') ||
+    combined.includes('is not running')
+  ) {
+    return { code: 'container_gone', message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).' }
   }
   if (
     combined.includes('permission denied') ||
@@ -196,6 +218,12 @@ export class DockerSession extends CliSession {
     this._image = opts.image || 'node:22-slim'
     this._memoryLimit = opts.memoryLimit || '2g'
     this._cpuLimit = opts.cpuLimit || '2'
+    // #7599: a small ring of the exec child's most-recent stderr lines, so
+    // `_handleContainerGoneOnClose` can classify a `docker exec` failure ("…is
+    // not running" / "No such container") when the persistent child closes.
+    // Distinct from CliSession's `_recentStderrLines`, which is resume-scoped
+    // (only buffered while `_attemptedResumeId` is set) and cleared on init.
+    this._recentContainerStderr = []
   }
 
   /**
@@ -300,6 +328,9 @@ export class DockerSession extends CliSession {
   _spawnPersistentProcess(claudeArgs) {
     this._cleanupReadlines()
     this._processReady = false
+    // #7599: fresh exec → fresh stderr window, so a close is classified against
+    // THIS exec's output and never a stale line from a prior one.
+    this._recentContainerStderr = []
 
     if (!this._containerId) {
       this.emit('error', { message: 'Docker container not started — cannot exec' })
@@ -369,6 +400,12 @@ export class DockerSession extends CliSession {
     this._stderrRL = stderrRL
     stderrRL.on('line', (line) => {
       if (line.trim()) {
+        // #7599: keep the last few stderr lines so a close can be classified as
+        // a vanished container. `docker exec` into a stopped/removed container
+        // prints "Container … is not running" / "No such container" here and
+        // then the child closes non-zero.
+        this._recentContainerStderr.push(line)
+        if (this._recentContainerStderr.length > 20) this._recentContainerStderr.shift()
         log.info(`stderr: ${line}`)
       }
     })
@@ -406,9 +443,44 @@ export class DockerSession extends CliSession {
   // lands first so `docker logs <ctr>` correlation by operators stays easy.
   _handleChildClose(code) {
     if (!this._destroying && !this._respawning) {
-      log.info(`Container exec exited (code ${code}), scheduling respawn`)
+      log.info(`Container exec exited (code ${code})`)
     }
     super._handleChildClose(code)
+  }
+
+  /**
+   * #7599 — container-vanish hook (overrides CliSession's no-op).
+   *
+   * Called by CliSession._handleChildClose for a genuine unexpected exit — i.e.
+   * AFTER the intentional-stop and resume-unknown branches have returned, and
+   * just BEFORE the generic "exited unexpectedly → respawn" tail. Classifies
+   * this exec's buffered stderr; if the container is gone, surfaces one coded
+   * CONTAINER_VANISHED session error and returns `true` so the generic respawn
+   * is suppressed — respawning a `docker exec` into a stopped/removed container
+   * would only flap to `cli_respawn_exhausted`.
+   *
+   * The session is deliberately NOT torn down and `_containerId` is NOT nulled
+   * (the #7561 trap: a null id reads as `_containerOwned` and would launch a
+   * fresh default container). The session stays put so the reconnect path
+   * (#7602) can re-attach an env-backed container that returns.
+   *
+   * @param {number} code exit code of the closed exec child
+   * @returns {boolean} true if handled as a vanish (suppress respawn)
+   */
+  _handleContainerGoneOnClose(code) {
+    const stderr = (this._recentContainerStderr || []).join('\n')
+    const { code: dockerCode } = classifyDockerError(new Error(''), stderr)
+    if (dockerCode !== 'container_gone') return false
+
+    ;(this._log || log).warn(
+      `Container for this session is gone (exec exit ${code}) — surfacing CONTAINER_VANISHED, not respawning`,
+    )
+    this.emit('error', {
+      code: CONTAINER_VANISHED,
+      recoverable: true,
+      message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
+    })
+    return true
   }
 
   /**
