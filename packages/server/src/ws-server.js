@@ -1155,8 +1155,25 @@ export class WsServer {
         }
       }
       this.environmentManager.on('environment_sessions_changed', this._environmentSessionsChangedHandler)
+
+      // #7601: fast-path for a CHROXY-initiated environment stop/restart. The
+      // #7601 liveness poll is the mandatory detector (an EXTERNAL `docker stop`
+      // fires no event), but a `containers_action stop`/`restart` DOES emit here
+      // — so surface CONTAINER_VANISHED on the environment's bound sessions
+      // immediately rather than waiting up to a poll interval. A restart bounces
+      // the container (stop then start), severing every session's `docker exec`
+      // binding, so it surfaces a vanish too (the #7599 message covers "stopped,
+      // restarted, or removed"; #7602 owns the re-attach). Bridged via
+      // `env.sessions` reusing the destroy-with-sessions fan-out shape — NO
+      // SessionManager handle is injected into EnvironmentManager.
+      this._environmentStoppedHandler = ({ id } = {}) => this._surfaceContainerVanishedForEnvironment(id, 'environment_stopped')
+      this._environmentRestartedHandler = ({ id } = {}) => this._surfaceContainerVanishedForEnvironment(id, 'environment_restarted')
+      this.environmentManager.on('environment_stopped', this._environmentStoppedHandler)
+      this.environmentManager.on('environment_restarted', this._environmentRestartedHandler)
     } else {
       this._environmentSessionsChangedHandler = null
+      this._environmentStoppedHandler = null
+      this._environmentRestartedHandler = null
     }
     // #6691 (E-4): the OrchestrationManager (null when the feature is off). Its
     // run_delta events are forwarded to host-level clients by server-cli via
@@ -2575,6 +2592,40 @@ export class WsServer {
   }
 
   /**
+   * #7601 — fast-path bridge: a chroxy-initiated environment stop/restart severs
+   * every bound session's container binding, so surface CONTAINER_VANISHED on each
+   * one right away. Reads `env.sessions` (the roster EnvironmentManager maintains)
+   * and calls the session provider's idempotent `notifyContainerVanished()` — the
+   * SAME surface the #7599 reactive paths and the #7601 poll use, so a stop the
+   * poll also catches is deduped by the provider's latch. Does NOT inject a
+   * SessionManager handle into EnvironmentManager, does NOT untag `env.sessions`,
+   * and does NOT touch a session lacking the surface (docker-byok until #7600).
+   *
+   * @param {string} envId
+   * @param {string} reason  the emitting event, for the log line
+   */
+  _surfaceContainerVanishedForEnvironment(envId, reason) {
+    try {
+      if (!envId || !this.environmentManager || !this.sessionManager) return
+      const env = this.environmentManager.get?.(envId)
+      if (!env || !Array.isArray(env.sessions) || env.sessions.length === 0) return
+      // Copy the roster: notifyContainerVanished emits synchronously and a
+      // downstream listener could mutate env.sessions mid-iteration.
+      for (const sessionId of [...env.sessions]) {
+        const entry = this.sessionManager.getSession?.(sessionId)
+        const session = entry?.session
+        if (session && typeof session.notifyContainerVanished === 'function') {
+          if (session.notifyContainerVanished()) {
+            log.info(`[${reason}] surfaced CONTAINER_VANISHED for session ${sessionId} in env ${envId}`)
+          }
+        }
+      }
+    } catch (err) {
+      log.warn(`[${reason}] container-vanish fan-out failed for env ${envId}: ${err?.message || err}`)
+    }
+  }
+
+  /**
    * Broadcast a session-scoped message to clients viewing that session.
    * Tags the message with `sessionId` so clients can route it to the correct
    * session state. By default only delivers to clients whose activeSessionId
@@ -3165,6 +3216,17 @@ export class WsServer {
         this._environmentSessionsChangedHandler) {
       this.environmentManager.off('environment_sessions_changed', this._environmentSessionsChangedHandler)
       this._environmentSessionsChangedHandler = null
+    }
+    // #7601: symmetric detach of the stop/restart fast-path subscriptions.
+    if (this.environmentManager && typeof this.environmentManager.off === 'function') {
+      if (this._environmentStoppedHandler) {
+        this.environmentManager.off('environment_stopped', this._environmentStoppedHandler)
+        this._environmentStoppedHandler = null
+      }
+      if (this._environmentRestartedHandler) {
+        this.environmentManager.off('environment_restarted', this._environmentRestartedHandler)
+        this._environmentRestartedHandler = null
+      }
     }
 
     if (this._pingInterval) {

@@ -1,7 +1,7 @@
 import { execFile } from 'child_process'
 import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
-import { classifyDockerError, CONTAINER_VANISHED, probeContainerGone } from './docker-session.js'
+import { classifyDockerError, CONTAINER_VANISHED, CONTAINER_VANISHED_MESSAGE, probeContainerGone, surfaceContainerVanished } from './docker-session.js'
 import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
@@ -129,6 +129,8 @@ export class DockerSdkSession extends SdkSession {
     }
     this._containerUser = user
     this._containerCliPath = containerCliPath
+    // #7601 — the CONTAINER_VANISHED idempotency latch (see surfaceContainerVanished).
+    this._containerVanishedNotified = false
     // #3468 + #3501: `_stdinForwardingDisabled` is initialised by the
     // SdkSession parent constructor from the `stdinForwardingDisabled` opt
     // (see #3540 + #3576 — restored sessions hydrate the latched flag via
@@ -405,13 +407,38 @@ export class DockerSdkSession extends SdkSession {
     if (!this._containerId) return null
     const gone = await this._probeContainerGone()
     if (!gone) return null
+    // #7601: latch so a proactive liveness-poll tick doesn't ALSO surface this
+    // same vanish. The SDK reactive path still RETURNS the payload for
+    // SdkSession to emit (its deliberate per-turn re-surface is unchanged — the
+    // latch gates only the poll, not this return), so a still-gone container
+    // re-surfaces on the next turn exactly as in #7599.
+    this._containerVanishedNotified = true
     // Only `code` (+ `message`) survives the generic error normalizer to the
     // wire; the code is the surfaced signal (reconnectability is a #7602
     // server-side decision, not a wire flag).
     return {
       code: CONTAINER_VANISHED,
-      message: 'The container for this session is no longer running (it may have been stopped, restarted, or removed).',
+      message: CONTAINER_VANISHED_MESSAGE,
     }
+  }
+
+  /**
+   * #7601 — surface a CONTAINER_VANISHED error once for this session (idempotent).
+   * Called by the proactive liveness poll / environment_stopped fast-path; the
+   * shared latch keeps it from double-emitting with the reactive turn-reject path.
+   * @returns {boolean} true if it emitted
+   */
+  notifyContainerVanished() {
+    return surfaceContainerVanished(this)
+  }
+
+  /**
+   * #7601 — reset the CONTAINER_VANISHED latch after the container is observed
+   * running again, so a later vanish re-surfaces. Called by the liveness poll on
+   * a healthy inspect.
+   */
+  clearContainerVanished() {
+    this._containerVanishedNotified = false
   }
 
   /**
