@@ -38,6 +38,7 @@ export class ServerOrchestrator {
     schedulerEngine = null,
     modelsOverlayWatcher = null,
     getWorktreeReapTimer,
+    getOrphanReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo = defaultRemoveConnectionInfo,
     isPoolEnabled = defaultIsPoolEnabled,
@@ -69,6 +70,7 @@ export class ServerOrchestrator {
     // the daemon.
     this._modelsOverlayWatcher = modelsOverlayWatcher || null
     this._getWorktreeReapTimer = typeof getWorktreeReapTimer === 'function' ? getWorktreeReapTimer : () => null
+    this._getOrphanReapTimer = typeof getOrphanReapTimer === 'function' ? getOrphanReapTimer : () => null
     this._emergencyCleanupSync = emergencyCleanupSync
     this._removeConnectionInfo = removeConnectionInfo
     this._isPoolEnabled = isPoolEnabled
@@ -111,6 +113,9 @@ export class ServerOrchestrator {
     // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
     const worktreeReapTimer = this._getWorktreeReapTimer()
     if (worktreeReapTimer) clearInterval(worktreeReapTimer)
+    // #7606: same for the orphaned-child reaper.
+    const orphanReapTimer = this._getOrphanReapTimer()
+    if (orphanReapTimer) clearInterval(orphanReapTimer)
     // #5932: stop watching ~/.chroxy/models.json so the fs-watch doesn't outlive
     // the daemon. Best-effort — close() never throws but guard anyway.
     if (this._modelsOverlayWatcher) {

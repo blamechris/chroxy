@@ -976,12 +976,11 @@ export class CliSession extends BaseSession {
    * bails on `_resultTimeoutPaused` — and it routes through the funnel anyway.
    *
    * NOT a full solution on its own: this retires the prompt in the CLIENTS. The
-   * daemon's own `pendingPermissions` entry (ws-permissions.js) is NOT released
-   * here, because killing the CLI child does not signal the hook's `curl`
-   * grandchild (POSIX `killProcessTree` sends SIGTERM to the direct child only),
-   * so its socket stays open and `resendPendingPermissions` will re-send the
-   * request to any client that reconnects inside the five-minute window. That
-   * gap predates this change; see #7379.
+   * daemon's own `pendingPermissions` entry (ws-permissions.js) is still
+   * released explicitly rather than by relying on the hook dying: since #7606
+   * POSIX `killProcessTree` does signal the hook's `bash` → `curl` grandchildren
+   * on a respawn/destroy, but a crash runs no kill at all, and an explicit
+   * release is the only path that covers both. See #7379.
    *
    * @param {string} message Reason forwarded on the wire (clients log it; the
    *   user-visible copy is fixed client-side).
@@ -1743,7 +1742,8 @@ export class CliSession extends BaseSession {
       // shim wrapping a `.cmd` provider (claude/codex/…); the real node
       // grandchild is orphaned and the wrapper's `close` above then cancels the
       // forceKill escalation before it can fire. killProcessTree reaps the whole
-      // tree (POSIX behaviour is an identical graceful SIGTERM).
+      // tree — since #7606 on POSIX too (graceful SIGTERM to every descendant,
+      // enumerated before the child is signalled).
       killProcessTree(oldChild)
     } else {
       this._respawning = false

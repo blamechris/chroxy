@@ -108,6 +108,26 @@ describe('validateConfig', () => {
     assert.ok(result.warnings.some(w => w.includes('provider') && w.includes('string')))
   })
 
+  it('accepts a full orphanReap block and an empty one (#7606)', () => {
+    for (const block of [{}, { enabled: false }, { enabled: true, sweepIntervalMs: 60000, minAgeMs: 0 }]) {
+      const result = validateConfig({ orphanReap: block })
+      assert.ok(!result.warnings.some((w) => /orphanReap/.test(w)), `block ${JSON.stringify(block)}: ${result.warnings}`)
+    }
+  })
+
+  it('warns on a bad orphanReap shape, enabled type, interval, age, and unknown key (#7606)', () => {
+    const w = (cfg) => validateConfig(cfg).warnings.filter((m) => /orphanReap/.test(m))
+    assert.ok(w({ orphanReap: [] }).every((m) => /'orphanReap': expected object, got array/.test(m)) && w({ orphanReap: [] }).length >= 1)
+    assert.match(w({ orphanReap: { enabled: 'yes' } })[0], /orphanReap\.enabled.*boolean/)
+    for (const bad of [0, -1, 'soon', NaN, Infinity]) {
+      assert.match(w({ orphanReap: { sweepIntervalMs: bad } })[0], /orphanReap\.sweepIntervalMs.*positive/, `interval ${bad}`)
+    }
+    for (const bad of [-1, 'now', NaN]) {
+      assert.match(w({ orphanReap: { minAgeMs: bad } })[0], /orphanReap\.minAgeMs.*non-negative/, `age ${bad}`)
+    }
+    assert.match(w({ orphanReap: { enabld: true } })[0], /'orphanReap\.enabld': unknown key/)
+  })
+
   it('accepts worktreeGc with autoReap + valid reapIntervalMs (#5326)', () => {
     const result = validateConfig({ worktreeGc: { autoReap: true, reapIntervalMs: 60000 } })
     assert.equal(result.valid, true)
