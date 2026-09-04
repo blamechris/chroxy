@@ -3044,11 +3044,18 @@ export class SessionManager extends EventEmitter {
     // #7627 — a boot with nothing restored AND nothing registered must return
     // here, exactly as it did when persistence returned null for an all-stale
     // file. Everything below is the tail that runs for a boot that produced
-    // something, and letting it run on an empty one changed behaviour that has
-    // nothing to do with this fix: `_costBudget.restore` re-loads the cost map
-    // of sessions that were just dropped, and the all-stale boot is the ONLY
-    // occasion on which those dead entries are collected — every other boot
-    // round-trips them. Without this the `costs` map grows forever.
+    // something, and letting it run on an empty one changed behaviour unrelated
+    // to this fix: `_costBudget.restore` re-loads the cost map of sessions just
+    // dropped, and an all-stale boot with no refusal is the only occasion those
+    // dead entries are collected — every other boot round-trips them.
+    //
+    // Note what this does NOT restore: once a refusal is preserved, its frozen
+    // `lastActivityAt` keeps `anyFailure` true on every later boot, so that
+    // collection occasion is disabled for as long as the entry lives. Pre-existing
+    // — base behaves the same for any sub-24h reboot cadence, since the collection
+    // only ever happened on a boot that restored nothing at all — but the cost map
+    // is not self-collecting while a needs-attention entry exists, and that is
+    // worth knowing before treating this early return as a complete answer.
     if (!firstId && !anyFailure) return null
 
     // Restore cost tracking data (v1+), remapping old IDs to new IDs.
@@ -3118,19 +3125,6 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Drop failed-restore entries whose session has been inactive longer than the
-   * TTL, so a chronically-failing session can't grow _failedRestores +
-   * session-state.json without bound across boots. Conservative by design: a
-   * recently-active failure is KEPT (it still surfaces in the "needs attention"
-   * UI for retry), and an entry with no usable timestamp is kept rather than
-   * guessed-stale. Failed-restore entries are display + retry only, so pruning a
-   * long-dead one has no operational effect beyond removing the stale UI entry.
-   * Worktree-backed failed-restores are NEVER pruned (guard below) so the #2954
-   * worktree-preservation contract is never widened by this cleanup.
-   * @param {number} [now]
-   * @returns {number} count pruned
-   */
-  /**
    * Keep `_sessionCounter` ahead of any "Session N" name still occupying disk
    * state, so the first new auto-named session after a restore cannot collide
    * (#2338). Every restore outcome must call this — a restored session, a fresh
@@ -3148,6 +3142,19 @@ export class SessionManager extends EventEmitter {
     if (n > this._sessionCounter) this._sessionCounter = n
   }
 
+  /**
+   * Drop failed-restore entries whose session has been inactive longer than the
+   * TTL, so a chronically-failing session can't grow _failedRestores +
+   * session-state.json without bound across boots. Conservative by design: a
+   * recently-active failure is KEPT (it still surfaces in the "needs attention"
+   * UI for retry), and an entry with no usable timestamp is kept rather than
+   * guessed-stale. Failed-restore entries are display + retry only, so pruning a
+   * long-dead one has no operational effect beyond removing the stale UI entry.
+   * Worktree-backed failed-restores are NEVER pruned (guard below) so the #2954
+   * worktree-preservation contract is never widened by this cleanup.
+   * @param {number} [now]
+   * @returns {number} count pruned
+   */
   _pruneStaleFailedRestores(now = Date.now()) {
     const TTL_MS = FAILED_RESTORE_TTL_MS
     let pruned = 0

@@ -4,7 +4,20 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
+import { registerProvider } from '../src/providers.js'
+
+// #7627 — a provider cheap enough to assert an auto-generated NAME against,
+// so the counter test can check the real outcome instead of restating the
+// counter it just asserted. Uniquely named: the registry is process-global and
+// node --test runs files in parallel.
+class Noop7627 extends EventEmitter {
+  constructor(opts) { super(); this.cwd = opts.cwd; this.isRunning = false }
+  static get capabilities() { return {} }
+  start() {} destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
+}
+registerProvider('test-noop-7627', Noop7627)
 
 /**
  * Swarm-audit leak fix: a session that chronically fails to restore re-fails +
@@ -186,10 +199,15 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
     // degrading the visibility this whole fix restores.
     const { events } = bootWith({ ageMs: 25 * HOUR, extra: { name: 'Session 1' } })
     assert.equal(events.length, 1, 'control: the refusal really was preserved')
-    assert.equal(sm._sessionCounter, 1, 'the counter moved past the preserved name')
+    assert.equal(sm.getFailedRestores()[0].name, 'Session 1')
+
+    // Assert the OUTCOME, not the counter. Deriving the expected name from
+    // `_sessionCounter` would restate the line above it and could not fail on
+    // its own; actually creating the session can.
+    const newId = sm.createSession({ cwd: '/tmp', provider: 'test-noop-7627' })
     assert.equal(
-      sm.getFailedRestores().some(f => f.name === `Session ${sm._sessionCounter + 1}`), false,
-      'so the next auto-named session cannot collide with it',
+      sm.getSession(newId).name, 'Session 2',
+      'the new session must not take the name still held by the needs-attention entry',
     )
   })
 

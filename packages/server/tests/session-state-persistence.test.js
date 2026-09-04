@@ -230,10 +230,28 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.deepEqual(out.staleSessions.map(x => x.id), ['a', 'b'], 'both are set aside, in order (#7627)')
   })
 
-  it('returns null ONLY when there is genuinely nothing — no fresh AND no stale (#7627)', () => {
+  it('returns null for an EMPTY session list (the guard an all-stale file no longer reaches)', () => {
+    // Named for what it actually exercises: the `sessions.length === 0` guard.
+    // It was previously named for the all-stale early return, which #7627 made
+    // unreachable — the loop partitions a non-empty list into fresh ∪ stale, so
+    // "no fresh AND no stale" cannot happen and that branch is gone. This test
+    // never reached it either way, which is exactly why the name mattered.
     writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [] }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     assert.equal(p.restoreState(), null)
+  })
+
+  it('an ALL-stale file is no longer null — it carries every entry for adjudication (#7627)', () => {
+    const stale = Date.now() - 25 * 60 * 60 * 1000
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1, timestamp: stale,
+      sessions: [{ id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: stale }],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const out = p.restoreState()
+    assert.notEqual(out, null, 'the all-stale case is a result now, not an absence')
+    assert.deepEqual(out.sessions, [])
+    assert.deepEqual(out.staleSessions.map(x => x.id), ['a'])
   })
 
   it('returns parsed state for valid file', () => {

@@ -238,10 +238,12 @@ export class SessionStatePersistence {
       const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
       log.warn(`Set aside ${dropped.length} stale session(s), not restored (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
     }
-    if (fresh.length === 0 && stale.length === 0) {
-      log.info('All restored sessions are stale, starting fresh')
-      return null
-    }
+    // NOTE: there is deliberately no `fresh.length === 0` early return here.
+    // #7627 made one unreachable — the guard above returns for an empty
+    // `state.sessions`, and the loop partitions a non-empty one into
+    // `fresh ∪ stale` — so it would have been dead code, and the all-stale case
+    // is now a legitimate result carrying entries for SessionManager to
+    // adjudicate. The warn above already reports it.
     state.sessions = fresh
     // #7627: carried separately so the normal restore path sees EXACTLY what it
     // saw before — `state.sessions` is still the fresh set and nothing downstream
