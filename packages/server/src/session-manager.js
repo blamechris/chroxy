@@ -2747,14 +2747,18 @@ export class SessionManager extends EventEmitter {
       )
     }
     if (!containerId) {
-      // Nothing was persisted to compare against — a state file written before
-      // #7561 added the binding. Refusing every one of those would strand
+      // Nothing was persisted to compare against. The expected cause is a state
+      // file written before #7561 added the binding, but it is not the only one
+      // that reaches here — an incomplete or hand-edited state file lands in the
+      // same branch — so the log reports the OBSERVATION and names that cause as
+      // expected rather than certain. Refusing every one of these would strand
       // sessions that merely upgraded across that boundary, so it is accepted.
       // But "cannot verify" is recorded rather than silently treated as
       // "nothing to verify", which is the defect class this guard belongs to.
       log.warn(
         `Restored session in environment "${environmentId}" has no persisted container id; ` +
-        `cannot verify it is the container the session was created in (pre-#7561 state file).`,
+        `cannot verify the environment's current container is the one it was created in ` +
+        `(expected for a state file written before #7561 — otherwise the persisted state is incomplete).`,
       )
     }
 
