@@ -15,6 +15,26 @@ const log = createLogger('container-liveness')
 export const DEFAULT_LIVENESS_INTERVAL_MS = 30_000
 
 /**
+ * #7620 — describe an out-of-contract verdict for the log WITHOUT trusting it.
+ *
+ * The verdict comes from the very injection seam the guard below exists to
+ * distrust, so a bare `JSON.stringify` is not safe: it THROWS on a circular
+ * object (the raw `docker inspect` blob a mis-implemented seam is most likely to
+ * forward) and on a BigInt. That throw would escape the per-target try into the
+ * tick's outer catch — replacing the diagnostic that justifies warning at all
+ * with a generic line, AND releasing the `_ticking` latch while other
+ * containers' inspects are still in flight, so the next tick re-inspects them.
+ * Total by construction: every branch returns a string and none can throw.
+ */
+function describeVerdict(verdict) {
+  try {
+    return JSON.stringify(verdict) ?? String(verdict)
+  } catch {
+    return `[unserialisable ${typeof verdict}]`
+  }
+}
+
+/**
  * ContainerLivenessMonitor — a periodic, unref'd `docker inspect` poll over the
  * live containerized sessions, surfacing CONTAINER_VANISHED (#7599) on any whose
  * container has been stopped or removed underneath it.
@@ -139,7 +159,7 @@ export class ContainerLivenessMonitor {
         // verdict is a property of the container, not of each bound session)
         // because an unrecognised verdict means the seam itself is broken.
         if (status !== 'running' && status !== 'gone') {
-          this._log.warn(`container-liveness: unrecognised verdict ${JSON.stringify(status)} for ${String(containerId).slice(0, 12)} — treating as unknown`)
+          this._log.warn(`container-liveness: unrecognised verdict ${describeVerdict(status)} for ${String(containerId).slice(0, 12)} — treating as unknown`)
           return
         }
         for (const target of targets) {

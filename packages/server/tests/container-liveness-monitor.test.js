@@ -314,12 +314,31 @@ describe('#7620 ContainerLivenessMonitor._tick — an out-of-contract verdict is
   // AND — the positive control — that the tick actually REACHED the verdict
   // fan-out with this status. Without the warn assertion these would pass just
   // as well on a tick that never ran at all.
-  for (const [label, status] of [
-    ["a typo'd / future verdict string", 'exited'],
-    ['a Docker state that is not the contract', 'paused'],
-    ['a seam that returns nothing', undefined],
-    ['a seam that returns null', null],
-    ['a seam that returns a non-string', 1],
+  const circular = {}
+  circular.self = circular
+
+  // The third element is what the warn must actually SAY about the verdict.
+  // Asserting only "a warn happened" leaves the diagnostic — the entire reason
+  // to warn rather than no-op silently — untested: a describeVerdict returning a
+  // constant survived that weaker assertion.
+  for (const [label, status, described] of [
+    ["a typo'd / future verdict string", 'exited', '"exited"'],
+    ['a Docker state that is not the contract', 'paused', '"paused"'],
+    ['a seam that returns nothing', undefined, 'undefined'],
+    ['a seam that returns null', null, 'null'],
+    ['a seam that returns a non-string', 1, '1'],
+    // The realistic shape: a seam that forwards the raw `docker inspect` blob
+    // instead of classifying it. The two below are the same class, but they also
+    // pin that DESCRIBING the verdict cannot throw — the value comes from the very
+    // seam this guard exists to distrust, and a bare JSON.stringify throws on both.
+    ['a raw inspect blob', { State: { Running: true } }, '{"State":{"Running":true}}'],
+    ['an unserialisable circular object', circular, '[unserialisable object]'],
+    ['a BigInt (JSON.stringify throws)', 1n, '[unserialisable bigint]'],
+    // JSON.stringify returns undefined (not a string) for these two, so without a
+    // fallback the warn would report them as the literal "undefined" — a diagnostic
+    // that names the wrong problem for a seam that handed back a function or symbol.
+    ['a seam that returns its own function', function brokenSeam() {}, 'brokenSeam'],
+    ['a seam that returns a Symbol', Symbol('running'), 'Symbol(running)'],
   ]) {
     it(`${label} clears NOTHING and fires no re-attach`, async () => {
       const { t, recovered, warnings, mon } = wire(status)
@@ -329,6 +348,11 @@ describe('#7620 ContainerLivenessMonitor._tick — an out-of-contract verdict is
       assert.equal(t._calls.notify, 0, 'nor surface a vanish it never reported')
       assert.equal(warnings.length, 1, 'positive control: the fan-out ran and warned about the verdict')
       assert.ok(/unrecognised/i.test(warnings[0]), `warn names the problem: ${warnings[0]}`)
+      assert.ok(
+        warnings[0].includes(described),
+        `warn must NAME the verdict (expected ${described} in: ${warnings[0]})`,
+      )
+      assert.ok(warnings[0].includes('ctr-1'), 'and name the container it came from')
     })
   }
 
@@ -355,6 +379,38 @@ describe('#7620 ContainerLivenessMonitor._tick — an out-of-contract verdict is
     assert.equal(t._calls.clear, 0)
     assert.deepEqual(recovered, [])
     assert.deepEqual(warnings, [])
+  })
+
+  it('an UNSERIALISABLE verdict does not release the overlap latch while another container is still in flight', async () => {
+    // The tick's docstring promises "every failure is contained". If describing
+    // the verdict throws, the Promise.all rejects, the outer catch runs, and
+    // `finally { _ticking = false }` fires while the OTHER container's inspect is
+    // still pending — so the next tick re-inspects it, defeating the overlap
+    // guard. Deliberately does NOT await the first tick before releasing the
+    // gate: under the fix that tick is still pending, and awaiting it here would
+    // HANG rather than fail.
+    let bInspects = 0
+    let releaseB
+    const gate = new Promise((r) => { releaseB = r })
+    const bad = {}
+    bad.self = bad
+    const mon = new ContainerLivenessMonitor({
+      enumerate: () => [
+        { sessionId: 'a', containerId: 'A', session: { clearContainerVanished: () => true } },
+        { sessionId: 'b', containerId: 'B', session: { clearContainerVanished: () => true } },
+      ],
+      inspect: async (id) => {
+        if (id === 'B') { bInspects++; await gate; return 'running' }
+        return bad
+      },
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+    })
+    const first = mon._tick()
+    await new Promise((r) => setImmediate(r))
+    await mon._tick()
+    assert.equal(bInspects, 1, 'the overlap guard must hold even when a verdict cannot be serialised')
+    releaseB()
+    await first
   })
 
   it('the unrecognised verdict is warned ONCE PER CONTAINER, not once per bound session', async () => {
