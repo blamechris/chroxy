@@ -356,6 +356,16 @@ describe('#7602 clearContainerVanished — the recovery edge', () => {
     assert.equal(s.clearContainerVanished(), true)
     assert.equal(s._containerReady, true)
   })
+
+  it('DockerByokSession reports the edge but does NOT restore readiness without a container', () => {
+    const [, make] = providers[2]
+    const s = make()
+    captureErrors(s)
+    s.notifyContainerVanished()
+    s._containerId = null // no container to be ready for
+    assert.equal(s.clearContainerVanished(), true, 'the latch still transitions')
+    assert.equal(s._containerReady, false, 'but readiness is not restored')
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -441,6 +451,26 @@ describe('#7602 ContainerLivenessMonitor — onRecovered fires on the edge and o
     })
     await mon._tick()
     assert.deepEqual(recovered, ['a', 'c'])
+  })
+
+  it('absorbs an ASYNC rejection from onRecovered, not just a sync throw', async () => {
+    const a = latchSession(); const b = latchSession()
+    const recovered = []
+    const mon = new ContainerLivenessMonitor({
+      enumerate: () => [
+        { sessionId: 'a', containerId: 'c1', session: a },
+        { sessionId: 'b', containerId: 'c1', session: b },
+      ],
+      inspect: async () => (a._vanished ? 'running' : 'gone'),
+      onRecovered: async (t) => {
+        if (t.sessionId === 'a') throw new Error('async boom')
+        recovered.push(t.sessionId)
+      },
+      logger: silentLog,
+    })
+    await mon._tick()                          // arm both latches
+    await assert.doesNotReject(mon._tick())    // the edge: 'a' rejects, 'b' must still run
+    assert.deepEqual(recovered, ['b'])
   })
 
   it('is optional — without onRecovered the poll behaves exactly as #7601', async () => {
@@ -626,11 +656,59 @@ describe('#7602 end-to-end through the real poll + SessionManager + DockerSdkSes
 
   it('the boot restore path (#7571) is a distinct path — restoreState never calls the live re-resolve', () => {
     const { m } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
+    let bootCalls = 0
     let liveCalls = 0
+    const realBoot = m._resolveRestoredContainerBinding.bind(m)
+    m._resolveRestoredContainerBinding = (saved) => { bootCalls++; return realBoot(saved) }
     m._reattachEnvironmentBoundSession = () => { liveCalls++; return { reattached: false, reason: 'spy' } }
-    m.restoreState() // no state file ⇒ returns null, but must not route through the live path
-    assert.equal(liveCalls, 0)
-    assert.equal(typeof m._resolveRestoredContainerBinding, 'function', 'the boot resolver is still its own method')
+    // A REAL saved session, so the per-session restore loop actually executes.
+    // Without one, restoreState() returns at `if (!state) return null` and
+    // `liveCalls === 0` holds whether or not the loop calls the live path —
+    // the assertion would pass for the wrong reason.
+    m._persistence.restoreState = () => ({
+      version: 1,
+      sessions: [{ id: 'a'.repeat(32), name: 'Session 1', cwd: '/tmp', environmentId: 'env-1', containerId: 'ctr-env' }],
+    })
+    m.createSession = () => 'b'.repeat(32) // don't spawn a provider for this assertion
+
+    m.restoreState()
+
+    assert.equal(bootCalls, 1, 'CONTROL: the restore loop body really ran')
+    assert.equal(liveCalls, 0, 'and it routed through the boot resolver only')
+    m.destroyAll()
+  })
+
+  it('a session marked _destroying on the PROVIDER (entry still live) is refused', () => {
+    const env = envManagerStub({ info: { containerId: 'ctr-env' } })
+    const m = managerWith(env)
+    const s = envBoundSdkSession('ctr-env')
+    captureErrors(s)
+    s._destroying = true               // provider tearing down; entry not flagged yet
+    putEntry(m, 's1', { session: s, environmentId: 'env-1', destroying: false })
+
+    assert.deepEqual(m._reattachEnvironmentBoundSession('s1'), { reattached: false, reason: 'session_gone' })
+    assert.deepEqual(env.calls.getContainerInfo, [])
+    m.destroyAll()
+  })
+
+  it('a bare-containerId session sharing the env container stays terminal while its neighbour re-attaches', async () => {
+    let status = 'gone'
+    const { m, env } = wire({ inspectStatus: () => status, envInfo: { containerId: 'ctr-env' } })
+    const bound = envBoundSdkSession('ctr-env')
+    const bare = envBoundSdkSession('ctr-env')   // same container, NO environmentId
+    const boundErrors = captureErrors(bound)
+    const bareErrors = captureErrors(bare)
+    putEntry(m, 'bound', { session: bound, environmentId: 'env-1' })
+    putEntry(m, 'bare', { session: bare, environmentId: null })
+
+    await m._containerLivenessMonitor._tick()
+    status = 'running'
+    await m._containerLivenessMonitor._tick()
+
+    assert.deepEqual(env.calls.getContainerInfo, ['env-1'], 'only the env-bound session re-resolves')
+    assert.deepEqual(boundErrors.map(e => e.code), ['CONTAINER_VANISHED'])
+    assert.deepEqual(bareErrors.map(e => e.code), ['CONTAINER_VANISHED'], 'the bare session is fail-visible only')
+    assert.equal(bare._containerId, 'ctr-env', 'and its binding is untouched')
     m.destroyAll()
   })
 })
