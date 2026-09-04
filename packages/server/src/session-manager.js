@@ -3943,6 +3943,59 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #7602 — fan a recovery edge across every live session bound to `envId`, for a
+   * container chroxy itself just brought back (`EnvironmentManager.restart()`,
+   * which has already awaited `docker restart` and set `status: 'running'`).
+   *
+   * The #7601 fast-path was asymmetric without this: a Control Room restart
+   * surfaced CONTAINER_VANISHED on every bound session IMMEDIATELY, but the
+   * matching re-attach waited up to a full poll interval. That is not only slow
+   * on the one trigger whose container is most certainly back — it leaves the
+   * vanish latch SET for up to 30s, so a genuine second vanish inside that window
+   * would find the latch armed and surface NOTHING. Clearing the latch promptly
+   * is what makes the next real vanish visible again.
+   *
+   * MUST run AFTER the vanish fan-out for the same event: the edge is defined as
+   * `clearContainerVanished()` actually flipping the latch, so a session whose
+   * vanish has not been surfaced yet correctly contributes no edge, and a session
+   * that never vanished is skipped rather than gratuitously re-resolved.
+   *
+   * Reads `_sessions` filtered by `environmentId` rather than the environment's
+   * own `env.sessions` roster — deliberately the SAME source
+   * `_listContainerLivenessTargets` reads, so the two paths that can produce a
+   * recovery edge cannot disagree about who is in the environment.
+   *
+   * @param {string} envId
+   * @param {string} [reason] the emitting event, for the log line
+   * @returns {number} how many sessions were re-attached
+   */
+  reattachEnvironmentSessions(envId, reason = 'environment_restarted') {
+    // No `!envId` guard: `entry.environmentId` is normalised to a non-empty
+    // string or null at create time, so a blank/undefined `envId` matches no
+    // entry and the filter below already makes this a no-op. A separate
+    // emptiness check could not be made to fail — docs/false-safety-guards.md.
+    let reattached = 0
+    for (const [sessionId, entry] of [...this._sessions]) {
+      // No `_destroying` filter here on purpose: `_reattachEnvironmentBoundSession`
+      // already owns that gate, and a second copy of it could not be made to fail
+      // independently — see docs/false-safety-guards.md.
+      if (!entry || entry.environmentId !== envId) continue
+      const session = entry.session
+      try {
+        // The edge, synthesised exactly as the poll observes it.
+        if (session?.clearContainerVanished?.() !== true) continue
+        const outcome = this._reattachEnvironmentBoundSession(sessionId)
+        if (outcome.reattached) reattached++
+        log.info(`[${reason}] re-attach for session ${sessionId} in env ${envId}: ${outcome.reason}`)
+      } catch (err) {
+        // Contained per session: one throwing provider must not strand the rest.
+        log.warn(`[${reason}] re-attach failed for session ${sessionId}: ${err?.message || err}`)
+      }
+    }
+    return reattached
+  }
+
+  /**
    * #7602 — the LIVE analogue of `_resolveRestoredContainerBinding`: re-affirm a
    * running env-bound session's container binding when the liveness poll reports
    * that container running again, so the next turn resumes inside it.
@@ -4026,6 +4079,13 @@ export class SessionManager extends EventEmitter {
       // destroying)" alike — getContainerInfo throws for each.
       return refuse('environment_unavailable', err?.message || String(err))
     }
+    // LOAD-BEARING, and the reason teardown is checked ONCE at the top: the call
+    // above is SYNCHRONOUS, so this whole method runs as one uninterrupted block
+    // from those checks through `reattachContainer` below. If `getContainerInfo`
+    // ever becomes async (a remote backend, say), `entry._destroying` /
+    // `session._destroying` must be re-taken AFTER the await — a destroy landing
+    // in that gap would emit 'error' on a session whose listeners are already
+    // gone, and Node throws on an unhandled 'error'.
     if (!info || typeof info.containerId !== 'string' || info.containerId.length === 0) {
       return refuse('no_container', 'the environment reports no container')
     }

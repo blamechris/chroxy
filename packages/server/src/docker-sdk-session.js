@@ -506,8 +506,15 @@ export class DockerSdkSession extends SdkSession {
     if (cliPath) this._containerCliPath = cliPath
     const user = typeof binding.containerUser === 'string' ? binding.containerUser.trim() : ''
     // Same validation the constructor applies — a re-attach must not be a way to
-    // smuggle an unvalidated username into the `docker exec --user` argv.
-    if (user && VALID_USERNAME_RE.test(user)) this._containerUser = user
+    // smuggle an unvalidated username into the `docker exec --user` argv. The
+    // constructor THROWS here; a re-attach cannot (it would strand a session over
+    // a field it does not need), so it keeps the existing user — but says so,
+    // rather than dropping the update silently.
+    if (user && !VALID_USERNAME_RE.test(user)) {
+      log.warn(`Ignoring invalid containerUser "${user}" on re-attach — keeping "${this._containerUser}"`)
+    } else if (user) {
+      this._containerUser = user
+    }
 
     log.info(`Re-attached to container ${this._containerId.slice(0, 12)} — next turn resumes inside it`)
     return true

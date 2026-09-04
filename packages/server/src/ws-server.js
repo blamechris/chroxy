@@ -1167,7 +1167,20 @@ export class WsServer {
       // `env.sessions` reusing the destroy-with-sessions fan-out shape — NO
       // SessionManager handle is injected into EnvironmentManager.
       this._environmentStoppedHandler = ({ id } = {}) => this._surfaceContainerVanishedForEnvironment(id, 'environment_stopped')
-      this._environmentRestartedHandler = ({ id } = {}) => this._surfaceContainerVanishedForEnvironment(id, 'environment_restarted')
+      // #7602: a RESTART ends with the container running again, and `restart()`
+      // has already awaited `docker restart` and set `status: 'running'` before
+      // emitting — so re-attach right here instead of leaving it to the poll.
+      // Order is load-bearing: the vanish must surface FIRST (that is what arms
+      // the latch whose clearing IS the recovery edge). A `stop` gets no
+      // re-attach — its container is, correctly, still down.
+      this._environmentRestartedHandler = ({ id } = {}) => {
+        this._surfaceContainerVanishedForEnvironment(id, 'environment_restarted')
+        try {
+          this.sessionManager?.reattachEnvironmentSessions?.(id, 'environment_restarted')
+        } catch (err) {
+          log.warn(`[environment_restarted] re-attach fan-out failed for env ${id}: ${err?.message || err}`)
+        }
+      }
       this.environmentManager.on('environment_stopped', this._environmentStoppedHandler)
       this.environmentManager.on('environment_restarted', this._environmentRestartedHandler)
     } else {

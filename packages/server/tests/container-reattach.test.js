@@ -1,4 +1,4 @@
-import { describe, it, after } from 'node:test'
+import { describe, it, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -9,6 +9,8 @@ import { ContainerLivenessMonitor } from '../src/container-liveness-monitor.js'
 import { DockerSession } from '../src/docker-session.js'
 import { DockerSdkSession } from '../src/docker-sdk-session.js'
 import { DockerByokSession } from '../src/docker-byok-session.js'
+import { WsServer as _WsServer } from '../src/ws-server.js'
+import { setLogListener } from '../src/logger.js'
 
 /**
  * #7602 — live reconnect / re-attach of an env-bound session to a returned
@@ -284,11 +286,17 @@ describe('#7602 DockerSdkSession.reattachContainer — the provider contract', (
     assert.notEqual(s._containerCliPath, '/x/cli.js')
   })
 
-  it('never installs an invalid containerUser into the docker exec argv', () => {
+  it('never installs an invalid containerUser into the docker exec argv, and SAYS so', () => {
     const s = envBoundSdkSession('ctr-env')
     s._containerUser = 'chroxy'
-    assert.equal(s.reattachContainer({ containerId: 'ctr-env', containerUser: '--privileged' }), true)
+    const warnings = []
+    setLogListener((e) => { if (e.level === 'warn') warnings.push(e.message) })
+    try {
+      assert.equal(s.reattachContainer({ containerId: 'ctr-env', containerUser: '--privileged' }), true)
+    } finally { setLogListener(null) }
     assert.equal(s._containerUser, 'chroxy', 'an invalid username is rejected, not smuggled in')
+    assert.equal(warnings.filter(w => /Ignoring invalid containerUser/.test(w)).length, 1,
+      'a silently dropped update leaves the operator with no signal')
   })
 
   it('the next turn spawns into the re-affirmed container', () => {
@@ -529,6 +537,93 @@ describe('#7602 end-to-end through the real poll + SessionManager + DockerSdkSes
     m.destroyAll()
   })
 
+  it('a destroy landing DURING the awaited inspect never re-attaches or emits on a dead session', async () => {
+    // The poll's `await this._inspect(...)` is the one real yield point in the
+    // whole flow; everything downstream of it is synchronous, which is what
+    // makes checking teardown once (at the top of the re-attach) sufficient.
+    // Pin that here so an async getContainerInfo later cannot silently reopen
+    // the TOCTOU — Node throws on an 'error' emitted with no listener.
+    let release
+    const gate = new Promise((r) => { release = r })
+    const { m, env } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
+    const s = envBoundSdkSession('ctr-env')
+    captureErrors(s)
+    s.notifyContainerVanished()
+    putEntry(m, 's1', { session: s, environmentId: 'env-1' })
+    m._containerLivenessMonitor._inspect = async () => { await gate; return 'running' }
+
+    const tick = m._containerLivenessMonitor._tick()
+    // Tear down mid-inspect, exactly as destroySession does: flag, then strip
+    // listeners (so a later emit would be unhandled), then destroy.
+    const entry = m._sessions.get('s1')
+    entry._destroying = true
+    s.removeAllListeners()
+    s.on('error', () => {})
+    release()
+    await assert.doesNotReject(tick)
+
+    assert.deepEqual(env.calls.getContainerInfo, [], 'a session tearing down is never re-resolved')
+    m.destroyAll()
+  })
+
+  it('the environment_restarted fast-path re-attaches immediately, not a poll interval later', async () => {
+    const { m, env } = wire({ inspectStatus: () => 'gone', envInfo: { containerId: 'ctr-env', containerCliPath: '/opt/cli.js' } })
+    const s = envBoundSdkSession('ctr-env')
+    const errors = captureErrors(s)
+    putEntry(m, 's1', { session: s, environmentId: 'env-1' })
+
+    // What the ws-server handler does, in order: surface, then re-attach.
+    assert.equal(s.notifyContainerVanished(), true)
+    assert.equal(m.reattachEnvironmentSessions('env-1', 'environment_restarted'), 1)
+
+    assert.deepEqual(env.calls.getContainerInfo, ['env-1'])
+    assert.equal(s._containerCliPath, '/opt/cli.js')
+    assert.equal(s._containerId, 'ctr-env')
+    // The latch is clear again, so a genuine SECOND vanish still surfaces —
+    // the whole point of not waiting 30s for the poll.
+    assert.equal(s.notifyContainerVanished(), true)
+    assert.deepEqual(errors.map(e => e.code), ['CONTAINER_VANISHED', 'CONTAINER_VANISHED'])
+    m.destroyAll()
+  })
+
+  it('reattachEnvironmentSessions skips sessions that never vanished, and other environments', () => {
+    const { m, env } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
+    const healthy = envBoundSdkSession('ctr-env')       // in env-1, never vanished
+    const other = envBoundSdkSession('ctr-other')       // vanished, but a DIFFERENT env
+    const hit = envBoundSdkSession('ctr-env')           // in env-1, vanished
+    for (const s of [healthy, other, hit]) captureErrors(s)
+    putEntry(m, 'healthy', { session: healthy, environmentId: 'env-1' })
+    putEntry(m, 'other', { session: other, environmentId: 'env-2' })
+    putEntry(m, 'hit', { session: hit, environmentId: 'env-1' })
+    other.notifyContainerVanished()
+    hit.notifyContainerVanished()
+
+    assert.equal(m.reattachEnvironmentSessions('env-1'), 1)
+    assert.deepEqual(env.calls.getContainerInfo, ['env-1'], 'only the vanished session in THIS env re-resolves')
+    m.destroyAll()
+  })
+
+  it('reattachEnvironmentSessions contains a throwing provider and still processes the rest', () => {
+    const { m } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
+    const bad = envBoundSdkSession('ctr-env')
+    const good = envBoundSdkSession('ctr-env')
+    for (const s of [bad, good]) { captureErrors(s); s.notifyContainerVanished() }
+    bad.clearContainerVanished = () => { throw new Error('boom') }
+    putEntry(m, 'bad', { session: bad, environmentId: 'env-1' })
+    putEntry(m, 'good', { session: good, environmentId: 'env-1' })
+
+    assert.equal(m.reattachEnvironmentSessions('env-1'), 1)
+    m.destroyAll()
+  })
+
+  it('reattachEnvironmentSessions is a no-op without an environment id', () => {
+    const { m, env } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
+    assert.equal(m.reattachEnvironmentSessions(''), 0)
+    assert.equal(m.reattachEnvironmentSessions(undefined), 0)
+    assert.deepEqual(env.calls.getContainerInfo, [])
+    m.destroyAll()
+  })
+
   it('the boot restore path (#7571) is a distinct path — restoreState never calls the live re-resolve', () => {
     const { m } = wire({ inspectStatus: () => 'running', envInfo: { containerId: 'ctr-env' } })
     let liveCalls = 0
@@ -537,5 +632,88 @@ describe('#7602 end-to-end through the real poll + SessionManager + DockerSdkSes
     assert.equal(liveCalls, 0)
     assert.equal(typeof m._resolveRestoredContainerBinding, 'function', 'the boot resolver is still its own method')
     m.destroyAll()
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+describe('#7602 WsServer environment_restarted — the immediate re-attach fast-path', () => {
+  class WsServer extends _WsServer {
+    constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
+    start(...args) { super.start(...args); setLogListener(null) }
+  }
+
+  function makeEnvManager(envsById = {}) {
+    const mgr = new EventEmitter()
+    mgr.list = () => Object.values(envsById)
+    mgr.get = (id) => envsById[id] || null
+    return mgr
+  }
+
+  // Records the ORDER of the two fan-outs, which is load-bearing: the vanish
+  // arms the latch whose clearing IS the recovery edge.
+  function orderTrackingManager() {
+    const mgr = new EventEmitter()
+    const order = []
+    mgr.getSession = () => ({ session: { notifyContainerVanished() { order.push('surface'); return true } } })
+    mgr.reattachEnvironmentSessions = (id) => { order.push(`reattach:${id}`); return 1 }
+    return { mgr, order }
+  }
+
+  let server
+  afterEach(() => { if (server) { server.close(); server = null } })
+
+  it('re-attaches on environment_restarted, AFTER surfacing the vanish', () => {
+    const envManager = makeEnvManager({ 'env-1': { id: 'env-1', name: 'e', sessions: ['s1'] } })
+    const { mgr, order } = orderTrackingManager()
+    server = new WsServer({ port: 0, apiToken: 't', sessionManager: mgr, environmentManager: envManager })
+
+    envManager.emit('environment_restarted', { id: 'env-1', name: 'e' })
+
+    assert.deepEqual(order, ['surface', 'reattach:env-1'])
+  })
+
+  it('does NOT re-attach on environment_stopped — that container is still down', () => {
+    const envManager = makeEnvManager({ 'env-1': { id: 'env-1', name: 'e', sessions: ['s1'] } })
+    const { mgr, order } = orderTrackingManager()
+    server = new WsServer({ port: 0, apiToken: 't', sessionManager: mgr, environmentManager: envManager })
+
+    envManager.emit('environment_stopped', { id: 'env-1', name: 'e' })
+
+    assert.deepEqual(order, ['surface'])
+  })
+
+  // Capture warn-level logs so "silently feature-detected" can be told apart
+  // from "threw and was caught" — without this the catch below makes the two
+  // indistinguishable and the feature-detect becomes untestable.
+  function captureWarnings(fn) {
+    const warnings = []
+    setLogListener((e) => { if (e.level === 'warn') warnings.push(e.message) })
+    try { fn() } finally { setLogListener(null) }
+    return warnings
+  }
+
+  it('a session manager without the re-attach method is a SILENT no-op, not a caught throw', () => {
+    const envManager = makeEnvManager({ 'env-1': { id: 'env-1', name: 'e', sessions: ['s1'] } })
+    const { mgr } = orderTrackingManager()
+    delete mgr.reattachEnvironmentSessions
+    server = new WsServer({ port: 0, apiToken: 't', sessionManager: mgr, environmentManager: envManager })
+
+    const warnings = captureWarnings(() => {
+      assert.doesNotThrow(() => envManager.emit('environment_restarted', { id: 'env-1' }))
+    })
+    assert.deepEqual(warnings.filter(w => /re-attach fan-out failed/.test(w)), [],
+      'the feature-detect must skip it outright — relying on the catch would log an error for a supported configuration')
+  })
+
+  it('a throwing re-attach fan-out never escapes the handler, and IS logged', () => {
+    const envManager = makeEnvManager({ 'env-1': { id: 'env-1', name: 'e', sessions: ['s1'] } })
+    const { mgr } = orderTrackingManager()
+    mgr.reattachEnvironmentSessions = () => { throw new Error('boom') }
+    server = new WsServer({ port: 0, apiToken: 't', sessionManager: mgr, environmentManager: envManager })
+
+    const warnings = captureWarnings(() => {
+      assert.doesNotThrow(() => envManager.emit('environment_restarted', { id: 'env-1' }))
+    })
+    assert.equal(warnings.filter(w => /re-attach fan-out failed/.test(w)).length, 1)
   })
 })
