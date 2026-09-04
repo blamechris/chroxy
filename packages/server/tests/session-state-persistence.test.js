@@ -152,7 +152,7 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.equal(p.restoreState(), null)
   })
 
-  it('returns null for state older than TTL', () => {
+  it('does not restore state older than TTL, and hands the entry over (#7627)', () => {
     const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
@@ -214,7 +214,7 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.equal(result.sessions[0].id, 'fresh')
   })
 
-  it('returns null when every session is individually stale (audit P2-12)', () => {
+  it('restores none when every session is individually stale, setting all aside (audit P2-12, #7627)', () => {
     const now = Date.now()
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
