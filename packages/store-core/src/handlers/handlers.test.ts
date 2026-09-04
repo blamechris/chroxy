@@ -9567,7 +9567,8 @@ describe('handleContainerLost', () => {
       {
         sessionId: 'sess-1',
         code: 'ENVIRONMENT_UNAVAILABLE',
-        message: 'the environment now runs a different container (abc123456789)',
+        // `content` is where the normalizer puts the emitter's `message`.
+        content: 'the environment now runs a different container (abc123456789)',
       },
       null,
       fixedNow,
@@ -9596,11 +9597,11 @@ describe('handleContainerLost', () => {
         .containerReattachError,
     ).toBeNull()
     expect(
-      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', message: '   ' }, 's', fixedNow)
+      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', content: '   ' }, 's', fixedNow)
         ?.patch.containerReattachError,
     ).toBeNull()
     expect(
-      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', message: 42 }, 's', fixedNow)
+      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', content: 42 }, 's', fixedNow)
         ?.patch.containerReattachError,
     ).toBeNull()
   })
@@ -9677,7 +9678,7 @@ describe('handleMessage — container-health codes (#7603)', () => {
 
   it('produces the refusal patch for a live ENVIRONMENT_UNAVAILABLE', () => {
     const result = handleMessage(
-      { ...vanish, code: 'ENVIRONMENT_UNAVAILABLE', content: 'refused', message: 'rebuilt' },
+      { ...vanish, code: 'ENVIRONMENT_UNAVAILABLE', content: 'rebuilt' },
       'active-1',
       false,
       [],

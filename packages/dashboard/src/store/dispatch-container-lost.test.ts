@@ -106,16 +106,19 @@ function baseState(): Partial<ConnectionState> {
 }
 
 /** The wire shape the server actually produces for a vanish. */
-function vanishMessage(sessionId: string, code = 'CONTAINER_VANISHED', message?: string) {
+function vanishMessage(sessionId: string, code = 'CONTAINER_VANISHED', detail?: string) {
+  // The real envelope: the session emits `error{code, message}` and the event
+  // normalizer maps it to `content: data.message`. There is NO `message` field
+  // on the wire — an earlier version of this helper invented one, and the
+  // parse that read it looked correct while being dead in production.
   return {
     type: 'message',
     messageType: 'error',
-    content: 'The container for this session is no longer running.',
+    content: detail ?? 'The container for this session is no longer running.',
     timestamp: 1,
     code,
     sessionId,
-    ...(message ? { message } : {}),
-  }
+  };
 }
 
 describe('dashboard dispatch — container-lost state (#7603)', () => {

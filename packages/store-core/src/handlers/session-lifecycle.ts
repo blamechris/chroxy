@@ -236,12 +236,21 @@ export function handleContainerLost(
   const code = parseRawStringField(msg, 'code')
   if (code !== CONTAINER_VANISHED_CODE && code !== ENVIRONMENT_UNAVAILABLE_CODE) return null
 
-  // The refusal's own text is the operator-facing explanation ("the environment
-  // now runs a different container (abc123...)"). Carried verbatim; a non-string
-  // or empty payload degrades to null so the renderer shows the generic
-  // reconnect-failed copy rather than an empty detail line.
+  // The refusal's own text is the operator-facing explanation ("...the
+  // environment now runs a different container (abc123...)"). Read from
+  // `content`, which is where it lands: the session emits
+  // `error{code, message}` and the event normalizer maps that onto the chat
+  // envelope as `content: data.message` (event-normalizer.js, the `error:`
+  // branch). The envelope carries NO `message` field — reading one yields
+  // undefined on every real payload, which would silently disable the
+  // refused-variant banner while every test that fabricated a `message` field
+  // kept passing.
+  //
+  // Carried verbatim; a non-string or whitespace-only payload degrades to null
+  // so the renderer shows the generic reconnect-failed copy rather than an
+  // empty detail line.
   const detail =
-    code === ENVIRONMENT_UNAVAILABLE_CODE ? parseStringField(msg, 'message') ?? null : null
+    code === ENVIRONMENT_UNAVAILABLE_CODE ? parseStringField(msg, 'content') ?? null : null
 
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
