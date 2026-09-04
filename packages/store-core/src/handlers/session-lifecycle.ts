@@ -185,6 +185,97 @@ export function handleSessionStopped(
 }
 
 // ---------------------------------------------------------------------------
+// container-lost (#7603)
+// ---------------------------------------------------------------------------
+
+/**
+ * Server code for "the Docker container backing this session is no longer
+ * running" (#7599). Reaches clients as a normal chat `error` envelope, NOT as
+ * `session_error` — the session emits `error{code,message}`, ws-forwarding
+ * forwards it through the event normalizer, and the normalizer's `error:`
+ * branch produces `{ type: 'message', messageType: 'error', content, code }`.
+ * That is why this parse hangs off `handleMessage` rather than
+ * `handleSessionError`.
+ */
+export const CONTAINER_VANISHED_CODE = 'CONTAINER_VANISHED'
+
+/**
+ * Server code for "the automatic re-entry into this session's container was
+ * refused" (#7602 `_reattachEnvironmentBoundSession`). Same wire shape as
+ * {@link CONTAINER_VANISHED_CODE} — a chat `error` envelope carrying `code`.
+ */
+export const ENVIRONMENT_UNAVAILABLE_CODE = 'ENVIRONMENT_UNAVAILABLE'
+
+/**
+ * Parse the container-health codes out of an `error` chat message into a
+ * session patch (#7603).
+ *
+ * The two codes are ONE state with two stages, not two states:
+ *
+ *   - `CONTAINER_VANISHED` ARMS the state — the container is gone. The server
+ *     will re-enter it automatically if it comes back (#7602), so this is a
+ *     recoverable "needs attention", not a crash.
+ *   - `ENVIRONMENT_UNAVAILABLE` ESCALATES it — the recovery path ran and
+ *     declined. It records WHY on `containerReattachError` so the renderer can
+ *     say "reconnect failed" instead of "waiting to reconnect".
+ *
+ * `ENVIRONMENT_UNAVAILABLE` also arms `containerLostAt` when it arrives on its
+ * own. In practice it cannot — it is only reachable from the liveness poll's
+ * recovery edge, which requires the vanish latch to have been armed first — but
+ * a refusal that rendered nothing at all would be the worse failure direction,
+ * so the arming is unconditional rather than relying on that ordering.
+ *
+ * Returns null for every other message so the caller can skip the state write
+ * entirely. `now` is injected so tests can pin the timestamp.
+ */
+export function handleContainerLost(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+  now: () => number = Date.now,
+): SessionPatch | null {
+  const code = parseRawStringField(msg, 'code')
+  if (code !== CONTAINER_VANISHED_CODE && code !== ENVIRONMENT_UNAVAILABLE_CODE) return null
+
+  // The refusal's own text is the operator-facing explanation ("the environment
+  // now runs a different container (abc123...)"). Carried verbatim; a non-string
+  // or empty payload degrades to null so the renderer shows the generic
+  // reconnect-failed copy rather than an empty detail line.
+  const detail =
+    code === ENVIRONMENT_UNAVAILABLE_CODE ? parseStringField(msg, 'message') ?? null : null
+
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch:
+      code === CONTAINER_VANISHED_CODE
+        ? // A fresh vanish RESETS the refusal detail: the previous refusal
+          // described a previous recovery attempt, and leaving it set would
+          // render "reconnect failed" for a state whose recovery has not been
+          // attempted yet.
+          { containerLostAt: now(), containerReattachError: null }
+        : { containerLostAt: now(), containerReattachError: detail },
+  }
+}
+
+/**
+ * The patch that clears the container-lost state (#7603). Exported as a single
+ * helper so both clients clear it identically — the AC requires the state be
+ * applied AND released by the same shared code, and two hand-written literals
+ * are how the two clients drift.
+ *
+ * Applied on a completed turn (`result`) and on an explicit user dismiss. A
+ * `result` is positive evidence the container works: a turn whose container is
+ * gone throws inside the SDK query loop and is surfaced from the CATCH branch
+ * (`sdk-session.js` — `_classifyContainerFailure` then `emit('error')`), so it
+ * never reaches the result path.
+ */
+export function clearContainerLostPatch(): {
+  containerLostAt: null
+  containerReattachError: null
+} {
+  return { containerLostAt: null, containerReattachError: null }
+}
+
+// ---------------------------------------------------------------------------
 // log_entry
 // ---------------------------------------------------------------------------
 

@@ -85,6 +85,11 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     // session_stopped wire message arrives; cleared on next claude_ready.
     stoppedAt: null,
     stoppedCode: null,
+    // #7603: null = this session's container is not known to be gone. Set from
+    // a LIVE error{code:'CONTAINER_VANISHED'}; cleared by a completed turn or
+    // an explicit dismiss (never by claude_ready — see the field docs).
+    containerLostAt: null,
+    containerReattachError: null,
     activeAgents: [],
     activeTools: [],
     // #4307: empty until the first background_work_changed event or

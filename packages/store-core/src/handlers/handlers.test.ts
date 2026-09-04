@@ -100,6 +100,10 @@ import {
   handleUserQuestion,
   handleUserInput,
   handleMessage,
+  handleContainerLost,
+  clearContainerLostPatch,
+  CONTAINER_VANISHED_CODE,
+  ENVIRONMENT_UNAVAILABLE_CODE,
   handleToolStart,
   handleToolResult,
   handleToolInputDelta,
@@ -9524,5 +9528,172 @@ describe('resolvePermissionStreamSplit', () => {
     expect(resolvePermissionStreamSplit('client-2', remaps)).toEqual({
       serverStreamId: 'orig-2',
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleContainerLost / clearContainerLostPatch (#7603)
+// ---------------------------------------------------------------------------
+describe('handleContainerLost', () => {
+  const fixedNow = () => 1_700_000_000_000
+
+  it('exports the wire codes the server actually emits', () => {
+    // Pinned against the server's own constants (docker-session.js
+    // `CONTAINER_VANISHED`, session-manager.js `_reattachEnvironmentBoundSession`).
+    // A rename on either side must break here rather than silently render nothing.
+    expect(CONTAINER_VANISHED_CODE).toBe('CONTAINER_VANISHED')
+    expect(ENVIRONMENT_UNAVAILABLE_CODE).toBe('ENVIRONMENT_UNAVAILABLE')
+  })
+
+  it('arms containerLostAt on CONTAINER_VANISHED, targeting the explicit sessionId', () => {
+    const result = handleContainerLost(
+      { sessionId: 'sess-1', code: 'CONTAINER_VANISHED', message: 'gone' },
+      'active-1',
+      fixedNow,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { containerLostAt: 1_700_000_000_000, containerReattachError: null },
+    })
+  })
+
+  it('falls back to the active session when sessionId is absent', () => {
+    const result = handleContainerLost({ code: 'CONTAINER_VANISHED' }, 'active-1', fixedNow)
+    expect(result?.sessionId).toBe('active-1')
+  })
+
+  it('records the refusal detail on ENVIRONMENT_UNAVAILABLE', () => {
+    const result = handleContainerLost(
+      {
+        sessionId: 'sess-1',
+        code: 'ENVIRONMENT_UNAVAILABLE',
+        message: 'the environment now runs a different container (abc123456789)',
+      },
+      null,
+      fixedNow,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: {
+        containerLostAt: 1_700_000_000_000,
+        containerReattachError:
+          'the environment now runs a different container (abc123456789)',
+      },
+    })
+  })
+
+  it('arms the state even when ENVIRONMENT_UNAVAILABLE arrives without a prior vanish', () => {
+    // Unreachable in production (the refusal only fires from the liveness
+    // poll's recovery edge, which needs the vanish latch armed first) — but a
+    // refusal that rendered NOTHING would be the worse failure direction.
+    const result = handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE' }, 's', fixedNow)
+    expect(result?.patch.containerLostAt).toBe(1_700_000_000_000)
+  })
+
+  it('degrades a missing/blank refusal message to null rather than an empty detail line', () => {
+    expect(
+      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE' }, 's', fixedNow)?.patch
+        .containerReattachError,
+    ).toBeNull()
+    expect(
+      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', message: '   ' }, 's', fixedNow)
+        ?.patch.containerReattachError,
+    ).toBeNull()
+    expect(
+      handleContainerLost({ code: 'ENVIRONMENT_UNAVAILABLE', message: 42 }, 's', fixedNow)
+        ?.patch.containerReattachError,
+    ).toBeNull()
+  })
+
+  it('RESETS a stale refusal detail when a fresh vanish arrives', () => {
+    // The previous refusal described a previous recovery attempt. Leaving it
+    // set would render "reconnect failed" for a state whose recovery has not
+    // been attempted yet.
+    const result = handleContainerLost({ code: 'CONTAINER_VANISHED' }, 's', fixedNow)
+    expect(result?.patch.containerReattachError).toBeNull()
+  })
+
+  it('returns null for every other code and for a code-less message', () => {
+    expect(handleContainerLost({ code: 'SESSION_NOT_FOUND' }, 's', fixedNow)).toBeNull()
+    expect(handleContainerLost({ code: 'resume_unknown' }, 's', fixedNow)).toBeNull()
+    expect(handleContainerLost({ message: 'plain error' }, 's', fixedNow)).toBeNull()
+    expect(handleContainerLost({}, 's', fixedNow)).toBeNull()
+    // Case-sensitive: a lowercased variant is NOT the server's code.
+    expect(handleContainerLost({ code: 'container_vanished' }, 's', fixedNow)).toBeNull()
+    // Non-string code must not be coerced.
+    expect(handleContainerLost({ code: 1 }, 's', fixedNow)).toBeNull()
+  })
+
+  it('defaults `now` to Date.now when not injected', () => {
+    const before = Date.now()
+    const at = handleContainerLost({ code: 'CONTAINER_VANISHED' }, 's')?.patch
+      .containerLostAt as number
+    expect(at).toBeGreaterThanOrEqual(before)
+    expect(at).toBeLessThanOrEqual(Date.now())
+  })
+})
+
+describe('clearContainerLostPatch', () => {
+  it('clears both container-health fields', () => {
+    expect(clearContainerLostPatch()).toEqual({
+      containerLostAt: null,
+      containerReattachError: null,
+    })
+  })
+})
+
+describe('handleMessage — container-health codes (#7603)', () => {
+  const vanish = {
+    type: 'message',
+    messageType: 'error',
+    content: 'The container for this session is no longer running.',
+    timestamp: 1,
+    code: 'CONTAINER_VANISHED',
+    sessionId: 'sess-1',
+  }
+
+  it('produces a containerLostPatch for a LIVE vanish, alongside the chat message', () => {
+    const result = handleMessage(vanish, 'active-1', false, [])
+    expect(result.shouldDispatch).toBe(true)
+    if (!result.shouldDispatch) throw new Error('unreachable')
+    // The bubble is still rendered — the banner is additive, not a replacement.
+    expect(result.chatMessage.code).toBe('CONTAINER_VANISHED')
+    expect(result.containerLostPatch).toEqual({
+      sessionId: 'sess-1',
+      patch: { containerLostAt: expect.any(Number), containerReattachError: null },
+    })
+  })
+
+  it('does NOT arm from history replay (a replayed vanish is an ended outage)', () => {
+    // CONTROL: prove the message actually reached the dispatch branch, so the
+    // null below is the replay gate and not an early `shouldDispatch: false`
+    // return that would satisfy this assertion for free.
+    const result = handleMessage(vanish, 'active-1', true, [])
+    expect(result.shouldDispatch).toBe(true)
+    if (!result.shouldDispatch) throw new Error('unreachable')
+    expect(result.chatMessage.code).toBe('CONTAINER_VANISHED')
+    expect(result.containerLostPatch).toBeNull()
+  })
+
+  it('produces the refusal patch for a live ENVIRONMENT_UNAVAILABLE', () => {
+    const result = handleMessage(
+      { ...vanish, code: 'ENVIRONMENT_UNAVAILABLE', content: 'refused', message: 'rebuilt' },
+      'active-1',
+      false,
+      [],
+    )
+    if (!result.shouldDispatch) throw new Error('unreachable')
+    expect(result.containerLostPatch?.patch.containerReattachError).toBe('rebuilt')
+  })
+
+  it('leaves containerLostPatch null for an ordinary error message', () => {
+    const result = handleMessage(
+      { type: 'message', messageType: 'error', content: 'boom', timestamp: 1 },
+      'active-1',
+      false,
+      [],
+    )
+    if (!result.shouldDispatch) throw new Error('unreachable')
+    expect(result.containerLostPatch).toBeNull()
   })
 })

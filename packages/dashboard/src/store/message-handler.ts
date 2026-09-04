@@ -17,6 +17,8 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
+  // #7603: shared release path for the container-lost state (see `case 'result'`).
+  clearContainerLostPatch,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
@@ -5725,6 +5727,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       } else {
         get().addMessage(newMsg);
       }
+      // #7603 — the container-health state rides in on this same `error`
+      // envelope. `containerLostPatch` is non-null only for the two container
+      // codes and only for a LIVE message (store-core gates replay), so this
+      // is a no-op for every other message. Applied from the SHARED parse, not
+      // re-derived here — the app applies the identical patch.
+      const containerLost = result.containerLostPatch;
+      if (containerLost?.sessionId && get().sessionStates[containerLost.sessionId]) {
+        updateSession(containerLost.sessionId, () => containerLost.patch);
+      }
       // Surface rate limit / usage limit errors prominently (#616)
       if (result.isRateLimitError && result.errorContent) {
         _adapters.alert.alert('Usage Limit', result.errorContent);
@@ -5768,6 +5779,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         }
       }
       const resultPatch = {
+        // #7603 — a completed turn is the positive proof the container works,
+        // so it releases the container-lost banner. A turn whose container is
+        // gone throws inside the SDK query loop and is surfaced from the CATCH
+        // branch (sdk-session.js `_classifyContainerFailure`), so it never
+        // reaches this path. Deliberately NOT keyed off `claude_ready` like
+        // `stoppedAt` is: the server re-sends `claude_ready` on every reconnect
+        // and session switch whenever `session.isReady` (ws-history
+        // `sendSessionInfo`), and `isReady` describes the child process, not
+        // the container — clearing on it would hide a still-broken container.
+        ...clearContainerLostPatch(),
         streamingMessageId: null as string | null,
         contextUsage: normalized.contextUsage,
         // #6769: the occupancy snapshot PERSISTS across turns — only a result

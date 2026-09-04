@@ -186,6 +186,9 @@ import {
   // send-while-busy path + per-item cancel.
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
+  // #7603: the one place the container-lost fields are cleared, shared with
+  // the app so a dismiss means the same thing on both clients.
+  clearContainerLostPatch,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -2300,6 +2303,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // for known sessions once session_list has populated sessionStates).
       stoppedAt: null,
       stoppedCode: null,
+      // #7603: parity with the BaseSessionState shape. The container-lost
+      // banner is driven from a real SessionState (the patch names a
+      // sessionId); the flat-state fallback has no session to name.
+      containerLostAt: null,
+      containerReattachError: null,
       terminalRawBuffer: get().terminalRawBuffer,
       activeAgents: EMPTY_AGENTS,
       // #4308: parity with the BaseSessionState shape; no live tool tracking
@@ -5643,6 +5651,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
   dismissSessionNotFoundError: () => {
     set({ sessionNotFoundError: null });
+  },
+
+  // #7603 — manual escape from the container-lost banner. The state is
+  // otherwise released only by a completed turn (`result`), which is the one
+  // positive proof the container works again; a user who has already dealt
+  // with the outage out-of-band shouldn't have to run a turn to clear it.
+  // Uses the shared `clearContainerLostPatch()` so the dismiss and the
+  // turn-completion path cannot clear different field sets.
+  dismissContainerLost: (sessionId: string) => {
+    if (!get().sessionStates[sessionId]) return;
+    updateSession(sessionId, () => clearContainerLostPatch());
   },
 
   // Multi-server registry actions

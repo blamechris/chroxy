@@ -47,7 +47,16 @@ describe('SessionScreen stopped status strip (#4879)', () => {
   it("suppresses the stopped banner when health === 'crashed' (no double-banner)", () => {
     // Defensive: the server only emits stopped for clean exits, but if a
     // race ever surfaces both we want the louder crash banner to win.
-    expect(SessionScreenSrc).toMatch(/activeSessionHealth !== 'crashed' && activeSessionStoppedAt !== null/);
+    //
+    // #7603 inserted a third rung between the two: the container-stopped
+    // banner. The ladder is crashed > container-lost > stopped, and the
+    // stopped strip is now the LAST to render, so its condition carries both
+    // suppressions. Collapsed to a boolean before asserting — a failing
+    // `toMatch` here prints the whole ~90KB SessionScreen.tsx as the diff.
+    const ladder =
+      /activeSessionHealth !== 'crashed' && activeContainerLostAt === null && activeSessionStoppedAt !== null/;
+    expect(`stopped-strip ladder: ${ladder.test(SessionScreenSrc) ? 'found' : 'MISSING'}`)
+      .toBe('stopped-strip ladder: found');
   });
 
   it("renders bare 'Session stopped.' when code is 0 or null (clean exit, no decoration)", () => {
