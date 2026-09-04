@@ -207,12 +207,23 @@ export class SessionStatePersistence {
     const now = Date.now()
     const fresh = []
     const dropped = []
+    // #7627 — the stale ENTRIES, not just their names. They are SET ASIDE, not
+    // deleted: the log below says so, because "Dropped" described the old
+    // behaviour and reading it as deletion is what made this defect invisible. A stale session is still
+    // not restored (that is the policy this filter exists for), but this layer
+    // cannot tell a session that would restore fine from one whose restore will
+    // REFUSE and whose history the #2954 contract promises to preserve. Only
+    // SessionManager knows that, so hand the entries over instead of deleting
+    // them here and let it decide. Deleting them here made the failed-restore
+    // TTL (30 days) unreachable for anything last active more than 24h ago.
+    const stale = []
     for (const saved of state.sessions) {
       const activityAt = (typeof saved.lastActivityAt === 'number' && saved.lastActivityAt > 0)
         ? saved.lastActivityAt
         : state.timestamp
       if (activityAt && now - activityAt > this._stateTtlMs) {
         dropped.push(saved.name || saved.id || '<unknown>')
+        stale.push(saved)
       } else {
         fresh.push(saved)
       }
@@ -225,13 +236,19 @@ export class SessionStatePersistence {
       const MAX_NAMES = 10
       const sample = dropped.slice(0, MAX_NAMES).map((n) => JSON.stringify(String(n)))
       const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
-      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
+      log.warn(`Set aside ${dropped.length} stale session(s), not restored (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
     }
-    if (fresh.length === 0) {
-      log.info('All restored sessions are stale, starting fresh')
-      return null
-    }
+    // NOTE: there is deliberately no `fresh.length === 0` early return here.
+    // #7627 made one unreachable — the guard above returns for an empty
+    // `state.sessions`, and the loop partitions a non-empty one into
+    // `fresh ∪ stale` — so it would have been dead code, and the all-stale case
+    // is now a legitimate result carrying entries for SessionManager to
+    // adjudicate. The warn above already reports it.
     state.sessions = fresh
+    // #7627: carried separately so the normal restore path sees EXACTLY what it
+    // saw before — `state.sessions` is still the fresh set and nothing downstream
+    // has to learn about staleness to keep working.
+    state.staleSessions = stale
     return state
   }
 

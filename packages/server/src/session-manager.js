@@ -242,6 +242,15 @@ export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBi
 // "you have a bug" signal, not per-instance telemetry.
 const warnedUnknownCtorOptKeys = new Set()
 
+/**
+ * #2954 — how long a failed-restore entry is kept so the operator can act on it
+ * (and how long its history is preserved on disk). ONE definition: both
+ * `_pruneStaleFailedRestores` and the #7627 stale-entry sweep in `restoreState`
+ * bound against this, and a second copy is exactly how the 24h session filter
+ * came to silently override it.
+ */
+const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
 export class SessionManager extends EventEmitter {
   /**
    * @param {SessionManagerConfig} opts
@@ -2944,13 +2953,7 @@ export class SessionManager extends EventEmitter {
         }
         // Keep _sessionCounter ahead of any restored "Session N" names so the
         // first new auto-named session after restore never collides (#2338).
-        if (saved.name) {
-          const match = saved.name.match(/^Session (\d+)$/)
-          if (match) {
-            const n = parseInt(match[1], 10)
-            if (n > this._sessionCounter) this._sessionCounter = n
-          }
-        }
+        this._advanceSessionCounterPast(saved.name)
         // Restore message history if present (v1+).
         // Sweep any `tool_start` that lacks a matching `tool_result` and
         // splice in a synthetic interrupted result (#4617) BEFORE seeding
@@ -2976,14 +2979,8 @@ export class SessionManager extends EventEmitter {
         // Advance _sessionCounter past failed "Session N" names too, so any
         // new sessions created during this boot don't collide with the name
         // still occupying disk state.
-        if (saved.name) {
-          const match = saved.name.match(/^Session (\d+)$/)
-          if (match) {
-            const n = parseInt(match[1], 10)
-            if (n > this._sessionCounter) this._sessionCounter = n
-          }
-        }
-        log.error(`Failed to restore session "${saved.name}" (${saved.provider || 'default'}): ${err.message}`)
+        this._advanceSessionCounterPast(saved.name)
+        log.error(`Failed to restore session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'}): ${err.message}`)
         this.emit('session_restore_failed', {
           sessionId: failedId,
           name: saved.name,
@@ -2998,6 +2995,68 @@ export class SessionManager extends EventEmitter {
         })
       }
     }
+
+    // #7627 — the sessions the 24h staleness filter set aside. They are NOT
+    // restored: that policy is unchanged, and a stale session that would come
+    // back fine is still dropped here by simply not being touched. But a stale
+    // session whose restore would REFUSE is a different thing — #2954 promises
+    // its history is preserved for the operator, and deleting it unseen made
+    // that promise false for anything last active more than 24h ago, which is
+    // the ordinary "daemon was down overnight" case. Resolving the binding is
+    // cheap and constructs nothing, so ask, and register the refusals.
+    for (const saved of Array.isArray(state.staleSessions) ? state.staleSessions : []) {
+      // Bounded by the failed-restore TTL, not resurrected forever: past that
+      // horizon the entry is dropped exactly as before. The worktree exemption
+      // mirrors `_pruneStaleFailedRestores` deliberately — #2954 keeps a
+      // worktree-backed entry at ANY age, because dropping its id exposes the
+      // worktree to the orphan sweep, whose clean-tree guard cannot see
+      // committed-but-unreachable `--detach` commits. Both bounds must agree or
+      // one of them silently overrides the other, which is this whole issue.
+      const last = (typeof saved?.lastActivityAt === 'number' && saved.lastActivityAt > 0)
+        ? saved.lastActivityAt
+        : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
+      const pastTtl = last !== null && Number.isFinite(last) && Date.now() - last > FAILED_RESTORE_TTL_MS
+      if (pastTtl && !saved?.worktreePath) continue
+      try {
+        this._resolveRestoredContainerBinding(saved)
+        // It would have restored fine — it is merely stale. Unchanged: not
+        // restored, not preserved, dropped from disk on the next write.
+      } catch (err) {
+        anyFailure = true
+        const failedId = this._registerFailedRestore(saved, err)
+        this._advanceSessionCounterPast(saved.name)
+        log.warn(`Stale session ${JSON.stringify(String(saved.name))} cannot be restored and was kept for review: ${err.message}`)
+        this.emit('session_restore_failed', {
+          sessionId: failedId,
+          name: saved.name,
+          provider: saved.provider || this._providerType,
+          cwd: saved.cwd,
+          model: saved.model || null,
+          permissionMode: saved.permissionMode || null,
+          errorCode: err?.code || 'RESTORE_FAILED',
+          errorMessage: err?.message || String(err),
+          originalHistoryPreserved: true,
+          historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
+        })
+      }
+    }
+
+    // #7627 — a boot with nothing restored AND nothing registered must return
+    // here, exactly as it did when persistence returned null for an all-stale
+    // file. Everything below is the tail that runs for a boot that produced
+    // something, and letting it run on an empty one changed behaviour unrelated
+    // to this fix: `_costBudget.restore` re-loads the cost map of sessions just
+    // dropped, and an all-stale boot with no refusal is the only occasion those
+    // dead entries are collected — every other boot round-trips them.
+    //
+    // Note what this does NOT restore: once a refusal is preserved, its frozen
+    // `lastActivityAt` keeps `anyFailure` true on every later boot, so that
+    // collection occasion is disabled for as long as the entry lives. Pre-existing
+    // — base behaves the same for any sub-24h reboot cadence, since the collection
+    // only ever happened on a boot that restored nothing at all — but the cost map
+    // is not self-collecting while a needs-attention entry exists, and that is
+    // worth knowing before treating this early return as a complete answer.
+    if (!firstId && !anyFailure) return null
 
     // Restore cost tracking data (v1+), remapping old IDs to new IDs.
     this._costBudget.restore(state, oldToNew.size > 0 ? oldToNew : null)
@@ -3066,6 +3125,24 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Keep `_sessionCounter` ahead of any "Session N" name still occupying disk
+   * state, so the first new auto-named session after a restore cannot collide
+   * (#2338). Every restore outcome must call this — a restored session, a fresh
+   * failure, and a #7627 preserved stale refusal all leave a name on disk, and a
+   * path that skips it makes a needs-attention entry indistinguishable from a
+   * live session. It was three copies of this regex before #7627 added a fourth
+   * caller; one definition now.
+   * @private
+   */
+  _advanceSessionCounterPast(name) {
+    if (!name) return
+    const match = String(name).match(/^Session (\d+)$/)
+    if (!match) return
+    const n = parseInt(match[1], 10)
+    if (n > this._sessionCounter) this._sessionCounter = n
+  }
+
+  /**
    * Drop failed-restore entries whose session has been inactive longer than the
    * TTL, so a chronically-failing session can't grow _failedRestores +
    * session-state.json without bound across boots. Conservative by design: a
@@ -3079,7 +3156,7 @@ export class SessionManager extends EventEmitter {
    * @returns {number} count pruned
    */
   _pruneStaleFailedRestores(now = Date.now()) {
-    const TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+    const TTL_MS = FAILED_RESTORE_TTL_MS
     let pruned = 0
     for (const [sessionId, entry] of this._failedRestores) {
       const saved = entry?.saved

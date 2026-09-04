@@ -152,7 +152,7 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.equal(p.restoreState(), null)
   })
 
-  it('returns null for state older than TTL', () => {
+  it('does not restore state older than TTL, and hands the entry over (#7627)', () => {
     const staleTimestamp = Date.now() - 25 * 60 * 60 * 1000
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
@@ -160,7 +160,12 @@ describe('SessionStatePersistence.restoreState', () => {
       sessions: [{ name: 'test', cwd: '/tmp' }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
-    assert.equal(p.restoreState(), null)
+    // #7627: still not RESTORED (the guard), but no longer deleted unseen — the
+    // entry is handed to SessionManager, which is the only layer that can tell a
+    // merely-stale session from one whose restore would refuse.
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'nothing stale is offered for restore')
+    assert.equal(out.staleSessions.length, 1, 'and the entry survives for adjudication')
   })
 
   it('accepts state within default TTL (23h old)', () => {
@@ -185,7 +190,9 @@ describe('SessionStatePersistence.restoreState', () => {
       sessions: [{ name: 'test', cwd: '/tmp' }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
-    assert.equal(p.restoreState(), null, 'State older than custom 5min TTL should be rejected')
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'State older than the custom 5min TTL is still not restored')
+    assert.equal(out.staleSessions.length, 1, 'the custom TTL selects which entries are set aside (#7627)')
   })
 
   it('drops only the stale sessions, keeping fresh ones by per-entry lastActivityAt (audit P2-12)', () => {
@@ -207,7 +214,7 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.equal(result.sessions[0].id, 'fresh')
   })
 
-  it('returns null when every session is individually stale (audit P2-12)', () => {
+  it('restores none when every session is individually stale, setting all aside (audit P2-12, #7627)', () => {
     const now = Date.now()
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
@@ -218,7 +225,33 @@ describe('SessionStatePersistence.restoreState', () => {
       ],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'neither individually-stale session is restored')
+    assert.deepEqual(out.staleSessions.map(x => x.id), ['a', 'b'], 'both are set aside, in order (#7627)')
+  })
+
+  it('returns null for an EMPTY session list (the guard an all-stale file no longer reaches)', () => {
+    // Named for what it actually exercises: the `sessions.length === 0` guard.
+    // It was previously named for the all-stale early return, which #7627 made
+    // unreachable — the loop partitions a non-empty list into fresh ∪ stale, so
+    // "no fresh AND no stale" cannot happen and that branch is gone. This test
+    // never reached it either way, which is exactly why the name mattered.
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [] }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
     assert.equal(p.restoreState(), null)
+  })
+
+  it('an ALL-stale file is no longer null — it carries every entry for adjudication (#7627)', () => {
+    const stale = Date.now() - 25 * 60 * 60 * 1000
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1, timestamp: stale,
+      sessions: [{ id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: stale }],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const out = p.restoreState()
+    assert.notEqual(out, null, 'the all-stale case is a result now, not an absence')
+    assert.deepEqual(out.sessions, [])
+    assert.deepEqual(out.staleSessions.map(x => x.id), ['a'])
   })
 
   it('returns parsed state for valid file', () => {
