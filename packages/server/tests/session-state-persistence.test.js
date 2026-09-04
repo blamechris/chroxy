@@ -160,7 +160,12 @@ describe('SessionStatePersistence.restoreState', () => {
       sessions: [{ name: 'test', cwd: '/tmp' }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
-    assert.equal(p.restoreState(), null)
+    // #7627: still not RESTORED (the guard), but no longer deleted unseen — the
+    // entry is handed to SessionManager, which is the only layer that can tell a
+    // merely-stale session from one whose restore would refuse.
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'nothing stale is offered for restore')
+    assert.equal(out.staleSessions.length, 1, 'and the entry survives for adjudication')
   })
 
   it('accepts state within default TTL (23h old)', () => {
@@ -185,7 +190,9 @@ describe('SessionStatePersistence.restoreState', () => {
       sessions: [{ name: 'test', cwd: '/tmp' }],
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
-    assert.equal(p.restoreState(), null, 'State older than custom 5min TTL should be rejected')
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'State older than the custom 5min TTL is still not restored')
+    assert.equal(out.staleSessions.length, 1, 'the custom TTL selects which entries are set aside (#7627)')
   })
 
   it('drops only the stale sessions, keeping fresh ones by per-entry lastActivityAt (audit P2-12)', () => {
@@ -217,6 +224,14 @@ describe('SessionStatePersistence.restoreState', () => {
         { id: 'b', name: 'B', cwd: '/tmp', lastActivityAt: now - 26 * 60 * 60 * 1000 },
       ],
     }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const out = p.restoreState()
+    assert.deepEqual(out.sessions, [], 'neither individually-stale session is restored')
+    assert.deepEqual(out.staleSessions.map(x => x.id), ['a', 'b'], 'both are set aside, in order (#7627)')
+  })
+
+  it('returns null ONLY when there is genuinely nothing — no fresh AND no stale (#7627)', () => {
+    writeFileSync(stateFile, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [] }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     assert.equal(p.restoreState(), null)
   })

@@ -384,11 +384,34 @@ in the mechanism sections above.
 - **#7625** — a rebuilt-container restore failure is TERMINAL: unlike the other refusal
   arms it cannot be cleared by fixing the environment, and `clearFailedRestore` has no
   caller, so the operator has no action before the TTL deletes the preserved history.
+  Being re-scoped: the arm it was written about has no production trigger (see below), and
+  its premise depended on #7627.
+- **#7627 (fixed)** — the preservation this whole section relies on was, until now,
+  bounded at **24 hours, not 30 days**. `SessionStatePersistence.restoreState()` applies a
+  per-entry staleness filter (24h, never overridden in production) and `SessionManager`
+  calls it as its FIRST statement, before the restore loop; `serializeState` re-pushes a
+  failed restore verbatim, so its `lastActivityAt` never advances. Any boot more than 24h
+  after the session's last turn therefore deleted the entry before it could be registered
+  — no event, no needs-attention entry, history gone, and only a generic
+  `Dropped N stale session(s)` warn. The 30-day failed-restore TTL was unreachable.
+  Persistence now hands the stale entries to `SessionManager` instead of deleting them:
+  they are still not RESTORED, but one whose binding REFUSES is registered and preserved,
+  bounded by the one `FAILED_RESTORE_TTL_MS`. **Two TTLs governing the same data, the
+  shorter one winning silently, is the shape to watch for here** — every doc, this one
+  included, cited the longer.
 - **Snapshot restore swaps the container id** (`EnvironmentManager.restore()`), which is
   the one flow that legitimately rebuilds a container underneath a bound session — and
   nothing consumes the `environment_restored` event it emits, so those sessions would be
   permanently unrestorable under #7619. Latent only: `snapshot()`/`restore()` have no
   production caller today (tests only). Worth wiring before they get one.
+
+  **This makes arm 4 (rebuilt container) currently unreachable in production**, which is
+  worth stating plainly next to #7619 and #7625: `create()` mints a fresh `env-<hex>` (so
+  recreating an environment yields arm 1, environment-gone, not arm 4), `stop()`/`restart()`
+  pass the container id through unchanged, and `destroy()` removes the record. Snapshot
+  restore is the only id swap, and it has no caller. #7619 is therefore a guard against a
+  state nothing currently produces — correct to have, and the reason its cost had to be
+  bounded to a genuine rebuild rather than paid on every restart.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched
   test files rather than by the shared switch-fixture anti-drift harness, which cannot
   currently assert non-`messages` session-state fields.
