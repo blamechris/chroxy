@@ -2652,9 +2652,18 @@ export class SessionManager extends EventEmitter {
    *      `container_replaced`, since a rebuilt container carries none of the
    *      in-container `claude` install or the SDK transcript and would resume
    *      the conversation blank. Every one of those THROWS, which lands the
-   *      session in the #2954 failed-restore path: history is preserved on disk,
-   *      `session_restore_failed` fires, and the operator can retry once the
-   *      environment is back. Loud beats a silent respawn.
+   *      session in the #2954 failed-restore path: history is preserved on disk
+   *      and `session_restore_failed` fires. Loud beats a silent respawn.
+   *
+   *      Retryability differs by arm, and the rebuilt-container one is the odd
+   *      one out. Gone / stopped / disabled all clear when the operator brings
+   *      the environment back, and the next boot restores. A REBUILT container
+   *      never does: the environment is already back and running, and its id
+   *      will not match the persisted one again, so that session stays in the
+   *      needs-attention list until `_pruneStaleFailedRestores` drops it after
+   *      the TTL. `clearFailedRestore` exists for a user-driven dismiss but has
+   *      no caller yet, so there is currently no in-product way to act on it —
+   *      see #7625.
    *
    *      The one accepted-but-unverifiable case: a state file written before
    *      #7561 persisted no `containerId`, so there is nothing to compare. That

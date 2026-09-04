@@ -333,6 +333,16 @@ The last row is the one exception, and it is deliberate: a state file written be
 sessions that merely upgraded across that boundary, so it is accepted — but logged, so
 "cannot verify" is never silently recorded as "nothing to verify".
 
+**The boot refusal arms are not equally recoverable, and the new one is the odd arm.**
+Environment gone / stopped / disabled all clear when the operator brings the environment
+back, and the next boot restores. A rebuilt container never clears: the environment is
+already running, and its id will not match the persisted one again, so the session sits
+in the #2954 needs-attention list until the TTL prunes it — deleting the history that was
+preserved for it. `clearFailedRestore` exists for a user-driven dismiss and has no caller,
+so there is no in-product action for it today. Tracked as #7625; it is a pre-existing gap
+that #7619 is the first thing to make reachable in a state the operator cannot resolve by
+fixing the environment.
+
 **#7602 is silent to clients on success.** A successful re-attach emits nothing on the
 session and broadcasts nothing — only a log line, and the fast path's return count is
 discarded by its caller. The only client-visible artefacts of this slice are #7599's
@@ -360,6 +370,14 @@ one is a place where a code comment or a PR body described a stronger guarantee 
 code implements. Of those, **#7620** and **#7619** are now fixed — see the verdict
 fan-out and the rebuilt-container table above.
 
+- **#7625** — a rebuilt-container restore failure is TERMINAL: unlike the other refusal
+  arms it cannot be cleared by fixing the environment, and `clearFailedRestore` has no
+  caller, so the operator has no action before the TTL deletes the preserved history.
+- **Snapshot restore swaps the container id** (`EnvironmentManager.restore()`), which is
+  the one flow that legitimately rebuilds a container underneath a bound session — and
+  nothing consumes the `environment_restored` event it emits, so those sessions would be
+  permanently unrestorable under #7619. Latent only: `snapshot()`/`restore()` have no
+  production caller today (tests only). Worth wiring before they get one.
 - **#7621** — the `environment_restarted` arm and clear halves read DIFFERENT rosters, so
   the fast path's correctness depends on #7552's tagging keeping them in sync.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched
