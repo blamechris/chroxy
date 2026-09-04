@@ -3914,9 +3914,9 @@ export class SessionManager extends EventEmitter {
    *
    * A target is included only when its provider exposes the #7599 vanish-surface
    * contract (`notifyContainerVanished`) AND currently holds a container id.
-   * `docker-byok` advertises `containerized` but does NOT yet expose that surface,
-   * so it is excluded here until #7600 wires it — the feature-detect is the gate,
-   * not a hard-coded provider list. A session tearing down is skipped (its
+   * The feature-detect is the gate, not a hard-coded provider list: `docker-byok`
+   * advertised `containerized` without the surface until #7600 wired it, and was
+   * excluded here by exactly that check — no enumeration change was needed. A session tearing down is skipped (its
    * container is being removed deliberately). An environment with no sessions
    * contributes no target, so nothing is inspected for it — the #7601 negative
    * control falls out of this enumeration rather than a separate check.

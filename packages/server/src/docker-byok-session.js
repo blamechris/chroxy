@@ -137,7 +137,12 @@ import {
   buildGrepCommand,
 } from './built-in-tools/tool-transforms.js'
 import { DockerBackend } from './environments/backends/docker.js'
-import { classifyDockerError } from './docker-session.js'
+import {
+  CONTAINER_VANISHED_MESSAGE,
+  classifyDockerError,
+  inspectContainerLiveness,
+  surfaceContainerVanished,
+} from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedComposeStateStore } from './byok-compose-state-shared.js'
 import { createLogger } from './logger.js'
@@ -153,6 +158,29 @@ import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 import { configPath } from './config-dir.js'
 
 const log = createLogger('docker-byok')
+
+/**
+ * The built-in tools `_dispatchBuiltinTool` routes INTO the container, keyed
+ * to their implementations (every one goes through `_execAsContainerUser`).
+ * Anything not in here — TodoWrite (a pure in-memory map), WebFetch (HTTP,
+ * never touches the host FS), AskUserQuestion, and any tool the base class
+ * grows later — runs host-side via the super dispatcher.
+ *
+ * #7600 — this ONE map is both the dispatch table and the post-failure probe
+ * gate: a throw from a tool routed through it may mean the container vanished,
+ * while a host-side tool never touches Docker and never probes. Keeping the
+ * routing and the gate on a single roster is deliberate — a separate list of
+ * "container tools" beside the switch was the hardcoded-list-next-to-a-growing-
+ * set defect (#7607 review: dropping five names from it left every test green).
+ */
+const CONTAINER_ROUTED_TOOLS = new Map([
+  ['Read', (session, input) => session._containerRead(input)],
+  ['Write', (session, input) => session._containerWrite(input)],
+  ['Edit', (session, input) => session._containerEdit(input)],
+  ['Bash', (session, input, signal) => session._containerBash(input, signal)],
+  ['Glob', (session, input, signal) => session._containerGlob(input, signal)],
+  ['Grep', (session, input, signal) => session._containerGrep(input, signal)],
+])
 
 const DEFAULT_IMAGE = 'node:22-slim'
 const DEFAULT_MEMORY_LIMIT = '2g'
@@ -560,6 +588,10 @@ export class DockerByokSession extends ClaudeByokSession {
     this._dockerBackend = opts._dockerBackend || new DockerBackend()
     this._execFile = opts._execFile || execFile
     this._containerReady = false
+    // #7600 — the CONTAINER_VANISHED idempotency latch (see
+    // surfaceContainerVanished in docker-session.js; same field the
+    // DockerSession / DockerSdkSession surfaces use).
+    this._containerVanishedNotified = false
     // #5023 snapshot / restore opts. All string opts are trimmed before
     // the length check so callers passing whitespace-only values (e.g.
     // `'   '`) get the same default as no-opt-at-all — matches how
@@ -836,6 +868,102 @@ export class DockerByokSession extends ClaudeByokSession {
     if (!this._pool) return
     if (!this._containerId) return
     this._pool.markSoiled(this._containerId)
+  }
+
+  /**
+   * #7600 — the CONTAINER_VANISHED surface for docker-byok, mirroring the
+   * DockerSession / DockerSdkSession methods (#7599 / #7601). Exposing
+   * `notifyContainerVanished` is what enrols this session in the
+   * SessionManager's proactive liveness poll (its target enumeration
+   * feature-detects the method) — and that poll is the ONLY idle-time
+   * detection a byok session gets: the agent loop runs on the host and the
+   * container only ever sees discrete `docker exec` calls, so there is no
+   * long-lived in-container process whose exit could report the vanish.
+   *
+   * Beyond the shared once-per-vanish emit, a vanish has two byok-specific
+   * consequences that live HERE rather than in the shared helper:
+   *   - `_containerReady` flips false, so every later tool dispatch is
+   *     refused up-front ("container not ready"). The model keeps getting an
+   *     is_error tool_result and NOTHING falls back to host execution.
+   *   - the dead id is marked soiled in the shared pool, so a `release()`
+   *     evicts it instead of pooling it for a successor session (and the
+   *     `_containerReady === false` above already routes destroy() to
+   *     `docker rm -f` rather than release). Compose-stack and externally-
+   *     owned sessions carry no pool; the mark is a no-op for them.
+   *
+   * Both consequences are gated on the latch transition (the helper
+   * returning true): a repeat poll verdict re-runs neither, and a session
+   * that is already tearing down (`_destroying`) is left to destroy().
+   * `_containerId` is never nulled here (the #7561 trap) — destroy() needs it,
+   * and so does clearContainerVanished, which restores readiness when the
+   * poll sees the same container running again.
+   *
+   * @returns {boolean} true when this call surfaced the error
+   */
+  notifyContainerVanished() {
+    if (!surfaceContainerVanished(this)) return false
+    this._containerReady = false
+    this.markActiveContainerSoiled()
+    return true
+  }
+
+  /**
+   * #7601 — reset the latch after the liveness poll observes the container
+   * running again, so a later vanish re-surfaces. Poll-owned.
+   *
+   * #7600 — for byok the SAME transition also restores `_containerReady`.
+   * A container observed running again under the same id is one that was
+   * stopped and started (a Control Room restart of an env-backed container,
+   * `docker compose restart`, a manual `docker start`): its writable layer —
+   * the `useradd` / `chown` setup, the workspace, the run-time env — is
+   * intact, and byok has no in-container process to rebind, so the next
+   * `docker exec` simply works. That is the whole of a byok re-attach (the
+   * exec-based providers' version is #7602). Leaving readiness off here
+   * would brick exactly those sessions, which self-healed before #7600. A
+   * per-session `--rm` container can never be observed running again, so
+   * this branch is only ever taken for a container that genuinely returned.
+   *
+   * Gated on the latch transition: a 'running' verdict on a session that
+   * never vanished must NOT set readiness — the poll enumerates a session as
+   * soon as it holds a container id, which is before start() finishes the
+   * in-container setup. The pool's soiled mark is left in place: a container
+   * that was stopped underneath a session is not offered to a successor.
+   */
+  clearContainerVanished() {
+    if (!this._containerVanishedNotified) return
+    this._containerVanishedNotified = false
+    if (this._containerId && !this._destroying) this._containerReady = true
+  }
+
+  /**
+   * #7600 — after a container-routed tool dispatch throws, ask Docker whether
+   * the container is still there. Resolves true ONLY on a confirmed vanish
+   * (inspect verdict 'gone') — i.e. "the container really is gone", which is
+   * what the caller's tool_result text reports. It calls
+   * notifyContainerVanished on the way, but that call is a no-op when the
+   * vanish was already surfaced (the poll got there first) or the session is
+   * tearing down, and the verdict is still true in both cases: the fact is
+   * real even when nothing new is emitted (#7607 Copilot review).
+   *
+   * The exec error text alone is not proof: a restart window reports
+   * `container <id> is not running` for a container that is back a moment
+   * later, and a command killed mid-exec reports nothing container-shaped at
+   * all — so the inspect is the arbiter. Its 'running' verdict (transient
+   * exec failure) and its 'unknown' verdict (daemon down / unclassified
+   * error) both resolve false and surface nothing: a Docker outage must not
+   * be reported as every session's container vanishing (the #7601
+   * false-safety guard, see inspectContainerLiveness). A backend without an
+   * inspect (older test stubs) is 'unknown' too, never a vanish.
+   */
+  async _probeContainerVanished() {
+    const containerId = this._containerId
+    const backend = this._dockerBackend
+    if (!containerId || typeof backend?.getEnvironmentStatus !== 'function') return false
+    const status = await inspectContainerLiveness((id) => backend.getEnvironmentStatus(id), containerId)
+    if (status !== 'gone') return false
+    log.warn(`container ${containerId.slice(0, 12)} is gone (inspect after a failed tool dispatch) — surfacing CONTAINER_VANISHED`)
+    this.notifyContainerVanished()
+    return true
   }
 
   /**
@@ -1805,38 +1933,45 @@ export class DockerByokSession extends ClaudeByokSession {
    */
   async _dispatchBuiltinTool({ toolName, input, signal }) {
     if (!this._containerReady || !this._containerId) {
+      // #7600 — after a surfaced vanish, say so on EVERY refused dispatch, not
+      // only the one that detected it: a generic "not ready" reads to the model
+      // as a transient startup state and invites retrying up to the round cap.
+      const why = this._containerVanishedNotified
+        ? CONTAINER_VANISHED_MESSAGE
+        : 'container not ready'
       return {
-        content: `docker-byok: container not ready (tool ${toolName})`,
+        content: `docker-byok: ${why} (tool ${toolName})`,
         isError: true,
       }
     }
     try {
-      switch (toolName) {
-        case 'Read':
-          return await this._containerRead(input)
-        case 'Write':
-          return await this._containerWrite(input)
-        case 'Edit':
-          return await this._containerEdit(input)
-        case 'Bash':
-          return await this._containerBash(input, signal)
-        case 'Glob':
-          return await this._containerGlob(input, signal)
-        case 'Grep':
-          return await this._containerGrep(input, signal)
-        case 'TodoWrite':
-        case 'WebFetch':
-        case 'AskUserQuestion':
-          // Host-side execution is correct for these — see class docstring.
-          return await super._dispatchBuiltinTool({ toolName, input, signal })
-        default:
-          return await super._dispatchBuiltinTool({ toolName, input, signal })
-      }
+      const containerImpl = CONTAINER_ROUTED_TOOLS.get(toolName)
+      if (containerImpl) return await containerImpl(this, input, signal)
+      // Host-side execution is correct for everything else — see the map's
+      // docstring and the class docstring.
+      return await super._dispatchBuiltinTool({ toolName, input, signal })
     } catch (err) {
+      // #7600 — a container-routed tool may have thrown BECAUSE the container
+      // vanished (docker exec: `No such container` / `container <id> is not
+      // running`). Confirm with an inspect before surfacing anything at the
+      // session level; a transient failure keeps the plain error text. Either
+      // way this stays an is_error tool_result — never a host-side retry. The
+      // probe is fenced so that even a throw from inside it (an 'error' emit
+      // with no listener attached) still yields a tool_result, not a rejected
+      // dispatch.
+      let vanished = false
+      if (CONTAINER_ROUTED_TOOLS.has(toolName)) {
+        try {
+          vanished = await this._probeContainerVanished()
+        } catch (probeErr) {
+          log.warn(`vanish probe after a failed ${toolName} dispatch threw: ${probeErr?.message || probeErr}`)
+        }
+      }
       // Mirror byok-tool-executor.js's catch-all: surface as an
       // is_error tool_result so the model can recover or report up.
+      const detail = vanished ? CONTAINER_VANISHED_MESSAGE : (err?.message || String(err))
       return {
-        content: `Tool ${toolName} failed in docker-byok: ${err?.message || String(err)}`,
+        content: `Tool ${toolName} failed in docker-byok: ${detail}`,
         isError: true,
       }
     }
