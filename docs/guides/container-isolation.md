@@ -195,6 +195,23 @@ You can snapshot a running environment at any point using `docker commit`. Snaps
 
 **Restarting the daemon with an environment-backed session (#7561):** a session created into an environment persists its binding (`environmentId` plus the resolved container) and re-enters the SAME container on restore, re-attaching to `EnvironmentInfo.sessions`. If the environment is gone, stopped, or container environments have since been disabled, the restore FAILS LOUDLY into the needs-attention list (`session_restore_failed`, `errorCode: ENVIRONMENT_UNAVAILABLE`) with its history preserved for a retry — it is never silently restarted outside its container.
 
+**Stopping or removing the container UNDER a live session (#7569):** the paragraph above
+covers a daemon restart. While the daemon is UP, a `containers_action` stop/restart — or a
+plain `docker stop` / `restart` / `kill` run outside chroxy entirely — leaves the session
+pointing at a container it can no longer talk to. Rather than gating those actions, the
+session detects it and self-handles: it surfaces exactly one coded `CONTAINER_VANISHED`
+error, never falls back to the host and never launches a fresh default container, and
+keeps the session alive so it can be recovered. An idle session's externally-stopped
+container is caught by a 30s liveness poll (the only detector for a stop that fires no
+chroxy event); a chroxy-initiated environment stop/restart is surfaced immediately by a
+fast path. When an environment-backed container comes BACK under the same id, the session
+re-enters it automatically and the next turn resumes inside it; if the environment now
+runs a DIFFERENT container it refuses and says so, because a rebuilt container carries
+none of the session's state. Both clients render this as a per-session
+"container stopped" banner with a reconnect affordance — deliberately not the crash
+banner, because this state recovers. Full mechanism:
+[docs/decisions/2026-09-session-side-container-resilience.md](../decisions/2026-09-session-side-container-resilience.md).
+
 **CLI:**
 
 ```bash
