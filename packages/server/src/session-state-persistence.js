@@ -207,7 +207,9 @@ export class SessionStatePersistence {
     const now = Date.now()
     const fresh = []
     const dropped = []
-    // #7627 — the stale ENTRIES, not just their names. A stale session is still
+    // #7627 — the stale ENTRIES, not just their names. They are SET ASIDE, not
+    // deleted: the log below says so, because "Dropped" described the old
+    // behaviour and reading it as deletion is what made this defect invisible. A stale session is still
     // not restored (that is the policy this filter exists for), but this layer
     // cannot tell a session that would restore fine from one whose restore will
     // REFUSE and whose history the #2954 contract promises to preserve. Only
@@ -234,7 +236,7 @@ export class SessionStatePersistence {
       const MAX_NAMES = 10
       const sample = dropped.slice(0, MAX_NAMES).map((n) => JSON.stringify(String(n)))
       const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
-      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
+      log.warn(`Set aside ${dropped.length} stale session(s), not restored (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
     }
     if (fresh.length === 0 && stale.length === 0) {
       log.info('All restored sessions are stale, starting fresh')

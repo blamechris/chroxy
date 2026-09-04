@@ -2980,7 +2980,7 @@ export class SessionManager extends EventEmitter {
         // new sessions created during this boot don't collide with the name
         // still occupying disk state.
         this._advanceSessionCounterPast(saved.name)
-        log.error(`Failed to restore session "${saved.name}" (${saved.provider || 'default'}): ${err.message}`)
+        log.error(`Failed to restore session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'}): ${err.message}`)
         this.emit('session_restore_failed', {
           sessionId: failedId,
           name: saved.name,
@@ -3025,7 +3025,7 @@ export class SessionManager extends EventEmitter {
         anyFailure = true
         const failedId = this._registerFailedRestore(saved, err)
         this._advanceSessionCounterPast(saved.name)
-        log.warn(`Stale session "${saved.name}" cannot be restored and was kept for review: ${err.message}`)
+        log.warn(`Stale session ${JSON.stringify(String(saved.name))} cannot be restored and was kept for review: ${err.message}`)
         this.emit('session_restore_failed', {
           sessionId: failedId,
           name: saved.name,
