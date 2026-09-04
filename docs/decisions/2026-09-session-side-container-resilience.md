@@ -104,7 +104,7 @@ sessions are unaffected — the host CLI path stays fully synchronous.
 ## Mechanism (#7601) — proactive poll + the environment fast-path
 
 The #7599 paths are all **reactive**: each needs a live turn or a live exec child to
-notice anything. An `docker stop` run OUTSIDE chroxy against an **idle** session fires
+notice anything. A `docker stop` run OUTSIDE chroxy against an **idle** session fires
 no chroxy event and closes no exec, so nothing detects it until the user's next turn.
 `ContainerLivenessMonitor` (`container-liveness-monitor.js`) is that missing detector,
 and it is the ONLY one for that case.
