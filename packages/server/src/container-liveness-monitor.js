@@ -93,7 +93,9 @@ export class ContainerLivenessMonitor {
    * environment binding of every idle containerized session forever). A provider
    * whose `clearContainerVanished` returns nothing — an older stub, or one that
    * predates the boolean — yields NO edge, so the failure direction is "no
-   * reconnect attempted", never "reconnect attempted spuriously".
+   * reconnect attempted", never "reconnect attempted spuriously". #7620 holds
+   * that same direction for a broken INSPECT seam: only 'running' reaches the
+   * clear/recovery branch, and an unrecognised verdict no-ops like 'unknown'.
    */
   async _tick() {
     if (this._ticking) return
@@ -127,6 +129,19 @@ export class ContainerLivenessMonitor {
           status = 'unknown'
         }
         if (status === 'unknown') return // transient (daemon down / timeout) — leave the latch as-is
+        // #7620 — the fan-out is CLOSED over the three-value contract. `inspect`
+        // is an INJECTION SEAM, so 'running' is tested explicitly here and every
+        // unrecognised verdict degrades to the SAME no-op as 'unknown' rather
+        // than falling through to the clear/recovery branch below. A broken seam
+        // must fail in the "no reconnect attempted" direction, exactly as a
+        // provider whose clearContainerVanished returns nothing does — not clear
+        // a vanish latch and trigger a re-attach. Warned once per CONTAINER (the
+        // verdict is a property of the container, not of each bound session)
+        // because an unrecognised verdict means the seam itself is broken.
+        if (status !== 'running' && status !== 'gone') {
+          this._log.warn(`container-liveness: unrecognised verdict ${JSON.stringify(status)} for ${String(containerId).slice(0, 12)} — treating as unknown`)
+          return
+        }
         for (const target of targets) {
           const session = target.session
           try {

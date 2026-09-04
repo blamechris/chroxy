@@ -269,3 +269,106 @@ describe('#7601 ContainerLivenessMonitor.start — timer lifecycle', () => {
     assert.ok(Number.isInteger(DEFAULT_LIVENESS_INTERVAL_MS) && DEFAULT_LIVENESS_INTERVAL_MS > 0)
   })
 })
+
+// ── #7620 — the verdict fan-out is CLOSED over the three-value contract ──
+//
+// `inspectContainerLiveness` owns `'running' | 'gone' | 'unknown'`, but it is an
+// explicit INJECTION SEAM: the monitor takes whatever inspect it is handed. Before
+// #7620 the fan-out tested only 'unknown' and 'gone' and let EVERYTHING ELSE fall
+// into the clear/recovery branch — so a broken seam cleared the vanish latch and
+// could fire a re-attach, the opposite direction from the fail-closed guarantee
+// the recovery-edge docstring advertises for a provider that returns nothing.
+
+describe('#7620 ContainerLivenessMonitor._tick — an out-of-contract verdict is fail-CLOSED', () => {
+  // The latch must be able to transition, or the onRecovered assertion below
+  // could not fail: `clearContainerVanished()` returning true is precisely what
+  // makes today's fall-through fire the edge.
+  function recoverableTarget(containerId = 'ctr-1') {
+    const calls = { notify: 0, clear: 0 }
+    return {
+      sessionId: `s-${containerId}`,
+      containerId,
+      session: {
+        _containerId: containerId,
+        notifyContainerVanished() { calls.notify++; return true },
+        clearContainerVanished() { calls.clear++; return true },
+      },
+      _calls: calls,
+    }
+  }
+
+  function wire(status) {
+    const t = recoverableTarget()
+    const recovered = []
+    const warnings = []
+    const mon = new ContainerLivenessMonitor({
+      enumerate: () => [t],
+      inspect: async () => status,
+      onRecovered: (target) => recovered.push(target.sessionId),
+      logger: { info() {}, warn(m) { warnings.push(m) }, error() {}, debug() {} },
+    })
+    return { t, recovered, warnings, mon }
+  }
+
+  // Each case asserts BOTH halves of the no-op (latch untouched, no re-attach)
+  // AND — the positive control — that the tick actually REACHED the verdict
+  // fan-out with this status. Without the warn assertion these would pass just
+  // as well on a tick that never ran at all.
+  for (const [label, status] of [
+    ["a typo'd / future verdict string", 'exited'],
+    ['a Docker state that is not the contract', 'paused'],
+    ['a seam that returns nothing', undefined],
+    ['a seam that returns null', null],
+    ['a seam that returns a non-string', 1],
+  ]) {
+    it(`${label} clears NOTHING and fires no re-attach`, async () => {
+      const { t, recovered, warnings, mon } = wire(status)
+      await mon._tick()
+      assert.equal(t._calls.clear, 0, 'a broken seam must not clear the vanish latch')
+      assert.deepEqual(recovered, [], 'a broken seam must not trigger a re-attach')
+      assert.equal(t._calls.notify, 0, 'nor surface a vanish it never reported')
+      assert.equal(warnings.length, 1, 'positive control: the fan-out ran and warned about the verdict')
+      assert.ok(/unrecognised/i.test(warnings[0]), `warn names the problem: ${warnings[0]}`)
+    })
+  }
+
+  it("'unknown' stays SILENT — it is in-contract, not a broken seam", async () => {
+    const { t, recovered, warnings, mon } = wire('unknown')
+    await mon._tick()
+    assert.equal(t._calls.clear, 0)
+    assert.deepEqual(recovered, [])
+    assert.deepEqual(warnings, [], "a daemon-down tick must not warn about a 'broken seam' every 30s")
+  })
+
+  it("'running' still clears the latch and fires the recovery edge", async () => {
+    const { t, recovered, warnings, mon } = wire('running')
+    await mon._tick()
+    assert.equal(t._calls.clear, 1)
+    assert.deepEqual(recovered, ['s-ctr-1'])
+    assert.deepEqual(warnings, [])
+  })
+
+  it("'gone' still surfaces the vanish", async () => {
+    const { t, recovered, warnings, mon } = wire('gone')
+    await mon._tick()
+    assert.equal(t._calls.notify, 1)
+    assert.equal(t._calls.clear, 0)
+    assert.deepEqual(recovered, [])
+    assert.deepEqual(warnings, [])
+  })
+
+  it('the unrecognised verdict is warned ONCE PER CONTAINER, not once per bound session', async () => {
+    const a = recoverableTarget('env-ctr')
+    const b = recoverableTarget('env-ctr')
+    b.sessionId = 's-b'
+    const warnings = []
+    const mon = new ContainerLivenessMonitor({
+      enumerate: () => [a, b],
+      inspect: async () => 'exited',
+      logger: { info() {}, warn(m) { warnings.push(m) }, error() {}, debug() {} },
+    })
+    await mon._tick()
+    assert.equal(warnings.length, 1, 'the verdict is a property of the container, not of each session')
+    assert.equal(a._calls.clear + b._calls.clear, 0)
+  })
+})

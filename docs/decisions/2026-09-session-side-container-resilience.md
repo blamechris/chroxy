@@ -133,18 +133,22 @@ and it is the ONLY one for that case.
   whole target object is carried (not just the session) because the recovery edge needs
   `sessionId`. Malformed targets — missing `containerId` or `session` — are dropped
   before batching.
-- **Verdicts.** `'gone'` → `notifyContainerVanished()` and move on. `'unknown'` → return,
-  touching no latch: this is the fail-closed no-op, and an inspect that THROWS is coerced
-  to `'unknown'` for exactly that reason (a dead Docker daemon must not read as a fleet of
-  vanished containers).
+- **Verdicts.** `'gone'` → `notifyContainerVanished()` and move on. `'running'` → the
+  clear/recovery branch. `'unknown'` → return, touching no latch: this is the fail-closed
+  no-op, and an inspect that THROWS is coerced to `'unknown'` for exactly that reason (a
+  dead Docker daemon must not read as a fleet of vanished containers).
 
-**Recorded because it is easy to misread:** the branch structure is `unknown → return`,
-`gone → notify`, and **everything else** falls through to the clear/recovery branch —
-there is no explicit `=== 'running'` test. The three-value contract is owned by
-`inspectContainerLiveness`, the only production inspect, and is NOT enforced by the
-monitor. A future or mis-implemented seam returning an unrecognised string would clear
-latches and fire `onRecovered` rather than no-op — the opposite direction from the
-fail-closed guarantee the recovery edge advertises for a missing boolean.
+**The fan-out is CLOSED over those three values (#7620).** `inspect` is an injection
+seam, so the monitor does not rely on `inspectContainerLiveness` — the only production
+inspect — to be the only implementation: `'running'` is tested explicitly, and any
+unrecognised verdict (a typo'd string, a future seam, a `null`) degrades to the same
+no-op as `'unknown'`, with a warn naming the verdict because an unrecognised one means
+the seam itself is broken. It originally did not: `unknown → return`, `gone → notify`,
+**everything else** → the clear/recovery branch, so a mis-implemented seam cleared
+latches and could fire `onRecovered` — the opposite direction from the fail-closed
+guarantee the recovery edge advertises for a missing boolean. Both halves of the
+fail-closed direction now hold: a broken *inspect* seam and a `clearContainerVanished`
+that returns nothing each yield "no reconnect attempted", never a spurious one.
 
 **The fast-path dual.** `ws-server` subscribes to `environment_stopped` and
 `environment_restarted` and surfaces the same vanish immediately rather than up to 30s
@@ -328,18 +332,15 @@ above; the client surface is #7603.
 
 ## Open follow-ups
 
-Three of these were surfaced by verifying this document's mechanism against the source
-rather than against the PR descriptions, which is worth noting: each one is a place where
-a code comment or a PR body described a stronger guarantee than the code implements.
+**#7619**, **#7620** and **#7621** were surfaced by verifying this document's mechanism
+against the source rather than against the PR descriptions, which is worth noting: each
+one is a place where a code comment or a PR body described a stronger guarantee than the
+code implements. Of those, **#7620** is now fixed — see the verdict fan-out above.
 
 - **#7619** — the BOOT restore path accepts a rebuilt environment container that the live
   path refuses (`container_replaced`). The two paths disagree on the same situation, and
   the boot outcome is the silently-blank-session the live refusal exists to prevent. Needs
   a decision, not just a patch.
-- **#7620** — `ContainerLivenessMonitor`'s verdict branch fails OPEN: with no explicit
-  `'running'` test, an out-of-contract status clears the latch and can fire `onRecovered`
-  instead of no-opping. Latent (one well-behaved seam owns the contract in production),
-  but the seam is an injection point.
 - **#7621** — the `environment_restarted` arm and clear halves read DIFFERENT rosters, so
   the fast path's correctness depends on #7552's tagging keeping them in sync.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched
