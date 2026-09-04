@@ -116,6 +116,32 @@ describe('app dispatch — container-lost state (#7603)', () => {
     expect(ss.containerReattachError).toBe('the environment now runs a different container');
   });
 
+  it('does NOT banner the ACTIVE session when the vanish names an unregistered session', () => {
+    // The app's message-append falls back to the active session (`effectiveId`)
+    // so a bubble is never dropped. The container-lost patch deliberately does
+    // NOT take that fallback: `resolveSessionId` only falls back when the field
+    // is EMPTY, so a message naming an id the client has never heard of resolves
+    // to that foreign id, while `effectiveId` silently collapses to the active
+    // session. Applying the patch through `effectiveId` would banner a session
+    // whose container is perfectly healthy.
+    //
+    // This is the one regression the surrounding code comment claims to prevent
+    // and nothing else here exercises — swapping `containerLost.sessionId` for
+    // `effectiveId` leaves every other test in this file green.
+    const store = arrange();
+    _testMessageHandler.handle(vanishMessage('ghost-session-not-in-store'));
+
+    // CONTROL: the bubble DID land on the active session, so the message really
+    // was processed down the effectiveId fallback — the null below is the
+    // patch's own targeting, not a dropped message.
+    const active = store.getState().sessionStates.s1;
+    expect(active.messages.some((m) => m.code === 'CONTAINER_VANISHED')).toBe(true);
+
+    expect(active.containerLostAt).toBeNull();
+    expect(active.containerReattachError).toBeNull();
+    expect(store.getState().sessionStates.s2.containerLostAt).toBeNull();
+  });
+
   it('leaves the state untouched for an ordinary error message', () => {
     const store = arrange();
     _testMessageHandler.handle({

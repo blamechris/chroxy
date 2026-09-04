@@ -96,6 +96,10 @@ function baseState(): Partial<ConnectionState> {
     addServerError: (e: unknown) => { serverErrors.push(e) },
     // session_stopped raises an info toast (#4878) on its way through dispatch.
     addInfoNotification: () => undefined,
+    // An unknown sessionId falls through to the flat message log, not to the
+    // active session's state — that fallback is exactly what this file's
+    // unregistered-session test exercises.
+    addMessage: () => undefined,
     appendTerminalData: () => undefined,
     serverProtocolVersion: null,
   } as unknown as Partial<ConnectionState>
@@ -170,6 +174,19 @@ describe('dashboard dispatch — container-lost state (#7603)', () => {
     handleMessage(vanishMessage(OTHER_SESSION_ID), ctx() as any)
     expect(store.getState().sessionStates[OTHER_SESSION_ID]!.containerLostAt).toBe(NOW)
     expect(store.getState().sessionStates[SESSION_ID]!.containerLostAt).toBeNull()
+  })
+
+  it('does NOT banner the ACTIVE session when the vanish names an unregistered session', () => {
+    // Cross-client parity with the app's test of the same name. The dashboard
+    // reaches this safely by a different route — its message-append falls back
+    // to the flat `addMessage`, not to the active session's state — but the
+    // INVARIANT is shared and is what both clients must hold: a vanish for a
+    // session this client does not know must banner nobody, least of all the
+    // session the user is looking at.
+    handleMessage(vanishMessage('ghost-session-not-in-store'), ctx() as any)
+
+    expect(store.getState().sessionStates[SESSION_ID]!.containerLostAt).toBeNull()
+    expect(store.getState().sessionStates[OTHER_SESSION_ID]!.containerLostAt).toBeNull()
   })
 
   it('leaves the state untouched for an ordinary error message', () => {
