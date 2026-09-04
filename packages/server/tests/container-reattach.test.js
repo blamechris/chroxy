@@ -947,8 +947,10 @@ describe('#7619 SessionManager._resolveRestoredContainerBinding — a REBUILT co
  *
  * #7552's `addSession`/`removeSession` tagging is what keeps those two in sync,
  * so this is a live DEPENDENCY rather than a live bug. These tests pin what each
- * divergence actually does, so that if the tagging ever stops holding, the
- * consequence is a red test rather than a silently dead latch.
+ * divergence DOES, including its bound: neither mode is permanent, because the
+ * 30s poll reads `_sessions` with no environmentId filter at all and therefore
+ * reaches both. They set the two rosters by hand — they do NOT exercise #7552's
+ * tagging, so they document the coupling rather than guarding that tagging.
  *
  * Drives the REAL SessionManager and the REAL WsServer over one environment
  * manager, with the two rosters set independently — the only way to construct
@@ -1000,8 +1002,15 @@ describe('#7621 environment_restarted — the arm and clear halves read differen
     m.destroyAll()
   })
 
+  // NOTE for a future fix: these two divergence tests LOCK IN today's behaviour.
+  // The only mutation that reddens DIVERGENCE A is unifying the two rosters —
+  // i.e. the actual fix for #7621. If that fix lands, update these rather than
+  // reading them as a regression.
   it('DIVERGENCE A — in `_sessions` but missing from `env.sessions`: armed by nothing, so no edge (degraded, not broken)', () => {
-    const { m, session, errors } = scenario({ envRoster: [], entryEnvironmentId: 'env-1' })
+    // A NON-EMPTY roster that does not contain s1: an empty one would trip the
+    // `sessions.length === 0` early return instead of exercising the loop miss
+    // this mode is actually about.
+    const { m, session, errors } = scenario({ envRoster: ['s-other'], entryEnvironmentId: 'env-1' })
 
     assert.deepEqual(errors, [], 'the arm half never saw it')
     assert.equal(session._containerVanishedNotified, false, 'so there was no latch to clear')
@@ -1014,16 +1023,32 @@ describe('#7621 environment_restarted — the arm and clear halves read differen
     m.destroyAll()
   })
 
-  it('DIVERGENCE B — in `env.sessions` but the entry is NOT tagged with that env: armed and never cleared, leaving a DEAD LATCH', () => {
+  it('DIVERGENCE B — in `env.sessions` but the entry is NOT tagged with that env: armed, and not cleared BY THE FAST PATH', async () => {
     const { m, session, errors } = scenario({ envRoster: ['s1'], entryEnvironmentId: null })
 
     assert.equal(errors.length, 1, 'the arm half surfaced the vanish')
     assert.equal(session._containerVanishedNotified, true, 'but the clear half never reached it')
-    // This is the harm, stated as the observable rather than as the mechanism:
-    // the latch is idempotent, so while it stays set a GENUINE second vanish is
-    // swallowed — exactly what the fast path exists to prevent.
-    assert.equal(session.notifyContainerVanished(), false, 'a real second vanish now surfaces NOTHING')
-    assert.equal(errors.length, 1, 'still one — the second vanish was swallowed by the dead latch')
+    // The harm, as the observable rather than the mechanism: the latch is
+    // idempotent, so while it stays set a GENUINE second vanish is swallowed.
+    assert.equal(session.notifyContainerVanished(), false, 'inside the window a real second vanish surfaces NOTHING')
+    assert.equal(errors.length, 1, 'still one — swallowed by the set latch')
+
+    // ...but the window is BOUNDED, and that bound is the point of this half of
+    // the test. `_listContainerLivenessTargets` carries NO environmentId filter,
+    // so the poll reaches a mis-tagged session that the fast path's clear half
+    // cannot, and one tick restores it. Mode B is worse than mode A only for the
+    // length of that window — not permanently.
+    assert.deepEqual(
+      m._listContainerLivenessTargets().map(t => t.sessionId), ['s1'],
+      'the poll enumerates it despite the mis-tag — it does not filter on environmentId',
+    )
+    await new ContainerLivenessMonitor({
+      enumerate: () => m._listContainerLivenessTargets(),
+      inspect: async () => 'running',
+      logger: silentLog,
+    })._tick()
+    assert.equal(session._containerVanishedNotified, false, 'ONE poll tick clears the latch the fast path missed')
+    assert.equal(session.notifyContainerVanished(), true, 'and a genuine vanish is visible again')
     m.destroyAll()
   })
 

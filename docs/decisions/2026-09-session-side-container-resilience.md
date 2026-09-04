@@ -160,21 +160,6 @@ The restore case is the interesting one: the session's `_containerId` now names 
 container, so the poll verdicts `'gone'`, and any later recovery edge lands on
 `container_replaced` — fail-visible, never a silent rebind onto the rebuilt container.
 
-**The two fast-path halves read different rosters (#7621).** The arm half
-(`WsServer._surfaceContainerVanishedForEnvironment`) iterates `env.sessions`; the clear
-half (`SessionManager.reattachEnvironmentSessions`) iterates `_sessions` filtered on
-`environmentId`. A recovery edge therefore exists only for a session in BOTH. The clear
-half's source is chosen to agree with the POLL — which matters, since those are the two
-paths that can produce an edge — but that makes it a disagreement with the fan-out it is
-ordered directly behind. The two divergences differ in severity: a session in `_sessions`
-only is armed by nothing and costs latency (the poll reads the same roster and still
-reaches it), while a session in `env.sessions` whose entry is tagged with a different env
-is armed and never cleared, leaving the latch SET — and because the latch is idempotent, a
-genuine second vanish in that window surfaces nothing, which is the exact failure the fast
-path exists to prevent. #7552's `addSession`/`removeSession` tagging is what holds the two
-rosters together, so this is a dependency rather than a live bug; both modes are pinned by
-tests so that a tagging regression goes red instead of silently dead.
-
 **Latch scope, precisely.** `surfaceContainerVanished`'s `_containerVanishedNotified`
 latch dedups the poll, the environment fast-path, the docker-cli exec-close and byok —
 every emitter that routes through the shared helper. The **docker-sdk turn-reject path is
@@ -269,8 +254,18 @@ a session present in BOTH. A session in `_sessions` but missing from `env.sessio
 armed by nothing and waits for the poll; a session in `env.sessions` whose entry carries a
 different or null `environmentId` is armed and never cleared by the fast path. #7552's
 `addSession` tagging is what keeps the two in sync, so the fast path's correctness depends
-on it. (The source comment justifies reading `_sessions` for agreement with the POLL, and
-is silent about the fan-out it is ordered behind.)
+on it.
+
+**Neither mode is permanent, and #7621 pins both.** The bound is the poll:
+`_listContainerLivenessTargets` carries NO `environmentId` filter, so it reaches a
+mis-tagged session the re-attach half cannot, and one tick clears the latch. So the second
+mode is worse than the first only for the length of that window — inside it the idempotent
+latch swallows a genuine second vanish — not forever. The source comment used to justify
+reading `_sessions` for agreement with the POLL while saying nothing about the fan-out it
+is ordered behind; it now names that dependency, both modes and their shared bound. The
+tests set the two rosters directly, so they document the coupling rather than guarding
+#7552's tagging, and they lock in TODAY's behaviour: unifying the rosters is the fix, and
+it is also the only thing that reddens them.
 
 **Which sessions this can reach** follows from invariant 3 above: env-bound implies
 `DockerSdkSession`, by construction. That is why the feature-detect on `reattachContainer`

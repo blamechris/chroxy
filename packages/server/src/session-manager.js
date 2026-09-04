@@ -4027,14 +4027,18 @@ export class SessionManager extends EventEmitter {
    *     no latch to clear and no edge. Costs latency only: the 30s poll reads
    *     this same roster and still reaches it.
    *   - in `env.sessions` but the entry is tagged with a different env (or null)
-   *     → armed here and never cleared, leaving the latch SET. The latch is
-   *     idempotent, so a genuine second vanish inside that window surfaces
-   *     NOTHING — the exact failure this fast path exists to prevent.
+   *     → armed here and NOT cleared by this fast path, so the latch stays SET
+   *     until the next poll tick. The latch is idempotent, so a genuine second
+   *     vanish inside that window surfaces NOTHING. Worse than the first mode,
+   *     but bounded the same way and not permanent: `_listContainerLivenessTargets`
+   *     carries no `environmentId` filter, so the poll reaches a mis-tagged
+   *     session this method cannot, and one tick clears it.
    *
    * #7552's `addSession`/`removeSession` tagging is what keeps the two rosters in
    * sync, which is why the second mode is a dependency rather than a live bug.
-   * Both modes are pinned by tests, so if that tagging stops holding the result
-   * is a red test rather than a silently dead latch.
+   * Both modes are pinned by tests — which set the two rosters directly and so
+   * document the coupling; they do NOT exercise that tagging and would not catch
+   * a regression in it.
    *
    * @param {string} envId
    * @param {string} [reason] the emitting event, for the log line
