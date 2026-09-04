@@ -35,12 +35,16 @@ export class ContainerLivenessMonitor {
    * @param {() => Array<{sessionId: string, containerId: string, session: object}>} opts.enumerate
    *   live containerized poll targets (session exposes notifyContainerVanished + holds a containerId)
    * @param {(containerId: string) => Promise<'running'|'gone'|'unknown'>} opts.inspect
+   * @param {(target: {sessionId: string, containerId: string, session: object}) => any} [opts.onRecovered]
+   *   #7602 — called once per RECOVERY EDGE (see _tick). Optional: without it the
+   *   poll only clears the latch, exactly as in #7601.
    * @param {number} [opts.intervalMs]
    * @param {object} [opts.logger]
    */
-  constructor({ enumerate, inspect, intervalMs = DEFAULT_LIVENESS_INTERVAL_MS, logger = log } = {}) {
+  constructor({ enumerate, inspect, onRecovered = null, intervalMs = DEFAULT_LIVENESS_INTERVAL_MS, logger = log } = {}) {
     this._enumerate = enumerate
     this._inspect = inspect
+    this._onRecovered = onRecovered
     this._intervalMs = intervalMs
     this._log = logger
     this._timer = null
@@ -80,6 +84,16 @@ export class ContainerLivenessMonitor {
    * container is gone (or clear the latch on the ones whose container is running
    * again). Every failure is contained: one bad inspect or one throwing session
    * must not abort the whole pass or wedge the interval.
+   *
+   * #7602 — the RECOVERY EDGE. `clearContainerVanished()` returns true only when
+   * it actually flipped the latch, i.e. exactly on the gone→running transition of
+   * a session that HAD vanished. `onRecovered` is invoked on that edge and only
+   * there, which is what keeps the re-attach from re-running on every healthy
+   * tick of a session that never vanished (30s apart, that would re-resolve the
+   * environment binding of every idle containerized session forever). A provider
+   * whose `clearContainerVanished` returns nothing — an older stub, or one that
+   * predates the boolean — yields NO edge, so the failure direction is "no
+   * reconnect attempted", never "reconnect attempted spuriously".
    */
   async _tick() {
     if (this._ticking) return
@@ -94,11 +108,14 @@ export class ContainerLivenessMonitor {
       for (const t of targets) {
         if (!t || !t.containerId || !t.session) continue
         const list = byContainer.get(t.containerId)
-        if (list) list.push(t.session)
-        else byContainer.set(t.containerId, [t.session])
+        // #7602: the whole TARGET is carried, not just the session — the
+        // recovery edge hands `sessionId` to onRecovered, which is what the
+        // SessionManager needs to find the entry's `environmentId`.
+        if (list) list.push(t)
+        else byContainer.set(t.containerId, [t])
       }
 
-      await Promise.all([...byContainer.entries()].map(async ([containerId, sessions]) => {
+      await Promise.all([...byContainer.entries()].map(async ([containerId, targets]) => {
         let status
         try {
           status = await this._inspect(containerId)
@@ -110,10 +127,19 @@ export class ContainerLivenessMonitor {
           status = 'unknown'
         }
         if (status === 'unknown') return // transient (daemon down / timeout) — leave the latch as-is
-        for (const session of sessions) {
+        for (const target of targets) {
+          const session = target.session
           try {
-            if (status === 'gone') session.notifyContainerVanished?.()
-            else session.clearContainerVanished?.()
+            if (status === 'gone') {
+              session.notifyContainerVanished?.()
+              continue
+            }
+            // #7602: only a genuine gone→running transition is a recovery edge.
+            // A throwing re-attach is contained by this loop's own catch below,
+            // like every other per-session call here — it must not abort the
+            // fan-out to the other sessions sharing this container.
+            if (session.clearContainerVanished?.() !== true) continue
+            if (this._onRecovered) await this._onRecovered(target)
           } catch (err) {
             this._log.warn(`container-liveness surface failed: ${err?.message || err}`)
           }

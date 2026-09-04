@@ -928,11 +928,20 @@ export class DockerByokSession extends ClaudeByokSession {
    * soon as it holds a container id, which is before start() finishes the
    * in-container setup. The pool's soiled mark is left in place: a container
    * that was stopped underneath a session is not offered to a successor.
+   *
+   * #7602 — returns whether the latch transitioned, so the poll can tell a
+   * recovery edge from a routine healthy tick. byok exposes no
+   * `reattachContainer`, so that edge is a no-op for it: the readiness restore
+   * above already IS the byok re-attach, and the exec-based re-attach is
+   * `DockerSdkSession`'s.
+   *
+   * @returns {boolean} true when the latch transitioned
    */
   clearContainerVanished() {
-    if (!this._containerVanishedNotified) return
+    if (!this._containerVanishedNotified) return false
     this._containerVanishedNotified = false
     if (this._containerId && !this._destroying) this._containerReady = true
+    return true
   }
 
   /**
