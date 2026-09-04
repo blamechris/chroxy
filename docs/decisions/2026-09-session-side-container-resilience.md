@@ -305,11 +305,33 @@ survive and the resumed turn is genuinely the same conversation. A REBUILT conta
 none of that, so re-pointing at it would resume the conversation as a silently blank one.
 Refusing is what prevents that.
 
-**That argument is live-path-specific, and the boot path does not share it.**
-`_resolveRestoredContainerBinding` never compares the persisted container id against the
-environment's current one — it accepts whatever the environment reports. So a rebuilt
-environment container is ACCEPTED on a daemon-restart restore and REFUSED live. See
-follow-ups.
+**The boot path refuses it the same way (#7619).** `_resolveRestoredContainerBinding`
+originally never compared the persisted container id against the environment's current
+one — it accepted whatever the environment reported — so a rebuilt container was REFUSED
+live and silently ACCEPTED on a daemon-restart restore. It now compares, and fails with
+the same `ENVIRONMENT_UNAVAILABLE` every other boot-path refusal uses, which lands in the
+#2954 failed-restore path: nothing is constructed, history is preserved on disk, and
+`session_restore_failed` fires.
+
+**This is the single statement of how the two paths treat a rebuilt container:**
+
+| | live (#7602, daemon up) | boot (daemon restart) |
+|---|---|---|
+| same container id | re-affirm the binding | restore normally |
+| DIFFERENT container id | refuse, `container_replaced` | refuse, `ENVIRONMENT_UNAVAILABLE` |
+| no persisted container id | n/a — the live session holds one | accept, and WARN that it is unverifiable |
+
+The counter-argument was considered and rejected: a restored session is a fresh process
+with no in-memory turn state, so the *SDK-transcript* half of the live reasoning is
+weaker at boot. But the *in-container state* half is not — a rebuilt container still
+lacks whatever the session installed or wrote — and what the user sees is identical
+either way: a conversation that silently lost its history. A visible refusal they can act
+on beats a session that returns blank.
+
+The last row is the one exception, and it is deliberate: a state file written before
+#7561 carries no binding to compare against. Refusing every one of those would strand
+sessions that merely upgraded across that boundary, so it is accepted — but logged, so
+"cannot verify" is never silently recorded as "nothing to verify".
 
 **#7602 is silent to clients on success.** A successful re-attach emits nothing on the
 session and broadcasts nothing — only a log line, and the fast path's return count is
@@ -335,12 +357,9 @@ above; the client surface is #7603.
 **#7619**, **#7620** and **#7621** were surfaced by verifying this document's mechanism
 against the source rather than against the PR descriptions, which is worth noting: each
 one is a place where a code comment or a PR body described a stronger guarantee than the
-code implements. Of those, **#7620** is now fixed — see the verdict fan-out above.
+code implements. Of those, **#7620** and **#7619** are now fixed — see the verdict
+fan-out and the rebuilt-container table above.
 
-- **#7619** — the BOOT restore path accepts a rebuilt environment container that the live
-  path refuses (`container_replaced`). The two paths disagree on the same situation, and
-  the boot outcome is the silently-blank-session the live refusal exists to prevent. Needs
-  a decision, not just a patch.
 - **#7621** — the `environment_restarted` arm and clear halves read DIFFERENT rosters, so
   the fast path's correctness depends on #7552's tagging keeping them in sync.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched

@@ -795,3 +795,143 @@ describe('#7602 WsServer environment_restarted — the immediate re-attach fast-
     assert.equal(warnings.filter(w => /re-attach fan-out failed/.test(w)).length, 1)
   })
 })
+
+// ───────────────────────────────────────────────────────────────────────────
+/**
+ * #7619 — the BOOT restore path must refuse a REBUILT environment container,
+ * matching what the live path (#7602) already does for the same situation.
+ *
+ * `_resolveRestoredContainerBinding` returned `info.containerId` verbatim, never
+ * comparing it against the persisted `saved.containerId`. So for one underlying
+ * situation — the environment's container was rebuilt while the session was
+ * bound to the old one — the live path surfaced a visible `container_replaced`
+ * refusal and the boot path SILENTLY rebound. The user-visible outcome of that
+ * silent rebind is the blank session the live refusal exists to prevent: a
+ * rebuilt container has none of the in-container `claude` install or the SDK
+ * transcript, so the "resumed" conversation knows nothing.
+ */
+describe('#7619 SessionManager._resolveRestoredContainerBinding — a REBUILT container is refused at boot', () => {
+  const saved = (over = {}) => ({ environmentId: 'env-1', containerId: 'ctr-created', ...over })
+
+  it('REFUSES when the environment now runs a DIFFERENT container than the one persisted', () => {
+    const env = envManagerStub({ info: { containerId: 'ctr-rebuilt' } })
+    const m = managerWith(env)
+    assert.throws(
+      () => m._resolveRestoredContainerBinding(saved()),
+      (err) => {
+        assert.equal(err.code, 'ENVIRONMENT_UNAVAILABLE', 'lands in the #2954 failed-restore path')
+        assert.match(err.message, /different container/, 'names the situation')
+        assert.ok(err.message.includes('ctr-rebuilt'), 'names the container found')
+        assert.ok(err.message.includes('ctr-created'), 'and the one the session was created in')
+        return true
+      },
+    )
+    m.destroyAll()
+  })
+
+  it('ACCEPTS the same container — a stop/start keeps the writable layer, so the session is genuinely resumable', () => {
+    const env = envManagerStub({
+      info: { containerId: 'ctr-created', containerUser: 'devuser', containerCliPath: '/opt/cli.js' },
+    })
+    const m = managerWith(env)
+    assert.deepEqual(m._resolveRestoredContainerBinding(saved()), {
+      environmentId: 'env-1',
+      containerId: 'ctr-created',
+      containerUser: 'devuser',
+      containerCliPath: '/opt/cli.js',
+    })
+    m.destroyAll()
+  })
+
+  it('PARITY: the live path and the boot path now refuse the SAME situation', () => {
+    // One environment, one rebuilt container, both entry points.
+    const env = envManagerStub({ info: { containerId: 'ctr-rebuilt' } })
+    const m = managerWith(env)
+
+    const s = envBoundSdkSession('ctr-created')
+    captureErrors(s)
+    s.notifyContainerVanished()
+    putEntry(m, 's1', { session: s, environmentId: 'env-1' })
+
+    const live = m._reattachEnvironmentBoundSession('s1')
+    assert.deepEqual(live, { reattached: false, reason: 'container_replaced' }, 'live refuses')
+    assert.equal(s._containerId, 'ctr-created', 'and never repoints the binding')
+
+    assert.throws(() => m._resolveRestoredContainerBinding(saved()), /different container/, 'boot refuses too')
+    m.destroyAll()
+  })
+
+  it('a state file with NO persisted containerId is accepted, and says so — cannot-compare is not nothing-to-compare', () => {
+    // Pre-#7561 state files carry no container binding at all. There is nothing
+    // to compare against, and refusing every one of them would strand sessions
+    // that upgraded across that boundary. It is accepted — but the unverifiable
+    // case is LOGGED rather than silent, which is the whole difference between
+    // this and the bug being fixed.
+    const env = envManagerStub({ info: { containerId: 'ctr-rebuilt' } })
+    const m = managerWith(env)
+    const warnings = []
+    setLogListener((e) => { if (e.level === 'warn') warnings.push(e.message) })
+    let out
+    try {
+      out = m._resolveRestoredContainerBinding(saved({ containerId: undefined }))
+    } finally { setLogListener(null) }
+
+    assert.equal(out.containerId, 'ctr-rebuilt', 'the legacy session still restores')
+    assert.equal(
+      warnings.filter(w => /cannot verify|unverified/i.test(w) && w.includes('env-1')).length, 1,
+      'an unverifiable binding must leave the operator a signal',
+    )
+    m.destroyAll()
+  })
+
+  // The two below run the REAL restoreState loop, because a resolver that throws
+  // into a caller which creates the session anyway would be no guard at all. The
+  // success case is the positive control: without it, `created === 0` would hold
+  // just as well on a restore loop that never executed a single iteration.
+  function bootWith(envContainerId, savedContainerId) {
+    const env = envManagerStub({ info: { containerId: envContainerId } })
+    const m = managerWith(env)
+    const failures = []
+    let created = 0
+    m.on('session_restore_failed', (e) => failures.push(e))
+    m.createSession = () => { created++; return 'b'.repeat(32) }
+    m._persistence.restoreState = () => ({
+      version: 1,
+      sessions: [{
+        id: 'a'.repeat(32), name: 'Session 1', cwd: '/tmp',
+        environmentId: 'env-1', containerId: savedContainerId,
+        history: [{ role: 'user', content: 'hi' }],
+      }],
+    })
+    m.restoreState()
+    return { m, failures, created }
+  }
+
+  it('END-TO-END: a rebuilt container fails the restore LOUDLY and constructs no session', () => {
+    const { m, failures, created } = bootWith('ctr-rebuilt', 'ctr-created')
+    assert.equal(created, 0, 'nothing is constructed — the refusal is total')
+    assert.equal(failures.length, 1, 'the operator gets a session_restore_failed')
+    assert.equal(failures[0].errorCode, 'ENVIRONMENT_UNAVAILABLE')
+    assert.equal(failures[0].originalHistoryPreserved, true, 'history stays on disk for a retry')
+    assert.match(failures[0].errorMessage, /different container/)
+    m.destroyAll()
+  })
+
+  it('POSITIVE CONTROL: the same container restores normally through that identical path', () => {
+    const { m, failures, created } = bootWith('ctr-created', 'ctr-created')
+    assert.equal(created, 1, 'the restore loop really does reach createSession')
+    assert.deepEqual(failures, [])
+    m.destroyAll()
+  })
+
+  it('the BARE-containerId path (no environment) is untouched — there is no registry to compare against', () => {
+    const env = envManagerStub({ info: { containerId: 'ctr-rebuilt' } })
+    const m = managerWith(env)
+    assert.deepEqual(
+      m._resolveRestoredContainerBinding({ containerId: 'ctr-bare', containerUser: 'devuser' }),
+      { containerId: 'ctr-bare', containerUser: 'devuser', containerCliPath: undefined },
+    )
+    assert.deepEqual(env.calls.getContainerInfo, [], 'no environment lookup happens at all')
+    m.destroyAll()
+  })
+})
