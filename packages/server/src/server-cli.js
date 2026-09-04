@@ -1478,11 +1478,11 @@ export async function startCliServer(config) {
       .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
-  // #7606: orphaned-child reaper — SIGKILL work a dead session left reparented
-  // to pid 1 inside chroxy's own worktree root (ppid 1 + this uid + cwd under
-  // the root + older than minAgeMs). Default ON; the sweep is a no-op on
-  // Windows. Same lazy-import / getter-at-shutdown shape as the worktree
-  // reaper above.
+  // #7606: orphaned-child reaper — sends SIGKILL to processes a dead session
+  // left behind, reparented to pid 1 inside chroxy's own worktree root (ppid 1
+  // + this uid + cwd under the root + older than minAgeMs). Default ON; the
+  // sweep is a no-op on Windows. Same lazy-import / getter-at-shutdown shape
+  // as the worktree reaper above.
   let orphanReapTimer = null
   if (config.orphanReap?.enabled !== false) {
     import('./orphan-reaper.js')
