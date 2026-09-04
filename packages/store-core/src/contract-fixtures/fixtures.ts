@@ -94,10 +94,18 @@ export interface FixtureInitialState {
  * unresolved import is a build error where a typo'd `'__any_number__'` would
  * simply deep-equal against a string and fail for the wrong reason.
  *
- * Only the per-session field slice ({@link FixtureExpectation.sessions})
- * resolves matchers. In any other slice a matcher is deep-equalled against the
- * actual value and FAILS — loudly, and in the safe direction, rather than being
- * silently skipped.
+ * WHICH CONSUMERS RESOLVE A MATCHER — the slice alone does not decide this.
+ * Only the two SWITCH_FIXTURES harnesses (`contract-switch.test.ts` in the app
+ * and the dashboard) resolve matchers, and only in the per-session field slice
+ * ({@link FixtureExpectation.sessions}). `contract.test.ts`, which drives
+ * DISPATCH_FIXTURES, reads that SAME `sessions` slice and has no matcher
+ * awareness at all.
+ *
+ * Everywhere a matcher is not resolved it is deep-equalled against the actual
+ * value and FAILS — loudly, and in the safe direction, rather than being
+ * silently skipped. Verified by probe rather than assumed, on both unresolved
+ * paths: a matcher in `expect.flat`, and a matcher in a DISPATCH_FIXTURES row's
+ * `sessions` slice, each produce a legible function-vs-value diff.
  */
 export type FixtureFieldMatcher = (actual: unknown) => boolean
 
@@ -3063,9 +3071,16 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
   {
     name: 'an ordinary error leaves an armed container-lost state untouched (both clients)',
     type: 'message',
-    // Seeded ARMED, because the claim is that an uncoded error does not DISTURB
-    // the state. Against a fresh (null) session both assertions would hold for
-    // free whether or not the parse is code-gated at all.
+    // Seeded ARMED because of ONE regression a fresh session cannot see: an
+    // uncoded error that over-eagerly CLEARS the state. That writes
+    // `{ containerLostAt: null, containerReattachError: null }`, which against a
+    // fresh session is null -> null and invisible; against this seed it is red.
+    //
+    // The neighbouring regression — the code gate dropped, so the vanish patch
+    // is applied to every error — is caught either way, because `containerLostAt`
+    // transitions to a clock reading whatever the seed was. An earlier draft of
+    // this comment claimed the fresh seed made BOTH assertions hold for free;
+    // that was wrong, and measured wrong (both mutations were run).
     init: {
       activeSessionId: 's1',
       sessions: { s1: { containerLostAt: 1700000000000, containerReattachError: 'refused' } },
