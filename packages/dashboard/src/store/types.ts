@@ -2109,6 +2109,10 @@ export interface ConnectionState {
   setSessionNotFoundError: (err: SessionNotFoundErrorState | null) => void;
   dismissSessionNotFoundError: () => void;
 
+  // #7603 — dismiss the per-session container-lost banner. No-op for an
+  // unknown sessionId.
+  dismissContainerLost: (sessionId: string) => void;
+
   // Dev server preview
   closeDevPreview: (port: number) => void;
 

@@ -29,6 +29,8 @@ describe('createEmptyBaseSessionState', () => {
       // #4879: quiet "Stop confirmed" marker — null until session_stopped lands
       stoppedAt: null,
       stoppedCode: null,
+      containerLostAt: null,
+      containerReattachError: null,
       activeAgents: [],
       activeTools: [],
       // #4307: empty array on init — populated by background_work_changed

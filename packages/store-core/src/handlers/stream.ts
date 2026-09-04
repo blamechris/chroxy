@@ -17,6 +17,8 @@ import { getReplayWindowDepth } from '../replay-reconcile'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
+import type { SessionPatch } from './_shared'
+import { handleContainerLost } from './session-lifecycle'
 
 // ---------------------------------------------------------------------------
 // message
@@ -53,6 +55,18 @@ export type MessagePayload =
        * surface it via `Alert.alert('Usage Limit', errorContent)`). Null otherwise.
        */
       errorContent: string | null
+      /**
+       * #7603 — session patch for the container-health state, or null when
+       * this message carries none of the container codes (the overwhelming
+       * majority). Produced ONLY for live messages: see
+       * {@link handleContainerLost} for why replay must not arm the banner.
+       *
+       * Callers apply it to the session it names, in addition to appending
+       * the chat message. Both clients apply the SAME patch — the state is
+       * parsed once here so a client cannot reach into the wire payload and
+       * derive its own variant.
+       */
+      containerLostPatch: SessionPatch | null
     }
 
 /**
@@ -76,9 +90,15 @@ export type MessagePayload =
  *   `isRateLimitError: true` and `errorContent` so the caller can surface a
  *   platform-specific alert.
  *
- * `_activeSessionId` is preserved as a reserved parameter for signature
- * compatibility — both call sites re-derive their own session id locally
- * (#3149 dropped the unused `sessionId` from the payload).
+ * - #7603: parses the container-health codes into `containerLostPatch` (null
+ *   for every other message, and always null during replay).
+ *
+ * `activeSessionId` was a reserved, unused parameter from #3149 (which dropped
+ * the payload's `sessionId` because both call sites re-derive their own for
+ * replay-dedup). #7603 gave it a use: `containerLostPatch` names the session it
+ * targets, and resolving that here is what keeps the two clients from each
+ * inventing a fallback. The dispatch-side session resolution is unchanged —
+ * call sites still derive their own.
  *
  * The caller still owns the thinking-placeholder filter and the
  * `addMessage` vs `updateSession` choice — this helper returns the built
@@ -176,7 +196,7 @@ function parseMcpPromptExpansion(value: unknown): ChatMessage['mcpPromptExpansio
 
 export function handleMessage(
   msg: Record<string, unknown>,
-  _activeSessionId: string | null,
+  activeSessionId: string | null,
   receivingHistoryReplay: boolean,
   cachedMessages: readonly ChatMessage[],
 ): MessagePayload {
@@ -308,11 +328,25 @@ export function handleMessage(
     }
   }
 
+  // #7603 — container-health codes (CONTAINER_VANISHED / ENVIRONMENT_UNAVAILABLE)
+  // ride in on this same `error` envelope. Parsed here, in the one place both
+  // clients already funnel `message` through, so the dashboard and the app
+  // cannot derive different states from the same payload.
+  //
+  // Gated on `!receivingHistoryReplay`: the vanish is an ordinary chat entry
+  // and IS replayed on reconnect, so arming from replay would resurrect the
+  // banner for an outage that has long since ended. Nothing is hidden by the
+  // gate — a container that is still gone re-surfaces on the next turn.
+  const containerLostPatch = receivingHistoryReplay
+    ? null
+    : handleContainerLost(msg, activeSessionId)
+
   return {
     shouldDispatch: true,
     chatMessage,
     isRateLimitError,
     errorContent,
+    containerLostPatch,
   }
 }
 

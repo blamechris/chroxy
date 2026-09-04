@@ -347,6 +347,25 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].stoppedCode : null;
   });
+  // #7603: the active session's container-health state. Set from a LIVE
+  // error{code:'CONTAINER_VANISHED'} (#7599); released by a completed turn or
+  // an explicit dismiss. Drives the reconnect-oriented banner below — which is
+  // deliberately NOT the crash banner: the daemon re-enters the container by
+  // itself once it is running again (#7602), so crash copy would push the user
+  // to delete a session that is about to recover.
+  const activeContainerLostAt = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].containerLostAt : null;
+  });
+  // Non-null once the daemon TRIED to re-enter the container and refused —
+  // usually because the environment's container was rebuilt and carries none of
+  // this session's state. Switches the banner from "waiting" to "needs
+  // attention".
+  const activeContainerReattachError = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].containerReattachError : null;
+  });
+  const dismissContainerLost = useConnectionStore((s) => s.dismissContainerLost);
   const isPlanPending = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].isPlanPending : false;
@@ -1537,7 +1556,52 @@ export function SessionScreen() {
           stopped for clean exits per CliSession._handleChildClose). The
           strip auto-clears on the next `claude_ready` (typically when
           the operator sends another message). */}
-      {activeSessionHealth !== 'crashed' && activeSessionStoppedAt !== null && (
+      {/* #7603: container-stopped banner. Third rung of the mutual-exclusion
+          ladder (crashed > container-lost > stopped): a vanished container is
+          neither a crash nor a user-initiated Stop, and stacking two banners
+          on one session reads as two separate faults. Suppressed under the
+          crash banner for the same reason the stopped strip is.
+
+          Copy is reconnect-oriented, NOT "Session crashed. Delete this
+          session." — this state recovers on its own (#7602) and the delete
+          affordance would destroy the session that is about to come back. */}
+      {activeSessionHealth !== 'crashed' && activeContainerLostAt !== null && (
+        <View
+          testID="container-lost-banner"
+          style={[styles.reconnectingBanner, styles.warningBanner]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              testID="container-lost-banner-text"
+              style={styles.warningBannerText}
+              numberOfLines={2}
+            >
+              {activeContainerReattachError
+                ? 'Container stopped — chroxy could not re-enter it. Needs attention.'
+                : "Container stopped — this session will re-enter it automatically once it's running again."}
+            </Text>
+            <TouchableOpacity
+              testID="container-lost-banner-dismiss"
+              onPress={() => {
+                if (activeSessionId) dismissContainerLost(activeSessionId);
+              }}
+              // 48dp: Material's floor, which the repo prefers over the 44pt
+              // iOS minimum wherever the layout allows. The banner row has the
+              // height for it, so the visible control IS the hit area rather
+              // than an undersized box widened invisibly by hitSlop.
+              style={styles.containerLostDismiss}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss container-stopped notice"
+            >
+              <Icon name="close" size={14} color={COLORS.accentOrange} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* #7603: the stopped strip now also yields to the container-lost banner
+          (see the ladder note above). */}
+      {activeSessionHealth !== 'crashed' && activeContainerLostAt === null && activeSessionStoppedAt !== null && (
         <View
           testID="session-stopped-banner"
           style={[styles.reconnectingBanner, styles.stoppedBanner]}
@@ -2156,6 +2220,14 @@ const styles = StyleSheet.create({
   // reads it as a calm confirmation rather than an error.
   stoppedBanner: {
     backgroundColor: COLORS.backgroundCard,
+  },
+  // #7603: 48x48 tap target for the container-lost dismiss (Material's floor;
+  // the repo's rule is 44pt minimum, 48dp preferred on the mobile app).
+  containerLostDismiss: {
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   stoppedBannerText: {
     color: COLORS.textMuted,

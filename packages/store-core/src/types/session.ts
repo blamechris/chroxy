@@ -453,6 +453,65 @@ export interface BaseSessionState {
    * 0 is the common clean-exit case and renders bare.
    */
   stoppedCode: number | null;
+  /**
+   * #7603 — wall-clock timestamp (Date.now()) of the most recent LIVE
+   * `error{code:'CONTAINER_VANISHED'}` for this session, i.e. the server
+   * observed that the Docker container backing this session is no longer
+   * running (stopped, restarted, or removed — #7599/#7600/#7601). Null when
+   * the session is not in the container-lost state.
+   *
+   * Deliberately a THIRD axis, independent of both `health` (the binary
+   * `healthy | crashed` unexpected-exit signal) and the activity rollup's
+   * "failed" state: a vanished container is neither a crashed session nor a
+   * failed turn. The session object is alive and its binding is intact — the
+   * server re-enters the container automatically once it returns (#7602) —
+   * so rendering it through the crash path would tell the user to delete a
+   * session that is going to recover.
+   *
+   * Set ONLY from a live message, never from history replay: the vanish is a
+   * normal chat `error` entry and IS replayed on reconnect, so arming from
+   * replay would resurrect a banner for an outage that ended hours ago. A
+   * still-gone container re-surfaces on the next turn regardless
+   * (`DockerSdkSession._classifyContainerFailure` re-emits per turn), so the
+   * live-only gate cannot hide an ongoing outage.
+   *
+   * Cleared by a completed turn (`result` — see `clearContainerLostPatch`)
+   * or by an explicit user dismiss. Two things deliberately do NOT clear it,
+   * and both look like obvious fixes:
+   *
+   * 1. A RECONNECT. #4909 clears `stoppedAt`/`stoppedCode` on
+   *    `history_replay_start`, because that state is transient, is not
+   *    replayed, and would otherwise flash back into view. Copying that here
+   *    would be a false-safety bug: the server's vanish latch
+   *    (`surfaceContainerVanished`'s `_containerVanishedNotified`) is reset
+   *    ONLY by the liveness poll observing the container running again, so a
+   *    client that reconnects while the container is STILL gone receives no
+   *    fresh vanish. Clearing on reconnect would hand that user a
+   *    healthy-looking session over a dead container until their next turn
+   *    failed. The cost of not clearing is a stale banner on a session that
+   *    recovered while the client was away — over-warning, which dismiss and
+   *    the next completed turn both resolve. That is the direction to fail in.
+   *
+   * 2. `claude_ready`, which is what `stoppedAt` uses: the server re-sends `claude_ready` on every
+   * reconnect and session switch whenever `session.isReady` is true
+   * (ws-history `sendSessionInfo`), and `isReady` describes the child
+   * process, not the container — so clearing on it would silently drop the
+   * banner while the container was still gone.
+   */
+  containerLostAt: number | null;
+  /**
+   * #7603 — why an automatic re-entry into the container was REFUSED, taken
+   * from the server's `error{code:'ENVIRONMENT_UNAVAILABLE'}` message
+   * (#7602 `_reattachEnvironmentBoundSession`). Null while the session is
+   * merely container-lost and a re-entry may still succeed.
+   *
+   * Present means the recovery path ran and declined — most importantly when
+   * the environment's container was REBUILT, so it carries none of this
+   * session's in-container state and resuming into it would silently produce
+   * a blank conversation. Renderers use presence to switch the banner from
+   * "waiting to reconnect" to "reconnect failed / needs attention".
+   */
+  containerReattachError: string | null;
   activeAgents: AgentInfo[];
   /**
    * #4308 — in-flight tool calls for this session, in arrival order. See

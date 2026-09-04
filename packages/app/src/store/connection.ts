@@ -182,6 +182,9 @@ import {
   // immediately without waiting on the round-trip.
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
+  // #7603: the one place the container-lost fields are cleared, shared with the
+  // dashboard so a dismiss means the same thing on both clients.
+  clearContainerLostPatch,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -2599,6 +2602,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       serverErrors: state.serverErrors.filter((e) => e.id !== id),
     }));
+  },
+
+  // #7603 — manual escape from the container-lost banner. The state is
+  // otherwise released only by a completed turn (`result`), the one positive
+  // proof the container works again. Uses the shared `clearContainerLostPatch()`
+  // so dismiss and turn-completion cannot clear different field sets, on either
+  // client.
+  dismissContainerLost: (sessionId: string) => {
+    if (!get().sessionStates[sessionId]) return;
+    updateSession(sessionId, () => clearContainerLostPatch());
   },
 
   dismissSessionNotification: (id: string) => {

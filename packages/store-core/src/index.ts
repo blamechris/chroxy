@@ -671,6 +671,14 @@ export {
   // #4879: quiet "user-initiated Stop" confirmation handler — flips
   // stoppedAt/stoppedCode on the target session for the inline status strip
   handleSessionStopped,
+  // #7603: per-session container-health state. `handleContainerLost` parses the
+  // server's CONTAINER_VANISHED / ENVIRONMENT_UNAVAILABLE codes off the `error`
+  // chat envelope (they do NOT arrive as `session_error`);
+  // `clearContainerLostPatch` is the single release path both clients share.
+  handleContainerLost,
+  clearContainerLostPatch,
+  CONTAINER_VANISHED_CODE,
+  ENVIRONMENT_UNAVAILABLE_CODE,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,

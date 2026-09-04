@@ -678,6 +678,9 @@ export interface FileGitDiffActions {
  */
 export interface ServerNotificationActions {
   dismissServerError: (id: string) => void;
+  // #7603 — dismiss the per-session container-lost banner. No-op for an
+  // unknown sessionId.
+  dismissContainerLost: (sessionId: string) => void;
   dismissSessionNotification: (id: string) => void;
   dismissTimeoutWarning: () => void;
   // #4542: notification-prefs round-trip. `refresh` sends

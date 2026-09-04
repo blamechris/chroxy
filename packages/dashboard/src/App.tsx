@@ -51,6 +51,7 @@ import { ActivityIndicator, findInFlightToolUse } from './components/ActivityInd
 import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
+import { ContainerLostBanner } from './components/ContainerLostBanner'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ExposureWarningBanner } from './components/ExposureWarningBanner'
@@ -590,6 +591,30 @@ export function App() {
   // the operator a calm explanation while pointing at the sidebar.
   const sessionNotFoundError = useConnectionStore(s => s.sessionNotFoundError)
   const dismissSessionNotFoundError = useConnectionStore(s => s.dismissSessionNotFoundError)
+  // #7603 — the active session's container-health state. Subscribed as two
+  // primitives rather than the session object so a tab switch (or any other
+  // field on that session moving) doesn't re-render the whole App shell.
+  const activeContainerLostAt = useConnectionStore(s =>
+    s.activeSessionId ? (s.sessionStates[s.activeSessionId]?.containerLostAt ?? null) : null,
+  )
+  const activeContainerReattachError = useConnectionStore(s =>
+    s.activeSessionId
+      ? (s.sessionStates[s.activeSessionId]?.containerReattachError ?? null)
+      : null,
+  )
+  const dismissContainerLost = useConnectionStore(s => s.dismissContainerLost)
+  // #7603 — content of the most recent user turn, for the banner's Retry.
+  // Same "resend the last user message" contract StreamStallChip already uses
+  // (#4476): a fresh turn either succeeds — which clears the banner via the
+  // `result` path — or re-surfaces the vanish. Null when the session has no
+  // user turn yet, which hides the button rather than rendering a dead one.
+  const lastUserInputContent = useMemo(() => {
+    for (let i = storeMessages.length - 1; i >= 0; i--) {
+      const m = storeMessages[i]
+      if (m && m.type === 'user_input') return m.content
+    }
+    return null
+  }, [storeMessages])
   const destroySession = useConnectionStore(s => s.destroySession)
   const renameSession = useConnectionStore(s => s.renameSession)
   const createSession = useConnectionStore(s => s.createSession)
@@ -2746,6 +2771,24 @@ export function App() {
                     message={sessionNotFoundError.message}
                     attemptedSessionId={sessionNotFoundError.attemptedSessionId}
                     onDismiss={dismissSessionNotFoundError}
+                  />
+                )}
+                {/* #7603 — per-session container-stopped banner. Sits in the
+                    same slot as the SESSION_NOT_FOUND chip so it is visible on
+                    the first frame regardless of which pane is showing. Driven
+                    off the active session's own state, so a background
+                    session's outage does not banner the session in view. */}
+                {activeContainerLostAt !== null && (
+                  <ContainerLostBanner
+                    reattachError={activeContainerReattachError}
+                    onRetry={
+                      lastUserInputContent
+                        ? () => sendInput(lastUserInputContent)
+                        : undefined
+                    }
+                    onDismiss={() => {
+                      if (activeSessionId) dismissContainerLost(activeSessionId)
+                    }}
                   />
                 )}
                 {connectionPhase === 'connecting' ? (
