@@ -160,6 +160,21 @@ The restore case is the interesting one: the session's `_containerId` now names 
 container, so the poll verdicts `'gone'`, and any later recovery edge lands on
 `container_replaced` — fail-visible, never a silent rebind onto the rebuilt container.
 
+**The two fast-path halves read different rosters (#7621).** The arm half
+(`WsServer._surfaceContainerVanishedForEnvironment`) iterates `env.sessions`; the clear
+half (`SessionManager.reattachEnvironmentSessions`) iterates `_sessions` filtered on
+`environmentId`. A recovery edge therefore exists only for a session in BOTH. The clear
+half's source is chosen to agree with the POLL — which matters, since those are the two
+paths that can produce an edge — but that makes it a disagreement with the fan-out it is
+ordered directly behind. The two divergences differ in severity: a session in `_sessions`
+only is armed by nothing and costs latency (the poll reads the same roster and still
+reaches it), while a session in `env.sessions` whose entry is tagged with a different env
+is armed and never cleared, leaving the latch SET — and because the latch is idempotent, a
+genuine second vanish in that window surfaces nothing, which is the exact failure the fast
+path exists to prevent. #7552's `addSession`/`removeSession` tagging is what holds the two
+rosters together, so this is a dependency rather than a live bug; both modes are pinned by
+tests so that a tagging regression goes red instead of silently dead.
+
 **Latch scope, precisely.** `surfaceContainerVanished`'s `_containerVanishedNotified`
 latch dedups the poll, the environment fast-path, the docker-cli exec-close and byok —
 every emitter that routes through the shared helper. The **docker-sdk turn-reject path is
@@ -367,8 +382,9 @@ above; the client surface is #7603.
 **#7619**, **#7620** and **#7621** were surfaced by verifying this document's mechanism
 against the source rather than against the PR descriptions, which is worth noting: each
 one is a place where a code comment or a PR body described a stronger guarantee than the
-code implements. Of those, **#7620** and **#7619** are now fixed — see the verdict
-fan-out and the rebuilt-container table above.
+code implements. All three are now closed: **#7620** (the verdict fan-out), **#7619**
+(the rebuilt-container table) and **#7621** (the two fast-path rosters), each documented
+in the mechanism sections above.
 
 - **#7625** — a rebuilt-container restore failure is TERMINAL: unlike the other refusal
   arms it cannot be cleared by fixing the environment, and `clearFailedRestore` has no
@@ -378,8 +394,6 @@ fan-out and the rebuilt-container table above.
   nothing consumes the `environment_restored` event it emits, so those sessions would be
   permanently unrestorable under #7619. Latent only: `snapshot()`/`restore()` have no
   production caller today (tests only). Worth wiring before they get one.
-- **#7621** — the `environment_restarted` arm and clear halves read DIFFERENT rosters, so
-  the fast path's correctness depends on #7552's tagging keeping them in sync.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched
   test files rather than by the shared switch-fixture anti-drift harness, which cannot
   currently assert non-`messages` session-state fields.

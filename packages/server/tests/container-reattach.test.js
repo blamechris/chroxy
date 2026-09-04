@@ -935,3 +935,108 @@ describe('#7619 SessionManager._resolveRestoredContainerBinding — a REBUILT co
     m.destroyAll()
   })
 })
+
+// ───────────────────────────────────────────────────────────────────────────
+/**
+ * #7621 — the `environment_restarted` fast path runs two fan-outs that read
+ * DIFFERENT rosters, and a recovery edge exists only for a session in BOTH:
+ *
+ *   arm   — `WsServer._surfaceContainerVanishedForEnvironment` → `env.sessions`
+ *   clear — `SessionManager.reattachEnvironmentSessions`       → `_sessions`
+ *                                                      filtered on environmentId
+ *
+ * #7552's `addSession`/`removeSession` tagging is what keeps those two in sync,
+ * so this is a live DEPENDENCY rather than a live bug. These tests pin what each
+ * divergence actually does, so that if the tagging ever stops holding, the
+ * consequence is a red test rather than a silently dead latch.
+ *
+ * Drives the REAL SessionManager and the REAL WsServer over one environment
+ * manager, with the two rosters set independently — the only way to construct
+ * the divergence at all.
+ */
+describe('#7621 environment_restarted — the arm and clear halves read different rosters', () => {
+  class WsServer extends _WsServer {
+    constructor(opts = {}) { super({ noEncrypt: true, ...opts }) }
+    start(...args) { super.start(...args); setLogListener(null) }
+  }
+
+  // One object serving BOTH halves: `get()` (+ the event) for the arm side,
+  // `getContainerInfo()` for the clear side's re-attach.
+  function couplingEnv(sessions, { containerId = 'ctr-env' } = {}) {
+    const mgr = new EventEmitter()
+    const env = { id: 'env-1', name: 'e', sessions }
+    mgr.list = () => [env]
+    mgr.get = (id) => (id === 'env-1' ? env : null)
+    mgr.getContainerInfo = (id) => {
+      if (id !== 'env-1') throw new Error('no such environment')
+      return { containerId }
+    }
+    mgr.addSession = () => {}
+    mgr.removeSession = () => {}
+    return { mgr, env }
+  }
+
+  let server
+  afterEach(() => { if (server) { server.close(); server = null } })
+
+  function scenario({ envRoster, entryEnvironmentId }) {
+    const { mgr: envManager } = couplingEnv(envRoster)
+    const m = new SessionManager({ stateFilePath: tmpStateFile(), cwd: '/tmp', environmentManager: envManager })
+    const session = envBoundSdkSession('ctr-env')
+    const errors = captureErrors(session)
+    putEntry(m, 's1', { session, environmentId: entryEnvironmentId })
+    server = new WsServer({ port: 0, apiToken: 't', sessionManager: m, environmentManager: envManager })
+    envManager.emit('environment_restarted', { id: 'env-1', name: 'e' })
+    return { m, session, errors }
+  }
+
+  it('IN SYNC (control): present in both rosters → armed, then cleared, so the latch is free again', () => {
+    const { m, session, errors } = scenario({ envRoster: ['s1'], entryEnvironmentId: 'env-1' })
+
+    assert.equal(errors.length, 1, 'the arm half surfaced exactly one vanish')
+    assert.equal(session._containerVanishedNotified, false, 'the clear half released the latch')
+    // The property that matters downstream: a genuine LATER vanish is visible.
+    assert.equal(session.notifyContainerVanished(), true, 'a real second vanish still surfaces')
+    m.destroyAll()
+  })
+
+  it('DIVERGENCE A — in `_sessions` but missing from `env.sessions`: armed by nothing, so no edge (degraded, not broken)', () => {
+    const { m, session, errors } = scenario({ envRoster: [], entryEnvironmentId: 'env-1' })
+
+    assert.deepEqual(errors, [], 'the arm half never saw it')
+    assert.equal(session._containerVanishedNotified, false, 'so there was no latch to clear')
+    // Nothing is wedged: the 30s poll still reaches it, because the poll reads
+    // the SAME roster the clear half does.
+    assert.deepEqual(
+      m._listContainerLivenessTargets().map(t => t.sessionId), ['s1'],
+      'the poll still enumerates it — this mode costs latency, not correctness',
+    )
+    m.destroyAll()
+  })
+
+  it('DIVERGENCE B — in `env.sessions` but the entry is NOT tagged with that env: armed and never cleared, leaving a DEAD LATCH', () => {
+    const { m, session, errors } = scenario({ envRoster: ['s1'], entryEnvironmentId: null })
+
+    assert.equal(errors.length, 1, 'the arm half surfaced the vanish')
+    assert.equal(session._containerVanishedNotified, true, 'but the clear half never reached it')
+    // This is the harm, stated as the observable rather than as the mechanism:
+    // the latch is idempotent, so while it stays set a GENUINE second vanish is
+    // swallowed — exactly what the fast path exists to prevent.
+    assert.equal(session.notifyContainerVanished(), false, 'a real second vanish now surfaces NOTHING')
+    assert.equal(errors.length, 1, 'still one — the second vanish was swallowed by the dead latch')
+    m.destroyAll()
+  })
+
+  it('the two rosters are the ONLY thing that differs — same session, same event, opposite outcomes', () => {
+    // Side-by-side, so the coupling is legible without diffing two tests: the
+    // ONLY difference is which roster the session appears in.
+    const a = scenario({ envRoster: ['s1'], entryEnvironmentId: 'env-1' })
+    a.m.destroyAll()
+    server.close(); server = null
+    const b = scenario({ envRoster: ['s1'], entryEnvironmentId: 'other-env' })
+
+    assert.equal(a.session._containerVanishedNotified, false, 'tagged → latch released')
+    assert.equal(b.session._containerVanishedNotified, true, 'mis-tagged → latch stuck')
+    b.m.destroyAll()
+  })
+})
