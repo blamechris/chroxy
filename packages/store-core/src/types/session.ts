@@ -476,8 +476,23 @@ export interface BaseSessionState {
    * live-only gate cannot hide an ongoing outage.
    *
    * Cleared by a completed turn (`result` — see `clearContainerLostPatch`)
-   * or by an explicit user dismiss. NOT cleared by `claude_ready`, which is
-   * what `stoppedAt` uses: the server re-sends `claude_ready` on every
+   * or by an explicit user dismiss. Two things deliberately do NOT clear it,
+   * and both look like obvious fixes:
+   *
+   * 1. A RECONNECT. #4909 clears `stoppedAt`/`stoppedCode` on
+   *    `history_replay_start`, because that state is transient, is not
+   *    replayed, and would otherwise flash back into view. Copying that here
+   *    would be a false-safety bug: the server's vanish latch
+   *    (`surfaceContainerVanished`'s `_containerVanishedNotified`) is reset
+   *    ONLY by the liveness poll observing the container running again, so a
+   *    client that reconnects while the container is STILL gone receives no
+   *    fresh vanish. Clearing on reconnect would hand that user a
+   *    healthy-looking session over a dead container until their next turn
+   *    failed. The cost of not clearing is a stale banner on a session that
+   *    recovered while the client was away — over-warning, which dismiss and
+   *    the next completed turn both resolve. That is the direction to fail in.
+   *
+   * 2. `claude_ready`, which is what `stoppedAt` uses: the server re-sends `claude_ready` on every
    * reconnect and session switch whenever `session.isReady` is true
    * (ws-history `sendSessionInfo`), and `isReady` describes the child
    * process, not the container — so clearing on it would silently drop the
