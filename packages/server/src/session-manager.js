@@ -835,6 +835,9 @@ export class SessionManager extends EventEmitter {
       ? new ContainerLivenessMonitor({
         enumerate: () => this._listContainerLivenessTargets(),
         inspect: containerInspect,
+        // #7602: the live re-attach hangs off the poll's recovery edge — the
+        // one moment we KNOW a vanished session's container is running again.
+        onRecovered: ({ sessionId }) => this._reattachEnvironmentBoundSession(sessionId),
         ...(containerLivenessIntervalMs != null ? { intervalMs: containerLivenessIntervalMs } : {}),
       })
       : null
@@ -3937,6 +3940,168 @@ export class SessionManager extends EventEmitter {
       targets.push({ sessionId, containerId, session })
     }
     return targets
+  }
+
+  /**
+   * #7602 — fan a recovery edge across every live session bound to `envId`, for a
+   * container chroxy itself just brought back (`EnvironmentManager.restart()`,
+   * which has already awaited `docker restart` and set `status: 'running'`).
+   *
+   * The #7601 fast-path was asymmetric without this: a Control Room restart
+   * surfaced CONTAINER_VANISHED on every bound session IMMEDIATELY, but the
+   * matching re-attach waited up to a full poll interval. That is not only slow
+   * on the one trigger whose container is most certainly back — it leaves the
+   * vanish latch SET for up to 30s, so a genuine second vanish inside that window
+   * would find the latch armed and surface NOTHING. Clearing the latch promptly
+   * is what makes the next real vanish visible again.
+   *
+   * MUST run AFTER the vanish fan-out for the same event: the edge is defined as
+   * `clearContainerVanished()` actually flipping the latch, so a session whose
+   * vanish has not been surfaced yet correctly contributes no edge, and a session
+   * that never vanished is skipped rather than gratuitously re-resolved.
+   *
+   * Reads `_sessions` filtered by `environmentId` rather than the environment's
+   * own `env.sessions` roster — deliberately the SAME source
+   * `_listContainerLivenessTargets` reads, so the two paths that can produce a
+   * recovery edge cannot disagree about who is in the environment.
+   *
+   * @param {string} envId
+   * @param {string} [reason] the emitting event, for the log line
+   * @returns {number} how many sessions were re-attached
+   */
+  reattachEnvironmentSessions(envId, reason = 'environment_restarted') {
+    // No `!envId` guard: `entry.environmentId` is normalised to a non-empty
+    // string or null at create time, so a blank/undefined `envId` matches no
+    // entry and the filter below already makes this a no-op. A separate
+    // emptiness check could not be made to fail — docs/false-safety-guards.md.
+    let reattached = 0
+    for (const [sessionId, entry] of [...this._sessions]) {
+      // No `_destroying` filter here on purpose: `_reattachEnvironmentBoundSession`
+      // already owns that gate, and a second copy of it could not be made to fail
+      // independently — see docs/false-safety-guards.md.
+      if (!entry || entry.environmentId !== envId) continue
+      const session = entry.session
+      try {
+        // The edge, synthesised exactly as the poll observes it.
+        if (session?.clearContainerVanished?.() !== true) continue
+        const outcome = this._reattachEnvironmentBoundSession(sessionId)
+        if (outcome.reattached) reattached++
+        log.info(`[${reason}] re-attach for session ${sessionId} in env ${envId}: ${outcome.reason}`)
+      } catch (err) {
+        // Contained per session: one throwing provider must not strand the rest.
+        log.warn(`[${reason}] re-attach failed for session ${sessionId}: ${err?.message || err}`)
+      }
+    }
+    return reattached
+  }
+
+  /**
+   * #7602 — the LIVE analogue of `_resolveRestoredContainerBinding`: re-affirm a
+   * running env-bound session's container binding when the liveness poll reports
+   * that container running again, so the next turn resumes inside it.
+   *
+   * Reconnect is BEST-EFFORT and sits strictly ON TOP of #7599's non-negotiable
+   * fail-visible surface. The vanish has already been surfaced by the time this
+   * runs; nothing here can make a session quietly resume something it should not,
+   * because the only mutation it can produce is a re-affirmation of the binding
+   * the session already has. Every refusal below leaves `_containerId` exactly as
+   * it was — never nulled (the #7561 trap: a null id reads as `_containerOwned`
+   * and spawns a fresh default `node:22-slim`), never repointed.
+   *
+   * The gate order, and why each case lands where it does:
+   *
+   *   1. No `reattachContainer` on the provider → SILENT no-op. Feature-detect,
+   *      not a provider allow-list, exactly as #7601 gates the poll on
+   *      `notifyContainerVanished`. `DockerSession` (always self-owned `--rm`)
+   *      and `DockerByokSession` (whose whole re-attach is the readiness restore
+   *      inside its own `clearContainerVanished`, #7600) are excluded by this
+   *      and need no entry in any list here.
+   *   2. No `entry.environmentId` → SILENT no-op: TERMINAL by classification.
+   *      A session-owned `--rm` container and a bare-`containerId` session have
+   *      no environment to re-resolve against and no registry that could vouch
+   *      for the container; #7599's error is the whole story for them, and a
+   *      second error would be noise on a case that is working as designed.
+   *   3. Anything past that which cannot be confirmed — environments disabled,
+   *      `getContainerInfo` refusing (`status !== 'running'`, `destroying`), no
+   *      container on the environment, or an id that DIFFERS from the session's
+   *      — is a REFUSAL: one visible `ENVIRONMENT_UNAVAILABLE` session error and
+   *      no rebind. The differing-id case is the important one: it means the
+   *      environment's container was REBUILT, so it carries none of this
+   *      session's in-container state, and re-pointing at it would resume the
+   *      conversation as a silently blank one.
+   *
+   * The refusal emits at most once per vanish because it can only be reached
+   * from the poll's recovery EDGE (see ContainerLivenessMonitor._tick) — the
+   * latch transitions once, so a permanently-refusing environment produces one
+   * error, not one every 30s.
+   *
+   * `env.sessions` is deliberately untouched: the session never left the
+   * environment, so `addSession`/`removeSession` symmetry — and with it the
+   * #7562 destroy guard's truthfulness — is preserved by not participating.
+   *
+   * @param {string} sessionId
+   * @returns {{reattached: boolean, reason: string}}
+   * @private
+   */
+  _reattachEnvironmentBoundSession(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return { reattached: false, reason: 'session_gone' }
+    const session = entry.session
+    if (!session || session._destroying) return { reattached: false, reason: 'session_gone' }
+    if (typeof session.reattachContainer !== 'function') {
+      return { reattached: false, reason: 'provider_unsupported' }
+    }
+
+    const environmentId = typeof entry.environmentId === 'string' && entry.environmentId.length > 0
+      ? entry.environmentId
+      : null
+    if (!environmentId) return { reattached: false, reason: 'not_environment_bound' }
+
+    const refuse = (reason, detail) => {
+      log.warn(`Session ${sessionId}: refusing to re-attach to environment "${environmentId}" — ${detail}`)
+      session.emit('error', {
+        code: 'ENVIRONMENT_UNAVAILABLE',
+        message: `This session's container environment cannot be re-entered: ${detail}. ` +
+          `The session stays bound to its original container and will not be resumed elsewhere.`,
+      })
+      return { reattached: false, reason }
+    }
+
+    if (!this._environmentManager || typeof this._environmentManager.getContainerInfo !== 'function') {
+      return refuse('environments_disabled', 'container environments are not enabled on this server')
+    }
+
+    let info
+    try {
+      info = this._environmentManager.getContainerInfo(environmentId)
+    } catch (err) {
+      // Covers "no such environment" and "not running (status: stopped | error |
+      // destroying)" alike — getContainerInfo throws for each.
+      return refuse('environment_unavailable', err?.message || String(err))
+    }
+    // LOAD-BEARING, and the reason teardown is checked ONCE at the top: the call
+    // above is SYNCHRONOUS, so this whole method runs as one uninterrupted block
+    // from those checks through `reattachContainer` below. If `getContainerInfo`
+    // ever becomes async (a remote backend, say), `entry._destroying` /
+    // `session._destroying` must be re-taken AFTER the await — a destroy landing
+    // in that gap would emit 'error' on a session whose listeners are already
+    // gone, and Node throws on an unhandled 'error'.
+    if (!info || typeof info.containerId !== 'string' || info.containerId.length === 0) {
+      return refuse('no_container', 'the environment reports no container')
+    }
+    if (info.containerId !== session._containerId) {
+      return refuse(
+        'container_replaced',
+        `the environment now runs a different container (${info.containerId.slice(0, 12)}), ` +
+        `not the one this session was created in (${String(session._containerId).slice(0, 12)})`,
+      )
+    }
+
+    if (!session.reattachContainer(info)) {
+      return refuse('provider_refused', 'the session provider refused the binding')
+    }
+    log.info(`Session ${sessionId} re-attached to environment "${environmentId}" container ${info.containerId.slice(0, 12)}`)
+    return { reattached: true, reason: 'ok' }
   }
 
   getSessionCost(sessionId) {

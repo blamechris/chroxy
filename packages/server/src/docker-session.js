@@ -346,9 +346,27 @@ export class DockerSession extends CliSession {
    * #7601 — reset the CONTAINER_VANISHED latch after the container is observed
    * running again, so a later vanish re-surfaces. Called by the liveness poll on
    * a healthy inspect.
+   *
+   * #7602 — returns whether this call actually FLIPPED the latch (the gone→
+   * running recovery edge), symmetric with `notifyContainerVanished`'s "true if
+   * it emitted". The poll uses that edge to trigger the live re-attach; a
+   * 'running' verdict on a session that never vanished must not.
+   *
+   * DockerSession itself is never a re-attach target and deliberately exposes no
+   * `reattachContainer`: its container is ALWAYS self-owned and launched with
+   * `--rm` (`_startContainer`), and the constructor ignores `opts.containerId`
+   * entirely, so a docker-cli session can never be bound to an environment's
+   * container. A `--rm` container that stops is REMOVED, so it can never be
+   * observed running again — the recovery edge below is unreachable for a real
+   * one, and #7602's terminal/fail-visible-only classification of this provider
+   * holds by construction rather than by a check that could rot.
+   *
+   * @returns {boolean} true when the latch transitioned
    */
   clearContainerVanished() {
+    if (!this._containerVanishedNotified) return false
     this._containerVanishedNotified = false
+    return true
   }
 
   /**

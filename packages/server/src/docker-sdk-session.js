@@ -436,9 +436,88 @@ export class DockerSdkSession extends SdkSession {
    * #7601 — reset the CONTAINER_VANISHED latch after the container is observed
    * running again, so a later vanish re-surfaces. Called by the liveness poll on
    * a healthy inspect.
+   *
+   * #7602 — returns whether this call actually FLIPPED the latch (the gone→
+   * running recovery edge), symmetric with `notifyContainerVanished`'s "true if
+   * it emitted". That edge, and only that edge, drives the live re-attach in
+   * `SessionManager._reattachEnvironmentBoundSession`.
+   *
+   * @returns {boolean} true when the latch transitioned
    */
   clearContainerVanished() {
+    if (!this._containerVanishedNotified) return false
     this._containerVanishedNotified = false
+    return true
+  }
+
+  /**
+   * #7602 — the live re-attach contract: re-affirm this session's binding to an
+   * environment container that has come back, so the next turn's `docker exec`
+   * resumes inside it.
+   *
+   * Why the SDK provider is the one that has this: an `environmentId` create is
+   * forced to `provider: 'docker-sdk'` (`handlers/session-handlers.js`), env
+   * containers are launched NAMED and WITHOUT `--rm`, so they survive a stop and
+   * keep their id — the only reconnect target there is. `DockerSession`'s and a
+   * self-owned `DockerSdkSession`'s containers are `--rm` and are REMOVED when
+   * they stop; those stay terminal / fail-visible-only, which is why
+   * `_containerOwned` is refused below and why `DockerSession` exposes no
+   * `reattachContainer` at all (the SessionManager feature-detects this method
+   * exactly the way #7601 feature-detects `notifyContainerVanished`).
+   *
+   * There is no in-container process to respawn — a containerized turn spawns a
+   * fresh `docker exec` per query via `_createSpawnCallback`, which reads
+   * `_containerId` / `_containerCliPath` / `_containerUser` at spawn time. So a
+   * re-attach is exactly: confirm the binding still points at the container the
+   * environment owns, and refresh the exec parameters. The caller has already
+   * checked the id against the live `EnvironmentManager`; the equality check
+   * here is defence in depth, and it is what makes "never a new container" (the
+   * #7561 trap) true at BOTH layers.
+   *
+   * `_containerId` is never nulled and never widened to a different container:
+   * a stop/start preserves the container's writable layer, so the in-container
+   * `claude` install, the non-root user and the SDK transcript under its HOME
+   * are all still there and the resumed turn is genuinely the same conversation.
+   * A DIFFERENT id would be a REBUILT container with none of that — resuming
+   * into it would silently produce a blank session, which is the one outcome
+   * #7602 must not accept. Hence: refuse, and stay fail-visible.
+   *
+   * @param {{containerId?: string, containerUser?: string, containerCliPath?: string}} binding
+   * @returns {boolean} true when the binding was re-affirmed
+   */
+  reattachContainer(binding = {}) {
+    if (this._destroying) return false
+    // A self-owned `--rm` container is terminal — it cannot come back, and
+    // re-binding one would be the #7561 fresh-container trap by another route.
+    if (this._containerOwned) return false
+    // The `typeof` test is load-bearing, not defensive dressing: it is what
+    // keeps a non-string `containerId` from throwing on `.trim()`.
+    const containerId = typeof binding.containerId === 'string' ? binding.containerId.trim() : ''
+    // ONE clause, deliberately. The binding must name EXACTLY the container this
+    // session is already in; a missing, blank or non-string id normalises to ''
+    // and can never equal a real container id, and `_containerId` is never ''
+    // (the constructor maps a blank to null, and a null id means
+    // `_containerOwned`, already refused above). An extra "is it empty" test
+    // would be a guard nothing could ever make fail — see
+    // docs/false-safety-guards.md.
+    if (containerId !== this._containerId) return false
+
+    const cliPath = typeof binding.containerCliPath === 'string' ? binding.containerCliPath.trim() : ''
+    if (cliPath) this._containerCliPath = cliPath
+    const user = typeof binding.containerUser === 'string' ? binding.containerUser.trim() : ''
+    // Same validation the constructor applies — a re-attach must not be a way to
+    // smuggle an unvalidated username into the `docker exec --user` argv. The
+    // constructor THROWS here; a re-attach cannot (it would strand a session over
+    // a field it does not need), so it keeps the existing user — but says so,
+    // rather than dropping the update silently.
+    if (user && !VALID_USERNAME_RE.test(user)) {
+      log.warn(`Ignoring invalid containerUser "${user}" on re-attach — keeping "${this._containerUser}"`)
+    } else if (user) {
+      this._containerUser = user
+    }
+
+    log.info(`Re-attached to container ${this._containerId.slice(0, 12)} — next turn resumes inside it`)
+    return true
   }
 
   /**
