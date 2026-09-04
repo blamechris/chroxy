@@ -4017,6 +4017,29 @@ export class SessionManager extends EventEmitter {
    * `_listContainerLivenessTargets` reads, so the two paths that can produce a
    * recovery edge cannot disagree about who is in the environment.
    *
+   * #7621 — that agreement is with the POLL. It is a DISAGREEMENT with the fan-out
+   * this method is ordered directly behind: `WsServer._surfaceContainerVanishedForEnvironment`
+   * arms the latch from `env.sessions`, and this clears it from `_sessions`. An
+   * edge therefore exists only for a session in BOTH rosters, and the two
+   * divergences are not equally harmless:
+   *
+   *   - in `_sessions` but NOT in `env.sessions` → armed by nothing, so there is
+   *     no latch to clear and no edge. Costs latency only: the 30s poll reads
+   *     this same roster and still reaches it.
+   *   - in `env.sessions` but the entry is tagged with a different env (or null)
+   *     → armed here and NOT cleared by this fast path, so the latch stays SET
+   *     until the next poll tick. The latch is idempotent, so a genuine second
+   *     vanish inside that window surfaces NOTHING. Worse than the first mode,
+   *     but bounded the same way and not permanent: `_listContainerLivenessTargets`
+   *     carries no `environmentId` filter, so the poll reaches a mis-tagged
+   *     session this method cannot, and one tick clears it.
+   *
+   * #7552's `addSession`/`removeSession` tagging is what keeps the two rosters in
+   * sync, which is why the second mode is a dependency rather than a live bug.
+   * Both modes are pinned by tests — which set the two rosters directly and so
+   * document the coupling; they do NOT exercise that tagging and would not catch
+   * a regression in it.
+   *
    * @param {string} envId
    * @param {string} [reason] the emitting event, for the log line
    * @returns {number} how many sessions were re-attached

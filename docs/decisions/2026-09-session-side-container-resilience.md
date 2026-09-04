@@ -254,8 +254,18 @@ a session present in BOTH. A session in `_sessions` but missing from `env.sessio
 armed by nothing and waits for the poll; a session in `env.sessions` whose entry carries a
 different or null `environmentId` is armed and never cleared by the fast path. #7552's
 `addSession` tagging is what keeps the two in sync, so the fast path's correctness depends
-on it. (The source comment justifies reading `_sessions` for agreement with the POLL, and
-is silent about the fan-out it is ordered behind.)
+on it.
+
+**Neither mode is permanent, and #7621 pins both.** The bound is the poll:
+`_listContainerLivenessTargets` carries NO `environmentId` filter, so it reaches a
+mis-tagged session the re-attach half cannot, and one tick clears the latch. So the second
+mode is worse than the first only for the length of that window — inside it the idempotent
+latch swallows a genuine second vanish — not forever. The source comment used to justify
+reading `_sessions` for agreement with the POLL while saying nothing about the fan-out it
+is ordered behind; it now names that dependency, both modes and their shared bound. The
+tests set the two rosters directly, so they document the coupling rather than guarding
+#7552's tagging, and they lock in TODAY's behaviour: unifying the rosters is the fix, and
+it is also the only thing that reddens them.
 
 **Which sessions this can reach** follows from invariant 3 above: env-bound implies
 `DockerSdkSession`, by construction. That is why the feature-detect on `reattachContainer`
@@ -367,8 +377,9 @@ above; the client surface is #7603.
 **#7619**, **#7620** and **#7621** were surfaced by verifying this document's mechanism
 against the source rather than against the PR descriptions, which is worth noting: each
 one is a place where a code comment or a PR body described a stronger guarantee than the
-code implements. Of those, **#7620** and **#7619** are now fixed — see the verdict
-fan-out and the rebuilt-container table above.
+code implements. All three are now closed: **#7620** (the verdict fan-out), **#7619**
+(the rebuilt-container table) and **#7621** (the two fast-path rosters), each documented
+in the mechanism sections above.
 
 - **#7625** — a rebuilt-container restore failure is TERMINAL: unlike the other refusal
   arms it cannot be cleared by fixing the environment, and `clearFailedRestore` has no
@@ -378,8 +389,6 @@ fan-out and the rebuilt-container table above.
   nothing consumes the `environment_restored` event it emits, so those sessions would be
   permanently unrestorable under #7619. Latent only: `snapshot()`/`restore()` have no
   production caller today (tests only). Worth wiring before they get one.
-- **#7621** — the `environment_restarted` arm and clear halves read DIFFERENT rosters, so
-  the fast path's correctness depends on #7552's tagging keeping them in sync.
 - **#7618** — the cross-client container-lost contract is enforced by two hand-matched
   test files rather than by the shared switch-fixture anti-drift harness, which cannot
   currently assert non-`messages` session-state fields.
