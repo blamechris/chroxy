@@ -3,7 +3,15 @@
  *
  * Drives the SHARED {@link SWITCH_FIXTURES} (defined once in @chroxy/store-core)
  * through the dashboard's REAL `handleMessage` switch / HANDLERS map and asserts
- * the resulting `sessionStates[id].messages` match each fixture's expectation.
+ * the resulting session state matches each fixture's expectation — the `messages`
+ * list, any other session field the fixture names (#6325), the flat
+ * connection-state slice, and the terminal/toast side-channels.
+ *
+ * #7618: a fixture field may be a MATCHER function instead of a literal, for a
+ * field the handler fills from the wall clock. This docstring previously said
+ * `sessionStates[id].messages` and nothing else, which is how #7618 came to be
+ * filed on the premise that the harness could not assert past `messages` — it
+ * already could, and had since #6325. The prose was the stale part.
  *
  * The app's jest suite (`packages/app/__tests__/contract-switch.test.ts`) drives
  * the SAME fixtures through the app's REAL handler against the SAME expectations.
@@ -20,6 +28,7 @@ import {
   FakeHandshakeClient,
   type HandshakeStoreAdapter,
   type DriverMessage,
+  type FixtureFieldMatcher,
 } from '@chroxy/store-core'
 
 vi.mock('./crypto', () => ({
@@ -241,8 +250,31 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
         // unaffected; this unlocks the session-field types in the drain backlog.
         const { messages: _ignoredMessages, ...scalarFields } = fields as Record<string, unknown>
         void _ignoredMessages
-        if (Object.keys(scalarFields).length > 0) {
-          expect(ss, `${fx.name}: ${id} scalar fields`).toMatchObject(scalarFields)
+        // #7618: a field whose expected value is a MATCHER function is asserted by
+        // CALLING it with the actual value. `containerLostAt` is written from the
+        // wall clock, so no literal can match it and the deep-equal below cannot
+        // express it at all.
+        //
+        // Matchers are partitioned OUT of the deep-equal, never skipped past it. A
+        // matcher left in `literals` would compare a function against a number and
+        // fail for the wrong reason; a matcher merely dropped would be a fixture
+        // field that CANNOT FAIL — the exact shape docs/false-safety-guards.md
+        // catalogues, and the reason #7618 required the harness before the fixtures.
+        const literals: Record<string, unknown> = {}
+        const unmatched: string[] = []
+        for (const [key, expected] of Object.entries(scalarFields)) {
+          if (typeof expected === 'function') {
+            const actual = (ss as unknown as Record<string, unknown>)[key]
+            if (!(expected as FixtureFieldMatcher)(actual)) {
+              unmatched.push(`${id}.${key} (actual: ${String(actual)})`)
+            }
+          } else {
+            literals[key] = expected
+          }
+        }
+        expect(unmatched, `${fx.name}: fixture matchers`).toEqual([])
+        if (Object.keys(literals).length > 0) {
+          expect(ss, `${fx.name}: ${id} scalar fields`).toMatchObject(literals)
         }
       }
       // #6325: assert any flat (top-level connection-state) fields a fixture

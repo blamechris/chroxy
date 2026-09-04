@@ -71,6 +71,55 @@ export interface FixtureInitialState {
   webTasks?: Array<Record<string, unknown>>
 }
 
+// ---------------------------------------------------------------------------
+// Field matchers (#7618)
+// ---------------------------------------------------------------------------
+
+/**
+ * A matcher for a fixture field whose value cannot be pinned as a literal.
+ *
+ * Both harnesses deep-equal a fixture's expected fields against the real store,
+ * which works for every field whose value the fixture controls. It does NOT work
+ * for a field the handler fills from the wall clock: `handleContainerLost` writes
+ * `containerLostAt: Date.now()`, and neither harness's fake timers pin that to a
+ * stable epoch — both seed fake time FROM the system clock, so the value differs
+ * on every run and between the two clients. Measured by pinning the field to a
+ * literal `0` and reading the failure back: vitest/dashboard 1788551596346,
+ * jest/app 1788552040727, minutes apart in the same working tree.
+ *
+ * A field whose expected value is one of these functions is asserted by CALLING
+ * it with the actual value, in place of the deep-equal. It is a plain function
+ * rather than a sentinel string deliberately: a function cannot collide with a
+ * real field value, and it cannot be misspelled into a silent pass, because an
+ * unresolved import is a build error where a typo'd `'__any_number__'` would
+ * simply deep-equal against a string and fail for the wrong reason.
+ *
+ * WHICH CONSUMERS RESOLVE A MATCHER — the slice alone does not decide this.
+ * Only the two SWITCH_FIXTURES harnesses (`contract-switch.test.ts` in the app
+ * and the dashboard) resolve matchers, and only in the per-session field slice
+ * ({@link FixtureExpectation.sessions}). `contract.test.ts`, which drives
+ * DISPATCH_FIXTURES, reads that SAME `sessions` slice and has no matcher
+ * awareness at all.
+ *
+ * Everywhere a matcher is not resolved it is deep-equalled against the actual
+ * value and FAILS — loudly, and in the safe direction, rather than being
+ * silently skipped. Verified by probe rather than assumed, on both unresolved
+ * paths: a matcher in `expect.flat`, and a matcher in a DISPATCH_FIXTURES row's
+ * `sessions` slice, each produce a legible function-vs-value diff.
+ */
+export type FixtureFieldMatcher = (actual: unknown) => boolean
+
+/**
+ * The field holds a clock timestamp — i.e. the state is ARMED.
+ *
+ * `> 0` rather than a bare `typeof === 'number'` because the discrimination that
+ * matters is armed vs not-armed, and the un-armed value is `null` (or `0` for
+ * anything that zero-initialises). A plausible-epoch range would be sharper and
+ * is deliberately not used: it buys nothing this table needs, and it would rot.
+ */
+export const isTimestamp: FixtureFieldMatcher = (actual) =>
+  typeof actual === 'number' && Number.isFinite(actual) && actual > 0
+
 /**
  * The expected post-dispatch mutation. A fixture asserts only the slices it
  * cares about; an absent slice means "don't care".
@@ -79,6 +128,10 @@ export interface FixtureExpectation {
   /**
    * Per-session expected field subset. The assertion does a partial deep-equal
    * (`toMatchObject`) against `sessionStates[id]` for each listed id.
+   *
+   * #7618: a field whose value is a {@link FixtureFieldMatcher} is asserted by
+   * calling it with the actual value instead — for fields the handler fills from
+   * the wall clock, which no literal can match.
    */
   sessions?: Record<string, Record<string, unknown>>
   /** Expected flat (top-level connection-state) field subset. */
@@ -2950,6 +3003,97 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     message: { type: 'append_memory_result', path: null, created: false, error: 'denied' },
     expect: {
       sessions: { s1: { messages: [sysMsg("Couldn't save to memory: denied")] } },
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // container-lost (#7603, fixtures added by #7618)
+  //
+  // The server reports a dead session container as an ordinary chat `error`
+  // envelope carrying a `code` — NOT as `session_error` — so both clients parse
+  // it out of `case 'message'` via the shared `handleContainerLost`. These rows
+  // are the cross-client contract for the two NON-message fields that parse
+  // writes; the two hand-written per-client files (`container-lost.test.ts` /
+  // `dispatch-container-lost.test.ts`) keep the multi-message and cross-session
+  // claims these single-message rows structurally cannot make.
+  //
+  // `containerLostAt` uses the `isTimestamp` matcher: the handler fills it from
+  // the wall clock and neither harness pins that, so there is no literal to
+  // assert. See FixtureFieldMatcher.
+  // -------------------------------------------------------------------------
+  {
+    name: 'CONTAINER_VANISHED arms containerLostAt and resets the refusal detail (both clients)',
+    type: 'message',
+    // Seeded ARMED with a stale refusal detail from a previous recovery attempt:
+    // a fresh vanish must RESET it, or the renderer says "reconnect failed" for a
+    // state whose recovery has not been attempted yet. A null seed would make the
+    // reset assertion pass for free.
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { containerReattachError: 'stale detail from a previous attempt' } },
+    },
+    message: {
+      type: 'message',
+      messageType: 'error',
+      content: 'The container for this session is no longer running.',
+      timestamp: 1,
+      code: 'CONTAINER_VANISHED',
+      sessionId: 's1',
+    },
+    expect: {
+      sessions: { s1: { containerLostAt: isTimestamp, containerReattachError: null } },
+    },
+  },
+  {
+    name: 'ENVIRONMENT_UNAVAILABLE records the refusal detail from `content` (both clients)',
+    type: 'message',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    // The detail is read from `content`, which is where the event normalizer puts
+    // the session's `error{message}`. The envelope carries NO `message` field —
+    // a parse reading one looks correct and is dead in production (#7603).
+    message: {
+      type: 'message',
+      messageType: 'error',
+      content: 'the environment now runs a different container (abc123...)',
+      timestamp: 1,
+      code: 'ENVIRONMENT_UNAVAILABLE',
+      sessionId: 's1',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          containerLostAt: isTimestamp,
+          containerReattachError: 'the environment now runs a different container (abc123...)',
+        },
+      },
+    },
+  },
+  {
+    name: 'an ordinary error leaves an armed container-lost state untouched (both clients)',
+    type: 'message',
+    // Seeded ARMED because of ONE regression a fresh session cannot see: an
+    // uncoded error that over-eagerly CLEARS the state. That writes
+    // `{ containerLostAt: null, containerReattachError: null }`, which against a
+    // fresh session is null -> null and invisible; against this seed it is red.
+    //
+    // The neighbouring regression — the code gate dropped, so the vanish patch
+    // is applied to every error — is caught either way, because `containerLostAt`
+    // transitions to a clock reading whatever the seed was. An earlier draft of
+    // this comment claimed the fresh seed made BOTH assertions hold for free;
+    // that was wrong, and measured wrong (both mutations were run).
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { containerLostAt: 1700000000000, containerReattachError: 'refused' } },
+    },
+    message: {
+      type: 'message',
+      messageType: 'error',
+      content: 'boom',
+      timestamp: 1,
+      sessionId: 's1',
+    },
+    expect: {
+      sessions: { s1: { containerLostAt: 1700000000000, containerReattachError: 'refused' } },
     },
   },
 ]

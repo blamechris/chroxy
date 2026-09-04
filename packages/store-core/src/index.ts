@@ -931,11 +931,16 @@ export type {
 export {
   DISPATCH_FIXTURES,
   SWITCH_FIXTURES,
+  // #7618: the field-matcher vocabulary. A fixture field the handler fills from
+  // the wall clock (containerLostAt) has no pinnable literal, so both harnesses
+  // resolve a matcher function against the actual value instead.
+  isTimestamp,
 } from './contract-fixtures/fixtures'
 export type {
   ContractFixture,
   FixtureInitialState,
   FixtureExpectation,
+  FixtureFieldMatcher,
 } from './contract-fixtures/fixtures'
 
 // epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real
