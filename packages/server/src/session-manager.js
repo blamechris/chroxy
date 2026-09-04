@@ -2645,12 +2645,31 @@ export class SessionManager extends EventEmitter {
    *   1. Nothing persisted → `{}`. Non-container sessions and every state file
    *      written before #7561 take the unchanged path.
    *   2. `environmentId` persisted → the LIVE EnvironmentManager is the
-   *      authority. `getContainerInfo()` re-resolves the container (which may
-   *      have been rebuilt while the daemon was down) and throws when the
-   *      environment is gone or not running. Either way this method THROWS,
-   *      which lands the session in the #2954 failed-restore path: history is
-   *      preserved on disk, `session_restore_failed` fires, and the operator can
-   *      retry once the environment is back. Loud beats a silent respawn.
+   *      authority. `getContainerInfo()` re-resolves the container and throws
+   *      when the environment is gone or not running. #7619: the re-resolved id
+   *      is then COMPARED against the persisted one, and a REBUILT container is
+   *      refused too — the same situation the live path refuses as
+   *      `container_replaced`, since a rebuilt container carries none of the
+   *      in-container `claude` install or the SDK transcript and would resume
+   *      the conversation blank. Every one of those THROWS, which lands the
+   *      session in the #2954 failed-restore path: history is preserved on disk
+   *      and `session_restore_failed` fires. Loud beats a silent respawn.
+   *
+   *      Retryability differs by arm, and the rebuilt-container one is the odd
+   *      one out. Gone / stopped / disabled all clear when the operator brings
+   *      the environment back, and the next boot restores. A REBUILT container
+   *      never does: the environment is already back and running, and its id
+   *      will not match the persisted one again, so that session stays in the
+   *      needs-attention list until `_pruneStaleFailedRestores` drops it after
+   *      the TTL. `clearFailedRestore` exists for a user-driven dismiss but has
+   *      no caller yet, so there is currently no in-product way to act on it —
+   *      see #7625.
+   *
+   *      The one accepted-but-unverifiable case: a state file written before
+   *      #7561 persisted no `containerId`, so there is nothing to compare. That
+   *      restores (refusing would strand every session that upgraded across that
+   *      boundary) but WARNS, so "cannot verify" is never silently recorded as
+   *      "nothing to verify".
    *   3. Only a bare `containerId` persisted (no environment — an internal
    *      caller, never the wire) → forwarded verbatim. There is no registry to
    *      revalidate against; `DockerSdkSession._verifyContainer` is the runtime
@@ -2708,6 +2727,39 @@ export class SessionManager extends EventEmitter {
     }
     if (!info || typeof info.containerId !== 'string' || info.containerId.length === 0) {
       fail('the environment reports no container')
+    }
+
+    // #7619 — a REBUILT container is refused here exactly as the live path
+    // (`_reattachEnvironmentBoundSession`, reason `container_replaced`) refuses
+    // it. Both entry points see one underlying situation — the environment's
+    // container was replaced while this session was bound to the old one — and
+    // before this they disagreed: live surfaced a visible refusal, boot silently
+    // rebound. The silent rebind is the WORSE half, because a rebuilt container
+    // carries none of the in-container `claude` install or the SDK transcript,
+    // so the "restored" session comes back knowing nothing — precisely the
+    // blank-session outcome the live refusal exists to prevent. A restored
+    // session having no in-memory turn state does not change that: what the user
+    // sees is a conversation that silently lost its history either way.
+    if (containerId && info.containerId !== containerId) {
+      fail(
+        `the environment now runs a different container (${info.containerId.slice(0, 12)}), ` +
+        `not the one this session was created in (${containerId.slice(0, 12)})`,
+      )
+    }
+    if (!containerId) {
+      // Nothing was persisted to compare against. The expected cause is a state
+      // file written before #7561 added the binding, but it is not the only one
+      // that reaches here — an incomplete or hand-edited state file lands in the
+      // same branch — so the log reports the OBSERVATION and names that cause as
+      // expected rather than certain. Refusing every one of these would strand
+      // sessions that merely upgraded across that boundary, so it is accepted.
+      // But "cannot verify" is recorded rather than silently treated as
+      // "nothing to verify", which is the defect class this guard belongs to.
+      log.warn(
+        `Restored session in environment "${environmentId}" has no persisted container id; ` +
+        `cannot verify the environment's current container is the one it was created in ` +
+        `(expected for a state file written before #7561 — otherwise the persisted state is incomplete).`,
+      )
     }
 
     return {

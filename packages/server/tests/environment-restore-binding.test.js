@@ -197,25 +197,46 @@ describe('#7561 container binding survives a restart', () => {
     assert.deepEqual(envManager2.get(env.id).sessions, [restoredId], 'the environment is re-tagged')
   })
 
-  it('re-resolves the binding from the LIVE environment, not the stale saved copy', async () => {
+  // #7619 — this scenario used to REBIND to the rebuilt container ("the live
+  // manager is the authority"). It now refuses, matching the live re-attach
+  // path's `container_replaced`. The environment is still the authority on WHICH
+  // container is current; what changed is that a current container which is not
+  // the one this session was created in is a refusal rather than a substitution,
+  // because a rebuilt container carries none of the in-container `claude`
+  // install or the SDK transcript and would resume the conversation blank.
+  //
+  // Note this test has to REBUILD the container by hand. That is the load-bearing
+  // detail for the guard's blast radius: an ordinary stop/start reconnect keeps
+  // the same container id, so the healthy-restore case above still passes
+  // untouched and only a genuine rebuild trips the refusal.
+  it('REFUSES a rebuilt container rather than silently rebinding to it (#7619)', async () => {
     const { env, sessionId } = await seedEnvAndSession()
-    readSaved()
+    const [saved] = readSaved()
     mgr.destroyAll()
 
-    // The environment's container was recreated while the daemon was down, so
-    // the persisted containerId is stale. The live manager is the authority.
     const envManager2 = makeEnvManager()
     await envManager2.reconnect()
     assert.equal(envManager2.get(env.id).status, 'running', 'positive control: reconnect found the container running')
+    const original = envManager2.get(env.id).containerId
+    assert.equal(
+      saved.containerId, original,
+      'positive control: a plain reconnect leaves the id equal to the persisted one — only the rebuild below differs',
+    )
     envManager2.get(env.id).containerId = 'rebuilt-ctr'
 
     constructions = []
+    const events = []
     mgr = makeManager({ environmentManager: envManager2 })
+    mgr.on('session_restore_failed', (e) => events.push(e))
     const restoredId = mgr.restoreState()
 
-    assert.equal(restoredId, sessionId)
-    assert.equal(constructions.length, 1)
-    assert.equal(constructions[0].containerId, 'rebuilt-ctr')
+    assert.equal(restoredId, null, 'no session comes back live')
+    assert.deepEqual(constructions, [], 'nothing is constructed — never bound to the rebuilt container')
+    assert.equal(events.length, 1)
+    assert.equal(events[0].sessionId, sessionId)
+    assert.equal(events[0].errorCode, 'ENVIRONMENT_UNAVAILABLE')
+    assert.equal(events[0].originalHistoryPreserved, true, 'history survives for a retry')
+    assert.match(events[0].errorMessage, /different container/)
   })
 
   // ---- restore: the loud-failure arms -------------------------------------
