@@ -17,6 +17,7 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
 | ConnectionInfo | `src/connection-info.js` | Write/remove connection info file for programmatic access |
+| ContainerLivenessMonitor | `src/container-liveness-monitor.js` | Proactive 30s poll (`DEFAULT_LIVENESS_INTERVAL_MS`) that detects a vanished container on an idle containerized session; Docker-agnostic via two injected seams — `enumerate()` (live targets) and `inspect(containerId)` → `running`/`gone`/`unknown` (#7601) |
 | ContentBlocks | `src/content-blocks.js` | Content block builder for structured output |
 | ConversationScanner | `src/conversation-scanner.js` | Conversation history file scanning (parallel) |
 | CostBudgetManager | `src/cost-budget-manager.js` | Per-session cost budget tracking and enforcement |
@@ -371,6 +372,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `config.js` | Config schema validation + merge precedence |
 | `connection-info.js` | Write/remove connection info file |
+| `container-liveness-monitor.js` | Proactive 30s container-liveness poll; injected `enumerate` / `inspect` seams (#7601) |
 | `content-blocks.js` | Content block builder for structured output |
 | `conversation-scanner.js` | Conversation history file scanning (parallel) |
 | `cost-budget-manager.js` | Per-session cost budget tracking |
