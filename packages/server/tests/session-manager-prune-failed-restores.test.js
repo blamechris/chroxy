@@ -152,6 +152,57 @@ describe('#7627 a failed restore is governed by its OWN TTL, not the 24h session
     assert.equal(sm.getFailedRestores().length, 0, 'so the needs-attention list stays bounded')
   })
 
+  it('REGRESSION: an all-stale boot still COLLECTS the cost map of the sessions it dropped', () => {
+    // Removing persistence's null return let the tail of restoreState() run on a
+    // boot where it never used to. `_costBudget.restore()` then re-loads the cost
+    // entries of sessions dropped in that same flush — and the all-stale boot is
+    // the ONLY occasion those dead entries are collected, since every other boot
+    // round-trips the whole map. Without the early return, `costs` grows forever.
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-7627c-'))
+    const statePath = join(dir, 'state.json')
+    const stale = Date.now() - 25 * HOUR
+    const DEAD = 'd'.repeat(32)
+    writeFileSync(statePath, JSON.stringify({
+      version: 1,
+      timestamp: stale,
+      // No environmentId — it would have restored fine, so it is merely stale.
+      sessions: [{ id: DEAD, name: 'Session 1', cwd: '/tmp', lastActivityAt: stale, history: [] }],
+      costs: { [DEAD]: 4.25 },
+      budgetPaused: [DEAD],
+    }))
+    sm = new SessionManager({ stateFilePath: statePath })
+    sm.restoreState()
+    sm._flushPersist()
+    const disk = JSON.parse(readFileSync(statePath, 'utf-8'))
+    assert.equal(disk.sessions.length, 0, 'the stale session is dropped, as before')
+    assert.deepEqual(disk.costs ?? {}, {}, 'and its cost entry is collected, not carried forever')
+    assert.deepEqual(disk.budgetPaused ?? [], [], 'likewise its budget-paused flag')
+  })
+
+  it('REGRESSION: a PRESERVED stale refusal advances _sessionCounter, so a new session cannot take its name', () => {
+    // Every other restore outcome advances the counter (#2338). A preserved
+    // refusal leaves a "Session N" name on disk exactly as they do, so skipping
+    // it made the needs-attention entry and the next live session share a name —
+    // degrading the visibility this whole fix restores.
+    const { events } = bootWith({ ageMs: 25 * HOUR, extra: { name: 'Session 1' } })
+    assert.equal(events.length, 1, 'control: the refusal really was preserved')
+    assert.equal(sm._sessionCounter, 1, 'the counter moved past the preserved name')
+    assert.equal(
+      sm.getFailedRestores().some(f => f.name === `Session ${sm._sessionCounter + 1}`), false,
+      'so the next auto-named session cannot collide with it',
+    )
+  })
+
+  it('a WORKTREE-backed stale refusal is preserved at ANY age — matching the prune (#2954)', () => {
+    // _pruneStaleFailedRestores never drops a worktree-backed entry, because
+    // removing its id exposes the worktree to the orphan sweep. The sweep's
+    // bound must agree, or one silently overrides the other — which is the
+    // defect this issue is about, one layer down.
+    const { events } = bootWith({ ageMs: 40 * DAY, extra: { worktreePath: '/some/wt' } })
+    assert.equal(events.length, 1, 'kept despite being far past the TTL')
+    assert.equal(sm.getFailedRestores().length, 1)
+  })
+
   it('an ORDINARY stale session is still dropped at 24h — the filter is narrowed, not removed', () => {
     dir = mkdtempSync(join(tmpdir(), 'chroxy-7627b-'))
     const statePath = join(dir, 'state.json')
