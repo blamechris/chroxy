@@ -13,6 +13,26 @@
  * describes the child process, not the container. Clearing on it would drop the
  * banner while the container was still gone. It carries a positive CONTROL so
  * it cannot pass by the message never having been processed at all.
+ *
+ * #7618 — WHY THIS FILE STAYS, now that SWITCH_FIXTURES covers the same state.
+ * The shared harness gained a field-matcher (`isTimestamp`) and three
+ * container-lost rows, so the single-message claims — vanish ARMS, the refusal
+ * detail is read from `content`, an uncoded error DISTURBS NOTHING — are now
+ * enforced across both clients from one table, and the ordinary-error row is
+ * the STRONGER version of the one here (it seeds the state ARMED, where the
+ * local test asserts null against a fresh session and would pass for free).
+ *
+ * Three claims here are not portable to a fixture, which is why nothing was
+ * deleted:
+ *   - the ghost-session test's positive CONTROL reads `m.code` off the bubble,
+ *     and the harness's `normalize()` keeps a whitelist of message fields that
+ *     does not include `code` — it structurally cannot see it;
+ *   - a fixture asserts ONE post-`message` state, so the release sequences
+ *     (vanish -> result, vanish -> session_stopped -> claude_ready) cannot
+ *     assert the intermediate "it really was armed first" checkpoint that makes
+ *     their controls controls;
+ *   - `before <= containerLostAt <= after` is a sharper claim than the
+ *     matcher's "is a positive number".
  */
 import {
   _testMessageHandler,
