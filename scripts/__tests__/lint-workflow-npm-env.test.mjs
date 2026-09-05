@@ -42,7 +42,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -54,7 +54,7 @@ const REAL_WORKFLOWS = join(REPO, '.github', 'workflows')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 54
+const MIN_CASES = 76
 
 let pass = 0
 let fail = 0
@@ -113,7 +113,7 @@ function fixtureDir(files = {}, { base = BASE_FILES } = {}) {
 }
 
 const runCliOn = (dir, ...args) =>
-  spawnSync(process.execPath, [SCRIPT, '--dir', dir, ...args], { encoding: 'utf8' })
+  spawnSync(process.execPath, [SCRIPT, '--dir', dir, ...args], { encoding: 'utf8', timeout: 60_000 })
 
 // ---------------------------------------------------------------------------
 // 0. The isEntryPoint CALL SITE — and why it is FIRST, before the import below.
@@ -136,7 +136,7 @@ test('importing the module does NOT run the lint (a guard stuck TRUE would erase
     `import { MIN_WORKFLOWS } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}\n` +
     "process.stdout.write('IMPORT-RETURNED:' + MIN_WORKFLOWS + '\\n')\n",
   )
-  const r = spawnSync(process.execPath, [probe], { encoding: 'utf8', cwd: REPO })
+  const r = spawnSync(process.execPath, [probe], { encoding: 'utf8', cwd: REPO, timeout: 60_000 })
   assert(r.status === 0, `probe exited ${r.status}\n${r.stdout}${r.stderr}`)
   assert(
     /IMPORT-RETURNED:[1-9]\d*/.test(r.stdout),
@@ -162,6 +162,10 @@ if (fail > 0) {
     '\nFAIL: the entry-point call site is broken. Stopping BEFORE importing the module, ' +
     'because a guard stuck TRUE would exit this process during that import.\n',
   )
+  // This exit bypasses the cleanup loop at the bottom of the file, so do it here
+  // too. Only reachable when section 0 fails, but that is precisely the run
+  // nobody is going to tidy up after by hand.
+  for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
   process.exit(1)
 }
 
@@ -172,6 +176,8 @@ const {
   REQUIRED_ENV,
   analyze,
   findInstallSites,
+  overridesOf,
+  parseArgs,
   workflowEnv,
 } = await import(pathToFileURL(SCRIPT).href)
 
@@ -190,6 +196,11 @@ test('detects an install after a shell operator', () =>
   assert(sitesIn('          cd packages/server && npm ci\n') === 1))
 test('detects an install inside a command substitution', () =>
   assert(sitesIn('          out=$(npm ci)\n') === 1))
+test('detects an install inside a BACKTICK command substitution', () =>
+  // Missed until review: the leading class had `(` but not the backtick, so a
+  // real executable install site read as no site at all — the one direction
+  // this detector must never fail in.
+  assert(sitesIn('          OUT=`npm ci`\n') === 1))
 test('counts every line, not just the first', () =>
   assert(sitesIn('  run: npm ci\n  run: npm ci\n  run: npm ci\n') === 3))
 
@@ -237,6 +248,50 @@ test('tolerates blank lines and indented comments inside the block', () => {
 
 test('strips a trailing inline comment from a value', () => {
   const env = workflowEnv('env:\n  NPM_CONFIG_AUDIT: "false"  # see #7616\njobs:\n')
+  assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
+})
+
+test('a column-0 comment does NOT end the block — YAML resumes the mapping after it', () => {
+  // Cross-checked against a real YAML parser: this is ONE two-key mapping.
+  // The scanner used to break at the unindented comment and report
+  // NPM_CONFIG_FUND missing on a correct file.
+  const env = workflowEnv('env:\n  NPM_CONFIG_AUDIT: "false"\n# why fund too\n  NPM_CONFIG_FUND: "false"\njobs:\n')
+  assert(env.NPM_CONFIG_AUDIT === '"false"' && env.NPM_CONFIG_FUND === '"false"', JSON.stringify(env))
+})
+
+test('a column-0 comment immediately after `env:` does not wipe the block', () => {
+  const env = workflowEnv('env:\n# a note\n  NPM_CONFIG_AUDIT: "false"\njobs:\n')
+  assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
+})
+
+test('a double-quoted key is read', () => {
+  const env = workflowEnv('env:\n  "NPM_CONFIG_AUDIT": "false"\njobs:\n')
+  assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
+})
+
+test('a single-quoted key is read', () => {
+  const env = workflowEnv("env:\n  'NPM_CONFIG_AUDIT': \"false\"\njobs:\n")
+  assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
+})
+
+test('a FLOW mapping raises cannot-check rather than reading as no env block', () => {
+  let caught = null
+  try {
+    workflowEnv('env: { NPM_CONFIG_AUDIT: "false" }\njobs:\n')
+  } catch (err) {
+    caught = err
+  }
+  assert(caught instanceof CannotCheckError, `got ${caught && caught.constructor.name}`)
+  assert(/inline value/.test(caught.message), caught.message)
+})
+
+test('`env:` with only a trailing comment is still a block start', () => {
+  const env = workflowEnv('env:  # see #7616\n  NPM_CONFIG_AUDIT: "false"\njobs:\n')
+  assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
+})
+
+test('CRLF line endings parse identically', () => {
+  const env = workflowEnv('env:\r\n  NPM_CONFIG_AUDIT: "false"\r\njobs:\r\n')
   assert(env.NPM_CONFIG_AUDIT === '"false"', JSON.stringify(env))
 })
 
@@ -301,6 +356,44 @@ test('RED: a JOB-level env block does not satisfy the lint', () => {
     '    env:\n      NPM_CONFIG_AUDIT: "false"\n      NPM_CONFIG_FUND: "false"\n' +
     '    steps:\n      - run: npm ci\n'
   expectFail({ 'bad.yml': jobLevel }, /bad\.yml.*no workflow-level `env:` block/s)
+})
+
+test('RED: a JOB-level override neutralises a correct workflow-level block', () => {
+  // GitHub resolves step env over job env over workflow env, so this job's
+  // `npm ci` audits anyway. The lint reported OK on exactly this shape until
+  // review caught it: the workflow-level block is a DEFAULT, not a guarantee.
+  const overridden =
+    'name: Fixture\non:\n  push:\n' + ENV_BLOCK +
+    'jobs:\n  j:\n    runs-on: ubuntu-24.04\n' +
+    '    env:\n      NPM_CONFIG_AUDIT: "true"\n' +
+    '    steps:\n      - run: npm ci\n'
+  expectFail({ 'bad.yml': overridden }, /NPM_CONFIG_AUDIT is set to `"true"` somewhere below the workflow level/)
+})
+
+test('RED: a STEP-level override is caught the same way', () => {
+  const overridden =
+    'name: Fixture\non:\n  push:\n' + ENV_BLOCK +
+    'jobs:\n  j:\n    runs-on: ubuntu-24.04\n    steps:\n' +
+    '      - run: npm ci\n        env:\n          NPM_CONFIG_FUND: "true"\n'
+  expectFail({ 'bad.yml': overridden }, /NPM_CONFIG_FUND is set to `"true"`/)
+})
+
+test('GREEN-ish: a job-level env repeating "false" is not an override', () => {
+  // Redundant, but it does not neutralise anything — flagging it would be the
+  // deny-everything shape (#7273).
+  const repeated =
+    'name: Fixture\non:\n  push:\n' + ENV_BLOCK +
+    'jobs:\n  j:\n    runs-on: ubuntu-24.04\n' +
+    '    env:\n      NPM_CONFIG_AUDIT: "false"\n' +
+    '    steps:\n      - run: npm ci\n'
+  const r = runCliOn(fixtureDir({ 'ok.yml': repeated }))
+  assert(r.status === 0, `expected exit 0, got ${r.status}\n${r.stdout}${r.stderr}`)
+})
+
+test('RED: both violation kinds in one file are reported together', () => {
+  const both = workflow(1, { env: 'env:\n  NPM_CONFIG_AUDIT: "true"\n' })
+  const r = expectFail({ 'bad.yml': both }, /does not set NPM_CONFIG_FUND/)
+  assert(/NPM_CONFIG_AUDIT is `"true"`/.test(r.stderr), `only one kind reported\n${r.stderr}`)
 })
 
 test('RED: a NEW workflow added beside compliant ones is caught', () => {
@@ -378,11 +471,62 @@ test('CANNOT CHECK: too few install sites exits 2 — a dead detector is not a c
   const base = Object.fromEntries(['a', 'b', 'c', 'd', 'e'].map((n) => [`${n}.yml`, quiet]))
   const r = runCliOn(fixtureDir({ 'one.yml': workflow(1) }, { base }))
   assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
-  assert(/site detector is broken/.test(r.stderr), r.stderr)
+  assert(/site detector has stopped matching/.test(r.stderr), r.stderr)
 })
 
+test('CANNOT CHECK: an unreadable workflow file exits 2, not 1', () => {
+  // A DIRECTORY named *.yml, not `chmod 000`: readFileSync throws EISDIR for
+  // every uid, whereas a mode-000 file is readable by root and CI containers
+  // here run as root — the test would silently stop exercising this path
+  // (#6075's root-bypassed fs perms, one layer over).
+  //
+  // Exit 1 would also be "red", so this case is about the DIAGNOSIS: 1 means a
+  // workflow is missing the env block and sends the reader to the wrong place.
+  const dir = fixtureDir()
+  mkdirSync(join(dir, 'oops.yml'))
+  const r = runCliOn(dir)
+  assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/CANNOT CHECK/.test(r.stderr), r.stderr)
+  assert(/oops\.yml/.test(r.stderr), `the unreadable file was not named\n${r.stderr}`)
+})
+
+test('parseArgs: --dir=<path> is honoured, not silently ignored', () => {
+  // The equals form used to fall through indexOf('--dir') and take the DEFAULT,
+  // so `--dir=/some/fixture` reported on the real .github/workflows instead.
+  assert(parseArgs(['--dir=/tmp/x']).dir === '/tmp/x', JSON.stringify(parseArgs(['--dir=/tmp/x'])))
+})
+
+test('parseArgs: --dir <path> two-token form is honoured', () =>
+  assert(parseArgs(['--dir', '/tmp/x']).dir === '/tmp/x'))
+
+test('parseArgs: no arguments means .github/workflows', () =>
+  assert(parseArgs([]).dir === join('.github', 'workflows')))
+
+test('parseArgs: an unknown argument is an error, not a silent default', () =>
+  assert(/unknown argument/.test(parseArgs(['--bogus']).error || '')))
+
+test('CANNOT CHECK: --dir=<empty> exits 2 rather than scanning the real tree', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '--dir='], { encoding: 'utf8', cwd: REPO, timeout: 60_000 })
+  assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
+})
+
+test('CANNOT CHECK: an unknown argument exits 2', () => {
+  const r = spawnSync(process.execPath, [SCRIPT, '--bogus'], { encoding: 'utf8', cwd: REPO, timeout: 60_000 })
+  assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
+})
+
+test('CANNOT CHECK: a flow-style env: in a real file exits 2 and names the file', () => {
+  const flow = 'name: F\non:\n  push:\nenv: { NPM_CONFIG_AUDIT: "false" }\njobs:\n  j:\n    steps:\n      - run: npm ci\n'
+  const r = runCliOn(fixtureDir({ 'flow.yml': flow }))
+  assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/flow\.yml/.test(r.stderr), `the file was not named\n${r.stderr}`)
+})
+
+test('overridesOf: a comment mentioning the key is not an override', () =>
+  assert(overridesOf('        # NPM_CONFIG_AUDIT: "true" was tried here\n').length === 0))
+
 test('CANNOT CHECK: --dir with no value exits 2', () => {
-  const r = spawnSync(process.execPath, [SCRIPT, '--dir'], { encoding: 'utf8', cwd: REPO })
+  const r = spawnSync(process.execPath, [SCRIPT, '--dir'], { encoding: 'utf8', cwd: REPO, timeout: 60_000 })
   assert(r.status === 2, `expected exit 2, got ${r.status}\n${r.stdout}${r.stderr}`)
 })
 
@@ -413,7 +557,7 @@ const npmConfig = (key, env) => {
   const r = spawnSync(
     'npm',
     ['config', 'get', key, '--userconfig', join(iso, 'user'), '--globalconfig', join(iso, 'global')],
-    { encoding: 'utf8', env: { ...clean, ...env }, shell: process.platform === 'win32' },
+    { encoding: 'utf8', env: { ...clean, ...env }, shell: process.platform === 'win32', timeout: 60_000 },
   )
   assert(r.status === 0, `npm config get ${key} failed (${r.status})\n${r.stdout}${r.stderr}`)
   return r.stdout.trim()
@@ -443,6 +587,20 @@ for (const [key, envName] of [['audit', 'NPM_CONFIG_AUDIT'], ['fund', 'NPM_CONFI
 // 7. The SHIPPED tree, in both directions
 // ---------------------------------------------------------------------------
 
+test('SHIPPED: the PRODUCTION invocation — no arguments at all — passes', () => {
+  // ci.yml runs `node scripts/lint-workflow-npm-env.mjs` with NO arguments, and
+  // every other case in this file passes --dir. That left the default-path line
+  // guarded by nothing: a one-character typo there ('.github/workflow') breaks
+  // every CI run of the lint while this suite reports 54/54. A guard wired to
+  // only some of its callers is the catalogued shape from #7262.
+  const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', cwd: REPO, timeout: 60_000 })
+  assert(r.status === 0, `production invocation exited ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(
+    /\d+ workflow\(s\), \d+ npm install site\(s\) checked/.test(r.stdout),
+    `no scan summary — did it read the right directory?\n${r.stdout}${r.stderr}`,
+  )
+})
+
 test('SHIPPED: the real .github/workflows passes', () => {
   const r = runCliOn(REAL_WORKFLOWS)
   assert(r.status === 0, `the real tree failed the lint\n${r.stdout}${r.stderr}`)
@@ -464,12 +622,30 @@ test('SHIPPED: the real tree with ci.yml\'s env block removed FAILS', () => {
   assert(/ci\.yml/.test(r.stderr), `ci.yml was not named\n${r.stderr}`)
 })
 
-test('SHIPPED: every workflow with an install site is one of the five known files', () => {
-  // Not a roster the lint consults — a roster this TEST consults, so that a new
-  // installing workflow is a deliberate act with a line in this file, not a
-  // silent one. The lint itself enumerates the directory and needs no list.
-  const { installSites } = analyze(REAL_WORKFLOWS)
-  assert(installSites >= MIN_INSTALL_SITES, `only ${installSites} sites found`)
+test('SHIPPED: the workflows that install are exactly the five known files', () => {
+  // This case used to assert `installSites >= MIN_INSTALL_SITES` under this
+  // name — a duplicate of the floor case below, which stayed green when a
+  // review added a SIXTH installing workflow to the real tree. A comment
+  // promising a stronger check than the code performs is the shape catalogued
+  // at #7290/#7291, produced here in a test written for that catalogue.
+  //
+  // The roster is safe in a way a roster inside the LINT would not be: it is
+  // asserted EQUAL to the enumerated reality on every run, so it cannot drift
+  // silently — drift is the thing it reports. The lint itself still enumerates
+  // the directory and consults no list.
+  const { installing } = analyze(REAL_WORKFLOWS)
+  const known = [
+    'ci.yml',
+    'maestro-nightly.yml',
+    'nightly-k8s-integration.yml',
+    'release.yml',
+    'repo-relay.yml',
+  ]
+  assert(
+    JSON.stringify(installing) === JSON.stringify(known),
+    `the set of installing workflows changed.\n  now:   ${JSON.stringify(installing)}\n` +
+    `  known: ${JSON.stringify(known)}\nIf that is deliberate, update this roster in the same commit.`,
+  )
 })
 
 test('the two floors are floors, not counts — the real tree exceeds both', () => {
