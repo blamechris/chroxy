@@ -1731,11 +1731,17 @@ demonstrates. It cannot be measured without merging a PR whose required check is
 skipped, or temporarily requiring a job that skips, and neither is worth doing.
 
 **The measurement, because the answer could have gone the other way.** The first
-link was the one worth testing: if a `needs`-failed dependent produced *no check
-run*, the PR would WEDGE rather than merge — the safe outcome, and the whole
-entry would have been wrong. A third state makes that concrete: a required check
-that produces no check run at all does not satisfy protection, it wedges the PR
-(entry 22). So "skipped" and "absent" had to be told apart rather than assumed.
+link was the one worth testing, because the two answers point opposite ways. Had
+a `needs`-failed dependent produced *no check run*, the outcome would have been
+the safe one and this entry would have been wrong: an absent required context
+renders as *pending*, and a pending required check blocks the merge rather than
+satisfying it. Entry 22 carries this repo's own instance,
+on PR `#7023`: a run that never existed was rendered "pending" by every tool
+that looked, and `/batch-merge`'s gate classifies an absent required context
+`MISSING` and blocks on it. Neither of those is a reading of GitHub's merge
+button — they are how absence *renders* and how our own gate treats it. So
+"skipped" and "absent" had to be told apart rather than assumed: one of the two
+answers would have made this entry wrong.
 
 A throwaway branch settles it in one run, and the technique is worth keeping: a
 workflow whose `on: push` is scoped to that branch alone cannot touch `main` or
@@ -1768,8 +1774,9 @@ going quiet — which is the point: a gate whose failure mode is *silence* needs
 be able to fail loudly itself. `Scripts Tests` and `Release PR Subject` were
 promoted with it, the three that are deterministic and have no external-network
 surface. The remaining seven rows stay in the not-required table with the reason
-each is still waiting, and #7641 keeps the unmeasured half of the skip semantics
-open.
+each is still waiting. #7641 is closed: its measurement is above, and the one
+link still unverified — that GitHub's merge button accepts a skipped *required*
+check — is recorded here rather than left open as a task nobody can action.
 
 **Guard against it:** when a roster names members of a set, ask what enumerates
 the SET. If the answer is "a person, when they remember", the roster is a
