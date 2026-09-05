@@ -874,6 +874,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   environments: [],
   // #7625: null = never asked; a snapshot with restores: [] = asked, nothing failed.
   failedRestores: null,
+  failedRestoresLoading: false,
+  retryingRestoreIds: new Set<string>(),
+  retryRestoreResults: {},
   pairingRefreshedCount: 0,
   availableModels: [],
   availableModelsProvider: null,
@@ -1734,6 +1737,34 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // byok_pool_status_request; the reply is a single byok_pool_status_snapshot
   // handled into byokPoolStatus. Returns false (and does NOT set loading) when
   // the socket is closed.
+  // #7625: the failed-restore roster. Same survey shape as
+  // requestByokPoolStatus — flip the loading flag, send, let the reply clear it.
+  requestFailedRestores: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ failedRestoresLoading: true });
+      wsSend(socket, { type: 'list_failed_restores' });
+      return true;
+    }
+    return false;
+  },
+
+  // #7625: retry one parked failed restore. Mirrors sendByokPoolAction — mark
+  // the target pending and DROP its previous inline result, so a stale outcome
+  // cannot sit next to the spinner for the attempt now in flight.
+  sendRetryFailedRestore: (sessionId: string): boolean => {
+    const { socket } = get();
+    if (!sessionId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const pending = new Set(get().retryingRestoreIds);
+    pending.add(sessionId);
+    const results = { ...get().retryRestoreResults };
+    delete results[sessionId];
+    set({ retryingRestoreIds: pending, retryRestoreResults: results });
+    wsSend(socket, { type: 'retry_failed_restore', sessionId });
+    return true;
+  },
+
   requestByokPoolStatus: (): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -2931,7 +2962,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
         'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
         'repoEventsLoading', 'githubWebhookConfigLoading', 'orchestrationRunsLoading',
+      'failedRestoresLoading',
       ] as const;
+      // #7625: the retry markers ride the same drop. A pending retry's ack can
+      // never arrive on a dead socket, so leaving the id in the set would show
+      // a permanent "Retrying…" spinner on a button the operator cannot press.
+      if (get().retryingRestoreIds.size > 0) {
+        set({ retryingRestoreIds: new Set<string>() });
+      }
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
       for (const key of surveyLoadingKeys) {
         if (get()[key]) loadingReset[key] = false;

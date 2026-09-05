@@ -1353,6 +1353,22 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // The server owns the tag and replaces the whole array; a local prune would
     // be a second implementation racing the authoritative one, and would be
     // overwritten by the next broadcast anyway.
+    // #7625. Both are keyed by a sessionId, and both must survive session
+    // death for the same definitional reason `failedRestores` does: the id
+    // names a session parked in SessionManager._failedRestores, which is absent
+    // from `_sessions` and therefore from `session_list`. `removedIds` can
+    // never contain one, so a session-death prune would be a no-op or a bug.
+    // They ARE transient request markers, so they are cleared on a socket drop
+    // (see the onclose sweep in connection.ts) — that is a different lifetime
+    // question from this bucket, which answers the KEY question only (#7488).
+    retryingRestoreIds:
+      'Set<string> of parked sessionIds with a retry in flight. The id names a session that is ' +
+      'deliberately NOT live, so session-death pruning cannot apply. #7625',
+    retryRestoreResults:
+      'Record<sessionId, retry outcome> keyed by a PARKED session id — one absent from _sessions ' +
+      'and from session_list, so removedIds can never name it and a session-death prune could ' +
+      'only ever be a no-op. The outcome must also outlive the attempt itself: a failed retry ' +
+      'leaves the row on screen and this record is what that row renders. #7625',
     environments:
       'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`, and the element carries `sessions: ' +
       'string[]`, a LIVE attachment list of real session ids (#7552 wired ' +

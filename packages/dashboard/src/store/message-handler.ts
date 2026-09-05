@@ -6726,6 +6726,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           ...snapshot,
           restores: Array.isArray(snapshot.restores) ? snapshot.restores : [],
         },
+        // Cleared on EVERY reply, refusal included — a refused survey that left
+        // the flag set would disable its own Refresh button for good, since
+        // refreshDisabled = loading || !connected and only a request clears it.
+        failedRestoresLoading: false,
       });
       break;
     }
@@ -6735,11 +6739,27 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // a re-failure arrives as a fresh session_restore_failed. The UI that
       // renders pending/outcome state lands with the Control Room tab.
       const ok = (msg as { ok?: boolean }).ok === true;
-      if (!ok) {
-        const code = (msg as { code?: string }).code;
-        const detail = (msg as { message?: string }).message;
-        console.warn(`[chroxy] retry_failed_restore failed (${code ?? 'unknown'}): ${detail ?? ''}`);
-      }
+      const sessionId = (msg as { sessionId?: string }).sessionId;
+      // Symmetric with the `restores` guard on the sibling message above, which
+      // this originally lacked (Copilot, #7631 review). An absent or empty id
+      // would `delete('')` — clearing nothing — and then write the outcome under
+      // the empty-string key, leaving the REAL row spinning on "Retrying…"
+      // forever with no way for the operator to retry it again.
+      if (typeof sessionId !== 'string' || sessionId === '') break;
+      const code = (msg as { code?: string }).code;
+      const detail = (msg as { message?: string }).message;
+      const pending = new Set(get().retryingRestoreIds);
+      pending.delete(sessionId);
+      set({
+        retryingRestoreIds: pending,
+        retryRestoreResults: { ...get().retryRestoreResults, [sessionId]: { ok, code, message: detail } },
+      });
+      // A SUCCESS re-asks for the roster rather than splicing the row out
+      // locally: the server owns it, and a local prune would race the
+      // authoritative reply that a successful retry already triggers. A FAILURE
+      // leaves the row in place — it is still parked — and the recorded result
+      // is what that row renders.
+      if (ok) get().requestFailedRestores();
       break;
     }
     case 'environment_created':
