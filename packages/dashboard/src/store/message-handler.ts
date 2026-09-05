@@ -6739,7 +6739,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // a re-failure arrives as a fresh session_restore_failed. The UI that
       // renders pending/outcome state lands with the Control Room tab.
       const ok = (msg as { ok?: boolean }).ok === true;
-      const sessionId = (msg as { sessionId?: string }).sessionId ?? '';
+      const sessionId = (msg as { sessionId?: string }).sessionId;
+      // Symmetric with the `restores` guard on the sibling message above, which
+      // this originally lacked (Copilot, #7631 review). An absent or empty id
+      // would `delete('')` — clearing nothing — and then write the outcome under
+      // the empty-string key, leaving the REAL row spinning on "Retrying…"
+      // forever with no way for the operator to retry it again.
+      if (typeof sessionId !== 'string' || sessionId === '') break;
       const code = (msg as { code?: string }).code;
       const detail = (msg as { message?: string }).message;
       const pending = new Set(get().retryingRestoreIds);

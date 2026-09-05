@@ -61,6 +61,7 @@ export function FailedRestoresSection() {
       <div className="fr-toolbar">
         <span className="fr-title">Failed restores</span>
         <button
+          type="button"
           className="fr-refresh-btn"
           onClick={() => requestFailedRestores()}
           disabled={refreshDisabled}
@@ -113,6 +114,7 @@ export function FailedRestoresSection() {
                   </p>
                 ) : null}
                 <button
+                  type="button"
                   className="fr-retry-btn"
                   onClick={() => sendRetryFailedRestore(r.sessionId)}
                   disabled={busy || !connected}

@@ -117,6 +117,16 @@ describe('FailedRestoresSection (#7625)', () => {
     expect(screen.getByTestId(`failed-restore-result-${A}`).textContent).toContain('no longer parked')
   })
 
+  it('both buttons are type=button, so a surrounding form cannot submit', () => {
+    // Copilot, #7631 review — the dashboard convention (ControlRoomView,
+    // ByokPoolSection). An implicit type="submit" would post the enclosing form
+    // if this section is ever rendered inside one.
+    state.failedRestores = snapshot()
+    render(<FailedRestoresSection />)
+    expect((screen.getByTestId('failed-restores-refresh') as HTMLButtonElement).type).toBe('button')
+    expect((screen.getByTestId(`failed-restore-retry-${A}`) as HTMLButtonElement).type).toBe('button')
+  })
+
   it('Refresh is disabled while loading and while disconnected', () => {
     state.failedRestores = snapshot()
     state.failedRestoresLoading = true

@@ -176,6 +176,26 @@ describe('failed-restore dispatch (#7625)', () => {
     expect(requested).toBe(1)
   })
 
+  it('ignores an ack with no sessionId instead of stranding the real row', () => {
+    // Copilot, #7631 review. Without the guard, `delete('')` clears nothing and
+    // the outcome lands under the empty-string key — so the row that IS
+    // retrying keeps spinning, with no way to trigger it again.
+    handleMessage({ type: 'retry_failed_restore_result', ok: true } as never, ctx() as never)
+
+    expect(store.getState().retryingRestoreIds.has(A)).toBe(true)
+    expect(store.getState().retryingRestoreIds.has(B)).toBe(true)
+    expect(store.getState().retryRestoreResults['']).toBeUndefined()
+    // And it must not trigger the success refetch off a frame it rejected.
+    expect(requested).toBe(0)
+  })
+
+  it('ignores an ack whose sessionId is an empty string', () => {
+    handleMessage({ type: 'retry_failed_restore_result', sessionId: '', ok: false, code: 'X' } as never, ctx() as never)
+
+    expect(store.getState().retryingRestoreIds.size).toBe(2)
+    expect(Object.keys(store.getState().retryRestoreResults)).toEqual([])
+  })
+
   it('a FAILED retry records the code and does NOT re-ask', () => {
     handleMessage(
       { type: 'retry_failed_restore_result', sessionId: A, ok: false, code: 'ENVIRONMENT_STOPPED', message: 'still down' },
