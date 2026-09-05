@@ -2908,57 +2908,75 @@ export class SessionManager extends EventEmitter {
       // restored history + worktree instead of destroying them.
       isRestore: true,
     })
-    // #4089 / #4124: restore the per-session running totals + the
-    // threshold-notified latch onto the freshly-created entry. We do
-    // this AFTER createSession so the entry exists, and BEFORE
-    // history replay so a synthetic result event during replay
-    // (unlikely but defensive) doesn't double-count. Validate shape:
-    // missing / corrupt cumulativeUsage falls back to all-zero;
-    // non-boolean costThresholdNotified falls back to false.
-    //
-    // Per-field clamps:
-    //   - Token counts + turnsBilled are monotonic counters; corrupt
-    //     state with negatives clamps to 0.
-    //   - costUsd accepts negatives per #4099 (refund / credit
-    //     adjustments). Only non-finite values fall back to 0.
-    const restoredEntry = this._sessions.get(sessionId)
-    // #7082: the restore path reads ~/.chroxy/session-state.json, so a hand-edited
-    // or corrupt file can carry a fractional / past-2^53 / negative counter straight
-    // into the live snapshot. Same coercion as the accumulate path above.
-    if (restoredEntry) {
-      if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
-        const u = saved.cumulativeUsage
-        restoredEntry.cumulativeUsage = {
-          inputTokens: toWireCount(u.inputTokens),
-          outputTokens: toWireCount(u.outputTokens),
-          cacheReadTokens: toWireCount(u.cacheReadTokens),
-          cacheCreationTokens: toWireCount(u.cacheCreationTokens),
-          // costUsd is NOT coerced: `z.number().finite()` with no `.int()`, and
-          // legitimately negative for a refund / credit adjustment (#4099).
-          costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
-          turnsBilled: toWireCount(u.turnsBilled),
+    try {
+      // #4089 / #4124: restore the per-session running totals + the
+      // threshold-notified latch onto the freshly-created entry. We do
+      // this AFTER createSession so the entry exists, and BEFORE
+      // history replay so a synthetic result event during replay
+      // (unlikely but defensive) doesn't double-count. Validate shape:
+      // missing / corrupt cumulativeUsage falls back to all-zero;
+      // non-boolean costThresholdNotified falls back to false.
+      //
+      // Per-field clamps:
+      //   - Token counts + turnsBilled are monotonic counters; corrupt
+      //     state with negatives clamps to 0.
+      //   - costUsd accepts negatives per #4099 (refund / credit
+      //     adjustments). Only non-finite values fall back to 0.
+      const restoredEntry = this._sessions.get(sessionId)
+      // #7082: the restore path reads ~/.chroxy/session-state.json, so a hand-edited
+      // or corrupt file can carry a fractional / past-2^53 / negative counter straight
+      // into the live snapshot. Same coercion as the accumulate path above.
+      if (restoredEntry) {
+        if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
+          const u = saved.cumulativeUsage
+          restoredEntry.cumulativeUsage = {
+            inputTokens: toWireCount(u.inputTokens),
+            outputTokens: toWireCount(u.outputTokens),
+            cacheReadTokens: toWireCount(u.cacheReadTokens),
+            cacheCreationTokens: toWireCount(u.cacheCreationTokens),
+            // costUsd is NOT coerced: `z.number().finite()` with no `.int()`, and
+            // legitimately negative for a refund / credit adjustment (#4099).
+            costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
+            turnsBilled: toWireCount(u.turnsBilled),
+          }
+        }
+        if (saved.costThresholdNotified === true) {
+          restoredEntry.costThresholdNotified = true
         }
       }
-      if (saved.costThresholdNotified === true) {
-        restoredEntry.costThresholdNotified = true
+      // Keep _sessionCounter ahead of any restored "Session N" names so the
+      // first new auto-named session after restore never collides (#2338).
+      this._advanceSessionCounterPast(saved.name)
+      // Restore message history if present (v1+).
+      // Sweep any `tool_start` that lacks a matching `tool_result` and
+      // splice in a synthetic interrupted result (#4617) BEFORE seeding
+      // history so the subsequent dashboard history replay never sees a
+      // dangling tool_start. Without this, an unresolved tool_use from
+      // before shutdown re-enters `activeTools` on replay and never gets
+      // cleared — the footer shows "Running X · Nh Mm" forever.
+      if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
+        const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+        this._history.setHistory(sessionId, swept)
       }
-    }
-    // Keep _sessionCounter ahead of any restored "Session N" names so the
-    // first new auto-named session after restore never collides (#2338).
-    this._advanceSessionCounterPast(saved.name)
-    // Restore message history if present (v1+).
-    // Sweep any `tool_start` that lacks a matching `tool_result` and
-    // splice in a synthetic interrupted result (#4617) BEFORE seeding
-    // history so the subsequent dashboard history replay never sees a
-    // dangling tool_start. Without this, an unresolved tool_use from
-    // before shutdown re-enters `activeTools` on replay and never gets
-    // cleared — the footer shows "Running X · Nh Mm" forever.
-    if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
-      const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
-      this._history.setHistory(sessionId, swept)
-    }
-    if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
-      this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
+      if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
+        this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
+      }
+    } catch (err) {
+      // The TAIL threw, after createSession() already returned — so a live but
+      // half-seeded session exists and must not be left behind.
+      //
+      // Tear down `sessionId`, NOT `saved.id`. createSession falls back to a
+      // random id when `preserveId` is malformed or collides with a live
+      // session (see its `preserve` guard), and `saved.id` comes off disk, so
+      // the two genuinely can differ. An earlier version tore down the parked
+      // id in the CALLER and would have missed the orphan entirely in that
+      // case, leaving a live session AND a re-parked entry for the same
+      // restore (Copilot, #7630 review).
+      //
+      // Doing it here rather than in each caller also covers the boot path,
+      // whose catch re-parks without any orphan check of its own.
+      this._teardownHalfSeededSession(sessionId)
+      throw err
     }
     return sessionId
   }
@@ -3395,21 +3413,13 @@ export class SessionManager extends EventEmitter {
         log.info(`Retry restored session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
         return { ok: true, sessionId: restoredId }
       } catch (err) {
-        // A throw AFTER createSession returned (a re-seed step) leaves a LIVE
-        // but half-seeded session behind — no history, and a lastActivityAt of
-        // `now` from createSession's own touchActivity. Tear it down (provider
-        // + in-process maps only; the worktree stays) so the re-park below can
-        // restore the ORIGINAL `saved` verbatim.
+        // No orphan check here on purpose. `_attemptRestoreOne` tears down any
+        // half-seeded session it created before it rethrows, and it is the only
+        // scope that knows which id createSession actually used — `saved.id`
+        // can differ from it when preserveId is malformed or collides. A check
+        // at this level would be keyed on the wrong id in exactly the case that
+        // matters (Copilot, #7630 review).
         //
-        // The first version kept that session and flushed it, on the reasoning
-        // that a live session is better than none. Review reproduced the cost:
-        // the preserved conversation was erased and the #7627 freeze thawed,
-        // written to disk immediately, on the feature built to prevent exactly
-        // that. A retry must never be able to lose what a non-retry preserved.
-        if (this._sessions.has(sessionId)) {
-          log.error(`Retry for ${sessionId} created the session but failed to re-seed it; re-parking: ${err?.stack || err}`)
-          this._teardownHalfSeededSession(sessionId)
-        }
         // Re-park with the SAME `saved` object. #7627: a failed restore's
         // lastActivityAt is frozen at the value it had when first parked, and
         // re-using `saved` rather than re-serializing is what keeps it frozen —

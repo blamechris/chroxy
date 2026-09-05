@@ -746,8 +746,13 @@ async function handleRetryFailedRestore(ws, client, msg, ctx) {
   }
 
   ctx.transport.send(ws, {
+    // The id the manager actually restored, which is NOT always the one asked
+    // for: createSession falls back to a random id when preserveId is malformed
+    // or collides, so echoing the request would leave the client unable to find
+    // the session it just recovered (Copilot, #7630 review). Falls back to the
+    // requested id on the failure arms, where nothing was created.
+    sessionId: result.ok && result.sessionId ? result.sessionId : sessionId,
     type: 'retry_failed_restore_result',
-    sessionId,
     ok: result.ok === true,
     ...(result.ok ? {} : { code: result.code, message: result.message }),
   })

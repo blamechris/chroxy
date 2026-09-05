@@ -240,6 +240,49 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
     assert.deepEqual(serializedIds(sm), [saved.id], 'the id is serialized exactly once')
   })
 
+  // Copilot, #7630 review. createSession falls back to a RANDOM id when
+  // `preserveId` is malformed (a corrupt state file is the reachable case, and
+  // this file's own #7082 coercions already treat that file as untrusted) or
+  // collides with a live session. So the id createSession used is not always
+  // `saved.id` — and the teardown must key on the one it actually used, or it
+  // misses the orphan in exactly the case that matters.
+  it('tears down the half-seeded session even when its id is NOT the parked id', async () => {
+    makeSm()
+    // A malformed id: createSession's /^[a-f0-9]{32}$/ guard rejects it and
+    // mints a random one instead.
+    const saved = park(sm, dir, { id: 'NOT-A-VALID-HEX-ID' })
+    const original = sm._advanceSessionCounterPast.bind(sm)
+    let injected = false
+    sm._advanceSessionCounterPast = (name) => {
+      if (!injected) { injected = true; throw new Error('INJECTED: re-seed step failure') }
+      return original(name)
+    }
+
+    const result = await sm.retryFailedRestore('NOT-A-VALID-HEX-ID')
+
+    assert.equal(injected, true, 'CONTROL: the injected failure fired')
+    assert.equal(result.ok, false)
+    // The claim: NO live session is left behind under ANY id. Keying the
+    // teardown on saved.id would leave the randomly-id'd one running.
+    assert.equal(sm._sessions.size, 0, 'no orphan session under any id')
+    assert.equal(sm._failedRestores.has('NOT-A-VALID-HEX-ID'), true, 're-parked')
+    assert.equal(sm._failedRestores.get('NOT-A-VALID-HEX-ID').saved.history.length, 2, 'history intact')
+  })
+
+  it('reports the id the session was actually restored under', async () => {
+    makeSm()
+    const saved = park(sm, dir, { id: 'NOT-A-VALID-HEX-ID' })
+
+    const result = await sm.retryFailedRestore('NOT-A-VALID-HEX-ID')
+
+    assert.equal(result.ok, true)
+    // The restored session is live under a MINTED id, so returning the
+    // requested one would leave the caller unable to find what it recovered.
+    assert.notEqual(result.sessionId, 'NOT-A-VALID-HEX-ID')
+    assert.equal(sm._sessions.has(result.sessionId), true, 'the reported id is the live one')
+    void saved
+  })
+
   // The parked entry is constructed DIRECTLY here because production cannot
   // currently produce one: serializeState() skips isUserShell entries so a
   // user-shell session is never persisted or restored, and the re-park branch
