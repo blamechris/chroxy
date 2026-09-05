@@ -1867,7 +1867,22 @@ what it can carry: the call is written. Recorded rather than quietly corrected,
 because "I threaded the value so the call is covered" is exactly the plausible
 sentence that becomes entry 13's shape.
 
-Twenty-five mutants, twenty-five killed, each red in 0.2s naming its own case.
+**And the scrub itself was broken on one of the two platforms it runs on.**
+`{ ...process.env }` copies out whatever casing the OS holds — Windows spells it
+`Path`, not `PATH` — while Windows resolves a variable lookup without regard to
+case. So `delete env['GIT_DIR']` leaves an inherited `Git_Dir` in the copy for
+the git subprocess to read: a scrub that silently does nothing on Windows. The
+required `Server Windows Tests` leg found it on this change's first CI run, in
+the *assertion* (`assert.ok('PATH' in env)`) before the *scrub*, which is the
+same mistake twice — a check written on a POSIX developer's machine, naming a
+member of a set instead of quantifying over it. Both are folded now, and the
+"nothing else was dropped" case quantifies over the environment rather than
+naming `PATH`. **A guard's own cross-platform leg is a reviewer no panel
+replaces**, and the argument for keeping the Windows suite required is that it
+caught a defect in the fix for a false-safety bug, in the one place a false
+positive costs nothing.
+
+Twenty-eight mutants, twenty-eight killed, each red in 0.2s naming its own case.
 The two that survived a first pass were not argued away: one was a floor whose
 own derivation had no synthetic proof, the other a comment-stripper the real body
 could not exercise, and both got the treatment the rest had rather than a

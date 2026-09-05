@@ -303,10 +303,23 @@ const GIT_ENV_OVERRIDES = [
   'GIT_ICASE_PATHSPECS',
 ]
 
+/**
+ * Matched CASE-INSENSITIVELY, because Windows environment variables are.
+ *
+ * `{ ...process.env }` copies out whatever casing the OS holds — `Path`, not
+ * `PATH` — while Windows resolves a variable lookup without regard to case. So
+ * a case-sensitive `delete env['GIT_DIR']` leaves an inherited `Git_Dir` sitting
+ * in the copy, and the git subprocess reads it: a scrub that silently does
+ * nothing on one of the two platforms this suite runs on.
+ *
+ * Found by the Windows leg of this file's own first CI run, which is the
+ * argument for that leg existing. On POSIX the folding is harmless — a
+ * `Git_Dir` there is a different variable that git ignores, and dropping it
+ * costs nothing.
+ */
 function gitEnv() {
-  const env = { ...process.env }
-  for (const key of GIT_ENV_OVERRIDES) delete env[key]
-  return env
+  const drop = new Set(GIT_ENV_OVERRIDES.map(k => k.toUpperCase()))
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !drop.has(k.toUpperCase())))
 }
 
 /**
@@ -1251,23 +1264,58 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
   })
 
   describe('gitEnv', () => {
+    /** Set `vars`, run `fn`, and put the environment back whatever happens. */
+    const withEnv = (vars, fn) => {
+      const before = Object.fromEntries(Object.keys(vars).map(k => [k, process.env[k]]))
+      try {
+        for (const [k, v] of Object.entries(vars)) process.env[k] = v
+        fn()
+      } finally {
+        for (const [k, v] of Object.entries(before)) {
+          if (v === undefined) delete process.env[k]
+          else process.env[k] = v
+        }
+      }
+    }
+
     it('drops every variable that can redirect or narrow what git sees', () => {
       // Without a case here the scrub is a list nothing compares to anything —
       // `gitEnv()` returning `process.env` unchanged is invisible against a
       // developer's environment, which has none of these set. Measured:
       // GIT_INDEX_FILE alone turns 2496 tracked files into 0 at exit 0.
-      const before = { ...process.env }
-      try {
-        for (const key of GIT_ENV_OVERRIDES) process.env[key] = 'x'
+      withEnv(Object.fromEntries(GIT_ENV_OVERRIDES.map(k => [k, 'x'])), () => {
         const env = gitEnv()
         assert.deepEqual(GIT_ENV_OVERRIDES.filter(k => k in env), [])
-        assert.ok('PATH' in env, 'the rest of the environment must survive — git still needs to be found')
-      } finally {
-        for (const key of GIT_ENV_OVERRIDES) {
-          if (key in before) process.env[key] = before[key]
-          else delete process.env[key]
-        }
-      }
+      })
+    })
+
+    it('drops NOTHING else — git still has to be found and run', () => {
+      // The other direction, and the one that must not name a variable: the
+      // first Windows run of this file failed on `assert.ok('PATH' in env)`,
+      // because Windows spells it `Path` and a spread copies the OS casing.
+      // Quantifying over the environment instead of naming a member is both
+      // portable and a stronger claim.
+      const drop = new Set(GIT_ENV_OVERRIDES.map(k => k.toUpperCase()))
+      const env = gitEnv()
+      const lost = Object.keys(process.env).filter(k => !drop.has(k.toUpperCase()) && !(k in env))
+      assert.deepEqual(lost, [], 'gitEnv() dropped variables it has no business dropping')
+      assert.ok(Object.keys(env).length > 0, 'gitEnv() returned an empty environment')
+    })
+
+    it('drops them CASE-INSENSITIVELY — Windows environment variables are', () => {
+      // A case-sensitive delete leaves an inherited `Git_Dir` in the copy, and
+      // Windows resolves the lookup regardless of case, so git reads it: a
+      // scrub that does nothing on one of the two platforms this suite runs on.
+      // On POSIX `Git_Index_File` is simply a different variable, so this case
+      // is meaningful on both — it fails on either platform if the folding goes.
+      withEnv({ Git_Index_File: 'x', git_dir: 'y' }, () => {
+        const env = gitEnv()
+        assert.deepEqual(
+          ['Git_Index_File', 'git_dir'].filter(k => k in env),
+          [],
+          'the scrub is case-sensitive, so a differently-cased variable survives it'
+        )
+      })
     })
 
     it('names GIT_INDEX_FILE — the one that empties the listing at exit 0', () => {
