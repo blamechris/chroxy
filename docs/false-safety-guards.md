@@ -1711,20 +1711,50 @@ one-minute hosted gate job that is not itself required. A `needs` failure skips
 the dependent rather than failing it, so the one job that can stand down twelve
 required suites is the one job whose failure nothing consumes.
 
-Two halves, and they are not equally established — which matters, because the
-lesson from `#7637` was asserting an unverified causal story inside this very
-document. **Verified in this repo:** a skipped job emits a completed check run
-with conclusion `skipped` (observed organically on `Renovate Config`, at three
-API layers), and this repo's own `/batch-merge` gate hardcodes `SUCCESS` and
-`SKIPPED` as the only accepted states for a required context — so on the
-autonomous merge path the hole is real and is in our own code. **Documented but
-unmeasured here:** that GitHub's merge button treats a skipped *required* check
-as satisfied. No required context has ever reported skipped in this repo, and
-the fork-PR precedent `CONTRIBUTING.md` cites for it never actually ran — one
-fork PR in ~3,500, reporting no checks, predating the `if:` gate it supposedly
-demonstrates. A third state is genuinely different and was measured: a required
-check that produces *no* check run at all does not satisfy protection, it wedges
-the PR (entry 22).
+The chain has four links and they were not equally established — which matters,
+because the lesson from `#7637` was asserting an unverified causal story inside
+this very document. Three are verified:
+
+- a `needs`-failed dependent emits a **completed check run with conclusion
+  `skipped`** — measured directly, see below
+- a skipped job's check run is what protection reads (observed organically on
+  `Renovate Config`, at three API layers)
+- this repo's own `/batch-merge` gate hardcodes `SUCCESS` and `SKIPPED` as the
+  only accepted states for a required context, so on the autonomous merge path
+  the hole is in our own code and needs no inference about GitHub at all
+
+One is not: that GitHub's merge button treats a skipped *required* check as
+satisfied. No required context has ever reported skipped here, and the fork-PR
+precedent `CONTRIBUTING.md` cites for it never actually ran — one fork PR in
+~3,500, reporting no checks, predating the `if:` gate it supposedly
+demonstrates. It cannot be measured without merging a PR whose required check is
+skipped, or temporarily requiring a job that skips, and neither is worth doing.
+
+**The measurement, because the answer could have gone the other way.** The first
+link was the one worth testing: if a `needs`-failed dependent produced *no check
+run*, the PR would WEDGE rather than merge — the safe outcome, and the whole
+entry would have been wrong. A third state makes that concrete: a required check
+that produces no check run at all does not satisfy protection, it wedges the PR
+(entry 22). So "skipped" and "absent" had to be told apart rather than assumed.
+
+A throwaway branch settles it in one run, and the technique is worth keeping: a
+workflow whose `on: push` is scoped to that branch alone cannot touch `main` or
+any PR, so a deliberately-failing job is safe to publish. Three jobs — a gate
+that `exit 1`s, a dependent declaring `needs: gate`, and a control with no
+`needs` proving the workflow ran:
+
+```
+$ gh api repos/blamechris/chroxy/commits/2f60bcb.../check-runs
+  total_count=3
+  status=completed  conclusion=skipped   EXP Dependent (needs the failing gate)
+  status=completed  conclusion=failure   EXP Gate (fails on purpose)
+  status=completed  conclusion=success   EXP Control (no needs)
+```
+
+`skipped`, not absent. The hole was real, and requiring `Resolve Runner Target`
+closes it. The branch is deleted; the run and its check-runs remain queryable by
+SHA, and the reading is pasted into `#7641` because a filesystem path or a branch
+name in an issue is a pointer to something already scheduled for deletion.
 
 `runner-target` has never fired: 0 failures in every run sampled — 39/39 in a
 41-run job-level sample, and none in ~205 runs scanned for this job specifically
