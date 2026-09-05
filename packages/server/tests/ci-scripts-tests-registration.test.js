@@ -225,8 +225,17 @@ const GLOB_COVERED = [
     // The config the `why` below makes a claim about, and the keys that would
     // falsify it. `vitest run` names the runner; `vitest.config.ts` decides what
     // it discovers, and until #7640 nothing here read it.
+    //
+    // NOT line-anchored. The first version of this regex required the key to
+    // begin a line (`/^\s*(include|...)\s*:/m`), so the identical config written
+    // compactly — `test: { include: ['src/**\/*.test.ts'], testTimeout: 30_000 }` —
+    // was invisible to it: the exact edit the check exists to catch, passing in
+    // one spelling and failing in another. Two spellings of identical config
+    // must not disagree, which is the lesson this repo's shared workflow-reader
+    // was built around. A key is now matched wherever it sits, quoted or not,
+    // and both spellings are pinned by cases below.
     config: 'packages/store-core/vitest.config.ts',
-    narrowsDiscovery: /^\s*(include|exclude|dir|root)\s*:/m,
+    narrowsDiscovery: /(^|[{,\s])['"]?(include|exclude|dir|root|projects|workspace)['"]?\s*:/,
     covers: /\.test\.(mjs|cjs|js)$/,
     why:
       "vitest's defaultInclude is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which matches .mjs and is " +
@@ -270,23 +279,43 @@ const isSubject = p =>
  * The docblock below argued at length that `GIT_LITERAL_PATHSPECS` could
  * silently shrink the subject set, and dropped the PATHSPEC for that reason.
  * The argument is right; the defence was aimed at the one variable that fix had
- * already neutralised. Measured in a worktree of this repo:
+ * already neutralised. Measured in a worktree of this repo, each reading taken
+ * with the exit status captured BEFORE any pipe (a `cmd | wc` reports `wc`'s
+ * status, and a first pass at this table did exactly that and recorded two rows
+ * wrong):
  *
- *   git ls-files -z                              -> 2496 files, exit 0
- *   GIT_LITERAL_PATHSPECS=1 git ls-files -z      -> 2496 files, exit 0  (no effect —
- *                                                   there is no pathspec to reinterpret)
- *   GIT_INDEX_FILE=<empty file> git ls-files -z  ->    0 files, EXIT 0
- *   GIT_WORK_TREE=/tmp git ls-files -z           -> 2474 files, exit 0
+ *   git ls-files -z                                -> 2496 files, exit 0
+ *   GIT_LITERAL_PATHSPECS=1 git ls-files -z        -> 2496 files, exit 0    (no effect —
+ *                                                     there is no pathspec to reinterpret)
+ *   GIT_INDEX_FILE=<nonexistent path> git ls-files -z ->  0 files, EXIT 0
+ *   GIT_INDEX_FILE=<empty file> git ls-files -z    ->    0 files, exit 128
+ *   GIT_WORK_TREE=/tmp git ls-files -z             -> 2496 files, exit 0    (no effect on
+ *                                                     ls-files, which reads the INDEX)
+ *   GIT_DIR=<not a repo> git ls-files -z           ->    0 files, exit 128
  *
- * `GIT_INDEX_FILE` is the one that matters: a silently EMPTY enumeration that
- * exits 0 — "found nothing to check" wearing "nothing wrong", the second cause
- * in docs/false-safety-guards.md, reachable from the environment with no edit
- * to this repo at all. MIN_TRACKED_FILES catches it, and a floor as the ONLY
- * defence against a condition the caller can simply arrange is a thin one.
- * `spawnSync` passes the whole inherited environment unless told otherwise, so
- * it is told otherwise.
+ * `GIT_INDEX_FILE` pointing at a path that does not exist is the one that
+ * matters, and it is the ordinary accident rather than the exotic one — a stale
+ * path left in a shell, a wrapper that sets it for a different repo. git treats
+ * a missing index as an EMPTY index: zero files, exit 0. That is "found nothing
+ * to check" wearing "nothing wrong", the second cause in
+ * docs/false-safety-guards.md, reachable from the environment with no edit to
+ * this repo at all, and only MIN_TRACKED_FILES stands between it and a green
+ * run over no suites. A floor as the ONLY defence against a condition the caller
+ * can simply arrange is a thin one. `spawnSync` passes the whole inherited
+ * environment unless told otherwise, so it is told otherwise.
  *
- * The pathspec family goes too, following #7281's precedent in
+ * The loud variants (an empty or malformed index, a GIT_DIR that is not a repo)
+ * exit 128 and `assertGitRan` reports them. Both directions are covered, by
+ * different assertions, and the table above is the evidence for which is which.
+ *
+ * `GIT_WORK_TREE` is dropped on CATEGORY, not on a measurement: it redirects
+ * git's view of the tree, and it has no measured effect on `ls-files`
+ * specifically because `ls-files` reads the index. Said plainly rather than
+ * left to look like the other rows — an entry whose evidence is "it belongs to
+ * the family" is fine, and an entry pretending to a measurement it does not
+ * have is how a roster rots.
+ *
+ * The pathspec family goes for the same reason, following #7281's precedent in
  * packages/server/src/ws-file-ops/git.js: they are the user's to set and not
  * ours to assume absent.
  */
@@ -1253,9 +1282,10 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     })
 
     it('refuses an EMPTY listing that exited 0 — the shape GIT_INDEX_FILE produces', () => {
-      // Measured: `GIT_INDEX_FILE=<empty file> git ls-files -z` returns nothing
-      // and exits 0. `gitEnv()` scrubs that variable so it cannot arrive; this
-      // floor is what makes the scrub a second strap rather than the only one.
+      // Measured: `GIT_INDEX_FILE=<nonexistent path> git ls-files -z` returns
+      // nothing and exits 0 — git reads a missing index as an empty one.
+      // `gitEnv()` scrubs that variable so it cannot arrive; this floor is what
+      // makes the scrub a second strap rather than the only one.
       assert.throws(
         () => parseGitListing({ status: 0, stdout: Buffer.from('') }, '/r'),
         /the enumeration is broken, not the tree/
@@ -1329,15 +1359,16 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
       // The end-to-end proof, and the reason it is worth the temp file: every
       // case above tests `gitEnv()` in isolation, so dropping `env: gitEnv()`
       // from the spawn — the CALL rather than the function — would survive them
-      // all. Measured without the scrub: `GIT_INDEX_FILE=<empty file>
-      // git ls-files -z` returns nothing and exits 0, so this run would come
-      // back with an empty subject set and a clean green.
+      // all. A path that DOES NOT EXIST, deliberately: git reads a missing
+      // index as an empty one and exits 0 (measured), which is the silent shape
+      // this floor exists for. An EMPTY FILE would also work as a mutation
+      // detector but for the wrong reason — git rejects it with exit 128, which
+      // `assertGitRan` would catch, and the case would then be proving a
+      // different assertion than its name claims.
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-gitenv-'))
       const before = process.env.GIT_INDEX_FILE
       try {
-        const idx = join(dir, 'empty-index')
-        writeFileSync(idx, '')
-        process.env.GIT_INDEX_FILE = idx
+        process.env.GIT_INDEX_FILE = join(dir, 'no-such-index')
         assert.ok(trackedFiles().length >= MIN_TRACKED_FILES)
       } finally {
         if (before === undefined) delete process.env.GIT_INDEX_FILE
@@ -1366,6 +1397,78 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         () => checkedInventory(inventory(MIN_SUITES - 1)),
         new RegExp(`expected >=${MIN_SUITES} suites, found ${MIN_SUITES - 1}`)
       )
+    })
+  })
+
+  describe('checkedWorkflows (and assertReaderSane, which it threads)', () => {
+    // #7640 names assertReaderSane as one of the six controls needing a red
+    // proof. Relocating the call into checkedWorkflows does not give it one —
+    // it is a SHARED helper whose five sub-assertions were exercised only by
+    // the happy-path read of the real .github/workflows/, which is to say not
+    // at all. Synthetic workflows, because a shape the real directory does not
+    // have is exactly the one no directory-reading test can prove is handled.
+    //
+    // Only the OUTPUT SHAPE of readWorkflows is reproduced here, not its parse:
+    // { name, jobs: [{ steps: [[line, ...]] }] }. #7647 asks the reader to grow
+    // a stepRun-side floor of its own; that is about the other seven consumers.
+    const SETUP_NODE_STEP = ['      - uses: actions/setup-node@abc123', '        with:', '          node-version: 22']
+    const wf = (name, jobs) => ({ name, jobs })
+    const job = (setupNodeSteps = 1) => ({
+      steps: [...Array.from({ length: setupNodeSteps }, () => SETUP_NODE_STEP), ['      - run: echo hi']],
+    })
+    /** A synthetic set that clears every one of assertReaderSane's five floors. */
+    const healthy = () => [
+      wf('ci.yml', Array.from({ length: 16 }, () => job(1))),
+      wf('release.yml', Array.from({ length: 4 }, () => job(0))),
+      wf('a.yml', [job(0)]),
+      wf('b.yml', [job(0)]),
+      wf('c.yml', [job(0)]),
+    ]
+
+    it('CONTROL: a healthy synthetic set passes and is returned unchanged', () => {
+      const set = healthy()
+      assert.equal(checkedWorkflows(set), set)
+    })
+
+    it('refuses too FEW workflow files', () => {
+      assert.throws(() => checkedWorkflows(healthy().slice(0, 4)), /expected >=5 workflow files, found 4/)
+    })
+
+    it('refuses a set with no ci.yml — the file that carries nearly all the wiring', () => {
+      assert.throws(
+        () => checkedWorkflows(healthy().map(w => (w.name === 'ci.yml' ? wf('other.yml', w.jobs) : w))),
+        /expected ci.yml among the scanned workflows/
+      )
+    })
+
+    it('refuses a set with no release.yml', () => {
+      // The one sub-assertion measured to be a SOLE detector: drop release.yml
+      // from the real read and every other floor still passes, because no suite
+      // is wired there today. That last clause is load-bearing and will rot —
+      // wire a suite into release.yml and the orphan rule becomes a second
+      // catcher. Stated so the next person knows which kind of claim it is.
+      assert.throws(
+        () => checkedWorkflows(healthy().filter(w => w.name !== 'release.yml').concat([wf('d.yml', [job(0)])])),
+        /expected release.yml among the scanned workflows/
+      )
+    })
+
+    it('refuses too few JOBS across the set', () => {
+      assert.throws(
+        () => checkedWorkflows(healthy().map(w => wf(w.name, w.jobs.slice(0, 2)))),
+        /expected >=20 jobs across all workflows/
+      )
+    })
+
+    it('refuses too few setup-node steps — a reader that has stopped seeing `uses:`', () => {
+      assert.throws(
+        () => checkedWorkflows(healthy().map(w => wf(w.name, w.jobs.map(() => job(0))))),
+        /expected >=15 setup-node steps across all workflows/
+      )
+    })
+
+    it('refuses an EMPTY set — every rule would quantify over nothing', () => {
+      assert.throws(() => checkedWorkflows([]), /expected >=5 workflow files, found 0/)
     })
   })
 
@@ -1480,6 +1583,23 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         )
       })
 
+      it(`${entry.tree}: narrowsDiscovery REPORTS the same narrowing on ONE LINE`, () => {
+        // The spelling the line-anchored first version missed entirely. Two
+        // spellings of identical config must not disagree — that is the lesson
+        // the shared workflow-reader was built around, and this check had the
+        // same split until #7650's review measured it.
+        assert.ok(
+          entry.narrowsDiscovery.test("export default defineConfig({ test: { include: ['src/**/*.test.ts'], testTimeout: 30_000 } })\n"),
+          'a one-line config that narrows discovery must be reported'
+        )
+      })
+
+      it(`${entry.tree}: narrowsDiscovery REPORTS a QUOTED key and the project-level spellings`, () => {
+        assert.ok(entry.narrowsDiscovery.test('{ test: { "include": [\'a\'] } }'), 'a quoted key must be reported')
+        assert.ok(entry.narrowsDiscovery.test('{ test: { projects: [\'p\'] } }'), 'projects narrows discovery')
+        assert.ok(entry.narrowsDiscovery.test('{ test: { workspace: \'w\' } }'), 'workspace narrows discovery')
+      })
+
       it(`${entry.tree}: narrowsDiscovery does NOT report the timeouts-only shape`, () => {
         assert.ok(
           !entry.narrowsDiscovery.test("export default defineConfig({\n  test: {\n    testTimeout: 30_000,\n    maxWorkers: '50%',\n  },\n})\n"),
@@ -1493,6 +1613,34 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         assert.ok(!entry.covers.test(`${entry.tree}scripts/__tests__/x.test.sh`))
       })
     }
+  })
+
+  describe('checkedAgainstDisk', () => {
+    // enumerationDisagreements is proved above; that is the COMPUTATION. These
+    // are the two assert.deepEqual refusals that turn it into a control, and
+    // nothing exercised them: the real tree never disagrees, so deleting either
+    // one left the file green. The mutants that appeared to cover this
+    // (reverting each direction to []) mutate the computation, not the refusal.
+    const G = ROOT_SUITE_DIR
+
+    it('CONTROL: agreement returns the suites unchanged', () => {
+      const suites = [`${G}a.test.sh`]
+      assert.equal(checkedAgainstDisk(suites, new Set(['a.test.sh']), new Set()), suites)
+    })
+
+    it('refuses a suite git lists that the directory does not have', () => {
+      assert.throws(
+        () => checkedAgainstDisk([`${G}gone.test.sh`], new Set(), new Set()),
+        /the enumeration is stale/
+      )
+    })
+
+    it('refuses a suite on disk the enumeration lost', () => {
+      assert.throws(
+        () => checkedAgainstDisk([], new Set(['b.test.sh']), new Set()),
+        /the enumeration lost them/
+      )
+    })
   })
 
   describe('isSuiteShaped', () => {
@@ -1584,7 +1732,18 @@ describe('collectSubject calls every control this file declares (#7640)', () => 
     assert.ok(!body.includes('thisControlDoesNotExist('))
     assert.ok(
       !body.includes('function checkedInventory('),
-      'the slice reaches past collectSubject into the declarations themselves'
+      'the slice reaches BACKWARD past collectSubject into the declarations above it'
+    )
+    // FORWARD is the direction that matters, and the first version of this
+    // control could not see it: `checkedInventory` is declared BEFORE
+    // collectSubject, so asserting its declaration is absent says nothing about
+    // an over-slice. `checkedAgainstDisk` is declared immediately AFTER, so an
+    // unbounded slice swallows `function checkedAgainstDisk(` and its
+    // DECLARATION then satisfies the roster rule for a control whose CALL is
+    // gone. A control that tests the safe direction is not a control.
+    assert.ok(
+      !body.includes('function checkedAgainstDisk('),
+      'the slice reaches FORWARD past collectSubject, where a declaration can vouch for a missing call'
     )
     assert.ok(
       !body.includes('describeOrphans('),
@@ -1592,10 +1751,16 @@ describe('collectSubject calls every control this file declares (#7640)', () => 
     )
   })
 
-  it('CONTROL: the comment stripper does not let prose vouch for a call', () => {
-    const prose = '  // checkedInventory(suites) used to be called here\n  const x = 1\n'
-    const stripped = prose.split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n')
-    assert.ok(!stripped.includes('checkedInventory('))
+  it('CONTROL: prose cannot vouch for a call, in EITHER JavaScript comment form', () => {
+    // Calls the SHIPPING stripper. The version this replaces transcribed the
+    // regex inline, so widening the real one would have left this green — "a
+    // red proof that runs a second copy of the detector proves the copy goes
+    // red", which is this file's own rule about mutation cases, broken in the
+    // case written to enforce it.
+    assert.ok(!stripJsComments('  // checkedInventory(suites) was called here\n  const x = 1\n').includes('checkedInventory('))
+    assert.ok(!stripJsComments('  /* checkedInventory(suites) was called here */\n  const x = 1\n').includes('checkedInventory('))
+    assert.ok(!stripJsComments('  /*\n  checkedInventory(suites)\n  */\n  const x = 1\n').includes('checkedInventory('))
+    assert.ok(stripJsComments('  const y = checkedInventory(suites)\n').includes('checkedInventory('), 'a real call must survive stripping')
   })
 })
 
@@ -1636,21 +1801,54 @@ function declaredControls(text) {
  * `minLength` is a parameter so the synthetic cases can exercise the slice and
  * the strip separately from the floor; the real call takes the default.
  */
-function collectSubjectBody(text, { minLength = 200 } = {}) {
+function collectSubjectBody(text, { minLength = 200, maxLength = 4000 } = {}) {
   const start = text.indexOf('\nasync function collectSubject() {')
   assert.ok(start !== -1, 'collectSubject() not found — this guard has drifted from the file it reads')
   const end = text.indexOf('\n}\n', start)
   assert.ok(end > start, 'could not find the end of collectSubject()')
-  const body = text
-    .slice(start, end)
-    .split('\n')
-    .map(l => l.replace(/\/\/.*$/, ''))
-    .join('\n')
+  const body = stripJsComments(text.slice(start, end))
   assert.ok(
     body.length >= minLength,
     `the collectSubject() slice reads as ${body.length} chars (expected >=${minLength}) — it is wrong`
   )
+  // The UPPER bound is not symmetry. `indexOf('\\n}\\n')` has no end anchor: if
+  // collectSubject's closing brace is ever spelled differently the slice runs on
+  // into whatever follows, and what follows is `function checkedAgainstDisk(` —
+  // whose DECLARATION text then satisfies the roster rule for a control whose
+  // CALL is gone. Cheap to bound, and impossible to catch by reading the rule.
+  assert.ok(
+    body.length <= maxLength,
+    `the collectSubject() slice reads as ${body.length} chars (expected <=${maxLength}) — it has ` +
+      'run past the function into whatever follows, where a declaration can vouch for a missing call'
+  )
   return body
+}
+
+/**
+ * A JavaScript source with BOTH comment forms removed.
+ *
+ * The first version of this stripped `//` only, and that was the same defect
+ * the guard it serves exists to catch: block-commenting the `checkedAgainstDisk`
+ * call — Shift+Alt+A on the statement, the ordinary way anyone disables a line —
+ * left the call-site rule green, and combined with a shrunk enumeration the
+ * whole file reported 69/69 with a tracked suite silently outside the subject
+ * set. Measured, at this branch's own head.
+ *
+ * The idiom was borrowed from `uncommented()` a few hundred lines up, which is
+ * complete because SHELL HAS ONE COMMENT FORM. JavaScript has two, and the
+ * transcription kept the shape while losing the property. That is worth naming:
+ * the copy was of a correct function, and it was still wrong here.
+ *
+ * A `//` or a `/*` inside a string literal is stripped too, which can only
+ * SHORTEN what is searched — so its effect is to report a call as missing, which
+ * is loud and the safe direction.
+ */
+function stripJsComments(text) {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map(l => l.replace(/\/\/.*$/, ''))
+    .join('\n')
 }
 
 describe('the call-site guard\'s own derivations go RED (#7640)', () => {
@@ -1702,7 +1900,18 @@ describe('the call-site guard\'s own derivations go RED (#7640)', () => {
   })
 
   it('refuses a slice shorter than the floor', () => {
-    assert.throws(() => collectSubjectBody(SRC, { minLength: 10_000 }), /it is wrong/)
+    assert.throws(() => collectSubjectBody(SRC, { minLength: 10_000 }), /expected >=10000/)
+  })
+
+  it('refuses a slice LONGER than the ceiling — an over-slice reaches the declarations', () => {
+    // The ceiling is inert against the real file, whose slice is small, so
+    // without this case deleting it is invisible — the same "a floor fired" vs
+    // "this floor is guarded" gap the whole describe exists to close, found by
+    // the mutation run rather than by reading.
+    assert.throws(
+      () => collectSubjectBody(SRC, { minLength: 0, maxLength: 1 }),
+      /it has run past the function into whatever follows/
+    )
   })
 })
 

@@ -1829,19 +1829,42 @@ and so needs no second copy of the parser.
 `trackedFiles()`'s docblock argues at length that `GIT_LITERAL_PATHSPECS` could
 silently shrink the subject set, and drops the pathspec for that reason. The
 argument is right and it is aimed at the one variable the fix had already
-neutralised — with no pathspec there is nothing to reinterpret. Measured in a
-worktree of this repo:
+neutralised — with no pathspec there is nothing to reinterpret.
 
 ```
-git ls-files -z                              -> 2496 files, exit 0
-GIT_LITERAL_PATHSPECS=1 git ls-files -z      -> 2496 files, exit 0   (no effect)
-GIT_INDEX_FILE=<empty file> git ls-files -z  ->    0 files, EXIT 0
-GIT_WORK_TREE=/tmp git ls-files -z           -> 2474 files, exit 0
+git ls-files -z                                   -> 2496 files, exit 0
+GIT_LITERAL_PATHSPECS=1 git ls-files -z           -> 2496 files, exit 0    (no effect)
+GIT_INDEX_FILE=<nonexistent path> git ls-files -z ->    0 files, EXIT 0
+GIT_INDEX_FILE=<empty file> git ls-files -z       ->    0 files, exit 128
+GIT_WORK_TREE=/tmp git ls-files -z                -> 2496 files, exit 0    (no effect)
+GIT_DIR=<not a repo> git ls-files -z              ->    0 files, exit 128
 ```
 
-`spawnSync` passes the whole inherited environment unless told otherwise. The
-family is scrubbed now, following `#7281`'s precedent, and the floor stays as
-the second strap rather than the only one.
+A `GIT_INDEX_FILE` pointing at a path that does not exist is the dangerous one:
+git reads a missing index as an empty one, so zero files at exit 0 — "found
+nothing to check" wearing "nothing wrong", reachable from the environment with
+no edit to the repo. `spawnSync` passes the whole inherited environment unless
+told otherwise. The family is scrubbed now, following `#7281`'s precedent, and
+`MIN_TRACKED_FILES` stays as the second strap rather than the only one.
+
+**Two rows of that table were wrong when this entry was first written, and the
+correction is the more useful half.** It recorded `GIT_INDEX_FILE=<empty file>`
+as `0 files, EXIT 0` and `GIT_WORK_TREE=/tmp` as a 22-file shrink. Neither is
+true: an empty file is a malformed index and git exits **128**, and
+`GIT_WORK_TREE` has no effect on `ls-files` at all, which reads the **index**.
+The first came from `cmd | wc -c; echo $?` — the pipe reports `wc`'s status, not
+git's, a trap already written down in this repo's own notes. The second came
+from a reading taken in a different checkout, so the 22-file delta was two trees
+differing, not a variable doing anything.
+
+Both survived into the code comments, into four separate places in the guard,
+and into this entry, and were caught only by a review pass that re-ran the
+commands. **A measurement pasted into doctrine is load-bearing for every later
+reader, and a wrong one is worse than none** — the conclusion happened to
+survive (the scrub is still right, for the nonexistent-path reason), which is
+exactly how a bad measurement persists. `GIT_WORK_TREE` stays in the list on
+CATEGORY now, and says so, rather than pretending to a measurement it does not
+have.
 
 **And an exemption pinned the runner's name, never its glob.** `GLOB_COVERED`
 asserts `packages/store-core`'s `test` script is still `vitest run`. Its stated
@@ -1867,6 +1890,22 @@ what it can carry: the call is written. Recorded rather than quietly corrected,
 because "I threaded the value so the call is covered" is exactly the plausible
 sentence that becomes entry 13's shape.
 
+**Three of the six controls' own fixes were themselves unproven, and a review
+pass found it.** Extracting `enumerationDisagreements` proves the COMPUTATION;
+the two `assert.deepEqual` refusals in `checkedAgainstDisk` that turn it into a
+control had no case at all, because the real tree never disagrees. `assertReaderSane`
+— named in the issue — was only RELOCATED into a wrapper, which is not a proof of
+anything; its five sub-assertions still had none. And the source-level call-site
+guard, the fix for the surviving call-site mutants, **stripped `//` comments
+only**: block-commenting the `checkedAgainstDisk` call, the ordinary editor
+gesture, left the roster rule green, and combined with a shrunk enumeration the
+whole file reported 69/69 with a tracked suite silently outside the subject set.
+That stripper was transcribed from `invokes()`, which is *correct* — because
+shell has one comment form and JavaScript has two. **The copy was of a working
+function and was still wrong**, which is a sharper version of the
+copy-always-drifts rule: a transcription can fail on the first day, in a
+language the original never had to consider.
+
 **And the scrub itself was broken on one of the two platforms it runs on.**
 `{ ...process.env }` copies out whatever casing the OS holds — Windows spells it
 `Path`, not `PATH` — while Windows resolves a variable lookup without regard to
@@ -1882,11 +1921,13 @@ replaces**, and the argument for keeping the Windows suite required is that it
 caught a defect in the fix for a false-safety bug, in the one place a false
 positive costs nothing.
 
-Twenty-eight mutants, twenty-eight killed, each red in 0.2s naming its own case.
-The two that survived a first pass were not argued away: one was a floor whose
-own derivation had no synthetic proof, the other a comment-stripper the real body
-could not exercise, and both got the treatment the rest had rather than a
-paragraph explaining why they were fine.
+Thirty-nine mutants, thirty-nine killed, each red in 0.2s naming its own case.
+Three survived a first pass and none was argued away: a floor whose own
+derivation had no synthetic proof, a comment-stripper the real body could not
+exercise, and a slice ceiling inert against a healthy file. Each got the
+treatment the rest had. That is the pattern to copy — **the survivor is the
+finding**, and the temptation is always to write the paragraph explaining why it
+is fine.
 
 **Guard against it:** a mutation table proves the mutants it contains. When the
 subject is a guard, the controls are a second subject with a second table, and
@@ -1895,3 +1936,12 @@ the tell that you have only written the first is that every control's red is
 is otherwise healthy — and if you cannot construct that subject from the real
 tree, that is the finding, not an obstacle: it means the control and its absence
 are indistinguishable, which is the whole of this catalogue in one sentence.
+
+Three corollaries this entry paid for. **Relocating a control is not proving
+it** — moving `assertReaderSane` into a wrapper changed where it is called and
+nothing else. **Extracting the computation is not proving the assertion** — the
+pure function and the `assert.deepEqual` that consumes it are two subjects.
+And **re-run every measurement you are about to write down**, especially the
+ones that support a conclusion you already believe: two of the four readings
+pasted into this entry were wrong, the conclusion survived them anyway, and that
+is precisely why nobody looked again for a day.
