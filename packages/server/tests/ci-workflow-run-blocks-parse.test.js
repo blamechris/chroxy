@@ -1,10 +1,10 @@
-import { before, describe, it } from 'node:test'
+import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readWorkflows, assertReaderSane, jobShell, stepRun, code } from './helpers/workflow-reader.js'
+import { readWorkflows, assertReaderSane, jobShell, stepRun, stepInput, code } from './helpers/workflow-reader.js'
 
 /**
  * Every bash `run:` block in every workflow must PARSE (#7632).
@@ -36,6 +36,8 @@ import { readWorkflows, assertReaderSane, jobShell, stepRun, code } from './help
  * both Windows jobs — see `jobShell`. Excluding by step-level `shell:` alone
  * would have swept all six into `bash -n` and failed on correct config.
  */
+const POSIX_ONLY = { skip: process.platform === 'win32' ? 'spawns bash (POSIX-only)' : false }
+
 describe('workflow run: blocks parse under bash -n (#7632)', () => {
   let workflows
   let blocks
@@ -49,10 +51,14 @@ describe('workflow run: blocks parse under bash -n (#7632)', () => {
         for (const step of job.steps) {
           const script = stepRun(step)
           if (script === undefined) continue
-          const stepLevel = code(step)
-            .map(l => /^\s*shell:\s*(.*)$/.exec(l))
-            .find(Boolean)
-          const shell = (stepLevel ? stepLevel[1].replace(/\s+#.*$/, '').trim() : jobDefault) ?? 'bash'
+          // stepInput, NOT a local regex. A hand-rolled one here re-implemented
+          // step-key parsing and immediately drifted from the shared reader:
+          // it could not see `- shell: bash` written on a step's own dash line,
+          // so such a step fell back to its job default, was classified
+          // PowerShell in the two Windows jobs, and was SKIPPED — and a block
+          // that is never checked is a block that always passes. Found by
+          // mutation, in the same PR that taught stepInput that exact spelling.
+          const shell = stepInput(step, 'shell') ?? jobDefault ?? 'bash'
           const name = (code(step).map(l => /^\s*-?\s*name:\s*(.*)$/.exec(l)).find(Boolean)?.[1] ?? '(unnamed)').trim()
           blocks.push({ where: `${w.name} ${job.id} · ${name}`, shell, script })
         }
@@ -79,15 +85,30 @@ describe('workflow run: blocks parse under bash -n (#7632)', () => {
     )
   })
 
-  it('every bash run: block is syntactically valid shell', () => {
+  // Spawns bash, which on the Windows runner is WSL with no distro (see
+  // EXEMPT_REASONS['posix-shell-spawn'] in scripts/lib/windows-test-set.mjs).
+  // Skipped per-test rather than exempting the file — the manifest names that
+  // as the preferred fix, and the positive control above runs on Windows fine.
+  const scratch = []
+  after(() => {
+    // Every other mkdtempSync in this suite pairs with an rmSync; without it a
+    // run leaves 127 files behind and they accumulate across runs.
+    for (const d of scratch) rmSync(d, { recursive: true, force: true })
+  })
+
+  it('every bash run: block is syntactically valid shell', POSIX_ONLY, () => {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-runblocks-'))
+    scratch.push(dir)
     const bad = []
     for (const [i, b] of blocks.entries()) {
       if (!/^(bash|sh)$/.test(b.shell)) continue
       const file = join(dir, `block-${i}.sh`)
       writeFileSync(file, `#!/usr/bin/env bash\n${b.script}\n`)
       try {
-        execFileSync('bash', ['-n', file], { stdio: 'pipe' })
+        // Bounded: a guard that HANGS reads as flake rather than as a finding
+        // (docs/false-safety-guards.md entry 17). `bash -n` never executes the
+        // script, so this is a backstop, not a mitigation for hostile input.
+        execFileSync('bash', ['-n', file], { stdio: 'pipe', timeout: 10_000 })
       } catch (err) {
         // Collapse to the message: the whole script as an assertion payload is
         // the #7340 hazard (docs/false-safety-guards.md entry 17).

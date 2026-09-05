@@ -72,57 +72,89 @@ jobs:
       # `best_effort` is read by that LAST step, as REPO_RELAY_BEST_EFFORT. So a
       # failure in `Install dependencies` skips both remaining steps and fails
       # the composite step outright — the one failure shape best_effort
-      # structurally cannot reach, and the log of the run that prompted this
-      # shows exactly that (`Validate inputs` and `Run repo-relay` both
-      # `outcome=skipped`). `better-sqlite3` is a native module and the action
-      # commits no node_modules, so this install makes two network calls every
-      # run — prebuild-install fetches a prebuilt binary, then node-gyp falls
-      # back to fetching node headers — and either can ECONNRESET. Seen on the
-      # notify job of #7630 (run 33937387078), on a PR whose diff cannot reach
-      # this workflow at all.
+      # structurally cannot reach. Seen on the notify job of #7630 (run
+      # 33937387078), on a PR whose diff cannot reach this workflow at all.
       #
-      # This is a DETECTOR, and nothing below depends on it being anything
-      # more. Running the install here does also warm ~/.npm for the action's
-      # identical install a step later, but only the registry tarballs are
-      # certain to be reused: the native build under node_modules is keyed on
-      # the ABI of whichever node runs it, and this step uses the runner's
-      # default node while the action pins its own via setup-node. So the
-      # second install is cheaper, not free, and the tolerance below holds
-      # either way.
-      - name: Pre-run the repo-relay dependency install
-        id: relay_deps
+      # WHY THE NODE VERSION IS LOAD-BEARING (measured on run 33946845821):
+      # `better-sqlite3@12.10.0` publishes NO prebuilt binary for node 20's ABI
+      # — its linux-x64 assets are v127/v137/v141/v147, i.e. node 22 and newer —
+      # and repo-relay's action.yml pins node 20. So `prebuild-install` finds
+      # nothing, `node-gyp rebuild` takes over, and it fetches node headers from
+      # nodejs.org on EVERY run. That fetch is what ECONNRESET'd. An install run
+      # on any other node takes the prebuild path instead (5s, no node-gyp, no
+      # nodejs.org) and so never exercises the failure at all — which is why the
+      # version is READ FROM THE ACTION rather than assumed or hardcoded here. A
+      # probe on the wrong node is not a probe. (#7634 tracks fixing this at the
+      # source, upstream, where one line removes the compile entirely.)
+      - name: Locate the repo-relay action checkout
+        id: relay_action
         if: env.DISCORD_CONFIGURED == 'true'
-        continue-on-error: true
+        # Deliberately NOT continue-on-error. Nothing here is transient: every
+        # failure below means this workflow's assumptions about the action no
+        # longer hold, and the job must say so. Only the install a step later is
+        # tolerated, which is what keeps "skipped because the network blipped"
+        # distinguishable from "skipped forever because a path moved" —
+        # docs/false-safety-guards.md's "a precondition that is false, so the
+        # body never runs and the job is green".
         run: |
           set -euo pipefail
           shopt -s nullglob
-          # Located by glob rather than by repeating the pinned SHA below. A
-          # second copy of the pin would drift on the next version bump, and a
-          # path that no longer resolves would fail this step on every run —
-          # silently skipping every notification while the job stayed green.
-          # That is docs/false-safety-guards.md's "a precondition that is false,
-          # so the body never runs and the job is green", so it is reported
-          # through `layout` and made fatal by the next step instead.
+          # Found by glob, never by repeating the pinned SHA below: a second copy
+          # of the pin drifts on the next version bump. $RUNNER_WORKSPACE is a
+          # long-standing runner variable rather than one of the documented
+          # GITHUB_*/RUNNER_* contracts, so the layout it implies is asserted
+          # rather than assumed: if it ever stops resolving, the checks below
+          # fail the job loudly instead of quietly skipping the notification.
           dirs=("$RUNNER_WORKSPACE"/../_actions/blamechris/repo-relay/*/)
           if [ "${#dirs[@]}" -ne 1 ]; then
-            printf 'layout=unexpected\n' >> "$GITHUB_OUTPUT"
-            echo "::error::expected exactly one checked-out repo-relay action under _actions/, found ${#dirs[@]}"
+            echo "::error::expected exactly one checked-out repo-relay action under _actions/, found ${#dirs[@]}. The pre-install probe cannot run, so notifications would be skipped on every event — fix the glob in this workflow."
             exit 1
           fi
-          printf 'layout=ok\n' >> "$GITHUB_OUTPUT"
-          cd "${dirs[0]}"
-          npm ci --omit=dev
+          dir="${dirs[0]%/}"
+          if [ ! -f "$dir/action.yml" ]; then
+            echo "::error::$dir has no action.yml — the repo-relay checkout is not what this workflow expects."
+            exit 1
+          fi
+          # A missing lockfile is a PERMANENT condition, not a transient one:
+          # `npm ci` refuses outright, and if that landed in the tolerated step
+          # below it would skip the notification on every run, forever, green.
+          # Asserted here, where failure is loud. (It cannot happen while the
+          # action is pinned by SHA — the lockfile is content-addressed — which
+          # is exactly why the check is cheap enough to keep.)
+          if [ ! -f "$dir/package-lock.json" ]; then
+            echo "::error::$dir has no package-lock.json — npm ci cannot run, and this is not a transient failure."
+            exit 1
+          fi
+          # Read the action's own pinned node version instead of duplicating it.
+          # A copy here would drift the moment repo-relay bumps, and the probe
+          # would quietly go on testing the wrong ABI while still reporting
+          # success — the failure this whole change exists to prevent.
+          node_version=$(sed -n "s/^[[:space:]]*node-version:[[:space:]]*['\"]\{0,1\}\([0-9][0-9.]*\)['\"]\{0,1\}[[:space:]]*$/\1/p" "$dir/action.yml" | head -1)
+          if [ -z "$node_version" ]; then
+            echo "::error::could not read node-version from repo-relay's action.yml — the probe would run on the wrong node and stop exercising the install it is meant to gate."
+            exit 1
+          fi
+          printf 'dir=%s\n' "$dir" >> "$GITHUB_OUTPUT"
+          printf 'node_version=%s\n' "$node_version" >> "$GITHUB_OUTPUT"
+          echo "repo-relay at $dir, node $node_version"
 
-      - name: Fail if repo-relay's action checkout no longer resolves
-        # The step above is continue-on-error, so its exit code is swallowed —
-        # deliberately, for the transient install failure this is all about. A
-        # layout change is NOT transient: it would skip the action from then on,
-        # forever, with nothing going red. Step OUTPUTS survive
-        # continue-on-error, so `layout` is what separates the two.
-        if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outputs.layout != 'ok'
-        run: |
-          echo "::error::repo-relay's checkout path under _actions/ no longer resolves, so the pre-install probe above cannot run. Notifications are OFF until the glob in this workflow is updated."
-          exit 1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: env.DISCORD_CONFIGURED == 'true'
+        with:
+          node-version: ${{ steps.relay_action.outputs.node_version }}
+
+      - name: Pre-run the repo-relay dependency install
+        id: relay_deps
+        if: env.DISCORD_CONFIGURED == 'true'
+        # The ONLY tolerated step in this job, and the only one whose failure
+        # skips the notification instead of failing the build. It runs the same
+        # command, in the same directory, on the same node as the action's own
+        # `Install dependencies` — so if it passes, that one is running against
+        # a warm ~/.npm and a populated ~/.cache/node-gyp and no longer needs
+        # nodejs.org at all.
+        continue-on-error: true
+        working-directory: ${{ steps.relay_action.outputs.dir }}
+        run: npm ci --omit=dev
 
       - name: Note the tolerated dependency-install failure
         if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outcome != 'success'
@@ -130,8 +162,8 @@ jobs:
         # whitespace-preceded `#` starts a comment, which silently truncated
         # this line mid-string and left the shell with an unterminated quote —
         # so the step announcing a TOLERATED failure would itself have failed
-        # the job. Caught by `bash -n`, which no check in this repo runs over a
-        # workflow's `run:` blocks; the guard test added with this change does.
+        # the job. Caught by `bash -n`, which no check in this repo ran over a
+        # workflow's `run:` blocks; the guard added with this change does.
         run: |
           echo "::warning::repo-relay's dependency install failed (transient infrastructure); the Discord notification for this event was skipped. This does not fail the job — see #7632."
 
