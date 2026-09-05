@@ -341,6 +341,10 @@ The recurring causes:
   reintroduced the shape one layer down, classifying with an external `jq` whose
   failure yields the same empty list as "nothing wrong" — ask that question of
   every tool a gate shells out to (`#7540` review)
+- a roster checked in only ONE direction — every name in the list is a real job,
+  while nothing asks whether a real job is in the list; the same gap was filed
+  four times, once per job, before anyone read it as a missing invariant
+  (`#7199`, `#7216`, `#7544`, `#7639`)
 - a test suite that runs in NO job — executable, passing, and named by no
   workflow step for its whole life, while guarding the release updater-feed
   merge; the same sweep found that nothing in `.github/` had ever `bash -n`'d a

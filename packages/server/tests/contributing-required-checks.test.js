@@ -1,7 +1,7 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { parseJobs, code } from './helpers/workflow-reader.js'
+import { parseJobs, jobName } from './helpers/workflow-reader.js'
 import { parseRoster } from '../../../scripts/lib/contributing-roster.mjs'
 
 /**
@@ -36,24 +36,27 @@ describe('CONTRIBUTING required-checks roster (#7448)', () => {
 
     const ciYml = await readFile(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8')
     // A job's check context is its display name when `name:` is present, else
-    // its job id — and YAML quoting is cosmetic, so strip it (a quoted
-    // `name: "X"` is the same context as `name: X`).
-    jobNames = parseJobs(ciYml).map(j => {
-      const m = code(j.body).map(l => /^\s{4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean)
-      const raw = m ? m[1] : j.id
-      return raw.replace(/^(['"])(.*)\1$/, '$2')
-    })
+    // its job id — and YAML quoting is cosmetic, so a quoted `name: "X"` is the
+    // same context as `name: X`. That derivation was four lines here until
+    // #7639 needed it for a second guard; it now lives in the shared reader as
+    // `jobName()`, and this consumer is migrated in the same change rather than
+    // left on its private copy. Leaving it would have been #7637's shape
+    // exactly: `stepRun()` landed five days after the guard that needed it and
+    // never reached it.
+    jobNames = parseJobs(ciYml).map(jobName)
   })
 
   // ---- positive controls ----
   it('parses exactly the 13 required contexts and the ci.yml job names', () => {
+    // 16 since #7643 promoted Scripts Tests, Release PR Subject and Resolve
+    // Runner Target out of the not-required table.
     // EXACT on purpose, not a floor: the #7499 review proved a floor of 12 let
     // any single entry vanish silently — the precise drift this file exists to
     // prevent. The count IS the subject here, so changing the required set
     // must force a same-PR edit of this line. (Contrast the deliberately
     // loose floors in ci-npm-cache-routing.test.js, where the count is NOT
     // the subject and pinning it would misattribute unrelated refactors.)
-    assert.equal(roster.length, 13, `expected exactly 13 roster entries, got ${roster.length}: ${roster.join(', ')}`)
+    assert.equal(roster.length, 16, `expected exactly 16 roster entries, got ${roster.length}: ${roster.join(', ')}`)
     assert.ok(jobNames.length >= 10, `expected >=10 ci.yml job names, got ${jobNames.length}`)
   })
 

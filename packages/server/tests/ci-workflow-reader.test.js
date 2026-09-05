@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell } from './helpers/workflow-reader.js'
+import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell, jobName, workflowTriggers } from './helpers/workflow-reader.js'
 
 /**
  * Unit tests for the shared workflow reader (#7386).
@@ -376,5 +376,181 @@ ${job}
       shellOf('    runs-on: ubuntu-latest\n    defaults:\n      shell: powershell\n    steps:\n      - run: npm ci'),
       undefined
     )
+  })
+})
+
+describe('workflow reader: jobName (#7639)', () => {
+  /** The single job parsed out of a synthetic one-job workflow. */
+  const nameOf = body => jobName(parseJobs(`name: probe\non: push\njobs:\n  probe:\n${body}\n`)[0])
+
+  it('returns the display name when name: is present', () => {
+    assert.equal(nameOf('    name: Server Tests\n    runs-on: ubuntu-latest'), 'Server Tests')
+  })
+
+  it('falls back to the job id when there is no name:', () => {
+    // repo-relay.yml's `notify` is exactly this shape, and its check context
+    // really is the bare job id — confirmed against a live PR's check runs.
+    assert.equal(nameOf('    runs-on: ubuntu-latest'), 'probe')
+  })
+
+  it('strips a single layer of matching quotes — YAML quoting is cosmetic', () => {
+    assert.equal(nameOf('    name: "Desktop Rust Tests (Windows)"'), 'Desktop Rust Tests (Windows)')
+    assert.equal(nameOf("    name: 'Style Lint'"), 'Style Lint')
+  })
+
+  it('does NOT read a STEP name as the job name', () => {
+    // The dangerous direction: a job with no name: whose first step IS named
+    // would otherwise take the step's name as its check context, and the whole
+    // partition guard would quantify over a context GitHub never produces.
+    assert.equal(
+      nameOf('    runs-on: ubuntu-latest\n    steps:\n      - name: Install dependencies\n        run: npm ci'),
+      'probe'
+    )
+  })
+
+  it('does NOT read a commented-out name: as configuration', () => {
+    assert.equal(nameOf('    # name: Disabled Name\n    runs-on: ubuntu-latest'), 'probe')
+  })
+})
+
+describe('workflow reader: workflowTriggers (#7639)', () => {
+  it('reads the mapping form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  a:\n'), [
+      'push',
+      'pull_request',
+    ])
+  })
+
+  it('reads the list form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: [push, pull_request]\njobs:\n  a:\n'), ['push', 'pull_request'])
+  })
+
+  it('reads the bare string form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: pull_request\njobs:\n  a:\n'), ['pull_request'])
+  })
+
+  it('does NOT read a trigger named only in a comment', () => {
+    // Not hypothetical: repo-relay.yml's `on:` block carries a long comment
+    // explaining why `pull_request_review` was REMOVED. A reader that treats
+    // prose as configuration is satisfiable by prose.
+    assert.deepEqual(
+      workflowTriggers('name: x\non:\n  # pull_request_review: removed, see #6749\n  issue_comment:\n jobs:\n'),
+      ['issue_comment']
+    )
+  })
+
+  it('does not mistake a trigger option for a trigger', () => {
+    // `types:` and `branches:` sit one level deeper than the event names, so a
+    // reader that took every indented key would report them as triggers and a
+    // `pull_request`-scoped guard would widen to workflows that never run on one.
+    assert.deepEqual(
+      workflowTriggers('name: x\non:\n  pull_request:\n    types: [opened, closed]\n    branches: [main]\njobs:\n  a:\n'),
+      ['pull_request']
+    )
+  })
+
+  it('strips a trailing comment from the key line', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: push # only on push\njobs:\n  a:\n'), ['push'])
+  })
+
+  it('returns nothing for a workflow with no on: key, rather than guessing', () => {
+    assert.deepEqual(workflowTriggers('name: x\njobs:\n  a:\n'), [])
+  })
+})
+
+describe('workflow reader: on: spellings that used to drop a whole workflow (#7643)', () => {
+  /**
+   * Every case here returned `[]` or a bogus single name from the first version
+   * of `workflowTriggers()`, which matched only a bare unquoted `on:` in block
+   * or flow-sequence form. Two independent reviewers of #7643 reported it: a
+   * workflow spelled any of these ways is discovered by `readWorkflows()`,
+   * contributes real check contexts on every PR, and was silently dropped from
+   * `ci-required-check-partition.test.js`'s subject — reproducing, one layer
+   * down, the exact defect that guard exists to close. The floors could not
+   * catch it: the untouched real workflows already clear MIN_PR_WORKFLOWS and
+   * MIN_PR_JOBS on their own.
+   */
+  const pr = yml => workflowTriggers(yml).includes('pull_request')
+
+  it('a DOUBLE-quoted on: key still yields its triggers', () => {
+    // YAML 1.1 parses bare `on` as a boolean, so quoting the key is a normal,
+    // deliberate thing to find in a hand-written or linted workflow. GitHub
+    // treats both spellings identically and so must this.
+    assert.deepEqual(workflowTriggers('name: x\n"on":\n  pull_request:\njobs:\n  a:\n'), ['pull_request'])
+    assert.ok(pr('name: x\n"on":\n  pull_request:\njobs:\n  a:\n'))
+  })
+
+  it('a SINGLE-quoted on: key still yields its triggers', () => {
+    assert.deepEqual(workflowTriggers("name: x\n'on':\n  pull_request:\njobs:\n  a:\n"), ['pull_request'])
+  })
+
+  it('a flow-MAPPING value yields each event, not one bogus string', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: {push: null, pull_request: null}\njobs:\n  a:\n'), [
+      'push',
+      'pull_request',
+    ])
+  })
+
+  it('a flow mapping whose events carry options does not split on their commas', () => {
+    // The nested `[opened, closed]` must not be read as two more triggers.
+    assert.deepEqual(
+      workflowTriggers('name: x\non: {pull_request: {types: [opened, closed]}, push: null}\njobs:\n  a:\n'),
+      ['pull_request', 'push']
+    )
+  })
+
+  it('an anchor on the key line does not become the trigger', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: &triggers\n  pull_request:\njobs:\n  a:\n'), ['pull_request'])
+  })
+
+  it('quoted event names in a flow sequence are unquoted', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: ["push", \'pull_request\']\njobs:\n  a:\n'), [
+      'push',
+      'pull_request',
+    ])
+  })
+
+  it('quoted event keys in the block form are unquoted', () => {
+    assert.deepEqual(workflowTriggers('name: x\non:\n  "pull_request":\n  \'push\':\njobs:\n  a:\n'), [
+      'pull_request',
+      'push',
+    ])
+  })
+
+  it('CONTROL: a workflow that genuinely has no pull_request trigger still reports none', () => {
+    // Without this the fixes above could be satisfied by a function that
+    // reports `pull_request` for everything — #7273's deny/accept-everything
+    // shape, inverted.
+    assert.ok(!pr('name: x\non:\n  schedule:\n    - cron: "0 9 * * *"\njobs:\n  a:\n'))
+    assert.ok(!pr('name: x\n"on":\n  push:\n    tags: ["v*"]\njobs:\n  a:\n'))
+    assert.ok(!pr('name: x\non: {push: null}\njobs:\n  a:\n'))
+  })
+})
+
+describe('workflow reader: jobName edge cases from the #7643 review', () => {
+  const nameOf = body => jobName(parseJobs(`name: probe\non: push\njobs:\n  probe:\n${body}\n`)[0])
+
+  it('reads a name: declared AFTER steps:', () => {
+    // YAML does not order mapping keys, and GitHub still uses the name. An
+    // earlier version sliced the job body at `steps:` "for belt and braces" and
+    // silently returned the job id here — redundancy that was actually a
+    // regression.
+    assert.equal(nameOf('    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci\n    name: Late Name'), 'Late Name')
+  })
+
+  it('strips a trailing YAML comment from an unquoted name', () => {
+    // `name: Deploy Prod # temporary` is the context `Deploy Prod`. Reading the
+    // comment as part of the name puts a string in the roster that branch
+    // protection can never match — the #7191 family.
+    assert.equal(nameOf('    name: Deploy Prod # temporary\n    runs-on: ubuntu-latest'), 'Deploy Prod')
+  })
+
+  it('does NOT strip a # that is inside a quoted name', () => {
+    assert.equal(nameOf('    name: "Build #2"\n    runs-on: ubuntu-latest'), 'Build #2')
+  })
+
+  it('keeps a # that is not comment-shaped', () => {
+    // No preceding whitespace, so YAML does not open a comment here.
+    assert.equal(nameOf('    name: Build#2\n    runs-on: ubuntu-latest'), 'Build#2')
   })
 })

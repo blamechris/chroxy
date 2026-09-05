@@ -1657,3 +1657,95 @@ inert** by a differential search over 168,420 inputs rather than argued away,
 and that proof is recorded beside the line so the next person knows which kind
 it is. The mutant that survives is either the assertion you did not write or a
 claim about equivalence you have not checked, and those need telling apart.
+
+### 28. The roster that was only half a record — `#7639`, `#7544`, `#7216`, `#7199`
+
+`CONTRIBUTING.md` names the thirteen status checks that gate a merge, and
+`contributing-required-checks.test.js` (`#7448`) holds it honest — in one
+direction. It proves every name in the roster is a real `ci.yml` job, which
+catches a renamed or deleted job: a required context nothing will ever produce
+again, wedging every PR. Real, and worth catching.
+
+The other direction had nothing at all. Nothing asked whether a job that EXISTS
+is in the roster. So a job could be added, run on every PR, go red, and merge —
+its red and its green being the same observable outcome at the only place the
+outcome is used.
+
+**The tell was in the issue tracker, not the code.** The same defect had been
+filed four separate times, by four different reviews, once per job:
+
+```
+#7199  Release PR Subject      is not a required context   (2026-07)
+#7216  Renovate Config         is not a required context   (2026-08-16)
+#7544  Scripts Tests           is not a required context   (2026-08-30)
+#7639  Scripts Tests           is not a required context   (2026-09-05)
+```
+
+Four issues describing one defect is the signature of a missing invariant, not
+of four mistakes — and the fourth was filed 46 minutes after a `ci.yml` change,
+by a review that had just walked past the same gap. Each was written as "add
+this one job", which is the fix that guarantees a fifth.
+
+**What was actually missing is a partition.** Every job in a workflow triggered
+by `pull_request` produces a check-run context on every PR, so each one is
+either a merge gate or deliberately not one. Measured rather than assumed: on
+PR `#7638`'s head GitHub reported 23 distinct check-run contexts on
+2026-09-05, and the roster described 13 of them. A count is a reading, not an
+invariant — re-runs add check runs, and the number moved within the day — so what
+the guard pins is the DERIVATION against the workflow files, not this figure. The remaining ten — including `Scripts Tests`, which
+carries the `bash -n` parse-check over every tracked shell script and the
+`merge-updater-feeds.test.sh` suite whose subject breaks the desktop
+auto-updater — were in no list at all, described only by a parenthetical reading
+"Other CI jobs run too — e.g. scripts/hooks jobs". A sentence is not a record.
+
+`ci-required-check-partition.test.js` now requires the two lists to cover that
+set exactly and not overlap, so a job cannot be added without someone writing a
+row for it. The subject is derived from `readWorkflows()` and filtered by the
+workflow's own `on:` block, not scoped to `ci.yml` — `repo-relay.yml`
+contributes the `notify` context, and a one-file subject is the mistake entry 27
+had just finished making one directory wide.
+
+**A skipped required check is accepted, and that turns a dependency into a
+hole.** Twelve of the thirteen required checks declare `needs: runner-target`, a
+one-minute hosted gate job that is not itself required. A `needs` failure skips
+the dependent rather than failing it, so the one job that can stand down twelve
+required suites is the one job whose failure nothing consumes.
+
+Two halves, and they are not equally established — which matters, because the
+lesson from `#7637` was asserting an unverified causal story inside this very
+document. **Verified in this repo:** a skipped job emits a completed check run
+with conclusion `skipped` (observed organically on `Renovate Config`, at three
+API layers), and this repo's own `/batch-merge` gate hardcodes `SUCCESS` and
+`SKIPPED` as the only accepted states for a required context — so on the
+autonomous merge path the hole is real and is in our own code. **Documented but
+unmeasured here:** that GitHub's merge button treats a skipped *required* check
+as satisfied. No required context has ever reported skipped in this repo, and
+the fork-PR precedent `CONTRIBUTING.md` cites for it never actually ran — one
+fork PR in ~3,500, reporting no checks, predating the `if:` gate it supposedly
+demonstrates. A third state is genuinely different and was measured: a required
+check that produces *no* check run at all does not satisfy protection, it wedges
+the PR (entry 22).
+
+`runner-target` has never fired: 0 failures in every run sampled — 39/39 in a
+41-run job-level sample, and none in ~205 runs scanned for this job specifically
+(a full 11,047-run scan was abandoned rather than exhaust the API rate limit, so
+"never" is bounded by that). That is why this was never noticed, and why it was a
+latent hole rather than a past incident.
+
+**Closed in the same change.** `Resolve Runner Target` is now a required context,
+so its failure blocks directly instead of being inferred from twelve dependents
+going quiet — which is the point: a gate whose failure mode is *silence* needs to
+be able to fail loudly itself. `Scripts Tests` and `Release PR Subject` were
+promoted with it, the three that are deterministic and have no external-network
+surface. The remaining seven rows stay in the not-required table with the reason
+each is still waiting, and #7641 keeps the unmeasured half of the skip semantics
+open.
+
+**Guard against it:** when a roster names members of a set, ask what enumerates
+the SET. If the answer is "a person, when they remember", the roster is a
+hand-maintained list beside a growing set — the first cause in this catalogue —
+and the guard you need is the reverse containment, not another entry. The
+direction that gets written is always roster→reality, because that is the one a
+stale name makes noisy; the direction that matters is reality→roster, because
+that is the one silence hides. And when the same issue is filed a third time,
+stop fixing the instance.
