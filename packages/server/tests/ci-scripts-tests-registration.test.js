@@ -656,21 +656,52 @@ function isCommandPosition(line, at) {
 }
 
 /**
- * Shell here-document terminators, matched at a heredoc START.
+ * Shell here-document starts. The captured word is the raw delimiter.
  *
- * `<<<` is a here-STRING and takes no body, so it must not match. Both
- * lookarounds are load-bearing: without them the engine simply retries one
- * character along, matches the trailing `<` of `<<<` as the start of a `<<`,
- * and reads `cmd <<< "$x"` as opening a heredoc terminated by `$x` — which
- * swallows every line after it.
+ * THE DELIMITER IS A SHELL WORD, not an identifier. The first version of this
+ * matched `'...'`, `"..."` or `[A-Za-z_][A-Za-z0-9_]*` — and the shell accepts
+ * far more, so two ordinary spellings opened a heredoc that this did not see:
  *
- * That is not hypothetical either. The first version of this constant carried
- * this very sentence, describing a lookahead the regex did not contain, and the
- * case below caught it on the first run. The #7290/#7291 shape produced inside
- * the fix for the #7290/#7291 shape, which is a fair measure of how cheap it is
- * to write and how hard to see.
+ *   cat <<\EOF     the standard backslash-quoted literal heredoc, exactly
+ *                  equivalent to <<'EOF'
+ *   cat <<1EOF     a digit-leading delimiter
+ *
+ * Measured against the shipped predicate, and against real bash: both bodies
+ * were handed back as LIVE COMMANDS, so `bash <suite>` inside one read as an
+ * invocation while the shell ran nothing. A total fail-open of the protection
+ * this function exists to provide.
+ *
+ * The polarity is the thing to hold on to, because it INVERTS between the two
+ * ends of a heredoc. At the TERMINATOR, matching too eagerly ends the body
+ * early and hands data lines back as commands — dangerous — so that match is
+ * strict. At the START, matching too NARROWLY fails to open the body at all,
+ * which is the same danger by the opposite route. Strictness is not a direction;
+ * it is a direction *per end*, and the first version of this applied the
+ * terminator's argument to the start.
+ *
+ * So the delimiter is now "everything up to whitespace or a shell
+ * metacharacter", normalised by `heredocDelimiter` below. That over-matches:
+ * `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so the
+ * rest of the block is blanked. Over-blanking reports a wired suite as an
+ * ORPHAN — loud, and the safe direction.
+ *
+ * `<<<` is a here-STRING and takes no body. It is excluded TWICE over, and only
+ * once deliberately: the `(?<!<)` lookbehind stops the engine retrying one
+ * character along and reading the trailing `<` as a `<<` start, and `<` is also
+ * in the delimiter's excluded set. A `(?!<)` lookahead stood here too, with a
+ * comment calling both "load-bearing". It was INERT — a differential search over
+ * 204,204 strings found zero inputs where dropping it changed the result, and
+ * six where dropping the lookbehind did. It is removed rather than kept with a
+ * note, because the excluded set makes it redundant a second time; the proof is
+ * recorded here so the next person does not add it back.
  */
-const HEREDOC_START = /(?<!<)<<(?!<)-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_][A-Za-z0-9_]*))/
+const HEREDOC_START = /(?<!<)<<-?\s*([^\s;&|<>()`]+)/
+
+/**
+ * The terminator a heredoc delimiter denotes: quoting removed, since quoting
+ * only tells the shell whether to expand the BODY.
+ */
+const heredocDelimiter = word => word.replace(/['"\\]/g, '')
 
 /**
  * The lines of a run body with here-document BODIES blanked out (#7645).
@@ -715,7 +746,7 @@ function withoutHeredocBodies(lines) {
     out.push(line)
     const m = HEREDOC_START.exec(line)
     if (m) {
-      terminator = m[1] ?? m[2] ?? m[3]
+      terminator = heredocDelimiter(m[1])
       stripTabs = /<<-/.test(line)
     }
   }
@@ -743,8 +774,9 @@ function withoutHeredocBodies(lines) {
  * shortens what is searched, so its only effect is to report a wired suite as
  * an orphan — loud, and the safe direction.
  */
-const uncommented = runBody =>
-  runBody.split('\n').map(line => line.replace(/(^|\s)#.*$/, ''))
+const stripShellComment = line => line.replace(/(^|\s)#.*$/, '')
+
+const uncommented = runBody => runBody.split('\n').map(stripShellComment)
 
 /**
  * Does any line of this `run:` body actually INVOKE the named file, as opposed
@@ -762,9 +794,27 @@ const uncommented = runBody =>
  * a real orphan through.
  */
 function invokes(runBody, name) {
-  return withoutHeredocBodies(uncommented(runBody)).some(line =>
-    namePositions(line, name).some(at => isCommandPosition(line, at))
-  )
+  // ORDER MATTERS, and the first version had it backwards. Heredoc tracking is
+  // stateful and line-ordered; comment stripping rewrites lines. Running the
+  // stripper FIRST let it manufacture a terminator the shell never sees:
+  //
+  //     cat <<EOF
+  //     EOF # not really the terminator
+  //     bash <suite>
+  //     EOF
+  //
+  // The shell terminates only on a line that is exactly `EOF`, so the whole
+  // thing is data and nothing runs. Stripping first turns line 2 into `EOF`,
+  // closes the body there, and hands `bash <suite>` back as a live command —
+  // measured WIRED. Blanking the bodies first means the stripper only ever sees
+  // lines the shell would have executed.
+  //
+  // The reverse order costs nothing: a heredoc START hidden inside a comment
+  // (`echo x  # cat <<EOF`) now opens a body that never terminates and blanks
+  // the rest, which is over-blanking — loud, and the safe direction.
+  return withoutHeredocBodies(runBody.split('\n'))
+    .map(stripShellComment)
+    .some(line => namePositions(line, name).some(at => isCommandPosition(line, at)))
 }
 
 /** Is the name present at all — invoked or merely mentioned? Diagnostics only. */
@@ -1834,6 +1884,43 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
       assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\n\tEOF\nafter')), ['cat <<EOF', '', '', ''])
     })
 
+    it('honours a DOUBLE-quoted terminator', () => {
+      // Untested until review: the double-quoted branch of the delimiter had no
+      // case, so two independent mutants that removed it survived.
+      assert.deepEqual(withoutHeredocBodies(L('cat <<"EOF"\nbash x.test.sh\nEOF')), ['cat <<"EOF"', '', ''])
+    })
+
+    it('honours a BACKSLASH-quoted terminator — `<<\\EOF` is ordinary bash', () => {
+      // The fail-open review found. `<<\EOF` is exactly equivalent to `<<'EOF'`
+      // and is one of the two standard ways to write a literal heredoc. The
+      // first delimiter grammar matched neither it nor a digit-leading word, so
+      // the body was never opened and every line in it was handed back as a
+      // live command — verified against real bash, which runs none of them.
+      assert.deepEqual(withoutHeredocBodies(L('cat <<\\EOF\nbash x.test.sh\nEOF')), ['cat <<\\EOF', '', ''])
+    })
+
+    it('honours a DIGIT-LEADING delimiter — the shell takes any word', () => {
+      assert.deepEqual(withoutHeredocBodies(L('cat <<1EOF\nbash x.test.sh\n1EOF')), ['cat <<1EOF', '', ''])
+    })
+
+    it('does not TRUNCATE a delimiter at a non-identifier character', () => {
+      // `<<EOF-1` used to capture `EOF`, so a body line spelled `EOF` closed the
+      // body early and every data line after it became a live command.
+      assert.deepEqual(
+        withoutHeredocBodies(L('cat <<EOF-1\nEOF\nbash x.test.sh\nEOF-1\nafter')),
+        ['cat <<EOF-1', '', '', '', 'after']
+      )
+    })
+
+    it('over-blanks rather than under-blanks on a `<<` that is not a heredoc', () => {
+      // `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so
+      // the rest is blanked. Stated because it is a real consequence of taking
+      // the delimiter as a shell word: over-blanking reports a wired suite as an
+      // ORPHAN, which is loud and the safe direction, and the alternative — a
+      // narrower grammar — is the fail-open this case's neighbours document.
+      assert.deepEqual(withoutHeredocBodies(L('x=$(( 1 << 2 ))\nbash y.test.sh')), ['x=$(( 1 << 2 ))', ''])
+    })
+
     it('does NOT treat a here-STRING as a heredoc', () => {
       assert.deepEqual(
         withoutHeredocBodies(L('grep -q x <<< "$VAR"\nbash y.test.sh')),
@@ -1851,6 +1938,42 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     it('a terminator with trailing text does NOT end the body', () => {
       // Lenient matching would hand the remaining data lines back as commands.
       assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nEOF >> out\nbash x.test.sh')), ['cat <<EOF', '', '', ''])
+    })
+  })
+
+  describe('heredocDelimiter (#7645)', () => {
+    it('strips the three quoting forms the shell accepts, and nothing else', () => {
+      assert.equal(heredocDelimiter('EOF'), 'EOF')
+      assert.equal(heredocDelimiter("'EOF'"), 'EOF')
+      assert.equal(heredocDelimiter('"EOF"'), 'EOF')
+      assert.equal(heredocDelimiter('\\EOF'), 'EOF')
+      assert.equal(heredocDelimiter('EOF-1'), 'EOF-1', 'a dash is part of the word, not quoting')
+      assert.equal(heredocDelimiter('1EOF'), '1EOF')
+    })
+  })
+
+  describe('invokes composes the passes in the right ORDER (#7645)', () => {
+    const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
+
+    it('a data line that comment-stripping would TURN INTO the terminator does not close the body', () => {
+      // Stripping comments first manufactured a terminator the shell never
+      // sees: the shell ends a heredoc only on a line that is exactly `EOF`, so
+      // this whole block is data and nothing runs — but `EOF # not the
+      // terminator` strips to `EOF`, closed the body there, and handed
+      // `bash <suite>` back as a live command. Measured WIRED before the fix.
+      assert.ok(!invokes(`cat <<EOF\nEOF # not the terminator\nbash ${S}\nEOF`, S))
+    })
+
+    it('a heredoc START hidden in a comment blanks the rest — over-blanking, the safe direction', () => {
+      // The cost of the reversed order, stated rather than hidden. The shell
+      // sees a comment and no heredoc; this sees a heredoc that never
+      // terminates. It reports a wired suite as an orphan: loud.
+      assert.ok(!invokes(`echo hi  # cat <<EOF\nbash ${S}`, S))
+    })
+
+    it('CONTROL: an ordinary commented-out invocation is still stripped, not blanked', () => {
+      assert.ok(!invokes(`# bash ${S}\necho skipped`, S))
+      assert.ok(invokes(`# bash ${S} --old\nbash ${S}`, S))
     })
   })
 

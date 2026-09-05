@@ -1996,15 +1996,48 @@ would otherwise read as running it". It covers the *bare-name* spelling only;
 `cat <<EOF` / `bash <suite>` / `EOF` documents an invocation and read as
 performing one. Heredoc bodies are data, not commands, and are blanked now.
 
-**And the fix for that grew the same defect while being written.** The new
-`HEREDOC_START` constant carried a comment saying a negative lookahead kept
-`<<<` here-strings from opening a body — describing a lookahead the regex did
-not contain. Without it the engine retries one character along, matches the
-trailing `<` of `<<<` as the start of a `<<`, and swallows every line after it.
-The case written alongside caught it on the first run. **Entry 13's shape,
-produced inside the fix for entry 13, for the fourth time in this one file** —
-which is the honest measure of how cheap that sentence is to write and how hard
-it is to see once written.
+**And the fix for that grew the same defect three times over while being
+written.** All three were found after the first version was pushed, two of them
+by an adversarial review pass and one by its own new test on the first run:
+
+1. `HEREDOC_START` carried a comment saying a negative lookahead kept `<<<`
+   here-strings from opening a body — **describing a lookahead the regex did not
+   contain**. Its own case caught that immediately.
+2. The lookahead was then added, and the comment upgraded to "both lookarounds
+   are load-bearing". Also false: a differential search over 204,204 strings
+   found **zero** inputs where dropping `(?!<)` changed the result, and six where
+   dropping `(?<!<)` did. An inert guard with a comment claiming otherwise, which
+   is the same shape one layer along.
+3. The delimiter grammar was narrower than the shell's — `'...'`, `"..."` or
+   `[A-Za-z_][A-Za-z0-9_]*`, where the shell takes any word. `cat <<\EOF`, the
+   standard backslash-quoted literal heredoc and exactly equivalent to
+   `<<'EOF'`, matched nothing, so no body was opened and every line in it was
+   handed back as a live command. A **total fail-open of the protection the
+   function was added to provide**, verified against real bash.
+
+Item 3 carries the generalisable lesson, and it is about POLARITY. The function's
+docblock defended strictness — "a lenient match ends the body EARLY and hands the
+remaining data lines back as commands, which is the dangerous direction" — and
+that argument is sound *for the terminator*. At the START the polarity inverts: a
+missed start fails to blank the body at all, which is the same danger by the
+opposite route. **Strictness is not a direction; it is a direction per end**, and
+the first version applied the terminator's argument to the start.
+
+A fourth, from the same review: `invokes` composed the passes in the wrong ORDER.
+It stripped comments and *then* tracked heredocs, so the stripper manufactured a
+terminator the shell never sees — `EOF # not the terminator` strips to `EOF`,
+closes the body early, and hands the following `bash <suite>` back as a live
+command. Blanking bodies first means the stripper only ever sees lines the shell
+would have executed. **A stateful, line-ordered pass must not be fed text a
+line-local rewrite has already changed**, and the rewrite's own comment said its
+"only effect is to report a wired suite as an orphan" — true when it was consumed
+line by line, false the moment something downstream tracked state across lines.
+
+**No count is given for how many times entry 13's shape has now appeared in this
+one file, and the first version of this entry gave one — "the fourth time" —
+which was wrong.** The file labels more than twice that many. A tally beside a
+growing set is the first cause in this catalogue, and putting one in the entry
+about not doing that is its own small demonstration.
 
 **Guard against it:** when a guard decides that some text *runs* a file,
 enumerate the ways the same text can be true and the file still not run. The
