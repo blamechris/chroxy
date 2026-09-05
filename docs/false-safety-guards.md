@@ -1310,10 +1310,14 @@ The cause is structural rather than an oversight: `scripts-tests` names each
 suite in its own hand-written step, which is entry 3's hardcoded list beside a
 growing directory. Registering the orphan alone would leave the next one exactly
 as invisible, so `ci-scripts-tests-registration.test.js` now quantifies over the
-DIRECTORY — every `scripts/__tests__/*.test.{sh,mjs,js}` must be named by some
-workflow step, matched against step bodies with comments stripped (ci.yml
-discusses these files by name, and a guard that reads prose as configuration is
-satisfiable by prose).
+FILESYSTEM — every suite CI can only invoke by name must be named by some
+workflow step.
+
+That guard's first version claimed to match "against step bodies with comments
+stripped", because ci.yml discusses these files by name and a guard that reads
+prose as configuration is satisfiable by prose. It was satisfiable by prose
+anyway, and its subject was one directory wide. **See entry 27** — the fix for
+this entry is itself the next entry in this catalogue.
 
 Found alongside it: **nothing in `.github/` had ever parsed a shell script.**
 Every tracked `*.sh` file is invoked from a workflow step, a git hook or by
@@ -1559,3 +1563,97 @@ override is genuinely wanted, make it an **explicit field on the request**
 (`force: true`, strictly boolean) rather than a property of which handler the
 client happened to reach — an override you cannot see in the message is one you
 cannot audit, and one nobody can tell apart from a client that did not know.
+
+### 27. The anti-orphan guard that was satisfiable by a step doing nothing — `#7637`
+
+Entry 23 closed with "put the answer in a guard that reads the directory". The
+guard that advice produced —
+`packages/server/tests/ci-scripts-tests-registration.test.js` — read the
+directory correctly and then answered the wrong question, in the direction that
+lets a real orphan through. Both halves were found by review, and both were live
+on `main`.
+
+**It read the whole step, not the command.** The rule matched
+`code(step).join('\n')` — every line of a step block bar whole-line comments.
+Two shapes were reproduced against the real tree, each with the
+release-critical suite running in no step, each **green**:
+
+```yaml
+- name: Run scripts/__tests__/merge-updater-feeds.test.sh tests
+  run: true
+
+- name: Run merge-updater-feeds.mjs tests
+  run: true  # was bash scripts/__tests__/merge-updater-feeds.test.sh
+```
+
+The second is the realistic regression — a `run:` is deleted and the
+explanatory comment above or beside it survives — and `code()` structurally
+cannot catch it, because it drops whole-line comments and that is a trailing
+one. The rule's own comment said it matched step bodies "with comments
+stripped", because "a guard that reads prose as configuration is satisfiable by
+prose" — *while being satisfiable by prose*: entry 13's shape, produced inside
+the catalogue that names it.
+
+The sharper accessor did not exist when the guard was written, and the dates
+matter because they change the lesson. The guard landed **2026-08-30** in
+`#7540` against a reader that exported only `code()`. `stepRun()` — which
+reproduces YAML's reading of `run:` and yields only the shell the runner is
+handed — arrived **2026-09-04** in `#7633`, for a different guard, five days
+later. Nothing went back. So this is not "the right tool was on the shelf and
+went unused"; it is that **adding a sharper tool to a shared module leaves every
+existing consumer on the blunt one**, silently, and no lint compares the two.
+
+And `stepRun()` alone was not enough. It hands back a BLOCK scalar verbatim, on
+purpose, because a `#` inside one is a shell comment belonging to the script. So
+
+```yaml
+run: |
+  # bash scripts/__tests__/merge-updater-feeds.test.sh
+  echo "temporarily skipped"
+```
+
+still read as wired — the same regression in the other YAML spelling, missed by
+the entire first mutation suite because every case in it mutated a plain scalar.
+Two spellings of identical config must not disagree. Nor was "an interpreter
+before the name" what the code did: it asked whether one appeared *anywhere
+earlier on the line*, so `chmod +x ./x.test.sh` and `node --version && echo "see
+x.test.sh"` were invocations. Entry 13's shape three times in one function, in a
+fix written for entry 13 — which is the honest measure of how hard the safe
+direction is to hold.
+
+**It looked in one directory.** The subject was `readdir` over
+`scripts/__tests__/`, so `packages/desktop/scripts/verify-entitlements.test.sh`
+— wired only by name, one directory over — was exactly as exposed as
+merge-updater-feeds had been. Widening it needed a measurement, not a
+generalisation: the tempting rule "a `*.test.mjs` under `packages/` is
+discovered by that package's runner" is true of **two** of this repo's eight
+packages. Six cannot discover a `.mjs` at all — server and claude-hooks pin
+`./tests/**/*.test.js`, protocol pins `tests/*.test.js`, dashboard's vitest
+include is `src/**/*.test.{ts,tsx}`, app's jest default `testMatch` is
+`[jt]s?(x)`, and desktop has no `test` script whatsoever. Stated as a property
+of "packages" rather than of two specific runner configurations, that exclusion
+would have been a **hole with a template already sitting in the tree**, beside
+nine server lint scripts whose golden suites are the obvious thing to mirror.
+
+The one real exemption is now a table carrying the package's exact `test`
+script and the measurement behind it, asserted EQUAL to reality on every run —
+so the runner changing is what the guard *reports*, not what it hides — plus a
+check that the exempt tree still contains a file the exemption does work for. A
+roster line no evidence can contradict is how a roster rots.
+
+**Guard against it:** a guard is two questions, and passing the first is not
+passing the second. *What set does it quantify over* — and does that set come
+from the filesystem or from a roster? *What text does it match against* — and is
+that text the thing that EXECUTES, or merely the thing that mentions? The second
+question is the one this repo keeps getting wrong, because the mentioning text
+always contains the executing text, so the weaker match is green on every
+correct tree and diverges only on the broken one. Mutants applied one at a time with `cp` restore are what
+established that the new rule is load-bearing, and they are also what found the
+block-scalar hole, the unanchored `./`, and a one-word edit widening the
+exemption from `packages/store-core/` to `packages/` that left all 21 tests
+green — the blanket exclusion this very entry argues is a hole, reachable as a
+surviving mutant. Thirteen mutants; twelve killed; the thirteenth was **proved
+inert** by a differential search over 168,420 inputs rather than argued away,
+and that proof is recorded beside the line so the next person knows which kind
+it is. The mutant that survives is either the assertion you did not write or a
+claim about equivalence you have not checked, and those need telling apart.
