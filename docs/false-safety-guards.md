@@ -1786,3 +1786,97 @@ direction that gets written is always roster→reality, because that is the one 
 stale name makes noisy; the direction that matters is reality→roster, because
 that is the one silence hides. And when the same issue is filed a third time,
 stop fixing the instance.
+
+### 29. The controls that fired only as somebody else's side effect — `#7640`
+
+Entry 27's guard ends with thirteen mutants applied one at a time, twelve killed
+and the thirteenth proved inert. That run establishes the **rule**. It says
+nothing about the **controls** — the assertions that stop the rule reporting
+green over a tree it never examined — and the difference is easy to miss,
+because the controls did go red during it.
+
+They went red as a *side effect*. Truncating `git ls-files` trips
+`MIN_TRACKED_FILES`, so the mutation table shows the floor VALUE is reachable.
+It does not show the floor is PRESENT: delete the assertion and truncate the
+listing and the run is red either way, because five other things notice a tree
+with no suites in it. **"A floor fired" and "this floor is guarded" are
+different claims, and only the second is a guard.** Against the real tree git
+never fails to spawn, never exits non-zero and never returns a short listing —
+so for every one of these, absence and success were the same observable outcome.
+
+Six controls, and measuring them one at a time was worth more than the fix:
+
+**One was pointed the wrong way.** The `git`-versus-`readdir` cross-check said it
+existed because "`git ls-files` going stale or **returning a subset** is
+otherwise indistinguishable from a tree with fewer suites in it". It computed
+`git \ disk`. A shrunk enumeration removes the very rows it would have compared,
+so the result is `[]` *by construction* — the empty set is a subset of
+everything. Measured: it passed green under six separate collapses, including
+one that dropped a third of the subjects. Not unproven — **inert, with a
+rationale naming the direction it did not assert.** Entry 13's shape, in the
+guard written for entry 13, for the third time.
+
+**One floor could not see the failure it was for.** `runs.length >= 50` counts
+both YAML spellings together. `stepRun()` reads plain and block scalars by
+different branches, and the live split is 93 plain to 42 block — so removing the
+block branch leaves 93, clears the floor, and drops a third of every workflow's
+shell out of the search with every rule still green. A floor calibrated so far
+below the realistic degradation is a floor in name only. It now has a companion
+that counts multi-line bodies, which is the only spelling that can produce one
+and so needs no second copy of the parser.
+
+**One control's real defence was an environment variable nobody had considered.**
+`trackedFiles()`'s docblock argues at length that `GIT_LITERAL_PATHSPECS` could
+silently shrink the subject set, and drops the pathspec for that reason. The
+argument is right and it is aimed at the one variable the fix had already
+neutralised — with no pathspec there is nothing to reinterpret. Measured in a
+worktree of this repo:
+
+```
+git ls-files -z                              -> 2496 files, exit 0
+GIT_LITERAL_PATHSPECS=1 git ls-files -z      -> 2496 files, exit 0   (no effect)
+GIT_INDEX_FILE=<empty file> git ls-files -z  ->    0 files, EXIT 0
+GIT_WORK_TREE=/tmp git ls-files -z           -> 2474 files, exit 0
+```
+
+`spawnSync` passes the whole inherited environment unless told otherwise. The
+family is scrubbed now, following `#7281`'s precedent, and the floor stays as
+the second strap rather than the only one.
+
+**And an exemption pinned the runner's name, never its glob.** `GLOB_COVERED`
+asserts `packages/store-core`'s `test` script is still `vitest run`. Its stated
+basis is about *discovery* — that `vitest.config.ts` "sets only timeouts and
+workers and says so" — and nothing read that file. Adding
+`include: ['src/**/*.test.ts']` to it, a routine "stop vitest wandering outside
+src" edit, leaves all four exemption checks green while making the exemption
+false; `packages/store-core/scripts/__tests__/export-targets.test.mjs` is named
+by **no workflow step** (verified), so it would then be discovered by nothing and
+enumerated by nothing. `#7504` reproduced through the block written to prevent
+it.
+
+**The half a synthetic case cannot reach, and the claim that was wrong about
+it.** Extracting each control into a pure function proves the *assertion* fires.
+It does not prove the assertion is still *called*. The fix threaded each control
+so it returns the value it validates, and this entry's first draft said that made
+the call load-bearing — delete it and you get an `undefined` deref. The mutation
+run said otherwise: **a control that returns its argument is a no-op to remove**,
+the same array stays in the same variable, and all four call-site mutants
+survived. The call sites are pinned at the source text instead, with the roster
+of controls *derived* from the source rather than typed, and the claim reduced to
+what it can carry: the call is written. Recorded rather than quietly corrected,
+because "I threaded the value so the call is covered" is exactly the plausible
+sentence that becomes entry 13's shape.
+
+Twenty-five mutants, twenty-five killed, each red in 0.2s naming its own case.
+The two that survived a first pass were not argued away: one was a floor whose
+own derivation had no synthetic proof, the other a comment-stripper the real body
+could not exercise, and both got the treatment the rest had rather than a
+paragraph explaining why they were fine.
+
+**Guard against it:** a mutation table proves the mutants it contains. When the
+subject is a guard, the controls are a second subject with a second table, and
+the tell that you have only written the first is that every control's red is
+*also* somebody else's red. Mutate each control **alone**, against a subject that
+is otherwise healthy — and if you cannot construct that subject from the real
+tree, that is the finding, not an obstacle: it means the control and its absence
+are indistinguishable, which is the whole of this catalogue in one sentence.
