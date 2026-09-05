@@ -168,7 +168,17 @@ export function code(lines) {
  * green while the workflow really did hardcode the cache.
  */
 export function stepInput(stepLines, key) {
-  for (const line of code(stepLines)) {
+  // A step's FIRST line carries the `- ` list marker, so a key written there —
+  // `- continue-on-error: true`, `- if: ...`, `- id: ...` — is not preceded by
+  // whitespace alone and was invisible here until #7632, where a guard asserting
+  // "the action step must NOT be continue-on-error" stayed green against a step
+  // that was. Both spellings are the same config to GitHub; two spellings of
+  // identical config must not disagree. Normalising the marker to two spaces
+  // puts such a key at the same indent as every other one.
+  const normalised = stepLines.map((l, i) =>
+    i === 0 ? l.replace(/^(\s*)-\s/, (_, sp) => `${sp}  `) : l
+  )
+  for (const line of code(normalised)) {
     const m = new RegExp(`^\\s*${key}:\\s*(.*)$`).exec(line)
     if (!m) continue
     const raw = m[1].trim()
@@ -233,4 +243,98 @@ export function assertReaderSane(workflows) {
     `expected >=15 setup-node steps across all workflows, found ${setupNodeSteps.length} — ` +
       'the reader is probably broken'
   )
+}
+
+/**
+ * A job's `defaults.run.shell`, or undefined.
+ *
+ * Read from the job's keys BEFORE `steps:`, which is what makes it a job
+ * default rather than one step's.
+ *
+ * A `shell:` named only in a comment must not be read as configuration —
+ * ci.yml's `server-tests-windows` explains its choice in prose containing the
+ * literal string "shell: bash". TWO things independently prevent that: the
+ * pattern anchors `shell:` to the start of the line after indent, and `code()`
+ * drops comment lines first. They are redundant, and deliberately kept so:
+ * mutating either ALONE leaves the property intact, and it takes removing both
+ * to turn the guard red (verified). The comment says this rather than crediting
+ * `code()` alone, which would be a rationale describing a stronger check than
+ * any single line performs.
+ *
+ * This is not a nicety: BOTH of this repo's PowerShell jobs
+ * (`server-tests-windows`, `desktop-tests-windows`) declare their shell here
+ * and NEITHER declares it on a step. A consumer that looked only at step-level
+ * `shell:` would classify all six of their run blocks as bash — the
+ * "guard wired to only some of its callers" cause in docs/false-safety-guards.md.
+ */
+export function jobShell(jobBody) {
+  const stepsAt = jobBody.findIndex(l => /^\s*steps:\s*$/.test(l))
+  const end = stepsAt === -1 ? jobBody.length : stepsAt
+  for (const line of code(jobBody.slice(0, end))) {
+    const m = /^\s*shell:\s*(.*)$/.exec(line)
+    if (m) return m[1].replace(/\s+#.*$/, '').trim()
+  }
+  return undefined
+}
+
+/**
+ * The shell script a step runs, as YAML would hand it to the runner — or
+ * undefined for a step with no `run:`.
+ *
+ * It must reproduce YAML's reading, not a friendlier one, because the whole
+ * point is to catch a `run:` whose YAML value is not what its author sees. The
+ * plain-scalar branch is where that bites: a whitespace-preceded `#` opens a
+ * comment, so
+ *
+ *     run: echo "... see #7632."
+ *
+ * has the YAML value `echo "... see` — an unterminated quote, and a step that
+ * fails at parse time on the runner. That exact line shipped into
+ * repo-relay.yml during #7632 and was caught by `bash -n`, not by review.
+ *
+ * Block scalars (`|`, `|-`, `>`, and the indent-indicator forms) are the common
+ * case and are taken literally: a `#` inside one is a SHELL comment and must
+ * survive, so `code()` is deliberately not applied to the body.
+ */
+export function stepRun(stepLines) {
+  if (!stepLines.length) return undefined
+  const dash = /^(\s*)-\s/.exec(stepLines[0])
+  if (!dash) return undefined
+  const keyIndent = dash[1].length + 2
+  const runKey = new RegExp(`^ {${keyIndent}}run:\\s*(.*)$`)
+
+  for (let i = 0; i < stepLines.length; i++) {
+    // The first line carries `- ` where later lines carry two spaces; normalise
+    // it so a `- run: ...` step is found at the same indent as any other key.
+    const line = i === 0 ? stepLines[i].replace(/^(\s*)-\s/, (_, sp) => `${sp}  `) : stepLines[i]
+    const m = runKey.exec(line)
+    if (!m) continue
+    const head = m[1].trim()
+
+    if (/^[|>][-+]?\d*$/.test(head)) {
+      const body = []
+      for (let j = i + 1; j < stepLines.length; j++) {
+        const l = stepLines[j]
+        if (/^\s*$/.test(l)) {
+          body.push('')
+          continue
+        }
+        if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
+        body.push(l)
+      }
+      while (body.length && body[body.length - 1] === '') body.pop()
+      const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
+      const dedent = widths.length ? Math.min(...widths) : 0
+      return body.map(l => l.slice(dedent)).join('\n')
+    }
+
+    if (head.startsWith("'") || head.startsWith('"')) {
+      const q = head[0]
+      const close = head.indexOf(q, 1)
+      return close === -1 ? head.slice(1) : head.slice(1, close)
+    }
+
+    return head.replace(/\s+#.*$/, '').trim()
+  }
+  return undefined
 }
