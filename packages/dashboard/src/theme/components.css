@@ -13749,3 +13749,132 @@ a.session-ci-chip__pr:focus-visible {
   color: var(--text-disabled);
   cursor: default;
 }
+
+/* ---------------------------------------------------------------------------
+   Failed restores (#7625) — the Control Room tab listing sessions the daemon
+   could not bring back at boot, each with a Retry.
+
+   Tokens only, no raw literals: this is a NEW file's ruleset, so it is not
+   covered by scripts/no-raw-color-literals-baseline.txt and the ratchet lint
+   would fail on a hex. Modelled on the memory-* rules rather than the .cr-*
+   family for the same reason EnvironmentPanel/ByokPoolSection were not copied:
+   both are grandfathered offenders.
+   --------------------------------------------------------------------------- */
+.fr-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-card);
+}
+
+.fr-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.fr-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 44x44 minimum (CLAUDE.md / WCAG 2.5.5). Deliberately NOT `.cr-action`, whose
+   `padding: 3px 8px` leaves every Control Room action button well under the
+   floor — see #3751 / #3914 / #4876 / #4893 / #5634. */
+.fr-refresh-btn,
+.fr-retry-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.fr-refresh-btn:disabled,
+.fr-retry-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fr-refresh-btn:not(:disabled):hover,
+.fr-retry-btn:not(:disabled):hover {
+  background: var(--bg-secondary);
+}
+
+.fr-empty {
+  padding: 16px 14px;
+  color: var(--text-secondary);
+}
+
+.fr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.fr-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.fr-row-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fr-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.fr-provider {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* An absolute host path: allowed to wrap rather than force the row to scroll. */
+.fr-cwd {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.fr-row-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.fr-code {
+  font-family: var(--font-mono);
+  color: var(--text-error);
+}
+
+.fr-error {
+  overflow-wrap: anywhere;
+}
+
+.fr-history {
+  color: var(--text-secondary);
+}
+
+.fr-result-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-error);
+}

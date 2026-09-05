@@ -43,6 +43,7 @@ import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRe
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { ContainersStatusSection } from './ContainersStatusSection'
 import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
+import { FailedRestoresSection } from './FailedRestoresSection'
 import { ByokPoolSection } from './ByokPoolSection'
 import { HostPruneSection } from './HostPruneSection'
 import { DeviceRuntimesSection } from './DeviceRuntimesSection'
@@ -172,6 +173,21 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'byokPoolStatus',
     loadingKey: 'byokPoolStatusLoading',
     requestKey: 'requestByokPoolStatus',
+  },
+  // #7625: sessions the boot restore could not bring back. Its OWN tab rather
+  // than a panel under Containers: a failed restore is provider/config-shaped
+  // (a missing env var, a stopped environment, a disabled feature), not
+  // container-shaped, and it is deliberately absent from `session_list`, so no
+  // per-session surface can host it. Same survey:true request/snapshot flow as
+  // its neighbours, which buys fetch-on-activate and the 60s staleness refetch.
+  {
+    key: 'failed-restores',
+    label: 'Failed restores',
+    survey: true,
+    requestType: 'list_failed_restores',
+    snapshotKey: 'failedRestores',
+    loadingKey: 'failedRestoresLoading',
+    requestKey: 'requestFailedRestores',
   },
   // #6140 (epic #5530): the Host prune tab — reclaimable, chroxy-scoped,
   // orphan-only docker pressure (stopped chroxy containers + chroxy snapshot
@@ -773,6 +789,8 @@ export function ControlRoomView({
         <ContainersStatusSection />
       ) : tab === 'repo-config' ? (
         <RepoRuntimeConfigSection />
+      ) : tab === 'failed-restores' ? (
+        <FailedRestoresSection />
       ) : tab === 'byok-pool' ? (
         <ByokPoolSection />
       ) : tab === 'host-prune' ? (

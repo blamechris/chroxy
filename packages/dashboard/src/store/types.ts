@@ -1710,6 +1710,12 @@ export interface ConnectionState {
    * with no rows ("asked, nothing failed").
    */
   failedRestores: ServerFailedRestoresListMessage | null;
+  /** #7625: a `list_failed_restores` is in flight (survey-tab loading flag). */
+  failedRestoresLoading: boolean;
+  /** #7625: sessionIds with a retry in flight, mirroring byokPoolActioningIds. */
+  retryingRestoreIds: Set<string>;
+  /** #7625: last retry outcome per sessionId, mirroring byokPoolActionResults. */
+  retryRestoreResults: Record<string, { ok: boolean; code?: string; message?: string }>;
 
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).
@@ -2343,6 +2349,10 @@ export interface ConnectionState {
   // the message went on the wire (false = socket closed). Sets
   // `byokPoolStatusLoading` while in flight.
   requestByokPoolStatus: () => boolean;
+  /** #7625: ask the daemon for the parked failed-restore roster. */
+  requestFailedRestores: () => boolean;
+  /** #7625: retry one parked failed restore. */
+  sendRetryFailedRestore: (sessionId: string) => boolean;
 
   // #6140 (epic #5530): request a host prune survey. Dispatches a
   // `host_prune_status_request`; the server replies with a single
