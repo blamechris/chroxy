@@ -296,3 +296,85 @@ ${job}
     assert.equal(jobShell(job.body), undefined)
   })
 })
+
+describe('workflow reader: folded (>) run scalars (#7632)', () => {
+  const wrap = body => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+${body}
+`
+  const firstStep = yml => parseJobs(wrap(yml), 'run.yml')[0].steps[0]
+
+  it('FOLDS a > scalar to one line, as the runner receives it', () => {
+    // Treating `>` like `|` inverts this module's purpose. Unfolded, these are
+    // three statements and `bash -n` passes; folded — which is what GitHub
+    // actually hands bash — it is `if true; then echo hi fi`, which dies with
+    // "unexpected end of file". The guard would report green on a step that
+    // cannot run. Verified equal to js-yaml's reading of the same source.
+    assert.equal(
+      stepRun(firstStep('      - run: >\n          if true; then\n          echo hi\n          fi')),
+      'if true; then echo hi fi'
+    )
+  })
+
+  it('turns a blank line inside a folded scalar into a newline, not a space', () => {
+    assert.equal(stepRun(firstStep('      - run: >\n          echo one\n\n          echo two')), 'echo one\necho two')
+  })
+
+  it('keeps a MORE-indented line literal inside a folded scalar', () => {
+    assert.equal(
+      stepRun(firstStep('      - run: >\n          echo one\n            deeper\n          echo two')),
+      'echo one\n  deeper\necho two'
+    )
+  })
+
+  it('leaves a | scalar unfolded', () => {
+    assert.equal(stepRun(firstStep('      - run: |\n          echo one\n          echo two')), 'echo one\necho two')
+  })
+})
+
+describe('workflow reader: jobShell is anchored to defaults.run (#7632)', () => {
+  const wrap = job => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+${job}
+`
+  const shellOf = job => jobShell(parseJobs(wrap(job), 'j.yml')[0].body)
+
+  it('reads defaults.run.shell', () => {
+    assert.equal(
+      shellOf('    runs-on: windows-latest\n    defaults:\n      run:\n        shell: powershell\n    steps:\n      - run: npm ci'),
+      'powershell'
+    )
+  })
+
+  it('does NOT read a strategy.matrix.shell axis as the job shell', () => {
+    // The dangerous direction: the run-block guard only feeds bash/sh to
+    // `bash -n`, so one false "powershell" here silently drops every real bash
+    // block in that job out of the check.
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        shell: [bash, zsh]\n    steps:\n      - run: npm ci'),
+      undefined
+    )
+  })
+
+  it('does NOT read an env.shell as the job shell', () => {
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    env:\n      shell: fish\n    steps:\n      - run: npm ci'),
+      undefined
+    )
+  })
+
+  it('does NOT read a shell: sitting directly under defaults, outside run:', () => {
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    defaults:\n      shell: powershell\n    steps:\n      - run: npm ci'),
+      undefined
+    )
+  })
+})

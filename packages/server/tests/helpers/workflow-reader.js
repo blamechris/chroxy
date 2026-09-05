@@ -269,9 +269,29 @@ export function assertReaderSane(workflows) {
  */
 export function jobShell(jobBody) {
   const stepsAt = jobBody.findIndex(l => /^\s*steps:\s*$/.test(l))
-  const end = stepsAt === -1 ? jobBody.length : stepsAt
-  for (const line of code(jobBody.slice(0, end))) {
-    const m = /^\s*shell:\s*(.*)$/.exec(line)
+  const lines = code(jobBody.slice(0, stepsAt === -1 ? jobBody.length : stepsAt))
+
+  // Anchored to `defaults:` → `run:` → `shell:`, not "any shell: before steps:".
+  // The unanchored version read a `strategy.matrix.shell` axis, or an
+  // `env.shell`, as the job's effective shell. That is the dangerous direction:
+  // the run-block guard only feeds bash/sh shells to `bash -n`, so one false
+  // "powershell" here silently drops every real bash block in that job out of
+  // the check — "a guard wired to only some of its callers", and the mirror
+  // image of the bug it was written for.
+  const defaultsAt = lines.findIndex(l => /^\s*defaults:\s*$/.test(l))
+  if (defaultsAt === -1) return undefined
+  const defaultsIndent = /^(\s*)/.exec(lines[defaultsAt])[1].length
+
+  let runIndent = null
+  for (let i = defaultsAt + 1; i < lines.length; i++) {
+    const indent = /^(\s*)/.exec(lines[i])[1].length
+    if (indent <= defaultsIndent) break
+    if (runIndent === null) {
+      if (/^\s*run:\s*$/.test(lines[i])) runIndent = indent
+      continue
+    }
+    if (indent <= runIndent) break
+    const m = /^\s*shell:\s*(.*)$/.exec(lines[i])
     if (m) return m[1].replace(/\s+#.*$/, '').trim()
   }
   return undefined
@@ -311,7 +331,8 @@ export function stepRun(stepLines) {
     if (!m) continue
     const head = m[1].trim()
 
-    if (/^[|>][-+]?\d*$/.test(head)) {
+    const block = /^([|>])([-+]?\d*)$/.exec(head)
+    if (block) {
       const body = []
       for (let j = i + 1; j < stepLines.length; j++) {
         const l = stepLines[j]
@@ -325,7 +346,8 @@ export function stepRun(stepLines) {
       while (body.length && body[body.length - 1] === '') body.pop()
       const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
       const dedent = widths.length ? Math.min(...widths) : 0
-      return body.map(l => l.slice(dedent)).join('\n')
+      const dedented = body.map(l => l.slice(dedent))
+      return block[1] === '>' ? fold(dedented) : dedented.join('\n')
     }
 
     if (head.startsWith("'") || head.startsWith('"')) {
@@ -337,4 +359,46 @@ export function stepRun(stepLines) {
     return head.replace(/\s+#.*$/, '').trim()
   }
   return undefined
+}
+
+/**
+ * Fold a `>` block scalar the way YAML does, so a consumer sees the ONE line
+ * the runner will see rather than the several the author wrote.
+ *
+ * Treating `>` like `|` is not a cosmetic difference — it inverts this
+ * module's whole purpose. `> / if true; then / echo hi / fi` reads as three
+ * statements unfolded and parses clean, while GitHub hands bash the folded
+ * `if true; then echo hi fi`, which dies with "unexpected end of file". The
+ * guard would report green on a step that cannot run.
+ *
+ * The rules applied: a break between two non-empty lines at the base indent
+ * becomes a SPACE; n blank lines become n newlines; a MORE-indented line is
+ * literal and keeps the breaks around it.
+ */
+function fold(lines) {
+  const out = []
+  let buf = null
+  let blanks = 0
+  const flush = () => {
+    if (buf !== null) out.push(buf)
+    buf = null
+  }
+  for (const line of lines) {
+    if (line === '') {
+      blanks++
+      continue
+    }
+    if (/^\s/.test(line)) {
+      flush()
+      out.push('\n'.repeat(Math.max(blanks, 0)) + line)
+      blanks = 0
+      continue
+    }
+    if (buf === null) buf = line
+    else if (blanks > 0) buf += '\n'.repeat(blanks) + line
+    else buf += ' ' + line
+    blanks = 0
+  }
+  flush()
+  return out.join('\n')
 }
