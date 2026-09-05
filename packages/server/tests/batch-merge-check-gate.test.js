@@ -114,7 +114,18 @@ describe('/batch-merge Step 2a derives its required-check roster (#7503)', () =>
         `Step 2a fence in ${label} is only ${block.length} chars — too short to be the gate`
       )
     }
-    assert.equal(roster.length, 13, `expected 13 roster entries, got ${roster.length}`)
+    // A FLOOR, not the exact count. This is a positive control — its job is to
+    // catch a roster parse that yielded nothing, over which every rule below
+    // would pass vacuously. It is not the place that pins the required set;
+    // contributing-required-checks.test.js is, because there the count IS the
+    // subject. It was written as `=== 13` and #7643 duly broke it by promoting
+    // three checks: an exact count here turns a correct edit to a DIFFERENT
+    // file into a failure that blames this one, which is the same reasoning
+    // assertReaderSane states for its own loose thresholds.
+    assert.ok(
+      roster.length >= 10,
+      `expected >=10 roster entries, got ${roster.length} — the roster parse is probably broken`
+    )
   })
 
   it('reads the roster from scripts/lib/contributing-roster.mjs', () => {

@@ -63,7 +63,8 @@ Thanks for your interest in contributing! This document covers how to get starte
   `Server Tests`, `Server Lint`, `Server Windows Tests`, `Protocol Tests`,
   `Store Core Tests`, `Store Core Type Check`, `Dashboard Tests`,
   `Dashboard Type Check`, `Design Tokens Tests`, `App Tests`, `App Type Check`,
-  `App Expo Doctor`, and `Desktop Rust Tests`. That is the set wired as required.
+  `App Expo Doctor`, `Desktop Rust Tests`, `Scripts Tests`, `Release PR Subject`,
+  and `Resolve Runner Target`. That is the set wired as required.
   Every OTHER job that runs on a pull request is listed, with the reason it is
   not a gate, in the not-required table below — the two lists together must
   account for every PR-visible job, and a guard fails when they do not. The
@@ -107,10 +108,7 @@ gate, which derives its roster from the list above.
 
 | Check | Workflow | Why it is not a merge gate |
 | --- | --- | --- |
-| `Resolve Runner Target` | `ci.yml` | **No good reason — this one is a hole.** Twelve of the thirteen required checks declare `needs: runner-target`. A `needs` failure skips the dependent rather than failing it, and this repo's own `/batch-merge` gate accepts `SKIPPED` as passing for a required context — so on the autonomous merge path its failure would stand down twelve required suites. Whether GitHub's own merge button does the same is documented behaviour but **unmeasured here**: no required context has ever reported skipped in this repo. It is a one-minute hosted bash step with no flake history, so requiring it is cheap either way. Tracked in #7641. |
 | `Detect Changed Paths` | `ci.yml` | Path-filter plumbing whose only live consumer is `Renovate Config`. Same skip-cascade shape as the row above and it should follow the same decision; its `platform` output has no consumer at all (#7642). |
-| `Scripts Tests` | `ci.yml` | **Should be required; not yet wired.** It carries the `bash -n` parse-check over every tracked shell script, `compile-skill-targets --check`, the AGENTS.md sync gate, and all 14 `scripts/__tests__` suites including `merge-updater-feeds.test.sh`, whose subject breaks the desktop auto-updater. Deterministic, no network, no flake history. #7544, #7639. |
-| `Release PR Subject` | `ci.yml` | **Should be required; not yet wired.** Deterministic and content-derived; it is the check that would have caught #4627 and the 463-commit untagged gap in #7176. #7199. |
 | `Renovate Config` | `ci.yml` | Proposed for requiring in #7216, on the argument that its usual skipped result satisfies protection — documented, not measured here (#7641). Small external-network surface (`npx` resolving a pinned `renovate`) is the other argument for waiting. |
 | `Desktop Rust Tests (Windows)` | `ci.yml` | Its `if:` is byte-identical to the already-required macOS twin, so requiring it adds no new semantics. It shares the `chroxy-win` runner with the required `Server Windows Tests`, which has queued indefinitely during an outage before (#7057) — requiring it doubles the exposure to that one host, not the risk class. |
 | `Style Lint` | `ci.yml` | Design-token ratchet, undefined-CSS-var check and the #7103 NUL-byte scan. Held back only by having produced a PR-unrelated red before: the baseline `comm` ran under the ambient locale (#7493, #7513). That is fixed; this row is the remaining reason to re-check rather than a standing exemption. |
@@ -120,9 +118,10 @@ gate, which derives its roster from the list above.
 
 <!-- end not-required table -->
 
-Rows above that say "should be required" are the open half of #7639. Promoting one
-takes three edits, and only two of them are guarded — know which is which before
-you rely on it:
+Three rows left this table in #7643 — `Scripts Tests`, `Release PR Subject` and
+`Resolve Runner Target` are now required. The remaining rows that say "should be
+required" are the rest of the open half of #7639. Promoting one takes three edits,
+and only two of them are guarded — know which is which before you rely on it:
 
 1. Add the name to the roster bullet **and** delete its row here. The partition
    guard fails if you do one without the other, because the two lists would then

@@ -48,13 +48,15 @@ describe('CONTRIBUTING required-checks roster (#7448)', () => {
 
   // ---- positive controls ----
   it('parses exactly the 13 required contexts and the ci.yml job names', () => {
+    // 16 since #7643 promoted Scripts Tests, Release PR Subject and Resolve
+    // Runner Target out of the not-required table.
     // EXACT on purpose, not a floor: the #7499 review proved a floor of 12 let
     // any single entry vanish silently — the precise drift this file exists to
     // prevent. The count IS the subject here, so changing the required set
     // must force a same-PR edit of this line. (Contrast the deliberately
     // loose floors in ci-npm-cache-routing.test.js, where the count is NOT
     // the subject and pinning it would misattribute unrelated refactors.)
-    assert.equal(roster.length, 13, `expected exactly 13 roster entries, got ${roster.length}: ${roster.join(', ')}`)
+    assert.equal(roster.length, 16, `expected exactly 16 roster entries, got ${roster.length}: ${roster.join(', ')}`)
     assert.ok(jobNames.length >= 10, `expected >=10 ci.yml job names, got ${jobNames.length}`)
   })
 

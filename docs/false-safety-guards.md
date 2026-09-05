@@ -1728,9 +1728,18 @@ the PR (entry 22).
 
 `runner-target` has never fired: 0 failures in every run sampled — 39/39 in a
 41-run job-level sample, and none in ~205 runs scanned for this job specifically
-(a full 11,047-run scan was abandoned rather than exhaust the API rate limit,
-so "never" is bounded by that). That is why this was never noticed, and why it
-is a latent hole rather than a past incident.
+(a full 11,047-run scan was abandoned rather than exhaust the API rate limit, so
+"never" is bounded by that). That is why this was never noticed, and why it was a
+latent hole rather than a past incident.
+
+**Closed in the same change.** `Resolve Runner Target` is now a required context,
+so its failure blocks directly instead of being inferred from twelve dependents
+going quiet — which is the point: a gate whose failure mode is *silence* needs to
+be able to fail loudly itself. `Scripts Tests` and `Release PR Subject` were
+promoted with it, the three that are deterministic and have no external-network
+surface. The remaining seven rows stay in the not-required table with the reason
+each is still waiting, and #7641 keeps the unmeasured half of the skip semantics
+open.
 
 **Guard against it:** when a roster names members of a set, ask what enumerates
 the SET. If the answer is "a person, when they remember", the roster is a
