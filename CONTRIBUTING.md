@@ -111,7 +111,7 @@ gate, which derives its roster from the list above.
 | `Detect Changed Paths` | `ci.yml` | Path-filter plumbing whose only live consumer is `Renovate Config`. Same skip-cascade shape as the row above and it should follow the same decision; its `platform` output has no consumer at all (#7642). |
 | `Scripts Tests` | `ci.yml` | **Should be required; not yet wired.** It carries the `bash -n` parse-check over every tracked shell script, `compile-skill-targets --check`, the AGENTS.md sync gate, and all 14 `scripts/__tests__` suites including `merge-updater-feeds.test.sh`, whose subject breaks the desktop auto-updater. Deterministic, no network, no flake history. #7544, #7639. |
 | `Release PR Subject` | `ci.yml` | **Should be required; not yet wired.** Deterministic and content-derived; it is the check that would have caught #4627 and the 463-commit untagged gap in #7176. #7199. |
-| `Renovate Config` | `ci.yml` | Proposed for requiring in #7216, which already established that its usual skipped result satisfies protection. Small external-network surface (`npx` resolving a pinned `renovate`) is the only argument for waiting. |
+| `Renovate Config` | `ci.yml` | Proposed for requiring in #7216, on the argument that its usual skipped result satisfies protection — documented, not measured here (#7641). Small external-network surface (`npx` resolving a pinned `renovate`) is the other argument for waiting. |
 | `Desktop Rust Tests (Windows)` | `ci.yml` | Its `if:` is byte-identical to the already-required macOS twin, so requiring it adds no new semantics. It shares the `chroxy-win` runner with the required `Server Windows Tests`, which has queued indefinitely during an outage before (#7057) — requiring it doubles the exposure to that one host, not the risk class. |
 | `Style Lint` | `ci.yml` | Design-token ratchet, undefined-CSS-var check and the #7103 NUL-byte scan. Held back only by having produced a PR-unrelated red before: the baseline `comm` ran under the ambient locale (#7493, #7513). That is fixed; this row is the remaining reason to re-check rather than a standing exemption. |
 | `Claude Hooks Tests` | `ci.yml` | Validates the hook emitters that feed the daemon's notification pipeline. Left on the mixed self-hosted ARM64 pool and named in #7491 as showing the #7471 isolated-cancel signature — requiring it before that is fixed would convert an infrastructure flake into a blocked merge. |
@@ -120,9 +120,18 @@ gate, which derives its roster from the list above.
 
 <!-- end not-required table -->
 
-Rows above that say "should be required" are the open half of #7639: promoting one
-means adding it to the roster bullet, adding the context to live protection, and
-deleting its row here — the partition guard fails if those go out of step.
+Rows above that say "should be required" are the open half of #7639. Promoting one
+takes three edits, and only two of them are guarded — know which is which before
+you rely on it:
+
+1. Add the name to the roster bullet **and** delete its row here. The partition
+   guard fails if you do one without the other, because the two lists would then
+   either overlap or leave the job unclassified.
+2. Add the context to **live branch protection**. Nothing in CI can check this —
+   reading protection needs repo-admin scope that `GITHUB_TOKEN` does not have —
+   so a roster naming a context that is not actually required stays green here.
+   `scripts/check-required-contexts.sh` is what catches it, and it only runs when
+   a human runs it. Run it after any promotion.
 
 Deliberate policy choices (a solo-maintained project):
 

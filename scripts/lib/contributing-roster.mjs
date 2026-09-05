@@ -50,21 +50,32 @@ export const EXEMPT_END = '<!-- end not-required table -->'
  * carry backticks of their own — issue numbers, file names — so taking only the
  * first per row is what keeps a reason like `#7491` out of the name set.
  *
- * Fails closed on every shape it does not understand: missing anchors, a table
- * that parsed to nothing, or a name that cannot be a check context. It never
- * returns a partial list.
+ * That does assume the check name is the first backticked span in its row. A
+ * row with the columns swapped, or with an empty first cell, is MIS-PARSED
+ * rather than refused — this function cannot tell a workflow name from a check
+ * name. It is not the last line of defence and does not pretend to be: the
+ * partition rules compare whatever comes back against the real jobs, so a
+ * mis-parsed row surfaces as a phantom plus an unclassified job, which is a
+ * legible failure rather than a silent pass.
  *
- * THE `< 5` FLOOR IS REDUNDANT TODAY, and is kept deliberately rather than
- * because a mutant proved it. Emptying the table was run against this parser
- * both with the floor and without it, and BOTH are red: the partition rules in
- * ci-required-check-partition.test.js independently report all ten jobs as
- * unclassified. So the floor is an inert mutant above a fail-closed default,
- * not a missing assertion — the distinction docs/false-safety-guards.md asks
- * for, recorded here so the next reader does not "prove" it with a case that
- * actually exercises the partition rules. What it buys is the same contract
- * `parseRoster` gives its own CLI consumer: a FUTURE caller that reads
- * exemptions WITHOUT partition rules behind it inherits the refusal instead of
- * a silent empty list.
+ * Fails closed on the shapes that mean "this parse did not work": missing
+ * anchors, a table that yielded nothing, or a name that cannot be a check
+ * context. It never returns a partial list.
+ *
+ * THE FLOOR IS ONE ROW, NOT FIVE, and the difference matters. A `< 5` floor was
+ * written here first, on the reasoning that a plausible table has several rows.
+ * It is wrong in the direction that breaks a CORRECT change: promoting rows to
+ * the required roster is the whole intended lifecycle of this table, and taking
+ * it from ten rows to four — six promotions, exactly what #7639 contemplates —
+ * is a right answer that a `< 5` floor turns into a hard failure with a message
+ * about the table "shape" having changed (#7643 review).
+ *
+ * A floor that fires on a correct edit is not a safety net; it is a tax on
+ * doing the thing the document is for. What the floor must actually catch is a
+ * parse that produced nothing, and `< 1` catches exactly that. Everything
+ * stronger is already covered by the partition rules in
+ * ci-required-check-partition.test.js, which compare this list against the real
+ * jobs rather than against a guess about how long it ought to be.
  */
 export function parseExemptions(contributingText) {
   const startAt = contributingText.indexOf(EXEMPT_START)
@@ -81,8 +92,8 @@ export function parseExemptions(contributingText) {
     if (m) names.push(m[1])
   }
 
-  if (names.length < 5) {
-    throw new Error(`parsed only ${names.length} not-required entries — the table shape has changed`)
+  if (names.length < 1) {
+    throw new Error('parsed no not-required entries — the table is empty or its shape has changed')
   }
   const implausible = names.filter(n => n.includes('/') || n.includes('~') || n.includes('${{'))
   if (implausible.length > 0) {

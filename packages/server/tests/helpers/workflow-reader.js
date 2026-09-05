@@ -416,55 +416,115 @@ function fold(lines) {
  * whole life (#7637). Adding a sharper tool to a shared module does not migrate
  * its existing consumers; this one is migrated in the same change.
  *
- * Read only from the keys BEFORE `steps:`, so a step's own `name:` can never be
- * mistaken for the job's. The indent anchor alone would already exclude a step
- * name (steps sit at six spaces or deeper), and the two are deliberately
- * redundant: mutating either alone leaves the property intact.
+ * Anchored to a key at EXACTLY four spaces, which is the job-key column. That
+ * is what excludes a step's own `name:` — steps sit at six spaces or deeper —
+ * and it does so wherever the key appears in the job. An earlier version also
+ * sliced the body at `steps:` for belt and braces, and that turned out to be a
+ * regression rather than redundancy: YAML does not order mapping keys, so
+ * `steps:` before `name:` is valid and GitHub still uses the name. The slice
+ * silently returned the job id for such a job (#7643 review).
  *
  * YAML quoting is cosmetic — `name: "X"` and `name: X` are the same context —
- * so a single layer of matching quotes is stripped.
+ * so a single layer of matching quotes is stripped. An unquoted value ends at a
+ * whitespace-preceded `#`, per YAML, so `name: Deploy # temporary` is the
+ * context `Deploy`; reading the comment as part of the name would put a string
+ * in the roster that branch protection can never match. `stepInput()` already
+ * does this for step inputs and the two must not disagree.
+ *
+ * LIMITATION, stated because a caller cannot infer it: a matrix job's `name:`
+ * is a TEMPLATE (`Deploy (${{ matrix.os }})`), and GitHub posts one context per
+ * expansion, none of them equal to the template. This returns the template
+ * verbatim. No job in this repo uses `strategy.matrix` today; if one is added,
+ * its real contexts must be written out by hand, and
+ * contributing-required-checks.test.js already fails a roster entry containing
+ * `${{` for exactly that reason.
  */
 export function jobName(job) {
-  const body = job.body
-  const stepsAt = body.findIndex(l => /^\s*steps:\s*$/.test(l))
-  const head = code(stepsAt === -1 ? body : body.slice(0, stepsAt))
-  const m = head.map(l => /^ {4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean)
-  const raw = m ? m[1] : job.id
-  return raw.replace(/^(['"])(.*)\1$/, '$2')
+  const m = code(job.body)
+    .map(l => /^ {4}name:\s*(.+?)\s*$/.exec(l))
+    .find(Boolean)
+  if (!m) return job.id
+  const raw = m[1]
+  if (raw.startsWith("'") || raw.startsWith('"')) {
+    const q = raw[0]
+    const close = raw.indexOf(q, 1)
+    return close === -1 ? raw.slice(1) : raw.slice(1, close)
+  }
+  return raw.replace(/\s+#.*$/, '').trim()
 }
 
 /**
  * The event names in a workflow's top-level `on:` mapping.
  *
- * Only the mapping form is supported, which is what every workflow in this repo
- * uses; the list form (`on: [push, pull_request]`) and the string form
- * (`on: push`) are handled too, because a future workflow written either way
- * must not read as "triggers on nothing" — an empty trigger set would silently
- * drop the whole file out of any guard that quantifies over PR-visible jobs,
- * which is the cannot-check-treated-as-nothing-to-check failure in
- * docs/false-safety-guards.md.
+ * Every spelling GitHub accepts, because an unrecognised one returns NOTHING and
+ * silently drops the whole file out of any guard that quantifies over PR-visible
+ * jobs — the cannot-check-treated-as-nothing-to-check failure in
+ * docs/false-safety-guards.md, and the exact class
+ * ci-required-check-partition.test.js exists to close. Reported by two
+ * independent reviewers of #7643 against the first version of this function,
+ * which matched only a bare unquoted `on:` in block or list form.
  *
- * `code()` is applied first: repo-relay.yml's `on:` block carries a long
- * comment that names `pull_request_review` while explaining why that trigger
- * was REMOVED. A guard reading prose as configuration is satisfiable by prose.
+ * The spellings, and why each is real rather than hypothetical:
+ *
+ *   on:                    block mapping — what all seven workflows use today
+ *   on: [push, pull_request]   flow sequence
+ *   on: push               single scalar
+ *   "on":                   YAML 1.1 parses bare `on` as a BOOLEAN, so linters
+ *   'on':                   and hand-written workflows routinely quote the key.
+ *                          GitHub treats it identically; this reader must too.
+ *   on: {pull_request: null}   flow mapping
+ *   on: &anchor            an anchor on the key line, with the events below it
+ *
+ * `code()` is applied first: repo-relay.yml's `on:` block carries a long comment
+ * that names `pull_request_review` while explaining why that trigger was
+ * REMOVED. A guard reading prose as configuration is satisfiable by prose.
  */
 export function workflowTriggers(yml) {
   const lines = code(yml.split('\n'))
-  const at = lines.findIndex(l => /^on:/.test(l))
+  // The key may be quoted; YAML 1.1's bare `on` is a boolean, so `"on":` is a
+  // normal thing to find in a real workflow.
+  const at = lines.findIndex(l => /^(["']?)on\1\s*:/.test(l))
   if (at === -1) return []
 
-  const head = /^on:\s*(.*)$/.exec(lines[at])[1].replace(/\s+#.*$/, '').trim()
+  let head = /^(?:["']?)on(?:["']?)\s*:\s*(.*)$/.exec(lines[at])[1].replace(/\s+#.*$/, '').trim()
+  // An anchor or alias sits between the key and its value; strip it so the
+  // value (or the block below) is what gets read.
+  head = head.replace(/^[&*][A-Za-z0-9_-]+\s*/, '').trim()
+
+  // Flow sequence: [push, pull_request]
   if (head.startsWith('[')) {
-    return head.replace(/[[\]]/g, '').split(',').map(s => s.trim()).filter(Boolean)
+    return head.replace(/^\[|\]$/g, '').split(',').map(s => s.trim().replace(/^["']|["']$/g, '')).filter(Boolean)
   }
-  if (head) return [head]
+  // Flow mapping: {push: null, pull_request: {types: [opened]}} — the event is
+  // the key before the first colon of each top-level entry.
+  if (head.startsWith('{')) {
+    const inner = head.replace(/^\{|\}$/g, '')
+    const out = []
+    let depth = 0
+    let buf = ''
+    for (const ch of inner) {
+      if (ch === '{' || ch === '[') depth++
+      else if (ch === '}' || ch === ']') depth--
+      if (ch === ',' && depth === 0) {
+        out.push(buf)
+        buf = ''
+        continue
+      }
+      buf += ch
+    }
+    out.push(buf)
+    return out
+      .map(e => e.split(':')[0].trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean)
+  }
+  if (head) return [head.replace(/^["']|["']$/g, '')]
 
   const events = []
   for (let i = at + 1; i < lines.length; i++) {
     const line = lines[i]
     if (/^\s*$/.test(line)) continue
     if (/^\S/.test(line)) break
-    const m = /^ {2}([A-Za-z_]+):/.exec(line)
+    const m = /^ {2}["']?([A-Za-z_]+)["']?\s*:/.exec(line)
     if (m) events.push(m[1])
   }
   return events

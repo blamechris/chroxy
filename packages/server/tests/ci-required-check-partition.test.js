@@ -4,7 +4,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readWorkflows, assertReaderSane, jobName, workflowTriggers } from './helpers/workflow-reader.js'
 import { parseRoster, parseExemptions } from '../../../scripts/lib/contributing-roster.mjs'
 
@@ -39,14 +39,21 @@ import { parseRoster, parseExemptions } from '../../../scripts/lib/contributing-
  * one-directory-wide mistake #7637 made. Derived, not listed: `readWorkflows()`
  * discovers files with `readdir`, so a new PR-triggered workflow is in scope
  * the moment it lands. Measured against reality rather than assumed: on PR
- * #7638's head, GitHub reported exactly 23 check runs, and this derivation
- * yields exactly those 23 contexts.
+ * #7638's head, GitHub reported 23 distinct check-run contexts on 2026-09-05
+ * and this derivation yielded exactly those 23. The figure is dated on purpose:
+ * a re-run adds check runs, so the count is a reading rather than an invariant.
+ * What this file pins is the derivation, not the number.
  *
- * A SKIPPED JOB IS STILL IN SCOPE, on purpose. Branch protection treats a
- * skipped required check as satisfied (#7216 established this, and it is why
- * `Desktop Rust Tests` can be both required and fork-conditional), so a
- * conditional job is a perfectly ordinary gate. Excluding jobs by their `if:`
- * would exempt exactly the ones whose conditions are hardest to reason about.
+ * A SKIPPED JOB IS STILL IN SCOPE, on purpose. A conditional job is an ordinary
+ * gate: it emits a completed check run either way, so it can be required. Note
+ * the scope of what is actually established about the skipped case — #7216
+ * asserts branch protection treats a skipped required check as satisfied, and
+ * this repo's `/batch-merge` gate does accept SKIPPED, but no required context
+ * has ever reported skipped here, so the GitHub half is documented rather than
+ * measured (#7641). It does not change this file's subject either way:
+ * excluding jobs by their `if:` would exempt exactly the ones whose conditions
+ * are hardest to reason about, which is the wrong direction whatever a skip
+ * means at the merge button.
  *
  * WHAT THIS FILE CANNOT DO is read live branch protection — CI's GITHUB_TOKEN
  * has no repo-admin scope, and pretending otherwise would be the
@@ -103,6 +110,11 @@ export function prVisibleJobs(workflows) {
 }
 
 const REAL = new URL('../../../.github/workflows/', import.meta.url)
+// `cpSync` gets a PATH, not the URL — the idiom
+// ci-scripts-tests-registration.test.js established, and the one that behaves on
+// Windows, where this file also runs (it is not in windows-test-set.mjs's
+// exempt table, so `Server Windows Tests` — a required check — executes it).
+const REAL_PATH = fileURLToPath(REAL)
 const CONTRIBUTING = new URL('../../../CONTRIBUTING.md', import.meta.url)
 
 describe('required-check roster partitions the PR-visible jobs (#7639)', () => {
@@ -284,7 +296,7 @@ describe('the partition rule reads the real workflow tree (#7639)', () => {
   async function mutated(file, pairs) {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-partition-'))
     dirs.push(dir)
-    cpSync(REAL, dir, { recursive: true })
+    cpSync(REAL_PATH, dir, { recursive: true })
     const target = join(dir, file)
     let text = readFileSync(target, 'utf8')
     for (const [find, replace] of pairs) {
@@ -315,7 +327,7 @@ describe('the partition rule reads the real workflow tree (#7639)', () => {
   it('CONTROL: an unmutated copy is a clean partition', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-partition-'))
     dirs.push(dir)
-    cpSync(REAL, dir, { recursive: true })
+    cpSync(REAL_PATH, dir, { recursive: true })
     const prJobs = prVisibleJobs(await readWorkflows(pathToFileURL(`${dir}/`)))
     assert.deepEqual(partitionGaps({ prJobs, roster, exempt }).unclassified, [])
   })

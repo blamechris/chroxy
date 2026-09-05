@@ -1689,8 +1689,10 @@ this one job", which is the fix that guarantees a fifth.
 **What was actually missing is a partition.** Every job in a workflow triggered
 by `pull_request` produces a check-run context on every PR, so each one is
 either a merge gate or deliberately not one. Measured rather than assumed: on
-PR `#7638`'s head GitHub reported exactly 23 check runs, and the roster
-described 13 of them. The remaining ten — including `Scripts Tests`, which
+PR `#7638`'s head GitHub reported 23 distinct check-run contexts on
+2026-09-05, and the roster described 13 of them. A count is a reading, not an
+invariant — re-runs add check runs, and the number moved within the day — so what
+the guard pins is the DERIVATION against the workflow files, not this figure. The remaining ten — including `Scripts Tests`, which
 carries the `bash -n` parse-check over every tracked shell script and the
 `merge-updater-feeds.test.sh` suite whose subject breaks the desktop
 auto-updater — were in no list at all, described only by a parenthetical reading
@@ -1724,9 +1726,11 @@ demonstrates. A third state is genuinely different and was measured: a required
 check that produces *no* check run at all does not satisfy protection, it wedges
 the PR (entry 22).
 
-`runner-target` has never fired (39 successes, 0 failures across a 41-run
-sample), which is why this was never noticed and why it is a latent hole rather
-than a past incident.
+`runner-target` has never fired: 0 failures in every run sampled — 39/39 in a
+41-run job-level sample, and none in ~205 runs scanned for this job specifically
+(a full 11,047-run scan was abandoned rather than exhaust the API rate limit,
+so "never" is bounded by that). That is why this was never noticed, and why it
+is a latent hole rather than a past incident.
 
 **Guard against it:** when a roster names members of a set, ask what enumerates
 the SET. If the answer is "a person, when they remember", the roster is a
