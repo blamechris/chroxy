@@ -5,6 +5,7 @@
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { isBoundClient } from '../environments/authority.js'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
@@ -659,6 +660,104 @@ function handleClaimPrimary(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * #7625 — the parked failed-restore roster.
+ *
+ * REFUSES pairing-bound clients, matching `list_environments` (#7596) rather
+ * than redacting. Each row carries `cwd` (an absolute host path) plus the
+ * provider and error detail for a session the bound token is not scoped to,
+ * and a bound token learns nothing host-level. The roster is also, literally,
+ * a list of sibling sessions — the thing the bearer-token doc forbids a bound
+ * token from enumerating.
+ *
+ * The gate runs FIRST, before any SessionManager lookup, so the refusal cannot
+ * be used to distinguish "there are failed restores" from "there are none".
+ */
+function handleListFailedRestores(ws, client, _msg, ctx) {
+  if (isBoundClient(client)) {
+    // A DEGRADED snapshot of this survey's own type, not a session_error —
+    // the §4 survey shape. `session_error` also carries no `code` field, so a
+    // refusal sent that way could not name the reason at all.
+    ctx.transport.send(ws, {
+      type: 'failed_restores_list',
+      generatedAt: new Date().toISOString(),
+      restores: [],
+      refused: true,
+      code: 'FAILED_RESTORES_LIST_FORBIDDEN_BOUND_CLIENT',
+    })
+    return
+  }
+  const sm = ctx.sessions.sessionManager
+  const restores = typeof sm.getFailedRestores === 'function' ? sm.getFailedRestores() : []
+  ctx.transport.send(ws, { type: 'failed_restores_list', generatedAt: new Date().toISOString(), restores })
+}
+
+/**
+ * #7625 — retry one parked failed restore.
+ *
+ * AUTHORITY: the UNBOUND bar, not strict primary. Per the bearer-token doc's §9
+ * step 4 the question is "can a caller choose a binary, argv, or environment
+ * this daemon will spawn?" — and here it cannot: the only caller-supplied value
+ * is a sessionId, while the provider, cwd, model and every spawn input come
+ * from the entry the daemon itself persisted. That makes this
+ * `destroy_environment` (acts on state that already exists) rather than
+ * `create_environment` (caller-chooses cwd/name/limits, hence strict primary).
+ * The daemon already performs exactly this restore at every boot with no token
+ * involved at all.
+ *
+ * Bound clients are refused before the lookup, for the same existence-oracle
+ * reason as the list above. The user-shell refusal lives in SessionManager, so
+ * it covers callers other than this handler.
+ */
+async function handleRetryFailedRestore(ws, client, msg, ctx) {
+  const sessionId = typeof msg?.sessionId === 'string' ? msg.sessionId : ''
+  if (isBoundClient(client)) {
+    // Refused BEFORE the sessionId is even validated, let alone looked up, so
+    // the reply cannot distinguish a real parked id from a fabricated one.
+    ctx.transport.send(ws, {
+      type: 'retry_failed_restore_result',
+      sessionId,
+      ok: false,
+      code: 'RETRY_FAILED_RESTORE_FORBIDDEN_BOUND_CLIENT',
+      message: 'Pairing-issued session tokens cannot retry a failed restore — this requires a host-level (unbound) client, such as the primary token.',
+    })
+    return
+  }
+  if (!sessionId) {
+    ctx.transport.send(ws, {
+      type: 'retry_failed_restore_result',
+      sessionId: '',
+      ok: false,
+      code: 'RETRY_FAILED_RESTORE_INVALID',
+      message: 'retry_failed_restore requires a sessionId',
+    })
+    return
+  }
+
+  const result = await ctx.sessions.sessionManager.retryFailedRestore(sessionId)
+
+  if (result.ok) {
+    // The retried session is live again, so it now belongs in session_list.
+    // Nothing broadcasts that on its own — createSession does not emit a list
+    // — so every sibling flow (create/destroy/rename) calls this explicitly and
+    // so must this one, or other connected clients keep showing it as failed.
+    ctx.transport.broadcastSessionList()
+    log.info(`Retry of failed restore ${sessionId} succeeded`)
+  }
+
+  ctx.transport.send(ws, {
+    // The id the manager actually restored, which is NOT always the one asked
+    // for: createSession falls back to a random id when preserveId is malformed
+    // or collides, so echoing the request would leave the client unable to find
+    // the session it just recovered (Copilot, #7630 review). Falls back to the
+    // requested id on the failure arms, where nothing was created.
+    sessionId: result.ok && result.sessionId ? result.sessionId : sessionId,
+    type: 'retry_failed_restore_result',
+    ok: result.ok === true,
+    ...(result.ok ? {} : { code: result.code, message: result.message }),
+  })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -673,4 +772,6 @@ export const sessionHandlers = {
   terminal_resync: handleTerminalResync,
   client_visible: handleClientVisible,
   claim_primary: handleClaimPrimary,
+  list_failed_restores: handleListFailedRestores,
+  retry_failed_restore: handleRetryFailedRestore,
 }

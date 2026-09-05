@@ -103,6 +103,15 @@ const INTENTIONALLY_UNHANDLED = new Set([
 // Key = message type, Value = which handler covers it.
 // ---------------------------------------------------------------------------
 const PLATFORM_SPECIFIC = {
+  // #7625: the failed-restore roster + retry ack. Dashboard-only for the same
+  // reason as the environment_* family above — the surface is a host-level
+  // operator console, and the mobile app has no non-session-scoped list to host
+  // a roster that is deliberately absent from session_list. The app keeps the
+  // existing `session_restore_failed` toast, which is unchanged; an unknown
+  // type falls through both clients' graceful default case, so this costs
+  // mobile nothing at runtime (verified: app message-handler default case).
+  failed_restores_list: 'dashboard',
+  retry_failed_restore_result: 'dashboard',
   // Mobile app only
   // (pair_fail is now handled by BOTH platforms — the dashboard gained
   //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)

@@ -175,6 +175,7 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
@@ -6705,6 +6706,40 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'environment_list': {
       const { environments } = sharedEnvironmentList(msg);
       set({ environments: environments as EnvironmentInfo[] });
+      break;
+    }
+    case 'failed_restores_list': {
+      // #7625. Stored as the WHOLE message, like every sibling Control Room
+      // survey snapshot: `generatedAt` drives the tab strip's staleness line
+      // and its refetch, and `refused` rides inside so it can never disagree
+      // with the rows it arrived with. Replaced wholesale rather than merged —
+      // this is server truth, and merging would leave an entry a successful
+      // retry removed on screen.
+      //
+      // `restores` is normalised to an array: the schema requires one, but a
+      // malformed or hostile frame that skipped validation would otherwise
+      // reach the renderer and throw at `.map`, blanking the whole tab rather
+      // than showing one bad row.
+      const snapshot = msg as unknown as ServerFailedRestoresListMessage;
+      set({
+        failedRestores: {
+          ...snapshot,
+          restores: Array.isArray(snapshot.restores) ? snapshot.restores : [],
+        },
+      });
+      break;
+    }
+    case 'retry_failed_restore_result': {
+      // #7625. The roster is server truth, so rather than patch it locally we
+      // re-ask; a successful retry ALSO triggers a session_list broadcast, and
+      // a re-failure arrives as a fresh session_restore_failed. The UI that
+      // renders pending/outcome state lands with the Control Room tab.
+      const ok = (msg as { ok?: boolean }).ok === true;
+      if (!ok) {
+        const code = (msg as { code?: string }).code;
+        const detail = (msg as { message?: string }).message;
+        console.warn(`[chroxy] retry_failed_restore failed (${code ?? 'unknown'}): ${detail ?? ''}`);
+      }
       break;
     }
     case 'environment_created':

@@ -348,6 +348,8 @@ function _isSecureRequest(req) {
  *   { type: 'list_environments' }                       — list all persistent environments
  *   { type: 'destroy_environment', environmentId, force? } — destroy an environment and its container. #7562: REFUSES while sessions are running inside it (environment_error, code ENVIRONMENT_HAS_LIVE_SESSIONS) unless `force: true`, which destroys those sessions cleanly FIRST and then the environment
  *   { type: 'get_environment', environmentId }          — get single environment details
+ *   { type: 'list_failed_restores' }                    — #7625 roster of sessions the boot restore could not bring back (BOUND-REFUSED: rows carry cwd, an absolute host path, plus a sibling-session roster — same reasoning as list_environments #7596. Replies with a degraded, schema-valid failed_restores_list carrying refused+code, not an error, so the caller never waits on a reply that never comes)
+ *   { type: 'retry_failed_restore', sessionId }         — #7625 re-attempt one parked failed restore (BOUND-REFUSED, at the UNBOUND bar rather than strict primary: the caller supplies a sessionId and nothing else — provider, cwd and every spawn input come from the entry the daemon itself persisted, so there is no caller-chosen binary/argv/env)
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
@@ -388,6 +390,8 @@ function _isSecureRequest(req) {
  *   { type: 'session_persist_failed', sessionId, name|null }
  *     — a session-list mutation (create/rename/destroy) could not be flushed to disk and will be lost on restart (#5714).
  *       `name` is null on the destroy path where the entry was already removed before the flush.
+ *   { type: 'failed_restores_list', restores[], refused?, code? } — #7625 reply to list_failed_restores. Per-row shape matches session_restore_failed (both built from getFailedRestores()); historyLength only, never the history itself. `refused: true` is the bound-client degraded snapshot, and is what distinguishes a refusal from a genuinely empty roster. DASHBOARD-ONLY (PLATFORM_SPECIFIC), like the environment_* family
+ *   { type: 'retry_failed_restore_result', sessionId, ok, code?, message? } — #7625 reply to retry_failed_restore. code FAILED_RESTORE_NOT_FOUND means the entry was already gone (a concurrent retry won, or the 30-day TTL pruned it) — i.e. a stale button, deliberately distinguishable from a retry that ran and re-failed. A re-failure ALSO arrives as a fresh session_restore_failed broadcast. DASHBOARD-ONLY (PLATFORM_SPECIFIC)
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
