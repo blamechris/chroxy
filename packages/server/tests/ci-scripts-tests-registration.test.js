@@ -28,8 +28,8 @@ import { readWorkflows, assertReaderSane, code, stepRun } from './helpers/workfl
  * is registered, and demanding one particular job would be a guard that fails
  * on correct configurations.
  *
- * TWO DEFECTS FIXED IN #7637 — both found by review, both in the direction that
- * lets a real orphan through
+ * WHAT #7637 FIXED — every item below was found by review, and every one failed
+ * in the direction that lets a real orphan through
  * ----------------------------------------------------------------------------
  * 1. IT READ THE WHOLE STEP, NOT THE COMMAND. The rule matched
  *    `code(step).join('\n')` — every line of the step block bar whole-line
@@ -45,13 +45,43 @@ import { readWorkflows, assertReaderSane, code, stepRun } from './helpers/workfl
  *        run: true  # was bash scripts/__tests__/merge-updater-feeds.test.sh
  *
  *    The second is the realistic regression, and `code()` cannot catch it: it
- *    drops whole-line comments, and that is a TRAILING one. This file's own
- *    header warned "a guard that reads prose as configuration is satisfiable by
- *    prose" while being satisfiable by prose — a comment describing a stronger
- *    check than the code performs, which is the #7290/#7291 shape, produced in
- *    a guard written for that catalogue. The fix uses `stepRun()`, the reader's
- *    accessor for the shell script YAML actually hands the runner, which was
- *    already in the same module.
+ *    drops whole-line comments, and that is a TRAILING one. The rule's own
+ *    comment said it matched "STEP BODIES with comments stripped ... a guard
+ *    that reads prose as configuration is satisfiable by prose", while being
+ *    satisfiable by prose — a comment describing a stronger check than the code
+ *    performs, which is the #7290/#7291 shape, produced in a guard written for
+ *    that catalogue.
+ *
+ *    The fix uses `stepRun()`, the reader's accessor for the shell script YAML
+ *    actually hands the runner. It did NOT exist when this guard was written:
+ *    the guard landed 2026-08-30 in #7540 against a reader that had only
+ *    `code()`, and `stepRun()` arrived 2026-09-04 in #7633 for a different
+ *    guard. So this is not "the right accessor was there and went unused" — it
+ *    is a capability that appeared five days later and that nothing went back
+ *    to apply. Worth stating precisely, because the two have different
+ *    remedies: the first is a review miss, the second is that adding a sharper
+ *    tool to a shared module leaves every existing consumer on the blunt one.
+ *
+ * 1b. AND IT READ THE STEP AS PROSE ONE LAYER DOWN. `stepRun()` hands back a
+ *    BLOCK scalar verbatim, because a `#` inside one is a shell comment that
+ *    belongs to the script. So commenting the invocation out —
+ *
+ *      run: |
+ *        # bash scripts/__tests__/merge-updater-feeds.test.sh
+ *        echo "temporarily skipped"
+ *
+ *    still read as wired, which is the same regression in the other YAML
+ *    spelling, and the entire first mutation suite missed it because every case
+ *    in it mutated a plain scalar. Comments are stripped in `invokes()` now,
+ *    which is the only place that can: two spellings of identical config must
+ *    not disagree.
+ *
+ * 1c. AND "AN INTERPRETER BEFORE THE NAME" MEANT "ANYWHERE EARLIER ON THE
+ *    LINE". `chmod +x ./x.test.sh`, `cp ./x.test.sh /tmp/` and `node --version
+ *    && echo "see x.test.sh"` each read as an invocation while running nothing.
+ *    The match is anchored to a shell command position now — the #7290/#7291
+ *    shape again, three times in one function, which is a fair measure of how
+ *    hard the safe direction is to hold onto.
  *
  * 2. IT LOOKED IN ONE DIRECTORY. The subject was `readdir` over
  *    `scripts/__tests__/`, so `packages/desktop/scripts/verify-entitlements.
@@ -77,11 +107,14 @@ import { readWorkflows, assertReaderSane, code, stepRun } from './helpers/workfl
  *     of ONE measurement, store-core's — would leave a hole with a template
  *     already sitting in the tree next to nine server lint scripts.
  *
- *   scripts/__tests__/*.test.{js,cjs} — the root package.json has no `test`
- *     script and no runner, so nothing globs that directory whatever the
- *     extension. `*.test.js` is NOT swept repo-wide: it is the extension every
- *     package runner above is pinned to, so a repo-wide sweep would be almost
- *     entirely exemptions.
+ *   *.test.{js,cjs} under ANY `scripts/__tests__/` — no package runner's glob
+ *     reaches such a directory (they are pinned to `./tests/**`, `tests/*`,
+ *     `src/**`, or jest's defaults), and the root package.json has no `test`
+ *     script at all. It is NOT swept repo-wide: `.test.js` is the extension
+ *     five of the eight package runners ARE pinned to, so a repo-wide sweep
+ *     would be almost entirely exemptions. That boundary has a cost worth
+ *     naming — a `*.test.js` outside both a runner's glob and a
+ *     `scripts/__tests__/` is a subject this does not look at.
  *
  * WHAT THIS DELIBERATELY DOES NOT CLAIM
  * -------------------------------------
@@ -103,9 +136,10 @@ const ROOT_SUITE_DIR = 'scripts/__tests__/'
 const TESTS_DIR = new URL('../../../scripts/__tests__/', import.meta.url)
 
 /**
- * Loose floors, not counts. Today: 2494 tracked files, 16 suites. They catch an
- * enumeration that has stopped working, not the tree's size — a number tracking
- * today's count would be the first cause in docs/false-safety-guards.md again.
+ * Loose floors, not counts. Today 16 files match the shapes below and 15 are
+ * subjects, one being exempted by GLOB_COVERED. They catch an enumeration that
+ * has stopped working, not the tree's size — a number tracking today's count
+ * would be the first cause in docs/false-safety-guards.md again.
  */
 const MIN_TRACKED_FILES = 500
 const MIN_SUITES = 10
@@ -115,17 +149,30 @@ const MIN_SUITES = 10
  * with the measurement that establishes it.
  *
  * A roster beside a growing set is the first cause in the catalogue, so this
- * one is asserted EQUAL to reality on every run: `test` must still be that
- * package's exact `test` script, and the tree must still hold at least one file
- * the exemption is doing work for. Drift in either direction is the thing it
- * reports, rather than something it hides. The lint still enumerates the
- * filesystem and consults no list of SUITES.
+ * one is asserted EQUAL to reality on every run: the tree must be the package
+ * root the measurement is about, `test` must still be that package's exact
+ * `test` script, and the tree must still hold at least one file the exemption
+ * is doing work for. Drift in any of the three is the thing it reports, rather
+ * than something it hides. The guard still enumerates the filesystem and
+ * consults no list of SUITES.
+ *
+ * The tree-is-the-package check is not decoration: without it, widening `tree`
+ * to `packages/` left all 21 tests green while exempting every
+ * `packages/**\/*.test.mjs` — the blanket exclusion this guard's own header
+ * argues is a hole, reachable as a one-word edit. It was a surviving mutant,
+ * which is the definition of a missing assertion.
+ *
+ * The eighth package, design-tokens, runs a bare `node --test` and so DOES glob
+ * `*.test.mjs`. It has none today, and an entry covering nothing is a roster
+ * line no evidence can contradict — so it gets none, and the check below is
+ * what would demand one if a file ever appeared there.
  */
 const GLOB_COVERED = [
   {
     tree: 'packages/store-core/',
     pkg: 'packages/store-core/package.json',
     test: 'vitest run',
+    covers: /\.test\.(mjs|cjs|js)$/,
     why:
       "vitest's defaultInclude is `**/*.{test,spec}.?(c|m)[jt]s?(x)`, which matches .mjs and is " +
       'not confined to src/; packages/store-core/vitest.config.ts sets only timeouts and workers ' +
@@ -134,12 +181,33 @@ const GLOB_COVERED = [
   },
 ]
 
-/** Is this repo-relative path a suite that only a name in CI config can invoke? */
-function isSubject(p) {
-  if (/\.test\.sh$/.test(p)) return true
-  if (/\.test\.mjs$/.test(p)) return !GLOB_COVERED.some(e => p.startsWith(e.tree))
-  return p.startsWith(ROOT_SUITE_DIR) && /\.test\.(js|cjs)$/.test(p)
-}
+/**
+ * The files that LOOK like a suite of the kinds this guard covers, before any
+ * exemption. Kept separate from `isSubject` because the basename-collision
+ * check has to quantify over this wider set: an exempted file still sits in the
+ * tree with a basename, and a run line naming it would vouch for a subject that
+ * shares it.
+ *
+ * `*.test.{js,cjs}` is matched under any `scripts/__tests__/` rather than only
+ * the root one. No package runner's glob reaches a `scripts/__tests__/` — they
+ * are pinned to `./tests/**`, `tests/*`, `src/**` or jest's defaults — so such
+ * a file is invoked by name or by nothing wherever it lives. It is NOT swept
+ * repo-wide: `.test.js` is the extension five of the eight package runners are
+ * pinned to, so a repo-wide sweep would be almost entirely exemptions.
+ */
+const isSuiteShaped = p =>
+  /\.test\.(sh|mjs)$/.test(p) || (/(^|\/)scripts\/__tests__\//.test(p) && /\.test\.(js|cjs)$/.test(p))
+
+/**
+ * Is this repo-relative path a suite that only a name in CI config can invoke?
+ *
+ * An exemption applies only to the extensions its runner actually globs. vitest
+ * discovers JavaScript; it would not find a `*.test.sh` under store-core, so
+ * exempting the whole tree by path would open a hole in the one class that has
+ * no glob coverage anywhere.
+ */
+const isSubject = p =>
+  isSuiteShaped(p) && !GLOB_COVERED.some(e => p.startsWith(e.tree) && e.covers.test(p))
 
 /**
  * Every tracked file, via `git ls-files -z`.
@@ -179,7 +247,7 @@ const basenameOf = p => p.slice(p.lastIndexOf('/') + 1)
 const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
- * Where `text` names this file as a whole path segment, or -1.
+ * Every place `text` names this file as a whole path segment.
  *
  * A plain `includes()` is over-inclusive about WIRED, which is under-inclusive
  * about ORPHAN — the dangerous direction. `bash foo.test.sh.bak` and `bash
@@ -187,43 +255,135 @@ const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
  * different file. The left boundary admits `/` (a path prefix is exactly how
  * the name is normally spelled) but not a filename character; the right
  * boundary admits neither, so an extended name cannot vouch for the suite.
+ *
+ * EVERY occurrence, not the first: `echo "replacing x.test.sh" && bash
+ * x.test.sh` names it twice, and stopping at the first would read the mention
+ * and miss the invocation. That direction is only a false positive, but it is
+ * free to get right.
  */
-function indexOfName(text, name) {
-  const m = new RegExp(`(?<![A-Za-z0-9_.\\-])${esc(name)}(?![A-Za-z0-9_.\\-])`).exec(text)
-  return m ? m.index : -1
+function namePositions(text, name) {
+  const re = new RegExp(`(?<![A-Za-z0-9_.\\-])${esc(name)}(?![A-Za-z0-9_.\\-])`, 'g')
+  return [...text.matchAll(re)].map(m => m.index)
+}
+
+const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'npx', 'npm'])
+
+/** Shell command separators: everything after the last one begins a new command. */
+const SEPARATORS = /[;&|(`{]/g
+
+/**
+ * Is the name at `at` in a COMMAND position on this line — i.e. does the text
+ * immediately before it invoke it?
+ *
+ * The prefix is cut back to the last shell separator, quotes are dropped, and
+ * what remains must be one of:
+ *
+ *   `./`                     — `./x.test.sh`
+ *   <interpreter> [flags] [path-prefix]
+ *                            — `bash x.test.sh`, `node --test scripts/__tests__/x`,
+ *                              `bash ./x.test.sh`, `out=$(bash x.test.sh)`
+ *
+ * The first version of this asked only whether an interpreter appeared ANYWHERE
+ * earlier on the line, and whether `./` appeared anywhere earlier. Both were the
+ * #7290/#7291 shape — a comment ("before the name") describing a stronger check
+ * than the code performed — and both were live false negatives, verified:
+ * `chmod +x ./x.test.sh`, `cp ./x.test.sh /tmp/` and `node --version && echo
+ * "see x.test.sh"` each read as an invocation while running nothing. Anchoring
+ * to the command position is what makes the claim and the code agree.
+ *
+ * A bare `x.test.sh` at a command position is NOT accepted, though a shell
+ * would run it: nothing in this repo spells an invocation that way, and a
+ * heredoc body line naming a suite would otherwise read as running it. That
+ * costs a false positive on a shape nobody writes, which is the safe direction.
+ */
+function isCommandPosition(line, at) {
+  const before = line.slice(0, at)
+  SEPARATORS.lastIndex = 0
+  let cut = 0
+  for (const m of before.matchAll(SEPARATORS)) cut = m.index + 1
+  const seg = before.slice(cut).replace(/["']/g, '').trim()
+  if (seg === './') return true
+  const words = seg.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return false
+  // `words[0]` rather than `words.some(...)`: the interpreter must be the
+  // command WORD. The two are provably equivalent given the tail check below —
+  // an interpreter is neither a flag nor a path prefix, so it cannot appear
+  // after position 0 and still pass — and a differential search over 168,420
+  // token sequences found no input distinguishing them. Recorded because that
+  // makes swapping them a genuinely INERT mutant rather than a missing
+  // assertion, and the next person to mutate this deserves to know which.
+  if (!INTERPRETERS.has(words[0])) return false
+  // After the interpreter: flags, plus optionally a trailing path prefix — the
+  // directory part of the argument when the match was on the basename.
+  return words.slice(1).every((w, i, rest) => w.startsWith('-') || (i === rest.length - 1 && w.endsWith('/')))
 }
 
 /**
- * An interpreter at a command position. Bounded on BOTH sides: `sh` as a bare
- * substring matches inside `bash`, `.bashrc` and `--no-shell`, and a substring
- * standing in for a token is the #7290/#7291 shape this repo has been bitten by
- * twice.
+ * A run body's lines with shell comments removed.
+ *
+ * `stepRun()` strips a trailing comment from a PLAIN scalar, because that is
+ * what YAML does. It deliberately does NOT strip one inside a BLOCK scalar —
+ * a `#` there is a shell comment and belongs to the script it hands back. So
+ * the single most idiomatic way to disable a CI command,
+ *
+ *     run: |
+ *       # bash scripts/__tests__/x.test.sh
+ *       echo "temporarily skipped"
+ *
+ * read as WIRED until this existed: the same "delete the `run:`, keep the
+ * comment" regression this whole guard is about, one YAML spelling over, and
+ * missed by the entire mutation suite because every case in it mutated a plain
+ * scalar. Two spellings of identical config must not disagree.
+ *
+ * A `#` inside quotes truncates the line here where a shell would not. That
+ * shortens what is searched, so its only effect is to report a wired suite as
+ * an orphan — loud, and the safe direction.
  */
-const INVOKER_RE = /(?:^|[\s;&|(`"'=])(?:bash|sh|zsh|node|npx|npm)(?:\s|$)/
+const uncommented = runBody =>
+  runBody.split('\n').map(line => line.replace(/(^|\s)#.*$/, ''))
 
 /**
  * Does any line of this `run:` body actually INVOKE the named file, as opposed
  * to merely mentioning it?
  *
- * `stepRun()` already excludes a step's `name:`, `if:`, `with:` and trailing
- * comments, which is what closes the shipped fail-open. This closes the last
- * one inside the command itself: `run: echo "::error::scripts/__tests__/x.test.sh
- * is missing"` is a run body that names the suite and runs nothing.
+ * `stepRun()` already keeps a step's `name:`, `if:` and `with:` out of reach.
+ * This closes the rest: a comment inside a block scalar, and a mention inside a
+ * live command.
  *
- * Requiring an interpreter (or a `./`) before the name costs nothing today —
- * all 15 wired suites are invoked as `bash <path>` or `node <path>`, measured,
- * one line each. A future shape without one (`npm run x`, a variable holding
- * the path, `for f in ...; do bash "$f"; done`) would be reported as an orphan:
- * a false POSITIVE, loud, and fixable by whoever writes it. Under-inclusive is
- * the direction that waves a real orphan through.
+ * Requiring a real command position costs nothing today — all 15 wired suites
+ * are invoked as `bash <path>` or `node <path>`, measured, one line each. A
+ * future shape without one (`npm run x`, a variable holding the path, `for f in
+ * ...; do bash "$f"; done`) is reported as an orphan: a false POSITIVE, loud,
+ * and fixable by whoever writes it. Under-inclusive is the direction that waves
+ * a real orphan through.
  */
 function invokes(runBody, name) {
-  return runBody.split('\n').some(line => {
-    const at = indexOfName(line, name)
-    if (at === -1) return false
-    const before = line.slice(0, at)
-    return INVOKER_RE.test(before) || before.includes('./')
-  })
+  return uncommented(runBody).some(line =>
+    namePositions(line, name).some(at => isCommandPosition(line, at))
+  )
+}
+
+/** Is the name present at all — invoked or merely mentioned? Diagnostics only. */
+const mentions = (runBody, name) => namePositions(runBody, name).length > 0
+
+/**
+ * Paths that share a basename, as `a vs b`.
+ *
+ * Matching admits the basename alone because an invocation under
+ * `working-directory:` spells neither the full path nor the bare name: ci.yml
+ * runs `bash scripts/verify-entitlements.test.sh` from packages/desktop. That
+ * is only as strong as path matching while basenames are unique, so a collision
+ * has to fail the build rather than let one suite's step vouch for another.
+ */
+function basenameCollisions(paths) {
+  const seen = new Map()
+  const collisions = []
+  for (const p of paths) {
+    const b = basenameOf(p)
+    if (seen.has(b)) collisions.push(`${seen.get(b)} vs ${p}`)
+    else seen.set(b, p)
+  }
+  return collisions
 }
 
 /**
@@ -257,9 +417,7 @@ function orphansIn(suites, workflows) {
 function describeOrphans(suites, workflows) {
   const runs = runBodies(workflows)
   return orphansIn(suites, workflows).map(p => {
-    const mentioned = runs.some(
-      t => indexOfName(t, p) !== -1 || indexOfName(t, basenameOf(p)) !== -1
-    )
+    const mentioned = runs.some(t => mentions(t, p) || mentions(t, basenameOf(p)))
     return `${p} (${mentioned ? 'named in a run: body but never invoked' : 'named by no workflow step'})`
   })
 }
@@ -312,14 +470,26 @@ describe('every test suite CI can only invoke BY NAME is invoked by a workflow s
     // ci.yml runs `bash scripts/verify-entitlements.test.sh` from
     // packages/desktop. A collision would let one suite's step wire the other,
     // which is the under-inclusive direction.
-    const seen = new Map()
-    const collisions = []
-    for (const p of suites) {
-      const b = basenameOf(p)
-      if (seen.has(b)) collisions.push(`${seen.get(b)} vs ${p}`)
-      else seen.set(b, p)
-    }
-    assert.deepEqual(collisions, [], 'two suites share a basename — rename one')
+    //
+    // Quantified over every suite-SHAPED file, not just the subjects: a file
+    // excluded by GLOB_COVERED still sits in the tree with a basename, and a
+    // run line naming IT would vouch for a subject that shares it. Narrowing
+    // this argument back to `suites` is a real weakening that today's tree
+    // CANNOT falsify — no subject shares a basename with an exempt file — so it
+    // is a surviving mutant by construction, and the synthetic case below is
+    // what pins the logic instead. Said plainly rather than left for the next
+    // person to discover.
+    const collisions = basenameCollisions(trackedFiles().filter(isSuiteShaped))
+    assert.deepEqual(collisions, [], 'two suite files share a basename — rename one')
+  })
+
+  it('basenameCollisions REPORTS a collision — the check above is not vacuous', () => {
+    // The real tree has none, so the case above passes identically against a
+    // function that returns [] unconditionally. This is the control.
+    assert.deepEqual(
+      basenameCollisions(['a/x.test.sh', 'b/y.test.sh', 'c/x.test.sh']),
+      ['a/x.test.sh vs c/x.test.sh']
+    )
   })
 
   it('every suite is invoked by at least one workflow step', () => {
@@ -356,6 +526,31 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
   // rationale: the runner changes, the glob stops reaching the tree, and the
   // suites inside it are subjects that nothing enumerates.
   for (const entry of GLOB_COVERED) {
+    it(`${entry.tree} is the root of the package whose runner vouches for it`, () => {
+      // Without this, widening `tree` to `packages/` keeps both checks below
+      // green (pkg still points at store-core, and packages/ still contains its
+      // .test.mjs) while exempting every packages/**/*.test.mjs — the blanket
+      // exclusion this guard's header argues is a hole. A surviving mutant.
+      assert.equal(
+        entry.pkg,
+        `${entry.tree}package.json`,
+        'the exemption tree must be the package root the measurement is about — a wider tree ' +
+          'exempts files no runner in that package ever globs'
+      )
+    })
+
+    it(`${entry.tree}'s exemption does not reach *.test.sh`, () => {
+      // No runner in this repo globs shell, so no exemption may ever cover it.
+      // Without this, widening `covers` to /./ exempts a hypothetical
+      // *.test.sh under the tree from the one class that has no glob coverage
+      // anywhere — inert on today's files, and a hole the moment one appears.
+      assert.ok(
+        !entry.covers.test('packages/x/scripts/__tests__/a.test.sh'),
+        `${entry.tree}'s \`covers\` matches a shell suite. ${entry.why} is a claim about a ` +
+          'JavaScript runner; nothing in this repo discovers *.test.sh by glob.'
+      )
+    })
+
     it(`${entry.tree} still runs \`${entry.test}\``, async () => {
       const pkg = JSON.parse(await readFile(new URL(`../../../${entry.pkg}`, import.meta.url), 'utf8'))
       assert.equal(
@@ -368,7 +563,9 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
     })
 
     it(`${entry.tree} still holds a *.test.mjs the exemption is doing work for`, () => {
-      const covered = trackedFiles().filter(p => p.startsWith(entry.tree) && /\.test\.mjs$/.test(p))
+      const covered = trackedFiles().filter(
+        p => p.startsWith(entry.tree) && isSuiteShaped(p) && entry.covers.test(p)
+      )
       assert.ok(
         covered.length > 0,
         `no *.test.mjs under ${entry.tree}, so this exemption excludes nothing and is unfalsifiable. ` +
@@ -385,13 +582,16 @@ describe('Scripts Tests parse-checks every tracked shell script (#7504)', () => 
     const ci = workflowsByName(await readWorkflows(), 'ci.yml')
     const job = ci.jobs.find(j => j.id === 'scripts-tests')
     assert.ok(job, "ci.yml should have a 'scripts-tests' job")
-    const matches = job.steps.filter(s => code(s).join('\n').includes('bash -n'))
+    // Anchored to the RUN BODY, for the same reason the registration rule above
+    // is: `code()` keeps a step's `name:` and every trailing comment, so a
+    // narrowed pathspec plus a comment quoting the old one would read clean.
+    const matches = job.steps.filter(s => (stepRun(s) ?? '').includes('bash -n'))
     assert.equal(
       matches.length,
       1,
       `expected exactly one 'bash -n' step in scripts-tests, found ${matches.length}`
     )
-    step = code(matches[0]).join('\n')
+    step = uncommented(stepRun(matches[0])).join('\n')
   })
 
   it('enumerates the whole tracked set, not a typed subdirectory glob', () => {
@@ -441,16 +641,36 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     for (const d of dirs) rmSync(d, { recursive: true, force: true })
   })
 
-  /** A copy of the real workflows with `transform` applied to ci.yml. */
-  async function mutated(transform) {
+  /**
+   * A copy of the real workflows with each `[find, replace]` applied to ci.yml.
+   *
+   * Pairs rather than one transform, and each asserted SEPARATELY: a chained
+   * `.replace().replace()` whose first pattern has drifted still changes the
+   * text, so a single before/after check passes while the case silently
+   * degrades into a weaker one.
+   *
+   * The landing check is collapsed to a boolean before asserting. Comparing two
+   * ~86 KB strings with `assert.notEqual` puts BOTH in the AssertionError as
+   * `actual` and `expected` — ~200 KB of TAP per call — which is the payload
+   * that wedged this runner in #7340.
+   */
+  async function mutated(pairs) {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-wired-'))
     dirs.push(dir)
     cpSync(REAL, dir, { recursive: true })
     const ci = join(dir, 'ci.yml')
-    const src = readFileSync(ci, 'utf8')
-    const out = transform(src)
-    assert.notEqual(out, src, 'the mutation did not land — ci.yml has drifted from what it edits')
-    writeFileSync(ci, out)
+    let text = readFileSync(ci, 'utf8')
+    for (const [find, replace] of pairs) {
+      const occurrences = text.split(find).length - 1
+      assert.ok(
+        occurrences === 1,
+        `the mutation did not land: ci.yml contains ${occurrences} occurrences of ` +
+          `${JSON.stringify(find.slice(0, 90))}, expected exactly 1 — it has drifted from what ` +
+          'this case edits, and the case would otherwise pass for the wrong reason'
+      )
+      text = text.replace(find, replace)
+    }
+    writeFileSync(ci, text)
     return readWorkflows(pathToFileURL(`${dir}/`))
   }
 
@@ -474,7 +694,7 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
   })
 
   it('the `run:` deleted outright', async () => {
-    const wf = await mutated(s => s.replace(`${RUN_LINE}\n`, ''))
+    const wf = await mutated([[`${RUN_LINE}\n`, '']])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
@@ -491,16 +711,17 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // #7290/#7291 shape. The two mechanisms are pinned separately below: the
     // trailing-comment case is red without `stepRun()`, and the mention and
     // `refresh` cases are red without `invokes()`.
-    const wf = await mutated(s =>
-      s.replace(NAME_LINE, `      - name: Run ${SUITE} tests`).replace(RUN_LINE, '        run: true')
-    )
+    const wf = await mutated([
+      [NAME_LINE, `      - name: Run ${SUITE} tests`],
+      [RUN_LINE, '        run: true'],
+    ])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
   it('the `run:` replaced, the name surviving in a TRAILING comment (the shipped fail-open)', async () => {
     // The realistic regression, and the one `code()` cannot catch: it drops
     // whole-line comments, and this is a trailing one on a live `run:`.
-    const wf = await mutated(s => s.replace(RUN_LINE, `        run: true  # was bash ${SUITE}`))
+    const wf = await mutated([[RUN_LINE, `        run: true  # was bash ${SUITE}`]])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
@@ -508,9 +729,7 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // The last hole inside the command itself. `stepRun()` keeps a step's
     // `name:` and trailing comments out; this is a real run body that names the
     // suite and runs nothing.
-    const wf = await mutated(s =>
-      s.replace(RUN_LINE, `        run: echo "::error::${SUITE} was removed"`)
-    )
+    const wf = await mutated([[RUN_LINE, `        run: echo "::error::${SUITE} was removed"`]])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
     // Collapsed to a boolean before asserting: a failing `assert.match` carries
     // the WHOLE subject as `actual`, which has wedged this runner before (#7340).
@@ -518,12 +737,91 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     assert.ok(/named in a run: body but never invoked/.test(why), why)
   })
 
+  it('the invocation COMMENTED OUT inside a `run: |` block scalar', async () => {
+    // The realistic regression in the other YAML spelling, and the one the whole
+    // mutation suite missed until review: `stepRun()` must hand back a block
+    // scalar verbatim (a `#` there is a SHELL comment), so nothing but
+    // `invokes()` can strip it. Every other case here mutates a plain scalar,
+    // so without this one that branch of `stepRun()` is never exercised.
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          # bash ${SUITE}\n          echo "temporarily skipped"`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('a real invocation SURVIVING beside a commented-out one in the same block', async () => {
+    // The control for the case above. Stripping comments must not strip the
+    // command: a rule that dropped the whole body would report every suite
+    // orphaned and its negative tests would pass for the wrong reason (#7273).
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          # bash ${SUITE} --old\n          bash ${SUITE}`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
+  it('the file being CHMODded rather than run — `./` anywhere earlier is not an invocation', async () => {
+    // `before.includes('./')` accepted any relative path earlier on the line, so
+    // `chmod +x ./<suite>` and `cp ./<suite> /tmp/` both read as invocations
+    // while running nothing. Anchoring to the command position is what makes
+    // the header's claim ("before the name") and the code agree.
+    const wf = await mutated([[RUN_LINE, `        run: chmod +x ./${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('an interpreter earlier in the line, the suite only MENTIONED after it', async () => {
+    // INVOKER_RE used to be tested against the whole prefix, so any `node` or
+    // `bash` earlier on the line vouched for a mention later on it.
+    const wf = await mutated([
+      [RUN_LINE, `        run: node --version && echo "see ${SUITE}"`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('a real `./` invocation still counts — the anchoring is not deny-everything', async () => {
+    const wf = await mutated([[RUN_LINE, `        run: ./${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
+  it('`bash ./<path>` and a quoted argument still count', async () => {
+    const wf = await mutated([[RUN_LINE, `        run: bash "./${SUITE}"`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
+  it('a mention and a real invocation on the SAME line — every occurrence is examined', async () => {
+    // `namePositions` returns every match, not the first. Stopping at the first
+    // would read the mention and miss the invocation two words later, reporting
+    // a wired suite as an orphan. Only a false positive, but free to get right.
+    const wf = await mutated([
+      [RUN_LINE, `        run: echo "running ${SUITE}" && bash ${SUITE}`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
+  it('a commented-out invocation whose comment contains a shell separator', async () => {
+    // The `;` resets the command-position scan, so without comment stripping the
+    // text after it reads as a fresh command. This is what makes `uncommented()`
+    // load-bearing rather than redundant with the command-position anchoring —
+    // every other commented shape is caught twice.
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          # disabled; bash ${SUITE}\n          echo skipped`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('an interpreter NAMED but not first in the command — `echo bash <suite>`', async () => {
+    // The interpreter must be the command WORD, not merely present among the
+    // words. Accepting any position makes `echo bash x.test.sh` — printing a
+    // command rather than running it — read as an invocation.
+    const wf = await mutated([[RUN_LINE, `        run: echo bash ${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
   it('a MENTION whose prefix contains `sh` only inside another word', async () => {
     // Pins the token boundaries on INVOKER_RE itself. `refresh` contains `sh`,
     // `bash` contains `sh`, `.bashrc` contains `bash`; an unbounded alternation
     // reads any of them as an invocation and the mention counts as wiring.
     // Without this case that weakening is a SURVIVING mutant — measured.
-    const wf = await mutated(s => s.replace(RUN_LINE, `        run: echo "refresh ${SUITE}"`))
+    const wf = await mutated([[RUN_LINE, `        run: echo "refresh ${SUITE}"`]])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
@@ -531,14 +829,14 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // `bash x.test.sh.bak` invokes a different file. A substring match would
     // call the suite wired — over-inclusive about WIRED is under-inclusive
     // about ORPHAN, the direction that waves a real orphan through.
-    const wf = await mutated(s => s.replace(RUN_LINE, `${RUN_LINE}.bak`))
+    const wf = await mutated([[RUN_LINE, `${RUN_LINE}.bak`]])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
   it('the `run:` naming a file whose name merely ENDS with the suite name', async () => {
-    const wf = await mutated(s =>
-      s.replace(RUN_LINE, '        run: bash scripts/__tests__/x-merge-updater-feeds.test.sh')
-    )
+    const wf = await mutated([
+      [RUN_LINE, '        run: bash scripts/__tests__/x-merge-updater-feeds.test.sh'],
+    ])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
@@ -546,9 +844,9 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // Invoked as `bash scripts/verify-entitlements.test.sh` under
     // `working-directory: packages/desktop`, so this also pins that the rule
     // matches a basename and not only a repo-relative path.
-    const wf = await mutated(s =>
-      s.replace('        run: bash scripts/verify-entitlements.test.sh\n', '        run: true\n')
-    )
+    const wf = await mutated([
+      ['        run: bash scripts/verify-entitlements.test.sh\n', '        run: true\n'],
+    ])
     assert.deepEqual(orphansIn(SUITES, wf), [DESKTOP])
   })
 })

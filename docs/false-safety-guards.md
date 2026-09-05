@@ -1589,12 +1589,37 @@ release-critical suite running in no step, each **green**:
 The second is the realistic regression — a `run:` is deleted and the
 explanatory comment above or beside it survives — and `code()` structurally
 cannot catch it, because it drops whole-line comments and that is a trailing
-one. The file's own header said "a guard that reads prose as configuration is
-satisfiable by prose" *while being satisfiable by prose*: entry 13's shape,
-produced inside the catalogue that names it. The reader module already exported
-`stepRun()`, which reproduces YAML's reading of `run:` and yields only the shell
-the runner is handed. The guard imported `code` and not `stepRun` and nothing
-noticed for the guard's whole life.
+one. The rule's own comment said it matched step bodies "with comments
+stripped", because "a guard that reads prose as configuration is satisfiable by
+prose" — *while being satisfiable by prose*: entry 13's shape, produced inside
+the catalogue that names it.
+
+The sharper accessor did not exist when the guard was written, and the dates
+matter because they change the lesson. The guard landed **2026-08-30** in
+`#7540` against a reader that exported only `code()`. `stepRun()` — which
+reproduces YAML's reading of `run:` and yields only the shell the runner is
+handed — arrived **2026-09-04** in `#7633`, for a different guard, five days
+later. Nothing went back. So this is not "the right tool was on the shelf and
+went unused"; it is that **adding a sharper tool to a shared module leaves every
+existing consumer on the blunt one**, silently, and no lint compares the two.
+
+And `stepRun()` alone was not enough. It hands back a BLOCK scalar verbatim, on
+purpose, because a `#` inside one is a shell comment belonging to the script. So
+
+```yaml
+run: |
+  # bash scripts/__tests__/merge-updater-feeds.test.sh
+  echo "temporarily skipped"
+```
+
+still read as wired — the same regression in the other YAML spelling, missed by
+the entire first mutation suite because every case in it mutated a plain scalar.
+Two spellings of identical config must not disagree. Nor was "an interpreter
+before the name" what the code did: it asked whether one appeared *anywhere
+earlier on the line*, so `chmod +x ./x.test.sh` and `node --version && echo "see
+x.test.sh"` were invocations. Entry 13's shape three times in one function, in a
+fix written for entry 13 — which is the honest measure of how hard the safe
+direction is to hold.
 
 **It looked in one directory.** The subject was `readdir` over
 `scripts/__tests__/`, so `packages/desktop/scripts/verify-entitlements.test.sh`
@@ -1622,8 +1647,13 @@ from the filesystem or from a roster? *What text does it match against* — and 
 that text the thing that EXECUTES, or merely the thing that mentions? The second
 question is the one this repo keeps getting wrong, because the mentioning text
 always contains the executing text, so the weaker match is green on every
-correct tree and diverges only on the broken one. Ten single-line mutants,
-applied one at a time with `cp` restore, are what established that the new rule
-is load-bearing; one of them — unbounding the interpreter alternation so `sh`
-matches inside `refresh` — **survived** the first pass and cost one more case.
-The mutant that survives is the assertion you did not write.
+correct tree and diverges only on the broken one. Mutants applied one at a time with `cp` restore are what
+established that the new rule is load-bearing, and they are also what found the
+block-scalar hole, the unanchored `./`, and a one-word edit widening the
+exemption from `packages/store-core/` to `packages/` that left all 21 tests
+green — the blanket exclusion this very entry argues is a hole, reachable as a
+surviving mutant. Thirteen mutants; twelve killed; the thirteenth was **proved
+inert** by a differential search over 168,420 inputs rather than argued away,
+and that proof is recorded beside the line so the next person knows which kind
+it is. The mutant that survives is either the assertion you did not write or a
+claim about equivalence you have not checked, and those need telling apart.
