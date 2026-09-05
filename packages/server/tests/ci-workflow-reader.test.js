@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell } from './helpers/workflow-reader.js'
+import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell, jobName, workflowTriggers } from './helpers/workflow-reader.js'
 
 /**
  * Unit tests for the shared workflow reader (#7386).
@@ -376,5 +376,84 @@ ${job}
       shellOf('    runs-on: ubuntu-latest\n    defaults:\n      shell: powershell\n    steps:\n      - run: npm ci'),
       undefined
     )
+  })
+})
+
+describe('workflow reader: jobName (#7639)', () => {
+  /** The single job parsed out of a synthetic one-job workflow. */
+  const nameOf = body => jobName(parseJobs(`name: probe\non: push\njobs:\n  probe:\n${body}\n`)[0])
+
+  it('returns the display name when name: is present', () => {
+    assert.equal(nameOf('    name: Server Tests\n    runs-on: ubuntu-latest'), 'Server Tests')
+  })
+
+  it('falls back to the job id when there is no name:', () => {
+    // repo-relay.yml's `notify` is exactly this shape, and its check context
+    // really is the bare job id — confirmed against a live PR's check runs.
+    assert.equal(nameOf('    runs-on: ubuntu-latest'), 'probe')
+  })
+
+  it('strips a single layer of matching quotes — YAML quoting is cosmetic', () => {
+    assert.equal(nameOf('    name: "Desktop Rust Tests (Windows)"'), 'Desktop Rust Tests (Windows)')
+    assert.equal(nameOf("    name: 'Style Lint'"), 'Style Lint')
+  })
+
+  it('does NOT read a STEP name as the job name', () => {
+    // The dangerous direction: a job with no name: whose first step IS named
+    // would otherwise take the step's name as its check context, and the whole
+    // partition guard would quantify over a context GitHub never produces.
+    assert.equal(
+      nameOf('    runs-on: ubuntu-latest\n    steps:\n      - name: Install dependencies\n        run: npm ci'),
+      'probe'
+    )
+  })
+
+  it('does NOT read a commented-out name: as configuration', () => {
+    assert.equal(nameOf('    # name: Disabled Name\n    runs-on: ubuntu-latest'), 'probe')
+  })
+})
+
+describe('workflow reader: workflowTriggers (#7639)', () => {
+  it('reads the mapping form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  a:\n'), [
+      'push',
+      'pull_request',
+    ])
+  })
+
+  it('reads the list form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: [push, pull_request]\njobs:\n  a:\n'), ['push', 'pull_request'])
+  })
+
+  it('reads the bare string form', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: pull_request\njobs:\n  a:\n'), ['pull_request'])
+  })
+
+  it('does NOT read a trigger named only in a comment', () => {
+    // Not hypothetical: repo-relay.yml's `on:` block carries a long comment
+    // explaining why `pull_request_review` was REMOVED. A reader that treats
+    // prose as configuration is satisfiable by prose.
+    assert.deepEqual(
+      workflowTriggers('name: x\non:\n  # pull_request_review: removed, see #6749\n  issue_comment:\n jobs:\n'),
+      ['issue_comment']
+    )
+  })
+
+  it('does not mistake a trigger option for a trigger', () => {
+    // `types:` and `branches:` sit one level deeper than the event names, so a
+    // reader that took every indented key would report them as triggers and a
+    // `pull_request`-scoped guard would widen to workflows that never run on one.
+    assert.deepEqual(
+      workflowTriggers('name: x\non:\n  pull_request:\n    types: [opened, closed]\n    branches: [main]\njobs:\n  a:\n'),
+      ['pull_request']
+    )
+  })
+
+  it('strips a trailing comment from the key line', () => {
+    assert.deepEqual(workflowTriggers('name: x\non: push # only on push\njobs:\n  a:\n'), ['push'])
+  })
+
+  it('returns nothing for a workflow with no on: key, rather than guessing', () => {
+    assert.deepEqual(workflowTriggers('name: x\njobs:\n  a:\n'), [])
   })
 })

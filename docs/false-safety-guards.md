@@ -1657,3 +1657,67 @@ inert** by a differential search over 168,420 inputs rather than argued away,
 and that proof is recorded beside the line so the next person knows which kind
 it is. The mutant that survives is either the assertion you did not write or a
 claim about equivalence you have not checked, and those need telling apart.
+
+### 28. The roster that was only half a record — `#7639`, `#7544`, `#7216`, `#7199`
+
+`CONTRIBUTING.md` names the thirteen status checks that gate a merge, and
+`contributing-required-checks.test.js` (`#7448`) holds it honest — in one
+direction. It proves every name in the roster is a real `ci.yml` job, which
+catches a renamed or deleted job: a required context nothing will ever produce
+again, wedging every PR. Real, and worth catching.
+
+The other direction had nothing at all. Nothing asked whether a job that EXISTS
+is in the roster. So a job could be added, run on every PR, go red, and merge —
+its red and its green being the same observable outcome at the only place the
+outcome is used.
+
+**The tell was in the issue tracker, not the code.** The same defect had been
+filed four separate times, by four different reviews, once per job:
+
+```
+#7199  Release PR Subject      is not a required context   (2026-07)
+#7216  Renovate Config         is not a required context   (2026-08-16)
+#7544  Scripts Tests           is not a required context   (2026-08-30)
+#7639  Scripts Tests           is not a required context   (2026-09-05)
+```
+
+Four issues describing one defect is the signature of a missing invariant, not
+of four mistakes — and the fourth was filed 46 minutes after a `ci.yml` change,
+by a review that had just walked past the same gap. Each was written as "add
+this one job", which is the fix that guarantees a fifth.
+
+**What was actually missing is a partition.** Every job in a workflow triggered
+by `pull_request` produces a check-run context on every PR, so each one is
+either a merge gate or deliberately not one. Measured rather than assumed: on
+PR `#7638`'s head GitHub reported exactly 23 check runs, and the roster
+described 13 of them. The remaining ten — including `Scripts Tests`, which
+carries the `bash -n` parse-check over every tracked shell script and the
+`merge-updater-feeds.test.sh` suite whose subject breaks the desktop
+auto-updater — were in no list at all, described only by a parenthetical reading
+"Other CI jobs run too — e.g. scripts/hooks jobs". A sentence is not a record.
+
+`ci-required-check-partition.test.js` now requires the two lists to cover that
+set exactly and not overlap, so a job cannot be added without someone writing a
+row for it. The subject is derived from `readWorkflows()` and filtered by the
+workflow's own `on:` block, not scoped to `ci.yml` — `repo-relay.yml`
+contributes the `notify` context, and a one-file subject is the mistake entry 27
+had just finished making one directory wide.
+
+**A skipped required check satisfies branch protection, and that turns a
+dependency into a hole.** Twelve of the thirteen required checks declare
+`needs: runner-target`, a one-minute hosted gate job that is not itself
+required. A `needs` failure skips the dependent rather than failing it, and
+GitHub accepts a skipped required check — the same semantics `#7216` relied on
+to argue that requiring a conditional job is safe. So the one job that can stand
+down twelve required suites is the one job whose failure nothing consumes. It
+has never fired (39 successes, 0 failures across a 41-run sample), which is why
+it was never noticed and why it is a latent hole rather than a past incident.
+
+**Guard against it:** when a roster names members of a set, ask what enumerates
+the SET. If the answer is "a person, when they remember", the roster is a
+hand-maintained list beside a growing set — the first cause in this catalogue —
+and the guard you need is the reverse containment, not another entry. The
+direction that gets written is always roster→reality, because that is the one a
+stale name makes noisy; the direction that matters is reality→roster, because
+that is the one silence hides. And when the same issue is filed a third time,
+stop fixing the instance.

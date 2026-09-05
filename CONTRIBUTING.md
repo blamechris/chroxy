@@ -63,17 +63,22 @@ Thanks for your interest in contributing! This document covers how to get starte
   `Server Tests`, `Server Lint`, `Server Windows Tests`, `Protocol Tests`,
   `Store Core Tests`, `Store Core Type Check`, `Dashboard Tests`,
   `Dashboard Type Check`, `Design Tokens Tests`, `App Tests`, `App Type Check`,
-  `App Expo Doctor`, and `Desktop Rust Tests`. (Other CI jobs run too — e.g.
-  scripts/hooks jobs — but the list above is the set wired as required. The
+  `App Expo Doctor`, and `Desktop Rust Tests`. That is the set wired as required.
+  Every OTHER job that runs on a pull request is listed, with the reason it is
+  not a gate, in the not-required table below — the two lists together must
+  account for every PR-visible job, and a guard fails when they do not. The
   `Desktop (macOS)` / `Desktop (Windows)` release builds run only on tag pushes
   and gate the release pipeline, not PRs. One rostered check is conditional by
   design: `Desktop Rust Tests` runs only for same-repo events, so a fork PR
-  skips it — and a skipped required check still satisfies branch protection.)
-  Two guards hold this list honest:
+  skips it — and a skipped required check still satisfies branch protection.
+  Three guards hold these lists honest:
   `packages/server/tests/contributing-required-checks.test.js` proves every name
-  above is a real ci.yml job name, and
-  `scripts/check-required-contexts.sh` (local, needs repo-admin read) diffs it
-  against the LIVE required set — classic branch protection plus branch
+  in the roster is a real ci.yml job name;
+  `packages/server/tests/ci-required-check-partition.test.js` proves the roster
+  and the not-required table partition the PR-visible jobs exactly, so a job
+  added to any workflow cannot stay unclassified; and
+  `scripts/check-required-contexts.sh` (local, needs repo-admin read) diffs the
+  roster against the LIVE required set — classic branch protection plus branch
   rulesets — run it after changing either side; it exits 2, never 0, when it
   cannot see the live settings.
 - **All review conversations must be resolved.** A PR with an open review thread
@@ -81,6 +86,40 @@ Thanks for your interest in contributing! This document covers how to get starte
 - **A Copilot review** is requested automatically on the default branch (via a
   repository ruleset) and is expected before merge.
 - **No force-pushes or branch deletions** to `main`.
+
+#### Jobs that run on a PR and are deliberately not required
+
+A required-check roster is a hand-maintained list beside a growing set of jobs —
+the first cause in [`docs/false-safety-guards.md`](docs/false-safety-guards.md),
+and this repo has hit it four times, once per job, in #7199, #7216, #7544 and
+#7639. Each was filed because a job was added and nobody decided whether it
+should gate. So the roster above is only half the record: every job in a
+workflow triggered by `pull_request` must appear either there or here, and
+`ci-required-check-partition.test.js` fails until it does. A row in this table
+is a decision, not a backlog entry.
+
+"Not required" does not mean "advisory to the author" — it means **a red result
+here does not stop a merge**, on the GitHub merge button and in `/batch-merge`'s
+gate, which derives its roster from the list above.
+
+| Check | Workflow | Why it is not a merge gate |
+| --- | --- | --- |
+| `Resolve Runner Target` | `ci.yml` | **No good reason — this one is a hole.** Twelve of the thirteen required checks declare `needs: runner-target`, and a `needs` failure SKIPS the dependent, which branch protection accepts as satisfied. So its failure would quietly stand down twelve required suites rather than block. It is a one-minute hosted bash step with no flake history, so requiring it is safe and is the fix. Tracked in #7641. |
+| `Detect Changed Paths` | `ci.yml` | Path-filter plumbing whose only live consumer is `Renovate Config`. Same skip-cascade shape as the row above and it should follow the same decision; its `platform` output has no consumer at all (#7642). |
+| `Scripts Tests` | `ci.yml` | **Should be required; not yet wired.** It carries the `bash -n` parse-check over every tracked shell script, `compile-skill-targets --check`, the AGENTS.md sync gate, and all 14 `scripts/__tests__` suites including `merge-updater-feeds.test.sh`, whose subject breaks the desktop auto-updater. Deterministic, no network, no flake history. #7544, #7639. |
+| `Release PR Subject` | `ci.yml` | **Should be required; not yet wired.** Deterministic and content-derived; it is the check that would have caught #4627 and the 463-commit untagged gap in #7176. #7199. |
+| `Renovate Config` | `ci.yml` | Proposed for requiring in #7216, which already established that its usual skipped result satisfies protection. Small external-network surface (`npx` resolving a pinned `renovate`) is the only argument for waiting. |
+| `Desktop Rust Tests (Windows)` | `ci.yml` | Its `if:` is byte-identical to the already-required macOS twin, so requiring it adds no new semantics. It shares the `chroxy-win` runner with the required `Server Windows Tests`, which has queued indefinitely during an outage before (#7057) — requiring it doubles the exposure to that one host, not the risk class. |
+| `Style Lint` | `ci.yml` | Design-token ratchet, undefined-CSS-var check and the #7103 NUL-byte scan. Held back only by having produced a PR-unrelated red before: the baseline `comm` ran under the ambient locale (#7493, #7513). That is fixed; this row is the remaining reason to re-check rather than a standing exemption. |
+| `Claude Hooks Tests` | `ci.yml` | Validates the hook emitters that feed the daemon's notification pipeline. Left on the mixed self-hosted ARM64 pool and named in #7491 as showing the #7471 isolated-cancel signature — requiring it before that is fixed would convert an infrastructure flake into a blocked merge. |
+| `Dashboard Smoke (Playwright)` | `ci.yml` | The repo's only UI-regression gate (#6315), and the sole producer of the hosted npm-cache entry fork PRs restore. It runs a live `npx playwright install`, a 40-iteration boot poll and a full daemon start, so it has genuine PR-unrelated flake surface; it needs a measured flake baseline before it can gate a merge. |
+| `notify` | `repo-relay.yml` | Fires the cross-repo relay/notification. It reports on a PR but asserts nothing about the code, and a missed notification must never block a merge. The only row here that is exempt on its merits rather than pending a decision. |
+
+<!-- end not-required table -->
+
+Rows above that say "should be required" are the open half of #7639: promoting one
+means adding it to the roster bullet, adding the context to live protection, and
+deleting its row here — the partition guard fails if those go out of step.
 
 Deliberate policy choices (a solo-maintained project):
 

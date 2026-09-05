@@ -1,7 +1,7 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { parseJobs, code } from './helpers/workflow-reader.js'
+import { parseJobs, jobName } from './helpers/workflow-reader.js'
 import { parseRoster } from '../../../scripts/lib/contributing-roster.mjs'
 
 /**
@@ -36,13 +36,14 @@ describe('CONTRIBUTING required-checks roster (#7448)', () => {
 
     const ciYml = await readFile(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8')
     // A job's check context is its display name when `name:` is present, else
-    // its job id — and YAML quoting is cosmetic, so strip it (a quoted
-    // `name: "X"` is the same context as `name: X`).
-    jobNames = parseJobs(ciYml).map(j => {
-      const m = code(j.body).map(l => /^\s{4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean)
-      const raw = m ? m[1] : j.id
-      return raw.replace(/^(['"])(.*)\1$/, '$2')
-    })
+    // its job id — and YAML quoting is cosmetic, so a quoted `name: "X"` is the
+    // same context as `name: X`. That derivation was four lines here until
+    // #7639 needed it for a second guard; it now lives in the shared reader as
+    // `jobName()`, and this consumer is migrated in the same change rather than
+    // left on its private copy. Leaving it would have been #7637's shape
+    // exactly: `stepRun()` landed five days after the guard that needed it and
+    // never reached it.
+    jobNames = parseJobs(ciYml).map(jobName)
   })
 
   // ---- positive controls ----

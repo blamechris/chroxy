@@ -402,3 +402,70 @@ function fold(lines) {
   flush()
   return out.join('\n')
 }
+
+/**
+ * A job's CHECK CONTEXT name — its `name:` when present, else its job id.
+ *
+ * This is the string branch protection matches on, so it is the unit every
+ * roster guard quantifies over. It lived as a hand-rolled four-line snippet
+ * inside `contributing-required-checks.test.js` until #7639 needed the same
+ * derivation for a second guard; transcribing it would have produced the
+ * second implementation this module exists to prevent. That is not a
+ * hypothetical drift risk here — `stepRun()` landed five days AFTER the guard
+ * that needed it and left that guard on the blunt `code().join('\n')` for its
+ * whole life (#7637). Adding a sharper tool to a shared module does not migrate
+ * its existing consumers; this one is migrated in the same change.
+ *
+ * Read only from the keys BEFORE `steps:`, so a step's own `name:` can never be
+ * mistaken for the job's. The indent anchor alone would already exclude a step
+ * name (steps sit at six spaces or deeper), and the two are deliberately
+ * redundant: mutating either alone leaves the property intact.
+ *
+ * YAML quoting is cosmetic — `name: "X"` and `name: X` are the same context —
+ * so a single layer of matching quotes is stripped.
+ */
+export function jobName(job) {
+  const body = job.body
+  const stepsAt = body.findIndex(l => /^\s*steps:\s*$/.test(l))
+  const head = code(stepsAt === -1 ? body : body.slice(0, stepsAt))
+  const m = head.map(l => /^ {4}name:\s*(.+?)\s*$/.exec(l)).find(Boolean)
+  const raw = m ? m[1] : job.id
+  return raw.replace(/^(['"])(.*)\1$/, '$2')
+}
+
+/**
+ * The event names in a workflow's top-level `on:` mapping.
+ *
+ * Only the mapping form is supported, which is what every workflow in this repo
+ * uses; the list form (`on: [push, pull_request]`) and the string form
+ * (`on: push`) are handled too, because a future workflow written either way
+ * must not read as "triggers on nothing" — an empty trigger set would silently
+ * drop the whole file out of any guard that quantifies over PR-visible jobs,
+ * which is the cannot-check-treated-as-nothing-to-check failure in
+ * docs/false-safety-guards.md.
+ *
+ * `code()` is applied first: repo-relay.yml's `on:` block carries a long
+ * comment that names `pull_request_review` while explaining why that trigger
+ * was REMOVED. A guard reading prose as configuration is satisfiable by prose.
+ */
+export function workflowTriggers(yml) {
+  const lines = code(yml.split('\n'))
+  const at = lines.findIndex(l => /^on:/.test(l))
+  if (at === -1) return []
+
+  const head = /^on:\s*(.*)$/.exec(lines[at])[1].replace(/\s+#.*$/, '').trim()
+  if (head.startsWith('[')) {
+    return head.replace(/[[\]]/g, '').split(',').map(s => s.trim()).filter(Boolean)
+  }
+  if (head) return [head]
+
+  const events = []
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\s*$/.test(line)) continue
+    if (/^\S/.test(line)) break
+    const m = /^ {2}([A-Za-z_]+):/.exec(line)
+    if (m) events.push(m[1])
+  }
+  return events
+}
