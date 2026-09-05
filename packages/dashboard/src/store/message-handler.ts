@@ -6715,8 +6715,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // tell "you may not see this" from "nothing failed" — the array is empty
       // in both cases, which is exactly why the flag exists.
       const refused = (msg as { refused?: boolean }).refused === true;
+      const rawRestores = (msg as { restores?: unknown }).restores;
       set({
-        failedRestores: refused ? [] : (((msg as { restores?: unknown }).restores ?? []) as FailedRestoreInfo[]),
+        // `?? []` only covers null/undefined — a non-array (a malformed or
+        // hostile frame) would land in the store and throw at `.map` in the
+        // renderer, which is a blank Control Room tab rather than a bad row.
+        failedRestores: refused || !Array.isArray(rawRestores) ? [] : (rawRestores as FailedRestoreInfo[]),
         failedRestoresRefused: refused,
       });
       break;

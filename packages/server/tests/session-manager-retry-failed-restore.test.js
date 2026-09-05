@@ -198,6 +198,48 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
     assert.deepEqual(serializedIds(sm), [saved.id], 're-parked entry serializes exactly once')
   })
 
+  // #7625 review. The re-seed TAIL of _attemptRestoreOne runs after
+  // createSession() has already returned, so a throw there leaves a live but
+  // half-seeded session: no history (the seed never ran) and a lastActivityAt
+  // of `now` from createSession's own touchActivity rather than the frozen
+  // value #7627 depends on.
+  //
+  // The first implementation kept that session and flushed it. This test is the
+  // one that proves it does not any more — it FAILED against that version, with
+  // history erased and the freeze thawed, which is the whole reason the branch
+  // was rewritten. Fault injection is the only way in: every step in that tail
+  // is typeof-guarded, so no malformed state file reaches it today.
+  it('re-parks verbatim when a RE-SEED step throws after the session was created', async () => {
+    makeSm()
+    const saved = park(sm, dir)
+    const frozenActivity = saved.lastActivityAt
+
+    // Throw in the tail, after createSession() has returned.
+    const original = sm._advanceSessionCounterPast.bind(sm)
+    let injected = false
+    sm._advanceSessionCounterPast = (name) => {
+      if (!injected) { injected = true; throw new Error('INJECTED: re-seed step failure') }
+      return original(name)
+    }
+
+    const result = await sm.retryFailedRestore(saved.id)
+
+    assert.equal(injected, true, 'CONTROL: the injected failure really did fire')
+    assert.equal(result.ok, false)
+
+    // The claim: NOTHING is lost. A retry must never destroy what not
+    // retrying would have preserved.
+    assert.equal(sm._failedRestores.has(saved.id), true, 'the entry is re-parked, not consumed')
+    const reparked = sm._failedRestores.get(saved.id).saved
+    assert.equal(reparked.history.length, 2, 'the preserved history survives')
+    assert.equal(reparked.lastActivityAt, frozenActivity, 'the #7627 freeze is not thawed')
+
+    // And no half-seeded session is left live under that id, which would put it
+    // in BOTH maps and write the id to disk twice.
+    assert.equal(sm._sessions.has(saved.id), false, 'the half-seeded session is torn down')
+    assert.deepEqual(serializedIds(sm), [saved.id], 'the id is serialized exactly once')
+  })
+
   // The parked entry is constructed DIRECTLY here because production cannot
   // currently produce one: serializeState() skips isUserShell entries so a
   // user-shell session is never persisted or restored, and the re-park branch

@@ -3151,7 +3151,45 @@ export class SessionManager extends EventEmitter {
    * @returns {string} sessionId
    * @private
    */
-  _registerFailedRestore(saved, err) {
+/**
+   * Tear down a session that was CREATED but could not be fully re-seeded, so
+   * its parked entry can be restored verbatim (#7625 review).
+   *
+   * The window this closes: `_attemptRestoreOne` calls createSession() and then
+   * re-seeds usage counters, the name counter, history and lastActivityAt. A
+   * throw in that TAIL leaves a live-but-half-seeded session in `_sessions` —
+   * with NO history, because the seed never ran, and with a lastActivityAt of
+   * `now` from createSession's own touchActivity rather than the frozen value
+   * #7627 depends on.
+   *
+   * The first version of the retry treated that as "keep the live session, it
+   * is usable" and flushed it. Review reproduced what that costs: the preserved
+   * conversation is gone, the freeze is thawed, and the loss is written to disk
+   * immediately — on the one feature whose entire purpose is that a failed
+   * restore loses nothing. Keeping the half-seeded session is the wrong trade.
+   *
+   * So: detach and destroy ONLY the live provider and drop the in-process maps,
+   * exactly as `_handleAsyncStartFailure` does. The WORKTREE is deliberately
+   * left intact — that is what makes the next retry able to succeed — and the
+   * caller re-parks the ORIGINAL `saved`, which still holds the history and the
+   * frozen timestamp.
+   *
+   * @param {string} sessionId
+   */
+  _teardownHalfSeededSession(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return
+    try {
+      entry.session?.removeAllListeners?.()
+      entry.session?.on?.('error', () => {}) // swallow a stray error during destroy
+      entry.session?.destroy?.()
+    } catch (destroyErr) {
+      log.error(`Failed to destroy provider for half-seeded restore ${sessionId}: ${destroyErr?.stack || destroyErr}`)
+    }
+    this._cleanupSessionMaps(sessionId)
+  }
+
+    _registerFailedRestore(saved, err) {
     // Reuse the saved id when present so the client-visible identity is
     // stable across restart attempts; fall back to a random id otherwise.
     const sessionId = saved.id || randomBytes(16).toString('hex')
@@ -3317,24 +3355,31 @@ export class SessionManager extends EventEmitter {
       }
       const { saved } = parked
 
-      // DEFENCE IN DEPTH, and deliberately not presented as more than that.
-      // A user-shell session cannot currently BE parked: serializeState()
-      // skips `isUserShell` entries so one is never persisted or restored from
-      // disk, and _handleAsyncStartFailure's re-park branch requires
-      // `entry._isRestore`, which a fresh user-shell session never has. Both
-      // were verified before this check was written, so it guards a state that
-      // is unreachable today.
+      // A user-shell session has no resumable state, and re-spawning one would
+      // bypass the `userShell.enabled` gate if it was since turned off (#5983).
       //
-      // It is here anyway because the reachability argument rests on two
-      // invariants maintained in OTHER methods, and the strict-primary token
-      // gate that would otherwise cover this lives only in the WS layer
-      // (handleCreateSession) — so a retry driven from anywhere else would
-      // bypass it. Placed in SessionManager rather than the handler so it
-      // covers every caller, not just the one that exists now.
+      // REACHABILITY — corrected by review, because the first version of this
+      // comment claimed the state was unreachable and that was too strong. The
+      // daemon's own paths cannot park one: serializeState() skips
+      // `isUserShell` so one is never persisted, and _handleAsyncStartFailure's
+      // re-park branch requires `entry._isRestore`, which a fresh user-shell
+      // session never has. But restoreState() reads
+      // ~/.chroxy/session-state.json and parks whatever fails, so a
+      // hand-edited or corrupted state file carrying a user-shell entry reaches
+      // _registerFailedRestore through the ordinary boot path — and this file
+      // already treats that file as untrusted input elsewhere (#7082 coerces
+      // corrupt counters out of it). So this is a live guard, not dead code.
       //
-      // Do NOT delete this as dead code; its test constructs the entry
-      // directly to keep the invariant pinned.
-      if (saved.provider === USER_SHELL_PROVIDER) {
+      // It lives in SessionManager rather than the WS handler so it covers
+      // every caller: the strict-primary user-shell gate exists only in
+      // handleCreateSession, so a retry driven from anywhere else bypasses it.
+      // Resolved from the provider REGISTRY and checked on the class, matching
+      // every other user-shell gate in this file (`constructor.isUserShell`).
+      // A saved entry carries only a provider NAME, so the name comparison is
+      // kept as the fallback for a provider that is not registered in this
+      // process — but the class check is what actually decides when it can.
+      const SavedProviderClass = getProvider(saved.provider)
+      if (SavedProviderClass?.isUserShell === true || saved.provider === USER_SHELL_PROVIDER) {
         return {
           ok: false,
           code: 'RETRY_FORBIDDEN_USER_SHELL',
@@ -3351,20 +3396,19 @@ export class SessionManager extends EventEmitter {
         return { ok: true, sessionId: restoredId }
       } catch (err) {
         // A throw AFTER createSession returned (a re-seed step) leaves a LIVE
-        // session behind. Re-parking that id as well is precisely the duplicate
-        // this method's step 1 exists to prevent, so in that case keep the live
-        // session — it is usable — and report the partial failure instead. The
-        // ordinary case (createSession threw, having torn its own phantom entry
-        // down and re-thrown) leaves nothing in _sessions and re-parks normally.
-        const orphan = this._sessions.has(sessionId)
-        if (orphan) {
-          this._flushPersistOrWarn(sessionId)
-          log.error(`Retry for ${sessionId} created the session but failed to re-seed it: ${err?.stack || err}`)
-          return {
-            ok: false,
-            code: 'RESTORE_INCOMPLETE',
-            message: `Session was recreated but could not be fully restored: ${err?.message || String(err)}`,
-          }
+        // but half-seeded session behind — no history, and a lastActivityAt of
+        // `now` from createSession's own touchActivity. Tear it down (provider
+        // + in-process maps only; the worktree stays) so the re-park below can
+        // restore the ORIGINAL `saved` verbatim.
+        //
+        // The first version kept that session and flushed it, on the reasoning
+        // that a live session is better than none. Review reproduced the cost:
+        // the preserved conversation was erased and the #7627 freeze thawed,
+        // written to disk immediately, on the feature built to prevent exactly
+        // that. A retry must never be able to lose what a non-retry preserved.
+        if (this._sessions.has(sessionId)) {
+          log.error(`Retry for ${sessionId} created the session but failed to re-seed it; re-parking: ${err?.stack || err}`)
+          this._teardownHalfSeededSession(sessionId)
         }
         // Re-park with the SAME `saved` object. #7627: a failed restore's
         // lastActivityAt is frozen at the value it had when first parked, and
