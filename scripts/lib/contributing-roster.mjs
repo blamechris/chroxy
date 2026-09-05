@@ -16,10 +16,10 @@ export const ROSTER_START = 'Required status checks must be green'
 export const ROSTER_END = 'wired as required'
 
 export function parseRoster(contributingText) {
-  const startAt = contributingText.indexOf(ROSTER_START)
-  const endAt = contributingText.indexOf(ROSTER_END)
-  if (startAt === -1 || endAt <= startAt) {
-    throw new Error('could not locate the required-checks bullet (anchors missing or reordered)')
+  const startAt = soleIndexOf(contributingText, ROSTER_START, 'roster start')
+  const endAt = soleIndexOf(contributingText, ROSTER_END, 'roster end')
+  if (endAt <= startAt) {
+    throw new Error('could not locate the required-checks bullet (anchors reordered)')
   }
   const roster = [...contributingText.slice(startAt, endAt).matchAll(/`([^`]+)`/g)].map(m => m[1])
   if (roster.length < 10) {
@@ -39,8 +39,29 @@ export function parseRoster(contributingText) {
  * empty set would make the partition guard vacuous, which is the
  * "filter whose terms match nothing" failure in docs/false-safety-guards.md.
  */
-export const EXEMPT_START = 'deliberately not required'
+export const EXEMPT_START = '#### Jobs that run on a PR and are deliberately not required'
 export const EXEMPT_END = '<!-- end not-required table -->'
+
+/**
+ * The index of `needle` in `text`, refusing when it appears anything other than
+ * exactly once.
+ *
+ * `indexOf` silently takes the FIRST match, so a phrase that later appears
+ * twice — in prose, in a second heading, in an example — slices a region the
+ * author never meant and the parse succeeds against the wrong text. That is the
+ * failure Copilot flagged on #7643 against a broader `EXEMPT_START`, and it
+ * survives narrowing the anchor: a heading can be duplicated too. Refusing on
+ * ambiguity is the fail-loud property these anchors exist for, and it costs
+ * nothing to state.
+ */
+function soleIndexOf(text, needle, what) {
+  const first = text.indexOf(needle)
+  if (first === -1) throw new Error(`could not locate the ${what} anchor (${JSON.stringify(needle)})`)
+  if (text.indexOf(needle, first + 1) !== -1) {
+    throw new Error(`the ${what} anchor appears more than once (${JSON.stringify(needle)}) — the slice would be ambiguous`)
+  }
+  return first
+}
 
 /**
  * The check names in CONTRIBUTING.md's "deliberately not required" table.
@@ -78,10 +99,10 @@ export const EXEMPT_END = '<!-- end not-required table -->'
  * jobs rather than against a guess about how long it ought to be.
  */
 export function parseExemptions(contributingText) {
-  const startAt = contributingText.indexOf(EXEMPT_START)
-  const endAt = contributingText.indexOf(EXEMPT_END)
-  if (startAt === -1 || endAt <= startAt) {
-    throw new Error('could not locate the not-required table (anchors missing or reordered)')
+  const startAt = soleIndexOf(contributingText, EXEMPT_START, 'not-required table start')
+  const endAt = soleIndexOf(contributingText, EXEMPT_END, 'not-required table end')
+  if (endAt <= startAt) {
+    throw new Error('could not locate the not-required table (anchors reordered)')
   }
 
   const names = []
