@@ -63,14 +63,94 @@ jobs:
           restore-keys: |
             repo-relay-state-${{ github.repository }}-
 
+      # #7632 — run the action's OWN dependency install here first, where a
+      # failure is ours to tolerate.
+      #
+      # repo-relay is a COMPOSITE action, and its steps run in this order:
+      #   Setup Node.js -> Install dependencies (`npm ci --omit=dev`)
+      #   -> Validate inputs -> Run repo-relay (`node dist/cli.js`)
+      # `best_effort` is read by that LAST step, as REPO_RELAY_BEST_EFFORT. So a
+      # failure in `Install dependencies` skips both remaining steps and fails
+      # the composite step outright — the one failure shape best_effort
+      # structurally cannot reach, and the log of the run that prompted this
+      # shows exactly that (`Validate inputs` and `Run repo-relay` both
+      # `outcome=skipped`). `better-sqlite3` is a native module and the action
+      # commits no node_modules, so this install makes two network calls every
+      # run — prebuild-install fetches a prebuilt binary, then node-gyp falls
+      # back to fetching node headers — and either can ECONNRESET. Seen on the
+      # notify job of #7630 (run 33937387078), on a PR whose diff cannot reach
+      # this workflow at all.
+      #
+      # This is a DETECTOR, and nothing below depends on it being anything
+      # more. Running the install here does also warm ~/.npm for the action's
+      # identical install a step later, but only the registry tarballs are
+      # certain to be reused: the native build under node_modules is keyed on
+      # the ABI of whichever node runs it, and this step uses the runner's
+      # default node while the action pins its own via setup-node. So the
+      # second install is cheaper, not free, and the tolerance below holds
+      # either way.
+      - name: Pre-run the repo-relay dependency install
+        id: relay_deps
+        if: env.DISCORD_CONFIGURED == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # Located by glob rather than by repeating the pinned SHA below. A
+          # second copy of the pin would drift on the next version bump, and a
+          # path that no longer resolves would fail this step on every run —
+          # silently skipping every notification while the job stayed green.
+          # That is docs/false-safety-guards.md's "a precondition that is false,
+          # so the body never runs and the job is green", so it is reported
+          # through `layout` and made fatal by the next step instead.
+          dirs=("$RUNNER_WORKSPACE"/../_actions/blamechris/repo-relay/*/)
+          if [ "${#dirs[@]}" -ne 1 ]; then
+            printf 'layout=unexpected\n' >> "$GITHUB_OUTPUT"
+            echo "::error::expected exactly one checked-out repo-relay action under _actions/, found ${#dirs[@]}"
+            exit 1
+          fi
+          printf 'layout=ok\n' >> "$GITHUB_OUTPUT"
+          cd "${dirs[0]}"
+          npm ci --omit=dev
+
+      - name: Fail if repo-relay's action checkout no longer resolves
+        # The step above is continue-on-error, so its exit code is swallowed —
+        # deliberately, for the transient install failure this is all about. A
+        # layout change is NOT transient: it would skip the action from then on,
+        # forever, with nothing going red. Step OUTPUTS survive
+        # continue-on-error, so `layout` is what separates the two.
+        if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outputs.layout != 'ok'
+        run: |
+          echo "::error::repo-relay's checkout path under _actions/ no longer resolves, so the pre-install probe above cannot run. Notifications are OFF until the glob in this workflow is updated."
+          exit 1
+
+      - name: Note the tolerated dependency-install failure
+        if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outcome != 'success'
+        # A block scalar, not a plain one: in a plain YAML scalar a
+        # whitespace-preceded `#` starts a comment, which silently truncated
+        # this line mid-string and left the shell with an unterminated quote —
+        # so the step announcing a TOLERATED failure would itself have failed
+        # the job. Caught by `bash -n`, which no check in this repo runs over a
+        # workflow's `run:` blocks; the guard test added with this change does.
+        run: |
+          echo "::warning::repo-relay's dependency install failed (transient infrastructure); the Discord notification for this event was skipped. This does not fail the job — see #7632."
+
       # best_effort replaces the old blanket continue-on-error: transient
       # infra failures (Discord 5xx, timeouts, session budget) exit 0 with a
       # warning annotation, while definitive config errors (revoked token,
       # deleted channel, missing permissions) still fail loudly. Note the
       # cache post-step saves on job success, so relay state persists across
       # tolerated-failure runs — intended (state writes are incremental).
+      #
+      # #7632 gates this on the pre-install rather than wrapping it in
+      # continue-on-error: a dependency install that already failed skips the
+      # action (job green, warning annotation above), while everything the
+      # action itself reports still fails the job exactly as #6746 intended.
+      # `outcome` is the result BEFORE continue-on-error is applied — that is
+      # what leaves a tolerated step still readable as a signal — where
+      # `conclusion` would be the result after, and always 'success' here.
       - uses: blamechris/repo-relay@3fa58908bfb9e6f69fed5236ddae4ff2180a1d54 # v1.2.0
-        if: env.DISCORD_CONFIGURED == 'true'
+        if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outcome == 'success'
         with:
           discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}
           channel_prs: ${{ secrets.DISCORD_CHANNEL_PRS }}
