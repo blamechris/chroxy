@@ -1353,19 +1353,6 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // The server owns the tag and replaces the whole array; a local prune would
     // be a second implementation racing the authoritative one, and would be
     // overwritten by the next broadcast anyway.
-    // #7625. Tagged by session id (each row carries `sessionId`) and must
-    // SURVIVE session death for the definitional reason: a failed restore is a
-    // session that never became live, so it is not in `_sessions` and cannot be
-    // in `session_list` — `removedIds` can never name one, and a prune keyed on
-    // session death would only ever be a no-op or a bug. The server owns the
-    // roster and replaces the whole array on each `failed_restores_list`, so a
-    // local prune would race the authoritative replacement exactly as it would
-    // for `environments` above. It IS per-daemon, so it clears on disconnect().
-    failedRestores:
-      'FailedRestoreInfo[] | null — rows carry `sessionId`, but the id names a session that is ' +
-      'deliberately NOT live (it is parked in SessionManager._failedRestores, absent from ' +
-      '_sessions and therefore from session_list). Server-owned and replaced wholesale; null ' +
-      'means "not asked yet", distinct from an empty roster. #7625',
     environments:
       'EnvironmentInfo[] — keyed by `EnvironmentInfo.id`, and the element carries `sessions: ' +
       'string[]`, a LIVE attachment list of real session ids (#7552 wired ' +
@@ -2549,7 +2536,6 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     searchResults: "disconnect() — a search over the OLD daemon's transcripts",
     checkpoints: 'disconnect() — checkpoints belong to a session on the old daemon',
     environments: 'disconnect() — container/worktree environments are per daemon',
-    failedRestores: "disconnect() — the roster is the OLD daemon's parked sessions (#7625)",
     // #7557's twelfth field, adjudicated onto THIS answer rather than onto the
     // two full-reset sites, and it is the one member here whose home was
     // decided against a precedent rather than by its key space. #7528 ruled
@@ -2964,13 +2950,9 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     expect(assigns(disconnectBody, 'serverCapabilities'), 'resolved via the spread roster').toBe(true)
     expect(assigns(switchBody, 'serverCapabilities'), '_resetSessionMemory spreads the same roster').toBe(true)
 
-    // The roster is the real one, and it is the size the issues describe:
-    // #7559's sixteen, plus #7557's `infoNotifications`, plus #7625's
-    // `failedRestores`. The count is deliberately hardcoded so ADDING a member
-    // is a reviewed act rather than a silent one — the sort-comparison on the
-    // next line already pins the exact membership, so this number's only job is
-    // to make a quiet addition go red. Update both together.
-    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(18)
+    // The roster is the real one, and it is the size the two issues describe:
+    // #7559's sixteen plus #7557's `infoNotifications`.
+    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(17)
     expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...Object.keys(CLEARED_ON_DISCONNECT)].sort())
 
     // A field OUTSIDE the roster is not lit up by the spread — otherwise the

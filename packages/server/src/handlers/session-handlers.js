@@ -680,6 +680,7 @@ function handleListFailedRestores(ws, client, _msg, ctx) {
     // refusal sent that way could not name the reason at all.
     ctx.transport.send(ws, {
       type: 'failed_restores_list',
+      generatedAt: new Date().toISOString(),
       restores: [],
       refused: true,
       code: 'FAILED_RESTORES_LIST_FORBIDDEN_BOUND_CLIENT',
@@ -688,7 +689,7 @@ function handleListFailedRestores(ws, client, _msg, ctx) {
   }
   const sm = ctx.sessions.sessionManager
   const restores = typeof sm.getFailedRestores === 'function' ? sm.getFailedRestores() : []
-  ctx.transport.send(ws, { type: 'failed_restores_list', restores })
+  ctx.transport.send(ws, { type: 'failed_restores_list', generatedAt: new Date().toISOString(), restores })
 }
 
 /**

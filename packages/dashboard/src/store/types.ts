@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -125,25 +125,6 @@ import type {
   WebFeatureStatus,
   WebTask,
 } from '@chroxy/store-core';
-
-/**
- * #7625: one parked failed restore. Mirrors the server's `getFailedRestores()`
- * row. `historyLength` is a COUNT, never the history — the server does not ship
- * the content, so a future discard affordance can say how much it would destroy
- * without ever having transferred it.
- */
-export interface FailedRestoreInfo {
-  sessionId: string;
-  name: string;
-  provider: string;
-  cwd?: string;
-  model?: string | null;
-  permissionMode?: string | null;
-  errorCode: string;
-  errorMessage: string;
-  needsAttention?: boolean;
-  historyLength?: number;
-}
 
 export interface EnvironmentInfo {
   id: string;
@@ -1716,28 +1697,19 @@ export interface ConnectionState {
   // Environments
   environments: EnvironmentInfo[];
   /**
-   * #7625: sessions the boot restore could not bring back, from
-   * `failed_restores_list`. Server truth, replaced wholesale on each reply —
-   * never merged, so an entry a successful retry removed cannot linger.
+   * #7625: the parked failed-restore roster, as the daemon sent it.
    *
-   * `null` means "not asked yet", which the UI must distinguish from an empty
-   * roster ("asked, nothing failed"). `refused` rides INSIDE the object rather
-   * than as a sibling boolean for two reasons: the two can never disagree, and
-   * the connection-scoped reset roster (#7559) is a collection contract whose
-   * emptiness check cannot classify a bare `false`.
+   * The WHOLE reply message is stored, exactly like every other Control Room
+   * survey snapshot (`byokPoolStatus`, `hostStatus`, …): the tab strip's
+   * staleness line and its 60s refetch are driven off `generatedAt`, and
+   * ControlRoomView's `SnapshotKey` is derived as "store fields whose value
+   * carries a generatedAt". `refused` rides inside the message, so it cannot
+   * disagree with the rows it came with.
+   *
+   * `null` means "not asked yet", which the UI must distinguish from a roster
+   * with no rows ("asked, nothing failed").
    */
-  failedRestores: FailedRestoreInfo[] | null;
-  /**
-   * #7625: the last `failed_restores_list` was REFUSED (a pairing-bound token).
-   * A separate field rather than a member of the object above because the
-   * #7470 collection guard classifies by DECLARED SHAPE — `Record<string,`,
-   * `Set<string>` or an array — and an inline object type reaches neither its
-   * extraction nor its residual check. Kept connection-scoped by the same
-   * mechanism `transcriptViewer` uses: an explicit literal at both full-reset
-   * sites, since `createEmptyConnectionScope()`'s roster is collections-only
-   * and its emptiness check cannot classify a bare `false`.
-   */
-  failedRestoresRefused: boolean;
+  failedRestores: ServerFailedRestoresListMessage | null;
 
   // Pairing refresh counter — incremented each time the server broadcasts
   // pairing_refreshed so the dashboard can auto-refresh the QR code (#2916).

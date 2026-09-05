@@ -170,9 +170,6 @@ const ROSTER_EXPECTED = [
   'slashCommands', 'filePickerFiles', 'mcpResources', 'customAgents', 'conversationHistory',
   'searchResults', 'checkpoints', 'environments',
   'infoNotifications',
-  // #7625 — the parked failed-restore roster. Per daemon: the rows name
-  // sessions on the OLD server and carry its absolute host paths.
-  'failedRestores',
 ] as const
 
 /** Server A's values, one distinguishable marker per field. */
@@ -210,10 +207,6 @@ function serverAState(): Record<string, unknown> {
     searchResults: [{ conversationId: 'conv-a', snippet: 'from server A' }],
     checkpoints: [{ id: 'ckpt-a', label: 'A' }],
     environments: [{ id: 'env-a', name: 'A', sessions: ['sess-a'] }],
-    failedRestores: [{
-      sessionId: 'sess-parked-a', name: 'Parked A', provider: 'claude',
-      cwd: '/srv/a', errorCode: 'ENVIRONMENT_STOPPED', errorMessage: 'down', historyLength: 3,
-    }],
     infoNotifications: [{ id: 'info-a', category: 'general', message: 'server A: update available', recoverable: true, timestamp: 1 }],
   }
 }

@@ -273,6 +273,13 @@ export const ServerSessionRestoreFailedSchema = z.object({
 export const ServerFailedRestoresListSchema = z.object({
     type: z.literal('failed_restores_list'),
     /**
+     * When the daemon built this roster. Every Control Room survey snapshot
+     * carries one — the tab strip's "generated Nm ago" line and its 60s
+     * staleness refetch are driven off it, and `SnapshotKey` in ControlRoomView
+     * is literally derived as "the store fields whose value has a generatedAt".
+     */
+    generatedAt: z.string(),
+    /**
      * Set when the caller was refused (a pairing-bound token). The reply is a
      * DEGRADED, schema-valid snapshot rather than an error, following the
      * session-scoped-survey shape in docs/security/bearer-token-authority.md §4:

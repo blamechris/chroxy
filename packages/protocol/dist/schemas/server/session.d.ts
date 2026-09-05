@@ -211,6 +211,7 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
  */
 export declare const ServerFailedRestoresListSchema: z.ZodObject<{
     type: z.ZodLiteral<"failed_restores_list">;
+    generatedAt: z.ZodString;
     refused: z.ZodOptional<z.ZodBoolean>;
     code: z.ZodOptional<z.ZodString>;
     restores: z.ZodArray<z.ZodObject<{

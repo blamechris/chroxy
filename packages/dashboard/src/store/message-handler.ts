@@ -175,6 +175,7 @@ import {
   formatMemoryAppendNotice,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
+import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
@@ -198,7 +199,6 @@ import type {
   ConnectionState,
   DirectoryEntry,
   EnvironmentInfo,
-  FailedRestoreInfo,
   EvaluatorRewriteMeta,
   FileEntry,
   PendingCommunitySkill,
@@ -6709,19 +6709,23 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       break;
     }
     case 'failed_restores_list': {
-      // #7625. Replaced wholesale rather than merged: this is server truth, and
-      // merging would leave an entry a successful retry removed on screen.
-      // `refused` (a pairing-bound token) is kept as its own flag so the UI can
-      // tell "you may not see this" from "nothing failed" — the array is empty
-      // in both cases, which is exactly why the flag exists.
-      const refused = (msg as { refused?: boolean }).refused === true;
-      const rawRestores = (msg as { restores?: unknown }).restores;
+      // #7625. Stored as the WHOLE message, like every sibling Control Room
+      // survey snapshot: `generatedAt` drives the tab strip's staleness line
+      // and its refetch, and `refused` rides inside so it can never disagree
+      // with the rows it arrived with. Replaced wholesale rather than merged —
+      // this is server truth, and merging would leave an entry a successful
+      // retry removed on screen.
+      //
+      // `restores` is normalised to an array: the schema requires one, but a
+      // malformed or hostile frame that skipped validation would otherwise
+      // reach the renderer and throw at `.map`, blanking the whole tab rather
+      // than showing one bad row.
+      const snapshot = msg as unknown as ServerFailedRestoresListMessage;
       set({
-        // `?? []` only covers null/undefined — a non-array (a malformed or
-        // hostile frame) would land in the store and throw at `.map` in the
-        // renderer, which is a blank Control Room tab rather than a bad row.
-        failedRestores: refused || !Array.isArray(rawRestores) ? [] : (rawRestores as FailedRestoreInfo[]),
-        failedRestoresRefused: refused,
+        failedRestores: {
+          ...snapshot,
+          restores: Array.isArray(snapshot.restores) ? snapshot.restores : [],
+        },
       });
       break;
     }
