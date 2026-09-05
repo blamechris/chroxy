@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseJobs, parseSteps, stepInput, code } from './helpers/workflow-reader.js'
+import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell } from './helpers/workflow-reader.js'
 
 /**
  * Unit tests for the shared workflow reader (#7386).
@@ -169,6 +169,212 @@ jobs:
     assert.ok(
       jobs[1].body.some(l => l.includes('name: Second Job')),
       "second's body must carry its own name line, not be merged into first"
+    )
+  })
+})
+
+/**
+ * A step's keys may be written on its `- ` line or under it. GitHub reads the
+ * two identically, so the reader must too — see stepInput's own comment for the
+ * #7632 guard that stayed green against exactly the config it forbade.
+ */
+const KEY_ON_DASH_LINE = `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - continue-on-error: true
+        uses: some/action@0000000000000000000000000000000000000000
+`
+
+const KEY_UNDER_DASH_LINE = `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: some/action@0000000000000000000000000000000000000000
+        continue-on-error: true
+`
+
+describe('workflow reader: step keys on the dash line (#7632)', () => {
+  it('reads a key written on the step\'s own `- ` line', () => {
+    const [job] = parseJobs(KEY_ON_DASH_LINE, 'dash.yml')
+    assert.equal(stepInput(job.steps[0], 'continue-on-error'), 'true')
+  })
+
+  it('agrees between the two spellings of the same step config', () => {
+    const [onDash] = parseJobs(KEY_ON_DASH_LINE, 'dash.yml')
+    const [underDash] = parseJobs(KEY_UNDER_DASH_LINE, 'under.yml')
+    assert.equal(
+      stepInput(onDash.steps[0], 'continue-on-error'),
+      stepInput(underDash.steps[0], 'continue-on-error')
+    )
+  })
+
+  it('still reads a nested with: input', () => {
+    const [job] = parseJobs(BLOCK_SEQUENCE, 'block.yml')
+    assert.equal(stepInput(job.steps[0], 'cache'), 'npm')
+  })
+})
+
+describe('workflow reader: stepRun (#7632)', () => {
+  const wrap = body => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+${body}
+`
+  const firstStep = yml => parseJobs(wrap(yml), 'run.yml')[0].steps[0]
+
+  it('reads a block scalar and dedents it', () => {
+    assert.equal(stepRun(firstStep('      - name: go\n        run: |\n          set -e\n          echo hi')), 'set -e\necho hi')
+  })
+
+  it('keeps a `#` inside a block scalar, which is a SHELL comment', () => {
+    assert.equal(stepRun(firstStep('      - run: |\n          echo one # trailing\n          # whole line')), 'echo one # trailing\n# whole line')
+  })
+
+  it('TRUNCATES a plain scalar at a whitespace-preceded `#`, exactly as YAML does', () => {
+    // Not a bug being pinned in: reproducing YAML's reading is the entire point.
+    // The friendlier reading is what let repo-relay.yml ship an unterminated
+    // quote in #7632 — a guard must see what the runner sees, not what the
+    // author meant.
+    assert.equal(stepRun(firstStep('      - run: echo "see #7632."')), 'echo "see')
+  })
+
+  it('reads a quoted scalar up to its closing quote', () => {
+    assert.equal(stepRun(firstStep('      - run: "echo hi"')), 'echo hi')
+  })
+
+  it('finds a run: written on the step\'s own `- ` line', () => {
+    assert.equal(stepRun(firstStep('      - run: |\n          echo hi')), 'echo hi')
+  })
+
+  it('stops a block scalar at the next step key', () => {
+    assert.equal(stepRun(firstStep('      - run: |\n          echo hi\n        shell: bash')), 'echo hi')
+  })
+
+  it('returns undefined for a step with no run:', () => {
+    assert.equal(stepRun(firstStep('      - uses: some/action@0000000000000000000000000000000000000000')), undefined)
+  })
+})
+
+describe('workflow reader: jobShell (#7632)', () => {
+  const wrap = job => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+${job}
+`
+  it('reads a job-level defaults.run.shell', () => {
+    const [job] = parseJobs(wrap('    runs-on: windows-latest\n    defaults:\n      run:\n        shell: powershell\n    steps:\n      - run: npm ci'), 'j.yml')
+    assert.equal(jobShell(job.body), 'powershell')
+  })
+
+  it('does not read a shell named only in a COMMENT', () => {
+    // ci.yml's server-tests-windows explains its choice in prose containing the
+    // literal string "`shell: bash`". A guard satisfiable by prose is no guard.
+    const [job] = parseJobs(wrap('    runs-on: windows-latest\n    defaults:\n      run:\n        # shell: bash resolves to WSL bash on this runner\n        shell: powershell\n    steps:\n      - run: npm ci'), 'j.yml')
+    assert.equal(jobShell(job.body), 'powershell')
+  })
+
+  it('does not mistake a STEP-level shell for the job default', () => {
+    const [job] = parseJobs(wrap('    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci\n        shell: powershell'), 'j.yml')
+    assert.equal(jobShell(job.body), undefined)
+  })
+
+  it('returns undefined for a job that declares no shell', () => {
+    const [job] = parseJobs(wrap('    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci'), 'j.yml')
+    assert.equal(jobShell(job.body), undefined)
+  })
+})
+
+describe('workflow reader: folded (>) run scalars (#7632)', () => {
+  const wrap = body => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+${body}
+`
+  const firstStep = yml => parseJobs(wrap(yml), 'run.yml')[0].steps[0]
+
+  it('FOLDS a > scalar to one line, as the runner receives it', () => {
+    // Treating `>` like `|` inverts this module's purpose. Unfolded, these are
+    // three statements and `bash -n` passes; folded — which is what GitHub
+    // actually hands bash — it is `if true; then echo hi fi`, which dies with
+    // "unexpected end of file". The guard would report green on a step that
+    // cannot run. Verified equal to js-yaml's reading of the same source.
+    assert.equal(
+      stepRun(firstStep('      - run: >\n          if true; then\n          echo hi\n          fi')),
+      'if true; then echo hi fi'
+    )
+  })
+
+  it('turns a blank line inside a folded scalar into a newline, not a space', () => {
+    assert.equal(stepRun(firstStep('      - run: >\n          echo one\n\n          echo two')), 'echo one\necho two')
+  })
+
+  it('keeps a MORE-indented line literal inside a folded scalar', () => {
+    assert.equal(
+      stepRun(firstStep('      - run: >\n          echo one\n            deeper\n          echo two')),
+      'echo one\n  deeper\necho two'
+    )
+  })
+
+  it('leaves a | scalar unfolded', () => {
+    assert.equal(stepRun(firstStep('      - run: |\n          echo one\n          echo two')), 'echo one\necho two')
+  })
+})
+
+describe('workflow reader: jobShell is anchored to defaults.run (#7632)', () => {
+  const wrap = job => `
+name: probe
+on: workflow_dispatch
+jobs:
+  probe:
+${job}
+`
+  const shellOf = job => jobShell(parseJobs(wrap(job), 'j.yml')[0].body)
+
+  it('reads defaults.run.shell', () => {
+    assert.equal(
+      shellOf('    runs-on: windows-latest\n    defaults:\n      run:\n        shell: powershell\n    steps:\n      - run: npm ci'),
+      'powershell'
+    )
+  })
+
+  it('does NOT read a strategy.matrix.shell axis as the job shell', () => {
+    // The dangerous direction: the run-block guard only feeds bash/sh to
+    // `bash -n`, so one false "powershell" here silently drops every real bash
+    // block in that job out of the check.
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        shell: [bash, zsh]\n    steps:\n      - run: npm ci'),
+      undefined
+    )
+  })
+
+  it('does NOT read an env.shell as the job shell', () => {
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    env:\n      shell: fish\n    steps:\n      - run: npm ci'),
+      undefined
+    )
+  })
+
+  it('does NOT read a shell: sitting directly under defaults, outside run:', () => {
+    assert.equal(
+      shellOf('    runs-on: ubuntu-latest\n    defaults:\n      shell: powershell\n    steps:\n      - run: npm ci'),
+      undefined
     )
   })
 })

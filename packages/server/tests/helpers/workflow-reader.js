@@ -168,7 +168,17 @@ export function code(lines) {
  * green while the workflow really did hardcode the cache.
  */
 export function stepInput(stepLines, key) {
-  for (const line of code(stepLines)) {
+  // A step's FIRST line carries the `- ` list marker, so a key written there —
+  // `- continue-on-error: true`, `- if: ...`, `- id: ...` — is not preceded by
+  // whitespace alone and was invisible here until #7632, where a guard asserting
+  // "the action step must NOT be continue-on-error" stayed green against a step
+  // that was. Both spellings are the same config to GitHub; two spellings of
+  // identical config must not disagree. Normalising the marker to two spaces
+  // puts such a key at the same indent as every other one.
+  const normalised = stepLines.map((l, i) =>
+    i === 0 ? l.replace(/^(\s*)-\s/, (_, sp) => `${sp}  `) : l
+  )
+  for (const line of code(normalised)) {
     const m = new RegExp(`^\\s*${key}:\\s*(.*)$`).exec(line)
     if (!m) continue
     const raw = m[1].trim()
@@ -233,4 +243,162 @@ export function assertReaderSane(workflows) {
     `expected >=15 setup-node steps across all workflows, found ${setupNodeSteps.length} — ` +
       'the reader is probably broken'
   )
+}
+
+/**
+ * A job's `defaults.run.shell`, or undefined.
+ *
+ * Read from the job's keys BEFORE `steps:`, which is what makes it a job
+ * default rather than one step's.
+ *
+ * A `shell:` named only in a comment must not be read as configuration —
+ * ci.yml's `server-tests-windows` explains its choice in prose containing the
+ * literal string "shell: bash". TWO things independently prevent that: the
+ * pattern anchors `shell:` to the start of the line after indent, and `code()`
+ * drops comment lines first. They are redundant, and deliberately kept so:
+ * mutating either ALONE leaves the property intact, and it takes removing both
+ * to turn the guard red (verified). The comment says this rather than crediting
+ * `code()` alone, which would be a rationale describing a stronger check than
+ * any single line performs.
+ *
+ * This is not a nicety: BOTH of this repo's PowerShell jobs
+ * (`server-tests-windows`, `desktop-tests-windows`) declare their shell here
+ * and NEITHER declares it on a step. A consumer that looked only at step-level
+ * `shell:` would classify all six of their run blocks as bash — the
+ * "guard wired to only some of its callers" cause in docs/false-safety-guards.md.
+ */
+export function jobShell(jobBody) {
+  const stepsAt = jobBody.findIndex(l => /^\s*steps:\s*$/.test(l))
+  const lines = code(jobBody.slice(0, stepsAt === -1 ? jobBody.length : stepsAt))
+
+  // Anchored to `defaults:` → `run:` → `shell:`, not "any shell: before steps:".
+  // The unanchored version read a `strategy.matrix.shell` axis, or an
+  // `env.shell`, as the job's effective shell. That is the dangerous direction:
+  // the run-block guard only feeds bash/sh shells to `bash -n`, so one false
+  // "powershell" here silently drops every real bash block in that job out of
+  // the check — "a guard wired to only some of its callers", and the mirror
+  // image of the bug it was written for.
+  const defaultsAt = lines.findIndex(l => /^\s*defaults:\s*$/.test(l))
+  if (defaultsAt === -1) return undefined
+  const defaultsIndent = /^(\s*)/.exec(lines[defaultsAt])[1].length
+
+  let runIndent = null
+  for (let i = defaultsAt + 1; i < lines.length; i++) {
+    const indent = /^(\s*)/.exec(lines[i])[1].length
+    if (indent <= defaultsIndent) break
+    if (runIndent === null) {
+      if (/^\s*run:\s*$/.test(lines[i])) runIndent = indent
+      continue
+    }
+    if (indent <= runIndent) break
+    const m = /^\s*shell:\s*(.*)$/.exec(lines[i])
+    if (m) return m[1].replace(/\s+#.*$/, '').trim()
+  }
+  return undefined
+}
+
+/**
+ * The shell script a step runs, as YAML would hand it to the runner — or
+ * undefined for a step with no `run:`.
+ *
+ * It must reproduce YAML's reading, not a friendlier one, because the whole
+ * point is to catch a `run:` whose YAML value is not what its author sees. The
+ * plain-scalar branch is where that bites: a whitespace-preceded `#` opens a
+ * comment, so
+ *
+ *     run: echo "... see #7632."
+ *
+ * has the YAML value `echo "... see` — an unterminated quote, and a step that
+ * fails at parse time on the runner. That exact line shipped into
+ * repo-relay.yml during #7632 and was caught by `bash -n`, not by review.
+ *
+ * Block scalars (`|`, `|-`, `>`, and the indent-indicator forms) are the common
+ * case and are taken literally: a `#` inside one is a SHELL comment and must
+ * survive, so `code()` is deliberately not applied to the body.
+ */
+export function stepRun(stepLines) {
+  if (!stepLines.length) return undefined
+  const dash = /^(\s*)-\s/.exec(stepLines[0])
+  if (!dash) return undefined
+  const keyIndent = dash[1].length + 2
+  const runKey = new RegExp(`^ {${keyIndent}}run:\\s*(.*)$`)
+
+  for (let i = 0; i < stepLines.length; i++) {
+    // The first line carries `- ` where later lines carry two spaces; normalise
+    // it so a `- run: ...` step is found at the same indent as any other key.
+    const line = i === 0 ? stepLines[i].replace(/^(\s*)-\s/, (_, sp) => `${sp}  `) : stepLines[i]
+    const m = runKey.exec(line)
+    if (!m) continue
+    const head = m[1].trim()
+
+    const block = /^([|>])([-+]?\d*)$/.exec(head)
+    if (block) {
+      const body = []
+      for (let j = i + 1; j < stepLines.length; j++) {
+        const l = stepLines[j]
+        if (/^\s*$/.test(l)) {
+          body.push('')
+          continue
+        }
+        if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
+        body.push(l)
+      }
+      while (body.length && body[body.length - 1] === '') body.pop()
+      const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
+      const dedent = widths.length ? Math.min(...widths) : 0
+      const dedented = body.map(l => l.slice(dedent))
+      return block[1] === '>' ? fold(dedented) : dedented.join('\n')
+    }
+
+    if (head.startsWith("'") || head.startsWith('"')) {
+      const q = head[0]
+      const close = head.indexOf(q, 1)
+      return close === -1 ? head.slice(1) : head.slice(1, close)
+    }
+
+    return head.replace(/\s+#.*$/, '').trim()
+  }
+  return undefined
+}
+
+/**
+ * Fold a `>` block scalar the way YAML does, so a consumer sees the ONE line
+ * the runner will see rather than the several the author wrote.
+ *
+ * Treating `>` like `|` is not a cosmetic difference — it inverts this
+ * module's whole purpose. `> / if true; then / echo hi / fi` reads as three
+ * statements unfolded and parses clean, while GitHub hands bash the folded
+ * `if true; then echo hi fi`, which dies with "unexpected end of file". The
+ * guard would report green on a step that cannot run.
+ *
+ * The rules applied: a break between two non-empty lines at the base indent
+ * becomes a SPACE; n blank lines become n newlines; a MORE-indented line is
+ * literal and keeps the breaks around it.
+ */
+function fold(lines) {
+  const out = []
+  let buf = null
+  let blanks = 0
+  const flush = () => {
+    if (buf !== null) out.push(buf)
+    buf = null
+  }
+  for (const line of lines) {
+    if (line === '') {
+      blanks++
+      continue
+    }
+    if (/^\s/.test(line)) {
+      flush()
+      out.push('\n'.repeat(Math.max(blanks, 0)) + line)
+      blanks = 0
+      continue
+    }
+    if (buf === null) buf = line
+    else if (blanks > 0) buf += '\n'.repeat(blanks) + line
+    else buf += ' ' + line
+    blanks = 0
+  }
+  flush()
+  return out.join('\n')
 }
