@@ -170,7 +170,11 @@ jobs:
         # node_modules, so the compile was simply redone. That was accepted
         # because a probe which does not exercise the failure is worth nothing
         # at any price. Since repo-relay#193 pinned node 22 there is no compile
-        # to redo: both installs take the prebuild path at ~4s each.
+        # to redo, and the second install stopped being worth arguing about.
+        # Measured on run 33950384420, the notify job of the PR that re-pinned:
+        # this probe 4s, the whole action 5s, job total 15s against 183s. The
+        # tolerance stays because the failure it covers is structural, not
+        # because it was ever cheap.
         continue-on-error: true
         working-directory: ${{ steps.relay_action.outputs.dir }}
         run: npm ci --omit=dev
