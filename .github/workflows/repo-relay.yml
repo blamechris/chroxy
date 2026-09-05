@@ -23,6 +23,27 @@ on:
 concurrency:
   group: repo-relay-${{ github.repository }}
 
+# npm's implicit audit + funding calls off for every install here (#7616) —
+# see the block in ci.yml for the outage that motivated it. Required by
+# scripts/lint-workflow-npm-env.mjs.
+#
+# What this block covers is MEASURED, not assumed. It reaches both installs in
+# this job — the pre-install probe below, which is a step in this workflow, and
+# the composite action's own `npm ci --omit=dev`, which is a step in the ACTION:
+# GitHub exports workflow-level env into the job's process environment, and a
+# composite action's `run` steps inherit it. Run 33951308582 (main, before)
+# printed `added 66 packages, and audited 67 packages in 4s` and `5 high
+# severity vulnerabilities` for BOTH installs; run 33952673042 (the PR that
+# added this block) printed `added 66 packages in 2s` / `in 1s` and neither
+# line. The vanished `and audited 67 packages` clause is the observable.
+#
+# The action sets the same two variables at its own step level regardless
+# (blamechris/repo-relay#195), so a consumer WITHOUT a block like this one
+# still gets them — this one is not what makes the action fast for everybody.
+env:
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+
 jobs:
   notify:
     runs-on: ubuntu-latest

@@ -97,6 +97,29 @@ permissions:
 # differences — root-bypassed fs perms, $HOME assumptions, a uuidgen dependency —
 # not RAM); see the server-tests job comment.
 
+# npm's implicit audit + funding calls are OFF for every install in this
+# workflow (#7616). npm reads any `npm_config_*` environment variable as a
+# config value, case-insensitively, so this one block covers all 15 `npm ci` /
+# `npm install --package-lock-only` sites below AND every site added later —
+# which a per-step `--no-audit` flag cannot.
+#
+# WHY: on 2026-09-03/04 registry.npmjs.org's bulk-advisory endpoint
+# (`/-/npm/v1/security/advisories/bulk`) stalled 17-48s per call. Every
+# `npm ci` makes that call implicitly, so a cold install went 27s -> 2m15s and
+# Server Lint + Design Tokens Tests (both `timeout-minutes: 5`) failed four
+# consecutive times on #7608. No job in this repo runs `npm audit` on purpose,
+# so disabling it loses nothing. The self-hosted runner CONTAINERS already set
+# these out-of-band; this covers the GitHub-hosted fallback that
+# SELF_HOSTED_OR_HOSTED routing sends fork PRs to, which that mitigation misses.
+#
+# Quoted on purpose: an environment variable is always a string, and "false" is
+# exactly the value npm was proven to parse as false. Every workflow with an
+# install site must carry this block — enforced by
+# scripts/lint-workflow-npm-env.mjs, which fails CI if one is added without it.
+env:
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+
 jobs:
   runner-target:
     name: Resolve Runner Target
@@ -1378,6 +1401,15 @@ jobs:
       - name: Run lint-write-only-ctx-fields tests
         run: node scripts/__tests__/lint-write-only-ctx-fields.test.mjs
 
+      - name: Run lint-workflow-npm-env.mjs tests
+        # #7616 — includes a live positive-and-negative control that npm still
+        # honours NPM_CONFIG_AUDIT/NPM_CONFIG_FUND. The lint below only checks
+        # that the workflows CARRY the variables; if npm ever stopped reading
+        # them, every one of those `env:` blocks would be inert and the lint
+        # would go on passing. That control is the only thing in the repo that
+        # would notice.
+        run: node scripts/__tests__/lint-workflow-npm-env.test.mjs
+
       - name: No write-only per-connection state (app context + dashboard bindings)
         # #7452 — a field on the app store's `_ctx` that is written but never
         # read compiles, type-checks and passes every test: writing to a field
@@ -1399,6 +1431,26 @@ jobs:
         # `compile-skill-targets --check` lives here. Exit 2 (cannot check) is a
         # distinct, loud outcome from exit 0.
         run: node scripts/lint-write-only-ctx-fields.mjs
+
+      - name: Every workflow that installs npm deps disables audit + fund
+        # #7616 — npm's implicit bulk-advisory call stalled 17-48s per install
+        # during a registry incident on 2026-09-03/04, and `npm ci` went 27s ->
+        # 2m15s. Server Lint and Design Tokens Tests, both on `timeout-minutes:
+        # 5`, failed four consecutive times on #7608 over a call no job in this
+        # repo asked for.
+        #
+        # The fix is two environment variables at the workflow `env:` level, and
+        # this gate is what makes it stay fixed: per-step `--no-audit` flags
+        # would have covered the 22 install sites that existed when they were
+        # typed and nothing else. The 23rd site — or the next workflow FILE —
+        # is what this catches, which is the roster-beside-a-growing-set shape
+        # that heads docs/false-safety-guards.md.
+        #
+        # Runs HERE for the same reason as the two lints above: a pure-node
+        # source scan with no dependencies, in the one job that has setup-node
+        # and deliberately no `npm ci`. Exit 2 (cannot check) is a distinct,
+        # loud outcome from exit 0.
+        run: node scripts/lint-workflow-npm-env.mjs
 
       - name: Check compiled skill artifacts are in sync with .claude/commands
         # #7253 — .claude/commands/<name>.md is the neutral source, but
