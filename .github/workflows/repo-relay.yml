@@ -149,9 +149,18 @@ jobs:
         # The ONLY tolerated step in this job, and the only one whose failure
         # skips the notification instead of failing the build. It runs the same
         # command, in the same directory, on the same node as the action's own
-        # `Install dependencies` — so if it passes, that one is running against
-        # a warm ~/.npm and a populated ~/.cache/node-gyp and no longer needs
-        # nodejs.org at all.
+        # `Install dependencies`, which is the entire point: a failure here
+        # predicts a failure there, and that is what makes skipping the action
+        # the right response.
+        #
+        # IT COSTS A SECOND SOURCE BUILD, and the honest measurement is that it
+        # buys no speed back. Measured on run 33947560739: probe 90s, the
+        # action's own install 77s, job total 183s against 88s before. `npm ci`
+        # wipes node_modules, so the compile is redone; only the fetched headers
+        # are reused, and that saved nothing observable. The cost is accepted
+        # because a probe that does not exercise the failure is worth nothing at
+        # any price — and #7634 removes it at the source: on a node with a
+        # published prebuild both installs are ~5s and no compile happens.
         continue-on-error: true
         working-directory: ${{ steps.relay_action.outputs.dir }}
         run: npm ci --omit=dev
