@@ -75,17 +75,27 @@ jobs:
       # structurally cannot reach. Seen on the notify job of #7630 (run
       # 33937387078), on a PR whose diff cannot reach this workflow at all.
       #
-      # WHY THE NODE VERSION IS LOAD-BEARING (measured on run 33946845821):
-      # `better-sqlite3@12.10.0` publishes NO prebuilt binary for node 20's ABI
-      # — its linux-x64 assets are v127/v137/v141/v147, i.e. node 22 and newer —
-      # and repo-relay's action.yml pins node 20. So `prebuild-install` finds
-      # nothing, `node-gyp rebuild` takes over, and it fetches node headers from
-      # nodejs.org on EVERY run. That fetch is what ECONNRESET'd. An install run
-      # on any other node takes the prebuild path instead (5s, no node-gyp, no
-      # nodejs.org) and so never exercises the failure at all — which is why the
-      # version is READ FROM THE ACTION rather than assumed or hardcoded here. A
-      # probe on the wrong node is not a probe. (#7634 tracks fixing this at the
-      # source, upstream, where one line removes the compile entirely.)
+      # WHY THE NODE VERSION IS READ FROM THE ACTION (#7634, and it is still
+      # load-bearing now that the original cause is fixed):
+      # `better-sqlite3@12.10.0` publishes prebuilt binaries per node ABI, and
+      # its linux-x64 assets are v127/v137/v141/v147 — node 22 and newer.
+      # repo-relay USED TO pin node 20 (ABI v115), so `prebuild-install` found
+      # nothing, `node-gyp rebuild` took over, and it fetched node headers from
+      # nodejs.org on every run. That fetch is what ECONNRESET'd and produced
+      # #7632. repo-relay#193 pinned node 22 instead, so the install is now a
+      # ~4s download-and-extract with no compiler and no nodejs.org.
+      #
+      # The parse below stays, and is the whole reason this probe still tracks
+      # what it gates. Its value is not that node 20 was wrong — it is that a
+      # probe on a DIFFERENT node than the action uses tests a different install
+      # and proves nothing about the one that runs. Measured during #7633: a
+      # probe on the runner's default node finished in 5s against the action's
+      # 67s in the same job, because it took the prebuild path the action could
+      # not. It would have passed on the day of the outage and opened the gate.
+      # A hardcoded 22 here would be correct today and silently wrong the next
+      # time repo-relay moves; repo-relay's own `action-install` job now fails
+      # if it ever lands back on a prebuild-less ABI, and this reads whatever it
+      # lands on.
       - name: Locate the repo-relay action checkout
         id: relay_action
         if: env.DISCORD_CONFIGURED == 'true'
@@ -153,14 +163,14 @@ jobs:
         # predicts a failure there, and that is what makes skipping the action
         # the right response.
         #
-        # IT COSTS A SECOND SOURCE BUILD, and the honest measurement is that it
-        # buys no speed back. Measured on run 33947560739: probe 90s, the
-        # action's own install 77s, job total 183s against 88s before. `npm ci`
-        # wipes node_modules, so the compile is redone; only the fetched headers
-        # are reused, and that saved nothing observable. The cost is accepted
-        # because a probe that does not exercise the failure is worth nothing at
-        # any price — and #7634 removes it at the source: on a node with a
-        # published prebuild both installs are ~5s and no compile happens.
+        # THE COST, honestly measured, because it changed twice. While repo-relay
+        # pinned node 20 this step cost a SECOND source build and bought no
+        # speed back: run 33947560739 measured probe 90s, the action's own
+        # install 77s, job total 183s against 88s before — `npm ci` wipes
+        # node_modules, so the compile was simply redone. That was accepted
+        # because a probe which does not exercise the failure is worth nothing
+        # at any price. Since repo-relay#193 pinned node 22 there is no compile
+        # to redo: both installs take the prebuild path at ~4s each.
         continue-on-error: true
         working-directory: ${{ steps.relay_action.outputs.dir }}
         run: npm ci --omit=dev
@@ -190,7 +200,7 @@ jobs:
       # `outcome` is the result BEFORE continue-on-error is applied — that is
       # what leaves a tolerated step still readable as a signal — where
       # `conclusion` would be the result after, and always 'success' here.
-      - uses: blamechris/repo-relay@3fa58908bfb9e6f69fed5236ddae4ff2180a1d54 # v1.2.0
+      - uses: blamechris/repo-relay@0f126b57dc55fb6f31d3eec7f977d0d2c9fb77f2 # v1.3.0
         if: env.DISCORD_CONFIGURED == 'true' && steps.relay_deps.outcome == 'success'
         with:
           discord_bot_token: ${{ secrets.DISCORD_BOT_TOKEN }}

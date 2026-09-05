@@ -72,17 +72,23 @@ function runLocate(script, { dirs = 1, nodeVersion = '99', actionYml = true, loc
  *
  * 1. THE PROBE RUNS ON THE ACTION'S OWN NODE VERSION, READ FROM THE ACTION.
  *    This is the invariant the whole design rests on, and the first draft got
- *    it wrong. `better-sqlite3@12.10.0` ships no prebuilt binary for node 20's
- *    ABI (its linux-x64 assets are v127/v137/v141/v147 — node 22 and newer) and
- *    repo-relay pins node 20, so its install falls back to `node-gyp rebuild`
- *    and fetches node headers from nodejs.org every run. That fetch is what
- *    ECONNRESET'd. A probe on any OTHER node takes the prebuild path instead —
- *    measured at 5s versus the action's 67s in the same job — and never touches
- *    the failing hop at all. It would have passed on the day of the outage and
- *    opened the gate, and the action would have failed anyway. A probe that
- *    does not exercise the failure it gates is not a probe, so the version is
- *    read out of the action's own action.yml rather than copied here, where a
- *    copy would silently go stale the moment repo-relay bumps.
+ *    it wrong. `better-sqlite3@12.10.0` ships prebuilt binaries per node ABI
+ *    (its linux-x64 assets are v127/v137/v141/v147 — node 22 and newer).
+ *    repo-relay USED TO pin node 20, ABI v115, so its install fell back to
+ *    `node-gyp rebuild` and fetched node headers from nodejs.org every run;
+ *    that fetch is what ECONNRESET'd. A probe on any OTHER node took the
+ *    prebuild path instead — measured at 5s versus the action's 67s in the same
+ *    job — and never touched the failing hop at all. It would have passed on
+ *    the day of the outage and opened the gate, and the action would have
+ *    failed anyway.
+ *
+ *    repo-relay#193 has since pinned node 22, so no install compiles any more.
+ *    That does NOT retire this rule, and the distinction matters: the rule is
+ *    not "node 20 is wrong", it is "a probe on a different install than the one
+ *    it gates proves nothing". A hardcoded 22 here would be correct today and
+ *    silently wrong the next time repo-relay moves, which is exactly the shape
+ *    the first draft failed on. So the version is read out of the action's own
+ *    action.yml rather than copied here.
  * 2. Exactly ONE step is tolerated, and it is the install. Locating the action
  *    is NOT tolerated: a checkout that stops resolving would skip the action on
  *    every run with the job still green — "a precondition that is false, so the
