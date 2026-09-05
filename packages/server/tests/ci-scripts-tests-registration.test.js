@@ -573,9 +573,43 @@ const SEPARATORS = /[;&|(`{]/g
  * what remains must be one of:
  *
  *   `./`                     — `./x.test.sh`
- *   <interpreter> [flags] [path-prefix]
- *                            — `bash x.test.sh`, `node --test scripts/__tests__/x`,
+ *   <interpreter> [path-prefix]
+ *                            — `bash x.test.sh`, `bash scripts/__tests__/x.test.sh`,
  *                              `bash ./x.test.sh`, `out=$(bash x.test.sh)`
+ *
+ * NO FLAGS, and that is the #7645 fix rather than an omission. The previous
+ * rule accepted ANY `-`-prefixed word unconditionally, so a flag that stops the
+ * interpreter executing the file still read as an invocation. Measured against
+ * the shipped predicate:
+ *
+ *   WIRED  | bash -n <suite>            | parse-only, runs NOTHING
+ *   WIRED  | sh -n <suite>              | parse-only
+ *   WIRED  | bash --norc -n <suite>     | parse-only, behind a harmless flag
+ *   WIRED  | node --check <suite>       | compiles, runs NOTHING
+ *   WIRED  | node --help <suite>        | argument ignored entirely
+ *
+ * `bash -n` is not hypothetical: it is the idiom SIX LINES ABOVE the suite
+ * invocations in the same `scripts-tests` job, where the parse-check step runs
+ * `bash -n "$f"`. Downgrading a flaky suite to "just syntax-check it for now"
+ * is a copy of the line eight rows up, and the release-critical updater-feed
+ * suite would then run in no step with this guard reporting it wired — #7504
+ * exactly, through the guard written to prevent it.
+ *
+ * #7637 fixed three fail-opens in this function and every one was about the
+ * COMMAND WORD (`chmod +x ./x`, `cp ./x /tmp/`, `node --version && echo`). The
+ * flag axis was never considered. It is the #7281 shape as well: `bash <path>`
+ * is validated as a shell command word and `-n` is re-parsed by bash under a
+ * different grammar, as "do not execute".
+ *
+ * An ALLOWLIST rather than a denylist of no-exec flags, and an empty one:
+ * predicting a shell is unwinnable (#7341, entry 15 in the catalogue — six
+ * bypasses in two rounds), and `-n`, `--check`, `-e`, `-p`, `-c` and `--help`
+ * are only the ones anyone thought of. All 15 wired invocations in this repo
+ * spell zero flags — measured, `bash <path>` or `node <path>`, one line each —
+ * so an allowlist costs nothing today and a future `node --test <path>` is
+ * reported as an ORPHAN: a false positive, loud, and fixed by adding the flag
+ * here with the reason it preserves execution. Under-inclusive about WIRED is
+ * the direction this whole file is built toward.
  *
  * The first version of this asked only whether an interpreter appeared ANYWHERE
  * earlier on the line, and whether `./` appeared anywhere earlier. Both were the
@@ -586,9 +620,15 @@ const SEPARATORS = /[;&|(`{]/g
  * to the command position is what makes the claim and the code agree.
  *
  * A bare `x.test.sh` at a command position is NOT accepted, though a shell
- * would run it: nothing in this repo spells an invocation that way, and a
- * heredoc body line naming a suite would otherwise read as running it. That
- * costs a false positive on a shape nobody writes, which is the safe direction.
+ * would run it: nothing in this repo spells an invocation that way. That costs
+ * a false positive on a shape nobody writes, which is the safe direction.
+ *
+ * This paragraph used to credit the bare-name rejection with covering heredoc
+ * bodies too. It never did — it covers the BARE-NAME spelling, and a body line
+ * spelled `bash <suite>` read as an invocation (measured, #7645). Heredoc
+ * bodies are blanked by `withoutHeredocBodies` now, and this sentence claims
+ * only what this rule performs. The #7290/#7291 shape, found in the same
+ * function that had it three times before.
  */
 function isCommandPosition(line, at) {
   const before = line.slice(0, at)
@@ -607,9 +647,79 @@ function isCommandPosition(line, at) {
   // makes swapping them a genuinely INERT mutant rather than a missing
   // assertion, and the next person to mutate this deserves to know which.
   if (!INTERPRETERS.has(words[0])) return false
-  // After the interpreter: flags, plus optionally a trailing path prefix — the
-  // directory part of the argument when the match was on the basename.
-  return words.slice(1).every((w, i, rest) => w.startsWith('-') || (i === rest.length - 1 && w.endsWith('/')))
+  // After the interpreter: NOTHING, or a single trailing path prefix — the
+  // directory part of the argument when the match was on the basename. No
+  // flags; see the header for why the allowlist is empty rather than a
+  // denylist of the no-exec ones.
+  const rest = words.slice(1)
+  return rest.length === 0 || (rest.length === 1 && rest[0].endsWith('/'))
+}
+
+/**
+ * Shell here-document terminators, matched at a heredoc START.
+ *
+ * `<<<` is a here-STRING and takes no body, so it must not match. Both
+ * lookarounds are load-bearing: without them the engine simply retries one
+ * character along, matches the trailing `<` of `<<<` as the start of a `<<`,
+ * and reads `cmd <<< "$x"` as opening a heredoc terminated by `$x` — which
+ * swallows every line after it.
+ *
+ * That is not hypothetical either. The first version of this constant carried
+ * this very sentence, describing a lookahead the regex did not contain, and the
+ * case below caught it on the first run. The #7290/#7291 shape produced inside
+ * the fix for the #7290/#7291 shape, which is a fair measure of how cheap it is
+ * to write and how hard to see.
+ */
+const HEREDOC_START = /(?<!<)<<(?!<)-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_][A-Za-z0-9_]*))/
+
+/**
+ * The lines of a run body with here-document BODIES blanked out (#7645).
+ *
+ * A heredoc body is DATA the shell hands to a command, not commands the shell
+ * runs, so
+ *
+ *     cat <<EOF
+ *     bash scripts/__tests__/merge-updater-feeds.test.sh
+ *     EOF
+ *
+ * documents an invocation without performing one — and read as WIRED until
+ * this existed. The file's own header claimed the bare-name rejection covered
+ * heredocs; it covers only the bare-name spelling, and `bash <suite>` inside a
+ * body was an invocation. Measured before the fix.
+ *
+ * A body that is WRITTEN TO A FILE and later executed really does run the
+ * suite, so blanking it can report a wired suite as an orphan. That is the
+ * declared safe direction, and no workflow does it today.
+ *
+ * The terminator must appear ALONE on its line — leading tabs allowed only for
+ * `<<-`, which is what the shell strips. Deliberately strict: a lenient match
+ * ends the body EARLY and hands the remaining data lines back as commands,
+ * which is the dangerous direction. An unterminated heredoc therefore blanks
+ * the rest of the body, which is loud and safe. That also covers the shape this
+ * repo really has — `echo "body<<EOF" >> $GITHUB_OUTPUT`, a GitHub Actions
+ * multiline-output delimiter rather than a shell heredoc, whose terminator line
+ * is `echo "EOF" >> $GITHUB_OUTPUT` and never matches. Blanking from there on
+ * costs nothing measurable: no suite is invoked after one.
+ */
+function withoutHeredocBodies(lines) {
+  const out = []
+  let terminator = null
+  let stripTabs = false
+  for (const line of lines) {
+    if (terminator !== null) {
+      const candidate = stripTabs ? line.replace(/^\t+/, '') : line
+      if (candidate === terminator) terminator = null
+      out.push('')
+      continue
+    }
+    out.push(line)
+    const m = HEREDOC_START.exec(line)
+    if (m) {
+      terminator = m[1] ?? m[2] ?? m[3]
+      stripTabs = /<<-/.test(line)
+    }
+  }
+  return out
 }
 
 /**
@@ -652,7 +762,7 @@ const uncommented = runBody =>
  * a real orphan through.
  */
 function invokes(runBody, name) {
-  return uncommented(runBody).some(line =>
+  return withoutHeredocBodies(uncommented(runBody)).some(line =>
     namePositions(line, name).some(at => isCommandPosition(line, at))
   )
 }
@@ -1201,6 +1311,62 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })
 
+  it('the `run:` SYNTAX-CHECKING the suite rather than running it — `bash -n` (#7645)', async () => {
+    // The shipped fail-open. `bash -n` parses and executes NOTHING, and it is
+    // the idiom six lines above these invocations in the same job — the
+    // parse-check step runs `bash -n "$f"`. Downgrading a flaky suite to "just
+    // syntax-check it for now" is a copy of the line eight rows up.
+    const wf = await mutated([[RUN_LINE, `        run: bash -n ${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('a no-exec flag behind a HARMLESS one — `bash --norc -n` (#7645)', async () => {
+    // Rejecting only a leading `-n` would pass this. The rule takes no flags at
+    // all, so position does not matter.
+    const wf = await mutated([[RUN_LINE, `        run: bash --norc -n ${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('node COMPILING the suite rather than running it — `node --check` (#7645)', async () => {
+    const wf = await mutated([[RUN_LINE, `        run: node --check ${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('a flag that swallows the argument entirely — `node --help` (#7645)', async () => {
+    const wf = await mutated([[RUN_LINE, `        run: node --help ${SUITE}`]])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('the invocation inside a HEREDOC BODY, which is data and not commands (#7645)', async () => {
+    // `cat <<EOF ... EOF` documents an invocation without performing one. The
+    // header used to credit the bare-name rejection with covering this; it
+    // covers the bare-name spelling only, and `bash <suite>` in a body read as
+    // an invocation.
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          cat <<EOF\n          bash ${SUITE}\n          EOF`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
+  })
+
+  it('an invocation AFTER a terminated heredoc still counts — not blank-everything', async () => {
+    // The control for the case above. Blanking from the heredoc start onward
+    // unconditionally would report every suite orphaned, and its negative tests
+    // would pass for the wrong reason (#7273).
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          cat <<EOF\n          unrelated text\n          EOF\n          bash ${SUITE}`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
+  it('a HERE-STRING does not open a body — `<<<` takes no terminator', async () => {
+    // Without the negative lookahead in HEREDOC_START, `<<<` starts a body that
+    // never terminates and swallows the invocation below it.
+    const wf = await mutated([
+      [RUN_LINE, `        run: |\n          grep -q x <<< "$VAR"\n          bash ${SUITE}`],
+    ])
+    assert.deepEqual(orphansIn(SUITES, wf), [])
+  })
+
   it('a suite OUTSIDE scripts/__tests__ loses its step — the widening is load-bearing', async () => {
     // Invoked as `bash scripts/verify-entitlements.test.sh` under
     // `working-directory: packages/desktop`, so this also pins that the rule
@@ -1640,6 +1806,88 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         () => checkedAgainstDisk([], new Set(['b.test.sh']), new Set()),
         /the enumeration lost them/
       )
+    })
+  })
+
+  describe('withoutHeredocBodies (#7645)', () => {
+    const L = s => s.split('\n')
+
+    it('CONTROL: a body with no heredoc is returned unchanged', () => {
+      assert.deepEqual(withoutHeredocBodies(L('echo a\nbash x.test.sh')), ['echo a', 'bash x.test.sh'])
+    })
+
+    it('blanks the body and keeps the lines around it', () => {
+      assert.deepEqual(
+        withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\nEOF\nbash y.test.sh')),
+        ['cat <<EOF', '', '', 'bash y.test.sh']
+      )
+    })
+
+    it('honours a QUOTED terminator', () => {
+      assert.deepEqual(withoutHeredocBodies(L("cat <<'EOF'\nbash x.test.sh\nEOF")), ["cat <<'EOF'", '', ''])
+    })
+
+    it('strips leading TABS before the terminator only for `<<-`', () => {
+      assert.deepEqual(withoutHeredocBodies(L('cat <<-EOF\nbash x.test.sh\n\t\tEOF\nafter')), ['cat <<-EOF', '', '', 'after'])
+      // Plain `<<` does NOT strip tabs, so an indented terminator does not end
+      // the body — the strict direction, which blanks more rather than less.
+      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\n\tEOF\nafter')), ['cat <<EOF', '', '', ''])
+    })
+
+    it('does NOT treat a here-STRING as a heredoc', () => {
+      assert.deepEqual(
+        withoutHeredocBodies(L('grep -q x <<< "$VAR"\nbash y.test.sh')),
+        ['grep -q x <<< "$VAR"', 'bash y.test.sh']
+      )
+    })
+
+    it('blanks to the END when the terminator never appears — loud, not quiet', () => {
+      // The safe direction: an unterminated body hides invocations, which
+      // reports a wired suite as an orphan rather than the reverse. This is the
+      // shape `echo "body<<EOF" >> $GITHUB_OUTPUT` produces in release.yml.
+      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nb')), ['cat <<EOF', '', ''])
+    })
+
+    it('a terminator with trailing text does NOT end the body', () => {
+      // Lenient matching would hand the remaining data lines back as commands.
+      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nEOF >> out\nbash x.test.sh')), ['cat <<EOF', '', '', ''])
+    })
+  })
+
+  describe('isCommandPosition rejects no-exec flags (#7645)', () => {
+    const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
+    const reads = line => invokes(line, S)
+
+    it('CONTROL: the two spellings this repo actually uses still count', () => {
+      assert.ok(reads(`bash ${S}`))
+      assert.ok(reads(`node ${S}`))
+      assert.ok(reads(`bash ./${S}`))
+      assert.ok(reads(`./${S}`))
+      assert.ok(reads(`out=$(bash ${S})`))
+    })
+
+    for (const line of [
+      `bash -n ${S}`,
+      `sh -n ${S}`,
+      `zsh -n ${S}`,
+      `bash --norc -n ${S}`,
+      `node --check ${S}`,
+      `node --help ${S}`,
+      `node --version ${S}`,
+      `bash -c "echo hi" ${S}`,
+    ]) {
+      it(`rejects \`${line.replace(S, '<suite>')}\``, () => {
+        assert.ok(!reads(line), 'a flag that stops the interpreter executing the file is not an invocation')
+      })
+    }
+
+    it('rejects an UNKNOWN flag too — the allowlist is empty by design', () => {
+      // A future `node --test <suite>` is reported as an orphan: a false
+      // positive, loud, and fixed by adding the flag with the reason it
+      // preserves execution. Predicting a shell is unwinnable (#7341), so the
+      // guard cries wolf rather than guessing.
+      assert.ok(!reads(`node --test ${S}`))
+      assert.ok(!reads(`bash -x ${S}`))
     })
   })
 

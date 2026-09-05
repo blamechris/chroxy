@@ -1945,3 +1945,71 @@ And **re-run every measurement you are about to write down**, especially the
 ones that support a conclusion you already believe: two of the four readings
 pasted into this entry were wrong, the conclusion survived them anyway, and that
 is precisely why nobody looked again for a day.
+
+### 30. The flag that stopped the interpreter — `#7645`
+
+Entry 27 records three fail-opens fixed in the anti-orphan guard's
+`isCommandPosition`, and every one of them was about the **command word**:
+`chmod +x ./x`, `cp ./x /tmp/`, `node --version && echo "see x"`. The tail of
+the rule was
+
+```js
+words.slice(1).every((w, i, rest) => w.startsWith('-') || (i === rest.length - 1 && w.endsWith('/')))
+```
+
+— any `-`-prefixed word, unconditionally. **The flags were never looked at**,
+and a flag is exactly how you tell an interpreter not to interpret. Measured
+against the shipped predicate:
+
+```
+WIRED  | bash -n <suite>            | parses, executes NOTHING
+WIRED  | sh -n <suite>              | parses, executes NOTHING
+WIRED  | bash --norc -n <suite>     | the same, behind a harmless flag
+WIRED  | node --check <suite>       | compiles, executes NOTHING
+WIRED  | node --help <suite>        | the argument is ignored entirely
+```
+
+This is entry 12's shape — a value validated under one grammar and re-parsed
+under another. `bash <path>` is checked as a *shell command word*; bash then
+reads `-n` under its own option grammar as *do not execute*. The guard and the
+shell agree on every character and disagree on what happens.
+
+**And `bash -n` is the idiom six lines up.** The `scripts-tests` job runs
+`bash -n "$f"` over every tracked shell script at `ci.yml:1341`, and invokes
+the suites at `ci.yml:1351` onward. "The suite is flaky, let us just
+syntax-check it for now" is a copy of the line eight rows above, the step exits
+0 having executed zero assertions, and this guard — the one written because
+`merge-updater-feeds.test.sh` ran in no step for its whole life — calls it
+wired.
+
+**The fix is an allowlist, and an empty one.** A denylist of no-exec flags is
+entry 15 again: `-n`, `--check`, `-e`, `-p`, `-c`, `--help` are the ones
+somebody thought of, and predicting a shell is unwinnable. All fifteen wired
+invocations in this repo spell **zero** flags — measured, `bash <path>` or
+`node <path>`, one line each — so refusing every flag costs nothing today, and a
+future `node --test <path>` is reported as an ORPHAN: a false positive, loud,
+and answered by adding the flag with the reason it preserves execution.
+
+**A second claim in the same function was false.** Its header credited the
+bare-name rejection with covering heredocs — "a heredoc body line naming a suite
+would otherwise read as running it". It covers the *bare-name* spelling only;
+`cat <<EOF` / `bash <suite>` / `EOF` documents an invocation and read as
+performing one. Heredoc bodies are data, not commands, and are blanked now.
+
+**And the fix for that grew the same defect while being written.** The new
+`HEREDOC_START` constant carried a comment saying a negative lookahead kept
+`<<<` here-strings from opening a body — describing a lookahead the regex did
+not contain. Without it the engine retries one character along, matches the
+trailing `<` of `<<<` as the start of a `<<`, and swallows every line after it.
+The case written alongside caught it on the first run. **Entry 13's shape,
+produced inside the fix for entry 13, for the fourth time in this one file** —
+which is the honest measure of how cheap that sentence is to write and how hard
+it is to see once written.
+
+**Guard against it:** when a guard decides that some text *runs* a file,
+enumerate the ways the same text can be true and the file still not run. The
+command word is the obvious axis and it is the one everybody checks. The others
+— a flag that suppresses execution, a position that is data rather than code
+(a heredoc body, a string literal, a comment) — are found by asking *what would
+I write if I wanted to disable this without deleting the line?* Every answer to
+that question is a test case, and `bash -n` was the first one anybody asked.
