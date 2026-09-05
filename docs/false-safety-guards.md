@@ -1703,15 +1703,30 @@ workflow's own `on:` block, not scoped to `ci.yml` — `repo-relay.yml`
 contributes the `notify` context, and a one-file subject is the mistake entry 27
 had just finished making one directory wide.
 
-**A skipped required check satisfies branch protection, and that turns a
-dependency into a hole.** Twelve of the thirteen required checks declare
-`needs: runner-target`, a one-minute hosted gate job that is not itself
-required. A `needs` failure skips the dependent rather than failing it, and
-GitHub accepts a skipped required check — the same semantics `#7216` relied on
-to argue that requiring a conditional job is safe. So the one job that can stand
-down twelve required suites is the one job whose failure nothing consumes. It
-has never fired (39 successes, 0 failures across a 41-run sample), which is why
-it was never noticed and why it is a latent hole rather than a past incident.
+**A skipped required check is accepted, and that turns a dependency into a
+hole.** Twelve of the thirteen required checks declare `needs: runner-target`, a
+one-minute hosted gate job that is not itself required. A `needs` failure skips
+the dependent rather than failing it, so the one job that can stand down twelve
+required suites is the one job whose failure nothing consumes.
+
+Two halves, and they are not equally established — which matters, because the
+lesson from `#7637` was asserting an unverified causal story inside this very
+document. **Verified in this repo:** a skipped job emits a completed check run
+with conclusion `skipped` (observed organically on `Renovate Config`, at three
+API layers), and this repo's own `/batch-merge` gate hardcodes `SUCCESS` and
+`SKIPPED` as the only accepted states for a required context — so on the
+autonomous merge path the hole is real and is in our own code. **Documented but
+unmeasured here:** that GitHub's merge button treats a skipped *required* check
+as satisfied. No required context has ever reported skipped in this repo, and
+the fork-PR precedent `CONTRIBUTING.md` cites for it never actually ran — one
+fork PR in ~3,500, reporting no checks, predating the `if:` gate it supposedly
+demonstrates. A third state is genuinely different and was measured: a required
+check that produces *no* check run at all does not satisfy protection, it wedges
+the PR (entry 22).
+
+`runner-target` has never fired (39 successes, 0 failures across a 41-run
+sample), which is why this was never noticed and why it is a latent hole rather
+than a past incident.
 
 **Guard against it:** when a roster names members of a set, ask what enumerates
 the SET. If the answer is "a person, when they remember", the roster is a

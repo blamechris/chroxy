@@ -70,7 +70,10 @@ Thanks for your interest in contributing! This document covers how to get starte
   `Desktop (macOS)` / `Desktop (Windows)` release builds run only on tag pushes
   and gate the release pipeline, not PRs. One rostered check is conditional by
   design: `Desktop Rust Tests` runs only for same-repo events, so a fork PR
-  skips it — and a skipped required check still satisfies branch protection.
+  skips it — and a skipped required check is understood to still satisfy branch
+  protection. Understood, not measured: this repo has had one fork PR in ~3,500,
+  it predates that `if:` gate and reported no checks at all, so the precedent
+  behind this sentence has never actually run here (#7641).
   Three guards hold these lists honest:
   `packages/server/tests/contributing-required-checks.test.js` proves every name
   in the roster is a real ci.yml job name;
@@ -104,7 +107,7 @@ gate, which derives its roster from the list above.
 
 | Check | Workflow | Why it is not a merge gate |
 | --- | --- | --- |
-| `Resolve Runner Target` | `ci.yml` | **No good reason — this one is a hole.** Twelve of the thirteen required checks declare `needs: runner-target`, and a `needs` failure SKIPS the dependent, which branch protection accepts as satisfied. So its failure would quietly stand down twelve required suites rather than block. It is a one-minute hosted bash step with no flake history, so requiring it is safe and is the fix. Tracked in #7641. |
+| `Resolve Runner Target` | `ci.yml` | **No good reason — this one is a hole.** Twelve of the thirteen required checks declare `needs: runner-target`. A `needs` failure skips the dependent rather than failing it, and this repo's own `/batch-merge` gate accepts `SKIPPED` as passing for a required context — so on the autonomous merge path its failure would stand down twelve required suites. Whether GitHub's own merge button does the same is documented behaviour but **unmeasured here**: no required context has ever reported skipped in this repo. It is a one-minute hosted bash step with no flake history, so requiring it is cheap either way. Tracked in #7641. |
 | `Detect Changed Paths` | `ci.yml` | Path-filter plumbing whose only live consumer is `Renovate Config`. Same skip-cascade shape as the row above and it should follow the same decision; its `platform` output has no consumer at all (#7642). |
 | `Scripts Tests` | `ci.yml` | **Should be required; not yet wired.** It carries the `bash -n` parse-check over every tracked shell script, `compile-skill-targets --check`, the AGENTS.md sync gate, and all 14 `scripts/__tests__` suites including `merge-updater-feeds.test.sh`, whose subject breaks the desktop auto-updater. Deterministic, no network, no flake history. #7544, #7639. |
 | `Release PR Subject` | `ci.yml` | **Should be required; not yet wired.** Deterministic and content-derived; it is the check that would have caught #4627 and the 463-commit untagged gap in #7176. #7199. |
