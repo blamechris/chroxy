@@ -2780,6 +2780,189 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Restore ONE saved session: resolve its container binding, create the
+   * session, then re-seed everything createSession does NOT (usage counters,
+   * the auto-name counter, message history, lastActivityAt).
+   *
+   * Extracted from restoreState()'s loop by #7625 so the boot path and the
+   * operator-triggered retry drive the SAME recipe. Keeping two copies was the
+   * alternative and it is the defect class this repo already carries a lint
+   * for after three recurrences (scripts/lint-session-opt-forwarding.sh): a
+   * ~100-line option-forwarding list, hand-maintained twice, drifts. The
+   * extraction was a verbatim move — the block was asserted byte-identical
+   * after re-indenting, not retyped.
+   *
+   * THROWS on a SYNCHRONOUS failure (container binding refused, preflight,
+   * SessionLimitError, a sync start() rejection re-thrown by createSession).
+   * The caller owns the failed-restore bookkeeping, because the two callers
+   * want different things: boot collects them, retry re-parks one.
+   *
+   * An ASYNCHRONOUS start() rejection is NOT raised here and must not be
+   * handled by the caller either — createSession wires it to
+   * _handleAsyncStartFailure, which re-parks an `isRestore` session on its
+   * own. That is why `isRestore: true` below is load-bearing for the retry
+   * path and not merely inherited from the boot path.
+   *
+   * @param {object} saved A serialized entry (see _serializeSessionEntry).
+   * @param {boolean} seedHistory Seed saved.history onto the ring buffer.
+   *   False only for a legacy v0 state file, which carries no history.
+   * @returns {string} The new session id.
+   */
+  _attemptRestoreOne(saved, seedHistory) {
+    // #7561: resolve (and re-validate) the container binding FIRST, so a
+    // session whose environment is gone / stopped / disabled throws into the
+    // failed-restore catch below instead of being created host-side or into
+    // a freshly-spawned ad-hoc container. Nothing has been constructed at
+    // this point, which is what makes the refusal total.
+    const containerBinding = this._resolveRestoredContainerBinding(saved)
+    // skipPersist: we rewrite the state file once at the end of
+    // restoreState, after history and cost budget have been reseeded.
+    // Flushing per-session here would overwrite the on-disk file with
+    // empty history for all not-yet-processed sessions, erasing the
+    // data we're trying to restore.
+    const sessionId = this.createSession({
+      // #4983 — reuse the persisted ID so dashboard's localStorage-
+      // cached activeSessionId still resolves after a daemon restart.
+      // createSession validates the format (32-char lower-case hex);
+      // a malformed or duplicate id falls back to randomBytes so the
+      // call still succeeds. The dashboard's #4982 SESSION_NOT_FOUND
+      // chip is the safety net for the malformed/missing/cross-host
+      // cases that this preservation can't help with.
+      preserveId: saved.id,
+      name: saved.name,
+      cwd: saved.cwd,
+      model: saved.model,
+      permissionMode: saved.permissionMode,
+      resumeSessionId: saved.sdkSessionId,
+      provider: saved.provider || undefined,
+      // #5310 (WP-0.4) — rebind to the existing worktree (don't recreate).
+      // Only string paths flow through; non-worktree sessions and older
+      // state files (no field) pass undefined and take the normal path.
+      restoreWorktreePath: typeof saved.worktreePath === 'string' && saved.worktreePath.length > 0
+        ? saved.worktreePath
+        : undefined,
+      restoreWorktreeRepoDir: typeof saved.worktreeRepoDir === 'string' && saved.worktreeRepoDir.length > 0
+        ? saved.worktreeRepoDir
+        : undefined,
+      // #4664: restore per-session toggle/string settings via the
+      // shared registry. Each registry entry's `acceptFromConstructor`
+      // predicate drops malformed values to `undefined` so
+      // createSession applies BaseSession's default — exact match for
+      // the pre-refactor per-knob behaviour, and older state files
+      // (without these fields) round-trip cleanly.
+      ...restorePerSessionSettings(saved),
+      // #3639: forward the persisted skip-pattern source. Non-string /
+      // empty values are dropped (createSession ignores them) so older
+      // state files restore as null. Kept out of the registry because
+      // the empty-string-as-null wire shape doesn't fit the
+      // boolean/string factory.
+      promptEvaluatorSkipPattern: typeof saved.promptEvaluatorSkipPattern === 'string' && saved.promptEvaluatorSkipPattern.length > 0
+        ? saved.promptEvaluatorSkipPattern
+        : undefined,
+      // #3540: forward the persisted stdin_disabled latch. Only
+      // truthy values flip the flag; pre-#3540 state files (no
+      // field) restore as `false`. The SdkSession constructor
+      // initialises `_stdinForwardingDisabled` from this opt and
+      // the existing `_attachSidecarProcessListeners` short-circuit
+      // ensures no warn/error is re-emitted on restore — clients
+      // observe the disabled state via session_list metadata.
+      stdinForwardingDisabled: saved.stdinForwardingDisabled === true ? true : undefined,
+      // #6824: forward the persisted parked MCP server set so the respawned
+      // BYOK fleet skips starting them. Non-array / empty values are
+      // dropped (createSession only forwards a non-empty string array), so
+      // older state files restore with nothing parked.
+      disabledMcpServers: Array.isArray(saved.disabledMcpServers) && saved.disabledMcpServers.length > 0
+        ? saved.disabledMcpServers.filter((n) => typeof n === 'string')
+        : undefined,
+      // Restore the previously-booted model (#3700b) so the dashboard
+      // dropdown shows the real model on reconnect, not the registry
+      // fallback. createSession() ignores non-string / empty values so
+      // older state files (pre-#3700b) restore cleanly as null.
+      bootedModel: typeof saved.bootedModel === 'string' && saved.bootedModel.length > 0
+        ? saved.bootedModel
+        : undefined,
+      // Restore the messageId counter so new turns don't reuse old IDs
+      // and collide with dashboard-cached messages (#3700).
+      messageCounter: typeof saved.messageCounter === 'number' && Number.isFinite(saved.messageCounter) && saved.messageCounter >= 0
+        ? saved.messageCounter
+        : undefined,
+      // Mailbox (#5914 follow-up): re-register the persisted AGENT_COMM_ID so
+      // a restored session is reachable by the live-interrupt route again.
+      // createSession validates it (drops bad values to a no-op); older
+      // state files (no field) restore with no mailbox identity.
+      agentCommId: typeof saved.agentCommId === 'string' && saved.agentCommId.length > 0
+        ? saved.agentCommId
+        : undefined,
+      // #7561: environmentId + containerId/containerUser/containerCliPath,
+      // re-resolved above. Empty for a non-container session, so this spread
+      // is a no-op on every path that had one before. Forwarding
+      // `environmentId` is also what re-tags `env.sessions` — createSession's
+      // existing `addSession` call does it, so the environment's live-session
+      // set (and the #7562 destroy guard that reads it) is true again after a
+      // restart.
+      ...containerBinding,
+      skipPersist: true,
+      // #5316 (WP-2.2) — mark this as a restore so an ASYNC provider
+      // start() rejection (claude-tui PTY warmup death) preserves the
+      // restored history + worktree instead of destroying them.
+      isRestore: true,
+    })
+    // #4089 / #4124: restore the per-session running totals + the
+    // threshold-notified latch onto the freshly-created entry. We do
+    // this AFTER createSession so the entry exists, and BEFORE
+    // history replay so a synthetic result event during replay
+    // (unlikely but defensive) doesn't double-count. Validate shape:
+    // missing / corrupt cumulativeUsage falls back to all-zero;
+    // non-boolean costThresholdNotified falls back to false.
+    //
+    // Per-field clamps:
+    //   - Token counts + turnsBilled are monotonic counters; corrupt
+    //     state with negatives clamps to 0.
+    //   - costUsd accepts negatives per #4099 (refund / credit
+    //     adjustments). Only non-finite values fall back to 0.
+    const restoredEntry = this._sessions.get(sessionId)
+    // #7082: the restore path reads ~/.chroxy/session-state.json, so a hand-edited
+    // or corrupt file can carry a fractional / past-2^53 / negative counter straight
+    // into the live snapshot. Same coercion as the accumulate path above.
+    if (restoredEntry) {
+      if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
+        const u = saved.cumulativeUsage
+        restoredEntry.cumulativeUsage = {
+          inputTokens: toWireCount(u.inputTokens),
+          outputTokens: toWireCount(u.outputTokens),
+          cacheReadTokens: toWireCount(u.cacheReadTokens),
+          cacheCreationTokens: toWireCount(u.cacheCreationTokens),
+          // costUsd is NOT coerced: `z.number().finite()` with no `.int()`, and
+          // legitimately negative for a refund / credit adjustment (#4099).
+          costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
+          turnsBilled: toWireCount(u.turnsBilled),
+        }
+      }
+      if (saved.costThresholdNotified === true) {
+        restoredEntry.costThresholdNotified = true
+      }
+    }
+    // Keep _sessionCounter ahead of any restored "Session N" names so the
+    // first new auto-named session after restore never collides (#2338).
+    this._advanceSessionCounterPast(saved.name)
+    // Restore message history if present (v1+).
+    // Sweep any `tool_start` that lacks a matching `tool_result` and
+    // splice in a synthetic interrupted result (#4617) BEFORE seeding
+    // history so the subsequent dashboard history replay never sees a
+    // dangling tool_start. Without this, an unresolved tool_use from
+    // before shutdown re-enters `activeTools` on replay and never gets
+    // cleared — the footer shows "Running X · Nh Mm" forever.
+    if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
+      const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
+      this._history.setHistory(sessionId, swept)
+    }
+    if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
+      this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
+    }
+    return sessionId
+  }
+
+  /**
    * Restore session state from disk after a restart.
    * Creates new sessions using saved parameters. SdkSession can resume
    * via resumeSessionId; CliSession starts fresh (process state is ephemeral).
@@ -2817,157 +3000,8 @@ export class SessionManager extends EventEmitter {
     const oldToNew = new Map() // old serialized session ID → new session ID
     for (const saved of state.sessions) {
       try {
-        // #7561: resolve (and re-validate) the container binding FIRST, so a
-        // session whose environment is gone / stopped / disabled throws into the
-        // failed-restore catch below instead of being created host-side or into
-        // a freshly-spawned ad-hoc container. Nothing has been constructed at
-        // this point, which is what makes the refusal total.
-        const containerBinding = this._resolveRestoredContainerBinding(saved)
-        // skipPersist: we rewrite the state file once at the end of
-        // restoreState, after history and cost budget have been reseeded.
-        // Flushing per-session here would overwrite the on-disk file with
-        // empty history for all not-yet-processed sessions, erasing the
-        // data we're trying to restore.
-        const sessionId = this.createSession({
-          // #4983 — reuse the persisted ID so dashboard's localStorage-
-          // cached activeSessionId still resolves after a daemon restart.
-          // createSession validates the format (32-char lower-case hex);
-          // a malformed or duplicate id falls back to randomBytes so the
-          // call still succeeds. The dashboard's #4982 SESSION_NOT_FOUND
-          // chip is the safety net for the malformed/missing/cross-host
-          // cases that this preservation can't help with.
-          preserveId: saved.id,
-          name: saved.name,
-          cwd: saved.cwd,
-          model: saved.model,
-          permissionMode: saved.permissionMode,
-          resumeSessionId: saved.sdkSessionId,
-          provider: saved.provider || undefined,
-          // #5310 (WP-0.4) — rebind to the existing worktree (don't recreate).
-          // Only string paths flow through; non-worktree sessions and older
-          // state files (no field) pass undefined and take the normal path.
-          restoreWorktreePath: typeof saved.worktreePath === 'string' && saved.worktreePath.length > 0
-            ? saved.worktreePath
-            : undefined,
-          restoreWorktreeRepoDir: typeof saved.worktreeRepoDir === 'string' && saved.worktreeRepoDir.length > 0
-            ? saved.worktreeRepoDir
-            : undefined,
-          // #4664: restore per-session toggle/string settings via the
-          // shared registry. Each registry entry's `acceptFromConstructor`
-          // predicate drops malformed values to `undefined` so
-          // createSession applies BaseSession's default — exact match for
-          // the pre-refactor per-knob behaviour, and older state files
-          // (without these fields) round-trip cleanly.
-          ...restorePerSessionSettings(saved),
-          // #3639: forward the persisted skip-pattern source. Non-string /
-          // empty values are dropped (createSession ignores them) so older
-          // state files restore as null. Kept out of the registry because
-          // the empty-string-as-null wire shape doesn't fit the
-          // boolean/string factory.
-          promptEvaluatorSkipPattern: typeof saved.promptEvaluatorSkipPattern === 'string' && saved.promptEvaluatorSkipPattern.length > 0
-            ? saved.promptEvaluatorSkipPattern
-            : undefined,
-          // #3540: forward the persisted stdin_disabled latch. Only
-          // truthy values flip the flag; pre-#3540 state files (no
-          // field) restore as `false`. The SdkSession constructor
-          // initialises `_stdinForwardingDisabled` from this opt and
-          // the existing `_attachSidecarProcessListeners` short-circuit
-          // ensures no warn/error is re-emitted on restore — clients
-          // observe the disabled state via session_list metadata.
-          stdinForwardingDisabled: saved.stdinForwardingDisabled === true ? true : undefined,
-          // #6824: forward the persisted parked MCP server set so the respawned
-          // BYOK fleet skips starting them. Non-array / empty values are
-          // dropped (createSession only forwards a non-empty string array), so
-          // older state files restore with nothing parked.
-          disabledMcpServers: Array.isArray(saved.disabledMcpServers) && saved.disabledMcpServers.length > 0
-            ? saved.disabledMcpServers.filter((n) => typeof n === 'string')
-            : undefined,
-          // Restore the previously-booted model (#3700b) so the dashboard
-          // dropdown shows the real model on reconnect, not the registry
-          // fallback. createSession() ignores non-string / empty values so
-          // older state files (pre-#3700b) restore cleanly as null.
-          bootedModel: typeof saved.bootedModel === 'string' && saved.bootedModel.length > 0
-            ? saved.bootedModel
-            : undefined,
-          // Restore the messageId counter so new turns don't reuse old IDs
-          // and collide with dashboard-cached messages (#3700).
-          messageCounter: typeof saved.messageCounter === 'number' && Number.isFinite(saved.messageCounter) && saved.messageCounter >= 0
-            ? saved.messageCounter
-            : undefined,
-          // Mailbox (#5914 follow-up): re-register the persisted AGENT_COMM_ID so
-          // a restored session is reachable by the live-interrupt route again.
-          // createSession validates it (drops bad values to a no-op); older
-          // state files (no field) restore with no mailbox identity.
-          agentCommId: typeof saved.agentCommId === 'string' && saved.agentCommId.length > 0
-            ? saved.agentCommId
-            : undefined,
-          // #7561: environmentId + containerId/containerUser/containerCliPath,
-          // re-resolved above. Empty for a non-container session, so this spread
-          // is a no-op on every path that had one before. Forwarding
-          // `environmentId` is also what re-tags `env.sessions` — createSession's
-          // existing `addSession` call does it, so the environment's live-session
-          // set (and the #7562 destroy guard that reads it) is true again after a
-          // restart.
-          ...containerBinding,
-          skipPersist: true,
-          // #5316 (WP-2.2) — mark this as a restore so an ASYNC provider
-          // start() rejection (claude-tui PTY warmup death) preserves the
-          // restored history + worktree instead of destroying them.
-          isRestore: true,
-        })
+        const sessionId = this._attemptRestoreOne(saved, hasVersion)
         if (saved.id) oldToNew.set(saved.id, sessionId)
-        // #4089 / #4124: restore the per-session running totals + the
-        // threshold-notified latch onto the freshly-created entry. We do
-        // this AFTER createSession so the entry exists, and BEFORE
-        // history replay so a synthetic result event during replay
-        // (unlikely but defensive) doesn't double-count. Validate shape:
-        // missing / corrupt cumulativeUsage falls back to all-zero;
-        // non-boolean costThresholdNotified falls back to false.
-        //
-        // Per-field clamps:
-        //   - Token counts + turnsBilled are monotonic counters; corrupt
-        //     state with negatives clamps to 0.
-        //   - costUsd accepts negatives per #4099 (refund / credit
-        //     adjustments). Only non-finite values fall back to 0.
-        const restoredEntry = this._sessions.get(sessionId)
-        // #7082: the restore path reads ~/.chroxy/session-state.json, so a hand-edited
-        // or corrupt file can carry a fractional / past-2^53 / negative counter straight
-        // into the live snapshot. Same coercion as the accumulate path above.
-        if (restoredEntry) {
-          if (saved.cumulativeUsage && typeof saved.cumulativeUsage === 'object') {
-            const u = saved.cumulativeUsage
-            restoredEntry.cumulativeUsage = {
-              inputTokens: toWireCount(u.inputTokens),
-              outputTokens: toWireCount(u.outputTokens),
-              cacheReadTokens: toWireCount(u.cacheReadTokens),
-              cacheCreationTokens: toWireCount(u.cacheCreationTokens),
-              // costUsd is NOT coerced: `z.number().finite()` with no `.int()`, and
-              // legitimately negative for a refund / credit adjustment (#4099).
-              costUsd: Number.isFinite(u.costUsd) ? u.costUsd : 0,
-              turnsBilled: toWireCount(u.turnsBilled),
-            }
-          }
-          if (saved.costThresholdNotified === true) {
-            restoredEntry.costThresholdNotified = true
-          }
-        }
-        // Keep _sessionCounter ahead of any restored "Session N" names so the
-        // first new auto-named session after restore never collides (#2338).
-        this._advanceSessionCounterPast(saved.name)
-        // Restore message history if present (v1+).
-        // Sweep any `tool_start` that lacks a matching `tool_result` and
-        // splice in a synthetic interrupted result (#4617) BEFORE seeding
-        // history so the subsequent dashboard history replay never sees a
-        // dangling tool_start. Without this, an unresolved tool_use from
-        // before shutdown re-enters `activeTools` on replay and never gets
-        // cleared — the footer shows "Running X · Nh Mm" forever.
-        if (hasVersion && Array.isArray(saved.history) && saved.history.length > 0) {
-          const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
-          this._history.setHistory(sessionId, swept)
-        }
-        if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
-          this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
-        }
         if (!firstId) firstId = sessionId
         log.info(`Restored session "${saved.name}" (SDK resume: ${saved.sdkSessionId || 'none'})`)
       } catch (err) {
@@ -3215,6 +3249,125 @@ export class SessionManager extends EventEmitter {
     this._failedRestores.delete(sessionId)
     this._flushPersist()
     return true
+  }
+
+  /**
+   * Retry a parked failed restore (#7625) — the operator-triggered second
+   * attempt at a session the boot restore could not bring back.
+   *
+   * This is the caller `clearFailedRestore` never had. The dominant real case
+   * is an environment that was down at boot and is back now (a host reboot,
+   * since the `docker run` args carry no `--restart` policy), so the retry is
+   * non-destructive by design: nothing is discarded on failure, the entry is
+   * simply re-parked with the history and worktree it already had.
+   *
+   * ORDERING IS LOAD-BEARING, in three places:
+   *
+   * 1. The entry is removed from `_failedRestores` BEFORE the attempt, and
+   *    removing it AT ALL is what the tests actually pin. `serializeState()`
+   *    writes one entry per `_sessions` id AND, in a separate unguarded loop,
+   *    one per `_failedRestores` entry, so an entry left parked after a
+   *    successful retry puts the id on disk TWICE — and the next boot's
+   *    `preserveId` path treats a duplicate as malformed and silently mints a
+   *    random id instead, giving the operator a phantom second session.
+   *
+   *    Doing it BEFORE rather than after is defence-in-depth, and the honest
+   *    scope is narrower than it looks: mutation-testing this method showed
+   *    that moving the delete after the attempt — with or without
+   *    `skipPersist` — is NOT observable, because the success path flushes
+   *    again after the delete and overwrites any bad intermediate write. What
+   *    delete-first buys is that the two maps are never simultaneously live
+   *    for this id, so a crash inside that window cannot leave a duplicate on
+   *    disk, and the invariant survives `skipPersist` being dropped later.
+   *
+   * 2. The flush happens only AFTER a successful attempt.
+   *    `_attemptRestoreOne` passes `skipPersist: true` for the reason
+   *    createSession's own comment gives: flushing inside createSession runs
+   *    BEFORE history is re-seeded and would write EMPTY history over the very
+   *    data being restored. Flushing here instead is what makes that safe.
+   *    The failure path deliberately does NOT flush — delete-then-re-register
+   *    leaves `_failedRestores` byte-identical, so there is nothing to write.
+   *
+   * 3. The whole thing runs under the per-session lock, so two operators (or a
+   *    double-tapped button) cannot interleave a delete against an attempt.
+   *
+   * A SECOND async start() rejection needs no handling here: `_attemptRestoreOne`
+   * passes `isRestore: true`, so `_handleAsyncStartFailure` re-parks it exactly
+   * as it does on the boot path. That means `ok: true` reports a session that
+   * STARTED, not one that has proven healthy — same contract as boot restore.
+   *
+   * @param {string} sessionId The parked session's id.
+   * @returns {Promise<{ok: true, sessionId: string} | {ok: false, code: string, message: string}>}
+   */
+  async retryFailedRestore(sessionId) {
+    const release = await this._locks.acquire(sessionId)
+    try {
+      const parked = this._failedRestores.get(sessionId)
+      if (!parked) {
+        // Distinguishable from a failed attempt: the caller needs to tell "your
+        // button is stale, this entry is gone" (a concurrent retry won the race,
+        // or _pruneStaleFailedRestores dropped it at its TTL) from "the retry
+        // ran and failed again".
+        return {
+          ok: false,
+          code: 'FAILED_RESTORE_NOT_FOUND',
+          message: `No failed-restore entry for session ${sessionId}`,
+        }
+      }
+      const { saved } = parked
+      this._failedRestores.delete(sessionId)
+
+      try {
+        const restoredId = this._attemptRestoreOne(saved, true)
+        this._flushPersistOrWarn(restoredId)
+        log.info(`Retry restored session ${JSON.stringify(String(saved.name))} (${saved.provider || 'default'})`)
+        return { ok: true, sessionId: restoredId }
+      } catch (err) {
+        // A throw AFTER createSession returned (a re-seed step) leaves a LIVE
+        // session behind. Re-parking that id as well is precisely the duplicate
+        // this method's step 1 exists to prevent, so in that case keep the live
+        // session — it is usable — and report the partial failure instead. The
+        // ordinary case (createSession threw, having torn its own phantom entry
+        // down and re-thrown) leaves nothing in _sessions and re-parks normally.
+        const orphan = this._sessions.has(sessionId)
+        if (orphan) {
+          this._flushPersistOrWarn(sessionId)
+          log.error(`Retry for ${sessionId} created the session but failed to re-seed it: ${err?.stack || err}`)
+          return {
+            ok: false,
+            code: 'RESTORE_INCOMPLETE',
+            message: `Session was recreated but could not be fully restored: ${err?.message || String(err)}`,
+          }
+        }
+        // Re-park with the SAME `saved` object. #7627: a failed restore's
+        // lastActivityAt is frozen at the value it had when first parked, and
+        // re-using `saved` rather than re-serializing is what keeps it frozen —
+        // re-stamping it here would push the entry's 30-day TTL out on every
+        // retry, so a chronically-failing session could never age out.
+        this._registerFailedRestore(saved, err)
+        this._advanceSessionCounterPast(saved.name)
+        log.error(`Retry failed to restore session ${JSON.stringify(String(saved.name))}: ${err?.message || err}`)
+        this.emit('session_restore_failed', {
+          sessionId,
+          name: saved.name,
+          provider: saved.provider || this._providerType,
+          cwd: saved.cwd,
+          model: saved.model || null,
+          permissionMode: saved.permissionMode || null,
+          errorCode: err?.code || 'RESTORE_FAILED',
+          errorMessage: err?.message || String(err),
+          originalHistoryPreserved: true,
+          historyLength: Array.isArray(saved.history) ? saved.history.length : 0,
+        })
+        return {
+          ok: false,
+          code: err?.code || 'RESTORE_FAILED',
+          message: err?.message || String(err),
+        }
+      }
+    } finally {
+      release()
+    }
   }
 
   /**
