@@ -223,6 +223,12 @@ export function createEmptyConnectionScope() {
     connectedClients: [],
     // Web-task list is per daemon.
     webTasks: [],
+    // #7625: the failed-restore roster is the OLD daemon's parked sessions —
+    // ids, names and absolute host cwds that mean nothing on another server.
+    // Reset to `null` rather than `[]` so a reconnected tab reads "not asked
+    // yet" and re-requests, instead of rendering an authoritative-looking
+    // "nothing failed".
+    failedRestores: null,
     // Project commands differ per daemon and per session cwd.
     slashCommands: [],
     // A listing of the OLD daemon's filesystem.

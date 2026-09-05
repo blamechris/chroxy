@@ -268,6 +268,66 @@ export const ServerSessionRestoreFailedSchema = z.object({
 })
 
 /**
+ * #7625: the parked failed-restore roster, in reply to `list_failed_restores`.
+ *
+ * Same per-entry shape as {@link ServerSessionRestoreFailedSchema} (both are
+ * built from `SessionManager.getFailedRestores()`), because the push and the
+ * pull describe the same thing and a second, drifting shape for it is exactly
+ * what this repo keeps paying for. Note `historyLength` rather than the history
+ * itself: the roster says how much is preserved, never its content, so a
+ * discard affordance built on this can say what it would destroy without the
+ * server having shipped it.
+ *
+ * Dashboard-only, like the environment_* family (PLATFORM_SPECIFIC in
+ * packages/protocol/tests/handler-coverage.test.js). The mobile app keeps the
+ * existing `session_restore_failed` toast: it has no list surface, and an
+ * unknown type falls through both clients' graceful default case.
+ */
+export const ServerFailedRestoresListSchema = z.object({
+  type: z.literal('failed_restores_list'),
+  /**
+   * Set when the caller was refused (a pairing-bound token). The reply is a
+   * DEGRADED, schema-valid snapshot rather than an error, following the
+   * session-scoped-survey shape in docs/security/bearer-token-authority.md §4:
+   * a client that only ever receives one reply type cannot be left waiting on
+   * a reply that never comes. `restores` is empty in that case — refused and
+   * genuinely-empty are distinguished by this flag, not by the array.
+   */
+  refused: z.boolean().optional(),
+  code: z.string().optional(),
+  restores: z.array(z.object({
+    sessionId: z.string(),
+    name: z.string(),
+    provider: z.string(),
+    cwd: z.string().optional(),
+    model: z.string().nullable().optional(),
+    permissionMode: z.string().nullable().optional(),
+    errorCode: z.string(),
+    errorMessage: z.string(),
+    needsAttention: z.boolean().optional(),
+    historyLength: z.number().optional(),
+  })),
+})
+
+/**
+ * #7625: the reply to `retry_failed_restore`.
+ *
+ * `ok: false` with `code: 'FAILED_RESTORE_NOT_FOUND'` is deliberately
+ * distinguishable from a re-failure: it means the entry is already gone (a
+ * concurrent retry won, or the 30-day TTL pruned it), i.e. the operator's
+ * button was stale — not that the retry ran and failed. A renewed failure
+ * ALSO arrives as a fresh `session_restore_failed` broadcast, so a client that
+ * only listens for that still converges.
+ */
+export const ServerRetryFailedRestoreResultSchema = z.object({
+  type: z.literal('retry_failed_restore_result'),
+  sessionId: z.string(),
+  ok: z.boolean(),
+  code: z.string().optional(),
+  message: z.string().optional(),
+})
+
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

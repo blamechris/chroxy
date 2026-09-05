@@ -148,6 +148,8 @@ function clientCoverage(): { inApp: (t: string) => boolean; inDash: (t: string) 
 // pairing-approval banners, the prompt evaluator, the skills panel, the monthly
 // budget meter); mobile parity is a tracked follow-up under the cited epic.
 const DASHBOARD_ONLY = new Set<string>([
+  'failed_restores_list',       // #7625 parked failed-restore roster — the surface is a host-level operator console (a failed restore is absent from session_list, so no per-session surface can host it) and the mobile app has no non-session-scoped list to put it in; the app keeps the unchanged session_restore_failed toast. Mobile parity is not planned rather than deferred
+  'retry_failed_restore_result',// #7625 retry ack — rides with the roster above; only a client that can SHOW the roster can offer the retry that produces this
   'git_create_pr_result',       // #6876 in-app PR creation reply — GitPanel "Create PR" flow is dashboard-only for v1; mobile PR-creation UI is a tracked follow-up
   'session_pr_status',          // #7344 session PR/CI status chip — dashboard-only for the display slice (the mobile app header has no equivalent chip); mobile parity is #7425
   'session_pr_threads',         // #7430 unresolved review-thread count for the CI prefill line — dashboard-only because its only consumer (the CI chip's prefill action) is; mobile parity rides with #7425

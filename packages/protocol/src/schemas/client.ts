@@ -1398,6 +1398,30 @@ export const ListEnvironmentsSchema = z.object({
 // `session_destroyed` for each) and THEN the environment. Optional and strictly
 // boolean; absent/false means "refuse if anything is running in there", which is
 // the default the dashboard's Destroy button relies on.
+// #7625: the two failed-restore messages. A session the boot restore could not
+// bring back is parked server-side with its history and worktree preserved;
+// until #7625 nothing could act on it (`clearFailedRestore` had no callers).
+//
+// AUTHORITY (see docs/security/bearer-token-authority.md §4):
+//   - `list_failed_restores` REFUSES pairing-bound clients. The reply carries
+//     `cwd` (an absolute host path) plus a roster of sibling sessions the bound
+//     token has no right to enumerate — the same payload shape that had
+//     `list_environments` refused rather than redacted in #7596.
+//   - `retry_failed_restore` stops at the UNBOUND bar rather than strict
+//     primary. The caller supplies only a sessionId: the provider, cwd, model
+//     and argv all come from the entry the daemon persisted itself, so there is
+//     no "can the caller choose a binary, argv or environment" escalation
+//     (§9 step 4). That makes it `destroy_environment` (acts on existing state),
+//     not `create_environment` (caller-chosen cwd/name/limits).
+export const ListFailedRestoresSchema = z.object({
+  type: z.literal('list_failed_restores'),
+})
+
+export const RetryFailedRestoreSchema = z.object({
+  type: z.literal('retry_failed_restore'),
+  sessionId: z.string().min(1).max(256),
+})
+
 export const DestroyEnvironmentSchema = z.object({
   type: z.literal('destroy_environment'),
   environmentId: z.string().max(256),
@@ -1979,6 +2003,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   CreateEnvironmentSchema,
   ListEnvironmentsSchema,
   DestroyEnvironmentSchema,
+  ListFailedRestoresSchema,
+  RetryFailedRestoreSchema,
   GetEnvironmentSchema,
   EvaluateDraftSchema,
   HostStatusRequestSchema,

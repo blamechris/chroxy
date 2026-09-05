@@ -3,6 +3,7 @@ import { randomBytes } from 'crypto'
 import { statSync, mkdirSync, rmSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { execFileSync } from 'child_process'
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
@@ -3315,6 +3316,32 @@ export class SessionManager extends EventEmitter {
         }
       }
       const { saved } = parked
+
+      // DEFENCE IN DEPTH, and deliberately not presented as more than that.
+      // A user-shell session cannot currently BE parked: serializeState()
+      // skips `isUserShell` entries so one is never persisted or restored from
+      // disk, and _handleAsyncStartFailure's re-park branch requires
+      // `entry._isRestore`, which a fresh user-shell session never has. Both
+      // were verified before this check was written, so it guards a state that
+      // is unreachable today.
+      //
+      // It is here anyway because the reachability argument rests on two
+      // invariants maintained in OTHER methods, and the strict-primary token
+      // gate that would otherwise cover this lives only in the WS layer
+      // (handleCreateSession) — so a retry driven from anywhere else would
+      // bypass it. Placed in SessionManager rather than the handler so it
+      // covers every caller, not just the one that exists now.
+      //
+      // Do NOT delete this as dead code; its test constructs the entry
+      // directly to keep the invariant pinned.
+      if (saved.provider === USER_SHELL_PROVIDER) {
+        return {
+          ok: false,
+          code: 'RETRY_FORBIDDEN_USER_SHELL',
+          message: 'A user-shell session cannot be restored — it has no resumable state and re-spawning one would bypass the userShell.enabled gate.',
+        }
+      }
+
       this._failedRestores.delete(sessionId)
 
       try {

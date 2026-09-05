@@ -194,6 +194,56 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
     historyLength: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 /**
+ * #7625: the parked failed-restore roster, in reply to `list_failed_restores`.
+ *
+ * Same per-entry shape as {@link ServerSessionRestoreFailedSchema} (both are
+ * built from `SessionManager.getFailedRestores()`), because the push and the
+ * pull describe the same thing and a second, drifting shape for it is exactly
+ * what this repo keeps paying for. Note `historyLength` rather than the history
+ * itself: the roster says how much is preserved, never its content, so a
+ * discard affordance built on this can say what it would destroy without the
+ * server having shipped it.
+ *
+ * Dashboard-only, like the environment_* family (PLATFORM_SPECIFIC in
+ * packages/protocol/tests/handler-coverage.test.js). The mobile app keeps the
+ * existing `session_restore_failed` toast: it has no list surface, and an
+ * unknown type falls through both clients' graceful default case.
+ */
+export declare const ServerFailedRestoresListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"failed_restores_list">;
+    refused: z.ZodOptional<z.ZodBoolean>;
+    code: z.ZodOptional<z.ZodString>;
+    restores: z.ZodArray<z.ZodObject<{
+        sessionId: z.ZodString;
+        name: z.ZodString;
+        provider: z.ZodString;
+        cwd: z.ZodOptional<z.ZodString>;
+        model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        permissionMode: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        errorCode: z.ZodString;
+        errorMessage: z.ZodString;
+        needsAttention: z.ZodOptional<z.ZodBoolean>;
+        historyLength: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+/**
+ * #7625: the reply to `retry_failed_restore`.
+ *
+ * `ok: false` with `code: 'FAILED_RESTORE_NOT_FOUND'` is deliberately
+ * distinguishable from a re-failure: it means the entry is already gone (a
+ * concurrent retry won, or the 30-day TTL pruned it), i.e. the operator's
+ * button was stale — not that the retry ran and failed. A renewed failure
+ * ALSO arrives as a fresh `session_restore_failed` broadcast, so a client that
+ * only listens for that still converges.
+ */
+export declare const ServerRetryFailedRestoreResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"retry_failed_restore_result">;
+    sessionId: z.ZodString;
+    ok: z.ZodBoolean;
+    code: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
  * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
  * could not be flushed to disk — disk full, locked file, read-only home. The
  * write is atomic so on-disk state isn't corrupted, but the in-memory change

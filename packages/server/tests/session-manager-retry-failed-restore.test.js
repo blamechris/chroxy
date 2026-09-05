@@ -198,6 +198,25 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
     assert.deepEqual(serializedIds(sm), [saved.id], 're-parked entry serializes exactly once')
   })
 
+  // The parked entry is constructed DIRECTLY here because production cannot
+  // currently produce one: serializeState() skips isUserShell entries so a
+  // user-shell session is never persisted or restored, and the re-park branch
+  // in _handleAsyncStartFailure requires `_isRestore`, which a fresh user-shell
+  // session never has. The guard is defence-in-depth for those two invariants
+  // being maintained elsewhere — this test is what stops it being deleted as
+  // dead code, and what would catch it silently regressing to a no-op.
+  it('refuses to retry a user-shell session (defence in depth)', async () => {
+    makeSm()
+    const saved = park(sm, dir, { provider: 'user-shell' })
+
+    const result = await sm.retryFailedRestore(saved.id)
+
+    assert.equal(result.ok, false)
+    assert.equal(result.code, 'RETRY_FORBIDDEN_USER_SHELL')
+    assert.equal(sm._failedRestores.has(saved.id), true, 'the entry is left parked, not consumed')
+    assert.equal(sm._sessions.has(saved.id), false, 'no shell was spawned')
+  })
+
   it('reports a distinguishable code for an entry that is not parked', async () => {
     makeSm()
 

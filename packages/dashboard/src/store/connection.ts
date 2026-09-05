@@ -872,6 +872,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeModel: null,
   availableProviders: [],
   environments: [],
+  // #7625: null = never asked; [] = asked and nothing failed.
+  failedRestores: null,
+  failedRestoresRefused: false,
   pairingRefreshedCount: 0,
   availableModels: [],
   availableModelsProvider: null,
@@ -3184,6 +3187,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // from an ALREADY-disconnected tab clears them too. These were sixteen literals
       // here; the reasons for each moved with them into `createEmptyConnectionScope()`.
       ...createEmptyConnectionScope(),
+      // #7625 — the refusal verdict for the failed-restore roster. Not a
+      // Record/Set/array, so the roster in `createEmptyConnectionScope()` does
+      // not reach it; same mechanism as `transcriptViewer` below/above — an
+      // explicit literal at BOTH full-reset sites. Stale here would render
+      // server A's "you may not see this" as server B's.
+      failedRestoresRefused: false,
       // #7572 — the two #6691 (S-3) orchestration in-flight markers. The socket's
       // `onclose` handler clears these on a transport drop (see ~L2895) because
       // the reply can never arrive on the dead socket; but a USER-initiated
@@ -3606,6 +3615,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // `disconnect()`'s teardown for everything the guard skips. Keeping those
       // two lists in lockstep by hand is what follow-on #7592 removes.
       ...createEmptyConnectionScope(),
+      // #7625 — the refusal verdict for the failed-restore roster. Not a
+      // Record/Set/array, so the roster in `createEmptyConnectionScope()` does
+      // not reach it; same mechanism as `transcriptViewer` below/above — an
+      // explicit literal at BOTH full-reset sites. Stale here would render
+      // server A's "you may not see this" as server B's.
+      failedRestoresRefused: false,
       // #7578 — the transcript viewer slice, the store-field sibling of the
       // transcript-fetch tracking cleared at the top. `disconnect()` resets it
       // (~L3251); `_resetSessionMemory` did not, so an open transcript from

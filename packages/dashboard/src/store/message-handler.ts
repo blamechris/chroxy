@@ -198,6 +198,7 @@ import type {
   ConnectionState,
   DirectoryEntry,
   EnvironmentInfo,
+  FailedRestoreInfo,
   EvaluatorRewriteMeta,
   FileEntry,
   PendingCommunitySkill,
@@ -6705,6 +6706,32 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'environment_list': {
       const { environments } = sharedEnvironmentList(msg);
       set({ environments: environments as EnvironmentInfo[] });
+      break;
+    }
+    case 'failed_restores_list': {
+      // #7625. Replaced wholesale rather than merged: this is server truth, and
+      // merging would leave an entry a successful retry removed on screen.
+      // `refused` (a pairing-bound token) is kept as its own flag so the UI can
+      // tell "you may not see this" from "nothing failed" — the array is empty
+      // in both cases, which is exactly why the flag exists.
+      const refused = (msg as { refused?: boolean }).refused === true;
+      set({
+        failedRestores: refused ? [] : (((msg as { restores?: unknown }).restores ?? []) as FailedRestoreInfo[]),
+        failedRestoresRefused: refused,
+      });
+      break;
+    }
+    case 'retry_failed_restore_result': {
+      // #7625. The roster is server truth, so rather than patch it locally we
+      // re-ask; a successful retry ALSO triggers a session_list broadcast, and
+      // a re-failure arrives as a fresh session_restore_failed. The UI that
+      // renders pending/outcome state lands with the Control Room tab.
+      const ok = (msg as { ok?: boolean }).ok === true;
+      if (!ok) {
+        const code = (msg as { code?: string }).code;
+        const detail = (msg as { message?: string }).message;
+        console.warn(`[chroxy] retry_failed_restore failed (${code ?? 'unknown'}): ${detail ?? ''}`);
+      }
       break;
     }
     case 'environment_created':
