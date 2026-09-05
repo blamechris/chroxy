@@ -1746,7 +1746,7 @@ answers would have made this entry wrong.
 A throwaway branch settles it in one run, and the technique is worth keeping: a
 workflow whose `on: push` is scoped to that branch alone cannot touch `main` or
 any PR, so a deliberately-failing job is safe to publish. Three jobs — a gate
-that `exit 1`s, a dependent declaring `needs: gate`, and a control with no
+that runs `exit 1`, a dependent declaring `needs: gate`, and a control with no
 `needs` proving the workflow ran:
 
 ```
