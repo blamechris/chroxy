@@ -9,8 +9,10 @@ import { readWorkflows, assertReaderSane, jobShell, stepRun, stepInput, code } f
 /**
  * Every bash `run:` block in every workflow must PARSE (#7632).
  *
- * ci.yml's own "Shell scripts parse" step runs `bash -n` over `git ls-files
- * '*.sh'` — every tracked shell SCRIPT. A workflow's `run:` blocks are shell
+ * ci.yml's own parse-check step runs `bash -n` over `git ls-files '*.sh'` —
+ * every tracked shell SCRIPT — via scripts/parse-check-shell.sh, which #7646
+ * moved out of the step so a test could run it. A workflow's `run:` blocks are
+ * shell
  * too, and nothing has ever parsed them. #7504 found the same shape from the
  * other side (a test suite named by no job); this is the gap one level down.
  *

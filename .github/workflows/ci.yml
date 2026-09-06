@@ -1304,48 +1304,36 @@ jobs:
           node-version: 22
 
       - name: Parse-check every tracked shell script
-        # #7504 — nothing in .github/ had ever parsed these. Every tracked
-        # *.sh file is invoked from a workflow step, a git hook or by hand; none
-        # is imported by a test suite, so a syntax error in one ships green and
-        # is discovered by the next person to run it. No count is written here:
-        # the `-lt 20` floor below is the guard, and a number beside a growing
-        # set is the first cause in docs/false-safety-guards.md.
+        # #7504 — nothing in .github/ had ever parsed these. Every tracked *.sh
+        # file is invoked from a workflow step, a git hook or by hand; none is
+        # imported by a test suite, so a syntax error in one ships green and is
+        # discovered by the next person to run it.
         #
-        # PARSE-LEVEL ONLY, and the comment claims no more than the code does:
-        # `bash -n` reads a file and reports SYNTAX errors without executing
-        # anything. It does not catch unset variables, word-splitting, bad
-        # quoting or any of the semantic class shellcheck covers — adopting
-        # shellcheck over 30 files is a separate decision with a real baseline
-        # of findings behind it, deliberately not folded in here.
+        # #7646 — the loop this step used to hold INLINE now lives in
+        # scripts/parse-check-shell.sh, which carries the reasoning that used to
+        # be in this comment. Inline, it was reachable by no lint and no test in
+        # the repo (the #7270 shape), and the only thing standing behind it was
+        # a describe block matching three REGEXES over this step's YAML text.
+        # All six mutations #7646 reported survive those three assertions;
+        # four of them do it SILENTLY — among those, `rc=1` demoted to a
+        # `::warning` and `exit "$rc"` replaced by `exit 0`, either of which
+        # turns the whole sweep into a no-op that reports success. (Two of the
+        # six survive the regexes while still failing the job loudly or
+        # changing nothing at all — catalogue entry 31 has the measurements.)
         #
-        # The file list comes from `git ls-files`, not a glob roster typed into
-        # this step: a hardcoded list beside a growing set is the first cause in
-        # docs/false-safety-guards.md (and #7270 is the instance that lived in
-        # CI config, where no lint or test of the repo could reach it). A step
-        # scoped to `scripts/*.sh` would silently skip packages/server/scripts/,
-        # packages/desktop/scripts/, packages/app/.maestro/scripts/ and every
-        # directory added after it was written. Every tracked *.sh carries a
-        # bash shebang, so `bash -n` is the right parser for all of them.
-        #
-        # It fails CLOSED on a broken enumeration: finding nothing to check must
-        # not read as nothing wrong. The floor is loose on purpose — it catches
-        # an enumeration that has stopped working or been narrowed, not today's
-        # file count.
-        shell: bash
-        run: |
-          set -u
-          count=0
-          rc=0
-          while IFS= read -r -d '' f; do
-            count=$((count + 1))
-            bash -n "$f" || { echo "::error file=$f::bash -n: parse error"; rc=1; }
-          done < <(git ls-files -z '*.sh')
-          echo "parsed $count tracked shell script(s)"
-          if [ "$count" -lt 20 ]; then
-            echo "::error::enumerated only $count shell scripts (expected >=20) - the enumeration is broken, not the tree"
-            exit 2
-          fi
-          exit "$rc"
+        # The script's contract (0 clean / 1 parse error / 2 broken
+        # enumeration) is now exercised for real, against synthetic git repos,
+        # by scripts/__tests__/parse-check-shell.test.sh in the step below.
+        run: bash scripts/parse-check-shell.sh
+
+      - name: Run parse-check-shell.sh tests
+        # #7646 — the red proof for the step above. Text a guard matches is not
+        # behaviour a guard tests, so every case here RUNS the script and
+        # asserts on its exit code: a nested subject is parsed (a narrowed
+        # pathspec goes red), the alphabetically last file is parsed (a
+        # truncated enumeration goes red), and a tree outside git exits 2 rather
+        # than 0.
+        run: bash scripts/__tests__/parse-check-shell.test.sh
 
       - name: Run bump-version.sh tests
         run: bash scripts/__tests__/bump-version.test.sh
