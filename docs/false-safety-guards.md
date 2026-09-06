@@ -1323,7 +1323,9 @@ Found alongside it: **nothing in `.github/` had ever parsed a shell script.**
 Every tracked `*.sh` file is invoked from a workflow step, a git hook or by
 hand; none is imported by a test suite, so a syntax error in one ships green and
 is discovered by the next person to run it. A `bash -n` step now
-covers them, enumerated by `git ls-files -z '*.sh'` rather than a glob typed
+covers them — inline in that step until **entry 31** moved the loop into
+`scripts/parse-check-shell.sh`, because inline in CI config nothing could run it
+— enumerated by `git ls-files -z '*.sh'` rather than a glob typed
 into CI config — the pathspec is the property, and narrowing it to `scripts/*.sh`
 drops packages/server/scripts/, packages/desktop/scripts/ and
 packages/app/.maestro/scripts/ while staying green — 13 of the 30 files present
@@ -1974,13 +1976,14 @@ under another. `bash <path>` is checked as a *shell command word*; bash then
 reads `-n` under its own option grammar as *do not execute*. The guard and the
 shell agree on every character and disagree on what happens.
 
-**And `bash -n` is the idiom six lines up.** The `scripts-tests` job runs
-`bash -n "$f"` over every tracked shell script at `ci.yml:1341`, and invokes
-the suites at `ci.yml:1351` onward. "The suite is flaky, let us just
-syntax-check it for now" is a copy of the line eight rows above, the step exits
-0 having executed zero assertions, and this guard — the one written because
-`merge-updater-feeds.test.sh` ran in no step for its whole life — calls it
-wired.
+**And `bash -n` is the idiom one step up.** The `scripts-tests` job
+parse-checks every tracked shell script with a `bash -n "$f"` loop — inline in
+the step when this was written, and in `scripts/parse-check-shell.sh` since
+entry 31 (`#7646`) — from the step immediately before the suite invocations.
+"The suite is flaky, let us just syntax-check it for now" is a copy of the
+idiom one step above, the step exits 0 having executed zero assertions, and
+this guard — the one written because `merge-updater-feeds.test.sh` ran in no
+step for its whole life — calls it wired.
 
 **The fix is an allowlist, and an empty one.** A denylist of no-exec flags is
 entry 15 again: `-n`, `--check`, `-e`, `-p`, `-c`, `--help` are the ones
@@ -2046,3 +2049,169 @@ command word is the obvious axis and it is the one everybody checks. The others
 (a heredoc body, a string literal, a comment) — are found by asking *what would
 I write if I wanted to disable this without deleting the line?* Every answer to
 that question is a test case, and `bash -n` was the first one anybody asked.
+
+
+### 31. The guard that asserted the config's spelling — `#7646`
+
+Entry 23 closed `#7504` by adding a step that parse-checks every tracked shell
+script. The guard written to protect *that step* asserted three regexes over the
+step's YAML **text**:
+
+```js
+assert.ok(/git ls-files -z '\*\.sh'/.test(step), ...)
+assert.ok(/-lt 20/.test(step), ...)
+assert.ok(/exit 2/.test(step), ...)
+```
+
+It never ran the shell and never evaluated a branch. **All six mutations `#7646`
+reported do survive all three assertions** — the guard is exactly as weak as the
+issue says, and every one of them was re-run to confirm it. Four of the six are
+*silent*, which is the property that matters:
+
+- the floor demoted to a `::warning`, with `exit 2` relocated into live dead code
+- the floor inverted to `-gt 999999`, with `-lt 20` surviving in live dead code
+- `rc=1` replaced by a `::warning`
+- `exit "$rc"` replaced by `exit 0`
+
+The last two turn the entire sweep into a no-op that reports success — the exact
+class the step exists to prevent — with every assertion green.
+
+**Each regex was also weaker than it read.** `/exit 2/` is a *substring* match,
+satisfied by `exit 20`, `exit 255`, or `echo "would exit 2"`; `/-lt 20/` by
+`-lt 200`. That is entry 13's shape — a guard whose comment describes a stronger
+check than its code performs — sitting inside the guard for entry 23.
+
+**The other two survive the guard without being silent, and the difference is
+worth the paragraph.** Neither is a counter-example to `#7646`; both are cases
+where the consequence attached to the mutant does not follow from the command
+written beside it.
+
+`#7646` gave the narrowing as an APPENDED pathspec — `git ls-files -z '*.sh' --
+scripts packages/server`, "13" and "23" files. Git **unions** pathspecs; it does
+not intersect them. Re-measured:
+
+```
+git ls-files -z '*.sh'                                            ->   32
+git ls-files -z '*.sh' -- scripts                                 ->   61
+git ls-files -z '*.sh' -- scripts packages/server                 -> 1048
+git ls-files -z '*.sh' ':!packages/app/*' ':!packages/desktop/*'  ->   25
+```
+
+The appended form *widens*. All 32 scripts stay in the set, ~1016 non-shell files
+join them, `bash -n` chokes on the `.mjs` among them and the step exits 1 with
+around a thousand annotations. It survives the three regexes and still fails the
+job — a regex survivor and a runtime screamer, the opposite of silent. The
+issue's numbers describe an intersection git never performs.
+
+And `| head -c 100000` is an **equivalent mutant**: the whole NUL listing is 1397
+bytes, so it truncates nothing — `cmp` reports the two outputs byte-identical. It
+survives a perfect test suite because it changes no behaviour on any input.
+
+**The class both named is real; only the spellings were wrong.** The narrowing
+that works is an EXCLUDE, the one pathspec form that does intersect: the fourth
+line above keeps the asserted literal byte-for-byte intact, drops exactly the
+seven files `#7646` listed, and lands at 25 — above the runtime floor, so the job
+stays green too. The truncation that works is `head -c 60`. Both are in the
+mutation record now, and both go red. **A measurement inside an issue is a lead,
+not a reading**: the consequence was right, the command was not, and the only
+thing that told them apart was re-running it.
+
+**The cause is structural, not a weak regex.** The loop lived in `ci.yml`, where
+no lint and no test in this repo could execute it — entry 11's shape, a check in
+CI config that nothing in the repo can reach. Matching its spelling was not a
+lazy choice; it was the only thing available. So the fix is not a better regex.
+The loop moved into `scripts/parse-check-shell.sh`, the step became one
+invocation of it, and `scripts/__tests__/parse-check-shell.test.sh` now RUNS it
+against synthetic git repos and asserts on exit codes: a nested subject parsed
+(a narrowed pathspec goes red), the alphabetically last file parsed (a truncated
+enumeration goes red), a tree outside git exiting 2 rather than 0. Seventeen of
+nineteen mutants are killed, including every one above.
+
+**Two of those nineteen are the real lesson, because the first version of this
+fix did not kill either.** Both were found by review, after the suite was written
+and green.
+
+The first: `case "$f" in packages/*) continue ;; esac`, inserted between the
+enumeration and the parse. The listing is untouched, so the count is untouched;
+the sweep printed `parsed 32`, exited 0, and parsed 15. It survived all 23 cases.
+Two things were wrong, and both had to be fixed:
+
+- **`count` meant *enumerated*, not *parsed*.** It is incremented AFTER `bash -n`
+  now, so the number and the word "parsed" mean the same thing, and any `continue`
+  above it shows up in the count. That alone kills a skip keyed to a FILENAME,
+  which no fixture shape can see.
+- **The fixtures were the wrong SHAPE.** They were built under `mktemp` with
+  directories named `pkg/a/scripts/` and `pkg/b/deep/nested/` — nothing named
+  `packages/`. A mutation keyed to a real path is only observable in a fixture
+  that has that path, so `':!packages/server'` dropped ten real files, cleared
+  the floor, exited 0, and no fixture could see it either. The fixture's
+  directory set is now DERIVED from `git ls-files -z '*.sh'` in the real repo,
+  so a new script directory is covered for free and a typed list never drifts
+  from the tree it is meant to mirror.
+
+Neither fix subsumes the other: the counter catches what the shape cannot
+(filename-keyed skips), and the shape catches what the counter cannot (a skip
+that also bumps the counter — a two-site mutation, measured surviving until the
+fixtures were reshaped).
+
+Above them both sits a case that derives the count a SECOND time straight from
+`git ls-files` and compares it with what the script prints: nothing hardcoded, so
+it is not a number beside a growing set, and it kills every narrowing, truncation
+and early `break` against the real tree at once. Its blind spot — a mutation
+applied identically to both derivations — is written in its comment rather than
+left implied.
+
+**A third defect came from the environment rather than the logic, and its first
+fix was itself vacuous — twice.** An exported `CDPATH` makes `cd` ECHO the
+directory it resolved to, so `ROOT="$(cd "$(dirname "$0")/.." && pwd)"` captures
+TWO lines and every use of it afterwards is a two-line string. Measured
+identically on macOS bash 3.2.57 and Linux bash 5.2: `CDPATH=. bash
+scripts/parse-check-shell.sh` exited 3 with a garbled path that never named
+`CDPATH`, and the test harness — which has the same construct — died with
+"HARNESS BROKEN". It fails closed, so it is diagnosability rather than a false
+green, but `CDPATH=.` is an ordinary line in a shell profile and the script's
+header invites hand invocation.
+
+Both fixes for it were wrong before they were right, in the two ways this
+catalogue keeps recording:
+
+- the harness's scrub was placed with the existing `GIT_*` scrub, which sits
+  BELOW `REPO_ROOT` — after the `cd` it was meant to protect. It fixed nothing,
+  and the suite still died under `CDPATH=.`.
+- the new case invoked the script by an ABSOLUTE path, and `cd` consults
+  `CDPATH` only for a RELATIVE operand. The case passed with the scrub deleted
+  outright — a case that tests nothing, caught only because the scrub was
+  removed to see whether it went red.
+
+The second is the more instructive: it is entry 21's shape reached from the
+other side. The case did not derive its expectation from its subject; it failed
+to construct the CONDITION the subject is guarded against, so the subject was
+never exercised. **Adding a guard and adding a case that reaches it are two
+different pieces of work**, and only removing the guard tells them apart.
+
+**The two survivors are disclosed rather than argued away.** Removing `set -euo
+pipefail` survives the whole suite: every failure the script cares about is
+checked explicitly, so the line is a floor against future edits and no test can
+make it observable today. It is recorded as inert in the script's own header.
+The other is `head -c 100000`, which is **equivalent** rather than uncaught — it
+truncates nothing, so no test can kill it. A survivor described as covered is how
+a catalogue entry becomes a catalogue entry; so is an equivalent mutant counted
+as a kill.
+
+**Moving the subject created a new hole, and closing it is the other half of the
+fix.** The registration rule quantifies over `scripts/__tests__/` — test suites —
+not over the subjects they test. Deleting the `run: bash
+scripts/parse-check-shell.sh` step would leave the new suite passing and nothing
+parse-checking the tree: entry 23's own shape, one level up. A wiring assertion
+now stands in the describe the three regexes vacated, and it reuses the shared
+`invokes()` predicate rather than a fresh `.includes()`, so it inherits that
+function's heredoc blanking, comment stripping and no-exec-flag rejection
+instead of re-deriving them wrong.
+
+**Guard against it:** a guard that reads its subject as *text* can only ever
+assert spelling, and spelling is preserved by every mutation worth worrying
+about — appending, inverting, relocating a literal into dead code. When you find
+yourself matching a regex against a config file, the finding is not the regex.
+It is that the behaviour lives somewhere nothing can execute it. Move the
+behaviour to where a test can run it, and leave behind only the one claim config
+can actually carry: that it is still wired.

@@ -588,12 +588,15 @@ const SEPARATORS = /[;&|(`{]/g
  *   WIRED  | node --check <suite>       | compiles, runs NOTHING
  *   WIRED  | node --help <suite>        | argument ignored entirely
  *
- * `bash -n` is not hypothetical: it is the idiom SIX LINES ABOVE the suite
- * invocations in the same `scripts-tests` job, where the parse-check step runs
- * `bash -n "$f"`. Downgrading a flaky suite to "just syntax-check it for now"
- * is a copy of the line eight rows up, and the release-critical updater-feed
- * suite would then run in no step with this guard reporting it wired — #7504
- * exactly, through the guard written to prevent it.
+ * `bash -n` is not hypothetical: it is this repo's own parse-check idiom,
+ * run over every tracked shell script by `scripts/parse-check-shell.sh` —
+ * invoked from the step IMMEDIATELY ABOVE these suite invocations in the same
+ * `scripts-tests` job. (It sat inline in that step until #7646 moved it into a
+ * script a test could run; the distance changed, the adjacency did not.)
+ * Downgrading a flaky suite to "just syntax-check it for now" is a copy of the
+ * idiom one step up, and the release-critical updater-feed suite would then run
+ * in no step with this guard reporting it wired — #7504 exactly, through the
+ * guard written to prevent it.
  *
  * #7637 fixed three fail-opens in this function and every one was about the
  * COMMAND WORD (`chmod +x ./x`, `cp ./x /tmp/`, `node --version && echo`). The
@@ -786,8 +789,11 @@ const uncommented = runBody => runBody.split('\n').map(stripShellComment)
  * This closes the rest: a comment inside a block scalar, and a mention inside a
  * live command.
  *
- * Requiring a real command position costs nothing today — all 15 wired suites
- * are invoked as `bash <path>` or `node <path>`, measured, one line each. A
+ * Requiring a real command position costs nothing today — every wired suite is
+ * invoked as `bash <path>` or `node <path>`, measured, one line each. No count
+ * is written here: a number beside a growing set is the first cause in
+ * docs/false-safety-guards.md, and this line carried a stale 15 through the PR
+ * that made it 16. A
  * future shape without one (`npm run x`, a variable holding the path, `for f in
  * ...; do bash "$f"; done`) is reported as an orphan: a false POSITIVE, loud,
  * and fixable by whoever writes it. Under-inclusive is the direction that waves
@@ -1086,43 +1092,117 @@ describe('the GLOB_COVERED exemptions are still true (#7637)', () => {
   }
 })
 
-describe('Scripts Tests parse-checks every tracked shell script (#7504)', () => {
-  let step
+/**
+ * THE SUBJECT MOVED, AND THE ASSERTION HAD TO MOVE WITH IT (#7646).
+ *
+ * What stood here matched three regexes over the `bash -n` step's YAML text:
+ * /git ls-files -z '\*\.sh'/, /-lt 20/ and /exit 2/. All six mutations #7646
+ * reported survive all three, and four of them do it SILENTLY:
+ *
+ *   the floor demoted to `::warning`, `exit 2` relocated to LIVE DEAD CODE
+ *   the floor inverted to `-gt 999999`, `-lt 20` surviving in LIVE DEAD CODE
+ *   `rc=1` replaced by a `::warning`
+ *   `exit "$rc"` replaced by `exit 0`
+ *
+ * The last two turn the entire sweep into a no-op that reports success — the
+ * exact class the step exists to prevent — with all three assertions green.
+ *
+ * The other two survive the regexes without being silent, and the difference is
+ * in the COMMAND rather than the class. `-- scripts packages/server` does not
+ * narrow: git UNIONS pathspecs, so it measured 1048 files, not 23, and the step
+ * then exits 1 loudly. `| head -c 100000` truncates nothing — the whole listing
+ * is 1397 bytes — so it is an EQUIVALENT mutant. Both classes are real under a
+ * different spelling: an EXCLUDE (`':!packages/app/*' ':!packages/desktop/*'`
+ * -> 25 files, above the floor, literal intact, exactly the seven files the
+ * issue listed) and `head -c 60`. Both are in the mutation record and both go
+ * red. A measurement inside an issue is a lead, not a reading.
+ *
+ * Each regex was also weaker than it read. /exit 2/ is a SUBSTRING match,
+ * satisfied by `exit 20`, `exit 255` or `echo "would exit 2"`; /-lt 20/ by
+ * `-lt 200`. That is #7290/#7291 — a guard whose comment describes a stronger
+ * check than its code performs — inside the guard for #7504.
+ *
+ * The cause was structural rather than a weak regex: the loop lived in ci.yml,
+ * where no lint and no test of this repo could execute it (#7270), so matching
+ * its spelling was the only thing available. It now lives in
+ * scripts/parse-check-shell.sh and is exercised by
+ * scripts/__tests__/parse-check-shell.test.sh, which RUNS it against synthetic
+ * git repos and asserts on exit codes — a nested subject parsed (a narrowed
+ * pathspec goes red), the alphabetically last file parsed (a truncated
+ * enumeration goes red), a tree outside git exiting 2 rather than 0.
+ *
+ * That suite sits under scripts/__tests__/, so the registration rule at the top
+ * of this file already demands a workflow step invoke it, with no new roster
+ * line. What that rule does NOT reach is the SUBJECT: deleting the
+ * `run: bash scripts/parse-check-shell.sh` step leaves the suite green and
+ * nothing parse-checking the tree — #7504's own shape, one level up. So exactly
+ * one assertion belongs here, and it is about WIRING, not behaviour. Config is
+ * the only place wiring can be asserted; behaviour had to stop being asserted
+ * here, which is the whole point of the move.
+ *
+ * It reuses `invokes()` rather than matching a substring, so it inherits that
+ * function's heredoc blanking, comment stripping, command-position anchoring
+ * and no-exec-flag rejection (#7637, #7645). A fresh `.includes()` here would
+ * have been satisfied by the path appearing in a comment or a `name:`.
+ */
+describe('the parse-check SUBJECT stays wired into CI (#7504, #7646)', () => {
+  const SUBJECT = 'scripts/parse-check-shell.sh'
+  const SUITE = 'scripts/__tests__/parse-check-shell.test.sh'
+
+  let workflows
+  let suiteFiles
 
   before(async () => {
-    const ci = workflowsByName(await readWorkflows(), 'ci.yml')
-    const job = ci.jobs.find(j => j.id === 'scripts-tests')
-    assert.ok(job, "ci.yml should have a 'scripts-tests' job")
-    // Anchored to the RUN BODY, for the same reason the registration rule above
-    // is: `code()` keeps a step's `name:` and every trailing comment, so a
-    // narrowed pathspec plus a comment quoting the old one would read clean.
-    const matches = job.steps.filter(s => (stepRun(s) ?? '').includes('bash -n'))
-    assert.equal(
-      matches.length,
-      1,
-      `expected exactly one 'bash -n' step in scripts-tests, found ${matches.length}`
-    )
-    step = uncommented(stepRun(matches[0])).join('\n')
+    workflows = await readWorkflows()
+    const entries = await readdir(new URL('../../../scripts/__tests__/', import.meta.url), {
+      withFileTypes: true,
+    })
+    suiteFiles = entries.filter(e => e.isFile()).map(e => e.name)
   })
 
-  it('enumerates the whole tracked set, not a typed subdirectory glob', () => {
-    // The pathspec is the property. Narrowing it to `scripts/*.sh` re-creates
-    // the exact hole this closes — packages/server/scripts/,
-    // packages/desktop/scripts/ and packages/app/.maestro/scripts/ all drop
-    // out, and the step stays green while parsing 13 of 30 files.
+  it('a workflow step INVOKES the parse-check script', () => {
+    // Quantified over every workflow, not ci.yml's `scripts-tests` job, for the
+    // same reason the registration rule is: a subject legitimately moved to
+    // release.yml or a nightly is still wired, and demanding one particular job
+    // would be a guard that fails on correct configurations. Whether the job it
+    // lands in is a REQUIRED check is #7156's question, not this one's.
+    assertReaderSane(workflows)
     assert.ok(
-      /git ls-files -z '\*\.sh'/.test(step),
-      "the parse-check step must enumerate `git ls-files -z '*.sh'` — a narrower pathspec silently " +
-        'skips whole script directories, and a list typed into CI config is reachable by no lint or test (#7270)'
+      runBodies(workflows).some(body => invokes(body, SUBJECT)),
+      `no workflow step invokes ${SUBJECT} — the tree is no longer parse-checked, and the suite ` +
+        'that proves the script works would stay green through it (#7504 one level up)'
     )
   })
 
-  it('fails CLOSED when the enumeration comes back short', () => {
-    // "Found nothing to check" must not read as "nothing wrong" — the second
-    // cause in docs/false-safety-guards.md, and the one a `for f in glob` loop
-    // gets wrong for free (an unmatched glob iterates zero times, exit 0).
-    assert.ok(/-lt 20/.test(step), 'the parse-check step must assert a floor on the file count')
-    assert.ok(/exit 2/.test(step), 'a broken enumeration must exit 2 — a distinct, loud outcome from 0')
+  it('CONTROL: the same predicate reports a script no workflow invokes', () => {
+    // Without this, a broken reader or an `invokes()` that returned true for
+    // everything would satisfy the rule above just as green.
+    assert.equal(
+      runBodies(workflows).some(body => invokes(body, 'scripts/parse-check-shell-NOT-REAL.sh')),
+      false,
+      'invokes() reported a script that does not exist as wired — the rule above proves nothing'
+    )
+  })
+
+  it('the behaviour proof exists and is itself registered', () => {
+    // `isSubject` is a pure predicate over a PATH STRING — it never touches the
+    // filesystem, so `isSubject(SUITE)` on a string literal is constant-true and
+    // an earlier version of this comment claimed it "pins the FILE, so deleting
+    // the suite outright is a failure here". It does not, and a constant-true
+    // assertion whose comment describes a stronger check is the shape this whole
+    // file exists to catch. Both halves are asserted separately now: the file is
+    // on disk, and the predicate that decides whether the registration rule
+    // covers it still says yes (a future GLOB_COVERED exemption swallowing this
+    // suite fails here).
+    assert.ok(
+      suiteFiles.includes('parse-check-shell.test.sh'),
+      `${SUITE} must exist on disk — the behaviour proof for scripts/parse-check-shell.sh`
+    )
+    assert.ok(isSubject(SUITE), `${SUITE} must be a suite the registration rule covers`)
+    assert.ok(
+      runBodies(workflows).some(body => invokes(body, SUITE)),
+      `no workflow step invokes ${SUITE} — the parse-check script would ship untested`
+    )
   })
 })
 
@@ -1363,9 +1443,10 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
 
   it('the `run:` SYNTAX-CHECKING the suite rather than running it — `bash -n` (#7645)', async () => {
     // The shipped fail-open. `bash -n` parses and executes NOTHING, and it is
-    // the idiom six lines above these invocations in the same job — the
-    // parse-check step runs `bash -n "$f"`. Downgrading a flaky suite to "just
-    // syntax-check it for now" is a copy of the line eight rows up.
+    // this repo's own parse-check idiom: the step immediately above these
+    // invocations runs scripts/parse-check-shell.sh, which is a `bash -n "$f"`
+    // loop. Downgrading a flaky suite to "just syntax-check it for now" is a
+    // copy of the idiom one step up.
     const wf = await mutated([[RUN_LINE, `        run: bash -n ${SUITE}`]])
     assert.deepEqual(orphansIn(SUITES, wf), [SUITE])
   })

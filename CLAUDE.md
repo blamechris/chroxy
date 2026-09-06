@@ -330,6 +330,13 @@ The recurring causes:
   workflow step for its whole life, while guarding the release updater-feed
   merge; the same sweep found that nothing in `.github/` had ever `bash -n`'d a
   shell script (`#7504`)
+- a guard that asserts its subject's SPELLING because the subject lives where
+  nothing can execute it — three regexes over a CI step's YAML text, 6/6
+  mutations of that step surviving, four of them SILENTLY and two turning the
+  sweep into a no-op that reports success. The sharpest EXCLUDES a subtree, so
+  the asserted literal stays byte-for-byte intact while seven files leave the
+  sweep; the issue's own APPEND spelling widens instead, because git UNIONS
+  pathspecs (`#7646`)
 
 **Collapse to a boolean before asserting against file text.** A failing
 `assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`
