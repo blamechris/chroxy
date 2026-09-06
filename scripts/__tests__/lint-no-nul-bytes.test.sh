@@ -17,7 +17,10 @@
 #   4. a NUL in a BINARY asset (.png) is ignored (out of scope by extension)
 #   5. the `\u0000` escape — the sanctioned way to keep the byte at runtime —
 #      passes, since the file itself is plain ASCII
-#   6. the production invocation (whole git index) stays green
+#   6. a NUL in a .swift source file fails (EXTS covers every tracked text
+#      type) — added after the header was written, and the header was not
+#      updated, which is why EXPECTED_CASES below is 7
+#   7. the production invocation (whole git index) stays green
 #
 # Drives the lint against a TEMP tree via LINT_NUL_SCAN_DIR so it never
 # depends on repo state. No test framework — matches the sibling
@@ -30,6 +33,13 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-no-nul-bytes.sh"
+
+# Every case below must run. Without this, a harness whose cases stop executing
+# prints "PASS — all 0 cases" and exits 0 — "all cases passed" and "no case
+# executed" are the same observable outcome, which is the second recurring cause
+# in docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
+# case is as loud as skipping one.
+EXPECTED_CASES=7
 
 PASS=0
 FAIL=0
@@ -98,8 +108,14 @@ bash "$LINT" >/dev/null 2>&1
 check "default invocation (whole git index) green" 0 "$?"
 
 echo "----"
+BROKEN=0
 if [ "$FAIL" -ne 0 ]; then
   echo "FAILED ($FAIL): ${FAILED[*]}"
-  exit 1
+  BROKEN=1
 fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+  echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
 echo "PASS — all $PASS cases"

@@ -20,6 +20,18 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LINT="$REPO_ROOT/scripts/lint-no-raw-color-literals.sh"
 
+# Every case below must be ACCOUNTED FOR. Without this, a harness whose cases
+# stop executing prints "PASS — all 0 cases" and exits 0 — "all cases passed"
+# and "no case executed" are the same observable outcome, the second recurring
+# cause in docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so
+# removing a case is as loud as skipping one.
+#
+# SKIP is part of the sum, and that is not cosmetic: cases 5-7 run only on a
+# host with a case-folding UTF-8 locale, so PASS+FAIL alone is 8 on macOS and 5
+# on the Linux runner this suite actually runs on. Measured — a PASS+FAIL floor
+# of 8 here would have been red in CI and green for whoever wrote it.
+EXPECTED_CASES=8
+
 PASS=0
 FAIL=0
 FAILED=()
@@ -32,7 +44,15 @@ run_lint() {
   echo $?
 }
 
+# skip_case <name> — a case this host cannot run. Counted, so PASS+FAIL+SKIP
+# stays equal to the number of cases the file declares.
+skip_case() {
+  SKIP=$((SKIP + 1)); SKIPPED+=("$1")
+  echo "SKIP - $1 (no case-folding UTF-8 locale on this host)"
+}
+
 # check <name> <expected-exit> <actual-exit>
+
 check() {
   if [ "$2" = "$3" ]; then
     PASS=$((PASS + 1)); echo "ok   - $1"
@@ -114,9 +134,18 @@ done
 if [ -z "$HOSTILE" ]; then
   # NOT silently skipped: an unavailable case is reported in the summary, so a
   # host that cannot run it says so rather than reading as three more passes.
-  SKIP=$((SKIP + 3)); SKIPPED+=("collation cases (no case-folding UTF-8 locale on this host)")
-  echo "SKIP - collation cases: no case-folding UTF-8 locale found in \`locale -a\`"
+  #
+  # Once PER CASE, naming the case it stands in for, rather than one
+  # `SKIP=$((SKIP + 3))`. A literal 3 beside three cases is a count that has to
+  # be remembered: add a fourth collation case below and the total is 9 on a
+  # host that runs them and 8 on one that skips them, so EXPECTED_CASES would be
+  # right for whoever wrote it and wrong on the runner. Three calls cannot drift
+  # from three cases.
+  skip_case "fully-baselined tree is green under a case-folding locale"
+  skip_case "new offender still detected under the same locale"
+  skip_case "pre-fix split collation IS red on the same tree (control)"
 else
+
   echo "info - collation cases using LC_ALL=$HOSTILE"
 
   # Case 5 — the reported symptom: every file is baselined, so the lint must be
@@ -168,8 +197,14 @@ echo "----"
 if [ "$SKIP" -ne 0 ]; then
   echo "UNAVAILABLE ($SKIP): ${SKIPPED[*]}"
 fi
+BROKEN=0
 if [ "$FAIL" -ne 0 ]; then
   echo "FAILED ($FAIL): ${FAILED[*]}"
-  exit 1
+  BROKEN=1
 fi
+if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CASES" ]; then
+  echo "HARNESS BROKEN: ran $((PASS + FAIL + SKIP)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
 echo "PASS — all $PASS cases"

@@ -21,6 +21,16 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const script = resolve(__dirname, '..', 'lib', 'assert-test-count.mjs')
 
+// Every case below must run. Without this, a harness whose cases stop executing
+// reports "0 passed, 0 failed" and exits 0 — "all cases passed" and "no case
+// executed" are the same observable outcome, the second recurring cause in
+// docs/false-safety-guards.md (#7653). Asserted EQUAL, not >=, so removing a
+// case is as loud as skipping one: a shell/node harness enumerates its cases
+// literally, so the exact count is knowable here in a way it is not for a
+// runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
+// bound for exactly that reason).
+const EXPECTED_CASES = 13
+
 let pass = 0
 let fail = 0
 const failures = []
@@ -111,7 +121,14 @@ await test('no command at all is a usage error', async () => {
 })
 
 console.log(`\n${pass} passed, ${fail} failed`)
+let broken = false
 if (fail > 0) {
   for (const f of failures) console.error(`  FAIL ${f}`)
-  process.exit(1)
+  broken = true
 }
+const ran = pass + fail
+if (ran !== EXPECTED_CASES) {
+  console.log(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
+  broken = true
+}
+process.exit(broken ? 1 : 0)

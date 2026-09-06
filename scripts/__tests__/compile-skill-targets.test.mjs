@@ -30,6 +30,16 @@ const helperPath = resolve(__dirname, '..', 'compile-skill-targets.mjs')
 const { deriveDescription, detectUncompiledAgents, emitPi, ALL_TARGETS, REPO_LOCAL_TARGETS, checkDrift, listArtifacts } =
   await import(helperPath)
 
+// Every case below must run. Without this, a harness whose cases stop executing
+// reports "0 passed, 0 failed" and exits 0 — "all cases passed" and "no case
+// executed" are the same observable outcome, the second recurring cause in
+// docs/false-safety-guards.md (#7653). Asserted EQUAL, not >=, so removing a
+// case is as loud as skipping one: a shell/node harness enumerates its cases
+// literally, so the exact count is knowable here in a way it is not for a
+// runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
+// bound for exactly that reason).
+const EXPECTED_CASES = 43
+
 let pass = 0
 let fail = 0
 const failures = []
@@ -988,10 +998,18 @@ await test('listArtifacts refuses a target it cannot enumerate instead of return
 // --- summary --------------------------------------------------------------
 
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
+let broken = false
 if (fail > 0) {
   for (const f of failures) {
     process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
   }
-  process.exit(1)
+  broken = true
 }
-process.exit(0)
+const ran = pass + fail
+if (ran !== EXPECTED_CASES) {
+  process.stdout.write(
+    `HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing\n`,
+  )
+  broken = true
+}
+process.exit(broken ? 1 : 0)

@@ -17,6 +17,16 @@ VERIFIER="$SCRIPT_DIR/verify-entitlements.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+# Every case below must run. Without this, a harness whose cases stop executing
+# prints "0 passed, 0 failed" and exits 0 — "all cases passed" and "no case
+# executed" are the same observable outcome, the second recurring cause in
+# docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
+# case is as loud as skipping one.
+#
+# 13, not the 10 `assert_exit` call sites: three cases increment PASS/FAIL
+# inline, outside the shared helper.
+EXPECTED_CASES=13
+
 PASS=0
 FAIL=0
 
@@ -225,6 +235,12 @@ fi
 echo ""
 echo "verify-entitlements tests: $PASS passed, $FAIL failed"
 
+BROKEN=0
 if [ "$FAIL" -gt 0 ]; then
-    exit 1
+    BROKEN=1
 fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+    echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+    BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
