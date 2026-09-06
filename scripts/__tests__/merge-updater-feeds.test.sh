@@ -17,6 +17,23 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MERGE="$REPO_ROOT/scripts/merge-updater-feeds.mjs"
 
+# Every case below must run. Without this, a harness whose cases stop executing
+# prints "Results: 0 passed, 0 failed" and exits 0 — "all cases passed" and "no
+# case executed" are the same observable outcome, the second recurring cause in
+# docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
+# case is as loud as skipping one.
+#
+# This suite is the sharpest instance in the repo: its subject is the release
+# updater-feed merge, and it already ran in NO workflow for its whole life
+# (#7504). A silently-empty run here restores exactly the blind spot that closed.
+#
+# Four of the six test functions short-circuit on a run_merge failure
+# (`|| { FAIL++; return; }`), so a genuine subject regression drops the count
+# BELOW 14 as well as raising FAIL. Both diagnoses are therefore printed rather
+# than the first one winning: "the harness is broken" and "the subject is
+# broken" want different fixes.
+EXPECTED_CASES=14
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -276,11 +293,17 @@ test_later_input_overrides_same_platform
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
+BROKEN=0
 if [ "$FAIL" -gt 0 ]; then
   echo "Failed tests:"
   for t in "${FAILED_TESTS[@]}"; do
     echo "  - $t"
   done
-  exit 1
+  BROKEN=1
 fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+  echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
 exit 0

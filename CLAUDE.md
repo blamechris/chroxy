@@ -337,6 +337,12 @@ The recurring causes:
   the asserted literal stays byte-for-byte intact while seven files leave the
   sweep; the issue's own APPEND spelling widens instead, because git UNIONS
   pathspecs (`#7646`)
+- a hand-rolled harness that reports success over ZERO cases — eleven of this
+  repo's sixteen printed their usual summary with every counter at zero and
+  exited 0, `merge-updater-feeds.test.sh` (the release updater-feed merge)
+  among them. The bug report's own table listed five of the eleven, and the
+  enumeration written to replace it found a seventeenth file nobody had scoped
+  in (`#7653`)
 
 **Collapse to a boolean before asserting against file text.** A failing
 `assert.match(subject, re)` carries the ENTIRE subject as the error's `actual`

@@ -1463,6 +1463,19 @@ jobs:
       - name: Run check-release-pr-subject.mjs tests
         run: node scripts/__tests__/check-release-pr-subject.test.mjs
 
+      - name: Every hand-rolled harness goes red when its cases stop running
+        # #7653 — eleven of the repo's sixteen hand-rolled harnesses printed
+        # their normal summary with every counter at zero and exited 0: "all
+        # cases passed" and "no case executed" were the same observable
+        # outcome. They each carry a case-count floor now; this step is what
+        # proves the floors FIRE, by neutering each harness's counters in a
+        # copy and requiring the copy to go red.
+        #
+        # It runs LAST in this job on purpose: it executes a neutered copy of
+        # every harness above, so a failure here after those steps passed is
+        # unambiguously about the floors and not about the subjects.
+        run: node scripts/__tests__/harness-case-floor.test.mjs
+
   release-pr-subject:
     name: Release PR Subject
     # #7184 — auto-tag-on-release.yml only fires on a merge subject matching

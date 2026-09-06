@@ -16,6 +16,13 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUMP="$REPO_ROOT/scripts/bump-version.sh"
 
+# Every case below must run. Without this, a harness whose cases stop executing
+# prints "Results: 0 passed, 0 failed" and exits 0 — "all cases passed" and "no
+# case executed" are the same observable outcome, the second recurring cause in
+# docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
+# case is as loud as skipping one.
+EXPECTED_CASES=25
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -1144,10 +1151,16 @@ run_test "a generator that exits during IMPORT fails the bump (#7231 regression)
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
+BROKEN=0
 if [ "$FAIL" -gt 0 ]; then
   echo "Failed tests:"
   for t in "${FAILED_TESTS[@]}"; do
     echo "  - $t"
   done
-  exit 1
+  BROKEN=1
 fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+  echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1

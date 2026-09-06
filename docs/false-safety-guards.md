@@ -2215,3 +2215,98 @@ yourself matching a regex against a config file, the finding is not the regex.
 It is that the behaviour lives somewhere nothing can execute it. Move the
 behaviour to where a test can run it, and leave behind only the one claim config
 can actually carry: that it is still wired.
+
+### 32. The harnesses that reported success over zero cases — `#7653`
+
+Eleven of this repo's sixteen hand-rolled test harnesses printed their normal
+summary with every counter at zero and exited 0. "All cases passed" and "no case
+executed" were the same observable outcome — cause 2, in the files whose whole
+job is to notice cause 2.
+
+Measured by silencing every counter increment in a copy and running it:
+
+```
+scripts/__tests__/lint-no-nul-bytes.test.sh          PASS — all 0 cases         rc=0
+scripts/__tests__/docker-entrypoint.test.sh          passed: 0  failed: 0       rc=0
+scripts/__tests__/merge-updater-feeds.test.sh        Results: 0 passed, 0 failed rc=0
+packages/desktop/scripts/verify-entitlements.test.sh 0 passed, 0 failed          rc=0
+```
+
+Fifteen of the sixteen are `set -uo pipefail`, not `set -e`: a case can stop
+executing without stopping the run — a failed `mktemp`, a fixture directory
+never created, a renamed helper, an early `return`, a moved subject. The run
+keeps going and the summary reports success over whatever is left, or over
+nothing. `verify-entitlements.test.sh` is the exception and reaches the same
+zero-case green by another route: it is `set -euo pipefail`, but its cases sit
+in `if`/`else` blocks, where a nonzero status is a branch rather than an abort.
+
+
+`merge-updater-feeds.test.sh` is the sharpest: its subject is the release
+updater-feed merge that entry 23 (`#7504`) was filed about, so a silently-empty
+run there restores exactly the blind spot `#7504` closed.
+
+**The issue's own table listed five, and the tree held eleven.** It enumerated
+`scripts/__tests__/*.test.sh` and so missed `packages/desktop/scripts/
+verify-entitlements.test.sh` — outside that directory, same defect — and every
+hand-rolled `*.test.mjs` beside it. Cause 1, in the bug report for cause 2. The
+fix therefore enumerates from `git ls-files` rather than from a list, and the
+first run of that enumeration found a seventeenth file the *author's* hand-scoped
+roster had missed.
+
+**Adding a floor and proving it fires are two different pieces of work.** Five
+harnesses already carried a floor and were fine — four a lower-bound
+`MIN_CASES`, one (`parse-check-shell.test.sh`, entry 31) the EQUAL
+`EXPECTED_CASES` the eleven copy. Eleven now carry one too.
+ What makes them stay true is `scripts/__tests__/harness-case-floor.test.mjs`,
+which neuters each harness's counters in a sibling copy and requires the copy to
+go red — behaviour, not a grep for the floor's spelling, so it accepts both floor
+idioms in the tree (an EQUAL `EXPECTED_CASES` where a harness enumerates its
+cases literally, a lower-bound `MIN_CASES` where the count derives from the tree)
+without a roster of accepted spellings.
+
+**Three things it got wrong first, each caught by a mutation and not by a test:**
+
+- The neuter regex was line-anchored, so it missed every increment written inside
+  a one-line function body — `docker-entrypoint` reported all 5 of its cases and
+  `parse-check-shell` 11 of 25, and the floors still fired because a *partial*
+  neuter is still below the floor. Asserting "reported **zero**" rather than
+  "reported fewer" is the only reason that was visible.
+- The exit-code assertion was inert. Deleting `assert(code !== 0)` left the guard
+  green, because the negative control was a harness with *no floor at all*, which
+  is rejected for printing no floor line. A floor that prints and then exits 0
+  anyway — `#7646`'s "demoted to a warning" — needed its own control.
+- Failing to self-identify was recorded as a failure and execution continued, so
+  the guard became a subject of its own behavioural pass: it neutered a copy of
+  itself, the copy re-enumerated and neutered the original, and the run had to be
+  killed. A SIGKILLed process runs no `finally`, so it left 48 probe copies in the
+  tree. A false precondition must **stop** the run, not be noted while the body
+  proceeds.
+
+**And two more that only the review found, both of them this same class one turn
+deeper.** The roster admitted `#!/usr/bin/env bash` and nothing else, so a
+harness written `#!/bin/bash` — five tracked scripts here already are — left the
+roster silently. Nothing noticed, because the summary floor's expectation is
+`FIXED_CASES + subjects.length`: it SELF-ADJUSTED from 22 to 20 when two
+harnesses were dropped, and printed `20 passed, 0 failed`. A coverage check whose
+expectation comes from its own subject is entry 29's `#7424` — reproduced inside
+the guard whose PR adds that very cause to `CLAUDE.md`. Widening the regex fixes
+today's instance; what fixes the class is asserting the roster's COMPLEMENT
+against a written list, so a file leaving has to be justified in a diff. An
+exclusion set is the one place a hardcoded list is the right shape: the danger
+with a list beside a growing set is that it fails to grow, and here failing to
+grow is precisely what must go red.
+
+Separately, **five of the six assertions in the checker could be deleted with the
+whole guard still green** — the same survivor that had already been found and
+fixed for the sixth, left standing for the rest. Two synthetic controls cannot
+exercise six assertions: an unfloored harness is rejected by the first thing that
+reads its output, so everything behind that is unreachable. There is one control
+per assertion now, each shaped so that its assertion is the only thing that can
+reject it, and the deletion sweep runs 6/6.
+
+
+**Guard against it:** any component that counts its own cases and exits on
+`failures > 0` reports success when the count is zero. The floor is five lines;
+the part that decays is whether it is still reached, so prove it by removing the
+cases, not by reading the code. And when a bug report hands you a list of
+affected files, the list is a lead — enumerate the class yourself.

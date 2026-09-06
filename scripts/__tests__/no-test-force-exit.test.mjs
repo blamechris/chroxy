@@ -368,7 +368,7 @@ try {
 const ACCOUNTED = pass + fail
 if (ACCOUNTED < MIN_CASES) {
   process.stderr.write(
-    `\nERROR: only ${ACCOUNTED} case(s) accounted for, expected at least ${MIN_CASES}. ` +
+    `\nHARNESS BROKEN: ran ${ACCOUNTED} cases, expected at least ${MIN_CASES}. ` +
     'Cases went missing rather than failing.\n',
   )
   process.exit(1)

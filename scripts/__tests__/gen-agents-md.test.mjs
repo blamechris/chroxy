@@ -32,8 +32,21 @@ const { renderAgentsMd, readClaudeMd, readAgentsMd } = await import(scriptPath)
 // compile-skill-targets.test.mjs, which needed the identical staging (#7236).
 const stageGenerator = (scriptsDir) => stageScript(scriptPath, scriptsDir)
 
+// Every case below must be ACCOUNTED FOR. Without this, a harness whose cases
+// stop executing prints "0 passed, 0 failed" and exits 0 — "all cases passed"
+// and "no case executed" are the same observable outcome, the second recurring
+// cause in docs/false-safety-guards.md (#7653). Asserted EQUAL, not >=, so
+// removing a case is as loud as skipping one.
+//
+// `skipped` is part of the sum and had to be ADDED: the two root-gated cases
+// below printed a "skip" line and incremented nothing, so this file reports 8
+// as a normal user and 6 as root — measured, both exit 0. A pass+fail floor of
+// 8 would have been red on any runner that executes as root.
+const EXPECTED_CASES = 8
+
 let pass = 0
 let fail = 0
+let skipped = 0
 const failures = []
 
 const test = async (name, fn) => {
@@ -263,6 +276,7 @@ await test('--check detects drift when the script is unlinked after launch (#721
 // would pass without exercising the EACCES path at all — vacuously. Skipped
 // rather than silently weakened.
 if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  skipped++
   process.stdout.write('  skip --check detects drift when realpath fails with EACCES (#7214): running as root\n')
 } else {
   await test('--check detects drift when realpath fails with EACCES (#7214)', async () => {
@@ -285,6 +299,7 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
 // reaches stderr. It is the only test here that expects a no-op, which is
 // exactly why it has to prove the no-op announced itself.
 if (typeof process.getuid === 'function' && process.getuid() === 0) {
+  skipped++
   process.stdout.write('  skip the undecidable case warns instead of silently no-opping (#7226): running as root\n')
 } else {
   await test('the undecidable case warns instead of silently no-opping (#7226)', async () => {
@@ -345,11 +360,19 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
 }
 
 // --- summary --------------------------------------------------------------
-process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
+const ran = pass + fail + skipped
+process.stdout.write(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}\n`)
+let broken = false
 if (fail > 0) {
   for (const f of failures) {
     process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
   }
-  process.exit(1)
+  broken = true
 }
-process.exit(0)
+if (ran !== EXPECTED_CASES) {
+  process.stdout.write(
+    `HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing\n`,
+  )
+  broken = true
+}
+process.exit(broken ? 1 : 0)

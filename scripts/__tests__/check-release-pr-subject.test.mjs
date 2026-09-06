@@ -17,6 +17,16 @@ import { fileURLToPath } from 'node:url'
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'check-release-pr-subject.mjs')
 
+// Every case below must run. Without this, a harness whose cases stop executing
+// reports "0 passed, 0 failed" and exits 0 — "all cases passed" and "no case
+// executed" are the same observable outcome, the second recurring cause in
+// docs/false-safety-guards.md (#7653). Asserted EQUAL, not >=, so removing a
+// case is as loud as skipping one: a shell/node harness enumerates its cases
+// literally, so the exact count is knowable here in a way it is not for a
+// runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
+// bound for exactly that reason).
+const EXPECTED_CASES = 23
+
 let passed = 0
 let failed = 0
 const results = []
@@ -230,4 +240,9 @@ const releaseRepo = (subject) => makeRepo({
 console.log('\ncheck-release-pr-subject.mjs')
 console.log(results.join('\n'))
 console.log(`\nResults: ${passed} passed, ${failed} failed\n`)
+const ran = passed + failed
+if (ran !== EXPECTED_CASES) {
+  console.log(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
+  process.exit(1)
+}
 process.exit(failed ? 1 : 0)

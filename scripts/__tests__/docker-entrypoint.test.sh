@@ -28,6 +28,13 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENTRYPOINT="$REPO_ROOT/scripts/docker-entrypoint.sh"
 
+# Every case below must run. Without this, a harness whose cases stop executing
+# prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and "no case
+# executed" are the same observable outcome, the second recurring cause in
+# docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
+# case is as loud as skipping one.
+EXPECTED_CASES=5
+
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -151,8 +158,14 @@ rm -rf "$tmp"
 
 echo ""
 echo "passed: $PASS  failed: $FAIL"
+BROKEN=0
 if [ "$FAIL" -gt 0 ]; then
   for t in "${FAILED_TESTS[@]}"; do echo "  - $t"; done
-  exit 1
+  BROKEN=1
 fi
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
+  echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+[ "$BROKEN" -eq 0 ] || exit 1
 exit 0
