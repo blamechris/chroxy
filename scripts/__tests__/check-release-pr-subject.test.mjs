@@ -29,7 +29,6 @@ const EXPECTED_CASES = 23
 
 let passed = 0
 let failed = 0
-
 const results = []
 
 function check(name, cond) {

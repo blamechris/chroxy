@@ -43,7 +43,14 @@
  * reported all 5 cases and parse-check-shell 11 of 25, both of which this
  * assertion caught and a "fewer" assertion would not have.
  *
+ * ONE HARNESS OF THIS CLASS IS OUT OF SCOPE, and it is named rather than left
+ * to be rediscovered: packages/server/tests/smoke-test.mjs counts its own cases
+ * and exits on `failed > 0`, and ci.yml invokes it directly — but it is neither
+ * named `*.test.mjs` nor shebanged, and it needs Playwright and a live server,
+ * which this job deliberately has neither of. Filed as #7657.
+ *
  * ITS BLIND SPOT, STATED. A case that stops executing but is still COUNTED — a
+
  * case converted into a reported skip — satisfies every floor here.
  * lint-no-raw-color-literals.test.sh is the live instance: break its locale
  * probe and its three collation cases become three skips, the sum still reaches
@@ -81,23 +88,31 @@ const SELF_MARKER = 'HARNESS_FLOOR_META_GUARD'
 /**
  * A floor on the ENUMERATION, not a count of today's harnesses.
  *
- * `git ls-files '<glob>'` prints nothing and exits 0 from a subdirectory, and
- * again under an inherited GIT_NOGLOB_PATHSPECS or GIT_LITERAL_PATHSPECS —
- * measured in this repo, all three return 0 rows where the repo root returns
- * seven. Zero rows would satisfy every per-harness assertion below vacuously,
+ * `git ls-files '<glob>'` prints nothing and exits 0 under an inherited
+ * GIT_NOGLOB_PATHSPECS or GIT_LITERAL_PATHSPECS, and NARROWS to the subtree
+ * when run from a subdirectory — measured in this repo, the pathspec vars
+ * return 0 rows and `scripts/__tests__` returns 16 against 18 from the root.
+ * Zero rows would satisfy every per-harness assertion below vacuously,
+
  * which is #7503's shape (a filter whose terms match nothing, and a gate
  * satisfied by the empty result) reproduced inside the guard written for that
  * catalogue. The cwd and the environment are pinned below; this is the backstop
  * for whatever pins are missed.
  *
- * Deliberately loose — sixteen harnesses exist today. A number tracking the
- * live count would be a hardcoded list beside a growing set, the first cause in
- * the catalogue.
+ * Deliberately loose — the roster is seventeen today (sixteen proven harnesses
+ * plus this file). A number tracking the live count would be a hardcoded list
+ * beside a growing set, the first cause in the catalogue.
+ *
+ * It is the SECOND line of defence, not the first: a floor with headroom cannot
+ * notice one harness leaving the roster, which is why EXCLUDED_HARNESSES below
+ * is asserted equal. This catches an enumeration that has collapsed; that
+ * catches one that has merely leaked.
  */
 const MIN_HARNESSES = 12
 
+
 /** One case per harness, plus the fixed cases below. */
-const FIXED_CASES = 6
+const FIXED_CASES = 11
 
 /**
  * WHAT COUNTS AS A SUBJECT, and why it is the shebang.
@@ -119,13 +134,42 @@ const FIXED_CASES = 6
  * distinction derives itself. It was found by this guard on its first run,
  * against a roster the author had scoped by hand and got wrong.
  *
- * The limit, stated: a standalone harness written WITHOUT a shebang is not seen
- * here. It is not invisible to the repo — ci-scripts-tests-registration.test.js
- * independently requires every tracked test file to be invoked by a workflow
- * step or to be discovered by a package runner — but it would carry no proof
- * that its floor fires. Every one of the sixteen has one today.
+ * BOTH SPELLINGS OF A SHEBANG, and the exclusions are ASSERTED rather than
+ * printed. The first version of this rule accepted only `#!/usr/bin/env bash`,
+ * which is a comment describing a general boundary in front of a code path that
+ * hardcoded two strings — the #7290/#7291 shape, in the guard written for this
+ * catalogue. `#!/bin/bash` is an ordinary form and five tracked scripts here
+ * already use it. Measured on the narrow version: rewriting two harnesses'
+ * shebangs to `#!/bin/bash` dropped them from the roster and the guard printed
+ * `20 passed, 0 failed`, rc=0 — including merge-updater-feeds.test.sh, the one
+ * this file's own header names. Nothing caught it, because the summary floor's
+ * `expected` is derived from `subjects.length`, so it SELF-ADJUSTED from 22 to
+ * 20: a coverage check whose expectation comes from its own subject, which is
+ * `#7424` and is named in this repo's own list of recurring causes.
+ *
+ * Widening the regex closes today's instance. What closes the CLASS is
+ * EXCLUDED_HARNESSES below: the roster's complement is asserted equal to a
+ * written list, so a file leaving the roster for any reason — a new shebang
+ * spelling, a rename, a glob that stops matching — has to be justified in a
+ * diff. An exclusion set is the one place a hardcoded list is the correct
+ * shape: the danger with a list beside a growing set is that it fails to grow,
+ * and here failing to grow is exactly what must go red.
  */
-const SHEBANG = /^#!\/usr\/bin\/env[ \t]+(bash|node)[ \t]*$/
+const SHEBANG = /^#!(?:\/usr\/bin\/env[ \t]+|\/(?:usr\/)?bin\/)(bash|node)[ \t]*$/
+
+/**
+ * Tracked `*.test.sh` / `*.test.mjs` that are deliberately NOT proven here,
+ * each with the reason. Asserted EQUAL to what the enumeration actually skips.
+ *
+ * `export-targets.test.mjs` is a vitest suite: it declares no interpreter, is
+ * found by a runner's glob, and crashes under bare `node`. Its zero-test
+ * behaviour is #7447's class — a RUNNER exiting 0 on an empty discovery — which
+ * scripts/lib/assert-test-count.mjs guards, one layer up from here.
+ */
+const EXCLUDED_HARNESSES = [
+  'packages/store-core/scripts/__tests__/export-targets.test.mjs',
+]
+
 
 /**
  * Shell counters. NOT line-anchored: `pass() { PASS=$((PASS + 1)); echo ...; }`
@@ -197,7 +241,14 @@ const test = async (name, fn) => {
 const assert = (cond, msg) => { if (!cond) throw new Error(msg) }
 
 const run = (cmd, args, cwd) => new Promise((done) => {
-  execFile(cmd, args, { cwd, env: CLEAN_ENV, timeout: 300_000, maxBuffer: 32 * 1024 * 1024 },
+  // 60s, not the job's own 5 minutes. A per-child timeout equal to the job
+  // budget can never fire: GitHub cancels the job first, and on this repo's
+  // self-hosted runners a cancellation renders as a failure with no diagnostic.
+  // The slowest harness measured 13s on the runner, so this is 4x margin and
+  // still leaves a wedged harness to be reported by the guard's own
+  // "expected exactly one floor line, saw 0" message.
+  execFile(cmd, args, { cwd, env: CLEAN_ENV, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
+
     (err, stdout, stderr) => done({ code: err ? (err.code ?? 1) : 0, out: `${stdout}${stderr}` }))
 })
 
@@ -279,13 +330,18 @@ await test('the harness roster enumerates from git and clears its floor', () => 
     if (m) roster.push({ path, interpreter: m[1] })
     else skipped.push(path)
   }
-  // Named, not silently dropped: a harness that loses its shebang leaves the
-  // roster, and the only thing that would say so is this line.
-  if (skipped.length) process.stdout.write(`       (not standalone, no shebang: ${skipped.join(', ')})\n`)
+  // ASSERTED, not printed. Printing a dropped harness and carrying on is how
+  // the narrow version of SHEBANG lost merge-updater-feeds.test.sh in silence.
+  assert(JSON.stringify(skipped) === JSON.stringify(EXCLUDED_HARNESSES),
+    `the set of tracked test files this guard does NOT prove has changed.\n  skipped:  ${JSON.stringify(skipped)}\n  ` +
+    `expected: ${JSON.stringify(EXCLUDED_HARNESSES)}\nA file leaving the roster is the failure this assertion exists ` +
+    'for: the summary floor below derives its expectation from the roster, so a silent drop lowers the bar it is ' +
+    'measured against. Add it to EXCLUDED_HARNESSES with a reason, or give it a shebang.')
   assert(roster.length >= MIN_HARNESSES,
     `enumerated only ${roster.length} harnesses, expected at least ${MIN_HARNESSES} — the enumeration is ` +
     'broken, not the tree. Zero rows at exit 0 is what a narrowed pathspec looks like.')
 })
+
 
 await test('exactly one file is excluded from the behavioural pass, and it is this one', () => {
   selfMatches = roster.filter((h) => readFileSync(join(REPO_ROOT, h.path), 'utf8').includes(SELF_MARKER))
@@ -305,8 +361,12 @@ await test('exactly one file is excluded from the behavioural pass, and it is th
 // probe copies behind, because a SIGKILLed process runs no `finally`. A false
 // precondition must stop the run, not merely be noted while the body proceeds.
 if (selfMatches.length !== 1) {
-  process.stdout.write('\nHARNESS BROKEN: ran 1 cases, expected 1 — self-identification failed; refusing to ' +
-    'run the behavioural pass, which would recurse into this file.\n')
+  // A distinct prefix on purpose. The unified "HARNESS BROKEN: ran N cases,
+  // expected M" line is machine-read, and emitting it here would mean emitting
+  // numbers that say nothing is wrong while claiming something is.
+  process.stdout.write('\nHARNESS REFUSED: self-identification failed — refusing to run the behavioural ' +
+    'pass, which would recurse into this file.\n')
+
   process.exit(1)
 }
 
@@ -335,31 +395,106 @@ const CONTROL_DIR = mkdtempSync(join(tmpdir(), 'harness-floor-control-'))
  *                 to a `::warning` turned a real sweep into a no-op that
  *                 reported success.
  */
-const FLOOR_BODY = `if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
-  echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
-  MODE_EXIT
-fi`
+/**
+ * The synthetic controls. Each is a three-case harness identical but for how it
+ * reports a breach, and EVERY ONE is driven through `assertGoesRed` — the same
+ * function the real roster uses. A control that exercises a different path is
+ * not a control.
+ *
+ * There is one control per assertion in `assertGoesRed`, and that is the point:
+ * with only "floored" and "unfloored", FIVE of the six assertions could be
+ * deleted outright with this file still green, because an unfloored harness is
+ * rejected by the very first thing that looks at its output. Each mode below
+ * exists to be the ONLY reason its assertion fires.
+ *
+ *   floored       prints the line, exits 1              -> accepted
+ *   unfloored     no floor at all                       -> rejected: no floor line
+ *   toothless     prints the line, exits 0 anyway       -> rejected: exit code
+ *                 (#7646's "demoted to a warning")
+ *   undercount    floor fires but reports a NONZERO ran -> rejected: ran must be 0,
+ *                 (the partial-neuter shape)               not merely "fewer"
+ *   doubled       prints the floor line twice           -> rejected: exactly one line
+ *   zerofloor     expects 0 cases, a bar nothing can    -> rejected: expected > 0
+ *                 fall below
+ *   unmatched     counts with `((PASS++))`, a spelling  -> rejected: exit code
+ *                 the neuter does not know                 (its floor never fires)
+ *   faker         same unknown spelling, but PRINTS a   -> rejected: the neuter
+ *                 perfect floor line and exits 1            matched nothing
+ *                 whatever happens
+ *
+ * `faker` is the one that makes `substitutions > 0` load-bearing, and it was
+ * added because without it that assertion could be deleted with this file still
+ * green: `unmatched` is caught by the exit code instead, since a harness whose
+ * counters the neuter never touched simply passes and exits 0. `faker` is a
+ * harness that emits exactly what a working floor emits while the neuter did
+ * nothing at all — the only thing that can tell the difference is whether the
+ * neuter actually changed anything.
 
-const controlHarness = (mode) => `#!/usr/bin/env bash
+ *   movable       hides an increment inside its own     -> rejected: the neuter
+ *                 EXPECTED_CASES line                      altered a floor constant
+ */
+const CONTROL_MODES = {
+  floored: { verdict: 'accept' },
+  unfloored: { verdict: 'reject', because: 'no floor line' },
+  toothless: { verdict: 'reject', because: 'exit code' },
+  undercount: { verdict: 'reject', because: 'ran is not zero' },
+  doubled: { verdict: 'reject', because: 'more than one floor line' },
+  zerofloor: { verdict: 'reject', because: 'expected is zero' },
+  unmatched: { verdict: 'reject', because: 'its floor never fires' },
+  faker: { verdict: 'reject', because: 'the neuter matched nothing' },
+
+  movable: { verdict: 'reject', because: 'the neuter altered a floor constant' },
+}
+
+const floorLine = (ran, expected) =>
+  `echo "HARNESS BROKEN: ran ${ran} cases, expected ${expected} — a case stopped executing"`
+
+const controlHarness = (mode) => {
+  // `((PASS++))` is deliberately outside SHELL_INCREMENT's grammar.
+  const inc = (mode === 'unmatched' || mode === 'faker')
+    ? 'check() { if [ "$2" = "$3" ]; then ((PASS++)); else ((FAIL++)); fi; }'
+    : 'check() { if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi; }'
+
+  const decl = mode === 'movable'
+    ? 'EXPECTED_CASES=3 # a stray PASS=$((PASS + 1)) in the declaration line itself'
+    : 'EXPECTED_CASES=3'
+  let body
+  if (mode === 'unfloored') {
+    body = '# no floor at all'
+  } else if (mode === 'faker') {
+    // Emits exactly what a correctly-neutered, correctly-floored harness emits,
+    // while its counters were never touched. Only "did the neuter change
+    // anything" separates this from the real thing.
+    body = `${floorLine('0', '3')}\nexit 1`
+  } else {
+
+    const ran = mode === 'undercount' ? '2' : '$((PASS + FAIL))'
+    const exp = mode === 'zerofloor' ? '0' : '$EXPECTED_CASES'
+    const line = floorLine(ran, exp)
+    const emit = mode === 'doubled' ? `${line}\n  ${line}` : line
+    body = `if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ] || [ ${mode === 'undercount' ? 1 : 0} -eq 1 ]; then
+  ${emit}
+  ${mode === 'toothless' ? ': # prints, but does not exit' : 'exit 1'}
+fi`
+  }
+  return `#!/usr/bin/env bash
 set -uo pipefail
-EXPECTED_CASES=3
+${decl}
 PASS=0
 FAIL=0
-check() { if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi; }
+${inc}
 check "a" 1 1
 check "b" 1 1
 check "c" 1 1
 echo "ran $((PASS + FAIL))"
-${mode === 'unfloored'
-    ? '# no floor at all — the negative control'
-    : FLOOR_BODY.replace('MODE_EXIT', mode === 'toothless' ? ': # prints, but does not exit' : 'exit 1')}
+${body}
 exit 0
 `
+}
 
 const runControl = async (mode) => {
   const p = join(CONTROL_DIR, `control-${mode}.sh`)
   writeFileSync(p, controlHarness(mode))
-
   const src = readFileSync(p, 'utf8')
   let substitutions = 0
   const neutered = src.replace(SHELL_INCREMENT, () => { substitutions++; return ':' })
@@ -369,37 +504,36 @@ const runControl = async (mode) => {
   return { substitutions, code, out, neutered, src }
 }
 
-const rejects = (result, label) => {
-  try { assertGoesRed(result, label) } catch { return true }
-  return false
+/**
+ * Returns the assertion message `assertGoesRed` threw, or null if it accepted.
+ * A bare `catch {}` would count a CRASH as a correct rejection — the negative
+ * controls would then pass while proving nothing, which is the failure they
+ * exist to prevent. A non-assertion error is re-thrown.
+ */
+const rejectionOf = (result, label) => {
+  try { assertGoesRed(result, label) } catch (err) {
+    if (!(err instanceof Error) || err instanceof TypeError || err instanceof ReferenceError) throw err
+    return err.message
+  }
+  return null
 }
 
-await test('POSITIVE CONTROL: a synthetic floored harness is detected as red', async () => {
-  assertGoesRed(await runControl('floored'), 'synthetic-floored')
-})
+for (const [mode, spec] of Object.entries(CONTROL_MODES)) {
+  await test(`CONTROL: a synthetic "${mode}" harness is ${spec.verdict}ed${spec.because ? ` (${spec.because})` : ''}`, async () => {
+    const r = await runControl(mode)
+    assert(r.neutered !== r.src || mode === 'unmatched' || mode === 'faker',
 
-await test('NEGATIVE CONTROL: a synthetic UNFLOORED harness is NOT detected (the check discriminates)', async () => {
-  const r = await runControl('unfloored')
-  assert(r.substitutions > 0, 'the control neuter matched nothing — the control is not a control')
-  assert(r.code === 0, 'an unfloored harness exited nonzero — it is not the control it claims to be')
-  assert(rejects(r, 'synthetic-unfloored'), 'assertGoesRed passed a harness with no floor at all')
-})
-
-await test('NEGATIVE CONTROL: a floor that PRINTS but does not exit is NOT detected', async () => {
-  const r = await runControl('toothless')
-  assert(r.code === 0, 'the toothless control exited nonzero — it is not toothless')
-  assert([...r.out.matchAll(FLOOR_LINE)].length === 1,
-    'the toothless control printed no floor line — it would be rejected for the wrong reason')
-  assert(rejects(r, 'synthetic-toothless'),
-    'assertGoesRed accepted a floor that reports a breach and then exits 0 anyway — the #7646 shape, and ' +
-    'the exit-code assertion is inert without this control')
-})
-
-await test('the neuter regexes are not vacuous against the control', async () => {
-  const r = await runControl('floored')
-  assert(r.substitutions === 2, `expected 2 substitutions in the control, saw ${r.substitutions}`)
-  assert(r.neutered !== r.src, 'the neuter was a no-op on the control')
-})
+      `the neuter was a no-op on the ${mode} control — it is not a control`)
+    const why = rejectionOf(r, `synthetic-${mode}`)
+    if (spec.verdict === 'accept') {
+      assert(why === null, `assertGoesRed rejected the well-formed control: ${why}`)
+    } else {
+      assert(why !== null,
+        `assertGoesRed ACCEPTED the "${mode}" control, which it must reject on ${spec.because}. ` +
+        'Without this the corresponding assertion can be deleted with the whole guard still green.')
+    }
+  })
+}
 
 rmSync(CONTROL_DIR, { recursive: true, force: true })
 

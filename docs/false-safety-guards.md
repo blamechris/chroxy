@@ -2232,10 +2232,14 @@ scripts/__tests__/merge-updater-feeds.test.sh        Results: 0 passed, 0 failed
 packages/desktop/scripts/verify-entitlements.test.sh 0 passed, 0 failed          rc=0
 ```
 
-These are `set -uo pipefail` scripts, not `set -e`: a case can stop executing
-without stopping the run — a failed `mktemp`, a fixture directory never created,
-a renamed helper, an early `return`, a moved subject. The run keeps going and
-the summary reports success over whatever is left, or over nothing.
+Fifteen of the sixteen are `set -uo pipefail`, not `set -e`: a case can stop
+executing without stopping the run — a failed `mktemp`, a fixture directory
+never created, a renamed helper, an early `return`, a moved subject. The run
+keeps going and the summary reports success over whatever is left, or over
+nothing. `verify-entitlements.test.sh` is the exception and reaches the same
+zero-case green by another route: it is `set -euo pipefail`, but its cases sit
+in `if`/`else` blocks, where a nonzero status is a branch rather than an abort.
+
 
 `merge-updater-feeds.test.sh` is the sharpest: its subject is the release
 updater-feed merge that entry 23 (`#7504`) was filed about, so a silently-empty
@@ -2250,8 +2254,10 @@ first run of that enumeration found a seventeenth file the *author's* hand-scope
 roster had missed.
 
 **Adding a floor and proving it fires are two different pieces of work.** Five
-harnesses already carried a `MIN_CASES` floor and were fine; eleven now carry one
-too. What makes them stay true is `scripts/__tests__/harness-case-floor.test.mjs`,
+harnesses already carried a floor and were fine — four a lower-bound
+`MIN_CASES`, one (`parse-check-shell.test.sh`, entry 31) the EQUAL
+`EXPECTED_CASES` the eleven copy. Eleven now carry one too.
+ What makes them stay true is `scripts/__tests__/harness-case-floor.test.mjs`,
 which neuters each harness's counters in a sibling copy and requires the copy to
 go red — behaviour, not a grep for the floor's spelling, so it accepts both floor
 idioms in the tree (an EQUAL `EXPECTED_CASES` where a harness enumerates its
@@ -2275,6 +2281,29 @@ without a roster of accepted spellings.
   killed. A SIGKILLed process runs no `finally`, so it left 48 probe copies in the
   tree. A false precondition must **stop** the run, not be noted while the body
   proceeds.
+
+**And two more that only the review found, both of them this same class one turn
+deeper.** The roster admitted `#!/usr/bin/env bash` and nothing else, so a
+harness written `#!/bin/bash` — five tracked scripts here already are — left the
+roster silently. Nothing noticed, because the summary floor's expectation is
+`FIXED_CASES + subjects.length`: it SELF-ADJUSTED from 22 to 20 when two
+harnesses were dropped, and printed `20 passed, 0 failed`. A coverage check whose
+expectation comes from its own subject is entry 29's `#7424` — reproduced inside
+the guard whose PR adds that very cause to `CLAUDE.md`. Widening the regex fixes
+today's instance; what fixes the class is asserting the roster's COMPLEMENT
+against a written list, so a file leaving has to be justified in a diff. An
+exclusion set is the one place a hardcoded list is the right shape: the danger
+with a list beside a growing set is that it fails to grow, and here failing to
+grow is precisely what must go red.
+
+Separately, **five of the six assertions in the checker could be deleted with the
+whole guard still green** — the same survivor that had already been found and
+fixed for the sixth, left standing for the rest. Two synthetic controls cannot
+exercise six assertions: an unfloored harness is rejected by the first thing that
+reads its output, so everything behind that is unreachable. There is one control
+per assertion now, each shaped so that its assertion is the only thing that can
+reject it, and the deletion sweep runs 6/6.
+
 
 **Guard against it:** any component that counts its own cases and exits on
 `failures > 0` reports success when the count is zero. The floor is five lines;

@@ -52,7 +52,6 @@ skip_case() {
 }
 
 # check <name> <expected-exit> <actual-exit>
-
 check() {
   if [ "$2" = "$3" ]; then
     PASS=$((PASS + 1)); echo "ok   - $1"
@@ -145,7 +144,6 @@ if [ -z "$HOSTILE" ]; then
   skip_case "new offender still detected under the same locale"
   skip_case "pre-fix split collation IS red on the same tree (control)"
 else
-
   echo "info - collation cases using LC_ALL=$HOSTILE"
 
   # Case 5 — the reported symptom: every file is baselined, so the lint must be

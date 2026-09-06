@@ -673,7 +673,6 @@ process.stdout.write(`\n${pass}/${total} passed\n`)
 if (total < MIN_CASES) {
   process.stdout.write(
     `HARNESS BROKEN: ran ${total} cases, expected at least ${MIN_CASES}. A case stopped being ` +
-
     'discovered — that is a shrinking suite, not a passing one.\n',
   )
   process.exit(1)

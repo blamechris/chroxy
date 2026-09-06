@@ -393,7 +393,6 @@ const EXPECTED = pass + fail + skipped
 if (EXPECTED < MIN_CASES) {
   process.stderr.write(
     `\nHARNESS BROKEN: ran ${EXPECTED} cases, expected at least ${MIN_CASES}. ` +
-
     'Cases went missing rather than failing — check the root/platform skips.\n',
   )
   process.exit(1)

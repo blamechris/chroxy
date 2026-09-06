@@ -278,7 +278,6 @@ await test('--check detects drift when the script is unlinked after launch (#721
 if (typeof process.getuid === 'function' && process.getuid() === 0) {
   skipped++
   process.stdout.write('  skip --check detects drift when realpath fails with EACCES (#7214): running as root\n')
-
 } else {
   await test('--check detects drift when realpath fails with EACCES (#7214)', async () => {
     withBrokenRealpath('eacces', assertDetectedDrift)
@@ -302,7 +301,6 @@ if (typeof process.getuid === 'function' && process.getuid() === 0) {
 if (typeof process.getuid === 'function' && process.getuid() === 0) {
   skipped++
   process.stdout.write('  skip the undecidable case warns instead of silently no-opping (#7226): running as root\n')
-
 } else {
   await test('the undecidable case warns instead of silently no-opping (#7226)', async () => {
     const dir = mkdtempSync(join(realpathSync(tmpdir()), 'genagents-7226-'))
@@ -377,5 +375,4 @@ if (ran !== EXPECTED_CASES) {
   )
   broken = true
 }
-
 process.exit(broken ? 1 : 0)
