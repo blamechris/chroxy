@@ -1,5 +1,6 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   parseJobs,
   parseSteps,
@@ -20,6 +21,7 @@ import {
   assertEveryFileParsed,
   assertEveryFileContributes,
   assertReaderSane,
+  valuelessKey,
   readWorkflows,
   SETUP_NODE,
   commandUses,
@@ -1852,6 +1854,256 @@ describe('workflow reader: no single real file can collapse invisibly (#7659)', 
   })
 })
 
+describe('workflow reader: a valueless key may carry a trailing comment (#7673)', () => {
+  /**
+   * `parseJobs` has allowed a trailing comment on a job-id line since #7499.
+   * That fix went to the site that had the bug, and the module was never swept
+   * for siblings — there were four, and every one of them ended at a bare `$`.
+   * The adjacent-field pattern in docs/false-safety-guards.md, four instances
+   * of it in one file.
+   *
+   * Each case below measures ONE site, and each goes red with only its own
+   * anchor reverted. The bare spellings are asserted alongside, so the
+   * allowance cannot be "fixed" by matching everything.
+   */
+  /** The live corpus, for the behavioural rule below. */
+  let corpus
+  before(async () => {
+    corpus = await readWorkflows()
+  })
+
+  const bashJob = steps => [
+    '  a:',
+    '    runs-on: ubuntu-latest',
+    steps,
+    '      - run: echo hi',
+    '      - uses: actions/checkout@v4',
+  ]
+  const pwshJob = (defaults, run) => [
+    '  a:',
+    '    runs-on: windows-latest',
+    defaults,
+    run,
+    '        shell: pwsh',
+    '    steps:',
+    '      - run: Get-Item .',
+  ]
+
+  it('parseSteps: `steps: # comment` still yields the job its steps', () => {
+    // Measured before the fix: 2 steps for the bare spelling, ZERO for the
+    // commented one — the whole job's steps vanish, and every rule anchored to
+    // a step body then passes over an empty set for it.
+    assert.equal(parseSteps(bashJob('    steps:')).length, 2, 'control: the bare spelling')
+    assert.equal(parseSteps(bashJob('    steps: # the pipeline')).length, 2)
+  })
+
+  it('jobShell: `defaults: # comment` still classifies the job pwsh', () => {
+    // Measured before the fix: "pwsh" bare, `undefined` commented. Both of
+    // this repo's PowerShell jobs declare their shell in `defaults:` and
+    // neither declares it on a step.
+    assert.equal(jobShell(pwshJob('    defaults:', '      run:')), 'pwsh', 'control: the bare spelling')
+    assert.equal(jobShell(pwshJob('    defaults: # pwsh everywhere', '      run:')), 'pwsh')
+  })
+
+  it('jobShell: `run: # comment` still classifies the job pwsh', () => {
+    // The `defaults:` -> `run:` -> `shell:` chain has two valueless keys and
+    // the second was broken the same way. Measured: `undefined` before.
+    assert.equal(jobShell(pwshJob('    defaults:', '      run: # pwsh everywhere')), 'pwsh')
+  })
+
+  it('jobShell: `steps: # comment` must not read a RUN BODY as the job shell', () => {
+    // The sharp one, and the direction `jobShell`'s own comment names: with
+    // `steps:` unmatched the job-key slice runs to the end of the job, so the
+    // scan walks into a run block's body and reads a heredoc writing a
+    // workflow file as this job's configuration. Measured before the fix:
+    // "pwsh" FOR A BASH JOB — and a false "powershell" drops every real bash
+    // block in that job out of `bash -n`.
+    const heredocJob = steps => [
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      steps,
+      '      - run: |',
+      '          cat > w.yml <<EOF',
+      '          defaults:',
+      '            run:',
+      '              shell: pwsh',
+      '          EOF',
+    ]
+    assert.equal(jobShell(heredocJob('    steps:')), undefined, 'control: the bare spelling')
+    assert.equal(jobShell(heredocJob('    steps: # the pipeline')), undefined)
+  })
+
+  it('valuelessKey accepts a bare key and a trailing comment, and REFUSES a key with a value', () => {
+    // The contract, asserted directly. A mutation sweep made the pattern
+    // `${key}:.*$` — accepting a key WITH a value — and all four call sites
+    // stayed green, because these three keys are never written with one in real
+    // YAML. Inferring "valueless" from the call sites is inferring it from
+    // evidence that cannot vary; this is the case that can.
+    const k = valuelessKey('steps')
+    for (const ok of ['steps:', '    steps:', 'steps:   ', 'steps: # the pipeline', '  steps:\t# tab then comment']) {
+      assert.ok(k.test(ok), `expected a valueless key to match: ${JSON.stringify(ok)}`)
+    }
+    for (const no of ['steps: [a, b]', 'steps: 3 # three', 'stepsx:', 'steps:#nospace']) {
+      assert.ok(!k.test(no), `expected NO match: ${JSON.stringify(no)}`)
+    }
+    // `steps:#nospace` is in the reject list for a YAML reason, not a style
+    // one: a `#` needs preceding whitespace to open a comment, so that line is
+    // a plain scalar and not a mapping key at all.
+  })
+
+  it('a COMMENTED-OUT key is not the key — the `^` anchor, pinned on both consumers', () => {
+    // The other half of the contract, and separately untested: a sweep dropped
+    // the `^` from `valuelessKey` and nothing went red. Without it the pattern
+    // matches mid-line, so a bare `# steps:` — a commented-out key above the real
+    // one, which is how this repo actually edits workflows — reads AS the key.
+    // The commented key must be BARE: `# steps: moved below` matches neither
+    // spelling, so a fixture written that way proves nothing and passes either
+    // way. That is how the first draft of this case was written, and the sweep
+    // is what caught it.
+    // Neither consumer runs its anchor through `code()`, so nothing else stops
+    // it. Both consumers are pinned because the damage differs.
+    //
+    // jobShell: the job-key slice ends at the COMMENT, so the whole
+    // `defaults:` chain falls outside it and a pwsh job reads as unset.
+    const pwsh = [
+      '  a:',
+      '    runs-on: windows-latest',
+      '    # steps:',
+      '    #   - run: moved below',
+      '    defaults:',
+      '      run:',
+      '        shell: pwsh',
+      '    steps:',
+      '      - run: Get-Item .',
+    ]
+    assert.equal(jobShell(pwsh), 'pwsh')
+
+    // parseSteps: the scan starts at the comment, so the FIRST dash it meets
+    // sets the step indent — here a matrix axis, four spaces deeper than the
+    // real steps — and it returns the axis entries as this job's steps.
+    const matrix = [
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    strategy:',
+      '      matrix:',
+      '        # steps:',
+      '        os:',
+      '          - ubuntu-latest',
+      '          - macos-latest',
+      '    steps:',
+      '      - run: echo hi',
+    ]
+    assert.equal(parseSteps(matrix).length, 1, 'the matrix axis is not this job’s steps')
+  })
+
+  it('NO valueless-key anchor anywhere in the module may reject a trailing comment', () => {
+    // A UNIVERSAL rather than a list of site names — a roster beside a growing
+    // set is the first cause in docs/false-safety-guards.md, and a list would
+    // go stale on the next site, which is exactly how this survived #7499.
+    //
+    // WHAT IT DOES NOT COVER, measured in review of #7674 rather than reasoned
+    // about, because the first version of this comment claimed it meant "a
+    // fifth site cannot be added quietly" and it does not. It is a SPELLING
+    // check, and two behaviourally identical reintroductions of the bug went
+    // straight past it: `/^\s*steps[:]\s*$/` (colon in a character class) and
+    // `new RegExp("^\\s*defaults:" + "\\s*$")` (split across two lines). It
+    // could never have seen `parseJobs`'s `l === 'jobs:'` string equality
+    // either — the sixth site, which is not a regex at all.
+    //
+    // It is kept because it is cheap and it catches the shape people actually
+    // type. The rule that does the real work is the BEHAVIOURAL one below,
+    // which is spelling-blind by construction and is what found site six.
+    const src = readFileSync(new URL('./helpers/workflow-reader.js', import.meta.url), 'utf8')
+    const isComment = l => /^\s*(?:\/\/|\/?\*)/.test(l)
+    const bare = src
+      .split('\n')
+      .map((text, i) => ({ line: i + 1, text: text.trim() }))
+      .filter(r => !isComment(r.text) && r.text.includes(':\\s*$'))
+    assert.deepEqual(
+      bare.map(r => `${r.line}: ${r.text}`),
+      [],
+      'a `key:\\s*$` anchor ends at a bare `$`, so a legal trailing comment on that key matches ' +
+        'nothing — route it through valuelessKey() instead'
+    )
+  })
+
+  it('commenting EVERY valueless key in the live corpus changes nothing the reader reports', () => {
+    // The guard that is not a spelling check. It asks the question the source
+    // rule only approximates — does a legal trailing comment change what this
+    // reader reports? — and it asks it of the REAL workflows, through the
+    // public surface, so an anchor's spelling is irrelevant and an anchor that
+    // is not a regex at all is still covered. That is not hypothetical: this
+    // case is what found `parseJobs`'s `l === 'jobs:'` string equality, which
+    // made the whole file THROW and which the source rule cannot see.
+    //
+    // The transform is deliberately indiscriminate — every `key:` line with no
+    // value, at any indent, whatever the key — because naming the keys would
+    // reintroduce the roster this file keeps removing.
+    const VALUELESS = /^\s*[A-Za-z0-9_-]+:\s*$/
+    const observe = (name, text) =>
+      parseJobs(text, name).map(j => ({ id: j.id, steps: j.steps.length, shell: jobShell(j.body) ?? null }))
+
+    let touched = 0
+    for (const w of corpus) {
+      const lines = w.text.split('\n')
+      const n = lines.filter(l => VALUELESS.test(l)).length
+      // Per FILE, so a file with none drops out loudly instead of shrinking the
+      // sweep in silence — the same non-vacuity rule the #7668 sweep learned.
+      assert.ok(n > 0, `${w.name} has no valueless key, so this case proves nothing for it`)
+      touched += n
+      const commented = lines.map(l => (VALUELESS.test(l) ? `${l} # pinned by #7673` : l)).join('\n')
+      assert.deepEqual(
+        observe(w.name, commented),
+        observe(w.name, w.text),
+        `${w.name}: commenting its valueless keys changed what the reader reports`
+      )
+    }
+    // 223 today across seven files. A floor, not the exact number, because the
+    // corpus grows — but high enough that a transform which quietly stopped
+    // matching could not pass.
+    assert.ok(touched >= 100, `expected the transform to touch many keys, touched ${touched}`)
+  })
+
+  it('parseJobs: `jobs: # comment` is still the top-level jobs key (#7674 review)', () => {
+    // The sixth site, and the only one that was not a regex: `l === 'jobs:'`.
+    // Measured before the fix — THROWS, so the file yields nothing at all.
+    // Anchored at column zero, because `jobs:` is top-level and a nested
+    // `jobs:` further in must not be mistaken for it.
+    const text = ['jobs: # the pipeline', '  a:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo hi'].join('\n')
+    assert.equal(parseJobs(text, 'x.yml')[0].steps.length, 1)
+    assert.ok(!valuelessKey('jobs', { topLevel: true }).test('  jobs:'), 'a nested `jobs:` is not the top-level one')
+  })
+
+  it('valuelessKey is symmetric across line endings, and REFUSES a key it cannot safely interpolate', () => {
+    // Two review findings in one contract. `.` excludes `\r`, so the comment
+    // branch written with `.` matched `steps: \r` and REJECTED `steps: # c\r` —
+    // this same bug class, gated on line ending instead of on a comment.
+    // `.gitattributes` pins the repo to LF so nothing live hit it, but the
+    // helper is exported now.
+    const k = valuelessKey('steps')
+    assert.ok(k.test('steps: \r'), 'a bare key with a CR')
+    assert.ok(k.test('steps: # c\r'), 'and its commented form — these must agree')
+    // And the key is interpolated into a RegExp, so a metacharacter would widen
+    // the pattern silently rather than failing. Refused, not escaped.
+    for (const bad of ['ste.s', 'a(b', 'x|y', '']) {
+      assert.throws(() => valuelessKey(bad), /expects a plain YAML key/, `expected refusal for ${JSON.stringify(bad)}`)
+    }
+  })
+
+  it('CONTROL: the guard above can SEE a bare anchor, so its empty result means something', () => {
+    // Without this the case above passes on an empty file, a broken read, or a
+    // needle that matches nothing — "a filter whose terms match NOTHING, so the
+    // gate is satisfied by zero rows" (docs/false-safety-guards.md). The needle
+    // is applied to a line known to contain the shape.
+    const isComment = l => /^\s*(?:\/\/|\/?\*)/.test(l)
+    const planted = '  const stepsAt = bodyLines.findIndex(l => /^\\s*steps:\\s*$/.test(l))'
+    assert.ok(!isComment(planted) && planted.includes(':\\s*$'), 'the needle must match the pre-#7673 line')
+    const src = readFileSync(new URL('./helpers/workflow-reader.js', import.meta.url), 'utf8')
+    assert.ok(src.length > 1000, 'the module source must actually have been read')
+    assert.ok(src.includes('valuelessKey'), 'and it must be the module that carries the one implementation')
+  })
+})
+
 describe('workflow reader: no real file can absorb a step invisibly (#7668)', () => {
   /**
    * The companion of the block above, one level up from run bodies: the same
@@ -1884,7 +2136,7 @@ describe('workflow reader: no real file can absorb a step invisibly (#7668)', ()
     const lines = text.split('\n')
     let stepsIndent = null
     for (let i = 0; i < lines.length; i++) {
-      if (/^\s*steps:\s*$/.test(lines[i])) {
+      if (valuelessKey('steps').test(lines[i])) {
         stepsIndent = /^(\s*)/.exec(lines[i])[1].length
         continue
       }

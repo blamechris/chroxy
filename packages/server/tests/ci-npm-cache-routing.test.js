@@ -11,6 +11,7 @@ import {
   ROUTED_CACHE,
   ROUTED_RUNNER_OUTPUTS,
   LOCKFILE_GLOB,
+  valuelessKey,
 } from './helpers/workflow-reader.js'
 
 /**
@@ -456,7 +457,13 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
    */
   const triggersOnPushToMain = w => {
     const lines = triggers(w).split('\n')
-    const at = lines.findIndex(l => /^\s*push:\s*$/.test(l))
+    // `valuelessKey`, not a bare `/^\s*push:\s*$/`: a trailing comment on
+    // `push:` is legal YAML, and a bare anchor returns -1 for it — this
+    // function then reports NO push-to-main producer, which the case below
+    // calls the load-bearing assertion. Same defect as the six #7673 fixed in
+    // the reader; found by that PR's review one file over, which is the
+    // adjacent-field pattern at file granularity.
+    const at = lines.findIndex(l => valuelessKey('push').test(l))
     if (at === -1) return false
     const push = subBlock(lines, at)
     if (push.some(l => /^\s*paths(-ignore)?:/.test(l))) return false
@@ -490,10 +497,56 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
    * the job body ABOVE `steps:`.
    */
   const isUnconditional = job => {
-    const stepsAt = job.body.findIndex(l => /^\s*steps:\s*$/.test(l))
+    // Same fix, and here the failure is the `jobShell` one exactly: a trailing
+    // comment on `steps:` leaves `stepsAt` at -1, `head` becomes the WHOLE job
+    // body, and the scan walks into the step bodies it was written to stay
+    // above — where a step-level `if:` is, in this file's own words, "normal
+    // and irrelevant here".
+    const stepsAt = job.body.findIndex(l => valuelessKey('steps').test(l))
     const head = stepsAt === -1 ? job.body : job.body.slice(0, stepsAt)
     return !head.some(l => /^\s{2,}if:/.test(l))
   }
+
+  it('a trailing comment on `push:` does not erase the producer (#7673 sweep)', () => {
+    // Both helpers below anchored a valueless key at a bare `$` until #7674's
+    // review swept one file over from the reader and found them. `push: # …`
+    // is legal YAML; with a bare anchor `at` stays -1 and this function reports
+    // NO push-to-main producer — silently turning the load-bearing assertion
+    // below into a failure with an entirely wrong diagnosis.
+    const w = text => ({ name: 'x.yml', text })
+    const commented = w('on:\n  push: # only main\n    branches: [main]\njobs:\n  a:\n')
+    const bare = w('on:\n  push:\n    branches: [main]\njobs:\n  a:\n')
+    assert.equal(triggersOnPushToMain(bare), true, 'control: the bare spelling')
+    assert.equal(triggersOnPushToMain(commented), true)
+    // And the filters it exists to apply still apply through the comment.
+    assert.equal(
+      triggersOnPushToMain(w('on:\n  push: # only main\n    branches: [release]\njobs:\n  a:\n')),
+      false,
+      'a non-main branch filter must still disqualify it'
+    )
+  })
+
+  it('a trailing comment on `steps:` does not make a job read as conditional (#7673 sweep)', () => {
+    // The `jobShell` failure exactly, in a second file: with `steps:`
+    // unmatched, `head` becomes the WHOLE job body and the scan walks into the
+    // step bodies it was written to stay above — where a step-level `if:` is,
+    // in this function's own words, "normal and irrelevant here".
+    // The step's `if:` sits on a CONTINUATION line, not the dash line: the scan
+    // matches `/^\s{2,}if:/`, which a `- if:` dash line does not satisfy. The
+    // first draft of this case put it on the dash line, so it exercised nothing
+    // and the mutation sweep caught it — the third fixture in this PR to fail
+    // that way, which is why every case here was verified by mutation rather
+    // than by reading.
+    const body = steps => ['  a:', '    runs-on: ubuntu-latest', steps, '      - run: echo hi', '        if: always()']
+    assert.equal(isUnconditional({ body: body('    steps:') }), true, 'control: the bare spelling')
+    assert.equal(isUnconditional({ body: body('    steps: # the pipeline') }), true)
+    // A genuine JOB-level `if:` must still disqualify it, commented or not.
+    assert.equal(
+      isUnconditional({ body: ['  a:', '    runs-on: ubuntu-latest', '    if: github.event_name == \'push\'', '    steps: # p', '      - run: echo hi'] }),
+      false,
+      'a job-level if: must still count'
+    )
+  })
 
   it('finds at least one producer at all', () => {
     // Positive control AND the load-bearing assertion. If this reaches zero, every
