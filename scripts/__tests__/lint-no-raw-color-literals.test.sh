@@ -145,6 +145,14 @@ ALL_LOCALES="$(locale -a 2>/dev/null | tr -d '\r' || true)"
 LOCALE_COUNT="$(printf '%s\n' "$ALL_LOCALES" | grep -c . || true)"
 UTF8_CANDIDATES="$(printf '%s\n' "$ALL_LOCALES" | grep -iE '[.]utf-?8$' || true)"
 CANDIDATE_COUNT="$(printf '%s\n' "$UTF8_CANDIDATES" | grep -c . || true)"
+# A LOOSER reading of the same list, and it is what makes the check below
+# precise. "Zero candidates" alone cannot tell a broken pattern from a host that
+# genuinely ships no UTF-8 locale — `C`/`POSIX` only is a real Debian without
+# locales-all, and the first version of this check failed it (Copilot, #7682).
+# Anything mentioning utf at all is the loose set: if the loose set is non-empty
+# while the anchored one is empty, the ANCHOR has stopped matching. If both are
+# empty, the host simply has none.
+UTF8_LOOSE_COUNT="$(printf '%s\n' "$ALL_LOCALES" | grep -ic 'utf' || true)"
 
 # ONE-SIDED, and that is the whole design (#7682 review). This asked whether a
 # locale sorted a pair DIFFERENTLY FROM C — two sides, and equalising them is a
@@ -185,11 +193,11 @@ done
 # a spurious "a case stopped executing" — two diagnoses for one fault, the
 # second of them wrong.
 PROBE_BROKEN=0
-if [ "$CANDIDATE_COUNT" -eq 0 ] && [ "$LOCALE_COUNT" -gt 0 ]; then
+if [ "$CANDIDATE_COUNT" -eq 0 ] && [ "$UTF8_LOOSE_COUNT" -gt 0 ]; then
   PROBE_BROKEN=1
-  echo "PROBE BROKEN: examined 0 UTF-8 locales while \`locale -a\` listed $LOCALE_COUNT."
-  echo "  The probe's own pattern has stopped matching, so cases 5-7 would report"
-  echo "  as three ordinary skips rather than as a fault (#7655)."
+  echo "PROBE BROKEN: the anchored pattern matched 0 locales while $UTF8_LOOSE_COUNT of the"
+  echo "  $LOCALE_COUNT listed mention utf. The anchor has stopped matching, so cases 5-7"
+  echo "  would report as three ordinary skips rather than as a fault (#7655)."
 fi
 
 # The SECOND discriminator, and it exists because the first one does not reach
