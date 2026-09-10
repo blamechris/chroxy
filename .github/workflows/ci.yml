@@ -467,7 +467,58 @@ jobs:
     name: Server Lint
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
-    timeout-minutes: 5
+    # 10, not the 5 every other lint-tier job carries, because this job is the
+    # only one of them that resolves npm TWICE: `npm ci` at the root, and then
+    # `npm install --package-lock-only` in packages/server for the lockfile
+    # freshness check. Measured across ci.yml, every other <=5-minute job does
+    # one resolve or none (#7613).
+    #
+    # The budget was never a latency guard here. Steady state is 37-43s, so a
+    # 300s ceiling only ever fires when the runner's ~/.npm is cold — which
+    # turns a slow-but-correct job into a RED REQUIRED CHECK. On the night of
+    # 2026-09-03, against a runner container generation recreated hours earlier
+    # with an empty cache, it did so on two PRs at once. Per-attempt job
+    # records, which is where earlier attempts survive (the jobs API returns
+    # only the latest):
+    #
+    #     #7608, run 33817262694     #7607, run 33816965749
+    #       1  cancelled  316s         1  cancelled  312s
+    #       2  cancelled  315s         2  cancelled  317s
+    #       3  cancelled  316s         3  cancelled  310s
+    #       4  cancelled  316s         4  SUCCESS    269s
+    #       5  SUCCESS     39s
+    #
+    # #7608 is the four-consecutive-cancellation event the comments at the top
+    # of this file and in `app-typecheck` already cite, and its fifth attempt —
+    # 39s, once the cache had warmed — is the whole argument in one number: the
+    # job is not slow, the cache was cold. #7607 is the near-miss beside it,
+    # three cancellations and then a pass that still spent 90% of the budget.
+    # #7613 describes the four-count against #7607; the two are separate runs
+    # on the same night, which is worth stating because reconciling them is
+    # otherwise a second archaeology exercise.
+    #
+    # The strain is NOT unique to this job, and that matters for choosing the
+    # fix rather than against it: `App Type Check` (311s) and `Design Tokens
+    # Tests` (316s) were cancelled alongside it, and both resolve npm ONCE. A
+    # cold cache strains the whole 5-minute tier. What singles this job out is
+    # that those two passed on their next attempt while this one needed three
+    # or four — it is doing twice their npm work in the same budget. Raise this
+    # one; the tier is not the problem the evidence supports.
+    #
+    # Read the change as insurance, not as a live fire. The acute trigger that
+    # night was npm's unrequested advisory call stalling 17-48s per install, and
+    # #7636 removed it at the workflow `env:` level. Every Server Lint run on
+    # main since (9 of them, 2026-09-05 08:10Z onward): 90s, 146s, 40s, 37s,
+    # 37s, 41s, 43s, 37s, 39s — worst case 48% of the old budget. What #7636 did
+    # NOT remove is the asymmetry above: a genuinely cold cache still downloads
+    # everything, twice here and once everywhere else, and container generations
+    # do get recreated.
+    #
+    # The cost of the extra five minutes is that a genuinely hung job takes 10
+    # minutes to fail instead of 5, and holds a slot in the shared self-hosted
+    # pool that much longer while it does. That is the right trade for a
+    # required check whose observed failure mode is a false red.
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/server
