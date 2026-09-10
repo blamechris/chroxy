@@ -368,7 +368,7 @@ const runKeyLine = stepLines => stepLines.find(l => /^\s*(?:-\s+)?run:/.test(l))
 function runHeadSpelling(line) {
   const m = /^\s*(?:-\s+)?run:\s*(.*)$/.exec(line)
   const value = m ? m[1].trim() : ''
-  if (/^[|>][-+]?\d*\s*(?:#.*)?$/.test(value)) return 'block'
+  if (BLOCK_HEAD.test(value)) return 'block'
   if (value.startsWith("'") || value.startsWith('"')) return 'quoted'
   return 'plain'
 }
@@ -1058,7 +1058,7 @@ export function stepRun(stepLines) {
     if (!m) continue
     const head = m[1].trim()
 
-    const block = /^([|>])([-+]?\d*)$/.exec(head)
+    const block = BLOCK_HEAD.exec(head)
     if (block) {
       const dedented = keyBody(stepLines, i, keyIndent)
       return block[1] === '>' ? fold(dedented) : dedented.join('\n')
@@ -1083,11 +1083,11 @@ export function stepRun(stepLines) {
     // over an empty body and a step spelled this way was UNGUARDED.
     //
     // Folded, not joined with newlines, because that is what YAML does to a
-    // multi-line plain scalar: it is the same folding as `>`, which is why
-    // `fold()` is called here rather than a second copy of the rule. A step
-    // whose key really carries nothing still yields '' — `keyBody` returns no
-    // lines and `fold([])` is ''.
-    if (head === '') return fold(keyBody(stepLines, i, keyIndent))
+    // multi-line plain scalar. NOT the same folding as `>` — see `foldPlain`,
+    // which exists because sharing `fold()` here was wrong and measurably so.
+    // A step whose key really carries nothing still yields '' — `keyBody`
+    // returns no lines and `foldPlain([])` is ''.
+    if (head === '') return foldPlain(keyBody(stepLines, i, keyIndent))
 
     return head.replace(/\s+#.*$/, '').trim()
   }
@@ -1108,6 +1108,69 @@ export function stepRun(stepLines) {
  * becomes a SPACE; n blank lines become n newlines; a MORE-indented line is
  * literal and keeps the breaks around it.
  */
+/**
+ * A `run:` value that is a BLOCK-scalar header — `|`, `>`, their chomping and
+ * indent-indicator forms, and YAML's optional trailing comment.
+ *
+ * ONE grammar, shared by `stepRun`'s branch selection and `runHeadSpelling`'s
+ * classification. It was two, and `runHeadSpelling`'s comment claimed they
+ * MIRRORED each other while its own pattern carried `\s*(?:#.*)?` that
+ * `stepRun`'s did not — a comment describing a different check than the code
+ * performs, in a module that catalogues that cause.
+ *
+ * The divergence was not cosmetic. `run: | # c` is legal YAML whose value is
+ * `echo hi`; `stepRun` fell through to the plain catch-all and returned the
+ * literal string `"|"`, while `runHeadSpelling` called the same step a block.
+ * Measured against js-yaml in review of #7675: `| # c` -> `"|"`, `|- # c` ->
+ * `"|-"`, `>+ # c` -> `">+"`. The last is the dangerous one: `>+` is a VALID
+ * bash line (a redirect to a file named `+`), so `bash -n` passes it and a
+ * content-inspecting guard sees `">+"` instead of the script it meant to read.
+ * The same bare-`$` anchor #7673 swept out of every KEY position, surviving on
+ * the VALUE side.
+ */
+const BLOCK_HEAD = /^([|>])([-+]?\d*)\s*(?:#.*)?$/
+
+/**
+ * Fold a PLAIN scalar's continuation lines, which is NOT what `fold()` does.
+ *
+ * The two look like the same operation and are not, and sharing them was this
+ * change's own first mistake. A folded BLOCK scalar (`>`) keeps a
+ * more-indented line literal — that is what lets a `>` block hold an indented
+ * `if`/`fi` body. A PLAIN scalar has no such rule: every line break folds to a
+ * space regardless of indent. Measured against js-yaml:
+ *
+ *     run:
+ *       if true; then
+ *         echo hi
+ *       fi
+ *
+ * is the single line `if true; then echo hi fi`, not three lines. `fold()`
+ * returned the three-line form, so `bash -n` would have validated a script the
+ * runner never receives — a false green in the exact scenario `stepRun`'s
+ * block-scalar comment names as the reason folding matters at all.
+ *
+ * Blank lines still collapse the same way in both: n line breaks become n-1
+ * newlines, which is why a blank line survives as a `\n` here.
+ *
+ * `keyBody()` remains shared, because COLLECTING the lines really is the same
+ * operation in both styles. Only the fold differs.
+ */
+function foldPlain(lines) {
+  let out = ''
+  let blanks = 0
+  for (const line of lines) {
+    const text = line.trim()
+    if (text === '') {
+      blanks++
+      continue
+    }
+    if (out === '') out = text
+    else out += blanks > 0 ? '\n'.repeat(blanks) + text : ` ${text}`
+    blanks = 0
+  }
+  return out
+}
+
 /**
  * The lines belonging to the key at `stepLines[at]` — strictly more indented
  * than `keyIndent` — with the block's common indent removed and trailing blanks

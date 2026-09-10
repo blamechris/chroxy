@@ -1785,6 +1785,51 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
     assert.equal(stepRun(step), 'echo one echo two')
   })
 
+  it('a PLAIN scalar folds unconditionally — indentation does NOT make a line literal (#7675 review)', () => {
+    // The mistake this case exists for was mine, and it was the DRY instinct
+    // applied one step too far: `keyBody` really is the same collection in both
+    // scalar styles, so the first version shared `fold()` for the folding too.
+    // It is not the same rule. A folded BLOCK scalar keeps a more-indented line
+    // literal; a PLAIN scalar has no such rule and folds every break to a space.
+    //
+    // js-yaml says this step is the single line `if true; then echo hi fi`.
+    // Sharing `fold()` returned the three-line form — so `bash -n` would have
+    // validated a script the runner never receives, which is a false green in
+    // the exact scenario `stepRun`'s own block comment names as the reason
+    // folding matters at all.
+    const step = ['      - name: t', '        run:', '          if true; then', '            echo hi', '          fi']
+    assert.equal(stepRun(step), 'if true; then echo hi fi')
+    // A blank line is still a newline in BOTH styles: n breaks become n-1.
+    assert.equal(stepRun(['      - name: t', '        run:', '          echo one', '', '          echo two']), 'echo one\necho two')
+  })
+
+  it('CONTROL: a folded `>` block DOES keep a more-indented line literal', () => {
+    // The other half, and what makes the case above a statement about two
+    // different rules rather than about one of them. If this ever folds flat,
+    // someone has shared the plain rule back into the block branch and the
+    // `>` scalars in release.yml start being read wrong.
+    const step = ['      - name: t', '        run: >', '          echo one', '            deeper', '          echo two']
+    assert.equal(stepRun(step), 'echo one\n  deeper\necho two')
+  })
+
+  it('a block header with a TRAILING COMMENT is still a block header (#7675 review)', () => {
+    // The bare-`$` anchor #7673 swept out of every KEY position, surviving on
+    // the VALUE side. `run: | # c` is legal YAML whose value is `echo hi`;
+    // `stepRun` fell through to the plain catch-all and returned the literal
+    // `"|"`. Measured: `| # c` -> "|", `|- # c` -> "|-", `>+ # c` -> ">+".
+    //
+    // `>+` is the dangerous one: it is a VALID bash line — a redirect to a file
+    // named `+` — so `bash -n` passes it and a content-inspecting guard reads
+    // ">+" instead of the script. The other two are syntax errors, which fail
+    // loudly. Pre-existing, not introduced by #7670, and fixed here because the
+    // grammar is now shared with `runHeadSpelling`, which already accepted the
+    // comment — the two disagreed while a comment claimed they mirrored.
+    for (const head of ['| # c', '|- # c', '>+ # c', '|2 # c']) {
+      const step = ['      - name: t', `        run: ${head}`, '          echo hi']
+      assert.equal(stepRun(step), 'echo hi', `block header ${JSON.stringify(head)}`)
+    }
+  })
+
   it('a `run:` key that really carries nothing still yields the empty string', () => {
     // The boundary the new branch must not swallow: `keyBody` returns no lines,
     // `fold([])` is '', and the empty-body false red below still fires. Without
