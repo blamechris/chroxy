@@ -1269,6 +1269,60 @@ test('the roster records the declaration OFFSET, not just the name', () => {
   assert(b.exported === false && b.keyword === 'let', JSON.stringify(b))
 })
 
+// Each name below occurs EXACTLY ONCE in its declaration — asserted, so
+// `indexOf` is an unambiguous independent answer for where the entry should
+// point rather than merely the first of several candidates. #7533's acceptance
+// criterion is per-declarator offsets, and until this table the only thing
+// pinning them was the CLI verdict, which a name pointing at the wrong column
+// still satisfies: the classifier skips `index..index+name.length` to avoid
+// counting the declaration as a read, so a drifted offset leaves the real
+// declaration IN the scanned text and reads as a first reference.
+const offsetRoster = [
+  ['a multi-declarator `let`', 'let alpha = 1, beta = 2;\n', ['alpha', 'beta']],
+  ['a destructuring `const`', 'const { alpha, beta } = make();\n', ['alpha', 'beta']],
+  ['a RENAMED destructuring', 'const { a: alpha, b: beta } = make();\n', ['alpha', 'beta']],
+  ['a DEFAULTED destructuring', 'const { alpha = 1, beta = 2 } = make();\n', ['alpha', 'beta']],
+  ['an array pattern with a REST element', 'const [alpha, ...beta] = make();\n', ['alpha', 'beta']],
+]
+for (const [label, decl, names] of offsetRoster) {
+  test(`the roster records a per-declarator offset for ${label} (#7533)`, () => {
+    const found = extractModuleBindings(stripComments(decl))
+    assert(found.length === names.length, `got ${found.length} binding(s), want ${names.length}: ${decl}`)
+    assert(
+      found.map((b) => b.name).join(',') === names.join(','),
+      `names ${found.map((b) => b.name).join(',')} !== ${names.join(',')}`,
+    )
+    for (const [i, name] of names.entries()) {
+      assert(decl.split(name).length === 2, `${name} is not unique in ${JSON.stringify(decl)}`)
+      assert(
+        found[i].index === decl.indexOf(name),
+        `${name}: index ${found[i].index} !== ${decl.indexOf(name)} in ${JSON.stringify(decl)}`,
+      )
+    }
+  })
+}
+
+test('the second declarator of `let a = 1, b = 2` lands on its own column (#7533)', () => {
+  // The criterion's own example, with the arithmetic spelled out rather than
+  // derived, so the table above cannot agree with a wrong `indexOf` unnoticed.
+  const [a, b] = extractModuleBindings('let a = 1, b = 2;\n')
+  assert(a.name === 'a' && a.index === 4, JSON.stringify(a))
+  assert(b.name === 'b' && b.index === 11, JSON.stringify(b))
+})
+
+test('a renamed binding whose name is a SUBSTRING of the key it renames (#7533)', () => {
+  // Why `identifierOffset` is a whole-identifier match and not `indexOf`: in
+  // `{ alpha: pha }` the string `pha` first occurs INSIDE `alpha`, three
+  // columns early. `indexOf` survives every case in the table above — none of
+  // their names is a substring of anything to its left — so without this case
+  // the offset math would be pinned only where it cannot be wrong.
+  const decl = 'const { alpha: pha } = make();\n'
+  assert(decl.indexOf('pha') === 10, 'fixture no longer has the ambiguity it is for')
+  const [b] = extractModuleBindings(stripComments(decl))
+  assert(b.name === 'pha', JSON.stringify(b))
+  assert(b.index === 15, `index ${b.index} !== 15 — pointed inside \`alpha\`?`)
+})
+
 test('an EXPORTED binding is marked as such', () => {
   const [b] = extractModuleBindings('export let n = 0;\n')
   assert(b.exported === true, JSON.stringify(b))

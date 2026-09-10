@@ -1129,10 +1129,16 @@ function isConstantInitializer(init) {
  * Only brace-depth 0 counts: a `let` inside a function is a local, and
  * TypeScript's own `noUnusedLocals` already covers it.
  *
+ * SEEN since #7533, having been listed here as NOT SEEN before it: every
+ * declarator of `let a = 1, b = 2`, and every binding of a destructuring
+ * declaration (`const { a, b } = o`) including nested, renamed, defaulted and
+ * rest forms. `declaratorNames` below does that reading; this function only
+ * finds the declaration LIST and hands each declarator to it.
+ *
  * NOT SEEN, deliberately stated rather than implied:
- *   - a destructuring declaration (`const { a, b } = o`) contributes nothing;
- *   - only the FIRST declarator of `let a = 1, b = 2` is seen;
- *   - `declare`/ambient declarations are treated like any other.
+ *   - `declare`/ambient declarations are treated like any other;
+ *   - a declarator shape `declaratorNames` cannot read contributes no name —
+ *     it is REPORTED through `unparsed` rather than dropped (see there).
  * Each of those is missing COVERAGE, never a false green on a binding that is
  * in the roster.
  */
@@ -1148,8 +1154,15 @@ function isConstantInitializer(init) {
  *
  * A parser introduces the hazard it is meant to close, so this REPORTS what it
  * could not read rather than dropping it. A declarator that yields no name is
- * returned in `unparsed`, and the caller fails on it — a shape nobody
- * anticipated becomes a red build naming the text, not a silent gap.
+ * returned in `unparsed`, and `analyzeModuleBindings` PRINTS it as a NOTE and
+ * carries on — it does not fail the build, and the doc said it did until
+ * Copilot caught the mismatch on #7687.
+ *
+ * Not fatal for a measured reason: the previous extractor did not read those
+ * declarations either — it emitted entries literally named `const` for them —
+ * so failing here would red the build over a shape this change did not
+ * introduce. The gap is the same either way; what changed is that it is now
+ * NAMED instead of silent, which is the whole point.
  *
  * One level deep, deliberately. `const { a: { b } } = f()` reports the nested
  * pattern as unparsed rather than guessing, because a wrong name in the roster
