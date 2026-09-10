@@ -7,7 +7,14 @@
  * at three names, it still said three when there were nine, and #7661 arrived
  * to add the tenth. (The first correction to this sentence said "three short,
  * adding a fourth", which was the same mistake one layer up — #7662 review.)
- * `grep -l workflow-reader` answers it correctly and always.
+ * `grep -rl "helpers/workflow-reader" packages/server/tests --include='*.test.js'`
+ * answers it, and the IMPORT PATH is the part that matters: a bare
+ * `grep -l workflow-reader` also matches `batch-merge-check-gate.test.js`,
+ * which mentions this module in a comment and imports nothing from it. That
+ * over-count reached #7658's PR body (corrected there) and then #7666's, which
+ * said "eleven importers" for ten. The sentence this replaces claimed the bare
+ * grep "answers it correctly and always" — a comment describing a stronger
+ * check than the command performs, in the file that catalogues that cause.
  *
  * WHY THIS IS A MODULE AND NOT A COPY IN EACH TEST
  * ------------------------------------------------
@@ -383,6 +390,15 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * shallower indent than the mapping it follows — and `actionlint` runs in CI,
  * which is what catches it. This closes the case where the two readings can
  * DISAGREE, which is the one a guard can decide by itself.
+ *
+ * That hole is now smaller than this paragraph implies, and the correction is
+ * recorded rather than the paragraph rewritten, because the limitation is
+ * still real for one file. `assertEveryFileContributes` below reads the raw
+ * text with NO indent anchoring at all, so a wholesale re-indent leaves its
+ * declared count untouched while every body vanishes: measured in review of
+ * #7666, re-indenting the whole `jobs:` block of nightly-k8s-integration.yml,
+ * repo-relay.yml or maestro-nightly.yml keeps THIS check green and turns that
+ * one RED. It stays true only for a file carrying no run bodies — stale.yml.
  */
 export function assertEveryFileParsed(workflows) {
   const declaredJobs = text =>
@@ -409,6 +425,165 @@ export function assertEveryFileParsed(workflows) {
   )
 }
 
+/**
+ * Per-file agreement for the two quantities the GLOBAL floors below count:
+ * `run:` bodies, and `actions/setup-node@` steps.
+ *
+ * WHY THIS EXISTS AT ALL (#7659)
+ * ------------------------------
+ * `assertEveryFileParsed` closed the STRUCTURE half — a file must yield the
+ * jobs it declares, and every job must yield steps. This closes the CONTENT
+ * half, which that check structurally cannot reach: a file whose jobs are
+ * present, whose steps are present, and whose parsed `run:` content is simply
+ * gone. Every remaining floor in `assertReaderSane` is a total across the whole
+ * set, and `ci.yml` alone clears all of them — it carries 91 of the 137 run
+ * bodies, 17 of the 24 setup-node steps and 22 of the 34 jobs. So a file that
+ * stops yielding run bodies contributes nothing to any of them and the shared
+ * positive control still reports the reader healthy.
+ *
+ * WHAT MAKES IT A CONTROL AND NOT A RESTATEMENT
+ * --------------------------------------------
+ * Both quantities are compared against a reading of the file's RAW TEXT that
+ * shares none of the reader's structure. The parsed side walks
+ * `parseJobs` -> `parseSteps` -> `stepRun`, where `stepRun` anchors the key at
+ * exactly the step's dash indent plus two and then branches on the head's
+ * shape. The declared side matches a `run:`-shaped line with a non-empty value
+ * anywhere in the file, at any indent, with no notion of a job or a step. A
+ * collapse along that chain — a job lost, a step lost, the key not found at
+ * the anchored indent, a branch that stops returning a body — makes the two
+ * disagree. The independence is real but NOT total, and the exception is named
+ * under WHAT IT CANNOT SEE below: both sides read a VALUE-LESS `run:` key as
+ * nothing, so for that one spelling they agree by construction rather than by
+ * evidence. Deriving the expectation from the same traversal the
+ * subject uses would be the "expectation computed from its own subject" cause
+ * in docs/false-safety-guards.md, which is the trap #7662 avoided the same way
+ * one level up.
+ *
+ * THE LEGITIMATE ZERO IS STRUCTURAL, NOT AN EXEMPTION
+ * ---------------------------------------------------
+ * `stale.yml` has no run steps and no setup-node step today. It needs no entry
+ * on any list: it declares zero, so zero is what it is required to yield, and
+ * a file that later grows its first run step starts being held to it on the
+ * same commit. A hardcoded roster beside a growing set is the first cause in
+ * docs/false-safety-guards.md, and this module has already been bitten by one
+ * (the consumer list at the top of this file).
+ *
+ * EQUALITY, NOT A FLOOR, for the same reason `assertEveryFileParsed` uses one:
+ * yielded > declared means the reader has INVENTED a body — a `run:`-shaped
+ * line the file's text does not contain at all — which is as much a defect as
+ * losing one, and a floor cannot see it. Said precisely, because the sentence
+ * reads as though it protects the live corpus and it does not: for a caller
+ * whose `jobs` came from `parseJobs(w.text)` every step is a slice of that
+ * same text, so yielded <= declared always holds and the `>` direction is
+ * unreachable. What it guards is the SYNTHETIC callers — the fixtures in
+ * `ci-scripts-tests-registration.test.js` build `jobs` and `text` separately —
+ * and any future reader that stops deriving one from the other.
+ *
+ * PROSE MUST NOT COUNT AS A DECLARATION, and the two halves need DIFFERENT
+ * defences for it — a fact established by mutating them, not by reasoning
+ * about them. The setup-node side matches a SUBSTRING, so a comment that
+ * quotes the action is indistinguishable from a step that uses it, and both
+ * of its readings run through `code()`. The run side does not need one: a
+ * comment line's first non-space character is `#`, and `RUN_KEY` requires
+ * that character to be `-` or `r`, so the two filters are mutually exclusive
+ * by construction. `code()` was written on that side first and a mutation
+ * sweep found it INERT — removing it changed no count and killed no test.
+ * A filter that cannot alter an outcome is not a weak guard, it is a comment
+ * that reads like one, which is the "guard whose comment describes a stronger
+ * check than its code performs" cause in docs/false-safety-guards.md. So it
+ * is gone, and the anchor that does the work is pinned by its own case.
+ *
+ * WHAT IT CANNOT SEE, stated so no caller reads it as more than it is. Most of
+ * this list came out of review rather than out of writing the function, which
+ * is the usual ratio and the reason the list is here at all.
+ *
+ * It counts bodies; it does not INSPECT them, so a branch that still returns
+ * multi-line text while CORRUPTING it agrees with the declared count and
+ * passes. `fold()`'s and `stepRun()`'s unit tests and the `bash -n` pass in
+ * `ci-workflow-run-blocks-parse.test.js` are what catch that.
+ *
+ * FALSE REDS — legal spellings that fire on a healthy reader. Disclosed rather
+ * than guarded: each fails CLOSED, none exists in the corpus today, and
+ * excluding them would mean growing a second block-scalar parser on the
+ * declared side, which is the drift this module exists to prevent.
+ *   - A `run:`-shaped line inside a block scalar's BODY — a heredoc writing a
+ *     YAML file, say. The declared side has no notion of "inside a block
+ *     scalar", so it counts a line the parsed side correctly reads as data.
+ *   - A `run: |` with an empty block body, or `run: ''` — a declared key
+ *     against a yielded `''`.
+ *   - A setup-node reference outside any step.
+ *
+ * ONE FALSE GREEN, which is why the independence claim above is qualified. A
+ * plain scalar whose value sits on the NEXT line is a real run step to YAML:
+ *
+ *     - name: thing
+ *       run:
+ *         echo hi
+ *
+ * `stepRun` returns `''` for it, and the declared side skips it, because BOTH
+ * encode the same rule — nothing after the colon means nothing. Agreement is
+ * not evidence where the two sides share a rule, so a file spelled entirely
+ * this way would collect the same free pass `stale.yml` gets. It is a
+ * `stepRun` limitation first (the value really is `echo hi`), tracked
+ * separately; a case below pins it so it stays a KNOWN property.
+ *
+ * And a step written as a bare `- ` with its keys on the following line is
+ * absorbed into the previous step by `parseSteps`, which neither row here can
+ * see: the run half counts one body per step and the setup half counts lines,
+ * so a merge changes neither total. A per-file STEP-COUNT row would close it
+ * with the same different-signal method; tracked separately.
+ */
+export function assertEveryFileContributes(workflows) {
+  // A `run:`-shaped line with a non-empty value. The value matters: a job's
+  // `defaults:` -> `run:` -> `shell:` mapping is a bare `run:` key, and there
+  // are 15 of them in ci.yml alone — counting those would put the declared
+  // side 15 ahead of a perfectly healthy reader.
+  //
+  // The leading `^` is what keeps PROSE out: it forces the first non-space
+  // character to be `-` or `r`, which a comment line never is. Drop it and
+  // repo-relay.yml's prose starts counting: line 210 quotes a `run:` key
+  // inside a comment. Named exactly, because the first version of this line
+  // blamed ci.yml, which has no such line at all — the hazard is real and
+  // lives one file over.
+  const RUN_KEY = /^\s*(?:-\s+)?run:\s*\S/
+
+  const runRows = workflows.map(w => ({
+    file: w.name,
+    declared: w.text.split('\n').filter(l => RUN_KEY.test(l)).length,
+    yielded: w.jobs
+      .flatMap(j => j.steps)
+      .filter(s => {
+        const body = stepRun(s)
+        return typeof body === 'string' && body.length > 0
+      }).length,
+  }))
+  assert.deepEqual(
+    runRows.filter(r => r.declared !== r.yielded),
+    [],
+    'a workflow file yields a different number of `run:` bodies than its text declares — that ' +
+      'file now contributes nothing to the run-step floors below, and ci.yml clears those on ' +
+      'its own, so no total can see it'
+  )
+
+  // Both sides count LINES containing the action, not steps — a step carrying
+  // two would count twice on both. The quantity is stable because it is the
+  // same on each side; the WORD "steps" in the message below is the loose
+  // reading, and #7667 is where the counting rule itself gets decided.
+  const setupRows = workflows.map(w => ({
+    file: w.name,
+    declared: code(w.text.split('\n')).filter(l => l.includes(SETUP_NODE)).length,
+    yielded: w.jobs.flatMap(j =>
+      j.steps.flatMap(s => code(s).filter(l => l.includes(SETUP_NODE)))
+    ).length,
+  }))
+  assert.deepEqual(
+    setupRows.filter(r => r.declared !== r.yielded),
+    [],
+    'a workflow file declares setup-node LINES the reader does not reach through its jobs and ' +
+      'steps — the global setup-node floor below cannot see this, ci.yml clears it alone'
+  )
+}
+
 export function assertReaderSane(workflows) {
   assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
   assert.ok(
@@ -421,9 +596,31 @@ export function assertReaderSane(workflows) {
   )
   const totalJobs = workflows.reduce((n, w) => n + w.jobs.length, 0)
   assert.ok(totalJobs >= 20, `expected >=20 jobs across all workflows, found ${totalJobs}`)
-  // Before any global total, because a global total is what ci.yml alone
-  // satisfies while another file contributes nothing (#7659).
+
+  // ORDER IS LOAD-BEARING, and the two kinds of check above and below are not
+  // redundant with each other (#7659).
+  //
+  // The four assertions ABOVE are SET-LEVEL, and they are the only thing between
+  // a per-file check and an empty set: every per-file check is a quantifier over
+  // `workflows`, and a quantifier over an EMPTY set is satisfied by zero rows —
+  // the #7503 cause in docs/false-safety-guards.md. A `readWorkflows` returning
+  // `[]` would clear every per-file agreement below in perfect silence.
+  //
+  // HOW MUCH they prove, measured rather than assumed: `>=5` tolerates TWO of
+  // the seven files going MISSING — dropping repo-relay.yml AND
+  // nightly-k8s-integration.yml leaves this whole function green at 32 jobs and
+  // 130 run bodies; three dropped is the first red. That is #7659 in its ABSENT
+  // mode, which no per-file check can reach by construction — they quantify
+  // over the files that are PRESENT. Left loose on purpose, for the reason
+  // stated above: pinning the exact count turns "a workflow was deleted" into a
+  // failure that blames the reader for someone else's change.
+  //
+  // The two PER-FILE checks that follow are what the set-level floors cannot
+  // do: with ci.yml carrying 22 of 34 jobs, 91 of 137 run bodies and 17 of 24
+  // setup-node steps, it clears every total on its own, so a total says
+  // nothing about the other six files. Structure first, then content.
   assertEveryFileParsed(workflows)
+  assertEveryFileContributes(workflows)
   const setupNodeSteps = workflows.flatMap(w =>
     w.jobs.flatMap(j => j.steps.filter(s => s.some(l => l.includes(SETUP_NODE))))
   )
