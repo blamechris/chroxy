@@ -831,6 +831,37 @@ describe('workflow reader: maskQuotedData (#7661)', () => {
   })
 })
 
+describe('workflow reader: the mask stays aligned past an ASTRAL character (#7665)', () => {
+  // Copilot's finding. `[...line]` iterates CODE POINTS; the scan, `roles`, and
+  // every index a caller carries in from `namePositions` are UTF-16 CODE UNITS.
+  // One emoji made the mask a character shorter than its line, and from that
+  // point on every position was off by one.
+  const ROCKET = '\u{1F680}' // U+1F680, a surrogate pair: length 2, one code point
+
+  it('CONTROL: the two lines differ only by the astral character', () => {
+    // Without this the case below is satisfied by an ASCII line that was never
+    // going to desync — the mutation has to be the emoji and nothing else.
+    assert.equal(`echo "a" && npm ci`.length, 18)
+    assert.equal(`echo "${ROCKET}" && npm ci`.length, 19, 'the emoji is two code units wide')
+  })
+
+  it('the masked line is the same LENGTH as its input', () => {
+    for (const line of [`echo "${ROCKET}" && npm ci`, `npm ci # ${ROCKET}`, `echo '${ROCKET}${ROCKET}'`]) {
+      assert.equal(maskQuotedData(line).length, line.length, line)
+    }
+  })
+
+  it('an npm AFTER an astral character is still an invocation, not a quoted mention', () => {
+    // The bug in the direction that matters: the offset masked the unquoted
+    // `&&`, the segment before `npm` stopped being empty, and a real resolve
+    // read as prose. `commandUses` returned `quoted` — a resolve that vanishes.
+    assert.deepEqual(commandUses(`echo "${ROCKET}" && npm ci`, 'npm').map(u => u.kind), ['invocation'])
+    assert.deepEqual(commandUses(`echo "${ROCKET}" && npm ci`, 'npm')[0].args, ['ci'])
+    // …and one genuinely inside the string is still masked.
+    assert.deepEqual(commandUses(`echo "${ROCKET} npm ci"`, 'npm').map(u => u.kind), ['quoted'])
+  })
+})
+
 describe('workflow reader: hasUnclosedQuoting (#7661)', () => {
   it('CONTROL: a balanced line is closed', () => {
     assert.equal(hasUnclosedQuoting('echo "a" \'b\' `c`'), false)
@@ -893,8 +924,22 @@ describe('workflow reader: commandUses (#7661)', () => {
 
   it('the command word itself is an invocation, and its arguments come back', () => {
     assert.deepEqual(commandUses('npm ci --omit=dev', 'npm'), [
-      { kind: 'invocation', line: 'npm ci --omit=dev', args: ['ci', '--omit=dev'] },
+      { kind: 'invocation', line: 'npm ci --omit=dev', args: ['ci', '--omit=dev'], argsComplete: true },
     ])
+  })
+
+  it('the other two buckets report their arguments as INCOMPLETE, not as absent', () => {
+    // Nothing parsed the arguments of a mention inside a string or of a name
+    // behind `sudo`, so `args: []` there is "not read", not "none". `false` is
+    // what makes a caller who reads the flag without reading the docblock fail
+    // loudly rather than quietly treat an unparsed line as an empty one.
+    for (const line of ['echo "npm ci"', 'sudo npm ci']) {
+      assert.deepEqual(
+        commandUses(line, 'npm').map(u => u.argsComplete),
+        [false],
+        line
+      )
+    }
   })
 
   it('accepts every spelling that really puts npm at a command position', () => {
@@ -936,6 +981,143 @@ describe('workflow reader: commandUses (#7661)', () => {
     // npm. Verified with `bash -x`. Before #7662's fix the escaped `;` cut the
     // line and `npm` read as the command word.
     assert.deepEqual(kinds(String.raw`sudo\; npm ci`), ['unclassified'])
+  })
+})
+
+describe('workflow reader: arguments are read as the SHELL splits them (#7663)', () => {
+  const args = body => commandUses(body, 'npm')[0].args
+  const complete = body => commandUses(body, 'npm')[0].argsComplete
+  const kindsOf = (body, name = 'npm') => commandUses(body, name).map(u => u.kind)
+
+  it('a QUOTED argument is READ, not masked away', () => {
+    // The #7663 bug. `argWords` read the MASKED line, where a quoted span is
+    // spaces, so a quoted argument was indistinguishable from an absent one:
+    // this returned `['build']` and the caller saw `npm build`.
+    assert.deepEqual(args("npm 'run' build"), ['run', 'build'])
+    assert.deepEqual(args('npm "run" build'), ['run', 'build'])
+    assert.deepEqual(args('npm "ci"'), ['ci'])
+    // `$'…'` is quoting too, and the `$` belongs to the syntax rather than to
+    // the word — bash passes `run`, not `$run`.
+    assert.deepEqual(args(String.raw`npm $'run' build`), ['run', 'build'])
+  })
+
+  it('a quote does not END a word — `a`b is one argument', () => {
+    // Verified with `printf '%s\n'`: `npm 'c'i` names the subcommand `ci`.
+    // Splitting at the quote instead would report `c`, which no classifier
+    // will ever recognise.
+    assert.deepEqual(args("npm 'c'i"), ['ci'])
+    assert.deepEqual(args('npm r"un" build'), ['run', 'build'])
+  })
+
+  it('a separator INSIDE an argument does not end the command', () => {
+    // The half that masking got right and raw reading would get wrong: this is
+    // one invocation with two arguments, not `npm run` followed by `b`. Reading
+    // the raw line would cut at the quoted `&&` and truncate the list.
+    assert.deepEqual(args(`npm run 'a && b'`), ['run', 'a && b'])
+    assert.equal(complete(`npm run 'a && b'`), true)
+    assert.deepEqual(kindsOf('echo "a && npm ci"'), ['quoted'])
+  })
+
+  it('an UNQUOTED separator still ends it', () => {
+    assert.deepEqual(args('npm ci && npm run build'), ['ci'])
+    assert.deepEqual(args('npm ci; echo done'), ['ci'])
+    assert.deepEqual(args('npm ci | tee log'), ['ci'])
+  })
+
+  it('a substitution the command sits INSIDE ends at its closing paren', () => {
+    // `out=$(npm ci)` used to yield `['ci)']`, which counted as a resolve only
+    // because no denylist contains `ci)` — the same "wrong, but wrong safely"
+    // the quoted subcommand was.
+    assert.deepEqual(args('out=$(npm ci)'), ['ci'])
+    assert.deepEqual(args('out="$(npm run build)"'), ['run', 'build'])
+    assert.deepEqual(args('out=`npm ci`'), ['ci'])
+  })
+
+  it('a LINE CONTINUATION is an escape, not an argument, and the list is INCOMPLETE', () => {
+    // The other half of #7663. The trailing backslash used to come back as the
+    // word `\`, which counted as a resolve by luck: `\` is in no denylist. Now
+    // it produces no word at all, and `argsComplete` says why the list is
+    // short — the rest of the command is on the next line, which this per-line
+    // reader never sees.
+    assert.deepEqual(args('npm \\\nci'), [])
+    assert.equal(complete('npm \\\nci'), false)
+    // The words that WERE read are still accurate; only the tail is missing.
+    assert.deepEqual(args('npm ci \\\n--omit=dev'), ['ci'])
+    assert.equal(complete('npm ci \\\n--omit=dev'), false)
+    assert.deepEqual(args('npm --silent \\\nrun build'), ['--silent'])
+    assert.equal(complete('npm --silent \\\nrun build'), false)
+  })
+
+  it('an argument PRODUCED by a substitution cannot be read, and says so', () => {
+    // `npm $(pick) ci` — nothing static knows what `pick` prints. The words
+    // stop at the `(`, and the flag is what keeps "unreadable" from looking
+    // like "there was nothing there".
+    assert.equal(complete('npm $(pick) ci'), false)
+    assert.equal(complete('npm `pick` ci'), false)
+    // …while a substitution AFTER a real separator ends the command normally.
+    assert.equal(complete('npm ci; echo $(date)'), true)
+  })
+
+  it('an unclosed quote leaves the list incomplete too', () => {
+    // The per-line model does not apply to a string that closes on the next
+    // line, and `hasUnclosedQuoting` reports that for the line as a whole. An
+    // invocation on such a line inherits it rather than claiming a full read.
+    assert.equal(complete('npm ci "unterminated'), false)
+  })
+
+  it('a word the shell has not CLOSED is a fragment, and is not reported at all', () => {
+    // #7663 one layer down. A word still being accumulated when the line ran
+    // out is a prefix of the real word, not the word — and a caller comparing
+    // it against a list of known subcommands would be classifying that prefix.
+    // `npm 'ru` must answer "no subcommand", never `ru`.
+    assert.deepEqual(args("npm 'ru"), [])
+    assert.deepEqual(args('npm ru\\\nn build'), [])
+    // A word CLOSED by whitespace before the continuation is a real word, so
+    // the shape that actually occurs — a long command wrapped over lines —
+    // still reads its subcommand and does not go red for no reason.
+    assert.deepEqual(args('npm run \\\nbuild'), ['run'])
+    assert.deepEqual(args('npm ci \\\n--omit=dev'), ['ci'])
+  })
+
+  it('an EMPTY quoted argument is a word, and holds its position', () => {
+    // Found in review. `''` is entirely quoting syntax, so nothing was pushed
+    // and no word was emitted — which SHIFTED every later argument one place
+    // earlier. `npm '' run` then reported the subcommand `run`, a script run
+    // the shell never performs: npm receives an empty first argument and
+    // fails. Verified against bash, whose argv is ['', 'run'] for all three
+    // spellings.
+    assert.deepEqual(args("npm '' run"), ['', 'run'])
+    assert.deepEqual(args('npm "" run'), ['', 'run'])
+    assert.deepEqual(args(String.raw`npm $'' run`), ['', 'run'])
+    // …and an empty argument AFTER the subcommand does not disturb it.
+    assert.deepEqual(args("npm ci ''"), ['ci', ''])
+  })
+
+  it('an ANSI-C escape is OPAQUE, never its own escape letter', () => {
+    // Found in review, and the sharper half. `$'…'` is the one quoted form
+    // that DECODES escapes: bash passes `$'\t'` a tab byte and `$'ru\n'` the
+    // three characters `ru` plus a newline. Reading the escape letter instead
+    // reported `t` — npm's documented `test` alias — and `run`, both of which
+    // a caller's non-resolving list contains. This reader does not implement
+    // that grammar, so the character is marked opaque rather than guessed, and
+    // the stand-in cannot equal any real subcommand.
+    assert.deepEqual(args(String.raw`npm $'\t'`), ['�'])
+    assert.deepEqual(args(String.raw`npm $'ru\n'`), ['ru�'])
+    assert.deepEqual(args(String.raw`npm $'\x63i'`), ['�63i'])
+    // The three escapes that stand for themselves ARE read literally — this is
+    // the shape the workflows contain, and bash agrees the argument is `it's`.
+    assert.deepEqual(args(String.raw`npm $'it\'s'`), ["it's"])
+    // No escape, no opacity: `$'run'` really is the word `run`.
+    assert.deepEqual(args(String.raw`npm $'run' build`), ['run', 'build'])
+  })
+
+  it('CONTROL: an ordinary invocation is COMPLETE, so the flag is not always false', () => {
+    // Without this the cases above are satisfied by `argsComplete: false`
+    // everywhere, which reads as "nothing is ever legible" and would make a
+    // caller that fails safe on the flag fail safe on all 57 live invocations.
+    for (const body of ['npm ci', 'npm run build', 'npm', "npm 'run' build", 'out=$(npm ci)']) {
+      assert.equal(complete(body), true, body)
+    }
   })
 })
 

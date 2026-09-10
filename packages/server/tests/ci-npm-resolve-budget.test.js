@@ -137,9 +137,18 @@ const npmUses = job => runBodies(job).flatMap(body => commandUses(body, 'npm'))
  * "wrong, but wrong safely" is a property of this particular denylist, not of
  * the parse (#7662 review).
  *
- * `undefined` when there is none — a bare `npm`, or one whose arguments were
- * quoted and therefore unreadable. Both count as resolves at the call site; see
- * the header on which direction is silent.
+ * QUOTING IS NO LONGER A HOLE HERE (#7663). `commandUses` used to read its
+ * arguments off the masked line, where a quoted span is spaces, so `npm 'run'
+ * build` arrived as `['build']` and this reported `build` — a script run
+ * counted as a resolve. It now word-splits the way the shell does, so a quoted
+ * subcommand is READ rather than guessed at from what survived masking, and
+ * the classification no longer depends on the denylist polarity for its
+ * safety.
+ *
+ * `undefined` when there is none: a bare `npm`, or one whose subcommand this
+ * line does not contain — `npm \` with the rest on the next line, or an
+ * argument a substitution produces at run time. Every one of those counts as a
+ * resolve at the call site; see the header on which direction is silent.
  */
 const subcommandOf = use => use.args.find(a => !a.startsWith('-') && !/[<>]/.test(a))
 
@@ -262,6 +271,33 @@ describe('every npm resolve is paid for in the job budget (#7613, #7660, #7661)'
       [],
       'npm appears in a command-like position this guard cannot classify. Decide whether each one ' +
         'invokes npm and teach commandUses(), or rewrite the step — do not leave it unread.'
+    )
+  })
+
+  it('every npm invocation has its WHOLE argument list on one line (#7663)', () => {
+    // The same shape as the unclassified bucket, one field over. `commandUses`
+    // reads a line at a time, so an invocation split across lines by a `\`, or
+    // one whose argument a substitution produces, hands back a PREFIX of its
+    // arguments. Every rule here classifies on the first of those arguments, so
+    // a prefix that is missing the subcommand is a job whose resolve count is
+    // decided by the fall-through rather than by what it runs.
+    //
+    // Nothing in the workflows spells one today. Asserting that is what stops
+    // "this line was only partly read" from being indistinguishable from "this
+    // line has no subcommand".
+    const partial = workflows.flatMap(w =>
+      w.jobs.flatMap(j =>
+        npmUses(j)
+          .filter(u => u.kind === 'invocation' && !u.argsComplete)
+          .map(u => `${w.name}:${j.id}: ${u.line.trim()}`)
+      )
+    )
+    assert.deepEqual(
+      partial,
+      [],
+      'an npm invocation continues past the line it starts on. Its subcommand may be on the ' +
+        'next line, where this reader cannot see it — put the command on one line, or teach ' +
+        'commandUses() to fold continuations.'
     )
   })
 
@@ -450,6 +486,27 @@ describe('the budget rule goes RED — one mutation at a time (#7661)', () => {
     )
   })
 
+  it('an invocation CONTINUED onto the next line is reported, not read as a bare npm (#7663)', async () => {
+    // The proof that the partial-arguments control above fires. `npm \` puts
+    // the subcommand on a line this reader never sees, so the invocation
+    // arrives with no arguments at all — indistinguishable from a bare `npm`
+    // unless the flag says otherwise.
+    const wf = await mutated([
+      [TSC_STEP, '        run: |\n          npm \\\n            run build\n          npx tsc --noEmit'],
+    ])
+    const partial = wf
+      .flatMap(w => w.jobs.flatMap(npmUses))
+      .filter(u => u.kind === 'invocation' && !u.argsComplete)
+    assert.equal(partial.length, 1)
+    assert.match(partial[0].line, /npm \\$/)
+    assert.deepEqual(partial[0].args, [], 'the subcommand is on the next line, so there is none here')
+    // And the fall-through is the loud one: a job that really runs `npm run
+    // build` is charged for a resolve, which reds rather than passing silently.
+    assert.deepEqual(budgetViolations(wf), [
+      'ci.yml:app-typecheck resolves npm 2x on a 5-minute budget (needs >=10)',
+    ])
+  })
+
   it('a command-word shape the detector cannot classify is reported, not counted as zero', async () => {
     const wf = await mutated([[TSC_STEP, '        run: sudo npm ci']])
     const unclassified = wf
@@ -503,6 +560,38 @@ describe("the resolve detector's own reading goes RED (#7661)", () => {
     // An escaped separator is literal text, so npm never becomes the command
     // word behind one.
     ['sudo\\; npm ci', 0],
+    // A QUOTED subcommand is the same subcommand (#7663). Every one of these
+    // read as a RESOLVE before the arguments were split the way the shell
+    // splits them, because the quoted word was masked to spaces and the next
+    // word took its place.
+    ["npm 'run' build", 0],
+    ['npm "run" build', 0],
+    ['npm "run-script" build', 0],
+    [String.raw`npm $'run' build`, 0],
+    ["npm 'test'", 0],
+    // …and the fail-safe direction is unchanged: a quoted subcommand that DOES
+    // resolve still counts. It is now read rather than merely unrecognised.
+    ["npm 'ci'", 1],
+    ['npm "ci"', 1],
+    ['npm "install" --package-lock-only', 1],
+    // A separator inside a quoted ARGUMENT does not end the command, so the
+    // subcommand in front of it is still the one that classifies.
+    [`npm run 'a && b'`, 0],
+    ['npm run "build && test"', 0],
+    // An EMPTY quoted argument is a word (review finding). bash's argv here is
+    // ['', 'run'], so npm gets an empty subcommand and fails — it never runs a
+    // script. Dropping the empty word shifted `run` into the subcommand slot
+    // and reported 0, which is the silent direction.
+    ["npm '' run", 1],
+    ['npm "" run', 1],
+    [String.raw`npm $'' run`, 1],
+    // An ANSI-C escape is not its own escape letter (review finding). bash
+    // passes `$'\t'` a tab and `$'ru\n'` a newline-terminated `ru`; reading the
+    // letter reported `t` and `run` — both on the non-resolving list above.
+    [String.raw`npm $'\t'`, 1],
+    [String.raw`npm $'ru\n'`, 1],
+    // …while `$'…'` with no escape in it is an ordinary quoted word.
+    [String.raw`npm $'test'`, 0],
   ]
 
   for (const [body, expected] of cases) {
@@ -519,9 +608,47 @@ describe("the resolve detector's own reading goes RED (#7661)", () => {
     assert.equal(resolvesIn('npm dedupe'), 1)
   })
 
-  it('a bare `npm`, or one whose arguments are unreadable, counts as a resolve', () => {
+  it('a bare `npm`, or one whose subcommand this line does not contain, counts as a resolve', () => {
     assert.equal(resolvesIn('npm'), 1)
-    assert.equal(resolvesIn('npm "ci"'), 1)
+    // An argument a substitution produces at run time: no static read exists,
+    // so it falls through to the resolve side rather than being guessed.
+    assert.equal(resolvesIn('npm $(pick) ci'), 1)
+  })
+
+  it('a LINE CONTINUATION counts as a resolve BY RULE, not by luck (#7663)', () => {
+    // The trailing backslash used to come back as the argument `\`, which
+    // counted as a resolve for the only reason that no denylist contains `\`.
+    // It is now recognised as the escape it is: no word at all, and the flag
+    // says the command is unfinished on this line.
+    const [use] = commandUses('npm \\\nci', 'npm')
+    assert.deepEqual(use.args, [], 'the continuation is an escape, not an argument')
+    assert.equal(use.argsComplete, false, 'and the rest of the command is on the next line')
+    assert.equal(resolvesIn('npm \\\nci'), 1)
+    // The subcommand hides on the next line here too, so this counts as a
+    // resolve even though the real command does not resolve — the loud
+    // direction, now reached by the stated rule rather than by a stray `\`.
+    assert.equal(resolvesIn('npm \\\nrun build'), 1)
+    // A word the shell CLOSED before the continuation is a real word, so the
+    // shape that actually occurs — one command wrapped over several lines —
+    // classifies correctly instead of going red for no reason.
+    assert.equal(resolvesIn('npm run \\\n--silent build'), 0)
+    assert.equal(resolvesIn('npm ci \\\n--omit=dev'), 1)
+  })
+
+  it('a PREFIX of a subcommand is never OFFERED as the subcommand', () => {
+    // The same defect one layer down: a word the shell has not closed is a
+    // fragment. Reporting `ru` for `npm 'ru` would classify by a prefix, and a
+    // denylist entry that happens to BE a prefix of a resolving subcommand
+    // would then read as non-resolving — silently.
+    //
+    // The assertion is on the ARGUMENTS, not on the resolve count, and that is
+    // deliberate: `ru` is in no denylist, so the count is 1 whether the
+    // fragment is reported or dropped, and a case written on the count alone
+    // passes with the rule deleted (verified by mutation). What distinguishes
+    // the two is whether the fragment is handed over at all.
+    assert.deepEqual(commandUses("npm 'ru", 'npm')[0].args, [])
+    assert.deepEqual(commandUses('npm ru\\\nn build', 'npm')[0].args, [])
+    assert.equal(resolvesIn("npm 'ru"), 1, 'and the fall-through is still the loud one')
   })
 
   it('CONTROL: the classifier is not answering "resolve" to everything', () => {
