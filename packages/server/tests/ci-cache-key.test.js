@@ -5,6 +5,7 @@ import {
   assertReaderSane,
   stepInput,
   SETUP_NODE,
+  code,
   LOCKFILE_GLOB,
 } from './helpers/workflow-reader.js'
 
@@ -47,7 +48,7 @@ describe('setup-node npm cache key covers every lockfile (#7386)', () => {
     steps = workflows.flatMap(w =>
       w.jobs.flatMap(job =>
         job.steps
-          .filter(s => s.some(l => l.includes(SETUP_NODE)))
+          .filter(s => code(s).some(l => l.includes(SETUP_NODE)))
           .map(step => ({ where: `${w.name}:${job.line} ${job.id}`, step }))
       )
     )

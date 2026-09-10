@@ -1541,6 +1541,34 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
       )
     })
 
+    it('refuses a set whose setup-node mentions are only COMMENTS (#7667)', () => {
+      // The floor's stated subject is "the reader is still seeing `uses:`", and
+      // it counted RAW step lines — so a step whose only setup-node mention sat
+      // in a comment counted toward it. Prose inflating a calibrated total is
+      // the unsafe direction, and it is not hypothetical here: this repo's
+      // comments quote the exact strings guards match on.
+      //
+      // Every step below keeps a real `uses:` key, so the per-file rows stay
+      // green and only the global floor can fire — which is what makes this a
+      // proof about the floor rather than about the corpus collapsing.
+      const commented = healthy().map(w =>
+        wf(
+          w.name,
+          w.jobs.map(j => ({
+            steps: j.steps.map(step =>
+              step[0].includes('setup-node')
+                ? ['      - uses: actions/checkout@abc123', '        # was: uses: actions/setup-node@abc123']
+                : step
+            ),
+          }))
+        )
+      )
+      assert.throws(
+        () => checkedWorkflows(commented),
+        /expected >=15 setup-node steps across all workflows/
+      )
+    })
+
     it('refuses a set whose BLOCK-scalar steps yield nothing (#7647)', () => {
       // The measured degradation: `stepRun()` loses its block-scalar branch and
       // 42 of 135 run bodies vanish. Every floor ABOVE this one reads raw step

@@ -69,7 +69,7 @@ describe('CI npm cache routing (#7383)', () => {
     ciYml = await readFile(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8')
     jobs = parseJobs(ciYml)
     setupNodeSteps = jobs.flatMap(job =>
-      job.steps.filter(s => s.some(l => l.includes(SETUP_NODE))).map(step => ({ job, step }))
+      job.steps.filter(s => code(s).some(l => l.includes(SETUP_NODE))).map(step => ({ job, step }))
     )
   })
 
@@ -210,7 +210,7 @@ describe('CI npm cache routing (#7383)', () => {
 
     const offenders = installers
       .filter(job => {
-        const step = job.steps.find(s => s.some(l => l.includes(SETUP_NODE)))
+        const step = job.steps.find(s => code(s).some(l => l.includes(SETUP_NODE)))
         return !step || stepInput(step, 'cache') !== ROUTED_CACHE
       })
       .map(job => `${job.id} (ci.yml:${job.line})`)
@@ -334,7 +334,7 @@ describe('npm cache across all workflows (#7383)', () => {
         // legitimately resolve to a hosted runner for a fork PR.
         if (!/self-hosted/.test(job.runsOn)) continue
         for (const step of job.steps) {
-          if (!step.some(l => l.includes(SETUP_NODE))) continue
+          if (!code(step).some(l => l.includes(SETUP_NODE))) continue
           const cache = stepInput(step, 'cache')
           if (cache) offenders.push(`${name}:${job.line} ${job.id} -> cache: ${cache}`)
         }
@@ -407,7 +407,7 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
     producers = workflows.flatMap(w =>
       w.jobs.flatMap(job =>
         job.steps
-          .filter(st => st.some(l => l.includes(SETUP_NODE)))
+          .filter(st => code(st).some(l => l.includes(SETUP_NODE)))
           .filter(() => isHostedX64Linux(job.runsOn) && isUnconditional(job))
           .filter(st => stepInput(st, 'cache') === 'npm')
           .filter(st => stepInput(st, 'cache-dependency-path') === LOCKFILE_GLOB)
@@ -591,7 +591,7 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
       w.jobs
         .filter(job => /self-hosted/.test(job.runsOn))
         .filter(job =>
-          job.steps.some(st => st.some(l => l.includes(SETUP_NODE)) && stepInput(st, 'cache') === 'npm')
+          job.steps.some(st => code(st).some(l => l.includes(SETUP_NODE)) && stepInput(st, 'cache') === 'npm')
         )
         .map(job => `${w.name}:${job.id}`)
     )
