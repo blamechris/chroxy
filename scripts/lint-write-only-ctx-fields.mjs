@@ -1123,17 +1123,25 @@ function isConstantInitializer(init) {
  * Module-level `let`/`const` STATE declared in one ALREADY comment-stripped,
  * clause-blanked source.
  *
- * Returns `[{ name, index, exported, keyword }]`, where `index` is the offset
- * of the declared NAME (so the classifier can skip the declaration itself).
+ * Returns entries of TWO shapes, and a caller must branch on which:
+ *   - `{ name, index, exported, keyword }` — a binding. `index` is the offset
+ *     of the declared NAME, so the classifier can skip the declaration itself.
+ *   - `{ name: null, unparsed, index, exported, keyword }` — a declarator this
+ *     could not read, reported instead of dropped. `analyzeModuleBindings`
+ *     collects these and emits a `::warning::` per declarator.
  *
  * Only brace-depth 0 counts: a `let` inside a function is a local, and
  * TypeScript's own `noUnusedLocals` already covers it.
  *
  * SEEN since #7533, having been listed here as NOT SEEN before it: every
- * declarator of `let a = 1, b = 2`, and every binding of a destructuring
- * declaration (`const { a, b } = o`) including nested, renamed, defaulted and
- * rest forms. `declaratorNames` below does that reading; this function only
- * finds the declaration LIST and hands each declarator to it.
+ * declarator of `let a = 1, b = 2`, and every binding of a ONE-LEVEL
+ * destructuring declaration (`const { a, b } = o`) in its renamed, defaulted
+ * and rest forms. A NESTED pattern is not read — it is reported through the
+ * second shape above, which is why "including nested" was wrong here until
+ * Copilot caught it on #7687, in a paragraph written to fix a different
+ * overclaim in this same docblock. `declaratorNames` below does the reading;
+ * this function only finds the declaration LIST and hands each declarator to
+ * it.
  *
  * NOT SEEN, deliberately stated rather than implied:
  *   - `declare`/ambient declarations are treated like any other;
@@ -1154,9 +1162,9 @@ function isConstantInitializer(init) {
  *
  * A parser introduces the hazard it is meant to close, so this REPORTS what it
  * could not read rather than dropping it. A declarator that yields no name is
- * returned in `unparsed`, and `analyzeModuleBindings` PRINTS it as a NOTE and
- * carries on — it does not fail the build, and the doc said it did until
- * Copilot caught the mismatch on #7687.
+ * returned in `unparsed`, and `analyzeModuleBindings` emits a `::warning::`
+ * naming it and carries on — it does not fail the build, and the doc said it
+ * did until Copilot caught the mismatch on #7687.
  *
  * Not fatal for a measured reason: the previous extractor did not read those
  * declarations either — it emitted entries literally named `const` for them —
