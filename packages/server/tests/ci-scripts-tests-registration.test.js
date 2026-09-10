@@ -6,7 +6,13 @@ import { readdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { readWorkflows, assertReaderSane, stepRun } from './helpers/workflow-reader.js'
+import {
+  readWorkflows,
+  assertReaderSane,
+  stepRun,
+  MIN_BLOCK_RUN_STEPS,
+  MIN_PLAIN_RUN_STEPS,
+} from './helpers/workflow-reader.js'
 
 /**
  * #7504 — a test suite that runs in no workflow, and a green CI, are the same
@@ -1706,21 +1712,51 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     // have is exactly the one no directory-reading test can prove is handled.
     //
     // Only the OUTPUT SHAPE of readWorkflows is reproduced here, not its parse:
-    // { name, jobs: [{ steps: [[line, ...]] }] }. #7647 asks the reader to grow
-    // a stepRun-side floor of its own; that is about the other seven consumers.
+    // { name, jobs: [{ steps: [[line, ...]] }] }. Since #7647 the shared floor
+    // also exercises `stepRun`, so these steps carry BOTH `run:` spellings —
+    // the synthetic set has to clear the two new floors like any other.
     const SETUP_NODE_STEP = ['      - uses: actions/setup-node@abc123', '        with:', '          node-version: 22']
+    const PLAIN_RUN_STEP = ['      - run: echo hi']
+    const BLOCK_RUN_STEP = ['      - run: |', '          set -e', '          echo hi']
+    const QUOTED_RUN_STEP = ['      - run: "echo hi"']
     const wf = (name, jobs) => ({ name, jobs })
-    const job = (setupNodeSteps = 1) => ({
-      steps: [...Array.from({ length: setupNodeSteps }, () => SETUP_NODE_STEP), ['      - run: echo hi']],
+    const job = (setupNodeSteps = 1, { plain = 1, block = 0 } = {}) => ({
+      steps: [
+        ...Array.from({ length: setupNodeSteps }, () => SETUP_NODE_STEP),
+        ...Array.from({ length: plain }, () => PLAIN_RUN_STEP),
+        ...Array.from({ length: block }, () => BLOCK_RUN_STEP),
+      ],
     })
-    /** A synthetic set that clears every one of assertReaderSane's five floors. */
+    /** A synthetic set that clears every one of assertReaderSane's seven floors. */
     const healthy = () => [
-      wf('ci.yml', Array.from({ length: 16 }, () => job(1))),
+      wf('ci.yml', [
+        ...Array.from({ length: 16 }, () => job(1)),
+        // The two run-body floors are cleared from the CONSTANTS rather than
+        // from numbers typed here, so raising a floor cannot leave this set
+        // silently under it — the hardcoded-list-beside-a-growing-set cause in
+        // docs/false-safety-guards.md, which a red CONTROL would otherwise
+        // announce as a broken reader.
+        job(0, { plain: MIN_PLAIN_RUN_STEPS, block: MIN_BLOCK_RUN_STEPS }),
+      ]),
       wf('release.yml', Array.from({ length: 4 }, () => job(0))),
       wf('a.yml', [job(0)]),
       wf('b.yml', [job(0)]),
       wf('c.yml', [job(0)]),
     ]
+
+    /** `set` with every step matching `pred` dropped — one collapse at a time. */
+    const withoutSteps = (set, pred) =>
+      set.map(w => wf(w.name, w.jobs.map(j => ({ steps: j.steps.filter(s => !pred(s)) }))))
+    const isBlockRunStep = s => /run:\s*[|>]/.test(s[0])
+    // Excludes the quote characters, so this means a genuinely PLAIN scalar —
+    // the same three-way split the module's own runHeadSpelling() makes.
+    const isPlainRunStep = s => /run:\s*[^|>'"\s]/.test(s[0])
+
+    /** `set` with every plain-scalar step respelled as a QUOTED one. */
+    const asQuoted = set =>
+      set.map(w =>
+        wf(w.name, w.jobs.map(j => ({ steps: j.steps.map(s => (isPlainRunStep(s) ? QUOTED_RUN_STEP : s)) })))
+      )
 
     it('CONTROL: a healthy synthetic set passes and is returned unchanged', () => {
       const set = healthy()
@@ -1762,6 +1798,50 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
         () => checkedWorkflows(healthy().map(w => wf(w.name, w.jobs.map(() => job(0))))),
         /expected >=15 setup-node steps across all workflows/
       )
+    })
+
+    it('refuses a set whose BLOCK-scalar steps yield nothing (#7647)', () => {
+      // The measured degradation: `stepRun()` loses its block-scalar branch and
+      // 42 of 135 run bodies vanish. Every floor ABOVE this one reads raw step
+      // lines, so all five stayed green through exactly that collapse.
+      assert.throws(
+        () => checkedWorkflows(withoutSteps(healthy(), isBlockRunStep)),
+        /BLOCK-scalar branch has stopped producing anything/
+      )
+    })
+
+    it('refuses a set whose PLAIN-scalar steps yield nothing, with the block branch alive (#7647)', () => {
+      // The block steps SURVIVE this collapse, which is the point: a full
+      // MIN_BLOCK_RUN_STEPS of live multi-line bodies remain, and they must not
+      // be allowed to vouch for a dead plain branch. They cannot, because each
+      // step is counted by its raw YAML head rather than by the shape of what
+      // stepRun returned.
+      assert.throws(
+        () => checkedWorkflows(withoutSteps(healthy(), isPlainRunStep)),
+        /PLAIN-scalar branch has stopped producing anything/
+      )
+    })
+
+    it('refuses a set whose plain steps are all QUOTED — a live quoted branch must not clear the plain floor', () => {
+      // Review of #7658 found this hole and this is the counterexample, kept.
+      // `stepRun` has THREE branches; the plain floor first asked only "not a
+      // block head", so a quoted head counted as plain. With the plain branch
+      // deleted, a corpus of 45 quoted heads and 25 block ones kept
+      // assertReaderSane GREEN — a floor whose stated subject is one branch,
+      // cleared by another. Nothing here is mutated: the steps are merely
+      // RESPELLED, and the floor must still refuse to count them as plain.
+      assert.throws(
+        () => checkedWorkflows(asQuoted(healthy())),
+        /PLAIN-scalar branch has stopped producing anything/
+      )
+    })
+
+    it('CONTROL: respelling as quoted leaves the BLOCK floor satisfied', () => {
+      // Without this, the test above would also pass if `asQuoted` had simply
+      // broken the whole set — it proves the block steps are untouched, so the
+      // plain floor is what fired.
+      const quoted = asQuoted(healthy())
+      assert.equal(quoted.flatMap(w => w.jobs).flatMap(j => j.steps).filter(isBlockRunStep).length, MIN_BLOCK_RUN_STEPS)
     })
 
     it('refuses an EMPTY set — every rule would quantify over nothing', () => {
