@@ -467,7 +467,31 @@ jobs:
     name: Server Lint
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
-    timeout-minutes: 5
+    # 10, not the 5 every other lint-tier job carries, because this job is the
+    # only one of them that resolves npm TWICE: `npm ci` at the root, and then
+    # `npm install --package-lock-only` in packages/server for the lockfile
+    # freshness check. Measured across ci.yml: every other <=5-minute job does
+    # one resolve or none (#7613).
+    #
+    # The budget was never a latency guard here. Steady state is 37-43s, so a
+    # 300s ceiling only ever fires when the runner's ~/.npm is cold — which
+    # turns a slow-but-correct job into a RED REQUIRED CHECK. That happened on
+    # #7607: four consecutive cancellations, three of them alone on idle
+    # runners, every one inside an npm resolve, on a container generation
+    # recreated hours earlier with an empty cache.
+    #
+    # Read this as insurance, not as a live fire. The acute trigger on that
+    # occasion was npm's unrequested advisory call stalling 17-48s per install,
+    # and #7636 removed it at the workflow `env:` level. Server Lint has run
+    # 37s / 37s / 37s / 43s / 90s / 146s on main since, worst case less than
+    # half the old budget. What #7636 did NOT remove is the asymmetry above: a
+    # genuinely cold cache still has to download everything, twice here and
+    # once everywhere else, and container generations get recreated.
+    #
+    # The cost of the extra five minutes is that a genuinely hung job takes 10
+    # minutes to fail instead of 5. That is the right trade for a required
+    # check whose observed failure mode is a false red.
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: packages/server
