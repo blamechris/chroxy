@@ -964,6 +964,21 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
    * `actual` and `expected` — ~200 KB of TAP per call — which is the payload
    * that wedged this runner in #7340.
    */
+  // MECHANISM ATTRIBUTION, decided (#7649's first criterion).
+  //
+  // The landing check below proves the TEXT changed. It cannot prove a case
+  // went red for the reason its comment names. The concrete instance was fixed
+  // in #7640: a case claimed "the trailing-comment case is red without
+  // `stepRun()`", and measurement showed `uncommented()` inside `invokes()`
+  // strips the trailing comment on its own — so it passed either way.
+  //
+  // The rule adopted here is the cheap half of the two options: a comment may
+  // name a mechanism only if the case has been MEASURED against a build with
+  // that mechanism alone disabled. Otherwise it describes the INPUT and the
+  // expected verdict, and says nothing about which line does the work. Building
+  // per-mechanism variants of the rule for every case is the expensive half and
+  // is not adopted — it would mean maintaining N partial copies of the detector,
+  // which is the drift this file exists to prevent.
   async function mutated(pairs) {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-wired-'))
     dirs.push(dir)
@@ -981,7 +996,38 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
       text = text.replace(find, replace)
     }
     writeFileSync(ci, text)
-    return readWorkflows(pathToFileURL(`${dir}/`))
+    const mutatedWorkflows = await readWorkflows(pathToFileURL(`${dir}/`))
+
+    // The mutated copy must not have COLLAPSED (#7649). The landing check above
+    // proves the text changed; it cannot prove the result is still readable. A
+    // mutation that broke ci.yml outright would leave every rule below
+    // quantifying over an empty set — and these cases EXPECT orphans, so "the
+    // reader found nothing" and "the mutation worked" produce the same
+    // assertion result. Until now that was caught only incidentally, by DESKTOP
+    // having to stay wired in the cases that do not mutate it, and an
+    // incidental catch is one edit away from being gone.
+    //
+    // NOT `assertReaderSane`, and the reason is worth recording: several of
+    // these mutations deliberately produce INVALID Actions YAML — deleting a
+    // `run:` line outright leaves a step carrying neither `run:` nor `uses:`,
+    // which #7668's step row correctly refuses. Demanding schema validity of a
+    // fixture whose whole purpose is to be broken would reject the mutation
+    // rather than the collapse. Measured: it failed exactly that one case.
+    //
+    // Calibrated against the REAL corpus at call time rather than a constant,
+    // because a number beside a growing set is the first cause in
+    // docs/false-safety-guards.md. A single mutation removes at most a step or
+    // two; losing a fifth of the corpus is a collapse whatever the mutation.
+    const stepsOf = ws => ws.reduce((n, w) => n + w.jobs.reduce((m, j) => m + j.steps.length, 0), 0)
+    const real = stepsOf(await readWorkflows())
+    const got = stepsOf(mutatedWorkflows)
+    assert.ok(
+      got >= real * 0.8,
+      `the mutated copy collapsed: it yields ${got} steps against the real corpus's ${real}. ` +
+        'Every rule below would then quantify over a set the mutation emptied, and these cases ' +
+        'expect orphans — so a collapse and a working mutation look identical from the assertion'
+    )
+    return mutatedWorkflows
   }
 
   const SUITES = [SUITE, DESKTOP]
