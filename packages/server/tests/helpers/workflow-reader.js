@@ -612,6 +612,36 @@ export function assertEveryFileParsed(workflows) {
       'understanding that file, and every rule below it passes over an empty set for it'
   )
 
+  // A step written as a YAML FLOW COLLECTION — `- { run: echo hi }` — is legal
+  // Actions YAML that this reader cannot decompose: `parseSteps` starts a step
+  // for it, and every key-reading function below anchors on `run:`/`uses:` at
+  // the dash indent plus two and finds `{` there. REFUSED rather than taught
+  // (#7669, decided): reading it properly means a flow-YAML parser — nested
+  // braces, quoted strings containing `}`, commas inside values — in a module
+  // whose stated premise is that it is NOT a YAML parser, for a spelling the
+  // corpus does not use and GitHub's own docs never show. A step the reader
+  // cannot read must not be silently skipped; refusing is the fail-closed half
+  // of that, and it costs one line.
+  //
+  // #7668's step-count row ALREADY makes such a file red, because a flow step
+  // declares neither `run:` nor `uses:` where that row looks — measured:
+  // declared 1, parsed 2. This row exists anyway, and the reason is worth
+  // stating: that catch is INCIDENTAL. It reports "yields a different number of
+  // steps than its text declares", which sends the reader looking for a lost
+  // step rather than an unreadable one, and it would disappear silently the
+  // day `declaredSteps` learns the spelling. A named cause, ordered first, is
+  // the difference between a guard and a coincidence.
+  const flowSteps = workflows.flatMap(w =>
+    w.jobs.flatMap(j => j.steps.filter(s => FLOW_STEP.test(s[0])).map(() => `${w.name}:${j.id}`))
+  )
+  assert.deepEqual(
+    flowSteps,
+    [],
+    'a step is written as a YAML flow collection — this reader anchors every key at the step ' +
+      'dash indent plus two and cannot decompose it, so the step would contribute nothing to ' +
+      'any rule below. Rewrite it as a block mapping, or teach the reader the spelling'
+  )
+
   // The step row runs AFTER the jobs row and BEFORE the stepless one, and the
   // order is load-bearing in both directions. A file whose jobs collapse also
   // loses every step, so the jobs row has to speak first or the failure blames
@@ -656,6 +686,20 @@ function declaredSteps(text) {
   const lines = text.split('\n')
   return lines.filter((_, i) => isStepKeyLine(lines, i, STEP_REQUIRED_KEY)).length
 }
+
+/**
+ * A step's first line opening a YAML FLOW COLLECTION rather than a block
+ * mapping — `- { … }`, or `- [ … ]`.
+ *
+ * Both are refused, though only the mapping form is a plausible step: the
+ * sequence form is invalid for a step, and a reader that cannot decompose
+ * either should say so rather than let one of them through on a technicality.
+ * Exported so its own test can prove it SEES both shapes — the corpus has zero,
+ * so the assertion above quantifies over an empty set and would otherwise be
+ * satisfied by a predicate that matches nothing (#7503's cause, and #7669's
+ * third acceptance criterion).
+ */
+export const FLOW_STEP = /^\s*-\s*[{[]/
 
 /** Either of the two keys the schema requires a step to carry exactly one of. */
 const STEP_REQUIRED_KEY = /^(\s*)(-\s+)?(?:run|uses):/
