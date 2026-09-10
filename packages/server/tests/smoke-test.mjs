@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
+import { harnessVerdict, SMOKE_MIN_CASES } from './helpers/harness-floor.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
 const headed = process.argv.includes('--headed')
@@ -535,9 +536,10 @@ async function run() {
 
   // Summary
   console.log('\n\x1b[1m--- Summary ---\x1b[0m')
-  const passed = results.filter(r => r.status === 'PASS').length
-  const failed = results.filter(r => r.status === 'FAIL').length
+  const verdict = harnessVerdict(results, SMOKE_MIN_CASES)
+  const { passed, failed } = verdict
   console.log(`  \x1b[32m${passed} passed\x1b[0m, \x1b[${failed ? '31' : '32'}m${failed} failed\x1b[0m`)
+  if (verdict.broken) console.log(`  \x1b[31m${verdict.summary}\x1b[0m`)
   console.log(`  Screenshots: ${SCREENSHOT_DIR}/\n`)
 
   // Cleanup
@@ -562,15 +564,23 @@ async function run() {
     })
   }
 
-  process.exit(failed > 0 ? 1 : 0)
+  // RETURNED, not exited. `run()` contains no `process.exit` at all, and that is
+  // an invariant a test can enumerate rather than a string it has to find:
+  // review of #7681 defeated a substring check twice — once with an early
+  // `process.exit(0)` ABOVE this line, once with a `process.exit(0)` below the
+  // verdict — leaving both target substrings intact as dead code. A single exit
+  // at module scope makes both of those visible as an extra exit inside `run()`.
+  return verdict.exitCode
 }
 
-run().catch(err => {
+run()
+  .then(code => process.exit(code))
+  .catch(err => {
   console.error('Fatal:', err)
   if (browser) browser.close()
   // Fatal path: send only SIGTERM (no SIGKILL escalation here) so the server
   // gets a chance to flush session-state on the way out. The graceful cleanup
   // path above is the one that may escalate to SIGKILL if the process hangs.
-  if (managedServer) managedServer.kill('SIGTERM')
-  process.exit(1)
-})
+    if (managedServer) managedServer.kill('SIGTERM')
+    process.exit(1)
+  })

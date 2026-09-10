@@ -43,11 +43,22 @@
  * reported all 5 cases and parse-check-shell 11 of 25, both of which this
  * assertion caught and a "fewer" assertion would not have.
  *
- * ONE HARNESS OF THIS CLASS IS OUT OF SCOPE, and it is named rather than left
- * to be rediscovered: packages/server/tests/smoke-test.mjs counts its own cases
- * and exits on `failed > 0`, and ci.yml invokes it directly — but it is neither
- * named `*.test.mjs` nor shebanged, and it needs Playwright and a live server,
- * which this job deliberately has neither of. Filed as #7657.
+ * ONE HARNESS OF THIS CLASS IS OUT OF THIS ROSTER, and it is FLOORED ANYWAY
+ * (#7657, closed). packages/server/tests/smoke-test.mjs counts its own cases and
+ * ci.yml invokes it directly, but it is neither named `*.test.mjs` nor
+ * shebanged, and it needs Playwright and a live server — which this job
+ * deliberately has neither of, so a neutered copy run HERE would die for a
+ * reason unrelated to its floor, the very failure the "exactly one floor line"
+ * assertion below rejects.
+ *
+ * What resolved that is EXTRACTING THE VERDICT rather than relaxing the roster:
+ * the floor lives in `packages/server/tests/helpers/harness-floor.mjs`, a pure
+ * function with no browser, no server and no filesystem, and its red proof is
+ * `packages/server/tests/smoke-test-floor.test.js` — which runs in the ordinary
+ * server suite, on every platform, rather than only inside the job it guards.
+ * That file also pins the WIRING, because four cases exercising the pure
+ * function would all stay green against a harness that imported it and then
+ * exited on `failed > 0` regardless.
  *
  * ITS BLIND SPOT, STATED. A case that stops executing but is still COUNTED — a
 
