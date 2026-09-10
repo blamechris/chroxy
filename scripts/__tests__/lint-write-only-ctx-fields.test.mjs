@@ -1323,6 +1323,52 @@ test('a renamed binding whose name is a SUBSTRING of the key it renames (#7533)'
   assert(b.index === 15, `index ${b.index} !== 15 — pointed inside \`alpha\`?`)
 })
 
+// A default value carries colons of its own, and the rename split used to read
+// the first of them as `key: bound`. `{ a = cond ? 1 : 2 }` became "rename
+// `a = cond ? 1` to `2`", which fails the identifier test and drops `a` into
+// `unparsed`. Reported rather than silent — but still coverage the docblock
+// claims. The offsetRoster's defaulted case uses `= 1`, which has no colon, so
+// none of it exercised this.
+const ternaryDefaults = [
+  ['an object pattern', 'let { a = cond ? 1 : 2, b } = make();\n', ['a', 'b']],
+  ['an array pattern', 'const [a = flag ? 1 : 2, b] = make();\n', ['a', 'b']],
+  ['a RENAMED binding with a ternary default', 'const { k: a = cond ? 1 : 2 } = make();\n', ['a']],
+  ['a nested ternary', 'let { a = p ? q ? 1 : 2 : 3 } = make();\n', ['a']],
+]
+for (const [label, decl, names] of ternaryDefaults) {
+  test(`a ternary default does not read as a rename in ${label} (#7687)`, () => {
+    const found = extractModuleBindings(stripComments(decl))
+    const got = found.map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+    assert(got.join(',') === names.join(','), `got ${got.join(',')}, want ${names.join(',')}: ${decl}`)
+  })
+}
+
+test('a declarator that cannot be read is REPORTED, not dropped (#7533)', () => {
+  // The `unparsed` channel had no test at all until #7687's review — the one
+  // path whose documented behaviour had already been wrong once. A nested
+  // pattern is the shape that still reaches it.
+  const found = extractModuleBindings(stripComments('let { a: { deep } } = make();\n'))
+  assert(found.length === 1, `got ${found.length} entries: ${JSON.stringify(found)}`)
+  assert(found[0].name === null, `expected a null name, got ${JSON.stringify(found[0])}`)
+  assert(/deep/.test(found[0].unparsed), `unparsed text lost the declarator: ${JSON.stringify(found[0])}`)
+})
+
+test('an unreadable declarator surfaces as a CI ::warning::, and is NOT fatal (#7687)', () => {
+  // Both halves matter. It must be VISIBLE — it was the only diagnostic in the
+  // script emitted as a bare `console.log`, which CI renders nowhere, and it
+  // announces the one thing the run did not check. And it must NOT fail: the
+  // previous extractor did not read these declarations either, so failing here
+  // would red the build over a shape #7533 did not introduce.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { a: { deep } } = make();\n` +
+      'export function f(): number { return 1; }\n',
+  }))
+  assert(r.status === 0, `exit ${r.status} — an unread declarator must not fail the run\n${r.stderr}`)
+  assert(/::warning::/.test(r.stderr), `no CI annotation: ${r.stderr}`)
+  assert(/unread declarator: .*deep/.test(r.stderr), `the declarator text was not named: ${r.stderr}`)
+})
+
 test('an EXPORTED binding is marked as such', () => {
   const [b] = extractModuleBindings('export let n = 0;\n')
   assert(b.exported === true, JSON.stringify(b))

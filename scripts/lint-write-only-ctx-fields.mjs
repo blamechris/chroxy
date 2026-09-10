@@ -1200,8 +1200,16 @@ export function declaratorNames(text) {
     if (part === '') continue
     if (/^[{[]/.test(part)) { unparsed.push(part); continue }
     // `key: bound` binds the RIGHT side; `bound = default` binds the left.
-    const afterColon = splitTopLevel(part, ':')
-    const target = (afterColon.length > 1 ? afterColon.slice(1).join(':') : part).trim()
+    //
+    // The rename colon can only appear BEFORE the default, so look for it
+    // there and NOWHERE else. A default value carries colons of its own — a
+    // ternary is the ordinary case — and splitting the whole part reads
+    // `{ a = cond ? 1 : 2 }` as renaming `a = cond ? 1` to `2`, which fails
+    // the identifier test and loses `a` to `unparsed`. Reported, not silent,
+    // but still coverage this claims to have (#7687 review).
+    const beforeDefault = splitTopLevel(part, '=')[0]
+    const renamed = splitTopLevel(beforeDefault, ':')
+    const target = (renamed.length > 1 ? renamed.slice(1).join(':') : beforeDefault).trim()
     if (/^[{[]/.test(target)) { unparsed.push(part); continue }
     const m = /^([A-Za-z_$][\w$]*)/.exec(target)
     if (m && !RESERVED_WORDS.has(m[1])) names.push(m[1])
@@ -1590,11 +1598,14 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
     // so their bindings are unjudged — the same gap #7533 closed for
     // destructuring and multi-declarator forms, in the shapes still unread.
     // Naming them is the difference between a known gap and a silent one.
-    console.log(
-      `[write-only-ctx] NOTE: ${unreadable.length} declarator(s) could not be read and are ` +
-      'therefore unjudged. Their bindings are outside the roster:',
+    // As a `::warning::`, like every other diagnostic here. It was a bare
+    // `console.log` until #7687's review: the one line in this file that CI
+    // renders nowhere, announcing the one thing the run did not check.
+    console.warn(
+      `::warning::[write-only-ctx] ${unreadable.length} declarator(s) could not be read and ` +
+      'are therefore unjudged — their bindings are outside the roster.',
     )
-    for (const u of unreadable) console.log(`  - ${u}`)
+    for (const u of unreadable) console.warn(`::warning::[write-only-ctx] unread declarator: ${u}`)
   }
 
   return judge({
