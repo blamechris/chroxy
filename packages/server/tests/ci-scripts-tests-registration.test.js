@@ -1599,13 +1599,20 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
       // for the wrong reason and look identical from the outside.
       // `text` is left alone, which IS the collapse — the file still
       // declares what the reader no longer yields.
+      //
+      // The collapse RENAMES each run key rather than deleting the step, and
+      // that distinction became load-bearing with #7668: deleting the steps
+      // modelled "the steps are gone", not "the run bodies are gone", so the
+      // per-file STEP row caught it first and this case passed on a message
+      // it was not written to prove. Renaming leaves the step count intact and
+      // takes only the bodies, which is the collapse the name claims.
       const collapsed = healthy().map(w =>
         w.name !== 'a.yml'
           ? w
           : {
               ...w,
               jobs: w.jobs.map(j => ({
-                steps: j.steps.filter(s => !isBlockRunStep(s) && !isPlainRunStep(s)),
+                steps: j.steps.map(s => s.map(l => l.replace(/^(\s*(?:-\s+)?)run:/, '$1xun:'))),
               })),
             }
       )
