@@ -1,6 +1,24 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseJobs, parseSteps, stepInput, code, stepRun, jobShell, jobName, workflowTriggers } from './helpers/workflow-reader.js'
+import {
+  parseJobs,
+  parseSteps,
+  stepInput,
+  code,
+  stepRun,
+  jobShell,
+  jobName,
+  jobTimeout,
+  workflowTriggers,
+  invokes,
+  isCommandPosition,
+  withoutHeredocBodies,
+  heredocDelimiter,
+  maskQuotedData,
+  hasUnclosedQuoting,
+  stripShellComment,
+  commandUses,
+} from './helpers/workflow-reader.js'
 
 /**
  * Unit tests for the shared workflow reader (#7386).
@@ -552,5 +570,333 @@ describe('workflow reader: jobName edge cases from the #7643 review', () => {
   it('keeps a # that is not comment-shaped', () => {
     // No preceding whitespace, so YAML does not open a comment here.
     assert.equal(nameOf('    name: Build#2\n    runs-on: ubuntu-latest'), 'Build#2')
+  })
+})
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * The cases below moved here with the invocation predicate they cover (#7661),
+ * from `ci-scripts-tests-registration.test.js` where both lived while there was
+ * one consumer. They are unchanged: a hoist that rewrites the tests as it moves
+ * them cannot say whether the behaviour survived the move.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+describe('withoutHeredocBodies (#7645)', () => {
+  const L = s => s.split('\n')
+
+  it('CONTROL: a body with no heredoc is returned unchanged', () => {
+    assert.deepEqual(withoutHeredocBodies(L('echo a\nbash x.test.sh')), ['echo a', 'bash x.test.sh'])
+  })
+
+  it('blanks the body and keeps the lines around it', () => {
+    assert.deepEqual(
+      withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\nEOF\nbash y.test.sh')),
+      ['cat <<EOF', '', '', 'bash y.test.sh']
+    )
+  })
+
+  it('honours a QUOTED terminator', () => {
+    assert.deepEqual(withoutHeredocBodies(L("cat <<'EOF'\nbash x.test.sh\nEOF")), ["cat <<'EOF'", '', ''])
+  })
+
+  it('strips leading TABS before the terminator only for `<<-`', () => {
+    assert.deepEqual(withoutHeredocBodies(L('cat <<-EOF\nbash x.test.sh\n\t\tEOF\nafter')), ['cat <<-EOF', '', '', 'after'])
+    // Plain `<<` does NOT strip tabs, so an indented terminator does not end
+    // the body — the strict direction, which blanks more rather than less.
+    assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\n\tEOF\nafter')), ['cat <<EOF', '', '', ''])
+  })
+
+  it('honours a DOUBLE-quoted terminator', () => {
+    // Untested until review: the double-quoted branch of the delimiter had no
+    // case, so two independent mutants that removed it survived.
+    assert.deepEqual(withoutHeredocBodies(L('cat <<"EOF"\nbash x.test.sh\nEOF')), ['cat <<"EOF"', '', ''])
+  })
+
+  it('honours a BACKSLASH-quoted terminator — `<<\\EOF` is ordinary bash', () => {
+    // The fail-open review found. `<<\EOF` is exactly equivalent to `<<'EOF'`
+    // and is one of the two standard ways to write a literal heredoc. The
+    // first delimiter grammar matched neither it nor a digit-leading word, so
+    // the body was never opened and every line in it was handed back as a
+    // live command — verified against real bash, which runs none of them.
+    assert.deepEqual(withoutHeredocBodies(L('cat <<\\EOF\nbash x.test.sh\nEOF')), ['cat <<\\EOF', '', ''])
+  })
+
+  it('honours a DIGIT-LEADING delimiter — the shell takes any word', () => {
+    assert.deepEqual(withoutHeredocBodies(L('cat <<1EOF\nbash x.test.sh\n1EOF')), ['cat <<1EOF', '', ''])
+  })
+
+  it('does not TRUNCATE a delimiter at a non-identifier character', () => {
+    // `<<EOF-1` used to capture `EOF`, so a body line spelled `EOF` closed the
+    // body early and every data line after it became a live command.
+    assert.deepEqual(
+      withoutHeredocBodies(L('cat <<EOF-1\nEOF\nbash x.test.sh\nEOF-1\nafter')),
+      ['cat <<EOF-1', '', '', '', 'after']
+    )
+  })
+
+  it('over-blanks rather than under-blanks on a `<<` that is not a heredoc', () => {
+    // `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so
+    // the rest is blanked. Stated because it is a real consequence of taking
+    // the delimiter as a shell word: over-blanking reports a wired suite as an
+    // ORPHAN, which is loud and the safe direction, and the alternative — a
+    // narrower grammar — is the fail-open this case's neighbours document.
+    assert.deepEqual(withoutHeredocBodies(L('x=$(( 1 << 2 ))\nbash y.test.sh')), ['x=$(( 1 << 2 ))', ''])
+  })
+
+  it('does NOT treat a here-STRING as a heredoc', () => {
+    assert.deepEqual(
+      withoutHeredocBodies(L('grep -q x <<< "$VAR"\nbash y.test.sh')),
+      ['grep -q x <<< "$VAR"', 'bash y.test.sh']
+    )
+  })
+
+  it('blanks to the END when the terminator never appears — loud, not quiet', () => {
+    // The safe direction: an unterminated body hides invocations, which
+    // reports a wired suite as an orphan rather than the reverse. This is the
+    // shape `echo "body<<EOF" >> $GITHUB_OUTPUT` produces in release.yml.
+    assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nb')), ['cat <<EOF', '', ''])
+  })
+
+  it('a terminator with trailing text does NOT end the body', () => {
+    // Lenient matching would hand the remaining data lines back as commands.
+    assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nEOF >> out\nbash x.test.sh')), ['cat <<EOF', '', '', ''])
+  })
+})
+
+describe('heredocDelimiter (#7645)', () => {
+  it('strips the three quoting forms the shell accepts, and nothing else', () => {
+    assert.equal(heredocDelimiter('EOF'), 'EOF')
+    assert.equal(heredocDelimiter("'EOF'"), 'EOF')
+    assert.equal(heredocDelimiter('"EOF"'), 'EOF')
+    assert.equal(heredocDelimiter('\\EOF'), 'EOF')
+    assert.equal(heredocDelimiter('EOF-1'), 'EOF-1', 'a dash is part of the word, not quoting')
+    assert.equal(heredocDelimiter('1EOF'), '1EOF')
+  })
+})
+
+describe('invokes composes the passes in the right ORDER (#7645)', () => {
+  const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
+
+  it('a data line that comment-stripping would TURN INTO the terminator does not close the body', () => {
+    // Stripping comments first manufactured a terminator the shell never
+    // sees: the shell ends a heredoc only on a line that is exactly `EOF`, so
+    // this whole block is data and nothing runs — but `EOF # not the
+    // terminator` strips to `EOF`, closed the body there, and handed
+    // `bash <suite>` back as a live command. Measured WIRED before the fix.
+    assert.ok(!invokes(`cat <<EOF\nEOF # not the terminator\nbash ${S}\nEOF`, S))
+  })
+
+  it('a heredoc START hidden in a comment blanks the rest — over-blanking, the safe direction', () => {
+    // The cost of the reversed order, stated rather than hidden. The shell
+    // sees a comment and no heredoc; this sees a heredoc that never
+    // terminates. It reports a wired suite as an orphan: loud.
+    assert.ok(!invokes(`echo hi  # cat <<EOF\nbash ${S}`, S))
+  })
+
+  it('CONTROL: an ordinary commented-out invocation is still stripped, not blanked', () => {
+    assert.ok(!invokes(`# bash ${S}\necho skipped`, S))
+    assert.ok(invokes(`# bash ${S} --old\nbash ${S}`, S))
+  })
+})
+
+describe('isCommandPosition rejects no-exec flags (#7645)', () => {
+  const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
+  const reads = line => invokes(line, S)
+
+  it('CONTROL: the two spellings this repo actually uses still count', () => {
+    assert.ok(reads(`bash ${S}`))
+    assert.ok(reads(`node ${S}`))
+    assert.ok(reads(`bash ./${S}`))
+    assert.ok(reads(`./${S}`))
+    assert.ok(reads(`out=$(bash ${S})`))
+  })
+
+  for (const line of [
+    `bash -n ${S}`,
+    `sh -n ${S}`,
+    `zsh -n ${S}`,
+    `bash --norc -n ${S}`,
+    `node --check ${S}`,
+    `node --help ${S}`,
+    `node --version ${S}`,
+    `bash -c "echo hi" ${S}`,
+  ]) {
+    it(`rejects \`${line.replace(S, '<suite>')}\``, () => {
+      assert.ok(!reads(line), 'a flag that stops the interpreter executing the file is not an invocation')
+    })
+  }
+
+  it('rejects an UNKNOWN flag too — the allowlist is empty by design', () => {
+    // A future `node --test <suite>` is reported as an orphan: a false
+    // positive, loud, and fixed by adding the flag with the reason it
+    // preserves execution. Predicting a shell is unwinnable (#7341), so the
+    // guard cries wolf rather than guessing.
+    assert.ok(!reads(`node --test ${S}`))
+    assert.ok(!reads(`bash -x ${S}`))
+  })
+})
+
+describe('workflow reader: jobTimeout (#7661)', () => {
+  /** The single job parsed out of a synthetic one-job workflow. */
+  const timeoutOf = body => jobTimeout(parseJobs(`name: probe\non: push\njobs:\n  probe:\n${body}\n`)[0])
+
+  it('reads the job-level budget', () => {
+    assert.equal(timeoutOf('    runs-on: ubuntu-latest\n    timeout-minutes: 10'), 10)
+  })
+
+  it('is undefined when the job declares none — that is six hours, not zero', () => {
+    assert.equal(timeoutOf('    runs-on: ubuntu-latest'), undefined)
+  })
+
+  it('does NOT read a STEP timeout as the job budget', () => {
+    // The dangerous direction: a step's own two-minute cap standing in for a
+    // job's five would let a rule that floors the job budget pass on the wrong
+    // number entirely. Steps sit at six spaces; the anchor is four.
+    assert.equal(
+      timeoutOf('    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci\n        timeout-minutes: 2'),
+      undefined
+    )
+  })
+
+  it('does NOT read a commented-out budget as configuration', () => {
+    assert.equal(timeoutOf('    runs-on: ubuntu-latest\n    # timeout-minutes: 30'), undefined)
+  })
+
+  it('strips a trailing comment, per YAML', () => {
+    assert.equal(timeoutOf('    runs-on: ubuntu-latest\n    timeout-minutes: 5  # lint tier'), 5)
+  })
+
+  it('is NaN for a value that is not a number — which fails every floor', () => {
+    // Not a throw and not undefined. Undefined means "six hours" to every
+    // consumer, so an unreadable value would silently clear any budget floor;
+    // NaN fails every `>=` comparison there is, so it goes red at the consumer
+    // without anyone having to remember this case.
+    assert.ok(Number.isNaN(timeoutOf('    runs-on: ubuntu-latest\n    timeout-minutes: five')))
+    assert.equal(Number.isNaN(timeoutOf('    runs-on: ubuntu-latest\n    timeout-minutes: 5')), false)
+  })
+})
+
+describe('workflow reader: maskQuotedData (#7661)', () => {
+  it('CONTROL: an unquoted line is returned unchanged', () => {
+    assert.equal(maskQuotedData('npm ci && npm run build'), 'npm ci && npm run build')
+  })
+
+  it('preserves length, so positions in the mask still index the original', () => {
+    for (const line of ['echo "a b" c', "x='y' z", 'a `b` c', 'out="$(npm ci)"']) {
+      assert.equal(maskQuotedData(line).length, line.length, line)
+    }
+  })
+
+  it('masks single- and double-quoted text, quotes included', () => {
+    assert.equal(maskQuotedData("echo 'npm ci'"), 'echo         ')
+    assert.equal(maskQuotedData('echo "npm ci"'), 'echo         ')
+  })
+
+  it('masks a separator inside quotes — the whole reason this exists', () => {
+    // Unmasked, the quoted `&&` cuts the line back to an empty segment, which
+    // is exactly what a command-word test accepts. ci.yml's own lockfile error
+    // message is this shape.
+    assert.equal(maskQuotedData('echo "a && npm ci"'), 'echo              ')
+  })
+
+  it('leaves COMMAND SUBSTITUTION inside double quotes visible — it is code', () => {
+    // Masking it would undercount, and undercounting is the silent direction
+    // for anything that counts invocations.
+    assert.equal(maskQuotedData('out="$(npm ci)"'), 'out= $(npm ci) ')
+    assert.equal(maskQuotedData('out="`npm ci`"'), 'out= `npm ci` ')
+  })
+
+  it('a `\'` inside double quotes is data, not the start of a quote', () => {
+    // repo-relay.yml says "repo-relay's dependency install failed". Treating
+    // that apostrophe as an opening quote leaves the rest of the line masked.
+    assert.equal(maskQuotedData(`echo "it's fine" && npm ci`), 'echo             && npm ci')
+  })
+
+  it('an escaped quote does not close the string', () => {
+    assert.equal(maskQuotedData('echo "a \\" npm ci"'), 'echo              ')
+  })
+})
+
+describe('workflow reader: hasUnclosedQuoting (#7661)', () => {
+  it('CONTROL: a balanced line is closed', () => {
+    assert.equal(hasUnclosedQuoting('echo "a" \'b\' `c`'), false)
+  })
+
+  it('reports a quote left open — the per-line mask does not apply to the next line', () => {
+    assert.equal(hasUnclosedQuoting('echo "a'), true)
+    assert.equal(hasUnclosedQuoting("echo 'a"), true)
+  })
+
+  it('does NOT report a command substitution left open', () => {
+    // Three lines in this repo's workflows are exactly this: `version=$(printf
+    // '%s' "$COMMIT_MESSAGE" \` continued on the next line. Its continuation
+    // really is shell code, which is how the mask reads it, so the model still
+    // holds and flagging it would make the corpus control unusable.
+    assert.equal(hasUnclosedQuoting('version=$(printf \'%s\' "$MSG" \\'), false)
+  })
+})
+
+describe('workflow reader: stripShellComment is quote-aware (#7661)', () => {
+  it('CONTROL: a real comment is still stripped, in both positions', () => {
+    assert.equal(stripShellComment('# bash x.test.sh'), '')
+    // One separating space survives, exactly as the regex this replaces left
+    // it: the cut is at the whitespace character adjacent to the `#`, not at
+    // the end of the command.
+    assert.equal(stripShellComment('npm ci  # install'), 'npm ci ')
+  })
+
+  it('does NOT strip a `#` inside a quoted string', () => {
+    // The live shape, from repo-relay.yml. The old stripper cut here, leaving
+    // an unterminated quote and dropping the rest of the line — which for a
+    // rule that COUNTS invocations is a silent undercount.
+    const line = 'echo "::warning::… does not fail the job — see #7632." && npm ci'
+    assert.equal(stripShellComment(line), line)
+  })
+
+  it('a `#` with no whitespace before it was never a comment', () => {
+    assert.equal(stripShellComment('curl http://x/a#b'), 'curl http://x/a#b')
+  })
+})
+
+describe('workflow reader: commandUses (#7661)', () => {
+  const kinds = (body, name = 'npm') => commandUses(body, name).map(u => u.kind)
+
+  it('the command word itself is an invocation, and its arguments come back', () => {
+    assert.deepEqual(commandUses('npm ci --omit=dev', 'npm'), [
+      { kind: 'invocation', line: 'npm ci --omit=dev', args: ['ci', '--omit=dev'] },
+    ])
+  })
+
+  it('accepts every spelling that really puts npm at a command position', () => {
+    assert.deepEqual(kinds('cd packages/server && npm ci'), ['invocation'])
+    assert.deepEqual(kinds('foo | npm ci'), ['invocation'])
+    assert.deepEqual(kinds('out=$(npm ci)'), ['invocation'])
+    assert.deepEqual(kinds('out="$(npm ci)"'), ['invocation'])
+  })
+
+  it('a mention inside a string is QUOTED, even behind a quoted separator', () => {
+    assert.deepEqual(kinds('echo "run \'cd x && npm install\' first"'), ['quoted'])
+  })
+
+  it('a name with something in front of it is UNCLASSIFIED, never silently dropped', () => {
+    // Nothing here decides whether `sudo` runs its operand. Guessing wrong in
+    // the lenient direction is an invocation that vanishes, so the caller is
+    // handed the shape and asked.
+    assert.deepEqual(kinds('sudo npm ci'), ['unclassified'])
+    assert.deepEqual(kinds('if x; then npm ci; fi'), ['unclassified'])
+    assert.deepEqual(kinds('grep npm ci.yml'), ['unclassified'])
+  })
+
+  it('the name must be a whole word', () => {
+    assert.deepEqual(kinds('node scripts/lint-workflow-npm-env.mjs'), [])
+    assert.deepEqual(kinds('npmx ci'), [])
+  })
+
+  it('a shell comment and a heredoc body are not commands', () => {
+    assert.deepEqual(kinds('# npm ci'), [])
+    assert.deepEqual(kinds('cat <<EOF\nnpm ci\nEOF'), [])
+  })
+
+  it('every occurrence on a line is classified, not just the first', () => {
+    assert.deepEqual(kinds('npm ci && npm run build'), ['invocation', 'invocation'])
   })
 })

@@ -10,6 +10,8 @@ import {
   readWorkflows,
   assertReaderSane,
   stepRun,
+  invokes,
+  mentions,
   MIN_BLOCK_RUN_STEPS,
   MIN_PLAIN_RUN_STEPS,
 } from './helpers/workflow-reader.js'
@@ -543,295 +545,6 @@ function enumerationDisagreements({ gitSuites, onDisk, untracked }) {
   }
 }
 
-/** Escape a literal for embedding in a RegExp. */
-const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
-/**
- * Every place `text` names this file as a whole path segment.
- *
- * A plain `includes()` is over-inclusive about WIRED, which is under-inclusive
- * about ORPHAN — the dangerous direction. `bash foo.test.sh.bak` and `bash
- * xfoo.test.sh` both contain `foo.test.sh` as a substring and invoke a
- * different file. The left boundary admits `/` (a path prefix is exactly how
- * the name is normally spelled) but not a filename character; the right
- * boundary admits neither, so an extended name cannot vouch for the suite.
- *
- * EVERY occurrence, not the first: `echo "replacing x.test.sh" && bash
- * x.test.sh` names it twice, and stopping at the first would read the mention
- * and miss the invocation. That direction is only a false positive, but it is
- * free to get right.
- */
-function namePositions(text, name) {
-  const re = new RegExp(`(?<![A-Za-z0-9_.\\-])${esc(name)}(?![A-Za-z0-9_.\\-])`, 'g')
-  return [...text.matchAll(re)].map(m => m.index)
-}
-
-const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'npx', 'npm'])
-
-/** Shell command separators: everything after the last one begins a new command. */
-const SEPARATORS = /[;&|(`{]/g
-
-/**
- * Is the name at `at` in a COMMAND position on this line — i.e. does the text
- * immediately before it invoke it?
- *
- * The prefix is cut back to the last shell separator, quotes are dropped, and
- * what remains must be one of:
- *
- *   `./`                     — `./x.test.sh`
- *   <interpreter> [path-prefix]
- *                            — `bash x.test.sh`, `bash scripts/__tests__/x.test.sh`,
- *                              `bash ./x.test.sh`, `out=$(bash x.test.sh)`
- *
- * NO FLAGS, and that is the #7645 fix rather than an omission. The previous
- * rule accepted ANY `-`-prefixed word unconditionally, so a flag that stops the
- * interpreter executing the file still read as an invocation. Measured against
- * the shipped predicate:
- *
- *   WIRED  | bash -n <suite>            | parse-only, runs NOTHING
- *   WIRED  | sh -n <suite>              | parse-only
- *   WIRED  | bash --norc -n <suite>     | parse-only, behind a harmless flag
- *   WIRED  | node --check <suite>       | compiles, runs NOTHING
- *   WIRED  | node --help <suite>        | argument ignored entirely
- *
- * `bash -n` is not hypothetical: it is this repo's own parse-check idiom,
- * run over every tracked shell script by `scripts/parse-check-shell.sh` —
- * invoked from the step IMMEDIATELY ABOVE these suite invocations in the same
- * `scripts-tests` job. (It sat inline in that step until #7646 moved it into a
- * script a test could run; the distance changed, the adjacency did not.)
- * Downgrading a flaky suite to "just syntax-check it for now" is a copy of the
- * idiom one step up, and the release-critical updater-feed suite would then run
- * in no step with this guard reporting it wired — #7504 exactly, through the
- * guard written to prevent it.
- *
- * #7637 fixed three fail-opens in this function and every one was about the
- * COMMAND WORD (`chmod +x ./x`, `cp ./x /tmp/`, `node --version && echo`). The
- * flag axis was never considered. It is the #7281 shape as well: `bash <path>`
- * is validated as a shell command word and `-n` is re-parsed by bash under a
- * different grammar, as "do not execute".
- *
- * An ALLOWLIST rather than a denylist of no-exec flags, and an empty one:
- * predicting a shell is unwinnable (#7341, entry 15 in the catalogue — six
- * bypasses in two rounds), and `-n`, `--check`, `-e`, `-p`, `-c` and `--help`
- * are only the ones anyone thought of. All 15 wired invocations in this repo
- * spell zero flags — measured, `bash <path>` or `node <path>`, one line each —
- * so an allowlist costs nothing today and a future `node --test <path>` is
- * reported as an ORPHAN: a false positive, loud, and fixed by adding the flag
- * here with the reason it preserves execution. Under-inclusive about WIRED is
- * the direction this whole file is built toward.
- *
- * The first version of this asked only whether an interpreter appeared ANYWHERE
- * earlier on the line, and whether `./` appeared anywhere earlier. Both were the
- * #7290/#7291 shape — a comment ("before the name") describing a stronger check
- * than the code performed — and both were live false negatives, verified:
- * `chmod +x ./x.test.sh`, `cp ./x.test.sh /tmp/` and `node --version && echo
- * "see x.test.sh"` each read as an invocation while running nothing. Anchoring
- * to the command position is what makes the claim and the code agree.
- *
- * A bare `x.test.sh` at a command position is NOT accepted, though a shell
- * would run it: nothing in this repo spells an invocation that way. That costs
- * a false positive on a shape nobody writes, which is the safe direction.
- *
- * This paragraph used to credit the bare-name rejection with covering heredoc
- * bodies too. It never did — it covers the BARE-NAME spelling, and a body line
- * spelled `bash <suite>` read as an invocation (measured, #7645). Heredoc
- * bodies are blanked by `withoutHeredocBodies` now, and this sentence claims
- * only what this rule performs. The #7290/#7291 shape, found in the same
- * function that had it three times before.
- */
-function isCommandPosition(line, at) {
-  const before = line.slice(0, at)
-  SEPARATORS.lastIndex = 0
-  let cut = 0
-  for (const m of before.matchAll(SEPARATORS)) cut = m.index + 1
-  const seg = before.slice(cut).replace(/["']/g, '').trim()
-  if (seg === './') return true
-  const words = seg.split(/\s+/).filter(Boolean)
-  if (words.length === 0) return false
-  // `words[0]` rather than `words.some(...)`: the interpreter must be the
-  // command WORD. The two are provably equivalent given the tail check below —
-  // an interpreter is neither a flag nor a path prefix, so it cannot appear
-  // after position 0 and still pass — and a differential search over 168,420
-  // token sequences found no input distinguishing them. Recorded because that
-  // makes swapping them a genuinely INERT mutant rather than a missing
-  // assertion, and the next person to mutate this deserves to know which.
-  if (!INTERPRETERS.has(words[0])) return false
-  // After the interpreter: NOTHING, or a single trailing path prefix — the
-  // directory part of the argument when the match was on the basename. No
-  // flags; see the header for why the allowlist is empty rather than a
-  // denylist of the no-exec ones.
-  const rest = words.slice(1)
-  return rest.length === 0 || (rest.length === 1 && rest[0].endsWith('/'))
-}
-
-/**
- * Shell here-document starts. The captured word is the raw delimiter.
- *
- * THE DELIMITER IS A SHELL WORD, not an identifier. The first version of this
- * matched `'...'`, `"..."` or `[A-Za-z_][A-Za-z0-9_]*` — and the shell accepts
- * far more, so two ordinary spellings opened a heredoc that this did not see:
- *
- *   cat <<\EOF     the standard backslash-quoted literal heredoc, exactly
- *                  equivalent to <<'EOF'
- *   cat <<1EOF     a digit-leading delimiter
- *
- * Measured against the shipped predicate, and against real bash: both bodies
- * were handed back as LIVE COMMANDS, so `bash <suite>` inside one read as an
- * invocation while the shell ran nothing. A total fail-open of the protection
- * this function exists to provide.
- *
- * The polarity is the thing to hold on to, because it INVERTS between the two
- * ends of a heredoc. At the TERMINATOR, matching too eagerly ends the body
- * early and hands data lines back as commands — dangerous — so that match is
- * strict. At the START, matching too NARROWLY fails to open the body at all,
- * which is the same danger by the opposite route. Strictness is not a direction;
- * it is a direction *per end*, and the first version of this applied the
- * terminator's argument to the start.
- *
- * So the delimiter is now "everything up to whitespace or a shell
- * metacharacter", normalised by `heredocDelimiter` below. That over-matches:
- * `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so the
- * rest of the block is blanked. Over-blanking reports a wired suite as an
- * ORPHAN — loud, and the safe direction.
- *
- * `<<<` is a here-STRING and takes no body. It is excluded TWICE over, and only
- * once deliberately: the `(?<!<)` lookbehind stops the engine retrying one
- * character along and reading the trailing `<` as a `<<` start, and `<` is also
- * in the delimiter's excluded set. A `(?!<)` lookahead stood here too, with a
- * comment calling both "load-bearing". It was INERT — a differential search over
- * 204,204 strings found zero inputs where dropping it changed the result, and
- * six where dropping the lookbehind did. It is removed rather than kept with a
- * note, because the excluded set makes it redundant a second time; the proof is
- * recorded here so the next person does not add it back.
- */
-const HEREDOC_START = /(?<!<)<<-?\s*([^\s;&|<>()`]+)/
-
-/**
- * The terminator a heredoc delimiter denotes: quoting removed, since quoting
- * only tells the shell whether to expand the BODY.
- */
-const heredocDelimiter = word => word.replace(/['"\\]/g, '')
-
-/**
- * The lines of a run body with here-document BODIES blanked out (#7645).
- *
- * A heredoc body is DATA the shell hands to a command, not commands the shell
- * runs, so
- *
- *     cat <<EOF
- *     bash scripts/__tests__/merge-updater-feeds.test.sh
- *     EOF
- *
- * documents an invocation without performing one — and read as WIRED until
- * this existed. The file's own header claimed the bare-name rejection covered
- * heredocs; it covers only the bare-name spelling, and `bash <suite>` inside a
- * body was an invocation. Measured before the fix.
- *
- * A body that is WRITTEN TO A FILE and later executed really does run the
- * suite, so blanking it can report a wired suite as an orphan. That is the
- * declared safe direction, and no workflow does it today.
- *
- * The terminator must appear ALONE on its line — leading tabs allowed only for
- * `<<-`, which is what the shell strips. Deliberately strict: a lenient match
- * ends the body EARLY and hands the remaining data lines back as commands,
- * which is the dangerous direction. An unterminated heredoc therefore blanks
- * the rest of the body, which is loud and safe. That also covers the shape this
- * repo really has — `echo "body<<EOF" >> $GITHUB_OUTPUT`, a GitHub Actions
- * multiline-output delimiter rather than a shell heredoc, whose terminator line
- * is `echo "EOF" >> $GITHUB_OUTPUT` and never matches. Blanking from there on
- * costs nothing measurable: no suite is invoked after one.
- */
-function withoutHeredocBodies(lines) {
-  const out = []
-  let terminator = null
-  let stripTabs = false
-  for (const line of lines) {
-    if (terminator !== null) {
-      const candidate = stripTabs ? line.replace(/^\t+/, '') : line
-      if (candidate === terminator) terminator = null
-      out.push('')
-      continue
-    }
-    out.push(line)
-    const m = HEREDOC_START.exec(line)
-    if (m) {
-      terminator = heredocDelimiter(m[1])
-      stripTabs = /<<-/.test(line)
-    }
-  }
-  return out
-}
-
-/**
- * A run body's lines with shell comments removed.
- *
- * `stepRun()` strips a trailing comment from a PLAIN scalar, because that is
- * what YAML does. It deliberately does NOT strip one inside a BLOCK scalar —
- * a `#` there is a shell comment and belongs to the script it hands back. So
- * the single most idiomatic way to disable a CI command,
- *
- *     run: |
- *       # bash scripts/__tests__/x.test.sh
- *       echo "temporarily skipped"
- *
- * read as WIRED until this existed: the same "delete the `run:`, keep the
- * comment" regression this whole guard is about, one YAML spelling over, and
- * missed by the entire mutation suite because every case in it mutated a plain
- * scalar. Two spellings of identical config must not disagree.
- *
- * A `#` inside quotes truncates the line here where a shell would not. That
- * shortens what is searched, so its only effect is to report a wired suite as
- * an orphan — loud, and the safe direction.
- */
-const stripShellComment = line => line.replace(/(^|\s)#.*$/, '')
-
-const uncommented = runBody => runBody.split('\n').map(stripShellComment)
-
-/**
- * Does any line of this `run:` body actually INVOKE the named file, as opposed
- * to merely mentioning it?
- *
- * `stepRun()` already keeps a step's `name:`, `if:` and `with:` out of reach.
- * This closes the rest: a comment inside a block scalar, and a mention inside a
- * live command.
- *
- * Requiring a real command position costs nothing today — every wired suite is
- * invoked as `bash <path>` or `node <path>`, measured, one line each. No count
- * is written here: a number beside a growing set is the first cause in
- * docs/false-safety-guards.md, and this line carried a stale 15 through the PR
- * that made it 16. A
- * future shape without one (`npm run x`, a variable holding the path, `for f in
- * ...; do bash "$f"; done`) is reported as an orphan: a false POSITIVE, loud,
- * and fixable by whoever writes it. Under-inclusive is the direction that waves
- * a real orphan through.
- */
-function invokes(runBody, name) {
-  // ORDER MATTERS, and the first version had it backwards. Heredoc tracking is
-  // stateful and line-ordered; comment stripping rewrites lines. Running the
-  // stripper FIRST let it manufacture a terminator the shell never sees:
-  //
-  //     cat <<EOF
-  //     EOF # not really the terminator
-  //     bash <suite>
-  //     EOF
-  //
-  // The shell terminates only on a line that is exactly `EOF`, so the whole
-  // thing is data and nothing runs. Stripping first turns line 2 into `EOF`,
-  // closes the body there, and hands `bash <suite>` back as a live command —
-  // measured WIRED. Blanking the bodies first means the stripper only ever sees
-  // lines the shell would have executed.
-  //
-  // The reverse order costs nothing: a heredoc START hidden inside a comment
-  // (`echo x  # cat <<EOF`) now opens a body that never terminates and blanks
-  // the rest, which is over-blanking — loud, and the safe direction.
-  return withoutHeredocBodies(runBody.split('\n'))
-    .map(stripShellComment)
-    .some(line => namePositions(line, name).some(at => isCommandPosition(line, at)))
-}
-
-/** Is the name present at all — invoked or merely mentioned? Diagnostics only. */
-const mentions = (runBody, name) => namePositions(runBody, name).length > 0
-
 /**
  * Paths that share a basename, as `a vs b`.
  *
@@ -1309,8 +1022,8 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     //
     // The sentence that stood here claimed the two mechanisms were pinned
     // separately, "the trailing-comment case is red without `stepRun()`". That
-    // was wrong, and measurement is what showed it (#7640): `uncommented()`
-    // inside `invokes()` strips a trailing comment on its own, so that case
+    // was wrong, and measurement is what showed it (#7640): the comment
+    // stripping inside `invokes()` removes a trailing comment on its own, so that case
     // passes whether or not `stepRun()` strips one. NO case in this block is
     // red on `stepRun()` alone. `stepRun` is covered by
     // ci-workflow-reader.test.js, so this is a false attribution rather than an
@@ -1406,8 +1119,9 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
 
   it('a commented-out invocation whose comment contains a shell separator', async () => {
     // The `;` resets the command-position scan, so without comment stripping the
-    // text after it reads as a fresh command. This is what makes `uncommented()`
-    // load-bearing rather than redundant with the command-position anchoring —
+    // text after it reads as a fresh command. This is what makes `invokes()`'s
+    // comment stripping load-bearing rather than redundant with the
+    // command-position anchoring —
     // every other commented shape is caught twice.
     const wf = await mutated([
       [RUN_LINE, `        run: |\n          # disabled; bash ${SUITE}\n          echo skipped`],
@@ -2020,161 +1734,6 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     })
   })
 
-  describe('withoutHeredocBodies (#7645)', () => {
-    const L = s => s.split('\n')
-
-    it('CONTROL: a body with no heredoc is returned unchanged', () => {
-      assert.deepEqual(withoutHeredocBodies(L('echo a\nbash x.test.sh')), ['echo a', 'bash x.test.sh'])
-    })
-
-    it('blanks the body and keeps the lines around it', () => {
-      assert.deepEqual(
-        withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\nEOF\nbash y.test.sh')),
-        ['cat <<EOF', '', '', 'bash y.test.sh']
-      )
-    })
-
-    it('honours a QUOTED terminator', () => {
-      assert.deepEqual(withoutHeredocBodies(L("cat <<'EOF'\nbash x.test.sh\nEOF")), ["cat <<'EOF'", '', ''])
-    })
-
-    it('strips leading TABS before the terminator only for `<<-`', () => {
-      assert.deepEqual(withoutHeredocBodies(L('cat <<-EOF\nbash x.test.sh\n\t\tEOF\nafter')), ['cat <<-EOF', '', '', 'after'])
-      // Plain `<<` does NOT strip tabs, so an indented terminator does not end
-      // the body — the strict direction, which blanks more rather than less.
-      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\nbash x.test.sh\n\tEOF\nafter')), ['cat <<EOF', '', '', ''])
-    })
-
-    it('honours a DOUBLE-quoted terminator', () => {
-      // Untested until review: the double-quoted branch of the delimiter had no
-      // case, so two independent mutants that removed it survived.
-      assert.deepEqual(withoutHeredocBodies(L('cat <<"EOF"\nbash x.test.sh\nEOF')), ['cat <<"EOF"', '', ''])
-    })
-
-    it('honours a BACKSLASH-quoted terminator — `<<\\EOF` is ordinary bash', () => {
-      // The fail-open review found. `<<\EOF` is exactly equivalent to `<<'EOF'`
-      // and is one of the two standard ways to write a literal heredoc. The
-      // first delimiter grammar matched neither it nor a digit-leading word, so
-      // the body was never opened and every line in it was handed back as a
-      // live command — verified against real bash, which runs none of them.
-      assert.deepEqual(withoutHeredocBodies(L('cat <<\\EOF\nbash x.test.sh\nEOF')), ['cat <<\\EOF', '', ''])
-    })
-
-    it('honours a DIGIT-LEADING delimiter — the shell takes any word', () => {
-      assert.deepEqual(withoutHeredocBodies(L('cat <<1EOF\nbash x.test.sh\n1EOF')), ['cat <<1EOF', '', ''])
-    })
-
-    it('does not TRUNCATE a delimiter at a non-identifier character', () => {
-      // `<<EOF-1` used to capture `EOF`, so a body line spelled `EOF` closed the
-      // body early and every data line after it became a live command.
-      assert.deepEqual(
-        withoutHeredocBodies(L('cat <<EOF-1\nEOF\nbash x.test.sh\nEOF-1\nafter')),
-        ['cat <<EOF-1', '', '', '', 'after']
-      )
-    })
-
-    it('over-blanks rather than under-blanks on a `<<` that is not a heredoc', () => {
-      // `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so
-      // the rest is blanked. Stated because it is a real consequence of taking
-      // the delimiter as a shell word: over-blanking reports a wired suite as an
-      // ORPHAN, which is loud and the safe direction, and the alternative — a
-      // narrower grammar — is the fail-open this case's neighbours document.
-      assert.deepEqual(withoutHeredocBodies(L('x=$(( 1 << 2 ))\nbash y.test.sh')), ['x=$(( 1 << 2 ))', ''])
-    })
-
-    it('does NOT treat a here-STRING as a heredoc', () => {
-      assert.deepEqual(
-        withoutHeredocBodies(L('grep -q x <<< "$VAR"\nbash y.test.sh')),
-        ['grep -q x <<< "$VAR"', 'bash y.test.sh']
-      )
-    })
-
-    it('blanks to the END when the terminator never appears — loud, not quiet', () => {
-      // The safe direction: an unterminated body hides invocations, which
-      // reports a wired suite as an orphan rather than the reverse. This is the
-      // shape `echo "body<<EOF" >> $GITHUB_OUTPUT` produces in release.yml.
-      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nb')), ['cat <<EOF', '', ''])
-    })
-
-    it('a terminator with trailing text does NOT end the body', () => {
-      // Lenient matching would hand the remaining data lines back as commands.
-      assert.deepEqual(withoutHeredocBodies(L('cat <<EOF\na\nEOF >> out\nbash x.test.sh')), ['cat <<EOF', '', '', ''])
-    })
-  })
-
-  describe('heredocDelimiter (#7645)', () => {
-    it('strips the three quoting forms the shell accepts, and nothing else', () => {
-      assert.equal(heredocDelimiter('EOF'), 'EOF')
-      assert.equal(heredocDelimiter("'EOF'"), 'EOF')
-      assert.equal(heredocDelimiter('"EOF"'), 'EOF')
-      assert.equal(heredocDelimiter('\\EOF'), 'EOF')
-      assert.equal(heredocDelimiter('EOF-1'), 'EOF-1', 'a dash is part of the word, not quoting')
-      assert.equal(heredocDelimiter('1EOF'), '1EOF')
-    })
-  })
-
-  describe('invokes composes the passes in the right ORDER (#7645)', () => {
-    const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
-
-    it('a data line that comment-stripping would TURN INTO the terminator does not close the body', () => {
-      // Stripping comments first manufactured a terminator the shell never
-      // sees: the shell ends a heredoc only on a line that is exactly `EOF`, so
-      // this whole block is data and nothing runs — but `EOF # not the
-      // terminator` strips to `EOF`, closed the body there, and handed
-      // `bash <suite>` back as a live command. Measured WIRED before the fix.
-      assert.ok(!invokes(`cat <<EOF\nEOF # not the terminator\nbash ${S}\nEOF`, S))
-    })
-
-    it('a heredoc START hidden in a comment blanks the rest — over-blanking, the safe direction', () => {
-      // The cost of the reversed order, stated rather than hidden. The shell
-      // sees a comment and no heredoc; this sees a heredoc that never
-      // terminates. It reports a wired suite as an orphan: loud.
-      assert.ok(!invokes(`echo hi  # cat <<EOF\nbash ${S}`, S))
-    })
-
-    it('CONTROL: an ordinary commented-out invocation is still stripped, not blanked', () => {
-      assert.ok(!invokes(`# bash ${S}\necho skipped`, S))
-      assert.ok(invokes(`# bash ${S} --old\nbash ${S}`, S))
-    })
-  })
-
-  describe('isCommandPosition rejects no-exec flags (#7645)', () => {
-    const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
-    const reads = line => invokes(line, S)
-
-    it('CONTROL: the two spellings this repo actually uses still count', () => {
-      assert.ok(reads(`bash ${S}`))
-      assert.ok(reads(`node ${S}`))
-      assert.ok(reads(`bash ./${S}`))
-      assert.ok(reads(`./${S}`))
-      assert.ok(reads(`out=$(bash ${S})`))
-    })
-
-    for (const line of [
-      `bash -n ${S}`,
-      `sh -n ${S}`,
-      `zsh -n ${S}`,
-      `bash --norc -n ${S}`,
-      `node --check ${S}`,
-      `node --help ${S}`,
-      `node --version ${S}`,
-      `bash -c "echo hi" ${S}`,
-    ]) {
-      it(`rejects \`${line.replace(S, '<suite>')}\``, () => {
-        assert.ok(!reads(line), 'a flag that stops the interpreter executing the file is not an invocation')
-      })
-    }
-
-    it('rejects an UNKNOWN flag too — the allowlist is empty by design', () => {
-      // A future `node --test <suite>` is reported as an orphan: a false
-      // positive, loud, and fixed by adding the flag with the reason it
-      // preserves execution. Predicting a shell is unwinnable (#7341), so the
-      // guard cries wolf rather than guessing.
-      assert.ok(!reads(`node --test ${S}`))
-      assert.ok(!reads(`bash -x ${S}`))
-    })
-  })
-
   describe('isSuiteShaped', () => {
     // Measured: ZERO tracked files match the `scripts/__tests__/` +
     // `.test.{js,cjs}` clause today, so deleting it outright left every test
@@ -2366,7 +1925,8 @@ function collectSubjectBody(text, { minLength = 200, maxLength = 4000 } = {}) {
  * whole file reported 69/69 with a tracked suite silently outside the subject
  * set. Measured, at this branch's own head.
  *
- * The idiom was borrowed from `uncommented()` a few hundred lines up, which is
+ * The idiom was borrowed from `stripShellComment()` — now in
+ * helpers/workflow-reader.js — which is
  * complete because SHELL HAS ONE COMMENT FORM. JavaScript has two, and the
  * transcription kept the shape while losing the property. That is worth naming:
  * the copy was of a correct function, and it was still wrong here.

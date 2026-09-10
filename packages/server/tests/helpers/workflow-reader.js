@@ -1,8 +1,11 @@
 /**
  * A small indentation-aware reader for `.github/workflows/*.yml`, shared by the
- * CI guards in `packages/server/tests/ci-*.test.js` — today `ci-cache-key`
- * (#7386), `ci-npm-cache-routing` (#7383) and `ci-workflow-reader` (this
- * module's own tests).
+ * CI guards in `packages/server/tests/ci-*.test.js`, plus `ci-workflow-reader`
+ * (this module's own tests). The consumers are deliberately NOT listed here: a
+ * roster in a comment beside a growing set is the first cause in
+ * docs/false-safety-guards.md, and this one was already three names short of
+ * the truth when #7661 came to add a fourth. `grep -l workflow-reader` answers
+ * it correctly and always.
  *
  * WHY THIS IS A MODULE AND NOT A COPY IN EACH TEST
  * ------------------------------------------------
@@ -611,6 +614,47 @@ export function jobName(job) {
 }
 
 /**
+ * GitHub's own default when a job declares no `timeout-minutes` (six hours).
+ *
+ * Named rather than inlined because a consumer that treats "absent" as "no
+ * budget rule applies" and one that treats it as this number reach the same
+ * verdict for every rule that is a FLOOR, and different verdicts for anything
+ * else. Saying which one is meant is cheaper than re-deriving it per caller.
+ */
+export const DEFAULT_JOB_TIMEOUT_MINUTES = 360
+
+/**
+ * A job's declared `timeout-minutes` as a number, `undefined` when it declares
+ * none, or `NaN` when it declares something that is not a number.
+ *
+ * Anchored at EXACTLY four spaces, the job-key column, which is what excludes a
+ * STEP's own `timeout-minutes` — steps sit at six spaces or deeper, and a step
+ * timeout is a different budget with a different meaning. `jobName` is anchored
+ * the same way for the same reason; the two must not disagree about where a job
+ * key lives.
+ *
+ * NaN rather than a throw for an unparseable value, and it is deliberate: every
+ * consumer of this compares it against a required minimum, and NaN fails every
+ * `>=` comparison there is. A timeout nobody can read therefore goes RED at the
+ * consumer instead of quietly satisfying a floor — which is the whole
+ * "cannot check this treated as nothing to check" failure in
+ * docs/false-safety-guards.md, closed by arithmetic rather than by remembering.
+ *
+ * `undefined` is the case that CANNOT be made fail-closed here, because absent
+ * really is legal and really does mean six hours. A consumer must therefore
+ * carry a positive control proving this function still finds the timeouts that
+ * are declared: if it silently stopped matching, every job would read as
+ * absent, and a floor over `DEFAULT_JOB_TIMEOUT_MINUTES` passes for anything.
+ */
+export function jobTimeout(job) {
+  const m = code(job.body)
+    .map(l => /^ {4}timeout-minutes:\s*(.+?)\s*$/.exec(l))
+    .find(Boolean)
+  if (!m) return undefined
+  return Number(m[1].replace(/\s+#.*$/, '').trim())
+}
+
+/**
  * The event names in a workflow's top-level `on:` mapping.
  *
  * Every spelling GitHub accepts, because an unrecognised one returns NOTHING and
@@ -685,4 +729,556 @@ export function workflowTriggers(yml) {
     if (m) events.push(m[1])
   }
   return events
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * DOES A `run:` BODY REALLY INVOKE THIS?
+ *
+ * Everything below answers one question in two shapes:
+ *
+ *   invokes(body, 'scripts/__tests__/x.test.sh')   is this FILE executed?
+ *   commandUses(body, 'npm')                       is this COMMAND run?
+ *
+ * It began as a private predicate inside `ci-scripts-tests-registration.test.js`
+ * (#7637, #7645), which is the right place for one implementation with one
+ * consumer. #7660 established a second rule that needs the same "invokes, as
+ * opposed to mentions" judgement — an `npm ci` in a five-minute job — and this
+ * module's precedent is to hoist when the second consumer arrives (`jobName`,
+ * #7639). Transcribing instead would produce the second implementation the
+ * header of this file exists to prevent, and this predicate in particular has
+ * had SIX fail-opens found in it by measurement; a copy would inherit whichever
+ * of them was current on the day it was made.
+ *
+ * THE TWO SHAPES DIFFER IN ONE THING, AND IT IS NOT A DETAIL. Both run the same
+ * passes to decide what text is even a command — heredoc bodies blanked, shell
+ * comments stripped, the line cut back to the last separator before the name.
+ * They differ in what they then require of the words that remain:
+ *
+ *   FILE     the name is an OPERAND, so something must be running it. The
+ *            segment must be `./`, or an interpreter optionally followed by the
+ *            directory part of the path: `bash x.test.sh`, `./x.test.sh`,
+ *            `out=$(bash x.test.sh)`.
+ *   COMMAND  the name IS the command word, so nothing may precede it. The
+ *            segment must be EMPTY: `npm ci`, `a && npm ci`, `out=$(npm ci)`.
+ *
+ * WHY ONLY THE COMMAND SHAPE MASKS QUOTED TEXT. The file shape reads through
+ * quotes and must: `bash "x.test.sh"` really does run the file, and quoting an
+ * operand changes nothing. It can afford to, because its accepting condition is
+ * a segment HEADED BY AN INTERPRETER, and no amount of quoted prose produces
+ * one — `echo "... && bash x.test.sh"` cuts at the quoted `&&` to an EMPTY
+ * segment, which that shape rejects.
+ *
+ * The command shape accepts exactly that empty segment, so the same quoted
+ * separator hands it a false invocation. It is not hypothetical: ci.yml's
+ * `server-lint` job carries
+ *
+ *     echo "::error::… Run 'cd packages/server && npm install --package-lock-only' …"
+ *
+ * and a first pass at the #7660 measurement counted that line as a third npm
+ * resolve. A guard that reads prose as configuration is satisfiable by prose —
+ * this file's oldest rule, and the way to hold it here is to mask what the
+ * shell would treat as DATA before looking for a command at all.
+ *
+ * THE THIRD BUCKET IS THE POINT. `commandUses` classifies every occurrence as
+ * an `invocation`, `quoted` data, or `unclassified` — a name that survives
+ * masking but has something in front of it (`sudo npm ci`, `then npm ci`,
+ * `xargs npm ci`). Nothing here tries to decide whether such a prefix runs its
+ * operand, because that is predicting a shell (#7341), and guessing WRONG in
+ * the lenient direction is undercounting: the failure the budget rule exists to
+ * catch, arriving silently. A caller asserts the bucket is EMPTY over its
+ * corpus instead, so a spelling nobody anticipated goes red and gets classified
+ * by a person. Measured across all seven workflow files: 57 invocations, 6
+ * quoted mentions, 0 unclassified.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** Escape a literal for embedding in a RegExp. */
+const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * Every place `text` names this file as a whole path segment.
+ *
+ * A plain `includes()` is over-inclusive about WIRED, which is under-inclusive
+ * about ORPHAN — the dangerous direction. `bash foo.test.sh.bak` and `bash
+ * xfoo.test.sh` both contain `foo.test.sh` as a substring and invoke a
+ * different file. The left boundary admits `/` (a path prefix is exactly how
+ * the name is normally spelled) but not a filename character; the right
+ * boundary admits neither, so an extended name cannot vouch for the suite.
+ *
+ * EVERY occurrence, not the first: `echo "replacing x.test.sh" && bash
+ * x.test.sh` names it twice, and stopping at the first would read the mention
+ * and miss the invocation. That direction is only a false positive, but it is
+ * free to get right.
+ */
+export function namePositions(text, name) {
+  const re = new RegExp(`(?<![A-Za-z0-9_.\\-])${esc(name)}(?![A-Za-z0-9_.\\-])`, 'g')
+  return [...text.matchAll(re)].map(m => m.index)
+}
+
+const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'npx', 'npm'])
+
+/** Shell command separators: everything after the last one begins a new command. */
+const SEPARATORS = /[;&|(`{]/g
+
+/**
+ * Is the name at `at` in a COMMAND position on this line — i.e. does the text
+ * immediately before it invoke it?
+ *
+ * The prefix is cut back to the last shell separator, quotes are dropped, and
+ * what remains must be one of:
+ *
+ *   `./`                     — `./x.test.sh`
+ *   <interpreter> [path-prefix]
+ *                            — `bash x.test.sh`, `bash scripts/__tests__/x.test.sh`,
+ *                              `bash ./x.test.sh`, `out=$(bash x.test.sh)`
+ *
+ * NO FLAGS, and that is the #7645 fix rather than an omission. The previous
+ * rule accepted ANY `-`-prefixed word unconditionally, so a flag that stops the
+ * interpreter executing the file still read as an invocation. Measured against
+ * the shipped predicate:
+ *
+ *   WIRED  | bash -n <suite>            | parse-only, runs NOTHING
+ *   WIRED  | sh -n <suite>              | parse-only
+ *   WIRED  | bash --norc -n <suite>     | parse-only, behind a harmless flag
+ *   WIRED  | node --check <suite>       | compiles, runs NOTHING
+ *   WIRED  | node --help <suite>        | argument ignored entirely
+ *
+ * `bash -n` is not hypothetical: it is this repo's own parse-check idiom,
+ * run over every tracked shell script by `scripts/parse-check-shell.sh` —
+ * invoked from the step IMMEDIATELY ABOVE these suite invocations in the same
+ * `scripts-tests` job. (It sat inline in that step until #7646 moved it into a
+ * script a test could run; the distance changed, the adjacency did not.)
+ * Downgrading a flaky suite to "just syntax-check it for now" is a copy of the
+ * idiom one step up, and the release-critical updater-feed suite would then run
+ * in no step with this guard reporting it wired — #7504 exactly, through the
+ * guard written to prevent it.
+ *
+ * #7637 fixed three fail-opens in this function and every one was about the
+ * COMMAND WORD (`chmod +x ./x`, `cp ./x /tmp/`, `node --version && echo`). The
+ * flag axis was never considered. It is the #7281 shape as well: `bash <path>`
+ * is validated as a shell command word and `-n` is re-parsed by bash under a
+ * different grammar, as "do not execute".
+ *
+ * An ALLOWLIST rather than a denylist of no-exec flags, and an empty one:
+ * predicting a shell is unwinnable (#7341, entry 15 in the catalogue — six
+ * bypasses in two rounds), and `-n`, `--check`, `-e`, `-p`, `-c` and `--help`
+ * are only the ones anyone thought of. All 15 wired invocations in this repo
+ * spell zero flags — measured, `bash <path>` or `node <path>`, one line each —
+ * so an allowlist costs nothing today and a future `node --test <path>` is
+ * reported as an ORPHAN: a false positive, loud, and fixed by adding the flag
+ * here with the reason it preserves execution. Under-inclusive about WIRED is
+ * the direction this whole file is built toward.
+ *
+ * The first version of this asked only whether an interpreter appeared ANYWHERE
+ * earlier on the line, and whether `./` appeared anywhere earlier. Both were the
+ * #7290/#7291 shape — a comment ("before the name") describing a stronger check
+ * than the code performed — and both were live false negatives, verified:
+ * `chmod +x ./x.test.sh`, `cp ./x.test.sh /tmp/` and `node --version && echo
+ * "see x.test.sh"` each read as an invocation while running nothing. Anchoring
+ * to the command position is what makes the claim and the code agree.
+ *
+ * A bare `x.test.sh` at a command position is NOT accepted, though a shell
+ * would run it: nothing in this repo spells an invocation that way. That costs
+ * a false positive on a shape nobody writes, which is the safe direction.
+ *
+ * This paragraph used to credit the bare-name rejection with covering heredoc
+ * bodies too. It never did — it covers the BARE-NAME spelling, and a body line
+ * spelled `bash <suite>` read as an invocation (measured, #7645). Heredoc
+ * bodies are blanked by `withoutHeredocBodies` now, and this sentence claims
+ * only what this rule performs. The #7290/#7291 shape, found in the same
+ * function that had it three times before.
+ */
+export function isCommandPosition(line, at) {
+  // `segmentBefore` is shared with `commandUses`; see its own note on why the
+  // cut is not written twice.
+  const seg = segmentBefore(line, at).replace(/["']/g, '').trim()
+  if (seg === './') return true
+  const words = seg.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return false
+  // `words[0]` rather than `words.some(...)`: the interpreter must be the
+  // command WORD. The two are provably equivalent given the tail check below —
+  // an interpreter is neither a flag nor a path prefix, so it cannot appear
+  // after position 0 and still pass — and a differential search over 168,420
+  // token sequences found no input distinguishing them. Recorded because that
+  // makes swapping them a genuinely INERT mutant rather than a missing
+  // assertion, and the next person to mutate this deserves to know which.
+  if (!INTERPRETERS.has(words[0])) return false
+  // After the interpreter: NOTHING, or a single trailing path prefix — the
+  // directory part of the argument when the match was on the basename. No
+  // flags; see the header for why the allowlist is empty rather than a
+  // denylist of the no-exec ones.
+  const rest = words.slice(1)
+  return rest.length === 0 || (rest.length === 1 && rest[0].endsWith('/'))
+}
+
+/**
+ * Shell here-document starts. The captured word is the raw delimiter.
+ *
+ * THE DELIMITER IS A SHELL WORD, not an identifier. The first version of this
+ * matched `'...'`, `"..."` or `[A-Za-z_][A-Za-z0-9_]*` — and the shell accepts
+ * far more, so two ordinary spellings opened a heredoc that this did not see:
+ *
+ *   cat <<\EOF     the standard backslash-quoted literal heredoc, exactly
+ *                  equivalent to <<'EOF'
+ *   cat <<1EOF     a digit-leading delimiter
+ *
+ * Measured against the shipped predicate, and against real bash: both bodies
+ * were handed back as LIVE COMMANDS, so `bash <suite>` inside one read as an
+ * invocation while the shell ran nothing. A total fail-open of the protection
+ * this function exists to provide.
+ *
+ * The polarity is the thing to hold on to, because it INVERTS between the two
+ * ends of a heredoc. At the TERMINATOR, matching too eagerly ends the body
+ * early and hands data lines back as commands — dangerous — so that match is
+ * strict. At the START, matching too NARROWLY fails to open the body at all,
+ * which is the same danger by the opposite route. Strictness is not a direction;
+ * it is a direction *per end*, and the first version of this applied the
+ * terminator's argument to the start.
+ *
+ * So the delimiter is now "everything up to whitespace or a shell
+ * metacharacter", normalised by `heredocDelimiter` below. That over-matches:
+ * `$(( 1 << 2 ))` opens a body terminated by `2`, which never arrives, so the
+ * rest of the block is blanked. Over-blanking reports a wired suite as an
+ * ORPHAN — loud, and the safe direction.
+ *
+ * `<<<` is a here-STRING and takes no body. It is excluded TWICE over, and only
+ * once deliberately: the `(?<!<)` lookbehind stops the engine retrying one
+ * character along and reading the trailing `<` as a `<<` start, and `<` is also
+ * in the delimiter's excluded set. A `(?!<)` lookahead stood here too, with a
+ * comment calling both "load-bearing". It was INERT — a differential search over
+ * 204,204 strings found zero inputs where dropping it changed the result, and
+ * six where dropping the lookbehind did. It is removed rather than kept with a
+ * note, because the excluded set makes it redundant a second time; the proof is
+ * recorded here so the next person does not add it back.
+ */
+const HEREDOC_START = /(?<!<)<<-?\s*([^\s;&|<>()`]+)/
+
+/**
+ * The terminator a heredoc delimiter denotes: quoting removed, since quoting
+ * only tells the shell whether to expand the BODY.
+ */
+export const heredocDelimiter = word => word.replace(/['"\\]/g, '')
+
+/**
+ * The lines of a run body with here-document BODIES blanked out (#7645).
+ *
+ * A heredoc body is DATA the shell hands to a command, not commands the shell
+ * runs, so
+ *
+ *     cat <<EOF
+ *     bash scripts/__tests__/merge-updater-feeds.test.sh
+ *     EOF
+ *
+ * documents an invocation without performing one — and read as WIRED until
+ * this existed. The file's own header claimed the bare-name rejection covered
+ * heredocs; it covers only the bare-name spelling, and `bash <suite>` inside a
+ * body was an invocation. Measured before the fix.
+ *
+ * A body that is WRITTEN TO A FILE and later executed really does run the
+ * suite, so blanking it can report a wired suite as an orphan. That is the
+ * declared safe direction, and no workflow does it today.
+ *
+ * The terminator must appear ALONE on its line — leading tabs allowed only for
+ * `<<-`, which is what the shell strips. Deliberately strict: a lenient match
+ * ends the body EARLY and hands the remaining data lines back as commands,
+ * which is the dangerous direction. An unterminated heredoc therefore blanks
+ * the rest of the body, which is loud and safe. That also covers the shape this
+ * repo really has — `echo "body<<EOF" >> $GITHUB_OUTPUT`, a GitHub Actions
+ * multiline-output delimiter rather than a shell heredoc, whose terminator line
+ * is `echo "EOF" >> $GITHUB_OUTPUT` and never matches. Blanking from there on
+ * costs nothing measurable: no suite is invoked after one.
+ */
+export function withoutHeredocBodies(lines) {
+  const out = []
+  let terminator = null
+  let stripTabs = false
+  for (const line of lines) {
+    if (terminator !== null) {
+      const candidate = stripTabs ? line.replace(/^\t+/, '') : line
+      if (candidate === terminator) terminator = null
+      out.push('')
+      continue
+    }
+    out.push(line)
+    const m = HEREDOC_START.exec(line)
+    if (m) {
+      terminator = heredocDelimiter(m[1])
+      stripTabs = /<<-/.test(line)
+    }
+  }
+  return out
+}
+
+/**
+ * One line of a run body with its shell comment removed.
+ *
+ * `stepRun()` strips a trailing comment from a PLAIN scalar, because that is
+ * what YAML does. It deliberately does NOT strip one inside a BLOCK scalar —
+ * a `#` there is a shell comment and belongs to the script it hands back. So
+ * the single most idiomatic way to disable a CI command,
+ *
+ *     run: |
+ *       # bash scripts/__tests__/x.test.sh
+ *       echo "temporarily skipped"
+ *
+ * read as WIRED until this existed: the same "delete the `run:`, keep the
+ * comment" regression this whole guard is about, one YAML spelling over, and
+ * missed by the entire mutation suite because every case in it mutated a plain
+ * scalar. Two spellings of identical config must not disagree.
+ *
+ * A `#` INSIDE QUOTES is not a comment, and this used to truncate there anyway
+ * (#7661). That was defensible while the only consumer was the registration
+ * guard — discarding text can only report a wired suite as an ORPHAN, which is
+ * loud — but it is not defensible for a consumer that COUNTS: repo-relay.yml
+ * carries
+ *
+ *     echo "::warning::… does not fail the job — see #7632."
+ *
+ * and the old stripper cut that line at ` #7632`, leaving an unterminated quote
+ * and silently dropping whatever followed. For a rule that counts npm resolves
+ * per job, dropping text is UNDERCOUNTING — the exact failure the rule exists
+ * to catch, arriving quietly.
+ *
+ * So the `#` must be at a position the shell would read as code, which is
+ * `maskQuotedData`'s answer and not a second opinion about what a quote is.
+ * The change only ever KEEPS text that was discarded before, and keeping text
+ * cannot manufacture an invocation on its own: both shapes above still have to
+ * clear the command-position anchoring, and quoted prose does not.
+ */
+export const stripShellComment = line => {
+  const m = /(^|\s)#/.exec(maskQuotedData(line))
+  return m === null ? line : line.slice(0, m.index)
+}
+
+/**
+ * Does any line of this `run:` body actually INVOKE the named file, as opposed
+ * to merely mentioning it?
+ *
+ * `stepRun()` already keeps a step's `name:`, `if:` and `with:` out of reach.
+ * This closes the rest: a comment inside a block scalar, and a mention inside a
+ * live command.
+ *
+ * Requiring a real command position costs nothing today — every wired suite is
+ * invoked as `bash <path>` or `node <path>`, measured, one line each. No count
+ * is written here: a number beside a growing set is the first cause in
+ * docs/false-safety-guards.md, and this line carried a stale 15 through the PR
+ * that made it 16. A
+ * future shape without one (`npm run x`, a variable holding the path, `for f in
+ * ...; do bash "$f"; done`) is reported as an orphan: a false POSITIVE, loud,
+ * and fixable by whoever writes it. Under-inclusive is the direction that waves
+ * a real orphan through.
+ */
+export function invokes(runBody, name) {
+  // ORDER MATTERS, and the first version had it backwards. Heredoc tracking is
+  // stateful and line-ordered; comment stripping rewrites lines. Running the
+  // stripper FIRST let it manufacture a terminator the shell never sees:
+  //
+  //     cat <<EOF
+  //     EOF # not really the terminator
+  //     bash <suite>
+  //     EOF
+  //
+  // The shell terminates only on a line that is exactly `EOF`, so the whole
+  // thing is data and nothing runs. Stripping first turns line 2 into `EOF`,
+  // closes the body there, and hands `bash <suite>` back as a live command —
+  // measured WIRED. Blanking the bodies first means the stripper only ever sees
+  // lines the shell would have executed.
+  //
+  // The reverse order costs nothing: a heredoc START hidden inside a comment
+  // (`echo x  # cat <<EOF`) now opens a body that never terminates and blanks
+  // the rest, which is over-blanking — loud, and the safe direction.
+  return withoutHeredocBodies(runBody.split('\n'))
+    .map(stripShellComment)
+    .some(line => namePositions(line, name).some(at => isCommandPosition(line, at)))
+}
+
+/** Is the name present at all — invoked or merely mentioned? Diagnostics only. */
+export const mentions = (runBody, name) => namePositions(runBody, name).length > 0
+
+/**
+ * A shell line with everything the shell would treat as QUOTED DATA replaced by
+ * spaces, one space per character, so positions in the result still line up
+ * with positions in the input.
+ *
+ * Only `commandUses` reads this; the header above says why the file shape must
+ * not. What it models, and nothing more:
+ *
+ *   '…'        literal: masked whole, quotes included, no escapes inside
+ *   "…"        masked, EXCEPT `$(…)` and `` `…` `` inside it, which are code
+ *              the shell runs and are left visible — `out="$(npm ci)"` is a
+ *              real invocation, and masking it would UNDERCOUNT, the one
+ *              direction a budget rule must not fail in
+ *   \x         outside quotes, a literal character; skipped, not masked
+ *
+ * The `$(` and `` ` `` themselves stay visible, which matters: `(` and `` ` ``
+ * are separators, and they are what cuts `out="$(npm ci)"` back to an empty
+ * segment.
+ *
+ * IT IS PER LINE, and a quote that opens on one line and closes on another is
+ * not modelled — the second line would read as code. `hasUnclosedQuoting`
+ * exists so a caller can assert its corpus contains no such line rather than
+ * assume it; every unbalanced-quote line in this repo's workflows today is a
+ * COMMENT, and comments are stripped before this runs.
+ */
+export function maskQuotedData(line) {
+  return scanQuoting(line).masked
+}
+
+/**
+ * Does this line end with a QUOTE still open?
+ *
+ * The precondition of `maskQuotedData`'s per-line model, exposed so a consumer
+ * can prove it over its own corpus. "This model does not apply here" and "this
+ * line is clean" are otherwise the same observable outcome, which is the
+ * failure `docs/false-safety-guards.md` catalogues.
+ */
+export function hasUnclosedQuoting(line) {
+  return scanQuoting(line).openQuote
+}
+
+/**
+ * One pass, two answers, so the mask and the precondition cannot disagree about
+ * what a quote is.
+ *
+ * A stack rather than a flag: `"$(echo 'x')"` nests double → substitution →
+ * single, and each level has to return to the right one. A backtick both opens
+ * and closes, so it is popped when it is already the innermost context.
+ */
+function scanQuoting(line) {
+  const out = [...line]
+  const stack = ['code']
+  for (let i = 0; i < line.length; i++) {
+    const ctx = stack[stack.length - 1]
+    const c = line[i]
+
+    if (ctx === 'single') {
+      out[i] = ' '
+      if (c === "'") stack.pop()
+      continue
+    }
+
+    if (ctx === 'double') {
+      if (c === '\\') {
+        out[i] = ' '
+        if (i + 1 < line.length) out[i + 1] = ' '
+        i++
+        continue
+      }
+      if (c === '"') {
+        out[i] = ' '
+        stack.pop()
+        continue
+      }
+      // Command substitution inside double quotes is CODE. Left visible.
+      if (c === '$' && line[i + 1] === '(') {
+        stack.push('subst')
+        i++
+        continue
+      }
+      if (c === '`') {
+        stack.push('backtick')
+        continue
+      }
+      out[i] = ' '
+      continue
+    }
+
+    // `code`, `subst` and `backtick` are all contexts whose text is shell code.
+    if (c === '\\') {
+      i++
+      continue
+    }
+    if (c === "'") {
+      out[i] = ' '
+      stack.push('single')
+      continue
+    }
+    if (c === '"') {
+      out[i] = ' '
+      stack.push('double')
+      continue
+    }
+    if (c === '$' && line[i + 1] === '(') {
+      stack.push('subst')
+      i++
+      continue
+    }
+    if (c === '`') {
+      if (ctx === 'backtick') stack.pop()
+      else stack.push('backtick')
+      continue
+    }
+    if (c === ')' && ctx === 'subst') stack.pop()
+  }
+  // A QUOTE left open is what invalidates the per-line model. A command
+  // substitution left open does not: its continuation lines really are shell
+  // code, which is how this reads them, and three lines in this repo's
+  // workflows spell exactly that (`version=$(printf … \`).
+  return { masked: out.join(''), openQuote: stack.includes('single') || stack.includes('double') }
+}
+
+/**
+ * The line cut back to the last separator before `at` — everything the shell
+ * would read as part of the SAME command as the name at that position.
+ *
+ * Extracted from `isCommandPosition` when `commandUses` needed the same cut.
+ * Two copies of it inside one module is the drift this file's header is about,
+ * and the cut is exactly where a quoted `&&` does its damage.
+ */
+function segmentBefore(line, at) {
+  const before = line.slice(0, at)
+  SEPARATORS.lastIndex = 0
+  let cut = 0
+  for (const m of before.matchAll(SEPARATORS)) cut = m.index + 1
+  return before.slice(cut)
+}
+
+/**
+ * The words after `from` that belong to the same command, up to the next
+ * separator.
+ *
+ * Read off the MASKED line, so a quoted argument comes back as nothing rather
+ * than as text that might contain a separator. A caller that cannot read the
+ * argument it needs must fail in ITS safe direction; this returns what is
+ * legible and does not guess.
+ */
+function argWords(masked, from) {
+  let after = masked.slice(from)
+  SEPARATORS.lastIndex = 0
+  const cut = [...after.matchAll(SEPARATORS)].map(m => m.index)[0]
+  if (cut !== undefined) after = after.slice(0, cut)
+  return after.trim().split(/\s+/).filter(Boolean)
+}
+
+/**
+ * Every place `name` appears in a `run:` body, classified — see the section
+ * header for the three buckets and why the third one exists.
+ *
+ * `args` is populated for an `invocation` only; it is the words that follow the
+ * command word up to the next separator, which is what lets a caller ask about
+ * a SUBCOMMAND (`npm ci` resolves the dependency tree, `npm run build` does
+ * not) without a second parser.
+ *
+ * The passes run in the same order as `invokes()`, and for the same reason
+ * recorded there: blanking heredoc bodies BEFORE stripping comments, so the
+ * stripper cannot manufacture a terminator the shell never sees.
+ *
+ * @param {string} runBody A step's `run:` script, as `stepRun()` returns it.
+ * @param {string} name The command word to look for.
+ * @returns {Array<{kind: 'invocation'|'quoted'|'unclassified', line: string, args: string[]}>}
+ */
+export function commandUses(runBody, name) {
+  const uses = []
+  for (const line of withoutHeredocBodies(runBody.split('\n')).map(stripShellComment)) {
+    const masked = maskQuotedData(line)
+    for (const at of namePositions(line, name)) {
+      if (masked.slice(at, at + name.length) !== name) {
+        uses.push({ kind: 'quoted', line, args: [] })
+      } else if (segmentBefore(masked, at).trim() !== '') {
+        uses.push({ kind: 'unclassified', line, args: [] })
+      } else {
+        uses.push({ kind: 'invocation', line, args: argWords(masked, at + name.length) })
+      }
+    }
+  }
+  return uses
 }

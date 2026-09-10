@@ -2062,6 +2062,19 @@ which was wrong.** The file labels more than twice that many. A tally beside a
 growing set is the first cause in this catalogue, and putting one in the entry
 about not doing that is its own small demonstration.
 
+**The same sentence went stale a second time, on hoist — `#7661`.** That
+comment's claim is not a property of the stripper; it is a property of the
+CONSUMER. Discarding text can only report an orphan while the caller asks *does
+anything invoke this*, and the moment a caller asks *how many times*, the same
+discarding is an undercount — silent, and exactly the misconfiguration that
+caller exists to catch. #7661 hoisted this predicate into
+`tests/helpers/workflow-reader.js` for a second consumer that counts npm
+resolves per job, and the stripper had to be made quote-aware in the same change
+because repo-relay.yml really does carry `echo "… — see #7632."`, which it cut
+mid-string. **A "safe direction" recorded in a shared module is a claim about
+every future caller, and a hoist is where it silently stops being true.** Say
+which caller the direction is safe FOR, or make the function right.
+
 **Guard against it:** when a guard decides that some text *runs* a file,
 enumerate the ways the same text can be true and the file still not run. The
 command word is the obvious axis and it is the one everybody checks. The others
