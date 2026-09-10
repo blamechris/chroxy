@@ -66,6 +66,49 @@ export const ROUTED_RUNNER_OUTPUTS = [
 ]
 
 /**
+ * A `key:` line carrying NO value — the head of a block mapping or sequence —
+ * with YAML's optional trailing comment.
+ *
+ * ONE implementation, because there were four and every one of them was wrong
+ * the same way (#7673). Each ended at a bare `$`, so `steps: # the pipeline`
+ * and `defaults: # pwsh everywhere` — legal YAML, and this repo comments keys
+ * throughout ci.yml — matched nothing. Measured, before the fix:
+ *
+ *   parseSteps  `steps: # …`    -> 0 steps, the whole job's steps vanish
+ *   jobShell    `defaults: # …` -> undefined, a pwsh job reads as unset
+ *   jobShell    `run: # …`      -> undefined, the same
+ *   jobShell    `steps: # …`    -> "pwsh" FOR A BASH JOB
+ *
+ * That last one is the dangerous direction `jobShell`'s own comment names: with
+ * `steps:` unmatched the job-key slice runs to the end of the job, the scan
+ * walks into a run block's BODY, and a heredoc writing a workflow file is read
+ * as this job's configuration. A false "powershell" drops every real bash block
+ * in that job out of `bash -n`.
+ *
+ * `parseJobs` has carried the `(?:#.*)?$` allowance on a job-id line since
+ * #7499. That fix was applied to the site that had the bug and the module was
+ * never swept for siblings — the adjacent-field pattern, four instances of it.
+ * A source guard in `ci-workflow-reader.test.js` now refuses a bare one
+ * anywhere in this file, so a fifth site cannot be added quietly.
+ *
+ * VALUELESS IS THE LOAD-BEARING HALF, and it is asserted directly rather than
+ * inferred from the four call sites. A mutation sweep made this `${key}:.*$`
+ * — an allowance that accepts a key WITH a value — and every one of those
+ * sites stayed green, because in real YAML these three keys are never written
+ * with one. A comment claiming the call sites pin it would be describing a
+ * stronger check than they perform, so `valuelessKey` is exported and its
+ * contract is pinned by its own case.
+ *
+ * The `\\s+` before `#` is deliberate and stricter than `parseJobs`'s
+ * job-id pattern: YAML needs whitespace before a `#` for it to open a comment,
+ * so `steps:#x` is a plain scalar, not a key at all, and must not match.
+ */
+export const valuelessKey = key => new RegExp(`^\\s*${key}:(?:\\s+#.*|\\s*)$`)
+const STEPS_KEY = valuelessKey('steps')
+const DEFAULTS_KEY = valuelessKey('defaults')
+const RUN_MAPPING_KEY = valuelessKey('run')
+
+/**
  * Split a workflow's `jobs:` mapping into per-job blocks.
  *
  * Job ids are the only keys at exactly two-space indent, and these workflows
@@ -141,7 +184,7 @@ function runsOnOf(bodyLines) {
  * of a guard's reach.
  */
 export function parseSteps(bodyLines) {
-  const stepsAt = bodyLines.findIndex(l => /^\s*steps:\s*$/.test(l))
+  const stepsAt = bodyLines.findIndex(l => STEPS_KEY.test(l))
   if (stepsAt === -1) return []
 
   const starts = []
@@ -606,7 +649,7 @@ function declaredSteps(text) {
 function isDefaultsRunHead(lines, at) {
   for (let i = at - 1; i >= 0; i--) {
     if (/^\s*(?:#|$)/.test(lines[i])) continue
-    return /^\s*defaults:\s*(?:#.*)?$/.test(lines[i])
+    return DEFAULTS_KEY.test(lines[i])
   }
   return false
 }
@@ -881,7 +924,7 @@ export function assertReaderSane(workflows) {
  * "guard wired to only some of its callers" cause in docs/false-safety-guards.md.
  */
 export function jobShell(jobBody) {
-  const stepsAt = jobBody.findIndex(l => /^\s*steps:\s*$/.test(l))
+  const stepsAt = jobBody.findIndex(l => STEPS_KEY.test(l))
   const lines = code(jobBody.slice(0, stepsAt === -1 ? jobBody.length : stepsAt))
 
   // Anchored to `defaults:` → `run:` → `shell:`, not "any shell: before steps:".
@@ -891,7 +934,7 @@ export function jobShell(jobBody) {
   // "powershell" here silently drops every real bash block in that job out of
   // the check — "a guard wired to only some of its callers", and the mirror
   // image of the bug it was written for.
-  const defaultsAt = lines.findIndex(l => /^\s*defaults:\s*$/.test(l))
+  const defaultsAt = lines.findIndex(l => DEFAULTS_KEY.test(l))
   if (defaultsAt === -1) return undefined
   const defaultsIndent = /^(\s*)/.exec(lines[defaultsAt])[1].length
 
@@ -900,7 +943,7 @@ export function jobShell(jobBody) {
     const indent = /^(\s*)/.exec(lines[i])[1].length
     if (indent <= defaultsIndent) break
     if (runIndent === null) {
-      if (/^\s*run:\s*$/.test(lines[i])) runIndent = indent
+      if (RUN_MAPPING_KEY.test(lines[i])) runIndent = indent
       continue
     }
     if (indent <= runIndent) break
