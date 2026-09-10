@@ -90,8 +90,16 @@ export default [
   {
     // `tests/smoke-test.mjs` hands functions to Playwright's `page.evaluate`,
     // which runs them in the BROWSER — `document` there is correct, not a bug.
+    // NODE_GLOBALS is spread explicitly. Flat config MERGES `globals` across
+    // matching blocks rather than replacing them — measured: this file uses
+    // `process`, `console`, `fetch` AND `document` and lints clean either way,
+    // and `document` does not leak to a sibling test file. So the spread is not
+    // a fix; it means a reader does not have to know that, and the block stays
+    // correct if the merge semantics ever change (#7679 review).
     files: ['tests/smoke-test.mjs'],
-    languageOptions: { globals: { document: 'readonly', window: 'readonly', navigator: 'readonly' } },
+    languageOptions: {
+      globals: { ...NODE_GLOBALS, document: 'readonly', window: 'readonly', navigator: 'readonly' },
+    },
   },
   {
     files: ['src/dashboard/**/*.js'],
