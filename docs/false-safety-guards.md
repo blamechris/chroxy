@@ -1948,6 +1948,26 @@ ones that support a conclusion you already believe: two of the four readings
 pasted into this entry were wrong, the conclusion survived them anyway, and that
 is precisely why nobody looked again for a day.
 
+**The same shape, one layer up, closed later in `#7647` / `#7658`.** This entry
+fixed the run-body floor inside `ci-scripts-tests-registration.test.js`. The
+SHARED control it threads, `assertReaderSane`, still read only raw step lines and
+never called `stepRun()` at all — so deleting `stepRun()`'s block-scalar branch
+dropped 42 of 135 run bodies while the one function whose job is to say "the
+reader is still working" reported it healthy, for all of its consumers at once.
+It now floors each YAML spelling separately.
+
+Writing that fix reproduced this entry's own lesson immediately. The first
+version counted a step as plain when its head was merely **not** a block head,
+which quietly swept the third spelling — a QUOTED scalar — into the plain bucket:
+with `stepRun()`'s plain branch deleted, a corpus of 45 quoted heads and 25 block
+ones kept the floor green. A floor whose stated subject is one branch, cleared by
+a sibling branch — and the comment beside it claimed the quoted spelling was
+excluded, so the prose described a check the code did not perform (`#7290` /
+`#7291`) in the very patch written to close that class. Review caught it; the
+counterexample is kept as a test. **The floors count bodies of the right SHAPE
+and cannot inspect content** — a dedent that corrupts every line still passes —
+which is now written beside them rather than left to be assumed.
+
 ### 30. The flag that stopped the interpreter — `#7645`
 
 Entry 27 records three fail-opens fixed in the anti-orphan guard's

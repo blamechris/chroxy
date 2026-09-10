@@ -226,15 +226,48 @@ export async function readWorkflows(dir = new URL('../../../../.github/workflows
  *
  * Taking the FIRST match is what keeps a `run:`-shaped line INSIDE a block
  * scalar's body from being read as the key: the real key precedes its own body.
+ *
+ * It is NOT indent-anchored the way `stepRun`'s key search is, so a contrived
+ * step — a `run:`-shaped line inside an earlier `env:` block scalar, say — can
+ * hand back the wrong line. Measured across all 137 live run steps: zero
+ * disagreements with the line `stepRun` anchors on. And the failure direction is
+ * one-way: `stepRun` computes the body from its OWN exact-indent anchor
+ * regardless of what this picked, so a mis-picked head can only drop a step out
+ * of a bucket, never move one in. Deflation makes a floor HARDER to clear, which
+ * is the safe direction for a positive control (#7658 review).
  */
 const runKeyLine = stepLines => stepLines.find(l => /^\s*(?:-\s+)?run:/.test(l))
 
 /**
- * Is this `run:` key line a BLOCK scalar header — `|`, `>`, and the chomping
- * and indent-indicator forms — as opposed to a plain or quoted scalar on the
- * key line itself?
+ * Which of `stepRun()`'s three branches this `run:` key line selects: a BLOCK
+ * scalar header (`|`, `>`, and the chomping and indent-indicator forms), a
+ * QUOTED flow scalar, or a plain one.
+ *
+ * Three outcomes rather than "block or not", because the floors below must
+ * count each of `stepRun`'s branches SEPARATELY. An earlier version asked only
+ * `!isBlockRunHead`, which swept quoted heads into the plain bucket and made
+ * the plain floor satisfiable by a branch it does not measure: with the plain
+ * branch deleted, a synthetic corpus of 45 quoted heads and 25 block ones kept
+ * `assertReaderSane` GREEN. That is this module's own defect class — a floor
+ * whose stated subject is one branch, cleared by another — and it also
+ * contradicted the comment beside it, which claimed quoted heads were not
+ * floored at all. Caught in review of #7658; the test named for it below is
+ * that counterexample, kept.
+ *
+ * The block grammar deliberately MIRRORS `stepRun`'s own (`/^([|>])([-+]?\d*)$/`)
+ * rather than improving on it: both accept `|-2` and both reject the equally
+ * legal `|2-`. Agreeing with `stepRun` is the property that matters here, since
+ * a classifier that recognised a spelling `stepRun` does not would count a step
+ * whose body is the garbage string `'|2-'`. If `stepRun`'s regex is ever
+ * widened, widen this one in the same change.
  */
-const isBlockRunHead = line => /^\s*(?:-\s+)?run:\s*[|>][-+]?\d*\s*(?:#.*)?$/.test(line)
+function runHeadSpelling(line) {
+  const m = /^\s*(?:-\s+)?run:\s*(.*)$/.exec(line)
+  const value = m ? m[1].trim() : ''
+  if (/^[|>][-+]?\d*\s*(?:#.*)?$/.test(value)) return 'block'
+  if (value.startsWith("'") || value.startsWith('"')) return 'quoted'
+  return 'plain'
+}
 
 /**
  * Floors for the two `run:` spellings, calibrated 2026-09-09 against the live
@@ -268,7 +301,7 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * WHY IT ALSO EXERCISES `stepRun` (#7647)
  * ---------------------------------------
  * The floors above read RAW STEP LINES and never called `stepRun()` — the
- * accessor four of the eight `ci-*.test.js` consumers now anchor every
+ * accessor four of the eight `ci-*.test.js` consumers now anchor every RUN-BODY
  * assertion to. Measured: deleting `stepRun()`'s block-scalar branch drops 42
  * of 135 run bodies, and this function — the one whose whole job is to say "the
  * reader is still working" — reported the reader healthy, with every core test
@@ -289,14 +322,26 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * steps whose head is not a block head, so a live block branch cannot vouch for
  * a dead plain one.
  *
- * NOT floored: the QUOTED branch (`run: "echo hi"`). This corpus contains zero
- * quoted run heads, so a floor over them would be a gate satisfied by zero rows
- * — #7503, and the "filter whose terms match nothing" cause in
- * docs/false-safety-guards.md. `ci-workflow-reader.test.js` covers that branch
- * with synthetic input, which is the right home for a shape the real directory
- * does not have. Also not caught here: a block branch that still returns
- * multi-line text but folds `>` wrongly — that is `fold()`'s own unit tests'
- * job, and a floor cannot see it.
+ * The QUOTED branch (`run: "echo hi"`) is EXCLUDED from both floors rather than
+ * given a third. This corpus contains zero quoted run heads, so a floor over
+ * them would be a gate satisfied by zero rows — #7503, the "filter whose terms
+ * match nothing" cause in docs/false-safety-guards.md. Excluding is not the same
+ * as ignoring: a quoted head counted as plain would let a live quoted branch
+ * clear the floor that measures the plain one, which is how the first version of
+ * this code failed. `ci-workflow-reader.test.js` covers the quoted branch with
+ * synthetic input, the right home for a shape the real directory lacks.
+ *
+ * WHAT THESE FLOORS STILL CANNOT SEE, stated so no caller reads them as more
+ * than they are. They count bodies of the right SHAPE; they do not inspect
+ * content. So a block branch that still returns multi-line text while CORRUPTING
+ * it passes: swapping `Math.min` for `Math.max` in the dedent arithmetic
+ * over-slices every line (`echo` becomes `ho`), and both floors stay green
+ * (#7658 review). So does a `>` folded wrongly. Those belong to `fold()`'s and
+ * `stepRun()`'s own unit tests in `ci-workflow-reader.test.js`, and to the
+ * `bash -n` pass in `ci-workflow-run-blocks-parse.test.js`, which is what
+ * actually catches the dedent case today. A positive control answers "is the
+ * reader still producing output of each kind"; it cannot answer "is the output
+ * right".
  */
 export function assertReaderSane(workflows) {
   assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
@@ -327,7 +372,13 @@ export function assertReaderSane(workflows) {
     )
   )
   const blockBodies = runSteps.filter(
-    s => isBlockRunHead(s.head) && typeof s.body === 'string' && s.body.includes('\n')
+    s =>
+      runHeadSpelling(s.head) === 'block' &&
+      typeof s.body === 'string' &&
+      s.body.includes('\n') &&
+      // Non-blank, so a branch degraded to emitting only newlines does not
+      // clear a floor that means "still producing block bodies" (#7658 review).
+      s.body.trim().length > 0
   )
   assert.ok(
     blockBodies.length >= MIN_BLOCK_RUN_STEPS,
@@ -336,13 +387,18 @@ export function assertReaderSane(workflows) {
       'The floors above cannot see this: they read raw step lines and never call stepRun().'
   )
   const plainBodies = runSteps.filter(
-    s => !isBlockRunHead(s.head) && typeof s.body === 'string' && s.body.length > 0 && !s.body.includes('\n')
+    s =>
+      runHeadSpelling(s.head) === 'plain' &&
+      typeof s.body === 'string' &&
+      s.body.length > 0 &&
+      !s.body.includes('\n')
   )
   assert.ok(
     plainBodies.length >= MIN_PLAIN_RUN_STEPS,
     `expected >=${MIN_PLAIN_RUN_STEPS} plain-scalar \`run:\` steps to yield a body, found ` +
       `${plainBodies.length} — stepRun()'s PLAIN-scalar branch has stopped producing anything. ` +
-      'A live block branch cannot stand in for it: these are counted by their raw YAML head.'
+      'Neither a live block branch nor a live quoted one can stand in for it: these are counted ' +
+      'by their raw YAML head.'
   )
 }
 
