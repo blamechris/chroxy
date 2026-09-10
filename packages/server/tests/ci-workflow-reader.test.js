@@ -1339,7 +1339,7 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
             jobs: [{ id: 'a', steps: [['      - uses: actions/checkout@v4']] }],
           },
         ]),
-      /declares setup-node steps the reader does not reach/
+      /declares setup-node LINES the reader does not reach/
     )
   })
 
@@ -1360,6 +1360,100 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
         jobs: [{ id: 'a', steps: [step] }],
       },
     ])
+  })
+
+  it('refuses a file that yielded MORE setup-node lines than its text declares', () => {
+    // The direction the setup-node half had NO case for. Review of #7666
+    // mutated its `!==` to `>` — one-directional, blind to an invented step —
+    // and BOTH suites stayed green, 251/251. The doc comment claimed equality
+    // caught an invention; nothing proved it. That is the catalogue's
+    // "roster checked in only ONE direction" cause, committed inside the PR
+    // whose whole subject is that class.
+    assert.throws(
+      () =>
+        assertEveryFileContributes([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n',
+            jobs: [{ id: 'a', steps: [[`      - uses: ${SETUP_NODE}abc`]] }],
+          },
+        ]),
+      /declares setup-node LINES the reader does not reach/
+    )
+  })
+
+  it('refuses a file that declares ZERO run steps but yielded one', () => {
+    // The zero boundary of the same direction, and separately untested:
+    // review exempted `declared === 0` rows from the filter and nothing went
+    // red. Without this, "declares zero, so zero is required" — the argument
+    // that replaces an exemption list — is only half enforced.
+    assert.throws(
+      () => assertEveryFileContributes([runFile('x.yml', 0, 1)]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('FALSE RED, pinned: a `run:`-shaped line inside a block scalar BODY inflates the declared count', () => {
+    // Not a defect being fixed — a disclosed limit being pinned, so it stays a
+    // known property. The declared side has no notion of "inside a block
+    // scalar", so a heredoc that writes YAML counts as a second declaration
+    // while `stepRun` correctly reads it as data. It fails CLOSED, and the
+    // alternative — a second block-scalar parser on the declared side — is the
+    // drift this module exists to prevent. If this case ever starts FAILING,
+    // someone has made the declared side body-aware, and the comment in
+    // `assertEveryFileContributes` needs updating with it.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - run: |',
+      '          cat > out.yml <<EOF',
+      '          run: this is data, not a key',
+      '          EOF',
+      '',
+    ].join('\n')
+    assert.throws(
+      () => assertEveryFileContributes([{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it("FALSE RED, pinned: an empty quoted scalar `run: ''` declares a key and yields nothing", () => {
+    // The quoted sibling of the empty `run: |` case above. Both are degenerate
+    // YAML, neither is in this repo, and both fail CLOSED — listed together in
+    // the function's own limits paragraph so the pair cannot drift apart.
+    const text = "jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ''\n"
+    assert.throws(
+      () => assertEveryFileContributes([{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('FALSE GREEN, pinned: a plain scalar whose value is on the NEXT line is invisible to BOTH sides', () => {
+    // The one place the "two independent readings" claim does not hold, and
+    // the reason it is stated with a qualification. To YAML this step's value
+    // is `echo hi` — a real run step. `stepRun` returns '' and the declared
+    // side skips the key, because both encode the same rule: nothing after the
+    // colon means nothing. Agreement is not evidence where the two sides share
+    // a rule, so a file spelled entirely this way collects the free pass
+    // stale.yml gets. Pinned GREEN deliberately: this asserts the CURRENT
+    // behaviour, not the desired one. It is a `stepRun` limitation first and
+    // is tracked as its own issue; when that is fixed this case goes red and
+    // should be inverted, which is exactly the notification wanted.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: thing',
+      '        run:',
+      '          echo hi',
+      '',
+    ].join('\n')
+    const jobs = parseJobs(text, 'x.yml')
+    assert.equal(stepRun(jobs[0].steps[0]), '', 'precondition: stepRun yields the empty string here')
+    assertEveryFileContributes([{ name: 'x.yml', text, jobs }])
   })
 })
 
@@ -1407,21 +1501,36 @@ describe('workflow reader: no single real file can collapse invisibly (#7659)', 
           }
     )
 
-  it('CONTROL: the live corpus passes, and enough of it carries run bodies to make the sweep mean something', () => {
-    assertReaderSane(workflows)
-    const carriers = workflows.filter(yieldsRunBodies).map(w => w.name)
-    // Not a roster: derived from the corpus each run. The floor is here so the
-    // per-file sweep below cannot silently become a loop over zero rows — the
-    // #7503 cause in docs/false-safety-guards.md. Six of seven files carry run
-    // bodies today (all but stale.yml).
+  /**
+   * The files the reader currently yields at least one run body for — derived
+   * from the corpus on every run rather than listed, and FLOORED HERE rather
+   * than in one of the cases.
+   *
+   * The floor lived in the CONTROL case first, and review of #7666 showed why
+   * that is not good enough: with `stepRun` mutated to return `undefined`,
+   * `carriers` came back empty, the sweep below ran ZERO iterations and
+   * reported ok while its siblings went red. The file verdict was still red,
+   * so nothing escaped — but a case that reports success over zero cases is
+   * catalogue entry 32, and it was sitting inside the case written to prove a
+   * sweep fires. A case must not depend on a sibling for its own
+   * non-vacuity. Six of seven files carry run bodies today (all but stale.yml).
+   */
+  const carriersOf = ws => {
+    const carriers = ws.filter(yieldsRunBodies).map(w => w.name)
     assert.ok(
       carriers.length >= 5,
       `expected >=5 workflow files to yield run bodies, found ${carriers.length}: ${carriers.join(', ')}`
     )
+    return carriers
+  }
+
+  it('CONTROL: the live corpus passes, and enough of it carries run bodies to make the sweep mean something', () => {
+    assertReaderSane(workflows)
+    carriersOf(workflows)
   })
 
   it('every file that carries run bodies goes RED when only that file loses them', () => {
-    const carriers = workflows.filter(yieldsRunBodies).map(w => w.name)
+    const carriers = carriersOf(workflows)
     for (const name of carriers) {
       const collapsed = withRunKeysNeutralised(workflows, name)
       assert.throws(
