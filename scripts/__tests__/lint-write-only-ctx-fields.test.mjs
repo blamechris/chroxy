@@ -1391,6 +1391,25 @@ const literalAndWrapRoster = [
   ['a division, not a regex', 'let a = x / y, b = compute();\n', 'a,b'],
   ['a statement that really does end at the newline', 'let a = compute()\nlet b = compute()\n', 'a,b'],
   ['a comparison with no `<` at all', 'let isBig = count > 10, z = compute();\n', 'isBig,z'],
+  // An initializer beginning on the NEXT line. In-tree as
+  // `export const SCHEDULER_TIMEOUT_ERROR =\n  '...'`
+  // (packages/dashboard/src/store/scheduledTaskRequests.ts). Breaking the list
+  // at that newline left `init` empty, so `isConstantInitializer` never saw the
+  // string and four literal constants entered the real roster as state — where
+  // they get CLASSIFIED and can be reported as unreferenced state. They are all
+  // read today, so the lint stayed green: inert by luck, not by design.
+  ['a `const` whose string initializer starts on the next line', "export const X =\n  'literal';\n", ''],
+  ['a wrapped initializer with a real sibling', 'let a =\n  compute(), b = compute();\n', 'a,b'],
+  // Why the continuation set is `,` and `=` and stops there. Widening it to `+`
+  // continues across `let a = b++` into the NEXT statement — and the damage is
+  // not the swallow, which `i = listStart` undoes by re-walking: it is that the
+  // over-long list ALSO gets split, so `d` is emitted once from the bogus list
+  // and again from the real one. Measured with `+` added: `a,d,c,d`. A
+  // duplicate roster entry is classified twice, and the copy carries a
+  // skipIndex that does not match its own declaration — so that declaration
+  // stays in the scanned text and reads as a reference, which is the false-GREEN
+  // direction. The single-statement form below is inert; this one is not.
+  ['a POSTFIX increment ending the line', 'let a = b++\nlet c = compute(), d = compute();\n', 'a,c,d'],
 ]
 for (const [label, decl, want] of literalAndWrapRoster) {
   test(`the declarator scan reads ${label} (#7687)`, () => {

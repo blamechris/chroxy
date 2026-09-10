@@ -1386,9 +1386,27 @@ export function extractModuleBindings(strippedText) {
           // A declaration may WRAP: `let a = 1,\n    b = 2`. Ending at the
           // newline dropped every declarator past the first line — the exact
           // shape #7533 exists to see, and the reason the fix looked complete
-          // while missing the formatting this repo actually uses. A trailing
-          // comma means the list continues.
-          else if (nest === 0 && d === '\n' && lastSig !== ',') break
+          // while missing the formatting this repo actually uses.
+          //
+          // A trailing `,` or `=` continues the list, and the set stops there
+          // deliberately. `=` is the in-tree shape (`export const X =\n '...'`,
+          // scheduledTaskRequests.ts) and is always a continuation: every
+          // operator ending in `=` — `>=`, `!==`, `+=` — is binary, and `=>`
+          // ends in `>`.
+          //
+          // A wider set is NOT safe, and the reason is DUPLICATION rather than
+          // the swallow it looks like. With `+` added, `let a = b++\nlet c =
+          // f(), d = f()` runs the two statements together; `i = listStart`
+          // undoes the swallow by re-walking, but the over-long list is still
+          // SPLIT first, so `d` is emitted from the bogus list AND from the
+          // real one — measured `a,d,c,d`. The duplicate carries a skipIndex
+          // that does not match its own declaration, so that declaration stays
+          // in the scanned text and reads as a reference: the false-GREEN
+          // direction. Everything else that legitimately wraps (a `.` chain, a
+          // `+` concatenation) either sits inside brackets or ends its line on
+          // a token that can also END a statement, so it cannot be told apart
+          // here without a parser.
+          else if (nest === 0 && d === '\n' && lastSig !== ',' && lastSig !== '=') break
           if (!/\s/.test(d)) lastSig = d
           k++
         }
