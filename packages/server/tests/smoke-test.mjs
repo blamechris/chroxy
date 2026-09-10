@@ -19,6 +19,7 @@ import { mkdirSync, readFileSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
+import { harnessVerdict, SMOKE_MIN_CASES } from './helpers/harness-floor.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
 const headed = process.argv.includes('--headed')
@@ -535,9 +536,10 @@ async function run() {
 
   // Summary
   console.log('\n\x1b[1m--- Summary ---\x1b[0m')
-  const passed = results.filter(r => r.status === 'PASS').length
-  const failed = results.filter(r => r.status === 'FAIL').length
+  const verdict = harnessVerdict(results, SMOKE_MIN_CASES)
+  const { passed, failed } = verdict
   console.log(`  \x1b[32m${passed} passed\x1b[0m, \x1b[${failed ? '31' : '32'}m${failed} failed\x1b[0m`)
+  if (verdict.broken) console.log(`  \x1b[31m${verdict.summary}\x1b[0m`)
   console.log(`  Screenshots: ${SCREENSHOT_DIR}/\n`)
 
   // Cleanup
@@ -562,7 +564,7 @@ async function run() {
     })
   }
 
-  process.exit(failed > 0 ? 1 : 0)
+  process.exit(verdict.exitCode)
 }
 
 run().catch(err => {
