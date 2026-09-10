@@ -1048,6 +1048,38 @@ describe('workflow reader: arguments are read as the SHELL splits them (#7663)',
     assert.deepEqual(args('npm ci \\\n--omit=dev'), ['ci'])
   })
 
+  it('an EMPTY quoted argument is a word, and holds its position', () => {
+    // Found in review. `''` is entirely quoting syntax, so nothing was pushed
+    // and no word was emitted — which SHIFTED every later argument one place
+    // earlier. `npm '' run` then reported the subcommand `run`, a script run
+    // the shell never performs: npm receives an empty first argument and
+    // fails. Verified against bash, whose argv is ['', 'run'] for all three
+    // spellings.
+    assert.deepEqual(args("npm '' run"), ['', 'run'])
+    assert.deepEqual(args('npm "" run'), ['', 'run'])
+    assert.deepEqual(args(String.raw`npm $'' run`), ['', 'run'])
+    // …and an empty argument AFTER the subcommand does not disturb it.
+    assert.deepEqual(args("npm ci ''"), ['ci', ''])
+  })
+
+  it('an ANSI-C escape is OPAQUE, never its own escape letter', () => {
+    // Found in review, and the sharper half. `$'…'` is the one quoted form
+    // that DECODES escapes: bash passes `$'\t'` a tab byte and `$'ru\n'` the
+    // three characters `ru` plus a newline. Reading the escape letter instead
+    // reported `t` — npm's documented `test` alias — and `run`, both of which
+    // a caller's non-resolving list contains. This reader does not implement
+    // that grammar, so the character is marked opaque rather than guessed, and
+    // the stand-in cannot equal any real subcommand.
+    assert.deepEqual(args(String.raw`npm $'\t'`), ['�'])
+    assert.deepEqual(args(String.raw`npm $'ru\n'`), ['ru�'])
+    assert.deepEqual(args(String.raw`npm $'\x63i'`), ['�63i'])
+    // The three escapes that stand for themselves ARE read literally — this is
+    // the shape the workflows contain, and bash agrees the argument is `it's`.
+    assert.deepEqual(args(String.raw`npm $'it\'s'`), ["it's"])
+    // No escape, no opacity: `$'run'` really is the word `run`.
+    assert.deepEqual(args(String.raw`npm $'run' build`), ['run', 'build'])
+  })
+
   it('CONTROL: an ordinary invocation is COMPLETE, so the flag is not always false', () => {
     // Without this the cases above are satisfied by `argsComplete: false`
     // everywhere, which reads as "nothing is ever legible" and would make a

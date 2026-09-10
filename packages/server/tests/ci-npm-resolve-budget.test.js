@@ -578,6 +578,20 @@ describe("the resolve detector's own reading goes RED (#7661)", () => {
     // subcommand in front of it is still the one that classifies.
     [`npm run 'a && b'`, 0],
     ['npm run "build && test"', 0],
+    // An EMPTY quoted argument is a word (review finding). bash's argv here is
+    // ['', 'run'], so npm gets an empty subcommand and fails — it never runs a
+    // script. Dropping the empty word shifted `run` into the subcommand slot
+    // and reported 0, which is the silent direction.
+    ["npm '' run", 1],
+    ['npm "" run', 1],
+    [String.raw`npm $'' run`, 1],
+    // An ANSI-C escape is not its own escape letter (review finding). bash
+    // passes `$'\t'` a tab and `$'ru\n'` a newline-terminated `ru`; reading the
+    // letter reported `t` and `run` — both on the non-resolving list above.
+    [String.raw`npm $'\t'`, 1],
+    [String.raw`npm $'ru\n'`, 1],
+    // …while `$'…'` with no escape in it is an ordinary quoted word.
+    [String.raw`npm $'test'`, 0],
   ]
 
   for (const [body, expected] of cases) {

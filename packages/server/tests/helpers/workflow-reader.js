@@ -905,6 +905,25 @@ export function namePositions(text, name) {
 
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'npx', 'npm'])
 
+/**
+ * The `$'…'` escapes that stand for THEMSELVES, and so can be read literally.
+ *
+ * Every other ANSI-C escape denotes a character this reader does not decode —
+ * see the `opaque` role. These three are the ones the workflows actually spell.
+ */
+const ANSI_LITERAL_ESCAPES = `\\'"`
+
+/**
+ * The stand-in for a character whose value this reader cannot determine.
+ *
+ * It is deliberately not a word character: a subcommand carrying it can never
+ * equal a real npm subcommand, so a word this reader could not fully read is
+ * always UNRECOGNISED and always classified in whichever direction its caller
+ * treats as loud. That is the property to preserve if this is ever changed —
+ * substituting a plausible letter instead would let `$'ru\n'` read as `run`.
+ */
+const OPAQUE_CHAR = '\uFFFD'
+
 /** Shell command separators: everything after the last one begins a new command. */
 const SEPARATOR_CHARS = ';&|(`{'
 
@@ -1290,8 +1309,11 @@ export function hasUnclosedQuoting(line) {
  *
  *   code    shell code: whitespace separates words, a separator ends the command
  *   data    literal text: part of the current word, and never a separator
- *   syntax  quoting punctuation the shell REMOVES: skipped, and does not end a
- *           word — `'a'b` is the single word `ab`
+ *   syntax  quoting punctuation the shell REMOVES: dropped, but it STARTS a word,
+ *           so `''` is an empty argument and `'a'b` is the single word `ab`
+ *   opaque  a character whose decoded value this reader does not model — an
+ *           ANSI-C escape. It stands for SOMETHING, so the word it sits in keeps
+ *           its position, but the value is unknown; see `commandWords`
  *   end     closes a substitution the command sits inside, so the command ends
  *
  * `continued` reports a trailing unescaped backslash, which is the shell's line
@@ -1339,7 +1361,16 @@ function scanQuoting(line) {
       out[i] = ' '
       if (c === '\\') {
         escapes(i)
-        if (i + 1 < line.length) out[i + 1] = ' '
+        if (i + 1 < line.length) {
+          out[i + 1] = ' '
+          // `$'…'` DECODES its escapes: `$'\t'` is a tab byte, `$'ru\n'` is `ru`
+          // and a newline. This reader does not implement that grammar — doing so
+          // means reimplementing octal, hex, `\cX` and `\uXXXX`, which is
+          // predicting a shell. So the decoded character is marked OPAQUE
+          // instead. Only the three escapes that stand for themselves are read
+          // literally; `$'it\'s'` is the shape the workflows actually contain.
+          roles[i + 1] = ANSI_LITERAL_ESCAPES.includes(line[i + 1]) ? 'data' : 'opaque'
+        }
         i++
         continue
       }
@@ -1495,7 +1526,19 @@ function commandWords(line, from, scan = scanQuoting(line)) {
   }
   for (let i = from; i < line.length; i++) {
     const c = line[i]
-    if (roles[i] === 'syntax') continue // removed by the shell, and joins the word either side
+    if (roles[i] === 'syntax') {
+      // Removed by the shell, and it joins the word on either side — but it
+      // also STARTS one. `npm '' run` passes npm an empty first argument and
+      // `run` as its second; treating `''` as nothing would shift `run` into
+      // the subcommand slot and report a script run that the shell never
+      // performs. Verified against bash.
+      word = word ?? ''
+      continue
+    }
+    if (roles[i] === 'opaque') {
+      push(OPAQUE_CHAR) // present, position known, value not modelled
+      continue
+    }
     if (roles[i] === 'end') {
       ended = true // the substitution this command sits in closed
       break
