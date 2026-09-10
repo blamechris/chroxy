@@ -122,13 +122,55 @@ printf '%s\n%s\n%s\n' "$LOC/Zebra.tsx" "$LOC/chat/Alpha.tsx" "$LOC/chat/Beta.tsx
 # Probe for a locale that actually ORDERS these two names differently from C.
 # This is the positive control: without a demonstrated divergence the cases
 # below would pass for the wrong reason (nothing to reproduce).
+#
+# AND THE PROBE ITSELF NOW HAS ONE (#7655). The header above argues the probe is
+# the control for cases 5-7; nothing controlled the probe. Break its pattern —
+# `grep -iE '[.]utf-?8$'` mutated to match nothing — and HOSTILE stays empty,
+# the three cases become three skips, PASS+FAIL+SKIP still reaches 8, and every
+# floor is satisfied. #7653's floors are blind to a case that stops executing
+# while still being COUNTED, and this is the live instance.
+#
+# What makes it undetectable by a count is that the skipping state is the NORMAL
+# state: the Linux runner genuinely skips these three every run, so "no
+# case-folding locale here" and "the probe stopped matching locales" look
+# identical from outside. The distinction lives inside the probe, so the probe
+# is where it has to be drawn — count the candidates it EXAMINED, separately
+# from whether any of them case-folds.
+ALL_LOCALES="$(locale -a 2>/dev/null || true)"
+LOCALE_COUNT="$(printf '%s\n' "$ALL_LOCALES" | grep -c . || true)"
+UTF8_CANDIDATES="$(printf '%s\n' "$ALL_LOCALES" | grep -iE '[.]utf-?8$' || true)"
+CANDIDATE_COUNT="$(printf '%s\n' "$UTF8_CANDIDATES" | grep -c . || true)"
+
 HOSTILE=""
-for loc in $(locale -a 2>/dev/null | grep -iE '[.]utf-?8$'); do
+for loc in $UTF8_CANDIDATES; do
   if [ "$(printf '%s\n%s\n' "$LOC/Zebra.tsx" "$LOC/chat/Alpha.tsx" | LC_ALL="$loc" sort | head -1)" \
      != "$(printf '%s\n%s\n' "$LOC/Zebra.tsx" "$LOC/chat/Alpha.tsx" | LC_ALL=C sort | head -1)" ]; then
     HOSTILE="$loc"; break
   fi
 done
+
+# The probe's own control, and the ORDER matters: this is checked before the
+# skip branch, because the skip branch is what the broken probe hides behind.
+#
+#   candidates > 0, none case-folds  -> the documented, legitimate skip
+#   candidates == 0, no locales at all -> nothing to examine; also legitimate
+#                                         (a minimal image, or no `locale`)
+#   candidates == 0 while locales EXIST -> the pattern has stopped matching,
+#                                         which is a finding, not a skip
+#
+# It ABORTS rather than counting a failure, and that is deliberate: this is a
+# harness-integrity check in the same family as the HARNESS BROKEN line below,
+# not one of the eight cases the file declares. Counting it made the total 9
+# against EXPECTED_CASES=8, so a broken probe reported BOTH its own finding and
+# a spurious "a case stopped executing" — two diagnoses for one fault, the
+# second of them wrong.
+if [ "$CANDIDATE_COUNT" -eq 0 ] && [ "$LOCALE_COUNT" -gt 0 ]; then
+  echo "PROBE BROKEN: examined 0 UTF-8 locales while \`locale -a\` listed $LOCALE_COUNT."
+  echo "  The probe's own pattern has stopped matching. Cases 5-7 would report as"
+  echo "  three ordinary skips — indistinguishable from the Linux runner's normal"
+  echo "  state — so this refuses to report rather than skipping quietly (#7655)."
+  exit 1
+fi
 
 if [ -z "$HOSTILE" ]; then
   # NOT silently skipped: an unavailable case is reported in the summary, so a
