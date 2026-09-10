@@ -1160,13 +1160,29 @@ describe('workflow reader: an escaped separator is literal text (#7662)', () => 
 })
 
 describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
-  /** A file whose `text` declares `n` jobs and whose parse yielded `parsed`. */
+  const STEP = '      - run: echo hi'
+  /**
+   * A file whose `text` declares `n` jobs and whose parse yielded `parsed`.
+   *
+   * The steps are emitted into the TEXT as well as into `jobs`, GENERATED FROM
+   * THE SAME `stepsPerJob` rather than typed, because since #7668 the function
+   * reads the text for a second, independent count of the steps each file
+   * declares. Before that these fixtures carried no steps in their text at all
+   * and every one of them went red the moment the row landed — a fixture out of
+   * step with the shape the subject is handed.
+   */
   const file = (name, declared, parsed = declared, stepsPerJob = 1) => ({
     name,
-    text: `jobs:\n${Array.from({ length: declared }, (_, i) => `  job${i}:\n    runs-on: ubuntu-latest`).join('\n')}\n`,
+    text:
+      `jobs:\n${Array.from(
+        { length: declared },
+        (_, i) =>
+          `  job${i}:\n    runs-on: ubuntu-latest\n    steps:\n` +
+          Array.from({ length: stepsPerJob }, () => STEP).join('\n')
+      ).join('\n')}\n`,
     jobs: Array.from({ length: parsed }, (_, i) => ({
       id: `job${i}`,
-      steps: Array.from({ length: stepsPerJob }, () => ['      - run: echo hi']),
+      steps: Array.from({ length: stepsPerJob }, () => [STEP]),
     })),
   })
 
@@ -1195,18 +1211,39 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
-  it('counts a reusable-workflow job, which has `uses:` where a normal job has `runs-on:`', () => {
-    // No job in this repo is spelled this way today. Without the `uses:` half,
-    // adding one would report the file as short by a job and go red for a
-    // reason that has nothing to do with the reader.
+  it('counts a reusable-workflow `uses:` as a JOB and not also as a step (#7668)', () => {
+    // The reusable-workflow spelling is the one place the same key means a job
+    // at one indent and a step at another, so ONE fixture has to reach both
+    // halves — the jobs row's `^ {4}(?:runs-on|uses):`, without which adding
+    // such a job reports the file short by one, and the step row's negation of
+    // exactly that indent, without which the same line also declares a step for
+    // a job that has none. Mutating EITHER alone turns this case red.
+    //
+    // It was two cases with byte-identical fixtures and assertions until review
+    // of #7671 measured that the second added no coverage. A duplicate case is
+    // not neutral: it reads as two independent proofs and is one.
+    //
+    // The `steps:` block is a FICTION, and the honest thing is to say so: a
+    // real reusable-workflow job has no steps at all, and the stepless check
+    // below would refuse it. That is a latent false red this fixture has always
+    // dodged — tracked in #7672 rather than widened into here, since it is a
+    // property of the STEPLESS rule, which predates every per-file row.
     assertEveryFileParsed([
-      { name: 'x.yml', text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n', jobs: [{ id: 'call', steps: [['      - run: echo hi']] }] },
+      {
+        name: 'x.yml',
+        text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'call', steps: [['      - run: echo hi']] }],
+      },
     ])
   })
 
   it('does not read a COMMENTED-OUT job key as a declaration', () => {
     assertEveryFileParsed([
-      { name: 'x.yml', text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    # runs-on: was-moved\n', jobs: [{ id: 'a', steps: [['      - run: echo hi']] }] },
+      {
+        name: 'x.yml',
+        text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    # runs-on: was-moved\n    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'a', steps: [['      - run: echo hi']] }],
+      },
     ])
   })
 
@@ -1217,6 +1254,265 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     assert.throws(
       () => assertEveryFileParsed([file('ci.yml', 2, 2, 0)]),
       /a job parsed with no steps at all/
+    )
+  })
+
+  // --- the per-file STEP row (#7668) ---------------------------------------
+
+  it('refuses a file whose step was ABSORBED into its neighbour (#7668)', () => {
+    // The issue's fixture, driven through the real `parseJobs`. A step whose
+    // keys sit on the line AFTER the dash is legal Actions YAML and identical
+    // config to GitHub; `parseSteps` needs the space on the SAME line, so it
+    // never starts a step and these lines are absorbed into the previous one.
+    // js-yaml reads three steps here.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - uses: actions/checkout@v4',
+      '      -',
+      '        name: thing',
+      '        uses: actions/setup-node@abc',
+      '      - run: echo hi',
+      '',
+    ].join('\n')
+    const set = [{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]
+    assert.equal(set[0].jobs[0].steps.length, 2, 'precondition: parseSteps absorbed one of the three')
+    assert.throws(
+      () => assertEveryFileParsed(set),
+      /yields a different number of steps than its text declares/
+    )
+    // And the reason this row had to exist: BOTH content rows stay green on
+    // the same input, by construction. The run half counts one body per step,
+    // so absorbing a non-run step changes nothing; the setup half counts
+    // LINES, and a merge never changes a line count.
+    assertEveryFileContributes(set)
+  })
+
+  it('refuses a file that yielded MORE steps than its text declares', () => {
+    // Equality, not a floor — the same argument the jobs row makes. A step
+    // with neither `run:` nor `uses:` behind it is one the reader invented,
+    // and a floor cannot see an invention.
+    assert.throws(
+      () => assertEveryFileParsed([{ ...file('x.yml', 1, 1, 1), jobs: [{ id: 'job0', steps: [[STEP], [STEP]] }] }]),
+      /yields a different number of steps than its text declares/
+    )
+  })
+
+  it('reports the step disagreement rather than the emptier `no steps at all`', () => {
+    // The ordering between the two rules, and the reason they are not
+    // redundant: when the text declares steps the parse did not produce, the
+    // useful message names the disagreement. `steps.length === 0` says only
+    // that a job is empty, which is true of a great many broken parses.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n',
+            jobs: [{ id: 'a', steps: [] }],
+          },
+        ]),
+      /yields a different number of steps than its text declares/
+    )
+  })
+
+  it('leaves `no steps at all` to catch a job whose text declares none either', () => {
+    // The other half of that interaction, and what stops the step row from
+    // being read as a replacement: it agrees at zero, so only the stepless
+    // rule can refuse a job that yields nothing.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n',
+            jobs: [{ id: 'a', steps: [] }],
+          },
+        ]),
+      /a job parsed with no steps at all/
+    )
+  })
+
+  it('does not read a job-level `defaults: run:` mapping head as a step key', () => {
+    // A bare `run:` under `defaults:` is a mapping head, not a step. ci.yml
+    // has 15 of them, so without this exclusion the live corpus reads 15 steps
+    // over and the row is permanently red for a reason that is not the
+    // reader's. Deleting the exclusion turns this case red.
+    assertEveryFileParsed([
+      {
+        name: 'x.yml',
+        text:
+          'jobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n' +
+          '    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'a', steps: [['      - run: echo hi']] }],
+      },
+    ])
+  })
+
+  it('finds the `defaults:` parent past a comment between the two keys', () => {
+    // The exclusion reads the PARENT key, and a comment sitting between them
+    // must not hide it — the same reason `runsOnOf` skips blanks and comments
+    // rather than treating them as the end of a block. Without the skip the
+    // previous line is the comment, the `run:` counts as a step, and this case
+    // goes red.
+    assertEveryFileParsed([
+      {
+        name: 'x.yml',
+        text:
+          'jobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults:\n      # bash everywhere, see #1234\n' +
+          '      run:\n        shell: bash\n    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'a', steps: [['      - run: echo hi']] }],
+      },
+    ])
+  })
+
+  it('finds the `defaults:` parent when the key carries a TRAILING comment', () => {
+    // `defaults: # bash everywhere` is legal YAML and this repo's style writes
+    // trailing comments freely, but a bare `$` anchor does not match it, so the
+    // `run:` beneath counted as a step and the file went RED at declared+1.
+    // Measured before the fix: declared 2, parsed 1. The `(?:#.*)?$` allowance
+    // is the one `parseJobs` already uses on a job-id line (#7499) — the same
+    // hole, found once and not swept for siblings. Caught in review of #7671,
+    // not in writing it.
+    assertEveryFileParsed([
+      {
+        name: 'x.yml',
+        text:
+          'jobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults: # bash everywhere\n' +
+          '      run:\n        shell: bash\n    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'a', steps: [['      - run: echo hi']] }],
+      },
+    ])
+  })
+
+  it('does not read a COMMENTED-OUT step key as a declaration', () => {
+    // The ANCHOR does this, not a comment filter: `^` forces the first
+    // non-space character to be `-`, `r` or `u`, and a comment's is `#`. A
+    // `code()` call here could not change a count, which is precisely the
+    // INERT filter review of #7666 found and deleted on the run side. Dropping
+    // the `^` turns this case red, which is the mutation that reaches the
+    // mechanism in use.
+    assertEveryFileParsed([
+      {
+        name: 'x.yml',
+        text:
+          'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n' +
+          '      # - run: echo removed in #1234\n      - uses: actions/checkout@v4\n' +
+          '        # was: uses: actions/setup-node@abc\n',
+        jobs: [{ id: 'a', steps: [['      - uses: actions/checkout@v4', '        # was: uses: actions/setup-node@abc']] }],
+      },
+    ])
+  })
+
+  it('counts a step whose `run:` value is on the NEXT line — the row is VALUE-AGNOSTIC (#7670)', () => {
+    // The reason this row does not reuse `assertEveryFileContributes`'s
+    // `RUN_KEY`, which requires a value after the colon. To YAML this is one
+    // real step whose value is `echo hi`; only the BODY is lost, and the step
+    // count really is 1. Requiring a value here would report 0 against 1 and
+    // go red for the wrong quantity — a guard wrong about its own subject on a
+    // legal spelling. The two rows disagree about this file DELIBERATELY, and
+    // the case asserts both halves so the disagreement cannot drift silently.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: thing',
+      '        run:',
+      '          echo hi',
+      '',
+    ].join('\n')
+    const set = [{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]
+    assertEveryFileParsed(set)
+    // Pinned as the known false GREEN it is over there (#7670), not as
+    // desired behaviour.
+    assertEveryFileContributes(set)
+  })
+
+  it('a file with no jobs declares zero steps and yields zero, and needs no exemption', () => {
+    // The legitimate zero, and it is weaker evidence than the run row's: no
+    // live workflow exercises it, because every file here that has a job has
+    // steps. Held to zero all the same, in both directions.
+    const bare = { name: 'x.yml', text: 'name: nothing\non: push\njobs:\n', jobs: [] }
+    assertEveryFileParsed([bare])
+    assert.throws(
+      () => assertEveryFileParsed([{ ...bare, jobs: [{ id: 'a', steps: [[STEP]] }] }]),
+      /yields a different number of jobs than it declares/
+    )
+  })
+
+  it('FALSE RED, pinned: a step key the declared side cannot SPELL reads as zero declared', () => {
+    // The `parsed > declared` direction, and the reason this row's comment does
+    // NOT repeat the jobs row's "means an invented step". Each of these is a
+    // real step to YAML that the declared side cannot match, so the file goes
+    // red at declared 0 — fail-closed and legible, but for the opposite reason
+    // to an invention. Measured on real `parseJobs` output; `- { run: … }` is
+    // tracked as #7669. If any of these ever goes GREEN, someone has taught the
+    // declared side the spelling and the comment must move with it.
+    for (const [label, step, parsed] of [
+      ['quoted key', '      - "run": echo hi', 1],
+      ['space before the colon', '      - run : echo hi', 1],
+      ['flow mapping (#7669)', '      - { run: echo hi }', 1],
+    ]) {
+      const text = ['jobs:', '  a:', '    runs-on: ubuntu-latest', '    steps:', step, ''].join('\n')
+      const jobs = parseJobs(text, 'x.yml')
+      assert.equal(jobs[0].steps.length, parsed, `precondition: parseSteps still starts a step for ${label}`)
+      assert.throws(
+        () => assertEveryFileParsed([{ name: 'x.yml', text, jobs }]),
+        /yields a different number of steps than its text declares/,
+        `${label} did not go red`
+      )
+    }
+  })
+
+  it('FALSE RED, pinned: a mapping key named `run` outside a step inflates the declared count', () => {
+    // The exclusion list is the two the LIVE CORPUS needs, not every place a
+    // key can be spelled `run` or `uses`. A job-level `env:` variable named
+    // `run` is legal — env names are free-form — and reads as a declaration.
+    // Fails CLOSED, nothing in the corpus is spelled this way, and guarding it
+    // would mean growing a notion of "which mapping am I in" on the declared
+    // side, which is the drift this module exists to prevent.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    env:',
+      '      run: /some/path',
+      '    steps:',
+      '      - run: echo hi',
+      '',
+    ].join('\n')
+    assert.throws(
+      () => assertEveryFileParsed([{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]),
+      /yields a different number of steps than its text declares/
+    )
+  })
+
+  it('FALSE RED, pinned: a step-key-shaped line inside a block scalar BODY inflates the declared count', () => {
+    // Not a defect being fixed — a disclosed limit being pinned, the same one
+    // `assertEveryFileContributes` carries for run bodies. The declared side
+    // has no notion of "inside a block scalar", so a heredoc that writes YAML
+    // counts as a second step. It fails CLOSED, nothing in the corpus is
+    // spelled this way, and the alternative is a second block-scalar parser on
+    // the declared side — the drift this module exists to prevent. If this
+    // case ever starts PASSING, someone has made the declared side body-aware
+    // and the comment in `assertEveryFileParsed` must move with it.
+    const text = [
+      'jobs:',
+      '  a:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - run: |',
+      '          cat > out.yml <<EOF',
+      '          - uses: actions/checkout@v4',
+      '          EOF',
+      '',
+    ].join('\n')
+    assert.throws(
+      () => assertEveryFileParsed([{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]),
+      /yields a different number of steps than its text declares/
     )
   })
 })
@@ -1552,6 +1848,111 @@ describe('workflow reader: no single real file can collapse invisibly (#7659)', 
     assert.ok(empty.length >= 1, 'expected at least one workflow with no run steps (stale.yml)')
     for (const name of empty) {
       assertEveryFileContributes(withRunKeysNeutralised(workflows, name))
+    }
+  })
+})
+
+describe('workflow reader: no real file can absorb a step invisibly (#7668)', () => {
+  /**
+   * The companion of the block above, one level up from run bodies: the same
+   * argument about the real corpus, for the STEP count. Synthetic YAML proves
+   * the row understands the spelling; only the real seven files can establish
+   * that not one of them absorbs a step where nothing sees it.
+   */
+  let workflows
+  before(async () => {
+    workflows = await readWorkflows()
+  })
+
+  /**
+   * `text` with its first RUN-FREE step respelled the #7668 way: the keys on
+   * the dash line move DOWN one line, to the column they already occupied.
+   * Identical YAML to GitHub, and `parseSteps` — which needs the space on the
+   * SAME line as the dash — stops starting a step there.
+   *
+   * Run-free ON PURPOSE. Absorbing a step that carries a `run:` also destroys
+   * a run body, which `assertEveryFileContributes` catches on its own; the
+   * claim under measurement is that this row sees what that one cannot, so the
+   * mutation has to leave that one nothing to find. Measured: with a run-free
+   * step chosen, all seven files go red HERE and green THERE.
+   *
+   * Returns null for a file with no such step, which the sweep counts rather
+   * than skips — a file quietly dropping out is how a sweep reports success
+   * over fewer cases than it claims.
+   */
+  const withAStepAbsorbed = text => {
+    const lines = text.split('\n')
+    let stepsIndent = null
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s*steps:\s*$/.test(lines[i])) {
+        stepsIndent = /^(\s*)/.exec(lines[i])[1].length
+        continue
+      }
+      if (stepsIndent === null) continue
+      const m = /^(\s+)- (\S.*)$/.exec(lines[i])
+      if (!m || m[1].length <= stepsIndent) continue
+      let end = lines.length
+      for (let k = i + 1; k < lines.length; k++) {
+        const dash = /^(\s*)- \S/.exec(lines[k])
+        if (dash && dash[1].length === m[1].length) { end = k; break }
+        if (/\S/.test(lines[k]) && /^(\s*)/.exec(lines[k])[1].length <= stepsIndent) { end = k; break }
+      }
+      if (lines.slice(i, end).some(l => /^\s*(?:-\s+)?run:/.test(l))) continue
+      lines.splice(i, 1, `${m[1]}-`, `${m[1]}  ${m[2]}`)
+      return lines.join('\n')
+    }
+    return null
+  }
+
+  const withFileReplaced = (ws, name, text) =>
+    ws.map(w => (w.name === name ? { name, text, jobs: parseJobs(text, name) } : w))
+
+  /**
+   * The corpus, FLOORED HERE rather than in one of the cases — the same shape
+   * as `carriersOf` in the block above, and for the same reason it moved there.
+   *
+   * The floor sat in the CONTROL case in the first draft of this block, and
+   * review of #7671 measured what that costs: with `workflows` empty the sweep
+   * below runs ZERO iterations and reports ok, and only the SIBLING case says
+   * so. That is catalogue entry 29 — a control that fires as somebody else's
+   * side effect — reintroduced two describe blocks after the comment
+   * explaining it. A case must not depend on a sibling for its own
+   * non-vacuity, so both cases call this and neither can pass over nothing.
+   */
+  const flooredCorpus = ws => {
+    assert.ok(ws.length >= 5, `expected >=5 workflow files, found ${ws.length}`)
+    return ws
+  }
+
+  it('CONTROL: the live corpus passes, and every file has a step this mutation can reach', () => {
+    const ws = flooredCorpus(workflows)
+    assertEveryFileParsed(ws)
+    const unreachable = ws.filter(w => withAStepAbsorbed(w.text) === null).map(w => w.name)
+    assert.deepEqual(
+      unreachable,
+      [],
+      'a file with no run-free step would drop out of the sweep below and shrink it in silence'
+    )
+  })
+
+  it('every file goes RED when one of its steps is absorbed, and the content rows stay GREEN', () => {
+    for (const w of flooredCorpus(workflows)) {
+      const text = withAStepAbsorbed(w.text)
+      assert.notEqual(text, null, `${w.name} has no run-free step to absorb`)
+      const set = withFileReplaced(workflows, w.name, text)
+      const after = set.find(x => x.name === w.name).jobs.reduce((n, j) => n + j.steps.length, 0)
+      const before = w.jobs.reduce((n, j) => n + j.steps.length, 0)
+      assert.equal(after, before - 1, `absorbing a step in ${w.name} did not cost the parse a step`)
+      assert.throws(
+        () => assertEveryFileParsed(set),
+        /yields a different number of steps than its text declares/,
+        `absorbing a step in ${w.name} alone did not go red`
+      )
+      // What makes this a new catch rather than a restatement: the file is
+      // still there, its jobs are still there, its run bodies and setup-node
+      // lines are all still counted — the absorbed lines simply live in the
+      // neighbouring step now.
+      assertEveryFileContributes(set)
     }
   })
 })
