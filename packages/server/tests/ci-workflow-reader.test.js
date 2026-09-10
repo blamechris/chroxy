@@ -870,6 +870,22 @@ describe('workflow reader: stripShellComment is quote-aware (#7661)', () => {
   it('a `#` with no whitespace before it was never a comment', () => {
     assert.equal(stripShellComment('curl http://x/a#b'), 'curl http://x/a#b')
   })
+
+  it('MASKING does not manufacture the whitespace that makes a `#` a comment', () => {
+    // Masking replaces a quoted span with SPACES, so asking the masked line
+    // "is there whitespace before this `#`" answers yes where the original had
+    // a quote. Verified against real bash: `echo "x"#y && echo RAN` prints
+    // `x#y` and then RAN — the `#` is inside a word, and the tail runs. The
+    // first version of this cut the line at the `#` and lost `&& npm ci`
+    // entirely, which is the undercount direction and silent.
+    assert.equal(stripShellComment('echo "a"#b'), 'echo "a"#b')
+    assert.equal(stripShellComment('echo "x"#y && npm ci'), 'echo "x"#y && npm ci')
+    assert.deepEqual(commandUses('echo "x"#y && npm ci', 'npm').map(u => u.kind), ['invocation'])
+    // …while a `#` that really does begin a word still starts a comment, and
+    // one inside the quotes still does not.
+    assert.equal(stripShellComment('echo "a" #b'), 'echo "a"')
+    assert.equal(stripShellComment('echo "a #b"'), 'echo "a #b"')
+  })
 })
 
 describe('workflow reader: commandUses (#7661)', () => {

@@ -1139,10 +1139,31 @@ export function withoutHeredocBodies(lines) {
  * The change only ever KEEPS text that was discarded before, and keeping text
  * cannot manufacture an invocation on its own: both shapes above still have to
  * clear the command-position anchoring, and quoted prose does not.
+ *
+ * TWO LINES ARE READ HERE, AND WHICH ONE ANSWERS WHICH QUESTION IS THE WHOLE
+ * CARE. The MASKED line says whether the `#` is code or data. The ORIGINAL line
+ * says whether it begins a word, which is what makes it a comment: bash starts
+ * one at a `#` that follows unquoted WHITESPACE or the start of the line, and
+ * `a#b` is a single word in which the `#` is literal.
+ *
+ * Asking the masked line both questions is wrong, and the first version of this
+ * did (#7662 review, found by Copilot). Masking replaces a quoted span with
+ * SPACES, so it manufactures whitespace where the original had none: in
+ * `echo "x"#y && npm ci` the `#` follows a `"`, bash runs `echo x#y` and then
+ * runs the `npm ci` — verified — while the masked line shows a space before the
+ * `#` and the whole tail was cut. Dropping text is the UNDERCOUNT direction for
+ * anything that counts invocations, and it is silent.
  */
 export const stripShellComment = line => {
-  const m = /(^|\s)#/.exec(maskQuotedData(line))
-  return m === null ? line : line.slice(0, m.index)
+  const masked = maskQuotedData(line)
+  for (let i = 0; i < masked.length; i++) {
+    if (masked[i] !== '#') continue
+    if (i === 0) return ''
+    // The single preceding whitespace character goes with the comment, which is
+    // what the `/(^|\s)#.*$/` this replaces did.
+    if (/\s/.test(line[i - 1])) return line.slice(0, i - 1)
+  }
+  return line
 }
 
 /**
