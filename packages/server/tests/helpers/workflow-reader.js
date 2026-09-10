@@ -1167,11 +1167,24 @@ function foldPlain(lines) {
   let out = ''
   let blanks = 0
   for (const line of lines) {
-    const text = line.trim()
-    if (text === '') {
+    const trimmed = line.trim()
+    if (trimmed === '') {
       blanks++
       continue
     }
+    // A whitespace-preceded `#` ENDS a plain scalar — the same rule the
+    // single-line plain branch applies to the key line, and it has to apply
+    // here too or the comment lands in the body. Measured against js-yaml in
+    // review of #7675: `run:` / `echo hi # note` is `echo hi`, and this
+    // returned `echo hi # note`. That is not cosmetic — the body goes to
+    // `bash -n` and to every content-inspecting guard.
+    //
+    // A line that is ONLY a comment ends the scalar outright rather than
+    // folding in as content. `echo hi#note` keeps its `#`, because YAML needs
+    // the preceding whitespace for a comment to open — the same rule
+    // `valuelessKey` encodes on the key side.
+    if (trimmed.startsWith('#')) break
+    const text = trimmed.replace(/\s+#.*$/, '')
     if (out === '') out = text
     else out += blanks > 0 ? '\n'.repeat(blanks) + text : ` ${text}`
     blanks = 0

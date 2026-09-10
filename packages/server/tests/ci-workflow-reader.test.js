@@ -1810,6 +1810,24 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
     assert.equal(stepRun(['      - name: t', '        run:', '          echo one', '', '          echo two']), 'echo one\necho two')
   })
 
+  it('a whitespace-preceded `#` ENDS a continued plain scalar (#7675 review, Copilot)', () => {
+    // The single-line plain branch has stripped a trailing comment since #7383
+    // ("`cache: npm # hosted-only` parses as `npm`"); the new continued branch
+    // did not, so the comment landed in the body. Measured against js-yaml:
+    // `run:` / `echo hi # note` is `echo hi`, and this returned
+    // `echo hi # note`. Not cosmetic — the body goes to `bash -n` and to every
+    // content-inspecting guard.
+    const step = tail => ['      - name: t', '        run:', ...tail]
+    assert.equal(stepRun(step(['          echo hi # note'])), 'echo hi')
+    // And it leaks across the FOLD, which the single-line branch cannot show:
+    assert.equal(stepRun(step(['          echo one', '          echo two # note'])), 'echo one echo two')
+    // No whitespace before the `#` means no comment — YAML's rule, and the same
+    // one `valuelessKey` encodes on the key side.
+    assert.equal(stepRun(step(['          echo hi#note'])), 'echo hi#note')
+    // A line that is ONLY a comment ends the scalar rather than folding in.
+    assert.equal(stepRun(step(['          echo one', '          # done'])), 'echo one')
+  })
+
   it('CONTROL: a folded `>` block DOES keep a more-indented line literal', () => {
     // The other half, and what makes the case above a statement about two
     // different rules rather than about one of them. If this ever folds flat,
