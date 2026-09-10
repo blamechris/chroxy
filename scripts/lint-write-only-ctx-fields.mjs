@@ -1239,6 +1239,39 @@ function matchingBracket(s) {
   return -1
 }
 
+/** The end of the string, template or regex literal starting at `i`, or `i`
+ *  if none starts there.
+ *
+ *  `stripComments` deliberately leaves literal CONTENT byte-identical, so every
+ *  scanner below has to step OVER a literal rather than count its characters.
+ *  Skipping this is not theoretical: the comma inside `/a,b/` was split on and
+ *  the remainder `b/` accepted as a binding named `b`; `` `${x},${y}` `` yielded
+ *  one named `$`. A roster entry gets CLASSIFIED, so an invented name can fail
+ *  the build over state that does not exist (#7687 review). */
+function literalEnd(s, i) {
+  const c = s[i]
+  if (c === '"' || c === "'" || c === '`') {
+    for (let j = i + 1; j < s.length; j++) {
+      if (s[j] === '\\') { j++; continue }
+      if (s[j] === c) return j + 1
+      // A quoted string cannot span a newline; a template can.
+      if (c !== '`' && s[j] === '\n') return j
+    }
+    return s.length
+  }
+  if (c !== '/') return i
+  // `/` divides unless what precedes it can only be followed by a value.
+  const prev = (s.slice(0, i).match(/\S$/) ?? [''])[0]
+  if (prev && !'=([,:;!&|?+-*%~^<>{}'.includes(prev)) return i
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') { j++; continue }
+    if (s[j] === '[') { while (j < s.length && s[j] !== ']') { if (s[j] === '\\') j++; j++ } continue }
+    if (s[j] === '/') return j + 1
+    if (s[j] === '\n') return i
+  }
+  return i
+}
+
 /** Split on `sep` at bracket depth 0, ignoring separators inside nesting. */
 function splitTopLevel(s, sep) {
   return splitTopLevelWithOffsets(s, sep).map(p => p.text)
@@ -1261,10 +1294,34 @@ function splitTopLevelWithOffsets(s, sep) {
   let angle = 0
   let start = 0
   for (let i = 0; i < s.length; i++) {
+    const lit = literalEnd(s, i)
+    if (lit > i) { i = lit - 1; continue }
     const c = s[i]
     if ('{[('.includes(c)) depth++
     else if ('}])'.includes(c)) depth--
-    else if (c === '<' && /[\w$>]/.test((s.slice(0, i).match(/\S$/) ?? [''])[0])) angle++
+    // A `<` opens a type-argument list only if one actually CLOSES: `a = b < c`
+    // has an identifier before it exactly like `Record<string, number>` does,
+    // so the character before cannot decide this on its own. Requiring the `>`
+    // is what separates them — and it is why fixing `prev` (which used to
+    // return '' whenever a space preceded the `<`, silently exempting every
+    // spaced comparison) did not break `let a = b < c, d = 2`.
+    //
+    // After `=` the shape must be a generic ARROW's parameter list,
+    // `const f = <T, U = T>(x: T) => x` — `<...>` immediately before a `(`.
+    // Missing it split on the comma inside `<T, U>` and put the type parameter
+    // `U` in the roster as a binding (#7687 review).
+    else if (c === '<' && /^<[^;\n]*?>/.test(s.slice(i)) && (() => {
+      // Computed HERE, not per character: this walks backwards over `s`, so
+      // hoisting it out of the `<` branch made the whole split O(n^2) and
+      // wedged the harness at >120s (it runs in ~1s).
+      //
+      // The last non-space character, which is NOT what `/\S$/` finds — that
+      // anchors at the very end, so any space before the operator yields ''.
+      // `Record<string, number>` has none and worked; `= <T, U = T>(` has one,
+      // and the generic arrow went unrecognised because of it.
+      const prev = (s.slice(0, i).match(/(\S)\s*$/) ?? ['', ''])[1]
+      return /[\w$>]/.test(prev) || (prev === '=' && /^<[^;\n]*?>\s*\(/.test(s.slice(i)))
+    })()) angle++
     else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
     else if (depth === 0 && angle === 0 && c === sep) {
       out.push({ text: s.slice(start, i), offset: start })
@@ -1318,11 +1375,21 @@ export function extractModuleBindings(strippedText) {
         const listStart = m.index + m[0].length
         let k = listStart
         let nest = 0
+        let lastSig = ''
         while (k < s.length) {
+          const lit = literalEnd(s, k)
+          if (lit > k) { lastSig = s[lit - 1]; k = lit; continue }
           const d = s[k]
           if (d === '(' || d === '[' || d === '{') nest++
           else if (d === ')' || d === ']' || d === '}') nest--
-          else if (nest === 0 && (d === ';' || d === '\n')) break
+          else if (nest === 0 && d === ';') break
+          // A declaration may WRAP: `let a = 1,\n    b = 2`. Ending at the
+          // newline dropped every declarator past the first line — the exact
+          // shape #7533 exists to see, and the reason the fix looked complete
+          // while missing the formatting this repo actually uses. A trailing
+          // comma means the list continues.
+          else if (nest === 0 && d === '\n' && lastSig !== ',') break
+          if (!/\s/.test(d)) lastSig = d
           k++
         }
         const list = s.slice(listStart, k)
