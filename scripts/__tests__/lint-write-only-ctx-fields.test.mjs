@@ -1369,6 +1369,38 @@ test('an unreadable declarator surfaces as a CI ::warning::, and is NOT fatal (#
   assert(/unread declarator: .*deep/.test(r.stderr), `the declarator text was not named: ${r.stderr}`)
 })
 
+// `stripComments` leaves literal CONTENT byte-identical by design, so a comma,
+// semicolon or brace inside a string, template or regex reaches the declarator
+// scanners raw. Uncounted, those characters either TRUNCATE the declaration
+// list (losing a sibling) or split it in the wrong place — and a fragment that
+// happens to start with an identifier character is then accepted as a binding.
+// An invented name is the ACCUSE direction: it gets classified, and can fail
+// the build over state that does not exist. Each row's `want` was checked
+// against main, which produces none of the phantoms.
+const literalAndWrapRoster = [
+  ['a regex literal holding a comma', 'let re = /a,b/, c = compute();\n', 're,c'],
+  ['a template holding interpolated commas', 'let a = `${x},${y}`, b = compute();\n', 'a,b'],
+  ['a string holding an unbalanced brace', "let a = '{', b = compute();\n", 'a,b'],
+  ['a string holding a semicolon', "let a = ';', b = compute();\n", 'a,b'],
+  ['a generic ARROW parameter list', 'const id = <T, U = T>(x: T): U => x, z = compute();\n', 'id,z'],
+  ['a declaration WRAPPED across lines', 'let a = 1,\n    b = compute();\n', 'a,b'],
+  // Controls. Each one is a shape a plausible fix for the rows above breaks,
+  // and three of them broke while this was being written.
+  ['a spaced comparison, not a generic', 'let a = b < c, d = compute();\n', 'a,d'],
+  ['a generic type ANNOTATION', 'let counts: Record<string, number> = {}, z = compute();\n', 'counts,z'],
+  ['a division, not a regex', 'let a = x / y, b = compute();\n', 'a,b'],
+  ['a statement that really does end at the newline', 'let a = compute()\nlet b = compute()\n', 'a,b'],
+  ['a comparison with no `<` at all', 'let isBig = count > 10, z = compute();\n', 'isBig,z'],
+]
+for (const [label, decl, want] of literalAndWrapRoster) {
+  test(`the declarator scan reads ${label} (#7687)`, () => {
+    const got = extractModuleBindings(stripComments(decl))
+      .map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+      .join(',')
+    assert(got === want, `got [${got}], want [${want}] from ${JSON.stringify(decl)}`)
+  })
+}
+
 test('an EXPORTED binding is marked as such', () => {
   const [b] = extractModuleBindings('export let n = 0;\n')
   assert(b.exported === true, JSON.stringify(b))
