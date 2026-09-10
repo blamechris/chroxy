@@ -74,22 +74,50 @@ export const ROUTED_RUNNER_OUTPUTS = [
  * and `defaults: # pwsh everywhere` — legal YAML, and this repo comments keys
  * throughout ci.yml — matched nothing. Measured, before the fix:
  *
+ *   parseJobs   `jobs: # …`     -> THROWS; the whole FILE yields nothing
  *   parseSteps  `steps: # …`    -> 0 steps, the whole job's steps vanish
- *   jobShell    `defaults: # …` -> undefined, a pwsh job reads as unset
+ *   jobShell    `defaults: # …` -> undefined, a powershell job reads as unset
  *   jobShell    `run: # …`      -> undefined, the same
  *   jobShell    `steps: # …`    -> "pwsh" FOR A BASH JOB
  *
- * That last one is the dangerous direction `jobShell`'s own comment names: with
- * `steps:` unmatched the job-key slice runs to the end of the job, the scan
- * walks into a run block's BODY, and a heredoc writing a workflow file is read
- * as this job's configuration. A false "powershell" drops every real bash block
- * in that job out of `bash -n`.
+ * WHICH OF THOSE REACHES A CONSUMER is not what the first version of this
+ * comment claimed, and the correction is recorded rather than the sentence
+ * quietly rewritten, because the wrong version is the intuitive one.
+ *
+ * The `defaults:` and `run:` rows are the ones that independently change a
+ * CLASSIFICATION. `ci-workflow-run-blocks-parse` resolves a block's shell as
+ * `stepInput(step, 'shell') ?? jobShell(job.body) ?? 'bash'`, and both of this
+ * repo's PowerShell jobs declare their shell in `defaults:` with nothing on a
+ * step — so `undefined` feeds every one of their blocks to `bash -n` as bash.
+ * That file carries a control for exactly this (`blocks.some(b =>
+ * /powershell|pwsh/.test(b.shell))`), so it fails LOUD, under the misleading
+ * diagnosis "jobShell has stopped reading job-level defaults".
+ *
+ * The two `steps:` rows share a TRIGGER — the same regex on the same line — so
+ * the bogus "pwsh" is computed and never consumed: the block loop iterates
+ * `job.steps`, which `parseSteps` has already emptied. The job's run blocks get
+ * no `bash -n` coverage at all, which is the OUTCOME the earlier wording
+ * claimed but not its mechanism. Since #7671 the per-file step row catches that
+ * too, so it is loud rather than silent. Measured in review of #7674.
+ *
+ * `parseJobs`'s row is the SIXTH site and was not a regex at all — a
+ * `l === 'jobs:'` string equality, which no source grep for a regex shape could
+ * have found. It surfaced only once the guard started asking BEHAVIOURALLY.
  *
  * `parseJobs` has carried the `(?:#.*)?$` allowance on a job-id line since
  * #7499. That fix was applied to the site that had the bug and the module was
- * never swept for siblings — the adjacent-field pattern, four instances of it.
- * A source guard in `ci-workflow-reader.test.js` now refuses a bare one
- * anywhere in this file, so a fifth site cannot be added quietly.
+ * never swept for siblings — the adjacent-field pattern. The sweep for this fix
+ * found SIX instances here plus two more in a sibling FILE
+ * (`ci-npm-cache-routing.test.js`), which is the same pattern one level up.
+ *
+ * TWO GUARDS, AND THE WEAKER ONE IS HONEST ABOUT BEING WEAK. A source rule in
+ * `ci-workflow-reader.test.js` refuses a bare `key:\s*$` anchor in this file.
+ * It is cheap, and it is a SPELLING check: review of #7674 evaded it twice, with
+ * `[:]` and with a split `new RegExp("…" + "…")`, and it could never have seen
+ * `parseJobs`'s string equality. The rule that does the real work is
+ * BEHAVIOURAL — comment every valueless key in the live corpus, and the reader
+ * must report exactly what it reported before. That one is spelling-blind by
+ * construction, and it is what found the sixth site.
  *
  * VALUELESS IS THE LOAD-BEARING HALF, and it is asserted directly rather than
  * inferred from the four call sites. A mutation sweep made this `${key}:.*$`
@@ -101,9 +129,30 @@ export const ROUTED_RUNNER_OUTPUTS = [
  *
  * The `\\s+` before `#` is deliberate and stricter than `parseJobs`'s
  * job-id pattern: YAML needs whitespace before a `#` for it to open a comment,
- * so `steps:#x` is a plain scalar, not a key at all, and must not match.
+ * so `steps:#x` is a plain scalar, not a key at all, and must not match. It is
+ * ALSO stricter than the `defaults:` matcher #7671 added, which accepted
+ * `defaults:#x` — the one accept->reject flip this consolidation makes. It is a
+ * correctness gain and no file in the corpus relies on the old form.
+ *
+ * `[^\\n]` rather than `.` in the comment branch, because `.` excludes `\\r`:
+ * with `.` the pattern matched `steps: \\r` and REJECTED `steps: # c\\r`,
+ * reproducing this very bug class gated on line ending instead of on a comment.
+ * `.gitattributes` pins the repo to LF so nothing live hit it, but this is an
+ * exported helper now and a future caller carries no such promise.
  */
-export const valuelessKey = key => new RegExp(`^\\s*${key}:(?:\\s+#.*|\\s*)$`)
+export const valuelessKey = (key, { topLevel = false } = {}) => {
+  // `key` is interpolated into a RegExp. Anything but a plain YAML identifier
+  // would change what the pattern MATCHES rather than failing loudly — one `.`
+  // or `(` from a future caller silently widens every anchor built from it.
+  // REFUSED rather than escaped: every key this module anchors on is a plain
+  // identifier, and a refusal needs no escape table to be correct.
+  assert.ok(
+    /^[A-Za-z0-9_-]+$/.test(key),
+    `valuelessKey expects a plain YAML key, got ${JSON.stringify(key)}`
+  )
+  return new RegExp(`^${topLevel ? '' : '\\s*'}${key}:(?:\\s+#[^\\n]*|\\s*)$`)
+}
+const JOBS_KEY = valuelessKey('jobs', { topLevel: true })
 const STEPS_KEY = valuelessKey('steps')
 const DEFAULTS_KEY = valuelessKey('defaults')
 const RUN_MAPPING_KEY = valuelessKey('run')
@@ -121,7 +170,7 @@ const RUN_MAPPING_KEY = valuelessKey('run')
  */
 export function parseJobs(yml, name = 'workflow') {
   const lines = yml.split('\n')
-  const jobsAt = lines.findIndex(l => l === 'jobs:')
+  const jobsAt = lines.findIndex(l => JOBS_KEY.test(l))
   assert.notEqual(jobsAt, -1, `${name} should have a top-level 'jobs:' key`)
 
   const starts = []
