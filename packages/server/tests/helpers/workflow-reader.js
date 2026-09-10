@@ -704,6 +704,27 @@ export function assertEveryFileParsed(workflows) {
   // nothing, not because both halves are sole detectors; a case pins which row
   // speaks.
   //
+  // IT CAN NEVER BE THE SOLE FAILING ROW FOR AN INDENT CAUSE, which is the same
+  // coupling `declaredSteps` documents one row up. `^ {4}uses:` is a strict
+  // SUBSET of the jobs row's `^ {4}(?:runs-on|uses):`, so any indentation that
+  // hides a reusable job from this count hides it from that one too, and the
+  // jobs row runs first. Loosen `^ {4}` there without revisiting here and this
+  // row's evidence changes shape silently.
+  //
+  // NO LIVE FILE EXERCISES THE REUSABLE SIDE — the corpus has zero `uses:` jobs,
+  // so the equality is held at 0 === 0 by every real file and only synthetic
+  // fixtures reach the other value. Stated for the same reason the step row
+  // states its untested zero: an untested branch described as handled is how
+  // this module's other floors earned their corrections.
+  //
+  // THE INVARIANT'S EVIDENCE, honestly: that a NORMAL job must have steps is
+  // GitHub's runtime behaviour ("No steps defined in `steps`"), not something
+  // the community JSON schema says — SchemaStore requires only `runs-on`, with
+  // `minItems: 1` on `steps` if present. Checked in review of #7677. If a
+  // step-less normal job ever turns out to be accepted, this equality is the
+  // thing that has to change, and it will announce itself as a red build rather
+  // than as silence.
+  //
   // AND IT IS A PER-FILE TOTAL, so a SWAP is invisible: attribute a normal
   // job's step to the reusable one and jobs, steps and stepless counts all
   // still agree. That is the limitation every per-file row here shares, and

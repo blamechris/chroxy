@@ -1271,15 +1271,29 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     // "expectation computed from its own subject" cause. Pinned GREEN
     // deliberately: this asserts CURRENT behaviour. If it ever goes red,
     // someone has closed it and this case should be inverted.
-    assertEveryFileParsed([
-      {
-        name: 'x.yml',
-        text:
-          'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n' +
-          '  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n',
-        jobs: [{ id: 'call', steps: [['      - run: echo hi']] }, { id: 'a', steps: [] }],
-      },
-    ])
+    const swapped = {
+      name: 'x.yml',
+      text:
+        'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n' +
+        '  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n',
+      jobs: [{ id: 'call', steps: [['      - run: echo hi']] }, { id: 'a', steps: [] }],
+    }
+    assertEveryFileParsed([swapped])
+
+    // A green assertion alone would prove NOTHING: review of #7677 measured
+    // that deleting the equality outright leaves the line above passing, so on
+    // its own this is a documentation comment wearing a test's clothes — the
+    // sixth such fixture in this session. The paired assertion is what gives it
+    // teeth: the SAME file with one more step-less job is refused, so the case
+    // dies with the rule it documents. What stays undetectable is the swap, not
+    // the rule.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          { ...swapped, jobs: [...swapped.jobs, { id: 'b', steps: [] }], text: `${swapped.text}  b:\n    runs-on: ubuntu-latest\n` },
+        ]),
+      /different number of step-less jobs than it declares reusable-workflow calls/
+    )
   })
 
   it('a normal job with no steps is still refused, in a file that ALSO has a reusable one (#7672)', () => {
