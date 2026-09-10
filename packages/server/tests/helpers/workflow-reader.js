@@ -3,9 +3,11 @@
  * CI guards in `packages/server/tests/ci-*.test.js`, plus `ci-workflow-reader`
  * (this module's own tests). The consumers are deliberately NOT listed here: a
  * roster in a comment beside a growing set is the first cause in
- * docs/false-safety-guards.md, and this one was already three names short of
- * the truth when #7661 came to add a fourth. `grep -l workflow-reader` answers
- * it correctly and always.
+ * docs/false-safety-guards.md, and this one demonstrated it — written accurate
+ * at three names, it still said three when there were nine, and #7661 arrived
+ * to add the tenth. (The first correction to this sentence said "three short,
+ * adding a fourth", which was the same mistake one layer up — #7662 review.)
+ * `grep -l workflow-reader` answers it correctly and always.
  *
  * WHY THIS IS A MODULE AND NOT A COPY IN EACH TEST
  * ------------------------------------------------
@@ -346,6 +348,67 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * reader still producing output of each kind"; it cannot answer "is the output
  * right".
  */
+/**
+ * Every workflow file yields the jobs it declares, and every job yields steps.
+ *
+ * THE FLOORS BELOW ARE GLOBAL TOTALS, AND THAT IS A BLIND SPOT (#7659). `ci.yml`
+ * carries 22 of this repo's 34 jobs and clears every one of them on its own, so
+ * a file that silently stops parsing contributes nothing and the reader still
+ * reports healthy. Measured while reviewing #7662: misindenting ONE job id in
+ * `nightly-k8s-integration.yml` by a single space drops that file to zero jobs,
+ * leaves `assertReaderSane` green, and hides a genuine two-resolve-in-five-
+ * minutes violation from the guard written to catch exactly that.
+ *
+ * A global floor structurally cannot see this, so this check is PER FILE and
+ * derives its expectation from a DIFFERENT signal than `parseJobs` uses.
+ * `parseJobs` anchors on the job-id key at two spaces; this counts the job-level
+ * key every job must have — `runs-on:` for a normal job, `uses:` for a
+ * reusable-workflow call, both at exactly four spaces, and the schema allows
+ * exactly one of them per job. Deriving the expectation from the same regex the
+ * subject uses would be the "expectation computed from its own subject" failure
+ * in docs/false-safety-guards.md; two independent readings of the same file have
+ * to agree, and when they do not, one of them is wrong.
+ *
+ * Equality, not a floor: parsed > declared means a job with neither key, which
+ * GitHub rejects, and parsed < declared is the collapse above.
+ *
+ * The step check is the same argument one level down — a file whose jobs parse
+ * but whose STEPS do not contributes no run bodies, and every rule that
+ * quantifies over run bodies then passes over an empty set for that file. All
+ * 34 jobs in this repo have steps.
+ *
+ * WHAT IT STILL CANNOT SEE, stated so no caller reads it as more: a job
+ * re-indented WHOLESALE moves its `runs-on:` too, so both readings fall
+ * together and agree. That YAML is invalid — a sibling key cannot sit at a
+ * shallower indent than the mapping it follows — and `actionlint` runs in CI,
+ * which is what catches it. This closes the case where the two readings can
+ * DISAGREE, which is the one a guard can decide by itself.
+ */
+export function assertEveryFileParsed(workflows) {
+  const declaredJobs = text =>
+    code(text.split('\n')).filter(l => /^ {4}(?:runs-on|uses):/.test(l)).length
+
+  const disagreements = workflows
+    .map(w => ({ file: w.name, parsed: w.jobs.length, declared: declaredJobs(w.text) }))
+    .filter(f => f.parsed !== f.declared)
+  assert.deepEqual(
+    disagreements,
+    [],
+    'a workflow file yields a different number of jobs than it declares — the reader has stopped ' +
+      'understanding that file, and every rule below it passes over an empty set for it'
+  )
+
+  const stepless = workflows.flatMap(w =>
+    w.jobs.filter(j => j.steps.length === 0).map(j => `${w.name}:${j.id}`)
+  )
+  assert.deepEqual(
+    stepless,
+    [],
+    'a job parsed with no steps at all — it contributes no run bodies, so every run-body rule ' +
+      'passes over nothing for it'
+  )
+}
+
 export function assertReaderSane(workflows) {
   assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
   assert.ok(
@@ -358,6 +421,9 @@ export function assertReaderSane(workflows) {
   )
   const totalJobs = workflows.reduce((n, w) => n + w.jobs.length, 0)
   assert.ok(totalJobs >= 20, `expected >=20 jobs across all workflows, found ${totalJobs}`)
+  // Before any global total, because a global total is what ci.yml alone
+  // satisfies while another file contributes nothing (#7659).
+  assertEveryFileParsed(workflows)
   const setupNodeSteps = workflows.flatMap(w =>
     w.jobs.flatMap(j => j.steps.filter(s => s.some(l => l.includes(SETUP_NODE))))
   )
@@ -817,7 +883,37 @@ export function namePositions(text, name) {
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'npx', 'npm'])
 
 /** Shell command separators: everything after the last one begins a new command. */
-const SEPARATORS = /[;&|(`{]/g
+const SEPARATOR_CHARS = ';&|(`{'
+
+/**
+ * Every index in `text` holding an UNESCAPED separator.
+ *
+ * The escape awareness is #7662's fix for a fail-open that shipped in the
+ * original: this was a `/[;&|(`{]/g` regex, and a BACKSLASH-ESCAPED separator
+ * is literal text the shell passes to the command in front of it, not a new
+ * command. So `echo \`bash x.test.sh\`` — where bash prints the words and runs
+ * nothing, verified with `bash -x` — cut at the escaped backtick, left `bash `
+ * as the segment, and `invokes()` reported the suite WIRED. Every separator
+ * has this spelling — `\;`, `\|`, `\&`, `\(`, `\{`, `` \` `` — and that is the
+ * registration guard's dangerous direction: an orphaned suite reading as wired. None of them is in
+ * the workflows today, so this was latent rather than an active miss.
+ *
+ * ONE implementation, scanned rather than matched, because the two callers want
+ * opposite ends of the same list — the LAST separator before a position, and
+ * the FIRST after one — and a regex plus a hand-rolled scan would be the second
+ * copy this module exists to prevent.
+ */
+function separatorIndexes(text) {
+  const out = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') {
+      i++
+      continue
+    }
+    if (SEPARATOR_CHARS.includes(text[i])) out.push(i)
+  }
+  return out
+}
 
 /**
  * Is the name at `at` in a COMMAND position on this line — i.e. does the text
@@ -1146,12 +1242,31 @@ export function hasUnclosedQuoting(line) {
 function scanQuoting(line) {
   const out = [...line]
   const stack = ['code']
+  let escaped = -1
   for (let i = 0; i < line.length; i++) {
     const ctx = stack[stack.length - 1]
     const c = line[i]
 
     if (ctx === 'single') {
       out[i] = ' '
+      if (c === "'") stack.pop()
+      continue
+    }
+
+    // `$'…'` is ANSI-C quoting, and it is the ONE single-quoted form that
+    // honours backslash escapes — `$'it\'s'` is one string, where the plain
+    // `'it\'s'` is a bash syntax error. Without this the embedded `\'` closed
+    // the string, the next `'` opened a new one, and everything after it on the
+    // line was masked as data: `echo $'it\'s' && npm ci` reported the `npm ci`
+    // as QUOTED. That is the undercount direction — a resolve that vanishes
+    // (#7662 review, verified against real bash).
+    if (ctx === 'ansi') {
+      out[i] = ' '
+      if (c === '\\') {
+        if (i + 1 < line.length) out[i + 1] = ' '
+        i++
+        continue
+      }
       if (c === "'") stack.pop()
       continue
     }
@@ -1184,12 +1299,16 @@ function scanQuoting(line) {
 
     // `code`, `subst` and `backtick` are all contexts whose text is shell code.
     if (c === '\\') {
+      // The escaped character is literal, and remembering WHICH one is what
+      // keeps `\$'…'` — a literal dollar followed by an ordinary single-quoted
+      // string — from being read as ANSI-C quoting below.
+      escaped = i + 1
       i++
       continue
     }
     if (c === "'") {
       out[i] = ' '
-      stack.push('single')
+      stack.push(line[i - 1] === '$' && i - 1 !== escaped ? 'ansi' : 'single')
       continue
     }
     if (c === '"') {
@@ -1213,7 +1332,10 @@ function scanQuoting(line) {
   // substitution left open does not: its continuation lines really are shell
   // code, which is how this reads them, and three lines in this repo's
   // workflows spell exactly that (`version=$(printf … \`).
-  return { masked: out.join(''), openQuote: stack.includes('single') || stack.includes('double') }
+  return {
+    masked: out.join(''),
+    openQuote: ['single', 'double', 'ansi'].some(q => stack.includes(q)),
+  }
 }
 
 /**
@@ -1226,10 +1348,8 @@ function scanQuoting(line) {
  */
 function segmentBefore(line, at) {
   const before = line.slice(0, at)
-  SEPARATORS.lastIndex = 0
-  let cut = 0
-  for (const m of before.matchAll(SEPARATORS)) cut = m.index + 1
-  return before.slice(cut)
+  const seps = separatorIndexes(before)
+  return before.slice(seps.length ? seps[seps.length - 1] + 1 : 0)
 }
 
 /**
@@ -1242,11 +1362,9 @@ function segmentBefore(line, at) {
  * legible and does not guess.
  */
 function argWords(masked, from) {
-  let after = masked.slice(from)
-  SEPARATORS.lastIndex = 0
-  const cut = [...after.matchAll(SEPARATORS)].map(m => m.index)[0]
-  if (cut !== undefined) after = after.slice(0, cut)
-  return after.trim().split(/\s+/).filter(Boolean)
+  const after = masked.slice(from)
+  const [cut] = separatorIndexes(after)
+  return (cut === undefined ? after : after.slice(0, cut)).trim().split(/\s+/).filter(Boolean)
 }
 
 /**

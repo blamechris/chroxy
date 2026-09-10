@@ -17,6 +17,7 @@ import {
   maskQuotedData,
   hasUnclosedQuoting,
   stripShellComment,
+  assertEveryFileParsed,
   commandUses,
 } from './helpers/workflow-reader.js'
 
@@ -814,6 +815,20 @@ describe('workflow reader: maskQuotedData (#7661)', () => {
   it('an escaped quote does not close the string', () => {
     assert.equal(maskQuotedData('echo "a \\" npm ci"'), 'echo              ')
   })
+
+  it("`$'…'` is ANSI-C quoting, the one single-quoted form that honours escapes", () => {
+    // `$'it\'s'` is ONE string to bash; the plain `'it\'s'` is a syntax error.
+    // Without the special case the embedded `\'` closed the string, the next
+    // `'` opened a fresh one, and the whole rest of the line was masked as
+    // data — so a real `npm ci` after it read as QUOTED. Undercount, silent
+    // (#7662 review, verified against real bash).
+    assert.equal(maskQuotedData(String.raw`echo $'it\'s' && npm ci`), "echo $        && npm ci")
+    assert.deepEqual(commandUses(String.raw`echo $'it\'s' && npm ci`, 'npm').map(u => u.kind), ['invocation'])
+  })
+
+  it("a BACKSLASH-escaped `$` before a quote is not ANSI-C — it is a literal dollar", () => {
+    assert.deepEqual(commandUses(String.raw`echo \$'plain' && npm ci`, 'npm').map(u => u.kind), ['invocation'])
+  })
 })
 
 describe('workflow reader: hasUnclosedQuoting (#7661)', () => {
@@ -898,5 +913,102 @@ describe('workflow reader: commandUses (#7661)', () => {
 
   it('every occurrence on a line is classified, not just the first', () => {
     assert.deepEqual(kinds('npm ci && npm run build'), ['invocation', 'invocation'])
+  })
+
+  it('an ESCAPED separator does not start a new command', () => {
+    // `sudo\; npm ci` runs `sudo;` — a command not found — and never reaches
+    // npm. Verified with `bash -x`. Before #7662's fix the escaped `;` cut the
+    // line and `npm` read as the command word.
+    assert.deepEqual(kinds(String.raw`sudo\; npm ci`), ['unclassified'])
+  })
+})
+
+describe('workflow reader: an escaped separator is literal text (#7662)', () => {
+  const S = 'scripts/__tests__/merge-updater-feeds.test.sh'
+
+  it('CONTROL: the real separators still start a new command', () => {
+    assert.ok(invokes(`echo hi && bash ${S}`, S))
+    assert.ok(invokes(`echo hi ; bash ${S}`, S))
+    assert.ok(invokes(`out=$(bash ${S})`, S))
+  })
+
+  for (const [label, line] of [
+    ['backtick', 'echo \\`bash ' + S + '\\`'],
+    ['semicolon', 'echo run this manually\\; bash ' + S],
+    ['pipe', 'echo foo\\| bash ' + S],
+    ['ampersand', 'echo foo\\& bash ' + S],
+    ['paren', 'echo \\(bash ' + S + '\\)'],
+  ]) {
+    it(`an escaped ${label} does not make a mention into an invocation`, () => {
+      // Each of these is one `echo` printing words, verified with `bash -x`;
+      // the suite runs in none of them. The separator scan matched the
+      // metacharacter regardless of the backslash, cut there, and left `bash `
+      // as the segment — so an ORPHANED suite read as WIRED, which is the
+      // registration guard's dangerous direction. Latent, not live: no
+      // workflow spells one today.
+      assert.ok(!invokes(line, S), 'an escaped separator is literal text, not a command boundary')
+    })
+  }
+})
+
+describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
+  /** A file whose `text` declares `n` jobs and whose parse yielded `parsed`. */
+  const file = (name, declared, parsed = declared, stepsPerJob = 1) => ({
+    name,
+    text: `jobs:\n${Array.from({ length: declared }, (_, i) => `  job${i}:\n    runs-on: ubuntu-latest`).join('\n')}\n`,
+    jobs: Array.from({ length: parsed }, (_, i) => ({
+      id: `job${i}`,
+      steps: Array.from({ length: stepsPerJob }, () => ['      - run: echo hi']),
+    })),
+  })
+
+  it('CONTROL: a set where every file parses is accepted', () => {
+    assertEveryFileParsed([file('ci.yml', 22), file('release.yml', 7), file('stale.yml', 1)])
+  })
+
+  it('refuses a file that parsed FEWER jobs than it declares', () => {
+    // The #7659 blind spot, measured on the real corpus while reviewing #7662:
+    // misindenting one job id by a single space drops that whole file to zero
+    // jobs. Every GLOBAL floor stays clear — ci.yml carries 22 of 34 jobs and
+    // satisfies all of them alone — so the file silently contributes nothing.
+    assert.throws(
+      () => assertEveryFileParsed([file('ci.yml', 22), file('nightly.yml', 1, 0)]),
+      /yields a different number of jobs than it declares/
+    )
+  })
+
+  it('refuses a file that parsed MORE jobs than it declares', () => {
+    // Equality, not a floor. A job with neither `runs-on:` nor `uses:` is one
+    // GitHub rejects, so the two readings disagreeing in this direction means
+    // the reader has invented a job rather than lost one.
+    assert.throws(
+      () => assertEveryFileParsed([file('ci.yml', 3, 4)]),
+      /yields a different number of jobs than it declares/
+    )
+  })
+
+  it('counts a reusable-workflow job, which has `uses:` where a normal job has `runs-on:`', () => {
+    // No job in this repo is spelled this way today. Without the `uses:` half,
+    // adding one would report the file as short by a job and go red for a
+    // reason that has nothing to do with the reader.
+    assertEveryFileParsed([
+      { name: 'x.yml', text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n', jobs: [{ id: 'call', steps: [['      - run: echo hi']] }] },
+    ])
+  })
+
+  it('does not read a COMMENTED-OUT job key as a declaration', () => {
+    assertEveryFileParsed([
+      { name: 'x.yml', text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    # runs-on: was-moved\n', jobs: [{ id: 'a', steps: [['      - run: echo hi']] }] },
+    ])
+  })
+
+  it('refuses a job that parsed with no steps at all', () => {
+    // One level down from the file check, same argument: a job with no steps
+    // contributes no run bodies, and every run-body rule then passes over an
+    // empty set for it.
+    assert.throws(
+      () => assertEveryFileParsed([file('ci.yml', 2, 2, 0)]),
+      /a job parsed with no steps at all/
+    )
   })
 })

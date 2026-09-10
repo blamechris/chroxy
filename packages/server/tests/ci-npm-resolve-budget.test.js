@@ -34,13 +34,17 @@ import {
  * THE RULE: a job needs at least MINUTES_PER_NPM_RESOLVE of budget for every
  * npm resolve it performs.
  *
- * Two points calibrate it and both are load-bearing rather than slack. Eight
- * jobs run exactly one resolve inside five minutes today, so the constant
- * cannot go up without going red; `server-lint` runs two inside ten, so it
- * cannot go down. The linear form is the simplest rule through both, and it
- * extends to a third resolve without anyone re-deriving the reasoning. It is a
- * FLOOR ON THE BUDGET, not an estimate of the runtime: steady-state
- * `server-lint` is 37-43 seconds.
+ * Two points calibrate it. Eight jobs run exactly one resolve inside five
+ * minutes today, so raising the constant turns the LIVE corpus red. Lowering it
+ * cannot — structurally, a smaller floor can never create a violation that was
+ * not already there — so that direction is pinned by the mutation cases below,
+ * which spell their expected budgets (`needs >=10`) as literal strings. That is
+ * deliberate and worth knowing before anyone "improves" those literals into
+ * arithmetic over the constant: doing so would delete the only thing holding
+ * the constant from below (#7662 review). The linear form is the simplest rule
+ * through both points and extends to a third resolve without anyone
+ * re-deriving the reasoning. It is a FLOOR ON THE BUDGET, not an estimate of
+ * the runtime: steady-state `server-lint` is 37-43 seconds.
  *
  * A job that declares no `timeout-minutes` gets GitHub's six-hour default,
  * which clears every floor this rule can produce. That is correct — those jobs
@@ -86,9 +90,23 @@ const MINUTES_PER_NPM_RESOLVE = 5
  * reason it contacts nothing.
  *
  * Measured across all seven workflow files: the only subcommands spelled
- * anywhere are `ci`, `install`, `run` and `test`.
+ * anywhere are `ci`, `install`, `run` and `test`. The rest are here because
+ * omitting an alias of a name that IS here is the same inconsistency by
+ * another spelling — `start`, `stop` and `restart` run the script of that name
+ * (and `start` falls back to `node server.js`, still contacting nothing), and
+ * `tst`/`t` are npm's own documented aliases of `test`. Each entry is a claim
+ * that the subcommand cannot reach the registry; do not add one without it.
  */
-const NON_RESOLVING_NPM_SUBCOMMANDS = new Set(['run', 'run-script', 'test'])
+const NON_RESOLVING_NPM_SUBCOMMANDS = new Set([
+  'run',
+  'run-script',
+  'test',
+  'tst',
+  't',
+  'start',
+  'stop',
+  'restart',
+])
 
 /**
  * Floors, not counts — loose enough to survive honest growth and shrinkage,
@@ -112,11 +130,18 @@ const npmUses = job => runBodies(job).flatMap(body => commandUses(body, 'npm'))
 /**
  * The subcommand of an npm invocation: the first argument that is not a flag.
  *
+ * A redirection is skipped along with the flags: `npm >/dev/null ci` puts
+ * `>/dev/null` where the subcommand would be, and reading it as one would
+ * classify by a string no denylist will ever contain. That happens to land in
+ * the loud direction today, which is exactly why it is worth fixing now —
+ * "wrong, but wrong safely" is a property of this particular denylist, not of
+ * the parse (#7662 review).
+ *
  * `undefined` when there is none — a bare `npm`, or one whose arguments were
  * quoted and therefore unreadable. Both count as resolves at the call site; see
  * the header on which direction is silent.
  */
-const subcommandOf = use => use.args.find(a => !a.startsWith('-'))
+const subcommandOf = use => use.args.find(a => !a.startsWith('-') && !/[<>]/.test(a))
 
 /** How many npm resolves this job performs. */
 function npmResolves(job) {
@@ -310,17 +335,17 @@ describe('the budget rule goes RED — one mutation at a time (#7661)', () => {
    * drifted still produces a file, and the case then passes against a mutation
    * that was never applied.
    */
-  async function mutated(pairs) {
+  async function mutated(pairs, file = 'ci.yml') {
     const dir = mkdtempSync(join(tmpdir(), 'chroxy-npm-budget-'))
     dirs.push(dir)
     cpSync(REAL, dir, { recursive: true })
-    const ci = join(dir, 'ci.yml')
+    const ci = join(dir, file)
     let text = readFileSync(ci, 'utf8')
     for (const [find, replace] of pairs) {
       const occurrences = text.split(find).length - 1
       assert.ok(
         occurrences === 1,
-        `the mutation did not land: ci.yml contains ${occurrences} occurrences of ` +
+        `the mutation did not land: ${file} contains ${occurrences} occurrences of ` +
           `${JSON.stringify(find.slice(0, 90))}, expected exactly 1 — it has drifted from what ` +
           'this case edits, and the case would otherwise pass for the wrong reason'
       )
@@ -389,6 +414,42 @@ describe('the budget rule goes RED — one mutation at a time (#7661)', () => {
     assert.deepEqual(budgetViolations(wf), [])
   })
 
+  it('a violation in a NON-ci.yml file, and the same violation hidden by a reader collapse', async () => {
+    // Two halves of one finding (#7662 review). First: the rule really does
+    // reach the other six workflow files, not just ci.yml.
+    const wf = await mutated(
+      [
+        ['    timeout-minutes: 15', '    timeout-minutes: 5'],
+        ['        run: npm ci', '        run: |\n          npm ci\n          npm install --package-lock-only'],
+      ],
+      'nightly-k8s-integration.yml'
+    )
+    assert.deepEqual(budgetViolations(wf), [
+      'nightly-k8s-integration.yml:k8s-sidecar-integration resolves npm 2x on a 5-minute budget (needs >=10)',
+    ])
+
+    // Second, and the reason `assertEveryFileParsed` exists: misindent that
+    // job's id by ONE space and the file yields zero jobs, so the violation is
+    // still physically there and `budgetViolations` returns nothing. Every
+    // GLOBAL floor stays clear, because ci.yml carries 22 of the 34 jobs and
+    // satisfies all of them by itself. Measured — before the per-file control,
+    // this whole suite stayed 38/38 green with the violation in place.
+    const hidden = await mutated(
+      [
+        ['    timeout-minutes: 15', '    timeout-minutes: 5'],
+        ['        run: npm ci', '        run: |\n          npm ci\n          npm install --package-lock-only'],
+        ['\n  k8s-sidecar-integration:', '\n   k8s-sidecar-integration:'],
+      ],
+      'nightly-k8s-integration.yml'
+    )
+    assert.deepEqual(budgetViolations(hidden), [], 'the collapse really does hide it from the rule')
+    assert.throws(
+      () => assertReaderSane(hidden),
+      /yields a different number of jobs than it declares/,
+      'so the reader has to refuse the corpus outright — no rule below it can see this'
+    )
+  })
+
   it('a command-word shape the detector cannot classify is reported, not counted as zero', async () => {
     const wf = await mutated([[TSC_STEP, '        run: sudo npm ci']])
     const unclassified = wf
@@ -429,6 +490,19 @@ describe("the resolve detector's own reading goes RED (#7661)", () => {
     ['cat <<EOF\nnpm ci\nEOF', 0],
     ['node scripts/lint-workflow-npm-env.mjs', 0],
     ['echo "npmcache=npm" >> "$GITHUB_OUTPUT"', 0],
+    // npm's script-running aliases. Omitting one while keeping `test` would be
+    // the same inconsistency by another spelling (#7662 review).
+    ['npm start', 0],
+    ['npm stop', 0],
+    ['npm restart', 0],
+    ['npm t', 0],
+    ['npm tst', 0],
+    // A redirection is not the subcommand.
+    ['npm >/dev/null run build', 0],
+    ['npm 2>/dev/null ci', 1],
+    // An escaped separator is literal text, so npm never becomes the command
+    // word behind one.
+    ['sudo\\; npm ci', 0],
   ]
 
   for (const [body, expected] of cases) {

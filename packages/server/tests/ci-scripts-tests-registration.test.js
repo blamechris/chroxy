@@ -1023,8 +1023,8 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // The sentence that stood here claimed the two mechanisms were pinned
     // separately, "the trailing-comment case is red without `stepRun()`". That
     // was wrong, and measurement is what showed it (#7640): the comment
-    // stripping inside `invokes()` removes a trailing comment on its own, so that case
-    // passes whether or not `stepRun()` strips one. NO case in this block is
+    // stripping inside `invokes()` removes a trailing comment on its own, so
+    // that case passes whether or not `stepRun()` strips one. NO case in this block is
     // red on `stepRun()` alone. `stepRun` is covered by
     // ci-workflow-reader.test.js, so this is a false attribution rather than an
     // uncovered accessor — but an attribution nobody measured is the same shape
@@ -1429,13 +1429,28 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     // { name, jobs: [{ steps: [[line, ...]] }] }. Since #7647 the shared floor
     // also exercises `stepRun`, so these steps carry BOTH `run:` spellings —
     // the synthetic set has to clear the two new floors like any other.
+    // Every synthetic job carries one, because a real job does and because the
+    // shared floor refuses a job with NO steps at all (#7662) — the collapses
+    // below strip RUN steps, and a job left with literally nothing would trip
+    // that instead of the floor each case is written to prove.
+    const CHECKOUT_STEP = ['      - uses: actions/checkout@abc123']
     const SETUP_NODE_STEP = ['      - uses: actions/setup-node@abc123', '        with:', '          node-version: 22']
     const PLAIN_RUN_STEP = ['      - run: echo hi']
     const BLOCK_RUN_STEP = ['      - run: |', '          set -e', '          echo hi']
     const QUOTED_RUN_STEP = ['      - run: "echo hi"']
-    const wf = (name, jobs) => ({ name, jobs })
+    // `text` is part of readWorkflows()'s output shape too, and since #7662 the
+    // shared floor reads it for a SECOND, independent count of the jobs a file
+    // declares — so a synthetic file has to carry one, generated from the same
+    // `jobs` array rather than typed, or these fixtures would fail the per-file
+    // control for a reason that has nothing to do with the collapse under test.
+    const wf = (name, jobs) => ({
+      name,
+      jobs,
+      text: `jobs:\n${jobs.map((_, i) => `  job${i}:\n    runs-on: ubuntu-latest`).join('\n')}\n`,
+    })
     const job = (setupNodeSteps = 1, { plain = 1, block = 0 } = {}) => ({
       steps: [
+        CHECKOUT_STEP,
         ...Array.from({ length: setupNodeSteps }, () => SETUP_NODE_STEP),
         ...Array.from({ length: plain }, () => PLAIN_RUN_STEP),
         ...Array.from({ length: block }, () => BLOCK_RUN_STEP),
