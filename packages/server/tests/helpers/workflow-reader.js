@@ -855,6 +855,29 @@ export function workflowTriggers(yml) {
  * corpus instead, so a spelling nobody anticipated goes red and gets classified
  * by a person. Measured across all seven workflow files: 57 invocations, 6
  * quoted mentions, 0 unclassified.
+ *
+ * READING THE ARGUMENTS NEEDS A THIRD ANSWER, AND THE MASK CANNOT GIVE IT.
+ * Deciding whether npm is a COMMAND needs to know which text is code; deciding
+ * what SUBCOMMAND it runs needs to know what the quoted text says. The mask
+ * answers the first and destroys the second — a quoted span comes back as
+ * spaces, so `npm 'run' build` read as `['build']` and a script run counted as
+ * a registry resolve (#7663). Reading the raw line instead only trades the
+ * error for the opposite one: a quoted `&&` truncates the argument list.
+ *
+ * So `scanQuoting` reports a per-character ROLE — code, literal data, quoting
+ * punctuation the shell removes, or the close of a substitution — and
+ * `commandWords` splits on that, which is what the shell itself does. Quotes
+ * stop breaking words (`'a'b` is `ab`), separators inside them stop ending
+ * commands, and a quoted subcommand is read rather than inferred from whatever
+ * survived masking. Both readings were half-right; the roles are the whole
+ * question, and one scan answers it so no two consumers can disagree.
+ *
+ * WHAT ONE LINE CANNOT CONTAIN IS REPORTED, NOT GUESSED. A `\` continuation, an
+ * unclosed quote, or an argument a substitution produces at run time all leave
+ * the list a PREFIX of the real one, and `argsComplete` says so. A word the
+ * shell has not closed is dropped rather than reported short, because a prefix
+ * offered as a word is the same defect one layer down: `npm 'ru` answering `ru`
+ * would be classified against a list of real subcommands.
  * ─────────────────────────────────────────────────────────────────────────── */
 
 /** Escape a literal for embedding in a RegExp. */
@@ -1253,24 +1276,55 @@ export function hasUnclosedQuoting(line) {
 }
 
 /**
- * One pass, two answers, so the mask and the precondition cannot disagree about
- * what a quote is.
+ * One pass, several answers, so no two consumers can disagree about what a
+ * quote is.
  *
  * A stack rather than a flag: `"$(echo 'x')"` nests double → substitution →
  * single, and each level has to return to the right one. A backtick both opens
  * and closes, so it is popped when it is already the innermost context.
+ *
+ * `roles` is the per-character answer to "what is this character FOR", and it
+ * is what `commandWords` needs and the mask cannot give it. Masking is lossy on
+ * purpose — a quoted span and an absent one are both spaces — so a consumer
+ * that has to READ a quoted word has to be told which spaces stood for text:
+ *
+ *   code    shell code: whitespace separates words, a separator ends the command
+ *   data    literal text: part of the current word, and never a separator
+ *   syntax  quoting punctuation the shell REMOVES: skipped, and does not end a
+ *           word — `'a'b` is the single word `ab`
+ *   end     closes a substitution the command sits inside, so the command ends
+ *
+ * `continued` reports a trailing unescaped backslash, which is the shell's line
+ * continuation: the command is not finished on this line, and any consumer
+ * reading a single line has an incomplete picture of it.
  */
 function scanQuoting(line) {
   const out = [...line]
+  const roles = new Array(line.length).fill('code')
   const stack = ['code']
   let escaped = -1
+  let continued = false
+  /** A backslash that acts as an escape: syntax here, literal text next. */
+  const escapes = i => {
+    roles[i] = 'syntax'
+    if (i + 1 < line.length) roles[i + 1] = 'data'
+    else continued = true
+  }
   for (let i = 0; i < line.length; i++) {
     const ctx = stack[stack.length - 1]
     const c = line[i]
 
     if (ctx === 'single') {
       out[i] = ' '
-      if (c === "'") stack.pop()
+      // No escapes inside `'…'`, so a trailing backslash there is literal text
+      // and continues nothing — the unclosed quote is what carries to the next
+      // line, and `openQuote` already reports that.
+      if (c === "'") {
+        roles[i] = 'syntax'
+        stack.pop()
+      } else {
+        roles[i] = 'data'
+      }
       continue
     }
 
@@ -1284,27 +1338,36 @@ function scanQuoting(line) {
     if (ctx === 'ansi') {
       out[i] = ' '
       if (c === '\\') {
+        escapes(i)
         if (i + 1 < line.length) out[i + 1] = ' '
         i++
         continue
       }
-      if (c === "'") stack.pop()
+      if (c === "'") {
+        roles[i] = 'syntax'
+        stack.pop()
+      } else {
+        roles[i] = 'data'
+      }
       continue
     }
 
     if (ctx === 'double') {
       if (c === '\\') {
         out[i] = ' '
+        escapes(i)
         if (i + 1 < line.length) out[i + 1] = ' '
         i++
         continue
       }
       if (c === '"') {
         out[i] = ' '
+        roles[i] = 'syntax'
         stack.pop()
         continue
       }
-      // Command substitution inside double quotes is CODE. Left visible.
+      // Command substitution inside double quotes is CODE. Left visible, and
+      // its role stays `code` for the same reason.
       if (c === '$' && line[i + 1] === '(') {
         stack.push('subst')
         i++
@@ -1315,6 +1378,7 @@ function scanQuoting(line) {
         continue
       }
       out[i] = ' '
+      roles[i] = 'data'
       continue
     }
 
@@ -1324,16 +1388,24 @@ function scanQuoting(line) {
       // keeps `\$'…'` — a literal dollar followed by an ordinary single-quoted
       // string — from being read as ANSI-C quoting below.
       escaped = i + 1
+      escapes(i)
       i++
       continue
     }
     if (c === "'") {
       out[i] = ' '
-      stack.push(line[i - 1] === '$' && i - 1 !== escaped ? 'ansi' : 'single')
+      roles[i] = 'syntax'
+      const ansi = line[i - 1] === '$' && i - 1 !== escaped
+      // The `$` of `$'…'` is part of the quoting, not part of the word: the
+      // shell hands `$'run'` to the command as `run`. It stays VISIBLE in the
+      // mask, where it always was and where nothing reads it as a separator.
+      if (ansi) roles[i - 1] = 'syntax'
+      stack.push(ansi ? 'ansi' : 'single')
       continue
     }
     if (c === '"') {
       out[i] = ' '
+      roles[i] = 'syntax'
       stack.push('double')
       continue
     }
@@ -1343,11 +1415,18 @@ function scanQuoting(line) {
       continue
     }
     if (c === '`') {
-      if (ctx === 'backtick') stack.pop()
-      else stack.push('backtick')
+      if (ctx === 'backtick') {
+        roles[i] = 'end'
+        stack.pop()
+      } else {
+        stack.push('backtick')
+      }
       continue
     }
-    if (c === ')' && ctx === 'subst') stack.pop()
+    if (c === ')' && ctx === 'subst') {
+      roles[i] = 'end'
+      stack.pop()
+    }
   }
   // A QUOTE left open is what invalidates the per-line model. A command
   // substitution left open does not: its continuation lines really are shell
@@ -1356,6 +1435,8 @@ function scanQuoting(line) {
   return {
     masked: out.join(''),
     openQuote: ['single', 'double', 'ansi'].some(q => stack.includes(q)),
+    roles,
+    continued,
   }
 }
 
@@ -1374,18 +1455,78 @@ function segmentBefore(line, at) {
 }
 
 /**
- * The words after `from` that belong to the same command, up to the next
- * separator.
+ * The words after `from` that belong to the same command, as the SHELL would
+ * split them — quotes honoured and then removed, up to the next separator.
  *
- * Read off the MASKED line, so a quoted argument comes back as nothing rather
- * than as text that might contain a separator. A caller that cannot read the
- * argument it needs must fail in ITS safe direction; this returns what is
- * legible and does not guess.
+ * THIS USED TO READ THE MASKED LINE, and #7663 is why it no longer does.
+ * Masking is lossy by design: a quoted span becomes spaces, so `npm 'run'
+ * build` came back as `['build']` and was indistinguishable from `npm build`.
+ * The subcommand then read as `build`, and a script run that contacts no
+ * registry counted as an npm resolve. Reading the RAW line instead is not the
+ * fix either — that is what lets a quoted separator truncate the list, which is
+ * the mistake masking was introduced to prevent. Both readings are wrong
+ * because each answers only half the question, and `roles` answers all of it:
+ * which characters the shell treats as code, which as literal text, and which
+ * it removes.
+ *
+ * Word boundaries come from the code role only, so a quote never breaks a word
+ * (`'a'b` is `ab`) and a separator inside one never ends the command
+ * (`npm run 'a && b'` is one invocation with two arguments).
+ *
+ * `complete` is false when the words are a PREFIX of the real argument list
+ * rather than all of it — a line continuation, an unclosed quote, or a
+ * substitution whose output is the argument. The words themselves are still
+ * accurate; what is unknown is whether more follow. A caller that finds what it
+ * needs may use it, and one that does not must fail in ITS safe direction —
+ * `commandUses` passes the flag straight through rather than deciding here.
+ *
+ * `scan` lets a caller that has already scanned the line hand the result over
+ * rather than paying for a second pass — the same object, so the two readings
+ * cannot come from different scans.
  */
-function argWords(masked, from) {
-  const after = masked.slice(from)
-  const [cut] = separatorIndexes(after)
-  return (cut === undefined ? after : after.slice(0, cut)).trim().split(/\s+/).filter(Boolean)
+function commandWords(line, from, scan = scanQuoting(line)) {
+  const { roles, openQuote, continued } = scan
+  const words = []
+  let word = null
+  let complete = !openQuote && !continued
+  let ended = false // the shell finished this command ON THIS LINE
+  const push = c => {
+    word = (word ?? '') + c
+  }
+  for (let i = from; i < line.length; i++) {
+    const c = line[i]
+    if (roles[i] === 'syntax') continue // removed by the shell, and joins the word either side
+    if (roles[i] === 'end') {
+      ended = true // the substitution this command sits in closed
+      break
+    }
+    if (roles[i] === 'data') {
+      push(c)
+      continue
+    }
+    if (/\s/.test(c)) {
+      if (word !== null) words.push(word)
+      word = null
+      continue
+    }
+    if (SEPARATOR_CHARS.includes(c)) {
+      // `(` and a backtick in a command's ARGUMENT position open a
+      // substitution, so the argument is computed at run time and no static
+      // read of it exists. Every other separator genuinely ends the command.
+      if (c === '(' || c === '`') complete = false
+      ended = true
+      break
+    }
+    push(c)
+  }
+  // A word still being ACCUMULATED when the line ran out is a fragment, and
+  // reporting it would be the #7663 mistake one layer down: `npm 'ru` would
+  // answer `ru`, a word the shell never forms, and a caller comparing that
+  // against a list of known subcommands would be classifying a prefix. A word
+  // is reported only once the shell has closed it — at whitespace, at the
+  // separator that ended the command, or at the end of a line that finishes it.
+  if (word !== null && (ended || complete)) words.push(word)
+  return { words, complete }
 }
 
 /**
@@ -1393,9 +1534,23 @@ function argWords(masked, from) {
  * header for the three buckets and why the third one exists.
  *
  * `args` is populated for an `invocation` only; it is the words that follow the
- * command word up to the next separator, which is what lets a caller ask about
- * a SUBCOMMAND (`npm ci` resolves the dependency tree, `npm run build` does
- * not) without a second parser.
+ * command word up to the next separator, quoted exactly as the shell would hand
+ * them over, which is what lets a caller ask about a SUBCOMMAND (`npm ci`
+ * resolves the dependency tree, `npm run build` does not) without a second
+ * parser.
+ *
+ * `argsComplete` says whether `args` is the WHOLE argument list. It is false
+ * for a line continuation, an unclosed quote, or an argument produced by a
+ * substitution — cases where this line does not contain the rest of the
+ * command. An empty `args` with `argsComplete: true` is a bare `npm`; an empty
+ * one with `argsComplete: false` is `npm \` with the subcommand on the next
+ * line, and telling those apart is the whole of #7663. Nothing here guesses
+ * what the missing words are; the caller decides which way to fail.
+ *
+ * The other two buckets report `argsComplete: false` because nothing tried to
+ * read their arguments — a mention inside a string and a name behind `sudo` are
+ * not commands this function has parsed. `false` is the answer that makes a
+ * caller who reads the flag without reading this paragraph fail LOUDLY.
  *
  * The passes run in the same order as `invokes()`, and for the same reason
  * recorded there: blanking heredoc bodies BEFORE stripping comments, so the
@@ -1403,19 +1558,23 @@ function argWords(masked, from) {
  *
  * @param {string} runBody A step's `run:` script, as `stepRun()` returns it.
  * @param {string} name The command word to look for.
- * @returns {Array<{kind: 'invocation'|'quoted'|'unclassified', line: string, args: string[]}>}
+ * @returns {Array<{kind: 'invocation'|'quoted'|'unclassified', line: string, args: string[], argsComplete: boolean}>}
  */
 export function commandUses(runBody, name) {
   const uses = []
   for (const line of withoutHeredocBodies(runBody.split('\n')).map(stripShellComment)) {
-    const masked = maskQuotedData(line)
+    // One scan per line, shared by both questions: which text is code (the
+    // mask) and what the quoted text says (the roles).
+    const scan = scanQuoting(line)
+    const masked = scan.masked
     for (const at of namePositions(line, name)) {
       if (masked.slice(at, at + name.length) !== name) {
-        uses.push({ kind: 'quoted', line, args: [] })
+        uses.push({ kind: 'quoted', line, args: [], argsComplete: false })
       } else if (segmentBefore(masked, at).trim() !== '') {
-        uses.push({ kind: 'unclassified', line, args: [] })
+        uses.push({ kind: 'unclassified', line, args: [], argsComplete: false })
       } else {
-        uses.push({ kind: 'invocation', line, args: argWords(masked, at + name.length) })
+        const { words, complete } = commandWords(line, at + name.length, scan)
+        uses.push({ kind: 'invocation', line, args: words, argsComplete: complete })
       }
     }
   }
