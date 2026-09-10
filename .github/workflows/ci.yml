@@ -475,10 +475,25 @@ jobs:
     #
     # The budget was never a latency guard here. Steady state is 37-43s, so a
     # 300s ceiling only ever fires when the runner's ~/.npm is cold — which
-    # turns a slow-but-correct job into a RED REQUIRED CHECK. That happened on
-    # #7607: four consecutive cancellations, three of them alone on idle
-    # runners, every one inside an npm resolve, on a container generation
-    # recreated hours earlier with an empty cache.
+    # turns a slow-but-correct job into a RED REQUIRED CHECK. Measured on
+    # #7607's run 33816965749, against a runner container generation recreated
+    # hours earlier with an empty cache:
+    #
+    #     attempt 1  cancelled  312s        attempt 3  cancelled  310s
+    #     attempt 2  cancelled  317s        attempt 4  SUCCESS    269s
+    #
+    # Three cancellations, and the attempt that finally passed still spent 90%
+    # of the budget. (#7613 records this as four cancellations; the fourth
+    # attempt succeeded. Re-measured from the run's per-attempt job records,
+    # which is where earlier attempts survive — the jobs API shows only the
+    # latest.)
+    #
+    # It is NOT unique to this job, and the honest version matters for choosing
+    # the fix: `App Type Check` (311s) and `Design Tokens Tests` (316s) were
+    # cancelled in that same attempt, and both resolve npm ONCE. A cold cache
+    # strains the whole 5-minute tier. What makes this job the one to raise is
+    # that the other two passed on the next attempt while this one needed three
+    # — it is doing twice their npm work in the same budget.
     #
     # Read this as insurance, not as a live fire. The acute trigger on that
     # occasion was npm's unrequested advisory call stalling 17-48s per install,
