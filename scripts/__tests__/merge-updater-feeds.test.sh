@@ -183,15 +183,21 @@ test_writes_to_output_file() {
 JSON
 
   local rc
-  run_merge --output "$tmp/out.json" "$tmp/mac.json" >/dev/null 2>&1; rc=$?
+  # Captured rather than discarded to /dev/null: on a non-zero exit the output is
+  # the only clue why, and every other run_merge case prints it (Copilot, #7683).
+  out="$(run_merge --output "$tmp/out.json" "$tmp/mac.json" 2>&1)"; rc=$?
   assert_eq "writes_to_output_file: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
-  # THREE cases on BOTH paths, not two-or-one. The branch used to contribute two
-  # when the file existed and one when it did not, which is the same
-  # outcome-dependence #7656 is about, hiding inside a conditional rather than
-  # in an early return — measured: a subject regression landed on 17 of 18, one
-  # short, and this was the missing one. Reading an absent file as an empty body
-  # lets the same asserts run and fail truthfully.
+  # This BRANCH contributes three cases on both paths (existence + two content
+  # asserts), where it used to contribute two when the file existed and one when
+  # it did not — the same outcome-dependence #7656 is about, hiding inside a
+  # conditional rather than in an early return. The function as a whole
+  # contributes FOUR, counting the exit-code assert above; the three here is the
+  # branch, not the test. Measured: after the four early returns were fixed a
+  # subject regression still landed on 17 of 18, one short, and this was it.
+  # Reading an absent file as an empty body lets the same asserts run and fail
+  # truthfully.
   local body=""
   local exists="no"
   if [ -f "$tmp/out.json" ]; then
@@ -295,6 +301,7 @@ JSON
   local out rc
   out="$(run_merge "$tmp/a.json" "$tmp/b.json" 2>&1)"; rc=$?
   assert_eq "later_input_overrides_same_platform: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
   assert_contains "has NEW signature" "$out" 'NEW'
   assert_not_contains "OLD signature is gone" "$out" '"signature": "OLD"'
