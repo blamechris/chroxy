@@ -612,6 +612,36 @@ export function assertEveryFileParsed(workflows) {
       'understanding that file, and every rule below it passes over an empty set for it'
   )
 
+  // A step written as a YAML FLOW COLLECTION — `- { run: echo hi }` — is legal
+  // Actions YAML that this reader cannot decompose: `parseSteps` starts a step
+  // for it, and every key-reading function below anchors on `run:`/`uses:` at
+  // the dash indent plus two and finds `{` there. REFUSED rather than taught
+  // (#7669, decided): reading it properly means a flow-YAML parser — nested
+  // braces, quoted strings containing `}`, commas inside values — in a module
+  // whose stated premise is that it is NOT a YAML parser, for a spelling the
+  // corpus does not use and GitHub's own docs never show. A step the reader
+  // cannot read must not be silently skipped; refusing is the fail-closed half
+  // of that, and it costs one line.
+  //
+  // #7668's step-count row ALREADY makes such a file red, because a flow step
+  // declares neither `run:` nor `uses:` where that row looks — measured:
+  // declared 1, parsed 2. This row exists anyway, and the reason is worth
+  // stating: that catch is INCIDENTAL. It reports "yields a different number of
+  // steps than its text declares", which sends the reader looking for a lost
+  // step rather than an unreadable one, and it would disappear silently the
+  // day `declaredSteps` learns the spelling. A named cause, ordered first, is
+  // the difference between a guard and a coincidence.
+  const flowSteps = workflows.flatMap(w =>
+    w.jobs.flatMap(j => j.steps.filter(flowStep).map(() => `${w.name}:${j.id}`))
+  )
+  assert.deepEqual(
+    flowSteps,
+    [],
+    'a step is written as a YAML flow collection — this reader anchors every key at the step ' +
+      'dash indent plus two and cannot decompose it, so the step would contribute nothing to ' +
+      'any rule below. Rewrite it as a block mapping, or teach the reader the spelling'
+  )
+
   // The step row runs AFTER the jobs row and BEFORE the stepless one, and the
   // order is load-bearing in both directions. A file whose jobs collapse also
   // loses every step, so the jobs row has to speak first or the failure blames
@@ -655,6 +685,60 @@ export function assertEveryFileParsed(workflows) {
 function declaredSteps(text) {
   const lines = text.split('\n')
   return lines.filter((_, i) => isStepKeyLine(lines, i, STEP_REQUIRED_KEY)).length
+}
+
+/**
+ * The flow indicator, with the prefixes YAML allows in front of it: a tag
+ * and/or an anchor. `{ … }`, `!!map { … }`, `&a { … }`, `!!map &a { … }`.
+ */
+const FLOW_OPEN = /^(?:[!&]\S*\s+)*[{[]/
+
+/**
+ * Does this step open a YAML FLOW COLLECTION rather than a block mapping?
+ *
+ * Both `- { … }` and `- [ … ]` are refused, though only the mapping form is a
+ * plausible step: the sequence form is invalid for one, and a reader that
+ * cannot decompose either should say so rather than let one through on a
+ * technicality.
+ *
+ * IT READS THE STEP, NOT ITS FIRST LINE, and that is the correction review of
+ * #7676 forced. The first version tested `stepLines[0]` against
+ * `/^\s*-\s*[{[]/`, which misses three spellings js-yaml parses identically to
+ * the caught one — measured:
+ *
+ *     - !!map { run: echo hi }     a tag before the brace
+ *     - &anchor { run: echo hi }   an anchor before the brace
+ *     -                            the mapping wrapped to the next line
+ *       { run: echo hi }
+ *
+ * All three fell through to #7668's step-count row, which is exactly the
+ * INCIDENTAL catch this refusal exists to replace — so the guard missed its own
+ * stated target on three of four spellings while its comment claimed otherwise.
+ *
+ * Scanning to the first CONTENT line is what covers the wrapped form, and
+ * returning on that line is what keeps a later brace out of it: a step whose
+ * first content line is `run: echo ${{ github.sha }}` — ubiquitous here — or
+ * `run: cleanup - {tmp}` is a block mapping and must not be refused.
+ *
+ * Exported so its own test can prove it SEES every shape: the corpus has zero,
+ * so the assertion above quantifies over an empty set and would otherwise be
+ * satisfied by a predicate that matches nothing (#7503's cause, and #7669's
+ * third acceptance criterion).
+ *
+ * NOT COVERED, and unreachable rather than guarded: `-{run: x}` with no space
+ * after the dash. js-yaml rejects it outright ("bad indentation of a mapping
+ * entry"), and `parseSteps` does not start a step for it either, so it is
+ * absorbed into the previous step and NO row flags it. GitHub's own parser
+ * refuses the file first, which is the only reason that is tolerable.
+ */
+export const flowStep = stepLines => {
+  for (const [i, raw] of stepLines.entries()) {
+    const line = i === 0 ? raw.replace(/^\s*-\s*/, '') : raw
+    const text = line.trim()
+    if (text === '' || text.startsWith('#')) continue
+    return FLOW_OPEN.test(text)
+  }
+  return false
 }
 
 /** Either of the two keys the schema requires a step to carry exactly one of. */

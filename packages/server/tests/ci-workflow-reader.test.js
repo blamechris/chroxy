@@ -22,6 +22,7 @@ import {
   assertEveryFileContributes,
   assertReaderSane,
   valuelessKey,
+  flowStep,
   readWorkflows,
   SETUP_NODE,
   commandUses,
@@ -1259,6 +1260,119 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
+  // --- flow-collection steps are REFUSED (#7669) ---------------------------
+
+  it('refuses a step written as a YAML flow mapping, and says WHY', () => {
+    // `- { run: echo hi }` is legal Actions YAML. `parseSteps` starts a step
+    // for it, and every key-reading function anchors on `run:`/`uses:` at the
+    // dash indent plus two and finds `{` there — so the step contributes to
+    // nothing while looking like a step.
+    //
+    // The assertion on the MESSAGE is the point of this case. #7668's
+    // step-count row already made such a file red (declared 1, parsed 2), so
+    // the bare fact of redness proves nothing new. What this pins is that the
+    // named cause speaks FIRST: "yields a different number of steps than its
+    // text declares" sends a reader looking for a lost step rather than an
+    // unreadable one, and it would vanish the day `declaredSteps` learns the
+    // spelling.
+    const text = ['jobs:', '  a:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo one', '      - { run: echo hi }', ''].join('\n')
+    const jobs = parseJobs(text, 'x.yml')
+    // The facts that MOTIVATE the refusal, asserted rather than left in prose.
+    // Review of #7676 noted these lived only in comments once the flow entry
+    // moved out of the "cannot SPELL" case, which is the shape this repo
+    // catalogues as a comment describing something no test checks.
+    assert.equal(jobs[0].steps.length, 2, 'parseSteps DOES start a step for it')
+    assert.equal(stepRun(jobs[0].steps[1]), undefined, 'and every key-reader finds `{` where it expects a key')
+    assert.throws(
+      () => assertEveryFileParsed([{ name: 'x.yml', text, jobs }]),
+      /a step is written as a YAML flow collection/
+    )
+  })
+
+  it('refuses the flow SEQUENCE form too', () => {
+    // Invalid for a step, unlike the mapping form — refused anyway, because a
+    // reader that cannot decompose either should not let one through on a
+    // technicality.
+    const text = ['jobs:', '  a:', '    runs-on: ubuntu-latest', '    steps:', '      - [ run, echo hi ]', ''].join('\n')
+    assert.throws(
+      () => assertEveryFileParsed([{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]),
+      /a step is written as a YAML flow collection/
+    )
+  })
+
+  it('refuses the spellings a first-line regex misses: tag, anchor, and wrapped to the next line', () => {
+    // Review of #7676 measured that the first version of this predicate — a
+    // regex over `stepLines[0]` — missed three spellings js-yaml parses
+    // IDENTICALLY to the caught one. All three fell through to #7668's
+    // step-count row, which is the incidental catch this refusal exists to
+    // replace, so the guard was missing its own stated target on three of four
+    // spellings while its comment claimed otherwise.
+    const file = step => {
+      const text = ['jobs:', '  a:', '    runs-on: ubuntu-latest', '    steps:', '      - run: echo one', ...step, ''].join('\n')
+      return [{ name: 'x.yml', text, jobs: parseJobs(text, 'x.yml') }]
+    }
+    for (const [label, step] of [
+      ['tag before the brace', ['      - !!map { run: echo hi }']],
+      ['anchor before the brace', ['      - &a { run: echo hi }']],
+      ['both', ['      - !!map &a { run: echo hi }']],
+      ['wrapped to the next line', ['      - ', '        { run: echo hi }']],
+    ]) {
+      assert.throws(
+        () => assertEveryFileParsed(file(step)),
+        /a step is written as a YAML flow collection/,
+        `${label} was not refused`
+      )
+    }
+  })
+
+  it('CONTROL: flowStep sees every flow shape and no ordinary step, so its empty result means something', () => {
+    // #7669's third acceptance criterion, and the reason it is a criterion:
+    // the corpus has ZERO flow steps, so the assertion in
+    // `assertEveryFileParsed` quantifies over an empty set and would be
+    // satisfied by a predicate that matches NOTHING — the #7503 cause in
+    // docs/false-safety-guards.md. This exercises the predicate directly.
+    for (const yes of [
+      ['      - { run: echo hi }'],
+      ['      - {run: x}'],
+      ['      - [ a, b ]'],
+      ['  - {  }'],
+      ['      - !!map { run: echo hi }'],
+      ['      - &a { run: echo hi }'],
+      ['      - ', '        { run: echo hi }'],
+      ['      - ', '        # a comment first', '        { run: echo hi }'],
+    ]) {
+      assert.ok(flowStep(yes), `expected a flow step: ${JSON.stringify(yes)}`)
+    }
+    for (const no of [
+      ['      - run: echo hi'],
+      ['      - uses: actions/checkout@v4'],
+      ['      - name: thing', '        run: echo { not a step start }'],
+      // Ubiquitous in the real corpus — a `${{ }}` expression must never be
+      // read as a flow collection.
+      ['      - run: echo ${{ github.sha }}'],
+      // A brace LATER on the first content line. This is what makes the
+      // predicate's anchoring load-bearing: review measured that dropping the
+      // `^` from the old regex survived every assertion in the PR.
+      ['      - run: cleanup - {tmp}'],
+      // The #7668 absorbed-step shape is NOT a flow step — that row owns it.
+      ['      - ', '        name: t'],
+    ]) {
+      assert.ok(!flowStep(no), `expected NOT a flow step: ${JSON.stringify(no)}`)
+    }
+  })
+
+  it('the live corpus has no flow-collection step, and the predicate that says so is live', async () => {
+    // The set-level half: a real reading, not a synthetic one — and the
+    // predicate proven live against a planted positive in the same case, so
+    // "zero found" cannot mean "nothing was looked at".
+    const ws = await readWorkflows()
+    assert.ok(ws.length >= 5, `expected >=5 workflow files, found ${ws.length}`)
+    const steps = ws.flatMap(w => w.jobs.flatMap(j => j.steps))
+    assert.ok(steps.length >= 100, `expected the corpus to carry many steps, found ${steps.length}`)
+    assert.deepEqual(steps.filter(flowStep).map(st => st[0]), [])
+    assert.ok(flowStep(['      - { run: echo hi }']), 'the predicate must still fire on a planted positive')
+  })
+
   // --- the per-file STEP row (#7668) ---------------------------------------
 
   it('refuses a file whose step was ABSORBED into its neighbour (#7668)', () => {
@@ -1453,10 +1567,14 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     // to an invention. Measured on real `parseJobs` output; `- { run: … }` is
     // tracked as #7669. If any of these ever goes GREEN, someone has taught the
     // declared side the spelling and the comment must move with it.
+    // The flow-mapping spelling was a third entry here until #7669 gave it its
+    // OWN refusal, which fires first and names the cause. That is the intended
+    // succession, not a regression: this case pins the spellings the declared
+    // side cannot READ, and a flow step is one the reader cannot DECOMPOSE at
+    // all — a different fact deserving a different message.
     for (const [label, step, parsed] of [
       ['quoted key', '      - "run": echo hi', 1],
       ['space before the colon', '      - run : echo hi', 1],
-      ['flow mapping (#7669)', '      - { run: echo hi }', 1],
     ]) {
       const text = ['jobs:', '  a:', '    runs-on: ubuntu-latest', '    steps:', step, ''].join('\n')
       const jobs = parseJobs(text, 'x.yml')
