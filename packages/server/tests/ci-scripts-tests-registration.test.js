@@ -1438,15 +1438,27 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
     const PLAIN_RUN_STEP = ['      - run: echo hi']
     const BLOCK_RUN_STEP = ['      - run: |', '          set -e', '          echo hi']
     const QUOTED_RUN_STEP = ['      - run: "echo hi"']
-    // `text` is part of readWorkflows()'s output shape too, and since #7662 the
-    // shared floor reads it for a SECOND, independent count of the jobs a file
-    // declares — so a synthetic file has to carry one, generated from the same
-    // `jobs` array rather than typed, or these fixtures would fail the per-file
+    // `text` is part of readWorkflows()'s output shape too, and the shared floor
+    // reads it for a SECOND, independent count of what each file declares —
+    // its jobs since #7662, and its `run:` bodies and setup-node steps since
+    // #7659. So a synthetic file has to carry one, GENERATED FROM THE SAME
+    // `jobs` array rather than typed, or these fixtures would fail a per-file
     // control for a reason that has nothing to do with the collapse under test.
+    // Emitting each step verbatim under `steps:` is what keeps the two readings
+    // in agreement through every collapse below: `withoutSteps` and `asQuoted`
+    // both rebuild through `wf`, so the text follows the jobs automatically.
     const wf = (name, jobs) => ({
       name,
       jobs,
-      text: `jobs:\n${jobs.map((_, i) => `  job${i}:\n    runs-on: ubuntu-latest`).join('\n')}\n`,
+      text:
+        'jobs:\n' +
+        jobs
+          .map(
+            (j, i) =>
+              `  job${i}:\n    runs-on: ubuntu-latest\n    steps:\n${j.steps.flat().join('\n')}`
+          )
+          .join('\n') +
+        '\n',
     })
     const job = (setupNodeSteps = 1, { plain = 1, block = 0 } = {}) => ({
       steps: [
@@ -1575,6 +1587,59 @@ describe('the fail-closed controls go RED — one synthetic collapse at a time (
 
     it('refuses an EMPTY set — every rule would quantify over nothing', () => {
       assert.throws(() => checkedWorkflows([]), /expected >=5 workflow files, found 0/)
+    })
+
+    it('refuses a set where ONE file yields no run bodies while its text still declares them (#7659)', () => {
+      // The wiring proof for the per-file content check. Every case above
+      // this one drives a GLOBAL floor, and a global floor structurally
+      // cannot see this: a.yml's run steps vanish entirely while ci.yml
+      // keeps enough of both spellings to clear each floor by itself. That
+      // last clause is ASSERTED below rather than claimed here, because a
+      // fixture that quietly fell under a floor would make this case pass
+      // for the wrong reason and look identical from the outside.
+      // `text` is left alone, which IS the collapse — the file still
+      // declares what the reader no longer yields.
+      const collapsed = healthy().map(w =>
+        w.name !== 'a.yml'
+          ? w
+          : {
+              ...w,
+              jobs: w.jobs.map(j => ({
+                steps: j.steps.filter(s => !isBlockRunStep(s) && !isPlainRunStep(s)),
+              })),
+            }
+      )
+      const surviving = spelling =>
+        collapsed.flatMap(w => w.jobs).flatMap(j => j.steps).filter(spelling).length
+      assert.ok(
+        surviving(isPlainRunStep) >= MIN_PLAIN_RUN_STEPS,
+        `the collapse must leave the PLAIN floor clear, found ${surviving(isPlainRunStep)}`
+      )
+      assert.ok(
+        surviving(isBlockRunStep) >= MIN_BLOCK_RUN_STEPS,
+        `the collapse must leave the BLOCK floor clear, found ${surviving(isBlockRunStep)}`
+      )
+      assert.throws(
+        () => checkedWorkflows(collapsed),
+        /yields a different number of `run:` bodies than its text declares/
+      )
+    })
+
+    it('refuses a set where ONE file yields fewer JOBS than its text declares (#7662)', () => {
+      // The same wiring proof for the per-file STRUCTURE check, which had
+      // none: nothing here established that `assertReaderSane` calls it at
+      // all, so deleting the call left every case in this block green — the
+      // guard-wired-to-only-some-of-its-callers cause in
+      // docs/false-safety-guards.md, one level up from the guard itself.
+      // Dropping one of release.yml's four jobs leaves 23 across the set,
+      // clear of the `>=20` total, so only the per-file check can fire.
+      const collapsed = healthy().map(w =>
+        w.name !== 'release.yml' ? w : { ...w, jobs: w.jobs.slice(0, 3) }
+      )
+      assert.throws(
+        () => checkedWorkflows(collapsed),
+        /yields a different number of jobs than it declares/
+      )
     })
   })
 

@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   parseJobs,
@@ -18,6 +18,10 @@ import {
   hasUnclosedQuoting,
   stripShellComment,
   assertEveryFileParsed,
+  assertEveryFileContributes,
+  assertReaderSane,
+  readWorkflows,
+  SETUP_NODE,
   commandUses,
 } from './helpers/workflow-reader.js'
 
@@ -40,6 +44,12 @@ import {
  * These drive synthetic YAML rather than the repo's real workflows on purpose:
  * a spelling the repo does not currently use is exactly the one no
  * repo-scanning guard can prove it handles.
+ *
+ * ONE block is the exception, and says so where it sits: the #7659 sweep at
+ * the end asserts a property OF the live corpus — that no single real file
+ * can collapse without the shared control noticing — and that claim is about
+ * how the real run bodies are distributed across the real files, which no
+ * synthetic fixture can establish.
  */
 
 const BLOCK_SEQUENCE = `
@@ -1208,5 +1218,231 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
       () => assertEveryFileParsed([file('ci.yml', 2, 2, 0)]),
       /a job parsed with no steps at all/
     )
+  })
+})
+
+describe('workflow reader: assertEveryFileContributes (#7659)', () => {
+  /**
+   * A file whose TEXT declares `declared` run steps and whose PARSE yielded
+   * `yielded` of them. The two are separate parameters because that is the
+   * whole subject: the guard compares a reading of the raw text against a
+   * reading that walked jobs -> steps -> stepRun, and only a fixture that can
+   * make them disagree can prove it notices.
+   */
+  const runFile = (name, declared, yielded = declared) => ({
+    name,
+    text:
+      `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n` +
+      Array.from({ length: declared }, () => '      - run: echo hi').join('\n') +
+      '\n',
+    jobs: [{ id: 'a', steps: Array.from({ length: yielded }, () => ['      - run: echo hi']) }],
+  })
+
+  it('CONTROL: a set where every file yields what it declares is accepted', () => {
+    assertEveryFileContributes([runFile('ci.yml', 20), runFile('release.yml', 7)])
+  })
+
+  it('refuses a file that yielded FEWER run bodies than its text declares', () => {
+    // The #7659 blind spot, measured on the real corpus: neutralising one
+    // file's run keys leaves every GLOBAL floor clear, because ci.yml carries
+    // 91 of the 137 run bodies and satisfies both of them alone. Five of the
+    // repo's six run-carrying files collapse completely invisibly that way.
+    assert.throws(
+      () => assertEveryFileContributes([runFile('ci.yml', 20), runFile('nightly.yml', 3, 0)]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('refuses a file that yielded MORE run bodies than its text declares', () => {
+    // Equality, not a floor — the same argument `assertEveryFileParsed` makes
+    // about jobs. A body with no `run:` line behind it is invented, and a
+    // floor cannot see an invention.
+    assert.throws(
+      () => assertEveryFileContributes([runFile('ci.yml', 2, 3)]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('a file with NO run steps needs no exemption, and stops being exempt the moment it grows one', () => {
+    // `stale.yml` genuinely has zero run steps today. A roster of files
+    // allowed to contribute nothing would be a hardcoded list beside a growing
+    // set — the first cause in docs/false-safety-guards.md. Deriving the
+    // expectation from the file's own text needs no roster: zero declared is
+    // zero required, and the same file is held to one the day it declares one.
+    assertEveryFileContributes([runFile('ci.yml', 20), runFile('stale.yml', 0)])
+    assert.throws(
+      () => assertEveryFileContributes([runFile('ci.yml', 20), runFile('stale.yml', 1, 0)]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('does not read a job-level `defaults: run:` mapping as a run step', () => {
+    // A bare `run:` key with no value is the head of the `defaults.run.shell`
+    // mapping, not a step. ci.yml has 15 of them; counting those would put the
+    // declared side 15 ahead of a perfectly healthy reader and make the guard
+    // permanently red for a reason that is not the reader's.
+    assertEveryFileContributes([
+      {
+        name: 'x.yml',
+        text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: bash\n    steps:\n      - uses: actions/checkout@v4\n',
+        jobs: [{ id: 'a', steps: [['      - uses: actions/checkout@v4']] }],
+      },
+    ])
+  })
+
+  it('does not read a COMMENTED-OUT run key as a declaration', () => {
+    // The ANCHOR is what does this, not a comment filter: `RUN_KEY`'s `^`
+    // forces the first non-space character to be `-` or `r`. Named precisely
+    // because the first version of this case credited a `code()` call that a
+    // mutation sweep then proved INERT on this side — the case stayed green
+    // with the filter deleted. It goes red when the anchor is dropped, which
+    // is the mutation that reaches the mechanism actually in use.
+    assertEveryFileContributes([
+      {
+        name: 'x.yml',
+        text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      # - run: echo removed in #1234\n      - uses: actions/checkout@v4\n',
+        jobs: [{ id: 'a', steps: [['      - uses: actions/checkout@v4']] }],
+      },
+    ])
+  })
+
+  it('counts a run step whose body is EMPTY as not yielded', () => {
+    // A `run: |` with nothing under it yields `''`. Requiring a NON-empty body
+    // is what stops a branch degraded to returning the empty string from
+    // vouching for itself — the same reason `assertReaderSane`'s block floor
+    // rejects a body that is only newlines (#7658 review). The YAML is
+    // degenerate and this repo has none, and the guard fails CLOSED on it.
+    assert.throws(
+      () =>
+        assertEveryFileContributes([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n',
+            jobs: [{ id: 'a', steps: [['      - run: |']] }],
+          },
+        ]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('refuses a file whose setup-node step the reader does not reach', () => {
+    // The `>=15` global setup-node floor is the same shape as the run floors:
+    // ci.yml carries 17 of the repo's 24, so dropping any ONE of the other
+    // four files' setup-node steps leaves it clear. Measured: the global floor
+    // catches the ci.yml collapse and is blind to all four others.
+    assert.throws(
+      () =>
+        assertEveryFileContributes([
+          {
+            name: 'x.yml',
+            text: `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ${SETUP_NODE}abc\n`,
+            jobs: [{ id: 'a', steps: [['      - uses: actions/checkout@v4']] }],
+          },
+        ]),
+      /declares setup-node steps the reader does not reach/
+    )
+  })
+
+  it('does not read a COMMENTED-OUT setup-node reference as a declaration, on EITHER side', () => {
+    // The setup-node half matches a SUBSTRING, so unlike the run half it has
+    // no anchor to lean on and both of its readings run through `code()`. The
+    // comment sits inside the STEP as well as in the text — which is how
+    // `readWorkflows` really hands step lines over — so this one fixture
+    // reaches both filters; dropping either one alone turns it red.
+    const step = [
+      '      - uses: actions/checkout@v4',
+      `        # was: uses: ${SETUP_NODE}abc`,
+    ]
+    assertEveryFileContributes([
+      {
+        name: 'x.yml',
+        text: `jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n${step.join('\n')}\n`,
+        jobs: [{ id: 'a', steps: [step] }],
+      },
+    ])
+  })
+})
+
+describe('workflow reader: no single real file can collapse invisibly (#7659)', () => {
+  /**
+   * The one block in this file that drives the REPO'S OWN workflows rather
+   * than synthetic YAML, and it is deliberate. Every other test here pins a
+   * spelling the directory does not use, because a shape no repo-scanning
+   * guard ever meets is the one it cannot prove it handles. This asserts the
+   * opposite kind of fact — a property OF the live corpus, that no one file's
+   * collapse is invisible to the shared control — and synthetic input cannot
+   * establish it, because the whole claim is about how the real 137 run bodies
+   * are distributed across the real seven files.
+   *
+   * The collapse is applied to the PARSED side only, leaving each file's text
+   * untouched: every step's `run:` key is renamed, so `stepRun` finds nothing
+   * while the declared count is unchanged. That is the exact failure #7659
+   * describes — jobs present, steps present, run bodies gone — and it is the
+   * one `assertEveryFileParsed` structurally cannot see, which each case
+   * re-checks rather than assumes.
+   */
+  let workflows
+  before(async () => {
+    workflows = await readWorkflows()
+  })
+
+  const yieldsRunBodies = w =>
+    w.jobs
+      .flatMap(j => j.steps)
+      .some(s => {
+        const body = stepRun(s)
+        return typeof body === 'string' && body.length > 0
+      })
+
+  const withRunKeysNeutralised = (ws, target) =>
+    ws.map(w =>
+      w.name !== target
+        ? w
+        : {
+            ...w,
+            jobs: w.jobs.map(j => ({
+              ...j,
+              steps: j.steps.map(s => s.map(l => l.replace(/^(\s*(?:-\s+)?)run:/, '$1xun:'))),
+            })),
+          }
+    )
+
+  it('CONTROL: the live corpus passes, and enough of it carries run bodies to make the sweep mean something', () => {
+    assertReaderSane(workflows)
+    const carriers = workflows.filter(yieldsRunBodies).map(w => w.name)
+    // Not a roster: derived from the corpus each run. The floor is here so the
+    // per-file sweep below cannot silently become a loop over zero rows — the
+    // #7503 cause in docs/false-safety-guards.md. Six of seven files carry run
+    // bodies today (all but stale.yml).
+    assert.ok(
+      carriers.length >= 5,
+      `expected >=5 workflow files to yield run bodies, found ${carriers.length}: ${carriers.join(', ')}`
+    )
+  })
+
+  it('every file that carries run bodies goes RED when only that file loses them', () => {
+    const carriers = workflows.filter(yieldsRunBodies).map(w => w.name)
+    for (const name of carriers) {
+      const collapsed = withRunKeysNeutralised(workflows, name)
+      assert.throws(
+        () => assertEveryFileContributes(collapsed),
+        /yields a different number of `run:` bodies than its text declares/,
+        `collapsing ${name}'s run bodies alone did not go red`
+      )
+      // The #7662 check stays GREEN on the same input: the file is still
+      // there, its jobs are still there, its steps are still there. That is
+      // what makes this a new catch rather than a restatement of that one.
+      assertEveryFileParsed(collapsed)
+    }
+  })
+
+  it('a file that carries NO run bodies cannot collapse, and needs no entry on any list', () => {
+    const empty = workflows.filter(w => !yieldsRunBodies(w)).map(w => w.name)
+    // stale.yml today. If this set is ever empty the assertion below is
+    // vacuous, which is why the case says so rather than looping in silence.
+    assert.ok(empty.length >= 1, 'expected at least one workflow with no run steps (stale.yml)')
+    for (const name of empty) {
+      assertEveryFileContributes(withRunKeysNeutralised(workflows, name))
+    }
   })
 })
