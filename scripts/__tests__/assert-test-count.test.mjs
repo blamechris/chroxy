@@ -31,7 +31,7 @@ const script = resolve(__dirname, '..', 'lib', 'assert-test-count.mjs')
 // literally, so the exact count is knowable here in a way it is not for a
 // runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
 // bound for exactly that reason).
-const EXPECTED_CASES = 16
+const EXPECTED_CASES = 17
 
 let pass = 0
 let fail = 0
@@ -98,11 +98,23 @@ await test('CANCELLED tests fail, though `# fail` is 0 and the count clears the 
   // whole describe leaves the count unchanged.
   eq(await run(['--min', '2', ...tapWith(4, 0, 3)]), 1, 'exit')
 })
-await test('CONTROL: the same summary WITHOUT the cancelled line still passes', async () => {
+await test('CONTROL: the same summary with `# cancelled 0` still passes', async () => {
   // Without this the case above would also pass on a wrapper that had simply
-  // started rejecting everything — it pins that `# cancelled 3` is what fires,
-  // not the shape of the summary.
+  // started rejecting everything — it pins that the NUMBER is what fires, not
+  // the presence of the line. A healthy `node --test` run emits `# cancelled 0`.
   eq(await run(['--min', '2', ...tapWith(4, 0, 0)]), 0, 'exit')
+})
+await test('CONTROL: a summary with NO cancelled line at all still passes', async () => {
+  // The other half, and a different claim: this pins the `cancelled !== null`
+  // half of the guard. The case above was originally labelled "without the
+  // cancelled line" while emitting `# cancelled 0`, so it could not tell "no
+  // line" from "line saying zero" — the two shapes a runner that does not
+  // report cancellations and a healthy modern one produce (Copilot, #7684).
+  //
+  // It matters beyond tidiness: a `null` treated as `> 0` would fail every
+  // consumer on an older Node, and a `null` is exactly what the parser returns
+  // when the label is absent.
+  eq(await run(['--min', '2', ...tap(4, 0)]), 0, 'exit')
 })
 await test('a REAL throwing before() is caught end to end, not just a synthetic summary', async () => {
   // The synthetic cases above assert on a hand-written TAP summary, which pins
