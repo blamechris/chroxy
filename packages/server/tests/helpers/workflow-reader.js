@@ -1113,6 +1113,24 @@ export function assertReaderSane(workflows) {
   // comment is genuinely indistinguishable from a step here and the filter is
   // the only thing that separates them.
   //
+  // THE REST OF THIS MODULE'S `code()` CALLS, measured in review of #7678 so
+  // the next sweep does not delete the wrong one by analogy — the rule is the
+  // ANCHOR, not the function:
+  //   - `jobName`, `jobTimeout`, `stepInput` anchor their key at line start, so
+  //     a comment cannot match and their `code()` calls are empirically INERT
+  //     (stripping them changed no output across four adversarial comment
+  //     placements each). Left in place rather than swept: they are harmless,
+  //     and a fourth deletion round for zero behaviour change is not worth the
+  //     churn. Now at least they are labelled.
+  //   - `workflowTriggers`'s call IS load-bearing, but NOT for the reason its
+  //     own docblock gives: repo-relay.yml's cited comment sits at two-space
+  //     indent and cannot match the block scan either way. The real hazard is a
+  //     ZERO-indent comment inside `on:`, which trips the loop's `/^\S/` early
+  //     break and silently drops every event after it.
+  // Six readers OUTSIDE this module scanned raw step lines for `SETUP_NODE`
+  // until #7678 routed them through `code()` too, and a directory-scanning
+  // guard in `ci-workflow-reader.test.js` now refuses a seventh.
+  //
   // The live count is 24 either way, so the calibration basis is unchanged —
   // re-derived rather than assumed, per #7667's third criterion.
   const setupNodeSteps = workflows.flatMap(w =>

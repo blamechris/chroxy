@@ -1,6 +1,6 @@
 import { before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import {
   parseJobs,
   parseSteps,
@@ -2181,6 +2181,64 @@ describe('workflow reader: no single real file can collapse invisibly (#7659)', 
     for (const name of empty) {
       assertEveryFileContributes(withRunKeysNeutralised(workflows, name))
     }
+  })
+})
+
+describe('every SETUP_NODE reader goes through code() (#7667)', () => {
+  /**
+   * #7667 tightened `assertReaderSane`'s global floor so prose could not help
+   * clear it. Review then measured that the fix was ONE OF THREE FILES: six
+   * more readers scanned raw step lines, and `ci-cache-key.test.js` carried a
+   * byte-identical `>=15` assertion that still counted 16 on a corpus whose
+   * every setup-node mention was a comment. The module's thesis — two spellings
+   * of identical config must not disagree — did not hold one file over.
+   *
+   * This is a SPELLING check and says so, the same caveat the valueless-key
+   * source rule carries: a reader spelled with a different helper, built by
+   * string concatenation, or written across two lines would pass it. It is here
+   * because it catches what people actually type, and because `includes()` is
+   * an unanchored substring match — the one place in this module where a
+   * comment is genuinely indistinguishable from configuration, so a raw reader
+   * is always wrong rather than merely unproven.
+   */
+  const TEST_DIR = new URL('./', import.meta.url)
+  const files = readdirSync(TEST_DIR).filter(n => n.endsWith('.test.js'))
+
+  it('CONTROL: the scan sees a planted raw reader, and enough files to matter', () => {
+    // Without this the rule below is satisfied by zero rows — a filter whose
+    // terms match nothing (docs/false-safety-guards.md).
+    assert.ok(files.length >= 10, `expected many test files, found ${files.length}`)
+    const raw = l => /\.some\(\w+ => \w+\.includes\(SETUP_NODE\)\)/.test(l) && !l.includes('code(')
+    // The token is SPLICED rather than written, because this file is one of the
+    // files the rule below scans — the first version of this control planted
+    // the literal and the rule dutifully reported the control as an offender.
+    // A guard whose own fixture trips it is not a false positive; it is the
+    // guard working on a file nobody thought of, which is the whole point of
+    // scanning the directory rather than a list.
+    const token = `SETUP_${'NODE'}`
+    assert.ok(raw(`  const x = job.steps.filter(s => s.some(l => l.includes(${token})))`), 'the needle must see the pre-#7667 line')
+    assert.ok(!raw(`  const x = job.steps.filter(s => code(s).some(l => l.includes(${token})))`), 'and must not fire on the fixed one')
+    const withReaders = files.filter(n => readFileSync(new URL(n, TEST_DIR), 'utf8').includes('SETUP_NODE'))
+    assert.ok(withReaders.length >= 3, `expected several files to read SETUP_NODE, found ${withReaders.length}`)
+  })
+
+  it('no test file scans raw step lines for the setup-node action', () => {
+    const offenders = []
+    for (const name of files) {
+      readFileSync(new URL(name, TEST_DIR), 'utf8')
+        .split('\n')
+        .forEach((l, i) => {
+          if (/\.some\(\w+ => \w+\.includes\(SETUP_NODE\)\)/.test(l) && !l.includes('code(')) {
+            offenders.push(`${name}:${i + 1}`)
+          }
+        })
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a setup-node reader scans RAW step lines, so a comment quoting the action counts as a step ' +
+        'that uses it — route it through code(), as every other reader does'
+    )
   })
 })
 
