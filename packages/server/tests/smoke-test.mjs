@@ -564,15 +564,23 @@ async function run() {
     })
   }
 
-  process.exit(verdict.exitCode)
+  // RETURNED, not exited. `run()` contains no `process.exit` at all, and that is
+  // an invariant a test can enumerate rather than a string it has to find:
+  // review of #7681 defeated a substring check twice — once with an early
+  // `process.exit(0)` ABOVE this line, once with a `process.exit(0)` below the
+  // verdict — leaving both target substrings intact as dead code. A single exit
+  // at module scope makes both of those visible as an extra exit inside `run()`.
+  return verdict.exitCode
 }
 
-run().catch(err => {
+run()
+  .then(code => process.exit(code))
+  .catch(err => {
   console.error('Fatal:', err)
   if (browser) browser.close()
   // Fatal path: send only SIGTERM (no SIGKILL escalation here) so the server
   // gets a chance to flush session-state on the way out. The graceful cleanup
   // path above is the one that may escalate to SIGKILL if the process hangs.
-  if (managedServer) managedServer.kill('SIGTERM')
-  process.exit(1)
-})
+    if (managedServer) managedServer.kill('SIGTERM')
+    process.exit(1)
+  })

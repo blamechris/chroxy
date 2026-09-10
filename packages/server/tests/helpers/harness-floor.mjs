@@ -7,6 +7,16 @@
  * success. `.github/workflows/ci.yml`'s `Dashboard Smoke (Playwright)` job
  * invokes it directly, so nothing but those counters decides the verdict.
  *
+ * WHAT THIS FLOOR CAN AND CANNOT DO, stated so nobody reads it as a merge gate:
+ * `Dashboard Smoke (Playwright)` is NOT a required status check. CONTRIBUTING.md
+ * records that deliberately — the job "has genuine PR-unrelated flake surface;
+ * it needs a measured flake baseline before it can gate a merge" — so a red run,
+ * including a correctly-reported HARNESS BROKEN, is informational today. This
+ * floor makes a collapsed harness VISIBLE; making it BLOCKING is #7639's
+ * question, not this one's. Verified against branch protection in review of
+ * #7681, because a floor whose blocking power is assumed rather than checked is
+ * the same class of claim this module exists to refuse.
+ *
  * #7654 could not fold it in for a reason worth preserving: its behavioural
  * proof cannot run where the roster guard runs. That guard lives in
  * `scripts-tests`, which deliberately has no `npm ci` and no browser, while
@@ -20,8 +30,10 @@
  * than only inside the job it guards.
  *
  * A LOWER BOUND, not an equality, and the calibration is measured rather than
- * assumed: three consecutive successful `Dashboard Smoke` runs on main each
- * recorded 22 cases (runs 34505429522, 34507108179, 34508854766). The count is
+ * assumed: SIXTEEN successful `Dashboard Smoke` runs sampled across 2026-09-05
+ * to 2026-09-10 each recorded exactly 22 cases — 16/16, no variance. Review of
+ * #7681 widened the sample from the three this comment first cited, two of
+ * which were feature branches rather than main as claimed. The count is
  * not a constant the way the other sixteen are — several checks are explicitly
  * best-effort and record only on the paths they reach ("a missing cr-controls
  * is logged, not failed") — so an equality would go red on a legitimate branch

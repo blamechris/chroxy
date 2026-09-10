@@ -58,14 +58,36 @@ describe('smoke-test harness floor (#7657)', () => {
     assert.equal(v.exitCode, 1)
   })
 
-  it('the harness actually USES the floor — not just exports it', () => {
-    // The wiring, which the four cases above cannot see: they exercise the pure
-    // function, and a harness that imported it and then exited on `failed > 0`
-    // anyway would leave every one of them green. That is the
-    // guard-wired-to-none-of-its-callers shape.
+  it('`run()` reaches the floored verdict on EVERY path — no exit can bypass it', () => {
+    // This replaced a substring check, and the replacement is the point.
+    //
+    // The first version asserted that the source CONTAINED
+    // `harnessVerdict(results, SMOKE_MIN_CASES)` and `process.exit(verdict.exitCode)`.
+    // Review of #7681 defeated it twice, with mutants that leave both strings
+    // intact as dead code: an early `process.exit(0)` inserted ABOVE the summary
+    // block, and a `process.exit(0)` inserted after cleanup with the verdict exit
+    // left unreachable below it. Both make a zero-case run exit 0 — the exact
+    // defect this PR exists to prevent — and both passed 5/5.
+    //
+    // A presence check cannot see an ADDED bypass; only an enumeration can. So
+    // `run()` now RETURNS its code and the invariant is that it performs no exit
+    // at all: any bypass has to add one, and adding one fails here.
     const src = readFileSync(new URL('./smoke-test.mjs', import.meta.url), 'utf8')
-    assert.ok(src.includes('harnessVerdict(results, SMOKE_MIN_CASES)'), 'it must compute the verdict')
-    assert.ok(src.includes('process.exit(verdict.exitCode)'), 'and exit on it')
-    assert.ok(!/process\.exit\(failed > 0/.test(src), 'the old failure-only exit must be gone')
+    const runBody = src.slice(src.indexOf('async function run()'), src.lastIndexOf('\nrun()'))
+    assert.ok(runBody.length > 1000, 'precondition: the run() body was actually located')
+    assert.deepEqual(
+      runBody.split('\n').map((l, i) => [i, l]).filter(([, l]) => /process\.exit\s*\(/.test(l) && !l.trimStart().startsWith('//')),
+      [],
+      '`run()` must not exit — it returns a code, so every path reaches the floored verdict'
+    )
+    assert.ok(/return verdict\.exitCode/.test(runBody), 'and the code it returns is the verdict')
+
+    // Exactly one exit carries that code, at module scope, and the fatal handler
+    // never exits 0 — a zero there would be the same bypass one level out.
+    const tail = src.slice(src.lastIndexOf('\nrun()'))
+    const exits = tail.split('\n').filter(l => /process\.exit\s*\(/.test(l) && !l.trimStart().startsWith('//'))
+    assert.equal(exits.length, 2, `expected exactly two exits at module scope, found ${exits.length}`)
+    assert.ok(/process\.exit\(code\)/.test(exits[0]), 'the success path exits on the returned code')
+    assert.ok(/process\.exit\(1\)/.test(exits[1]), 'the fatal path exits non-zero')
   })
 })
