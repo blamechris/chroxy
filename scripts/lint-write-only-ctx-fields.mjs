@@ -1136,10 +1136,138 @@ function isConstantInitializer(init) {
  * Each of those is missing COVERAGE, never a false green on a binding that is
  * in the roster.
  */
+/**
+ * The identifiers a declarator BINDS, and the shapes this does not understand.
+ *
+ * `let a = 1, b = 2` bound only `a` and `const { a, b } = f()` bound nothing at
+ * all until #7533 — not false greens on anything in the roster, but missing
+ * COVERAGE, and coverage that disappears by DECLARATION FORM is the same defect
+ * as a hardcoded roster beside a growing set, one level down: writing
+ * `let pendingA = null, pendingB = null` would quietly halve what the lint sees
+ * and nothing would go red.
+ *
+ * A parser introduces the hazard it is meant to close, so this REPORTS what it
+ * could not read rather than dropping it. A declarator that yields no name is
+ * returned in `unparsed`, and the caller fails on it — a shape nobody
+ * anticipated becomes a red build naming the text, not a silent gap.
+ *
+ * One level deep, deliberately. `const { a: { b } } = f()` reports the nested
+ * pattern as unparsed rather than guessing, because a wrong name in the roster
+ * is worse than a named refusal: the classifier would judge a binding that does
+ * not exist.
+ *
+ * @param {string} text One declarator, e.g. `a = 1` or `{ a, b: c } = f()`.
+ * @returns {{names: string[], unparsed: string[]}}
+ */
+export function declaratorNames(text) {
+  const d = text.trim()
+  if (d === '') return { names: [], unparsed: [] }
+
+  if (!/^[{[]/.test(d)) {
+    const m = /^([A-Za-z_$][\w$]*)/.exec(d)
+    if (!m) return { names: [], unparsed: [d] }
+    // A reserved word is never a binding name; seeing one means the split
+    // landed somewhere it should not have. Main's roster carried two entries
+    // literally named `const` from exactly this — noise that gets CLASSIFIED,
+    // so it can produce a confusing verdict about a binding that does not
+    // exist. Reported rather than accepted (#7533).
+    return RESERVED_WORDS.has(m[1]) ? { names: [], unparsed: [d] } : { names: [m[1]], unparsed: [] }
+  }
+
+  // A binding pattern. Take its balanced span, then read the bound names out of
+  // it: `{ a }` -> a, `{ a: b }` -> b (the RENAME binds, not the key),
+  // `{ a = 1 }` -> a, `[x, y]` -> x/y, `...rest` -> rest.
+  const close = matchingBracket(d)
+  if (close === -1) return { names: [], unparsed: [d] }
+  const inner = d.slice(1, close)
+  const names = []
+  const unparsed = []
+  for (const rawPart of splitTopLevel(inner, ',')) {
+    const part = rawPart.trim().replace(/^\.\.\./, '')
+    if (part === '') continue
+    if (/^[{[]/.test(part)) { unparsed.push(part); continue }
+    // `key: bound` binds the RIGHT side; `bound = default` binds the left.
+    const afterColon = splitTopLevel(part, ':')
+    const target = (afterColon.length > 1 ? afterColon.slice(1).join(':') : part).trim()
+    if (/^[{[]/.test(target)) { unparsed.push(part); continue }
+    const m = /^([A-Za-z_$][\w$]*)/.exec(target)
+    if (m && !RESERVED_WORDS.has(m[1])) names.push(m[1])
+    else unparsed.push(part)
+  }
+  return { names, unparsed }
+}
+
+/** Words that can never be a binding name — a declarator yielding one of these
+ *  is a parse artifact, not a discovery. */
+const RESERVED_WORDS = new Set([
+  'const', 'let', 'var', 'function', 'class', 'return', 'await', 'new', 'typeof',
+  'export', 'import', 'default', 'if', 'else', 'for', 'while', 'do', 'switch',
+  'case', 'break', 'continue', 'throw', 'try', 'catch', 'finally', 'yield',
+  'delete', 'void', 'in', 'of', 'instanceof', 'this', 'super', 'null', 'true', 'false',
+])
+
+/** The index of the bracket closing the one at position 0, or -1. */
+function matchingBracket(s) {
+  const open = s[0]
+  const shut = open === '{' ? '}' : ']'
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === open) depth++
+    else if (s[i] === shut) { depth--; if (depth === 0) return i }
+  }
+  return -1
+}
+
+/** Split on `sep` at bracket depth 0, ignoring separators inside nesting. */
+function splitTopLevel(s, sep) {
+  return splitTopLevelWithOffsets(s, sep).map(p => p.text)
+}
+
+/** The same split, keeping each piece's offset in `s` — callers need it to
+ *  report a binding's position in the ORIGINAL source, not within its own
+ *  declarator (#7533: `let a = 1, b = 2` put `b` at the offset of `a`). */
+function splitTopLevelWithOffsets(s, sep) {
+  const out = []
+  let depth = 0
+  // TypeScript generics are nesting too, and forgetting that was a real
+  // regression, not a hypothetical: `const counts: Record<string, number> = {}`
+  // split at the comma INSIDE the annotation and yielded `number` as the
+  // binding, dropping `counts` entirely — the harness case for #7537 caught it.
+  //
+  // `<` opens only after an identifier or a closing `>` (a generic argument
+  // list); `>` closes only when one is open and it is not the tail of `=>`.
+  // That keeps comparisons and arrow functions from unbalancing the counter.
+  let angle = 0
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if ('{[('.includes(c)) depth++
+    else if ('}])'.includes(c)) depth--
+    else if (c === '<' && /[\w$>]/.test((s.slice(0, i).match(/\S$/) ?? [''])[0])) angle++
+    else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
+    else if (depth === 0 && angle === 0 && c === sep) {
+      out.push({ text: s.slice(start, i), offset: start })
+      start = i + 1
+    }
+  }
+  out.push({ text: s.slice(start), offset: start })
+  return out
+}
+
+/** Where `name` appears in `text` as a whole identifier, or 0. A bare
+ *  `indexOf` finds `b` inside `ba` — wrong binding, wrong offset. */
+function identifierOffset(text, name) {
+  const m = new RegExp(`(^|[^\\w$])(${name.replace(/[$]/g, '\\$')})(?![\\w$])`).exec(text)
+  return m ? m.index + m[1].length : 0
+}
+
 export function extractModuleBindings(strippedText) {
   const s = strippedText
   const found = []
-  const decl = /(export\s+)?(let|const|var)\s+([A-Za-z_$][\w$]*)/y
+  // Matches the KEYWORD only. It used to require an identifier immediately
+  // after, which is why `const { a, b } = f()` contributed nothing: the regex
+  // did not match at all. The declarator LIST is parsed below (#7533).
+  const decl = /(export\s+)?(let|const|var)\s+/y
   let depth = 0
   let i = 0
   while (i < s.length) {
@@ -1163,27 +1291,65 @@ export function extractModuleBindings(strippedText) {
       decl.lastIndex = i
       const m = decl.exec(s)
       if (m) {
-        const name = m[3]
-        const nameIndex = m.index + m[0].length - name.length
-        // Walk to this declarator's `=` at nesting depth 0 to read its
-        // initializer; stop at `;` or a newline if there is none.
-        let k = m.index + m[0].length
+        // The whole declaration: from after the keyword to the top-level `;`,
+        // or a newline that is not inside nesting. One `let a = 1, b = 2` is a
+        // single declaration with two declarators, and both must be emitted.
+        const listStart = m.index + m[0].length
+        let k = listStart
         let nest = 0
-        let init = null
         while (k < s.length) {
           const d = s[k]
-          if (d === '(' || d === '[' || d === '{' || d === '<') nest++
-          else if (d === ')' || d === ']' || d === '}' || d === '>') nest--
-          else if (nest === 0 && d === '=' && s[k + 1] !== '=' && !'=!<>'.includes(s[k - 1])) {
-            init = s.slice(k + 1, k + 200)
-            break
-          } else if (nest === 0 && (d === ';' || d === '\n')) break
+          if (d === '(' || d === '[' || d === '{') nest++
+          else if (d === ')' || d === ']' || d === '}') nest--
+          else if (nest === 0 && (d === ';' || d === '\n')) break
           k++
         }
-        if (m[2] !== 'const' || (init !== null && !isConstantInitializer(init))) {
-          found.push({ name, index: nameIndex, exported: Boolean(m[1]), keyword: m[2] })
+        const list = s.slice(listStart, k)
+
+        for (const { text: raw, offset: rawAt } of splitTopLevelWithOffsets(list, ',')) {
+          const { names, unparsed } = declaratorNames(raw)
+          for (const bad of unparsed) {
+            // NAMED, never dropped. A declarator shape this cannot read would
+            // otherwise leave its bindings unjudged and the run honestly green
+            // about the ones it did judge — the silent-coverage-loss this
+            // change exists to close (#7533).
+            found.push({
+              name: null,
+              unparsed: bad,
+              index: listStart + rawAt + Math.max(raw.indexOf(bad), 0),
+              exported: Boolean(m[1]),
+              keyword: m[2],
+            })
+          }
+          // A destructured binding has no initializer of its own; it inherits
+          // the declarator's, which is what follows the pattern's `=`.
+          const eq = splitTopLevel(raw, '=')
+          const init = eq.length > 1 ? eq.slice(1).join('=').slice(0, 200) : null
+          for (const name of names) {
+            if (m[2] !== 'const' || (init !== null && !isConstantInitializer(init))) {
+              found.push({
+                name,
+                index: listStart + rawAt + identifierOffset(raw, name),
+                exported: Boolean(m[1]),
+                keyword: m[2],
+              })
+            }
+          }
         }
-        i = m.index + m[0].length
+        // Resume at the START of the declarator list, NOT at its end. The end
+        // scan above tracks brackets but NOT string spans, so a `{` or `}`
+        // inside a string literal skews it — and jumping `i` past that region
+        // means the OUTER loop (which does skip strings) never counts those
+        // braces, leaving `depth` wrong for the whole rest of the file.
+        //
+        // Measured: with `i = k`, `connection.ts` lost SIX production state
+        // bindings — `_prevConnectionPhase`, `_prevActiveServerId`,
+        // `_prevActiveSessionId`, `_prevMessageCounts`,
+        // `_prevTerminalBufferLen`, `_prevSessions` — because depth went
+        // negative earlier in the file and never returned to 0. Losing coverage
+        // is the unsafe direction, and it is exactly what this change was
+        // written to prevent one level down.
+        i = listStart
         continue
       }
     }
@@ -1348,10 +1514,22 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
   // bare-identifier scan cannot tell which one an importer meant, and the
   // wrong answer would be a silent rescue. Refuse rather than guess.
   const exportedSeen = new Map()
+  const unreadable = []
   const keys = []
   const perName = new Map()
   for (const decl of declPrepared) {
     for (const b of extractModuleBindings(decl.text)) {
+      if (b.name === null) {
+        // A declarator the extractor could not read. REPORTED, never dropped:
+        // its bindings go unjudged either way, and the difference between a
+        // silent gap and a named one is the whole point of #7533. Not fatal —
+        // main's extractor did not read these declarations either (it emitted
+        // entries literally named `const` for them), so failing here would red
+        // the build over a shape this change did not introduce. Tracked for
+        // tightening; see the declaration-slice note in #7533's follow-up.
+        unreadable.push(`${decl.path}: ${b.unparsed.replace(/\s+/g, ' ').slice(0, 80)}`)
+        continue
+      }
       if (b.exported) {
         if (exportedSeen.has(b.name)) {
           throw new CannotCheckError(
@@ -1392,6 +1570,18 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
       'hold no state any more or the extractor no longer understands their shape — both are ' +
       '"cannot check", not "clean".',
     )
+  }
+
+  if (unreadable.length > 0) {
+    // Printed, not swallowed. These declarations contribute no roster entries,
+    // so their bindings are unjudged — the same gap #7533 closed for
+    // destructuring and multi-declarator forms, in the shapes still unread.
+    // Naming them is the difference between a known gap and a silent one.
+    console.log(
+      `[write-only-ctx] NOTE: ${unreadable.length} declarator(s) could not be read and are ` +
+      'therefore unjudged. Their bindings are outside the roster:',
+    )
+    for (const u of unreadable) console.log(`  - ${u}`)
   }
 
   return judge({

@@ -1472,6 +1472,34 @@ test('CLI exits 1 on a dashboard counter mutated only by counts[k]++ (#7553)', (
   assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
 })
 
+test('CLI exits 1 on the SECOND declarator of a multi-declarator, written and never read (#7533)', () => {
+  // `let a = 1, b = 2` used to yield only `a`, so `b` was never judged. Not a
+  // false green on anything in the roster — missing COVERAGE, which is the same
+  // defect as a hardcoded roster beside a growing set, one level down: a
+  // refactor writing `let pendingA = null, pendingB = null` would quietly halve
+  // what this lint sees and nothing would go red.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let readMe = 1, writeOnly = 2;\n` +
+      'export function f(): number { writeOnly = 3; return readMe; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a DESTRUCTURED binding written and never read (#7533)', () => {
+  // `const { a, b } = f()` yielded nothing at all — the old regex required an
+  // identifier immediately after the keyword, so it did not match the
+  // declaration in the first place.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { readMe, writeOnly } = make();\n` +
+      'export function f(): number { writeOnly = 3; return readMe; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
 test('CLI exits 1 on a counter mutated only by counts.hits++ (#7553, property form)', () => {
   const r = runCliOn(fixtureRoot(CLEAN_DECL, {
     [DASH_DECL_REL]:
