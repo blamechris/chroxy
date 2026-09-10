@@ -429,8 +429,18 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * every job exactly one of `runs-on:` or `uses:`. So the declared side counts
  * that required KEY in the raw text, at any indent, with no notion of a job or
  * a step — nothing of `parseSteps`'s list-marker arithmetic — and the parsed
- * side is `j.steps.length`. Equality, for the same reason the jobs row uses
- * one: parsed > declared means an invented step.
+ * side is `j.steps.length`. Equality, not a floor, and the reason is NOT the
+ * one the jobs row gives. That row says parsed > declared means an invented
+ * job; here that direction is mostly the declared side failing to recognise a
+ * legal key spelling — measured, on real `parseJobs` output: `- "run": echo hi`
+ * (quoted key) gives 2/0, `- run : echo hi` (space before the colon) 1/0, and
+ * `- { run: echo hi }` (a flow-mapping step, #7669) 1/0. Every one of those is
+ * a real step this row cannot see the declaration of. A floor in either
+ * direction would pass over all of them; equality refuses the corpus and names
+ * the file, which is the fail-closed behaviour this module wants. The
+ * INVENTED-step reading is still true, but only for a SYNTHETIC caller that
+ * builds `jobs` and `text` separately — the same qualification
+ * `assertEveryFileContributes` makes about its own `>` direction.
  *
  * VALUE-AGNOSTIC ON PURPOSE, unlike `assertEveryFileContributes`'s `RUN_KEY`.
  * A `run:` whose value sits on the next line is still a step, and requiring a
@@ -439,7 +449,9 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * count really is 1 and only the BODY is lost. A guard that is wrong about its
  * own quantity for a legal spelling is worse than one that is silent.
  *
- * TWO EXCLUSIONS, BOTH LOAD-BEARING, both pinned by their own case:
+ * TWO EXCLUSIONS, BOTH LOAD-BEARING, both pinned by their own case — and they
+ * are the two the LIVE CORPUS needs, not an exhaustive list of the places a
+ * mapping key can be spelled `run` or `uses`. See the false reds below:
  *   - A job's own `uses:` — the reusable-workflow call — sits at the job-key
  *     indent with no list marker. It is counted as a JOB above; counting it
  *     here would declare a step for a job that has none.
@@ -478,10 +490,21 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * WHAT IT CANNOT SEE. It is a per-FILE total, so one job losing a step while a
  * sibling gains one agrees — the same limitation both rows below carry.
  * FALSE REDS, disclosed rather than guarded for the same reason as theirs: a
- * `run:`- or `uses:`-shaped line inside a block scalar's BODY, a `with:` input
- * literally named `run` or `uses`, and a step carrying both keys or neither.
- * The last two are invalid to GitHub; none exists in the corpus; all fail
- * CLOSED.
+ * `run:`- or `uses:`-shaped line inside a block scalar's BODY, ANY mapping key
+ * literally named `run` or `uses` outside a step — a `with:` input, an `env:`
+ * variable (measured: a job-level `env:` -> `run:` gives declared 2 against
+ * parsed 1) — and a step carrying both keys or neither. The last is invalid to
+ * GitHub; none exists in the corpus; all fail CLOSED.
+ *
+ * ONE COUPLING TO THE JOBS ROW, undocumented until review of this change and
+ * worth stating because nothing in either row's comment implied it. The `<= 4`
+ * above is the step row's only indent literal, and it is safe ONLY because
+ * `declaredJobs` requires `runs-on:`/`uses:` at EXACTLY four spaces: a job body
+ * shallow enough for a bare-dash step's continuation line to land at <= 4 has
+ * already failed the jobs row, and a job body that clears the jobs row cannot
+ * put one there (measured: dash at 4, continuation at 5, declared 2 / parsed 1,
+ * RED). Loosen `^ {4}` in `declaredJobs` without revisiting this and the
+ * absorbed-step case this row exists for becomes silently GREEN again.
  */
 export function assertEveryFileParsed(workflows) {
   const declaredJobs = text =>
@@ -513,8 +536,9 @@ export function assertEveryFileParsed(workflows) {
   assert.deepEqual(
     stepDisagreements,
     [],
-    'a workflow file yields a different number of steps than its text declares — `parseSteps` has ' +
-      'stopped seeing a step, so every rule anchored to a step body reads a neighbour\'s step or none'
+    'a workflow file yields a different number of steps than its text declares — one of the two ' +
+      'readings has stopped recognising a step, so a rule anchored to a step body reads a ' +
+      'neighbour\'s step, none, or one the text does not contain'
   )
 
   const stepless = workflows.flatMap(w =>
@@ -556,6 +580,20 @@ function declaredSteps(text) {
  * Blank and comment lines are skipped for the same reason `runsOnOf` skips
  * them: a comment between the two keys must not hide the relationship.
  *
+ * The `(?:#.*)?$` is the trailing-comment allowance `parseJobs` already uses on
+ * a job-id line (#7499), and it is not decoration: `defaults: # bash everywhere`
+ * is legal YAML that this repo's style writes freely, and a bare `$` anchor
+ * misses it, so the `run:` beneath counts as a step and the file goes RED at
+ * declared+1. Measured before the fix: declared 2, parsed 1. Found by review of
+ * this change, not by writing it.
+ *
+ * FOUR SIBLING ANCHORS IN THIS MODULE STILL LACK IT — `parseSteps`'s and
+ * `jobShell`'s `steps:`, and `jobShell`'s `defaults:` and `run:`. Named here
+ * rather than fixed here: each has its own blast radius (`jobShell` returning
+ * undefined decides whether a run block is fed to `bash -n`), and fixing three
+ * of four while walking past the fourth is this repo's adjacent-field pattern.
+ * Tracked separately.
+ *
  * Read by PARENT, and by nothing else. This carried an indent comparison as
  * well — the parent had to be SHALLOWER — until a mutation sweep proved it
  * inert: no legal spelling can falsify it, because `defaults:` is valid only at
@@ -568,7 +606,7 @@ function declaredSteps(text) {
 function isDefaultsRunHead(lines, at) {
   for (let i = at - 1; i >= 0; i--) {
     if (/^\s*(?:#|$)/.test(lines[i])) continue
-    return /^\s*defaults:\s*$/.test(lines[i])
+    return /^\s*defaults:\s*(?:#.*)?$/.test(lines[i])
   }
   return false
 }
@@ -678,8 +716,12 @@ function isDefaultsRunHead(lines, at) {
  * And a step written as a bare `- ` with its keys on the following line is
  * absorbed into the previous step by `parseSteps`, which neither row here can
  * see: the run half counts one body per step and the setup half counts lines,
- * so a merge changes neither total. A per-file STEP-COUNT row would close it
- * with the same different-signal method; tracked separately.
+ * so a merge changes neither total. CLOSED IN #7668, one level up rather than
+ * here — `assertEveryFileParsed`'s step-count row uses the same
+ * different-signal method against the required `run:`/`uses:` step key. The
+ * limitation is still true OF THESE TWO ROWS, which is why it is corrected in
+ * place rather than deleted: they remain blind to it, and something else now
+ * is not.
  */
 export function assertEveryFileContributes(workflows) {
   // A `run:`-shaped line with a non-empty value. The value matters: a job's
