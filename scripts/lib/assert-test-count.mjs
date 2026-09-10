@@ -27,11 +27,15 @@
  *
  *   1. It runs the underlying test command (passed as argv), streaming all
  *      output through unchanged so coverage + TAP land on the terminal/CI log.
- *   2. From the aggregate TAP summary it reads `# tests N` and `# fail M`.
+ *   2. From the aggregate TAP summary it reads `# tests N`, `# fail M` and
+ *      `# cancelled C`.
  *   3. It exits non-zero if:
  *        - the summary is missing (the runner died before reporting), OR
  *        - the run was killed by a signal, OR
  *        - `M > 0` (real test failures — mirrors the runner's own exit), OR
+ *        - `C > 0` (a `before()` hook threw, so tests were CANCELLED rather than
+ *          run — counted in `N` and leaving `M` at zero, so neither other check
+ *          can see them), OR
  *        - `N < EXPECTED_MIN_TESTS` (enough of the suite went missing to fall
  *          below the documented floor — a glob that stopped matching, a file
  *          that failed to load, a bad merge that deleted a directory).
@@ -146,6 +150,7 @@ child.on('close', (code, signal) => {
 
   const total = lastNumber('tests')
   const failed = lastNumber('fail')
+  const cancelled = lastNumber('cancelled')
 
   if (signal) {
     console.error(`\n[assert-test-count] FAIL: test process was killed by signal ${signal}.`)
@@ -162,6 +167,34 @@ child.on('close', (code, signal) => {
 
   if (failed > 0) {
     console.error(`\n[assert-test-count] FAIL: ${failed} test(s) failed (see TAP output above).`)
+    return fail()
+  }
+
+  // CANCELLED tests are the failure mode that looks most like a healthy run,
+  // and both floors above are blind to it (#7648). When a `before()` hook
+  // throws, `node --test` marks the tests it guarded `cancelled`, COUNTS them in
+  // `# tests` as though they ran, and leaves `# fail 0`. Measured on node
+  // v26.8.1: a throwing `before()` over three tests gives
+  // `# tests 4 / # pass 1 / # fail 0 / # cancelled 3`.
+  //
+  // So `failed > 0` does not fire, and the count floor cannot fire either —
+  // that is the sharp part. Cancelled tests are INCLUDED in `# tests`, so a
+  // hook failure that cancels a whole describe leaves the total unchanged. The
+  // floor exists to catch "part of the suite did not report" (#5480), and this
+  // is a way for part of the suite not to report while the count says otherwise.
+  //
+  // The build did still go red, because the child's exit code is propagated at
+  // the end. But this wrapper printed `OK: N tests ran` on the way there, and a
+  // wrapper whose stated purpose is that "ran and passed" and "never ran" are
+  // different outcomes must not call the third one OK.
+  if (cancelled !== null && cancelled > 0) {
+    console.error(
+      `\n[assert-test-count] FAIL: ${cancelled} test(s) were CANCELLED, not run.\n` +
+      '  A `before()`/`beforeEach()` hook threw, so the tests it guarded never executed.\n' +
+      '  They are still counted in `# tests` and leave `# fail 0`, which is why neither\n' +
+      '  the failure check nor the count floor above can see this. Fix the hook — the\n' +
+      '  tests underneath it have reported nothing about the code they cover.',
+    )
     return fail()
   }
 
