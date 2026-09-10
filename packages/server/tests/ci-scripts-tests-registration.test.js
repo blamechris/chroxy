@@ -964,6 +964,23 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
    * `actual` and `expected` — ~200 KB of TAP per call — which is the payload
    * that wedged this runner in #7340.
    */
+  const stepsOf = ws => ws.reduce((n, w) => n + w.jobs.reduce((m, j) => m + j.steps.length, 0), 0)
+
+  /**
+   * The real corpus's step count, read ONCE. `mutated()` runs for every
+   * mutation case, and re-reading and re-parsing seven workflow files each time
+   * is I/O this suite does not need (Copilot, #7685). The real corpus cannot
+   * change mid-run, so a single read is not a staleness risk.
+   *
+   * Lazy rather than computed in `before()`, so a case that never mutates pays
+   * nothing and the helper stays self-contained.
+   */
+  let realSteps = null
+  const realStepCount = async () => {
+    if (realSteps === null) realSteps = stepsOf(await readWorkflows())
+    return realSteps
+  }
+
   // MECHANISM ATTRIBUTION, decided (#7649's first criterion).
   //
   // The landing check below proves the TEXT changed. It cannot prove a case
@@ -1018,9 +1035,8 @@ describe('the registration rule goes RED — one mutation at a time (#7637)', ()
     // because a number beside a growing set is the first cause in
     // docs/false-safety-guards.md. A single mutation removes at most a step or
     // two; losing a fifth of the corpus is a collapse whatever the mutation.
-    const stepsOf = ws => ws.reduce((n, w) => n + w.jobs.reduce((m, j) => m + j.steps.length, 0), 0)
-    const real = stepsOf(await readWorkflows())
     const got = stepsOf(mutatedWorkflows)
+    const real = await realStepCount()
     assert.ok(
       got >= real * 0.8,
       `the mutated copy collapsed: it yields ${got} steps against the real corpus's ${real}. ` +
