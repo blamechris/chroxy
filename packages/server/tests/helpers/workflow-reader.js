@@ -216,12 +216,87 @@ export async function readWorkflows(dir = new URL('../../../../.github/workflows
 }
 
 /**
+ * A step's `run:` key line, or undefined — the FIRST line of the step shaped
+ * like the key, which is the same line `stepRun()` acts on.
+ *
+ * Deliberately a loose line-shape match rather than a second copy of
+ * `stepRun()`'s indent arithmetic. It exists to CLASSIFY a step's YAML spelling
+ * for the floors below, and a classifier that reproduced `stepRun()`'s internals
+ * would degrade in step with it — the drift this module exists to prevent.
+ *
+ * Taking the FIRST match is what keeps a `run:`-shaped line INSIDE a block
+ * scalar's body from being read as the key: the real key precedes its own body.
+ */
+const runKeyLine = stepLines => stepLines.find(l => /^\s*(?:-\s+)?run:/.test(l))
+
+/**
+ * Is this `run:` key line a BLOCK scalar header — `|`, `>`, and the chomping
+ * and indent-indicator forms — as opposed to a plain or quoted scalar on the
+ * key line itself?
+ */
+const isBlockRunHead = line => /^\s*(?:-\s+)?run:\s*[|>][-+]?\d*\s*(?:#.*)?$/.test(line)
+
+/**
+ * Floors for the two `run:` spellings, calibrated 2026-09-09 against the live
+ * corpus: 137 run steps across 7 workflows — **42 block-spelled** (41 of which
+ * yield a multi-line body) and **95 plain-spelled**. Loose, like the floors
+ * above, for the same reason: ~50% headroom catches a branch that has collapsed
+ * without blaming the reader for someone else's refactor.
+ *
+ * The 42 is cross-checked by an unrelated method: #7647 reached the same number
+ * from the other direction, deleting `stepRun()`'s block branch and watching the
+ * body count fall. Its figures were 135 run bodies, 93 plain, 42 block; the
+ * corpus has since gained two plain scalars and no block ones, which is why the
+ * plain number moved and the block number did not.
+ *
+ * All 42 block heads are `|` today — the corpus contains ZERO `>` folded
+ * blocks. So the `>` half of `isBlockRunHead` is carried for correctness, not
+ * exercised by this floor; `ci-workflow-reader.test.js` covers folding on
+ * synthetic input, which is where a shape the real directory lacks belongs.
+ */
+export const MIN_BLOCK_RUN_STEPS = 20
+export const MIN_PLAIN_RUN_STEPS = 40
+
+/**
  * The shared positive control every consumer must run BEFORE its rules.
  *
  * Thresholds are LOOSE on purpose. Their job is to catch a reader that has
  * stopped understanding these files (which yields zero), not to pin today's job
  * count — sitting them on exact numbers would turn "a job was merged away" into
  * a failure that blames the reader for someone else's refactor.
+ *
+ * WHY IT ALSO EXERCISES `stepRun` (#7647)
+ * ---------------------------------------
+ * The floors above read RAW STEP LINES and never called `stepRun()` — the
+ * accessor four of the eight `ci-*.test.js` consumers now anchor every
+ * assertion to. Measured: deleting `stepRun()`'s block-scalar branch drops 42
+ * of 135 run bodies, and this function — the one whose whole job is to say "the
+ * reader is still working" — reported the reader healthy, with every core test
+ * of `ci-scripts-tests-registration.test.js` staying green. A third of the
+ * reader's output could vanish behind a clean bill of health.
+ *
+ * Each spelling is floored SEPARATELY, and each step is classified by its raw
+ * YAML head rather than by the shape of what `stepRun` returned. Classifying by
+ * the output would be circular — it would ask the mutated function to report
+ * its own mutation — and it is also wrong on this corpus: one of the 42
+ * block-spelled steps yields a single-line body, so "multi-line means block"
+ * both undercounts and, run backwards, lets a surviving block branch stand in
+ * for a dead plain one.
+ *
+ * The discriminators are sound in the direction that matters. ONLY the block
+ * branch can emit a newline, so "N block-spelled steps yielded a multi-line
+ * body" cannot be satisfied by a plain scalar; and the plain floor counts only
+ * steps whose head is not a block head, so a live block branch cannot vouch for
+ * a dead plain one.
+ *
+ * NOT floored: the QUOTED branch (`run: "echo hi"`). This corpus contains zero
+ * quoted run heads, so a floor over them would be a gate satisfied by zero rows
+ * — #7503, and the "filter whose terms match nothing" cause in
+ * docs/false-safety-guards.md. `ci-workflow-reader.test.js` covers that branch
+ * with synthetic input, which is the right home for a shape the real directory
+ * does not have. Also not caught here: a block branch that still returns
+ * multi-line text but folds `>` wrongly — that is `fold()`'s own unit tests'
+ * job, and a floor cannot see it.
  */
 export function assertReaderSane(workflows) {
   assert.ok(workflows.length >= 5, `expected >=5 workflow files, found ${workflows.length}`)
@@ -242,6 +317,32 @@ export function assertReaderSane(workflows) {
     setupNodeSteps.length >= 15,
     `expected >=15 setup-node steps across all workflows, found ${setupNodeSteps.length} — ` +
       'the reader is probably broken'
+  )
+
+  const runSteps = workflows.flatMap(w =>
+    w.jobs.flatMap(j =>
+      j.steps
+        .map(s => ({ head: runKeyLine(s), body: stepRun(s) }))
+        .filter(s => s.head !== undefined)
+    )
+  )
+  const blockBodies = runSteps.filter(
+    s => isBlockRunHead(s.head) && typeof s.body === 'string' && s.body.includes('\n')
+  )
+  assert.ok(
+    blockBodies.length >= MIN_BLOCK_RUN_STEPS,
+    `expected >=${MIN_BLOCK_RUN_STEPS} block-scalar \`run:\` steps to yield a multi-line body, found ` +
+      `${blockBodies.length} — stepRun()'s BLOCK-scalar branch has stopped producing anything. ` +
+      'The floors above cannot see this: they read raw step lines and never call stepRun().'
+  )
+  const plainBodies = runSteps.filter(
+    s => !isBlockRunHead(s.head) && typeof s.body === 'string' && s.body.length > 0 && !s.body.includes('\n')
+  )
+  assert.ok(
+    plainBodies.length >= MIN_PLAIN_RUN_STEPS,
+    `expected >=${MIN_PLAIN_RUN_STEPS} plain-scalar \`run:\` steps to yield a body, found ` +
+      `${plainBodies.length} — stepRun()'s PLAIN-scalar branch has stopped producing anything. ` +
+      'A live block branch cannot stand in for it: these are counted by their raw YAML head.'
   )
 }
 
