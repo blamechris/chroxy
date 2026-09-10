@@ -831,6 +831,37 @@ describe('workflow reader: maskQuotedData (#7661)', () => {
   })
 })
 
+describe('workflow reader: the mask stays aligned past an ASTRAL character (#7665)', () => {
+  // Copilot's finding. `[...line]` iterates CODE POINTS; the scan, `roles`, and
+  // every index a caller carries in from `namePositions` are UTF-16 CODE UNITS.
+  // One emoji made the mask a character shorter than its line, and from that
+  // point on every position was off by one.
+  const ROCKET = '\u{1F680}' // U+1F680, a surrogate pair: length 2, one code point
+
+  it('CONTROL: the two lines differ only by the astral character', () => {
+    // Without this the case below is satisfied by an ASCII line that was never
+    // going to desync — the mutation has to be the emoji and nothing else.
+    assert.equal(`echo "a" && npm ci`.length, 18)
+    assert.equal(`echo "${ROCKET}" && npm ci`.length, 19, 'the emoji is two code units wide')
+  })
+
+  it('the masked line is the same LENGTH as its input', () => {
+    for (const line of [`echo "${ROCKET}" && npm ci`, `npm ci # ${ROCKET}`, `echo '${ROCKET}${ROCKET}'`]) {
+      assert.equal(maskQuotedData(line).length, line.length, line)
+    }
+  })
+
+  it('an npm AFTER an astral character is still an invocation, not a quoted mention', () => {
+    // The bug in the direction that matters: the offset masked the unquoted
+    // `&&`, the segment before `npm` stopped being empty, and a real resolve
+    // read as prose. `commandUses` returned `quoted` — a resolve that vanishes.
+    assert.deepEqual(commandUses(`echo "${ROCKET}" && npm ci`, 'npm').map(u => u.kind), ['invocation'])
+    assert.deepEqual(commandUses(`echo "${ROCKET}" && npm ci`, 'npm')[0].args, ['ci'])
+    // …and one genuinely inside the string is still masked.
+    assert.deepEqual(commandUses(`echo "${ROCKET} npm ci"`, 'npm').map(u => u.kind), ['quoted'])
+  })
+})
+
 describe('workflow reader: hasUnclosedQuoting (#7661)', () => {
   it('CONTROL: a balanced line is closed', () => {
     assert.equal(hasUnclosedQuoting('echo "a" \'b\' `c`'), false)

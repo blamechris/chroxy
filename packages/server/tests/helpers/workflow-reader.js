@@ -1321,7 +1321,15 @@ export function hasUnclosedQuoting(line) {
  * reading a single line has an incomplete picture of it.
  */
 function scanQuoting(line) {
-  const out = [...line]
+  // `split('')` and NOT `[...line]`: the spread iterates CODE POINTS, while this
+  // loop — and `roles`, and every index a caller carries in from
+  // `namePositions` — is in UTF-16 CODE UNITS. One astral character (an emoji)
+  // makes `out` one element shorter than `line`, and from that character on the
+  // mask is offset by one against the line it is supposed to align with.
+  // `echo "🚀" && npm ci` then masked its `&&` and reported the real `npm ci`
+  // as QUOTED — a resolve that vanishes, which is the silent direction
+  // (Copilot, #7665 review; no workflow spells one today, so it was latent).
+  const out = line.split('')
   const roles = new Array(line.length).fill('code')
   const stack = ['code']
   let escaped = -1
