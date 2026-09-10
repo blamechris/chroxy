@@ -368,7 +368,7 @@ const runKeyLine = stepLines => stepLines.find(l => /^\s*(?:-\s+)?run:/.test(l))
 function runHeadSpelling(line) {
   const m = /^\s*(?:-\s+)?run:\s*(.*)$/.exec(line)
   const value = m ? m[1].trim() : ''
-  if (/^[|>][-+]?\d*\s*(?:#.*)?$/.test(value)) return 'block'
+  if (BLOCK_HEAD.test(value)) return 'block'
   if (value.startsWith("'") || value.startsWith('"')) return 'quoted'
   return 'plain'
 }
@@ -654,14 +654,32 @@ export function assertEveryFileParsed(workflows) {
  */
 function declaredSteps(text) {
   const lines = text.split('\n')
-  return lines.filter((line, i) => {
-    const m = /^(\s*)(-\s+)?(?:run|uses):/.exec(line)
-    if (!m) return false
-    // A job's own `uses:`: no list marker, at the job-key indent. `declaredJobs`
-    // above counts it, with the same `^ {4}` this negates.
-    if (m[2] === undefined && m[1].length <= 4) return false
-    return !isDefaultsRunHead(lines, i)
-  }).length
+  return lines.filter((_, i) => isStepKeyLine(lines, i, STEP_REQUIRED_KEY)).length
+}
+
+/** Either of the two keys the schema requires a step to carry exactly one of. */
+const STEP_REQUIRED_KEY = /^(\s*)(-\s+)?(?:run|uses):/
+/** Just `run:` — the same question, for the run-body row. */
+const STEP_RUN_KEY = /^(\s*)(-\s+)?run:/
+
+/**
+ * Is `lines[i]` a STEP-level key line matching `re`?
+ *
+ * ONE predicate for both rows, because the hard part is shared and was already
+ * transcribed once: a job's own `uses:` (no list marker, at the job-key indent —
+ * `declaredJobs` counts it, with the same `^ {4}` this negates) and the
+ * `defaults:` -> `run:` mapping head are the two things a step key is NOT, and
+ * getting either wrong moves a count on the live corpus.
+ *
+ * `re` must capture the indent as group 1 and the optional list marker as
+ * group 2; it is passed precompiled rather than interpolated, so no caller can
+ * widen it with a metacharacter (the hazard `valuelessKey` refuses outright).
+ */
+const isStepKeyLine = (lines, i, re) => {
+  const m = re.exec(lines[i])
+  if (!m) return false
+  if (m[2] === undefined && m[1].length <= 4) return false
+  return !isDefaultsRunHead(lines, i)
 }
 
 /**
@@ -725,17 +743,24 @@ function isDefaultsRunHead(lines, at) {
  * shares none of the reader's structure. The parsed side walks
  * `parseJobs` -> `parseSteps` -> `stepRun`, where `stepRun` anchors the key at
  * exactly the step's dash indent plus two and then branches on the head's
- * shape. The declared side matches a `run:`-shaped line with a non-empty value
- * anywhere in the file, at any indent, with no notion of a job or a step. A
- * collapse along that chain — a job lost, a step lost, the key not found at
- * the anchored indent, a branch that stops returning a body — makes the two
- * disagree. The independence is real but NOT total, and the exception is named
- * under WHAT IT CANNOT SEE below: both sides read a VALUE-LESS `run:` key as
- * nothing, so for that one spelling they agree by construction rather than by
- * evidence. Deriving the expectation from the same traversal the
- * subject uses would be the "expectation computed from its own subject" cause
- * in docs/false-safety-guards.md, which is the trap #7662 avoided the same way
- * one level up.
+ * shape. The declared side matches a step-level `run:` key anywhere in the
+ * file, at any indent, with no notion of a job or a step. A collapse along that
+ * chain — a job lost, a step lost, the key not found at the anchored indent, a
+ * branch that stops returning a body — makes the two disagree. Deriving the
+ * expectation from the same traversal the subject uses would be the
+ * "expectation computed from its own subject" cause in
+ * docs/false-safety-guards.md, which is the trap #7662 avoided the same way one
+ * level up.
+ *
+ * THE INDEPENDENCE USED TO BE QUALIFIED, AND IS NOT ANY MORE (#7670). The
+ * declared side required a NON-EMPTY value after the colon, and `stepRun`
+ * returned '' for a plain scalar continued on the next line — so for that one
+ * spelling both sides encoded the same rule, agreed at zero by construction
+ * rather than by evidence, and a file written entirely that way collected the
+ * free pass stale.yml gets. The shared rule was removed from BOTH sides at
+ * once, which is the only fix for that shape: `stepRun` folds the continuation
+ * and the declared side counts a bare `run:` key, with the `defaults:` mapping
+ * head excluded by its PARENT instead of by the absence of a value.
  *
  * THE LEGITIMATE ZERO IS STRUCTURAL, NOT AN EXEMPTION
  * ---------------------------------------------------
@@ -791,19 +816,20 @@ function isDefaultsRunHead(lines, at) {
  *     against a yielded `''`.
  *   - A setup-node reference outside any step.
  *
- * ONE FALSE GREEN, which is why the independence claim above is qualified. A
- * plain scalar whose value sits on the NEXT line is a real run step to YAML:
+ * THE ONE FALSE GREEN IS FIXED, and the paragraph is corrected rather than
+ * deleted, because the SHAPE is the thing worth remembering. A plain scalar
+ * whose value sits on the NEXT line is a real run step to YAML:
  *
  *     - name: thing
  *       run:
  *         echo hi
  *
- * `stepRun` returns `''` for it, and the declared side skips it, because BOTH
- * encode the same rule — nothing after the colon means nothing. Agreement is
- * not evidence where the two sides share a rule, so a file spelled entirely
- * this way would collect the same free pass `stale.yml` gets. It is a
- * `stepRun` limitation first (the value really is `echo hi`), tracked
- * separately; a case below pins it so it stays a KNOWN property.
+ * `stepRun` used to return `''` and the declared side used to skip the key,
+ * because BOTH encoded the same rule — nothing after the colon means nothing.
+ * Agreement is not evidence where the two sides share a rule, and no amount of
+ * testing either side alone could have found it. #7670 removed that rule from
+ * both at once; the case that pinned the behaviour is now INVERTED and asserts
+ * that both sides see the step.
  *
  * And a step written as a bare `- ` with its keys on the following line is
  * absorbed into the previous step by `parseSteps`, which neither row here can
@@ -816,10 +842,16 @@ function isDefaultsRunHead(lines, at) {
  * is not.
  */
 export function assertEveryFileContributes(workflows) {
-  // A `run:`-shaped line with a non-empty value. The value matters: a job's
-  // `defaults:` -> `run:` -> `shell:` mapping is a bare `run:` key, and there
-  // are 15 of them in ci.yml alone — counting those would put the declared
-  // side 15 ahead of a perfectly healthy reader.
+  // A step's `run:` key, WITH OR WITHOUT a value on the key line (#7670).
+  //
+  // This required a non-empty value until `stepRun` learned to read a plain
+  // scalar continued on the next line. That requirement was doing two jobs at
+  // once: excluding the 15 `defaults:` -> `run:` -> `shell:` mapping heads in
+  // ci.yml, and — accidentally — excluding a real run step whose value sits
+  // below the key. The two are now separated: `isStepKeyLine` excludes the
+  // mapping head BY ITS PARENT, and a bare `run:` key counts as the step it is.
+  // Leaving `\S` in place would have put the declared side one BEHIND the
+  // yielded side for that spelling, which is measured in a case below.
   //
   // The leading `^` is what keeps PROSE out: it forces the first non-space
   // character to be `-` or `r`, which a comment line never is. Drop it and
@@ -827,11 +859,9 @@ export function assertEveryFileContributes(workflows) {
   // inside a comment. Named exactly, because the first version of this line
   // blamed ci.yml, which has no such line at all — the hazard is real and
   // lives one file over.
-  const RUN_KEY = /^\s*(?:-\s+)?run:\s*\S/
-
   const runRows = workflows.map(w => ({
     file: w.name,
-    declared: w.text.split('\n').filter(l => RUN_KEY.test(l)).length,
+    declared: (l => l.filter((_, i) => isStepKeyLine(l, i, STEP_RUN_KEY)).length)(w.text.split('\n')),
     yielded: w.jobs
       .flatMap(j => j.steps)
       .filter(s => {
@@ -1036,22 +1066,9 @@ export function stepRun(stepLines) {
     if (!m) continue
     const head = m[1].trim()
 
-    const block = /^([|>])([-+]?\d*)$/.exec(head)
+    const block = BLOCK_HEAD.exec(head)
     if (block) {
-      const body = []
-      for (let j = i + 1; j < stepLines.length; j++) {
-        const l = stepLines[j]
-        if (/^\s*$/.test(l)) {
-          body.push('')
-          continue
-        }
-        if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
-        body.push(l)
-      }
-      while (body.length && body[body.length - 1] === '') body.pop()
-      const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
-      const dedent = widths.length ? Math.min(...widths) : 0
-      const dedented = body.map(l => l.slice(dedent))
+      const dedented = keyBody(stepLines, i, keyIndent)
       return block[1] === '>' ? fold(dedented) : dedented.join('\n')
     }
 
@@ -1060,6 +1077,25 @@ export function stepRun(stepLines) {
       const close = head.indexOf(q, 1)
       return close === -1 ? head.slice(1) : head.slice(1, close)
     }
+
+    // A PLAIN scalar whose value sits on the FOLLOWING lines (#7670). Nothing
+    // after the colon does not mean nothing:
+    //
+    //     - name: thing
+    //       run:
+    //         echo hi
+    //
+    // is a real run step whose value is `echo hi`. This branch used to return
+    // the empty string for it, so every guard anchored to `stepRun` — the
+    // `bash -n` pass, the npm-resolve budget rule, the cache rules — passed
+    // over an empty body and a step spelled this way was UNGUARDED.
+    //
+    // Folded, not joined with newlines, because that is what YAML does to a
+    // multi-line plain scalar. NOT the same folding as `>` — see `foldPlain`,
+    // which exists because sharing `fold()` here was wrong and measurably so.
+    // A step whose key really carries nothing still yields '' — `keyBody`
+    // returns no lines and `foldPlain([])` is ''.
+    if (head === '') return foldPlain(keyBody(stepLines, i, keyIndent))
 
     return head.replace(/\s+#.*$/, '').trim()
   }
@@ -1080,6 +1116,109 @@ export function stepRun(stepLines) {
  * becomes a SPACE; n blank lines become n newlines; a MORE-indented line is
  * literal and keeps the breaks around it.
  */
+/**
+ * A `run:` value that is a BLOCK-scalar header — `|`, `>`, their chomping and
+ * indent-indicator forms, and YAML's optional trailing comment.
+ *
+ * ONE grammar, shared by `stepRun`'s branch selection and `runHeadSpelling`'s
+ * classification. It was two, and `runHeadSpelling`'s comment claimed they
+ * MIRRORED each other while its own pattern carried `\s*(?:#.*)?` that
+ * `stepRun`'s did not — a comment describing a different check than the code
+ * performs, in a module that catalogues that cause.
+ *
+ * The divergence was not cosmetic. `run: | # c` is legal YAML whose value is
+ * `echo hi`; `stepRun` fell through to the plain catch-all and returned the
+ * literal string `"|"`, while `runHeadSpelling` called the same step a block.
+ * Measured against js-yaml in review of #7675: `| # c` -> `"|"`, `|- # c` ->
+ * `"|-"`, `>+ # c` -> `">+"`. The last is the dangerous one: `>+` is a VALID
+ * bash line (a redirect to a file named `+`), so `bash -n` passes it and a
+ * content-inspecting guard sees `">+"` instead of the script it meant to read.
+ * The same bare-`$` anchor #7673 swept out of every KEY position, surviving on
+ * the VALUE side.
+ */
+const BLOCK_HEAD = /^([|>])([-+]?\d*)\s*(?:#.*)?$/
+
+/**
+ * Fold a PLAIN scalar's continuation lines, which is NOT what `fold()` does.
+ *
+ * The two look like the same operation and are not, and sharing them was this
+ * change's own first mistake. A folded BLOCK scalar (`>`) keeps a
+ * more-indented line literal — that is what lets a `>` block hold an indented
+ * `if`/`fi` body. A PLAIN scalar has no such rule: every line break folds to a
+ * space regardless of indent. Measured against js-yaml:
+ *
+ *     run:
+ *       if true; then
+ *         echo hi
+ *       fi
+ *
+ * is the single line `if true; then echo hi fi`, not three lines. `fold()`
+ * returned the three-line form, so `bash -n` would have validated a script the
+ * runner never receives — a false green in the exact scenario `stepRun`'s
+ * block-scalar comment names as the reason folding matters at all.
+ *
+ * Blank lines still collapse the same way in both: n line breaks become n-1
+ * newlines, which is why a blank line survives as a `\n` here.
+ *
+ * `keyBody()` remains shared, because COLLECTING the lines really is the same
+ * operation in both styles. Only the fold differs.
+ */
+function foldPlain(lines) {
+  let out = ''
+  let blanks = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed === '') {
+      blanks++
+      continue
+    }
+    // A whitespace-preceded `#` ENDS a plain scalar — the same rule the
+    // single-line plain branch applies to the key line, and it has to apply
+    // here too or the comment lands in the body. Measured against js-yaml in
+    // review of #7675: `run:` / `echo hi # note` is `echo hi`, and this
+    // returned `echo hi # note`. That is not cosmetic — the body goes to
+    // `bash -n` and to every content-inspecting guard.
+    //
+    // A line that is ONLY a comment ends the scalar outright rather than
+    // folding in as content. `echo hi#note` keeps its `#`, because YAML needs
+    // the preceding whitespace for a comment to open — the same rule
+    // `valuelessKey` encodes on the key side.
+    if (trimmed.startsWith('#')) break
+    const text = trimmed.replace(/\s+#.*$/, '')
+    if (out === '') out = text
+    else out += blanks > 0 ? '\n'.repeat(blanks) + text : ` ${text}`
+    blanks = 0
+  }
+  return out
+}
+
+/**
+ * The lines belonging to the key at `stepLines[at]` — strictly more indented
+ * than `keyIndent` — with the block's common indent removed and trailing blanks
+ * dropped.
+ *
+ * ONE implementation, shared by `stepRun`'s block-scalar branch and its
+ * continued-plain-scalar branch (#7670). The two differ only in what they do
+ * with the result — a block literal joins, a folded or plain scalar folds — and
+ * transcribing the collection twice is the drift this module exists to prevent.
+ */
+function keyBody(stepLines, at, keyIndent) {
+  const body = []
+  for (let j = at + 1; j < stepLines.length; j++) {
+    const l = stepLines[j]
+    if (/^\s*$/.test(l)) {
+      body.push('')
+      continue
+    }
+    if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
+    body.push(l)
+  }
+  while (body.length && body[body.length - 1] === '') body.pop()
+  const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
+  const dedent = widths.length ? Math.min(...widths) : 0
+  return body.map(l => l.slice(dedent))
+}
+
 function fold(lines) {
   const out = []
   let buf = null
