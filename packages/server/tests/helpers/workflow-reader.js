@@ -654,14 +654,32 @@ export function assertEveryFileParsed(workflows) {
  */
 function declaredSteps(text) {
   const lines = text.split('\n')
-  return lines.filter((line, i) => {
-    const m = /^(\s*)(-\s+)?(?:run|uses):/.exec(line)
-    if (!m) return false
-    // A job's own `uses:`: no list marker, at the job-key indent. `declaredJobs`
-    // above counts it, with the same `^ {4}` this negates.
-    if (m[2] === undefined && m[1].length <= 4) return false
-    return !isDefaultsRunHead(lines, i)
-  }).length
+  return lines.filter((_, i) => isStepKeyLine(lines, i, STEP_REQUIRED_KEY)).length
+}
+
+/** Either of the two keys the schema requires a step to carry exactly one of. */
+const STEP_REQUIRED_KEY = /^(\s*)(-\s+)?(?:run|uses):/
+/** Just `run:` — the same question, for the run-body row. */
+const STEP_RUN_KEY = /^(\s*)(-\s+)?run:/
+
+/**
+ * Is `lines[i]` a STEP-level key line matching `re`?
+ *
+ * ONE predicate for both rows, because the hard part is shared and was already
+ * transcribed once: a job's own `uses:` (no list marker, at the job-key indent —
+ * `declaredJobs` counts it, with the same `^ {4}` this negates) and the
+ * `defaults:` -> `run:` mapping head are the two things a step key is NOT, and
+ * getting either wrong moves a count on the live corpus.
+ *
+ * `re` must capture the indent as group 1 and the optional list marker as
+ * group 2; it is passed precompiled rather than interpolated, so no caller can
+ * widen it with a metacharacter (the hazard `valuelessKey` refuses outright).
+ */
+const isStepKeyLine = (lines, i, re) => {
+  const m = re.exec(lines[i])
+  if (!m) return false
+  if (m[2] === undefined && m[1].length <= 4) return false
+  return !isDefaultsRunHead(lines, i)
 }
 
 /**
@@ -816,10 +834,16 @@ function isDefaultsRunHead(lines, at) {
  * is not.
  */
 export function assertEveryFileContributes(workflows) {
-  // A `run:`-shaped line with a non-empty value. The value matters: a job's
-  // `defaults:` -> `run:` -> `shell:` mapping is a bare `run:` key, and there
-  // are 15 of them in ci.yml alone — counting those would put the declared
-  // side 15 ahead of a perfectly healthy reader.
+  // A step's `run:` key, WITH OR WITHOUT a value on the key line (#7670).
+  //
+  // This required a non-empty value until `stepRun` learned to read a plain
+  // scalar continued on the next line. That requirement was doing two jobs at
+  // once: excluding the 15 `defaults:` -> `run:` -> `shell:` mapping heads in
+  // ci.yml, and — accidentally — excluding a real run step whose value sits
+  // below the key. The two are now separated: `isStepKeyLine` excludes the
+  // mapping head BY ITS PARENT, and a bare `run:` key counts as the step it is.
+  // Leaving `\S` in place would have put the declared side one BEHIND the
+  // yielded side for that spelling, which is measured in a case below.
   //
   // The leading `^` is what keeps PROSE out: it forces the first non-space
   // character to be `-` or `r`, which a comment line never is. Drop it and
@@ -827,11 +851,9 @@ export function assertEveryFileContributes(workflows) {
   // inside a comment. Named exactly, because the first version of this line
   // blamed ci.yml, which has no such line at all — the hazard is real and
   // lives one file over.
-  const RUN_KEY = /^\s*(?:-\s+)?run:\s*\S/
-
   const runRows = workflows.map(w => ({
     file: w.name,
-    declared: w.text.split('\n').filter(l => RUN_KEY.test(l)).length,
+    declared: (l => l.filter((_, i) => isStepKeyLine(l, i, STEP_RUN_KEY)).length)(w.text.split('\n')),
     yielded: w.jobs
       .flatMap(j => j.steps)
       .filter(s => {
@@ -1038,20 +1060,7 @@ export function stepRun(stepLines) {
 
     const block = /^([|>])([-+]?\d*)$/.exec(head)
     if (block) {
-      const body = []
-      for (let j = i + 1; j < stepLines.length; j++) {
-        const l = stepLines[j]
-        if (/^\s*$/.test(l)) {
-          body.push('')
-          continue
-        }
-        if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
-        body.push(l)
-      }
-      while (body.length && body[body.length - 1] === '') body.pop()
-      const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
-      const dedent = widths.length ? Math.min(...widths) : 0
-      const dedented = body.map(l => l.slice(dedent))
+      const dedented = keyBody(stepLines, i, keyIndent)
       return block[1] === '>' ? fold(dedented) : dedented.join('\n')
     }
 
@@ -1060,6 +1069,25 @@ export function stepRun(stepLines) {
       const close = head.indexOf(q, 1)
       return close === -1 ? head.slice(1) : head.slice(1, close)
     }
+
+    // A PLAIN scalar whose value sits on the FOLLOWING lines (#7670). Nothing
+    // after the colon does not mean nothing:
+    //
+    //     - name: thing
+    //       run:
+    //         echo hi
+    //
+    // is a real run step whose value is `echo hi`. This branch used to return
+    // the empty string for it, so every guard anchored to `stepRun` — the
+    // `bash -n` pass, the npm-resolve budget rule, the cache rules — passed
+    // over an empty body and a step spelled this way was UNGUARDED.
+    //
+    // Folded, not joined with newlines, because that is what YAML does to a
+    // multi-line plain scalar: it is the same folding as `>`, which is why
+    // `fold()` is called here rather than a second copy of the rule. A step
+    // whose key really carries nothing still yields '' — `keyBody` returns no
+    // lines and `fold([])` is ''.
+    if (head === '') return fold(keyBody(stepLines, i, keyIndent))
 
     return head.replace(/\s+#.*$/, '').trim()
   }
@@ -1080,6 +1108,33 @@ export function stepRun(stepLines) {
  * becomes a SPACE; n blank lines become n newlines; a MORE-indented line is
  * literal and keeps the breaks around it.
  */
+/**
+ * The lines belonging to the key at `stepLines[at]` — strictly more indented
+ * than `keyIndent` — with the block's common indent removed and trailing blanks
+ * dropped.
+ *
+ * ONE implementation, shared by `stepRun`'s block-scalar branch and its
+ * continued-plain-scalar branch (#7670). The two differ only in what they do
+ * with the result — a block literal joins, a folded or plain scalar folds — and
+ * transcribing the collection twice is the drift this module exists to prevent.
+ */
+function keyBody(stepLines, at, keyIndent) {
+  const body = []
+  for (let j = at + 1; j < stepLines.length; j++) {
+    const l = stepLines[j]
+    if (/^\s*$/.test(l)) {
+      body.push('')
+      continue
+    }
+    if (/^(\s*)/.exec(l)[1].length <= keyIndent) break
+    body.push(l)
+  }
+  while (body.length && body[body.length - 1] === '') body.pop()
+  const widths = body.filter(l => l !== '').map(l => /^(\s*)/.exec(l)[1].length)
+  const dedent = widths.length ? Math.min(...widths) : 0
+  return body.map(l => l.slice(dedent))
+}
+
 function fold(lines) {
   const out = []
   let buf = null

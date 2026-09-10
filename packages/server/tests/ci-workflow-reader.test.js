@@ -1728,17 +1728,23 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
     )
   })
 
-  it('FALSE GREEN, pinned: a plain scalar whose value is on the NEXT line is invisible to BOTH sides', () => {
-    // The one place the "two independent readings" claim does not hold, and
-    // the reason it is stated with a qualification. To YAML this step's value
-    // is `echo hi` — a real run step. `stepRun` returns '' and the declared
-    // side skips the key, because both encode the same rule: nothing after the
-    // colon means nothing. Agreement is not evidence where the two sides share
-    // a rule, so a file spelled entirely this way collects the free pass
-    // stale.yml gets. Pinned GREEN deliberately: this asserts the CURRENT
-    // behaviour, not the desired one. It is a `stepRun` limitation first and
-    // is tracked as its own issue; when that is fixed this case goes red and
-    // should be inverted, which is exactly the notification wanted.
+  it('a plain scalar whose value is on the NEXT line is a real run step, and BOTH sides see it (#7670)', () => {
+    // THE INVERSION of a case that was pinned GREEN here for the opposite
+    // reason, and the comment is kept long because the history is the point.
+    //
+    // It used to read: "the one place the two independent readings do not
+    // hold". `stepRun` returned '' — its plain branch read only the remainder
+    // of the KEY LINE — and the declared side skipped the key because it
+    // required a value after the colon. Both encoded the same rule, nothing
+    // after the colon means nothing, so they AGREED at zero and a file spelled
+    // entirely this way would have collected the free pass stale.yml gets.
+    // Agreement is not evidence where the two sides share a rule.
+    //
+    // #7670 removed the shared rule from both sides at once, which is the only
+    // way to fix this class: `stepRun` folds the continuation, and the declared
+    // side counts a bare `run:` key, with the `defaults:` mapping head excluded
+    // by its PARENT rather than by the absence of a value. To YAML the value
+    // here is `echo hi`, and now it is to this reader too.
     const text = [
       'jobs:',
       '  a:',
@@ -1750,8 +1756,51 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
       '',
     ].join('\n')
     const jobs = parseJobs(text, 'x.yml')
-    assert.equal(stepRun(jobs[0].steps[0]), '', 'precondition: stepRun yields the empty string here')
+    assert.equal(stepRun(jobs[0].steps[0]), 'echo hi', 'the value really is on the next line')
     assertEveryFileContributes([{ name: 'x.yml', text, jobs }])
+  })
+
+  it('the two sides of that spelling now disagree when one of them breaks', () => {
+    // The other half, and the reason the case above is not just a restatement
+    // of the old one with a different assertion: agreement at ONE is only
+    // evidence if disagreement is reachable. Yield a body the text does not
+    // declare, and the row fires.
+    const text = 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n'
+    assert.throws(
+      () =>
+        assertEveryFileContributes([
+          { name: 'x.yml', text, jobs: [{ id: 'a', steps: [['      - run:', '          echo hi']] }] },
+        ]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
+  })
+
+  it('a multi-line plain scalar FOLDS, the way YAML folds one (#7670)', () => {
+    // Not a nicety — it is the difference between one command and two. YAML
+    // joins the lines of a plain scalar with a space, so this step runs
+    // `echo one echo two`, and a reader that joined with newlines would hand
+    // the `bash -n` pass a script the runner never sees. Same folding as `>`,
+    // which is why `fold()` is shared rather than copied.
+    const step = ['      - name: t', '        run:', '          echo one', '          echo two']
+    assert.equal(stepRun(step), 'echo one echo two')
+  })
+
+  it('a `run:` key that really carries nothing still yields the empty string', () => {
+    // The boundary the new branch must not swallow: `keyBody` returns no lines,
+    // `fold([])` is '', and the empty-body false red below still fires. Without
+    // this, "nothing after the colon" and "nothing at all" could drift apart.
+    assert.equal(stepRun(['      - name: t', '        run:']), '')
+    assert.throws(
+      () =>
+        assertEveryFileContributes([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run:\n',
+            jobs: [{ id: 'a', steps: [['      - run:']] }],
+          },
+        ]),
+      /yields a different number of `run:` bodies than its text declares/
+    )
   })
 })
 
