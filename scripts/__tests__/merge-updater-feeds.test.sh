@@ -27,12 +27,24 @@ MERGE="$REPO_ROOT/scripts/merge-updater-feeds.mjs"
 # updater-feed merge, and it already ran in NO workflow for its whole life
 # (#7504). A silently-empty run here restores exactly the blind spot that closed.
 #
-# Four of the six test functions short-circuit on a run_merge failure
-# (`|| { FAIL++; return; }`), so a genuine subject regression drops the count
-# BELOW 14 as well as raising FAIL. Both diagnoses are therefore printed rather
-# than the first one winning: "the harness is broken" and "the subject is
-# broken" want different fixes.
-EXPECTED_CASES=14
+# THE COUNT IS OUTCOME-INDEPENDENT, and #7656 is what made it so.
+#
+# Four of the six test functions used to short-circuit on a run_merge failure
+# (`|| { FAIL++; return; }`), skipping the asserts that followed. A genuine
+# SUBJECT regression therefore dropped the count below 14 as well as raising
+# FAIL, and the run's headline became "HARNESS BROKEN … a case stopped
+# executing" — the wrong diagnosis, and this was the only harness in the repo
+# where the two could be confused. Measured before the fix: pointing MERGE at a
+# script that exits 3 gave "ran 6 cases, expected 14" alongside the real
+# failures.
+#
+# Each of those four now ASSERTS the exit code and lets its remaining asserts
+# run. The trade-off is stated because it is real and was the reason #7653 did
+# not fold this in: one subject regression now reports six failures instead of
+# one. Every one of them is TRUE — the output really does lack the strings —
+# and the count stays 19 either way, so the floor's message is now always
+# accurate about which thing broke.
+EXPECTED_CASES=19
 
 PASS=0
 FAIL=0
@@ -138,10 +150,10 @@ JSON
 }
 JSON
 
-  local out
-  out="$(run_merge "$tmp/mac.json" "$tmp/win.json" 2>&1)" || {
-    FAIL=$((FAIL + 1)); FAILED_TESTS+=("merges_macos_and_windows: exit nonzero"); echo "    out: $out"; return
-  }
+  local out rc
+  out="$(run_merge "$tmp/mac.json" "$tmp/win.json" 2>&1)"; rc=$?
+  assert_eq "merges_macos_and_windows: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
   assert_contains "contains darwin-aarch64" "$out" '"darwin-aarch64"'
   assert_contains "contains darwin-x86_64"  "$out" '"darwin-x86_64"'
@@ -170,18 +182,31 @@ test_writes_to_output_file() {
 }
 JSON
 
-  run_merge --output "$tmp/out.json" "$tmp/mac.json" >/dev/null 2>&1 || {
-    FAIL=$((FAIL + 1)); FAILED_TESTS+=("writes_to_output_file: exit nonzero"); return
-  }
+  local rc
+  # Captured rather than discarded to /dev/null: on a non-zero exit the output is
+  # the only clue why, and every other run_merge case prints it (Copilot, #7683).
+  out="$(run_merge --output "$tmp/out.json" "$tmp/mac.json" 2>&1)"; rc=$?
+  assert_eq "writes_to_output_file: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
+  # This BRANCH contributes three cases on both paths (existence + two content
+  # asserts), where it used to contribute two when the file existed and one when
+  # it did not — the same outcome-dependence #7656 is about, hiding inside a
+  # conditional rather than in an early return. The function as a whole
+  # contributes FOUR, counting the exit-code assert above; the three here is the
+  # branch, not the test. Measured: after the four early returns were fixed a
+  # subject regression still landed on 17 of 18, one short, and this was it.
+  # Reading an absent file as an empty body lets the same asserts run and fail
+  # truthfully.
+  local body=""
+  local exists="no"
   if [ -f "$tmp/out.json" ]; then
-    local body; body="$(cat "$tmp/out.json")"
-    assert_contains "output file has version" "$body" '"version"'
-    assert_contains "output file has darwin entry" "$body" '"darwin-aarch64"'
-  else
-    FAIL=$((FAIL + 1)); FAILED_TESTS+=("writes_to_output_file: file missing")
-    echo "  FAIL: writes_to_output_file: $tmp/out.json was not created"
+    exists="yes"
+    body="$(cat "$tmp/out.json")"
   fi
+  assert_eq "writes_to_output_file: output file exists" "yes" "$exists"
+  assert_contains "output file has version" "$body" '"version"'
+  assert_contains "output file has darwin entry" "$body" '"darwin-aarch64"'
 
   rm -rf "$tmp"
 }
@@ -204,10 +229,10 @@ test_skips_missing_inputs() {
 }
 JSON
 
-  local out
-  out="$(run_merge "$tmp/mac.json" "$tmp/does-not-exist.json" 2>&1)" || {
-    FAIL=$((FAIL + 1)); FAILED_TESTS+=("skips_missing_inputs: exit nonzero"); echo "    out: $out"; return
-  }
+  local out rc
+  out="$(run_merge "$tmp/mac.json" "$tmp/does-not-exist.json" 2>&1)"; rc=$?
+  assert_eq "skips_missing_inputs: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
   assert_contains "still emits mac platform" "$out" '"darwin-aarch64"'
   assert_not_contains "no windows entry" "$out" '"windows-x86_64"'
@@ -273,10 +298,10 @@ JSON
 }
 JSON
 
-  local out
-  out="$(run_merge "$tmp/a.json" "$tmp/b.json" 2>&1)" || {
-    FAIL=$((FAIL + 1)); FAILED_TESTS+=("later_input_overrides_same_platform: exit nonzero"); return
-  }
+  local out rc
+  out="$(run_merge "$tmp/a.json" "$tmp/b.json" 2>&1)"; rc=$?
+  assert_eq "later_input_overrides_same_platform: merge exits 0" 0 "$rc"
+  [ "$rc" -eq 0 ] || echo "    out: $out"
 
   assert_contains "has NEW signature" "$out" 'NEW'
   assert_not_contains "OLD signature is gone" "$out" '"signature": "OLD"'
