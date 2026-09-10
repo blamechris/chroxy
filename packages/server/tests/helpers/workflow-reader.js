@@ -742,9 +742,11 @@ export function assertEveryFileParsed(workflows) {
   assert.deepEqual(
     steplessRows,
     [],
-    'a file has a different number of step-less jobs than it declares reusable-workflow calls — ' +
-      'a normal job with no steps contributes no run bodies, so every run-body rule passes over ' +
-      'nothing for it; and a `uses:` job that DID yield steps means the reader has invented them'
+    'a file has a different number of step-less jobs than it declares reusable-workflow calls. ' +
+      'More step-less jobs than calls: a normal job yielded nothing, so every run-body rule ' +
+      'passes over an empty set for it. Fewer: a `uses:` job yielded steps — either the file ' +
+      'really declares them under it, which GitHub rejects, or the reader has attributed a ' +
+      "neighbour's"
   )
 }
 

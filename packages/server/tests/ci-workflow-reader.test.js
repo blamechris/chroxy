@@ -1343,7 +1343,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     ])
   })
 
-  it('refuses a job that parsed with no steps at all', () => {
+  it('refuses a job with no steps in a file that declares no reusable-workflow call', () => {
     // One level down from the file check, same argument: a job with no steps
     // contributes no run bodies, and every run-body rule then passes over an
     // empty set for it.
@@ -1509,7 +1509,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
-  it('reports the step disagreement rather than the emptier `no steps at all`', () => {
+  it('reports the step disagreement rather than the emptier step-less count', () => {
     // The ordering between the two rules, and the reason they are not
     // redundant: when the text declares steps the parse did not produce, the
     // useful message names the disagreement. `steps.length === 0` says only
@@ -1527,7 +1527,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
-  it('leaves `no steps at all` to catch a job whose text declares none either', () => {
+  it('leaves the step-less equality to catch a job whose text declares no steps either', () => {
     // The other half of that interaction, and what stops the step row from
     // being read as a replacement: it agrees at zero, so only the stepless
     // rule can refuse a job that yields nothing.
