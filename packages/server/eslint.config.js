@@ -33,8 +33,15 @@ const NODE_GLOBALS = {
   globalThis: 'readonly',
   // Node's own `global`, used by tests that stub a global for a single case.
   global: 'readonly',
-  __dirname: 'readonly',
-  __filename: 'readonly',
+  // NOT `__dirname` / `__filename`. This package is `"type": "module"` and every
+  // block here sets `sourceType: 'module'`, where those are NOT globals — Node
+  // throws `ReferenceError: __dirname is not defined in ES module scope`. An
+  // earlier draft declared them, copied from a throwaway probe config without
+  // checking, and that is a HOLE rather than a convenience: it stops `no-undef`
+  // catching a bare CJS-style reference, in a package where 8+ files hand-write
+  // the `fileURLToPath(import.meta.url)` shim and so could easily forget one.
+  // Measured in review of #7679: with them declared, a bare `__dirname` in
+  // `src/` lints clean; without them it is an error, as it is on main today.
 }
 
 /**
@@ -62,6 +69,21 @@ export default [
     // typo, and the suite can still pass around it when the line sits in a
     // branch no case reaches.
     files: ['tests/**/*.js', 'tests/**/*.mjs'],
+    languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: NODE_GLOBALS },
+    rules: SHARED_RULES,
+  },
+  {
+    // `scripts/` was never linted either, and it is not the lesser half: it holds
+    // the custom CI guards (`lint-session-opt-forwarding.mjs`,
+    // `lint-tests-state-file-path.mjs`, `lint-entry-point-guard.mjs`, and six
+    // more) that CI's Server Lint job runs as its actual gates. Covering
+    // `tests/` while leaving those unchecked would be the adjacent-field
+    // pattern this repo keeps hitting. It costs 0 errors and 1 warning.
+    //
+    // Note for anyone tempted by `eslint .` instead: that reports these files as
+    // clean 0/0 while applying NO rules to them, because no `files:` block
+    // matches — a false clean, which is worse than not scanning them at all.
+    files: ['scripts/**/*.js', 'scripts/**/*.mjs'],
     languageOptions: { ecmaVersion: 2024, sourceType: 'module', globals: NODE_GLOBALS },
     rules: SHARED_RULES,
   },
