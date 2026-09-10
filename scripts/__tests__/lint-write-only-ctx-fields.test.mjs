@@ -1410,6 +1410,12 @@ const literalAndWrapRoster = [
   // stays in the scanned text and reads as a reference, which is the false-GREEN
   // direction. The single-statement form below is inert; this one is not.
   ['a POSTFIX increment ending the line', 'let a = b++\nlet c = compute(), d = compute();\n', 'a,c,d'],
+  // `of` is only contextually a keyword (`for (x of y)`); `let of = 1` is legal
+  // in a module, and listing it as reserved refused a real binding (#7687
+  // review). The pair below pins BOTH directions of that list: a word that is
+  // not reserved must bind, and one that is must still be refused.
+  ['a binding named `of`, which is NOT reserved', 'let of = compute(), b = compute();\n', 'of,b'],
+  ['a declarator named `await`, which IS reserved in a module', 'let a = 1, await = 2;\n', 'a,UNPARSED(await = 2)'],
 ]
 for (const [label, decl, want] of literalAndWrapRoster) {
   test(`the declarator scan reads ${label} (#7687)`, () => {

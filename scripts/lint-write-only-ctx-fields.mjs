@@ -1224,8 +1224,19 @@ const RESERVED_WORDS = new Set([
   'const', 'let', 'var', 'function', 'class', 'return', 'await', 'new', 'typeof',
   'export', 'import', 'default', 'if', 'else', 'for', 'while', 'do', 'switch',
   'case', 'break', 'continue', 'throw', 'try', 'catch', 'finally', 'yield',
-  'delete', 'void', 'in', 'of', 'instanceof', 'this', 'super', 'null', 'true', 'false',
+  'delete', 'void', 'in', 'instanceof', 'this', 'super', 'null', 'true', 'false',
 ])
+// NOT here, and each for a reason a future reader will want to re-litigate:
+//   - `of` was, wrongly (#7687 review). It is only CONTEXTUALLY a keyword, in
+//     `for (x of y)`; `let of = 1` is legal in a module, so listing it refused
+//     a real binding. Nothing in the shipped targets declares it, so the cost
+//     was zero — but a refusal this list cannot justify is the same defect as
+//     a name it cannot justify accepting.
+//   - `await` IS here and must stay. It is legal in a plain function, so the
+//     obvious probe (`new Function('let await = 1')`) says it is fine and is
+//     WRONG: the targets are ES modules, where `await` is reserved. Checked
+//     with `node --check` on an actual `.mjs`, which is the only probe that
+//     reproduces the scanned context.
 
 /** The index of the bracket closing the one at position 0, or -1. */
 function matchingBracket(s) {
