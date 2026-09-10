@@ -743,17 +743,24 @@ function isDefaultsRunHead(lines, at) {
  * shares none of the reader's structure. The parsed side walks
  * `parseJobs` -> `parseSteps` -> `stepRun`, where `stepRun` anchors the key at
  * exactly the step's dash indent plus two and then branches on the head's
- * shape. The declared side matches a `run:`-shaped line with a non-empty value
- * anywhere in the file, at any indent, with no notion of a job or a step. A
- * collapse along that chain — a job lost, a step lost, the key not found at
- * the anchored indent, a branch that stops returning a body — makes the two
- * disagree. The independence is real but NOT total, and the exception is named
- * under WHAT IT CANNOT SEE below: both sides read a VALUE-LESS `run:` key as
- * nothing, so for that one spelling they agree by construction rather than by
- * evidence. Deriving the expectation from the same traversal the
- * subject uses would be the "expectation computed from its own subject" cause
- * in docs/false-safety-guards.md, which is the trap #7662 avoided the same way
- * one level up.
+ * shape. The declared side matches a step-level `run:` key anywhere in the
+ * file, at any indent, with no notion of a job or a step. A collapse along that
+ * chain — a job lost, a step lost, the key not found at the anchored indent, a
+ * branch that stops returning a body — makes the two disagree. Deriving the
+ * expectation from the same traversal the subject uses would be the
+ * "expectation computed from its own subject" cause in
+ * docs/false-safety-guards.md, which is the trap #7662 avoided the same way one
+ * level up.
+ *
+ * THE INDEPENDENCE USED TO BE QUALIFIED, AND IS NOT ANY MORE (#7670). The
+ * declared side required a NON-EMPTY value after the colon, and `stepRun`
+ * returned '' for a plain scalar continued on the next line — so for that one
+ * spelling both sides encoded the same rule, agreed at zero by construction
+ * rather than by evidence, and a file written entirely that way collected the
+ * free pass stale.yml gets. The shared rule was removed from BOTH sides at
+ * once, which is the only fix for that shape: `stepRun` folds the continuation
+ * and the declared side counts a bare `run:` key, with the `defaults:` mapping
+ * head excluded by its PARENT instead of by the absence of a value.
  *
  * THE LEGITIMATE ZERO IS STRUCTURAL, NOT AN EXEMPTION
  * ---------------------------------------------------
@@ -809,19 +816,20 @@ function isDefaultsRunHead(lines, at) {
  *     against a yielded `''`.
  *   - A setup-node reference outside any step.
  *
- * ONE FALSE GREEN, which is why the independence claim above is qualified. A
- * plain scalar whose value sits on the NEXT line is a real run step to YAML:
+ * THE ONE FALSE GREEN IS FIXED, and the paragraph is corrected rather than
+ * deleted, because the SHAPE is the thing worth remembering. A plain scalar
+ * whose value sits on the NEXT line is a real run step to YAML:
  *
  *     - name: thing
  *       run:
  *         echo hi
  *
- * `stepRun` returns `''` for it, and the declared side skips it, because BOTH
- * encode the same rule — nothing after the colon means nothing. Agreement is
- * not evidence where the two sides share a rule, so a file spelled entirely
- * this way would collect the same free pass `stale.yml` gets. It is a
- * `stepRun` limitation first (the value really is `echo hi`), tracked
- * separately; a case below pins it so it stays a KNOWN property.
+ * `stepRun` used to return `''` and the declared side used to skip the key,
+ * because BOTH encoded the same rule — nothing after the colon means nothing.
+ * Agreement is not evidence where the two sides share a rule, and no amount of
+ * testing either side alone could have found it. #7670 removed that rule from
+ * both at once; the case that pinned the behaviour is now INVERTED and asserts
+ * that both sides see the step.
  *
  * And a step written as a bare `- ` with its keys on the following line is
  * absorbed into the previous step by `parseSteps`, which neither row here can

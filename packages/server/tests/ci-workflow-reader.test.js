@@ -1779,8 +1779,15 @@ describe('workflow reader: assertEveryFileContributes (#7659)', () => {
     // Not a nicety — it is the difference between one command and two. YAML
     // joins the lines of a plain scalar with a space, so this step runs
     // `echo one echo two`, and a reader that joined with newlines would hand
-    // the `bash -n` pass a script the runner never sees. Same folding as `>`,
-    // which is why `fold()` is shared rather than copied.
+    // the `bash -n` pass a script the runner never sees.
+    //
+    // This case is DELIBERATELY the weak one, and says so rather than
+    // pretending otherwise: its assertion cannot tell real folding from a
+    // naive `join(' ')`, and reverting `foldPlain` to `fold` leaves it green.
+    // The folding guarantee lives two cases below, in the unequal-indent case
+    // and its `>` CONTROL. An earlier version of this comment claimed
+    // `fold()` was shared here — true when it was written and false three
+    // cases later in the same file, which is the drift worth naming.
     const step = ['      - name: t', '        run:', '          echo one', '          echo two']
     assert.equal(stepRun(step), 'echo one echo two')
   })
