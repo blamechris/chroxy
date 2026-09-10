@@ -1093,8 +1093,30 @@ export function assertReaderSane(workflows) {
   // nothing about the other six files. Structure first, then content.
   assertEveryFileParsed(workflows)
   assertEveryFileContributes(workflows)
+  // THROUGH `code()`, so PROSE CANNOT HELP CLEAR THIS FLOOR (#7667).
+  //
+  // The floor's stated subject is "the reader is still seeing `uses:`", and it
+  // counted raw step lines — so a step whose ONLY setup-node mention sits in a
+  // comment counted toward it. That is the unsafe direction: prose INFLATES the
+  // total and makes `>=15` easier to clear. It is not hypothetical for this
+  // repo, whose comments quote the exact strings guards match on — the module
+  // header names `cache: npm` and `npm ci` doing precisely that, and a
+  // `# uses: actions/setup-node@…` line in a step's rationale is the same shape.
+  //
+  // DECIDED: the two readings AGREE rather than differ on purpose (#7667's first
+  // criterion). `assertEveryFileContributes` already ran both of ITS readings
+  // through `code()` for this reason, and this module's thesis is that two
+  // spellings of identical config must not disagree — a floor and a per-file row
+  // that count the same thing differently is that defect in miniature, one
+  // level up. Unlike the two `code()` calls #7672 deleted as inert, this one
+  // CHANGES A COUNT: `includes()` is a substring match with no anchor, so a
+  // comment is genuinely indistinguishable from a step here and the filter is
+  // the only thing that separates them.
+  //
+  // The live count is 24 either way, so the calibration basis is unchanged —
+  // re-derived rather than assumed, per #7667's third criterion.
   const setupNodeSteps = workflows.flatMap(w =>
-    w.jobs.flatMap(j => j.steps.filter(s => s.some(l => l.includes(SETUP_NODE))))
+    w.jobs.flatMap(j => j.steps.filter(s => code(s).some(l => l.includes(SETUP_NODE))))
   )
   assert.ok(
     setupNodeSteps.length >= 15,
