@@ -1226,21 +1226,114 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     // of #7671 measured that the second added no coverage. A duplicate case is
     // not neutral: it reads as two independent proofs and is one.
     //
-    // The `steps:` block is a FICTION, and the honest thing is to say so: a
-    // real reusable-workflow job has no steps at all, and the stepless check
-    // below would refuse it. That is a latent false red this fixture has always
-    // dodged — tracked in #7672 rather than widened into here, since it is a
-    // property of the STEPLESS rule, which predates every per-file row.
+    // The `steps:` block used to be a FICTION here — a real reusable-workflow
+    // job has no steps at all, and the old blanket stepless rule refused it, so
+    // the case for the reusable spelling had to be invalid YAML for the very
+    // spelling it was named for. #7672 replaced that rule with an equality, so
+    // the fixture is now the real shape.
     assertEveryFileParsed([
       {
         name: 'x.yml',
-        text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n    steps:\n      - run: echo hi\n',
-        jobs: [{ id: 'call', steps: [['      - run: echo hi']] }],
+        text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n',
+        jobs: [{ id: 'call', steps: [] }],
+      },
+    ])
+  })
+
+  it('a reusable-workflow job that yielded steps is refused — by the STEP-COUNT row, not this one', () => {
+    // Measured, and worth pinning because the equality's own comment would
+    // otherwise imply this direction is its to catch. It is not: a `uses:` job
+    // yielding a step makes parsed steps exceed what the text declares, and the
+    // step-count row runs first and says so. The direction the stepless
+    // equality UNIQUELY owns is the other one — a normal job with no steps.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n',
+            jobs: [{ id: 'call', steps: [['      - run: echo hi']] }],
+          },
+        ]),
+      /yields a different number of steps than its text declares/
+    )
+  })
+
+  it('DISCLOSED BLIND SPOT: a swap between two jobs keeps every per-file total intact', () => {
+    // The limitation all three per-file rows share, pinned here because this is
+    // where it is easiest to construct. The reader attributes the normal job's
+    // step to the reusable one: jobs 2 = 2, steps 1 = 1, stepless 1 = reusable
+    // 1. Every total agrees and the attribution is wrong.
+    //
+    // Guarding it needs a per-JOB declared count, which means deciding which
+    // text lines belong to which job — the traversal `parseJobs` already does,
+    // and deriving the expectation from it would be the
+    // "expectation computed from its own subject" cause. Pinned GREEN
+    // deliberately: this asserts CURRENT behaviour. If it ever goes red,
+    // someone has closed it and this case should be inverted.
+    const swapped = {
+      name: 'x.yml',
+      text:
+        'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n' +
+        '  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n',
+      jobs: [{ id: 'call', steps: [['      - run: echo hi']] }, { id: 'a', steps: [] }],
+    }
+    assertEveryFileParsed([swapped])
+
+    // A green assertion alone would prove NOTHING: review of #7677 measured
+    // that deleting the equality outright leaves the line above passing, so on
+    // its own this is a documentation comment wearing a test's clothes — the
+    // sixth such fixture in this session. The paired assertion is what gives it
+    // teeth: the SAME file with one more step-less job is refused, so the case
+    // dies with the rule it documents. What stays undetectable is the swap, not
+    // the rule.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          { ...swapped, jobs: [...swapped.jobs, { id: 'b', steps: [] }], text: `${swapped.text}  b:\n    runs-on: ubuntu-latest\n` },
+        ]),
+      /different number of step-less jobs than it declares reusable-workflow calls/
+    )
+  })
+
+  it('a normal job with no steps is still refused, in a file that ALSO has a reusable one (#7672)', () => {
+    // The reason the rule is an equality rather than an exemption. Under a
+    // floor, one legitimate `uses:` job would license a normal stepless job in
+    // the same file — the widening this change must not introduce.
+    assert.throws(
+      () =>
+        assertEveryFileParsed([
+          {
+            name: 'x.yml',
+            text: 'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n  a:\n    runs-on: ubuntu-latest\n',
+            jobs: [{ id: 'call', steps: [] }, { id: 'a', steps: [] }],
+          },
+        ]),
+      /different number of step-less jobs than it declares reusable-workflow calls/
+    )
+  })
+
+  it('a file with a reusable job AND a normal job with steps is accepted (#7672)', () => {
+    // The mixed CONTROL. Without it the two cases above would both pass on a
+    // rule that simply refused every file containing a `uses:` job.
+    assertEveryFileParsed([
+      {
+        name: 'x.yml',
+        text:
+          'jobs:\n  call:\n    uses: ./.github/workflows/y.yml\n' +
+          '  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n',
+        jobs: [{ id: 'call', steps: [] }, { id: 'a', steps: [['      - run: echo hi']] }],
       },
     ])
   })
 
   it('does not read a COMMENTED-OUT job key as a declaration', () => {
+    // The ANCHOR does this, not a comment filter. `^ {4}` requires the fifth
+    // character to be `r` or `u`, and a comment line has its `#` at or before
+    // the fourth. A `code()` call sat here until a #7672 mutation sweep proved
+    // it inert — this case stayed green with the filter deleted, and goes red
+    // when the anchor is dropped, which is the mutation that reaches the
+    // mechanism actually in use.
     assertEveryFileParsed([
       {
         name: 'x.yml',
@@ -1250,13 +1343,13 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     ])
   })
 
-  it('refuses a job that parsed with no steps at all', () => {
+  it('refuses a job with no steps in a file that declares no reusable-workflow call', () => {
     // One level down from the file check, same argument: a job with no steps
     // contributes no run bodies, and every run-body rule then passes over an
     // empty set for it.
     assert.throws(
       () => assertEveryFileParsed([file('ci.yml', 2, 2, 0)]),
-      /a job parsed with no steps at all/
+      /different number of step-less jobs than it declares reusable-workflow calls/
     )
   })
 
@@ -1416,7 +1509,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
-  it('reports the step disagreement rather than the emptier `no steps at all`', () => {
+  it('reports the step disagreement rather than the emptier step-less count', () => {
     // The ordering between the two rules, and the reason they are not
     // redundant: when the text declares steps the parse did not produce, the
     // useful message names the disagreement. `steps.length === 0` says only
@@ -1434,7 +1527,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
     )
   })
 
-  it('leaves `no steps at all` to catch a job whose text declares none either', () => {
+  it('leaves the step-less equality to catch a job whose text declares no steps either', () => {
     // The other half of that interaction, and what stops the step row from
     // being read as a replacement: it agrees at zero, so only the stepless
     // rule can refuse a job that yields nothing.
@@ -1447,7 +1540,7 @@ describe('workflow reader: assertEveryFileParsed (#7659, #7662)', () => {
             jobs: [{ id: 'a', steps: [] }],
           },
         ]),
-      /a job parsed with no steps at all/
+      /different number of step-less jobs than it declares reusable-workflow calls/
     )
   })
 

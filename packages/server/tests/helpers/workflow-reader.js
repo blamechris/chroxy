@@ -599,8 +599,18 @@ export const MIN_PLAIN_RUN_STEPS = 40
  * absorbed-step case this row exists for becomes silently GREEN again.
  */
 export function assertEveryFileParsed(workflows) {
+  // NO `code()` ON EITHER COUNT BELOW, and the anchor is why. `^ {4}` requires
+  // the fifth character to be `r` or `u`, and a comment line has its `#` at or
+  // before the fourth — so a comment cannot match either pattern and a comment
+  // filter here could not change a count. Both calls WERE here and a mutation
+  // sweep proved both INERT (#7672): removing them killed nothing. That is the
+  // third instance of this shape in this file — `assertEveryFileContributes`
+  // lost one in #7666's review, `declaredSteps` was written without one for the
+  // same reason — so it is stated once, here, rather than rediscovered a fourth
+  // time. A filter that cannot alter an outcome is not a weak guard, it is a
+  // comment that reads like one.
   const declaredJobs = text =>
-    code(text.split('\n')).filter(l => /^ {4}(?:runs-on|uses):/.test(l)).length
+    text.split('\n').filter(l => /^ {4}(?:runs-on|uses):/.test(l)).length
 
   const disagreements = workflows
     .map(w => ({ file: w.name, parsed: w.jobs.length, declared: declaredJobs(w.text) }))
@@ -663,14 +673,80 @@ export function assertEveryFileParsed(workflows) {
       'neighbour\'s step, none, or one the text does not contain'
   )
 
-  const stepless = workflows.flatMap(w =>
-    w.jobs.filter(j => j.steps.length === 0).map(j => `${w.name}:${j.id}`)
-  )
+  // A job with no steps is a defect for a NORMAL job and the only correct shape
+  // for a reusable-workflow CALL, so the rule is an EQUALITY per file rather
+  // than a blanket refusal (#7672).
+  //
+  // This used to reject any job with zero steps, which is a latent false red:
+  // `jobs: { call: { uses: ./.github/workflows/y.yml } }` is legal and has no
+  // steps by definition. The SAME function counts that job's `uses:` as a
+  // declared job above — the `^ {4}(?:runs-on|uses):` half added precisely so
+  // the spelling would not read as a missing job — and then refused it for
+  // having the zero steps the spelling requires. The two halves disagreed
+  // about the same job. Zero such jobs exist here, so nothing was red; the
+  // evidence it was real is that the FIXTURE had to fabricate a `- run:` step
+  // to get past it, making the case for the reusable spelling invalid YAML for
+  // the very spelling it was named for.
+  //
+  // WHY EQUALITY AND NOT AN EXEMPTION. A floor ("at most this many stepless
+  // jobs") would let a normal stepless job through any file that also has a
+  // reusable one. Equality says both directions at once: every reusable job
+  // yields no steps, and every stepless job is a reusable one. It needs no
+  // roster, and it reads only `text` and `jobs[].steps` — data every caller
+  // supplies, so it cannot degrade into "cannot check this, so nothing to
+  // check" for a synthetic caller that has no `body`.
+  //
+  // WHICH DIRECTION THIS ROW ACTUALLY OWNS, measured rather than implied: only
+  // stepless > reusable, a normal job with no steps. The other direction — a
+  // `uses:` job that yielded steps — makes parsed steps exceed the declared
+  // count, so the STEP-COUNT row above fires first and names it better. The
+  // equality is kept because it states the invariant in one line and costs
+  // nothing, not because both halves are sole detectors; a case pins which row
+  // speaks.
+  //
+  // IT CAN NEVER BE THE SOLE FAILING ROW FOR AN INDENT CAUSE, which is the same
+  // coupling `declaredSteps` documents one row up. `^ {4}uses:` is a strict
+  // SUBSET of the jobs row's `^ {4}(?:runs-on|uses):`, so any indentation that
+  // hides a reusable job from this count hides it from that one too, and the
+  // jobs row runs first. Loosen `^ {4}` there without revisiting here and this
+  // row's evidence changes shape silently.
+  //
+  // NO LIVE FILE EXERCISES THE REUSABLE SIDE — the corpus has zero `uses:` jobs,
+  // so the equality is held at 0 === 0 by every real file and only synthetic
+  // fixtures reach the other value. Stated for the same reason the step row
+  // states its untested zero: an untested branch described as handled is how
+  // this module's other floors earned their corrections.
+  //
+  // THE INVARIANT'S EVIDENCE, honestly: that a NORMAL job must have steps is
+  // GitHub's runtime behaviour ("No steps defined in `steps`"), not something
+  // the community JSON schema says — SchemaStore requires only `runs-on`, with
+  // `minItems: 1` on `steps` if present. Checked in review of #7677. If a
+  // step-less normal job ever turns out to be accepted, this equality is the
+  // thing that has to change, and it will announce itself as a red build rather
+  // than as silence.
+  //
+  // AND IT IS A PER-FILE TOTAL, so a SWAP is invisible: attribute a normal
+  // job's step to the reusable one and jobs, steps and stepless counts all
+  // still agree. That is the limitation every per-file row here shares, and
+  // closing it needs a per-JOB declared count — which means deciding which text
+  // lines belong to which job, the traversal `parseJobs` already does, and
+  // deriving the expectation from it is the cause this module avoids
+  // everywhere else. Disclosed, and pinned by a case.
+  const steplessRows = workflows
+    .map(w => ({
+      file: w.name,
+      stepless: w.jobs.filter(j => j.steps.length === 0).map(j => j.id),
+      reusable: w.text.split('\n').filter(l => /^ {4}uses:/.test(l)).length,
+    }))
+    .filter(r => r.stepless.length !== r.reusable)
   assert.deepEqual(
-    stepless,
+    steplessRows,
     [],
-    'a job parsed with no steps at all — it contributes no run bodies, so every run-body rule ' +
-      'passes over nothing for it'
+    'a file has a different number of step-less jobs than it declares reusable-workflow calls. ' +
+      'More step-less jobs than calls: a normal job yielded nothing, so every run-body rule ' +
+      'passes over an empty set for it. Fewer: a `uses:` job yielded steps — either the file ' +
+      'really declares them under it, which GitHub rejects, or the reader has attributed a ' +
+      "neighbour's"
   )
 }
 
