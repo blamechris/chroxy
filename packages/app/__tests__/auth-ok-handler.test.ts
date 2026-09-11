@@ -576,6 +576,29 @@ describe('auth_ok handler', () => {
       expect(saved.lanVerified).toBe(true);
     });
 
+    it('#7525 — the factory DEFAULT url classifies as tunnel, and that is load-bearing', () => {
+      // Every row above passes an explicit url, so none of them pins the
+      // factory's DEFAULT — and 230 of the 256 call sites across 11 files in
+      // this package rely on it. The scheme is not decoration: auth_ok reads it
+      // to choose the transport (`ws://` -> lan, `wss://` -> tunnel), so
+      // flipping the default silently re-points every one of those sites onto
+      // the OTHER branch.
+      //
+      // Measured before this row existed, across all 11 files (503 tests):
+      // changing the default to `wss://MUTANT.invalid`, and then flipping it to
+      // `ws://mutant.invalid:1`, each left every one of them passing, exit 0.
+      // With this row, the scheme flip fails.
+      //
+      // Asserting the classification rather than only the string is the point.
+      // A string check catches a rename; only this catches the change that
+      // moves ~230 tests onto a branch nobody chose.
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      expect(ctx.url).toBe('wss://test.example.com');
+
+      handleMessage(createAuthOkMessage(), ctx);
+      expect(mockSetActivePath).toHaveBeenCalledWith('tunnel');
+    });
+
     it('#5518 — sets activePath to tunnel for a wss:// connect', () => {
       const ctx = createMockConnectionContext({ url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket });
       handleMessage(createAuthOkMessage(), ctx);

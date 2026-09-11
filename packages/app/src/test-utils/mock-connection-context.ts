@@ -36,6 +36,15 @@ export function createMockConnectionContext<
   overrides?: T & Record<Exclude<keyof T, keyof ConnectionContext>, never>,
 ): ConnectionContext {
   const base: ConnectionContext = {
+    // PINNED, and the scheme is the load-bearing half (#7525). 230 of the 256
+    // call sites across 11 files in this package take this default, and auth_ok
+    // reads the scheme to choose the transport — `ws://` -> lan, `wss://` ->
+    // tunnel. Flipping it to `ws://` therefore re-points every one of those
+    // sites onto the OTHER branch, silently: measured, that change left all 503
+    // tests across those files passing, exit 0. The pin is
+    // "#7525 — the factory DEFAULT url classifies as tunnel" in
+    // __tests__/auth-ok-handler.test.ts, and it asserts the CLASSIFICATION, not
+    // just this string — a string check would only catch a rename.
     url: 'wss://test.example.com',
     token: 'test-token',
     isReconnect: false,
