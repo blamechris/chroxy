@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 344
+const MIN_CASES = 401
 
 let pass = 0
 let fail = 0
@@ -197,6 +197,8 @@ const {
   classifyReferences,
   extractInterfaceFields,
   extractModuleBindings,
+  declaratorNames,
+  genericEnd,
   incrementsThroughAccessor,
   stripComments,
 } = await import(pathToFileURL(SCRIPT).href)
@@ -625,6 +627,11 @@ test("a lone apostrophe in JSX prose cannot open a blind span (S3: quote spans s
 // finding bindings, or a classifier that quietly files every reference as a
 // read, both report "clean".
 // ---------------------------------------------------------------------------
+
+// A roster key is `<path>::<name>`, so `fields.includes('x')` can NEVER be true
+// — an absence assertion written that way passes with the guard deleted, which
+// is the shape this suite exists to catch. Match the SUFFIX.
+const has = (r, name) => r.fields.some((k) => k === name || k.endsWith(`::${name}`))
 
 const analyzeBindings = (text, opts = {}) =>
   analyzeTarget({
@@ -1539,15 +1546,240 @@ const literalAndWrapRoster = [
   // not reserved must bind, and one that is must still be refused.
   ['a binding named `of`, which is NOT reserved', 'let of = compute(), b = compute();\n', 'of,b'],
   ['a declarator named `await`, which IS reserved in a module', 'let a = 1, await = 2;\n', 'a,UNPARSED(await = 2)'],
+  // #7688. A destructuring declarator has NO initializer of its own — what
+  // follows its `=` is the SOURCE — so the alias rule was reading that source
+  // as the declarator's value and suppressing EVERY name in the pattern. On
+  // main these three rows yield the empty string.
+  //
+  // Every destructuring fixture above sources from `make()`, and a CALL escapes
+  // the alias rule, which is exactly why this shipped uncaught: the cases that
+  // existed could not tell the two behaviours apart.
+  ['a `const` pattern sourced from a BARE identifier', 'const { readMe, writeOnly } = ctx;\n', 'readMe,writeOnly', '#7688'],
+  ['a `const` pattern sourced from a DOTTED path', 'const { sessionId, phase } = store.state;\n', 'sessionId,phase', '#7688'],
+  ['a `const` ARRAY pattern sourced from a bare identifier', 'const [first, second] = tuple;\n', 'first,second', '#7688'],
+  // The renamed / defaulted / rest forms, repeated with a NON-call source. The
+  // `extractModuleBindings` docblock advertises exactly these as SEEN, and
+  // every fixture that pinned them sourced from `make()` — so the claim was
+  // testable only in the one spelling that escaped the alias rule. Each of the
+  // three returns `[]` on main.
+  ['a RENAMED `const` pattern from a bare source', 'const { a: alpha, b: beta } = ctx;\n', 'alpha,beta', '#7688'],
+  ['a DEFAULTED `const` pattern from a bare source', 'const { alpha = 1, beta = 2 } = ctx;\n', 'alpha,beta', '#7688'],
+  ['a REST `const` pattern from a bare source', 'const [alpha, ...beta] = ctx;\n', 'alpha,beta', '#7688'],
+  // Controls for the two rows above: the alias rule itself must be UNCHANGED
+  // for the single-name shape it was written for. Delete the `isPattern` guard
+  // and the three rows above go red; weaken `isConstantInitializer` instead and
+  // these two do.
+  ['a single-name alias, which is still NOT state', 'const ALIAS = OTHER;\n', '', '#7688'],
+  ['a single-name DOTTED alias, still NOT state', 'const ALIAS = other.path;\n', '', '#7688'],
+  // #7688's second half. `Map<string, { a: number; b: number }>` did not match
+  // the generic lookahead — it rejected any `<...>` containing a `;`, and a TS
+  // inline object type carries its own — so the comma INSIDE the generic split
+  // the declarator list and the fragment `{ x: number; y: number }>()` was read
+  // as a binding pattern. Main yields `_a,number,_b` here: a PHANTOM, which is
+  // the ACCUSE direction and the reason RESERVED_WORDS exists.
+  ['a generic holding an inline object type', 'let _a = new Map<string, { x: number; y: number }>(), _b = compute();\n', '_a,_b', '#7688'],
+  // The `const` spelling of the same line — in-tree at message-handler.ts:1240.
+  // It was CORRECT on main, but only by accident: the phantom fragment has no
+  // top-level `=`, so `init` was null and the alias rule dropped it. #7688's
+  // first half removes exactly that cushion, so without the widened lookahead
+  // this row would start failing.
+  ['the `const` spelling of that generic', 'const _a = new Map<string, { x: number; y: number }>();\n', '_a', '#7688'],
+  // Controls for the WIDENED lookahead: it must not start matching a `<` that
+  // is a comparison. The first has a brace after the comma (the new alternative
+  // in the regex) and must still split; the second puts the `;` at the
+  // generic's own depth, where it still disqualifies the match.
+  ['a comparison whose sibling is an object literal', 'let a = b < c, d = { x: 1 };\n', 'a,d', '#7688'],
+  ['a comparison across a statement boundary', 'let a = b < c; let d = e > f, g = compute();\n', 'a,d,g', '#7688'],
+  // The LOSS direction of the same generic bug, which the `new Map<...>` rows
+  // above cannot reach: in ANNOTATION position the mis-split does not add a
+  // phantom BESIDE the real binding, it REPLACES it. Main returns `number,z` —
+  // `m` is gone, so a write-only `m` would never be judged at all. This is the
+  // false-GREEN direction and the more serious of the two.
+  ['a generic ANNOTATION holding an inline object type', 'const m: Record<string, { a: number; b: number }> = {}, z = compute();\n', 'm,z', '#7688'],
+  // The generic ARROW spelling, which is the SECOND call site of the scan
+  // (`prev === '='`). The `<T, U = T>` row above has no braces, so it is
+  // satisfied by the old regex and cannot witness a revert of this half.
+  // Main returns `f,U,z`: the type parameter `U` as a phantom binding.
+  ['a generic ARROW parameter list holding an inline object type', 'const f = <T, U = { a: number; b: string }>(x: T) => x, z = compute();\n', 'f,z', '#7688'],
+  // CONTROLS for the scan, and the ones that caught the first attempt at this
+  // fix. Expressing "is this a generic" as a regex with a braced alternative
+  // (`\{[^{}]*\}`) admits exactly ONE brace level, so these three — which MAIN
+  // HANDLES CORRECTLY — started losing their binding to an `unparsed` warning.
+  // Trading a phantom for a missing name one level down is the defect class
+  // this whole file exists to catch, so both directions are pinned.
+  ['a generic whose object type NESTS braces', 'const _r: Record<string, { a: { b: 1 } }> = {}, z = compute();\n', '_r,z', '#7688'],
+  ['a generic nesting braces in initializer position', 'const _m = new Map<string, { run: { id: string } }>(), z = compute();\n', '_m,z', '#7688'],
+  ['a generic whose object type nests THREE deep', 'const _d: Record<string, { a: { b: { c: 1 } } }> = {}, z = compute();\n', '_d,z', '#7688'],
+  // A `{` inside a STRING LITERAL type must not be counted as nesting — the
+  // same class `literalEnd`'s docblock records for `/a,b/` and `` `${x},${y}` ``.
+  ['a generic holding a brace inside a string literal type', "const _s = new Map<'{', number>(), z = compute();\n", '_s,z', '#7688'],
+  // A generic WRAPPED across lines is still not recognised — `genericEnd` bails
+  // on a newline exactly as `[^;\n]` did. Pinned because the safe outcome is
+  // not obvious: the declaration-end scan stops at that same newline (the last
+  // significant character is `<`, not `,` or `=`), so the list TRUNCATES to one
+  // declarator instead of mis-splitting, and no fragment is produced at all.
+  ['a generic WRAPPED across lines, which truncates rather than mis-splits', 'let _w = new Map<\n  string, { a: number }\n>();\n', '_w', '#7688'],
 ]
-for (const [label, decl, want] of literalAndWrapRoster) {
-  test(`the declarator scan reads ${label} (#7687)`, () => {
+// The issue tag is per-ROW, not baked into the template: rows added later
+// belong to a different issue, and a case name that misattributes itself is the
+// same defect as a comment describing a stronger check than its code performs.
+for (const [label, decl, want, issue = '#7687'] of literalAndWrapRoster) {
+  test(`the declarator scan reads ${label} (${issue})`, () => {
     const got = extractModuleBindings(stripComments(decl))
       .map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
       .join(',')
     assert(got === want, `got [${got}], want [${want}] from ${JSON.stringify(decl)}`)
   })
 }
+
+// `genericEnd` — CLAUSE BY CLAUSE, driven directly (#7688 review).
+//
+// It is exported for this. The first version of it was pinned only through the
+// extractor, and a reachability probe showed THREE of its clauses — the `;`
+// rule, the newline bail and the unbalanced-`}` bail — were never executed by
+// any of the suite's cases, while 6 of 9 mutations to it survived green. The
+// `;` rule is the one behaviour this change deliberately alters, and the row
+// added as its control provably could not reach it: the declaration-end scan
+// breaks on a top-level `;` before the splitter ever sees one.
+//
+// A guard nobody can make fire is a guard nobody can prove.
+const GE = (src) => genericEnd(src, src.indexOf('<'))
+const GE_CALL = (src) => genericEnd(src, src.indexOf('<'), { requireCall: true })
+
+const genericEndCases = [
+  // [label, input, closes?]
+  ['a plain type-argument list', '<string, number>', true],
+  ['a `;` at the generic’s OWN depth, which is a comparison', 'a < b; c > d', false],
+  ['a `;` INSIDE braces, which is a type-member separator', '<string, { a: 1; b: 2 }>', true],
+  ['braces nested two deep', '<string, { a: { b: 1 } }>', true],
+  ['braces nested three deep', '<string, { a: { b: { c: 1 } } }>', true],
+  ['a NEWLINE, disqualifying at any depth', '<string,\n  number>', false],
+  ['a newline INSIDE braces, also disqualifying', '<string, {\n  a: 1\n}>', false],
+  // The unbalanced-`}` bail, in the ONLY spelling that discriminates. The
+  // obvious fixture `<string } number>` passes with the bail DELETED — the
+  // counter just goes to -1 and no later `>` sits at 0 — so it proves nothing.
+  // Here a following `{` brings the mutated counter back to 0, the `>` closes,
+  // and a stray brace has manufactured a generic. That is what the bail is for:
+  // a depth-0 `}` means the scan has left the expression, and letting the
+  // counter go negative lets it wander back in.
+  ['an unbalanced `}` that a later `{` would compensate', '<a } { b > c', false],
+  ['an unbalanced `}` at depth 0', '<string } number>', false],
+  ['a brace inside a STRING literal, not counted', "<'{', number>", true],
+  ['a `;` inside a string literal, still disqualifying', "<';', number>", false],
+  ['a newline inside a TEMPLATE literal, still disqualifying', '<`a\nb`, number>', false],
+  ['no closing `>` at all', '<string, number', false],
+]
+for (const [label, src, closes] of genericEndCases) {
+  test(`genericEnd handles ${label} (#7688)`, () => {
+    const got = GE(src)
+    assert((got !== -1) === closes, `got ${got} from ${JSON.stringify(src)}, expected ${closes ? 'a close' : '-1'}`)
+  })
+}
+
+test('genericEnd returns the index PAST the closing `>` (#7688)', () => {
+  // The call site slices from this index to test for a following `(`. Off by
+  // one and it reads the `>` itself, so every generic arrow stops being one.
+  // `return j` instead of `j + 1` is a mutation the suite DID kill; this states
+  // the contract directly rather than relying on that.
+  const src = '<string, number>(x)'
+  const end = GE(src)
+  assert(src[end - 1] === '>', `index ${end} does not sit just past a '>': ${JSON.stringify(src.slice(0, end))}`)
+  assert(src[end] === '(', `expected '(' at ${end}, got ${JSON.stringify(src[end])}`)
+})
+
+const genericEndCallCases = [
+  ['a type-parameter list followed by `(`', '<T, U>(x: T) => x', true],
+  ['a type-parameter list NOT followed by `(`', '<T, U> x', false],
+  // The BACKTRACKING clause. The regex this replaced was lazy, so the engine
+  // retried later `>` until one was followed by `(`. Returning the FIRST `>`
+  // closed at `Array<string>` and put the type parameter `U` in the roster as a
+  // binding — the exact phantom class this PR removes, one layer down, and
+  // `exported` on an `export const`, which aborts the target as a duplicate.
+  ['a nested generic before the `(`', '<T extends Array<string>, U>(x: T) => x', true],
+  ['a defaulted nested generic before the `(`', '<T = Map<string, number>, U>(x: T) => x', true],
+  ['a function type before the `(`', '<T extends (a: number) => void, U>(x: T) => x', true],
+  ['whitespace between the `>` and the `(`', '<T, U>  (x: T) => x', true],
+]
+for (const [label, src, closes] of genericEndCallCases) {
+  test(`genericEnd in requireCall mode handles ${label} (#7688)`, () => {
+    const got = GE_CALL(src)
+    assert((got !== -1) === closes, `got ${got} from ${JSON.stringify(src)}, expected ${closes ? 'a close' : '-1'}`)
+  })
+}
+
+// The four REGRESSIONS the review panel found in the first version of this
+// change, each measured against main. Every row here was CORRECT on main and
+// wrong on that version, so each is a control in the direction that matters:
+// they must stay green if this scan is ever touched again.
+const reviewRegressions = [
+  ['a generic ARROW whose type parameter nests a generic', 'const f = <T extends Array<string>, U>(x: T) => x, z = compute();\n', 'f,z'],
+  ['the EXPORTED spelling of that arrow', 'export const f = <T extends Array<string>, U>(x: T) => x;\n', 'f'],
+  ['a destructuring declarator with a TYPE ANNOTATION', 'let { readMe, writeOnly }: Ctx = ctx;\n', 'readMe,writeOnly'],
+  ['an ARRAY pattern with a type annotation', 'const [first, second]: T[] = tuple;\n', 'first,second'],
+  ['a comparison whose operand is a string holding a `;`', "let a = b < ';', c = d > e;\n", 'a,c'],
+  ['a pattern whose DEFAULT value holds a brace', "let { readMe = '}', writeOnly } = ctx;\n", 'readMe,writeOnly'],
+]
+for (const [label, decl, want] of reviewRegressions) {
+  test(`the declarator scan reads ${label} (#7688 review)`, () => {
+    const got = extractModuleBindings(stripComments(decl))
+      .map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+      .join(',')
+    assert(got === want, `got [${got}], want [${want}] from ${JSON.stringify(decl)}`)
+  })
+}
+
+// The pattern-needs-an-initializer guard (#7688), tested where it is
+// REACHABLE. A lexical destructuring declarator with no `=` is a SyntaxError,
+// so a `{`- or `[`-leading fragment without one was FABRICATED by the splitter
+// and is not a declarator at all. It must be refused BY NAME, never read for
+// bindings.
+//
+// Driven through `declaratorNames` directly because that is where every shape
+// is constructible. It IS reachable through the extractor — `const { a } ;` is
+// a pattern with no initializer and arrives here — and the row below pins that,
+// but most of the fragments this must refuse are ones only a mis-split can
+// produce. An earlier version of this comment claimed the extractor could not
+// reach it at all; that was wrong, and it is why the annotated-declarator
+// regression below went unmeasured until review. This is defence in depth
+// behind the scan — the layer that keeps a
+// residual mis-split from becoming a phantom now that the alias rule no longer
+// drops these fragments by accident (it used to, as a side effect of their
+// having no `=`: the same test written in the wrong place, by luck).
+const fabricatedFragments = [
+  ['the tail of a mis-split generic', '{ serverTs: number; recvAt: number }>()'],
+  ['an array-looking tail', '[a: number, b: string]>()'],
+  ['a bare pattern with no initializer at all', '{ a, b }'],
+  ['a pattern followed by `=>`, which is not an initializer', '{ a, b } => c'],
+  ['a pattern followed by `==`, which is not an initializer', '{ a, b } == c'],
+]
+for (const [label, fragment] of fabricatedFragments) {
+  test(`declaratorNames REFUSES ${label} instead of binding its names (#7688)`, () => {
+    const { names, unparsed } = declaratorNames(fragment)
+    assert(names.length === 0, `invented ${JSON.stringify(names)} from ${JSON.stringify(fragment)}`)
+    assert(unparsed.length === 1, `the refusal was not reported: ${JSON.stringify(unparsed)}`)
+  })
+}
+
+test('the EXTRACTOR reaches the refusal too, and reports rather than invents (#7688 review)', () => {
+  // `const { a } ;` is a pattern with no initializer — a SyntaxError, so it
+  // cannot be a real declaration — and it arrives at the guard through the
+  // normal extractor path. Pinned because the comment above used to claim the
+  // extractor could not reach this code at all, which is how the annotated
+  // declarator `let { a }: T = x` was refused for three review rounds without
+  // anyone measuring it.
+  const found = extractModuleBindings(stripComments('const { a } ;\n'))
+  assert(found.length === 1, `got ${JSON.stringify(found)}`)
+  assert(found[0].name === null, `a name was invented: ${JSON.stringify(found[0])}`)
+})
+
+test('declaratorNames still reads a REAL pattern, so the refusal did not widen (#7688)', () => {
+  // The control. Delete the guard and every row above passes anyway unless this
+  // one proves the guard is discriminating rather than blanket — a check that
+  // denies EVERYTHING is its own catalogued false-safety shape.
+  const { names, unparsed } = declaratorNames('{ readMe, writeOnly } = ctx')
+  assert(names.join(',') === 'readMe,writeOnly', `got ${JSON.stringify(names)}`)
+  assert(unparsed.length === 0, `a real declarator was refused: ${JSON.stringify(unparsed)}`)
+})
 
 test('an EXPORTED binding is marked as such', () => {
   const [b] = extractModuleBindings('export let n = 0;\n')
@@ -1778,6 +2010,75 @@ test('CLI exits 1 on a DESTRUCTURED binding written and never read (#7533)', () 
   }))
   assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
   assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a binding DESTRUCTURED FROM A BARE IDENTIFIER, written and never read (#7688)', () => {
+  // The case above is the same fixture sourced from `make()`. A CALL escapes
+  // the alias rule; a bare identifier does not, so on main this exits 0 and
+  // says OK — with no `::warning::` either, so it is invisible even to the
+  // honesty channel #7533 added. Changing ONLY `make()` to `ctx` is what turns
+  // the case above green-when-it-should-be-red, which is why both spellings
+  // have to be here.
+  //
+  // `const`, not `let`: `let` never reaches the alias rule at all, so the `let`
+  // spelling cannot witness this.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const { readMe, writeOnly } = ctx;\n` +
+      "export function f(): number { writeOnly.set('k', 1); return readMe.size; }\n",
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a Record whose generic holds an inline object type, written and never read (#7688)', () => {
+  // The false-GREEN half of #7688, end to end. `Record<string, T> = {}` is the
+  // shape this lint's own header calls out as live in the dashboard store, and
+  // `const counts: Record<string, number> = {}` is already a shipped case a few
+  // tests up — the ONLY difference here is that the type argument carries an
+  // inline object type, so the `;` inside it used to disqualify the generic.
+  // The comma then split the declarator list and the roster got `number`
+  // INSTEAD of `counts`: not a phantom beside the real binding, a phantom
+  // REPLACING it. On main this exits 0 and reports OK.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const counts: Record<string, { hits: number; last: number }> = {};\n` +
+      'export function record(k: string): void { counts[k] = { hits: 1, last: 2 }; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a binding destructured from a DOTTED path (#7688)', () => {
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}const { readMe, writeOnly } = store.state;\n` +
+      "export function f(): number { writeOnly.set('k', 1); return readMe.size; }\n",
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('a single-name alias is STILL rescued from the roster, so the carve-out did not widen (#7688)', () => {
+  // The other direction of the same change, and the one a careless fix breaks:
+  // dropping `isConstantInitializer` entirely would also pass every case above.
+  // `OTHER` is undeclared here, so if `ALIAS` entered the roster it would have
+  // zero references and reach the WARNING bucket — a standing warning on a
+  // green run is the failure mode `isConstantInitializer` exists to prevent.
+  const r = analyzeBindings("const ALIAS = OTHER;\nconst DOTTED = other.path;\nlet seen = 0;\nexport function f(): number { seen = 1; return seen; }\n")
+  assert(!has(r, 'ALIAS'), `the alias entered the roster: ${JSON.stringify(r.fields)}`)
+  assert(!has(r, 'DOTTED'), `the dotted alias entered the roster: ${JSON.stringify(r.fields)}`)
+  assert(has(r, 'seen'), `real state fell OUT of the roster: ${JSON.stringify(r.fields)}`)
+})
+
+test('a phantom from a generic holding an inline object type never reaches the roster (#7688)', () => {
+  // The harm the widened lookahead prevents, one level up from the declarator
+  // scan: on main `number` is a roster KEY here, and a roster key is
+  // CLASSIFIED — it can be reported as unreferenced state, or accused of being
+  // write-only, over a binding that does not exist.
+  const r = analyzeBindings('let _a = new Map<string, { x: number; y: number }>();\nexport function f(): number { _a.set(\'k\', 1); return _a.size; }\n')
+  assert(!has(r, 'number'), `a phantom binding entered the roster: ${JSON.stringify(r.fields)}`)
+  assert(has(r, '_a'), `the real binding was lost: ${JSON.stringify(r.fields)}`)
 })
 
 test('CLI exits 1 on a counter mutated only by counts.hits++ (#7553, property form)', () => {
