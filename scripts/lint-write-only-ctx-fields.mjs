@@ -149,11 +149,25 @@
  *     `.clear()` with no `.has()` anywhere was rescued by its own reset
  *     assignment and so never JUDGED on whether anything reads the contents.
  *   - It cost nothing live. Measured at the flip: 16 fields, 16 read, 0
- *     write-only — byte-identical to the flag off.
+ *     write-only — the same SUMMARY as the flag off. Not the same underneath,
+ *     and the difference is worth stating rather than rounding away: EIGHT
+ *     fields shift composition, because a mutator call that used to count as a
+ *     read now counts as a write. No field crosses into the failure bucket,
+ *     which is what "cost nothing" means here.
  *   - It costs something future, and that is the honest half: the read-side
  *     gaps in WHAT IT CANNOT SEE now have teeth on this target too. A field
  *     whose only reader is a SPREAD (`{ ..._ctx.set }` yields zero references)
  *     would be called write-only. That was already true for the binding kind.
+ *
+ *     Three fields are one refactor from it, having lost the cushion of
+ *     mutator-calls-counting-as-reads: `postPermissionSplits` (5r/0w -> 1r/4w),
+ *     `tokenToRender` and `clientRender` (both 2r/0w -> 1r/1w). Each now rests
+ *     on a SINGLE read reference — `postPermissionSplits` on the hand-off that
+ *     passes the Set by reference into the shared-delta context, the other two
+ *     on one `.summary()` call. Rewrite that one line as a destructure or a
+ *     spread, or drop it while the mutations survive, and the field is called
+ *     write-only. Naming them is the point: this is a documented cost, and a
+ *     documented cost nobody can locate is just a sentence.
  *
  * Until #7532 the interface path did not merely default the flag off — it
  * never THREADED it. `classifyReferences` took no options, so setting
