@@ -250,9 +250,22 @@
  *   - Two EXPORTED bindings sharing a name is a cannot-check, not a guess: a
  *     bare-identifier scan cannot tell them apart. Two PRIVATE ones are fine
  *     and exist today (`pending`, in two dashboard store modules).
- *   - A destructuring declaration contributes nothing, and only the first
- *     declarator of `let a = 1, b = 2` is seen. Both are missing COVERAGE, not
- *     a false green on something already in the roster.
+ *   - WHICH NAMES ENTER THE ROSTER is its own axis, and the entries below it
+ *     do not obey the rescue-only invariant stated at the end of this list.
+ *     `let a = 1, b = 2` contributed only `a`, and a destructuring declaration
+ *     contributed nothing at all, until #7533; a destructuring declaration
+ *     whose SOURCE is a bare identifier or a dotted path still contributed
+ *     nothing until #7688, because the alias rule read that source as the
+ *     declarator's value. Those were missing COVERAGE. The mirror, now that
+ *     they are admitted: a destructured binding whose only reader goes through
+ *     the SOURCE — `const { cache } = ctx`, mutated as `cache.set(k, v)` and
+ *     read only as `ctx.cache.get(k)` — has zero bare-identifier reads and is
+ *     ACCUSED as write-only. That is a false positive, resolved by an allowlist
+ *     entry naming the reader, and it is the same shape the interface kind's
+ *     DESTRUCTURING entry above already concedes. It was reachable for a
+ *     CALL-sourced pattern from #7533 onward; #7688 only extends it to the
+ *     remaining spellings, so it is a pre-existing class being named here
+ *     rather than a new one being introduced.
  *   - A mutator call in a concise arrow body (`() => m.clear()`) is not at
  *     statement position and reads as a READ — safe direction, still a gap.
  *   - IN-PLACE MUTATION IS SEEN ONE STEP DEEP. `o[k] = v;` and `o.field = v;`
@@ -289,11 +302,19 @@
  *     spellings; `++o` itself is untouched, because no accessor follows it and
  *     it rebinds rather than mutating. (#7532 still owns the flag.)
  *
- *     EVERY ENTRY ON THIS LIST IS NOW RESCUE-ONLY — a missed write, which can
- *     only lift a binding OUT of the failure bucket. That is the invariant the
- *     entry above used to be the single exception to, and it is load-bearing
- *     rather than decorative: an entry that ACCUSES turns a documented limit
- *     into a false red on real code.
+ *     EVERY CLASSIFIER ENTRY ON THIS LIST IS NOW RESCUE-ONLY — a missed write,
+ *     which can only lift a binding OUT of the failure bucket. That is the
+ *     invariant the entry above used to be the single exception to, and it is
+ *     load-bearing rather than decorative: an entry that ACCUSES turns a
+ *     documented limit into a false red on real code.
+ *
+ *     The word CLASSIFIER is doing real work and was added by #7688's review.
+ *     The invariant holds over the entries about how a REFERENCE is judged; it
+ *     does not hold, and never did, over the roster-membership entry above —
+ *     a name admitted to the roster whose every reader is out of model is
+ *     accused, and that has been reachable since #7533. Stating it as though it
+ *     covered the whole list is the comment-stronger-than-the-code shape this
+ *     file catalogues.
  *
  *     One rule is still tested before the flag and is NOT on this list:
  *     `DELETE_BEHIND`. `delete o` on a bare binding is a strict-mode
@@ -1267,6 +1288,14 @@ export function blankModuleClauses(text) {
  * function is not state, and including such a binding buys nothing but a
  * standing warning on every green run — which is how a warning bucket stops
  * being read at all (#7523). `let` is always state: it exists to be reassigned.
+ *
+ * ASKED ONLY OF A SINGLE-NAME DECLARATOR, since #7688. The caller skips this
+ * for a destructuring declarator, because what follows a pattern's `=` is the
+ * SOURCE being destructured rather than the declarator's value — so the
+ * question this function answers is not the one that declarator poses. See the
+ * `isPattern` guard at the call site for why suppressing a single-name alias
+ * loses nothing while suppressing a destructured name loses the coverage
+ * outright.
  */
 function isConstantInitializer(init) {
   const t = init.trimStart()
@@ -1297,7 +1326,17 @@ function isConstantInitializer(init) {
  * SEEN since #7533, having been listed here as NOT SEEN before it: every
  * declarator of `let a = 1, b = 2`, and every binding of a ONE-LEVEL
  * destructuring declaration (`const { a, b } = o`) in its renamed, defaulted
- * and rest forms. A NESTED pattern is not read — it is reported through the
+ * and rest forms.
+ *
+ * That sentence was WRITTEN in #7533 and was not TRUE until #7688: when `o` was
+ * a bare identifier or a dotted path, the alias rule at the bottom of this
+ * function read it as the declarator's value and suppressed every name in the
+ * pattern, so `const { a, b } = o` — the exact spelling above — yielded
+ * nothing. Only `const { a, b } = f()` worked, because a CALL escapes that
+ * rule, and every destructuring fixture #7533 shipped used one. A docblock
+ * describing a stronger check than the code performs is a catalogued defect in
+ * this repo (docs/false-safety-guards.md), and this is the second time it has
+ * landed on THIS docblock. A NESTED pattern is not read — it is reported through the
  * second shape above, which is why "including nested" was wrong here until
  * Copilot caught it on #7687, in a paragraph written to fix a different
  * overclaim in this same docblock. `declaratorNames` below does the reading;
@@ -1307,7 +1346,16 @@ function isConstantInitializer(init) {
  * NOT SEEN, deliberately stated rather than implied:
  *   - `declare`/ambient declarations are treated like any other;
  *   - a declarator shape `declaratorNames` cannot read contributes no name —
- *     it is REPORTED through `unparsed` rather than dropped (see there).
+ *     it is REPORTED through `unparsed` rather than dropped (see there);
+ *   - a declaration whose GENERIC wraps across lines. `genericEnd` bails on a
+ *     newline, exactly as the regex it replaced did. The outcome is safe but
+ *     not obvious, so it is pinned: the declaration-end scan stops at that same
+ *     newline, so the list TRUNCATES to its first declarator rather than
+ *     mis-splitting, and no fabricated fragment is produced (#7688);
+ *   - a `const` whose initializer is a single-name alias or dotted path. That
+ *     is `isConstantInitializer`'s deliberate noise trade, and it is a real
+ *     coverage hole rather than a neutral one — see the `isPattern` note at the
+ *     call site for the measurement.
  * Each of those is missing COVERAGE, never a false green on a binding that is
  * in the roster.
  */
@@ -1361,6 +1409,21 @@ export function declaratorNames(text) {
   // `{ a = 1 }` -> a, `[x, y]` -> x/y, `...rest` -> rest.
   const close = matchingBracket(d)
   if (close === -1) return { names: [], unparsed: [d] }
+  // A lexical destructuring declarator MUST have an initializer — `const { a }`
+  // with no `=` is a SyntaxError — so a pattern whose balanced span is not
+  // followed by one was FABRICATED by the splitter and is not a declarator at
+  // all. Refuse it by name rather than reading bindings out of it.
+  //
+  // This is defence in depth behind `genericEnd`, and it is the layer that
+  // matters once the alias rule stops masking (#7688): the rule used to drop
+  // these fragments for `const` as a side effect of their having no `=`, which
+  // is the same test written by accident in the wrong place. A residual
+  // mis-split — a generic wrapped across lines, a shape the scan still cannot
+  // read — would otherwise inject a phantom `const` binding, and two phantoms
+  // that both look EXPORTED abort the whole target with CannotCheckError.
+  //
+  // `=>` and `==` are excluded: neither is an initializer.
+  if (!/^\s*=(?![=>])/.test(d.slice(close + 1))) return { names: [], unparsed: [d] }
   const inner = d.slice(1, close)
   const names = []
   const unparsed = []
@@ -1452,6 +1515,76 @@ function literalEnd(s, i) {
   return i
 }
 
+/**
+ * Does a type-argument list start at `i`, and where does it end? Returns the
+ * index just past its closing `>`, or -1.
+ *
+ * NOT A REGEX, and that is the whole point. This was
+ * `/^<[^;\n]*?>/.test(s.slice(i))`, which rejected any `<...>` containing a
+ * `;` — but a TypeScript inline object type carries its own. So for this real
+ * line (packages/dashboard/src/store/message-handler.ts:1240)
+ *
+ *   const _deltaServerTs = new Map<string, { serverTs: number; recvAt: number }>();
+ *
+ * the `<` was not recognised, the comma INSIDE the generic split the declarator
+ * list, and the fragment `{ serverTs: number; recvAt: number }>()` reached
+ * `declaratorNames`. Measured on main, all three directions:
+ *
+ *   let _a = new Map<string, { x: number; y: number }>();          -> [_a, number]
+ *   const f = <T, U = { a: number; b: string }>(x: T) => x, z = c(); -> [f, U, z]
+ *   const m: Record<string, { a: number; b: number }> = {}, z = c(); -> [number, z]
+ *
+ * The first two ACCUSE (a phantom gets classified, and can fail the build over
+ * state that does not exist — the reason RESERVED_WORDS exists). The third is
+ * worse and is the false-GREEN direction: the real binding `m` is not merely
+ * joined by a phantom, it is REPLACED by one, so a write-only `m` is never
+ * judged at all.
+ *
+ * The obvious repair — admitting a braced span in the character class — is a
+ * NARROWING wearing a widening's clothes, and it was written here before being
+ * measured: `\{[^{}]*\}` admits exactly ONE brace level, so
+ * `Record<string, { a: { b: 1 } }>` stopped matching, and a shape main handled
+ * CORRECTLY started losing its binding. Trading a phantom for a missing name
+ * one level down is this repo's signature defect (docs/false-safety-guards.md),
+ * and adding a second brace level to the regex is the same trade at a third.
+ * Brace nesting is not a regular property; a scanner is the honest shape.
+ *
+ * The rule, stated so it can be checked against the code:
+ *   - step OVER a string or template literal, so the `{` in `Map<'{', number>`
+ *     is not counted (the same class `literalEnd`'s own docblock records);
+ *   - `{`/`}` nest, and a `;` is disqualifying ONLY at brace depth 0 — that is
+ *     the one behaviour this changes, and it is exactly `a < b; c > d`, which
+ *     must stay a comparison;
+ *   - a `>` at brace depth 0 closes it, matching the old regex's LAZY match:
+ *     `<Map<string, number>>` closed at the inner `>` before and still does,
+ *     because the caller counts `<` and `>` itself;
+ *   - a NEWLINE is disqualifying at any depth, exactly as `[^;\n]` made it. A
+ *     generic wrapped across lines was not recognised before and still is not;
+ *     it is bounded rather than fixed here, which is also what keeps this scan
+ *     O(line) per `<`.
+ *
+ * Index-based on purpose: the regex form ran `s.slice(i)` at every `<`, which
+ * allocated a copy of the remaining file each time.
+ */
+function genericEnd(s, i) {
+  let brace = 0
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j]
+    // Quotes only. A regex literal cannot appear in a type, and `literalEnd`'s
+    // `/` branch scans BACKWARDS over the whole file to decide division-vs-regex
+    // — the documented O(n^2) hazard in this function's neighbourhood.
+    if (c === '"' || c === "'" || c === '`') { j = literalEnd(s, j) - 1; continue }
+    if (c === '\n') return -1
+    if (c === '{') brace++
+    else if (c === '}') { if (brace === 0) return -1; brace-- }
+    else if (brace === 0) {
+      if (c === '>') return j + 1
+      if (c === ';') return -1
+    }
+  }
+  return -1
+}
+
 /** Split on `sep` at bracket depth 0, ignoring separators inside nesting. */
 function splitTopLevel(s, sep) {
   return splitTopLevelWithOffsets(s, sep).map(p => p.text)
@@ -1490,7 +1623,7 @@ function splitTopLevelWithOffsets(s, sep) {
     // `const f = <T, U = T>(x: T) => x` — `<...>` immediately before a `(`.
     // Missing it split on the comma inside `<T, U>` and put the type parameter
     // `U` in the roster as a binding (#7687 review).
-    else if (c === '<' && /^<[^;\n]*?>/.test(s.slice(i)) && (() => {
+    else if (c === '<' && genericEnd(s, i) !== -1 && (() => {
       // Computed HERE, not per character: this walks backwards over `s`, so
       // hoisting it out of the `<` branch made the whole split O(n^2) and
       // wedged the harness at >120s (it runs in ~1s).
@@ -1500,7 +1633,12 @@ function splitTopLevelWithOffsets(s, sep) {
       // `Record<string, number>` has none and worked; `= <T, U = T>(` has one,
       // and the generic arrow went unrecognised because of it.
       const prev = (s.slice(0, i).match(/(\S)\s*$/) ?? ['', ''])[1]
-      return /[\w$>]/.test(prev) || (prev === '=' && /^<[^;\n]*?>\s*\(/.test(s.slice(i)))
+      // After `=` the shape must be a generic ARROW's parameter list — `<...>`
+      // immediately before a `(`. This is the SECOND call site of the scan and
+      // needs its own pin: the `<T, U = T>` fixture has no braces, so it is
+      // satisfied by the old regex and cannot witness a revert of this half.
+      const ge = genericEnd(s, i)
+      return /[\w$>]/.test(prev) || (prev === '=' && ge !== -1 && /^\s*\(/.test(s.slice(ge, ge + 40)))
     })()) angle++
     else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
     else if (depth === 0 && angle === 0 && c === sep) {
@@ -1607,12 +1745,54 @@ export function extractModuleBindings(strippedText) {
               keyword: m[2],
             })
           }
-          // A destructured binding has no initializer of its own; it inherits
-          // the declarator's, which is what follows the pattern's `=`.
           const eq = splitTopLevel(raw, '=')
           const init = eq.length > 1 ? eq.slice(1).join('=').slice(0, 200) : null
+          // A destructuring declarator has NO initializer of its own. What
+          // follows its `=` is the SOURCE being destructured, and the alias
+          // rule — which asks "is this binding another NAME for the value on
+          // the right?" — is answering a question this declarator never posed.
+          // Every name in the pattern binds a distinct PROPERTY of that source,
+          // not the source itself.
+          //
+          // Left unguarded, one `const` bound to a bare identifier suppressed
+          // the WHOLE pattern (#7688). Measured on main:
+          //
+          //   const { readMe, writeOnly } = ctx;          ->  []
+          //   const { sessionId, phase } = store.state;   ->  []
+          //   const { readMe, writeOnly } = makeCtx();    ->  [readMe, writeOnly]
+          //   let   { readMe, writeOnly } = ctx;          ->  [readMe, writeOnly]
+          //
+          // Only the third of those is what #7687's own regression fixtures
+          // used — a CALL escapes the alias rule — which is precisely why this
+          // shipped uncaught. Coverage that disappears by DECLARATION FORM is
+          // the defect #7533 exists to close, and `const { x, y } = SHARED` is
+          // an ordinary refactor away from a roster that silently halves.
+          //
+          // The alias rule is NOT weakened for the shape it was written for: a
+          // single-name `const ALIAS = OTHER` or `const ALIAS = other.path` is
+          // still excluded. The reason is the NOISE cost in
+          // `isConstantInitializer`'s docblock (#7523), and it is worth being
+          // exact about what that buys, because the tempting justification —
+          // "excluding it loses nothing, the source is in the roster and gets
+          // judged there" — was written here first and is FALSE. Measured over
+          // the five alias-suppressed bindings live in
+          // packages/dashboard/src/store/ today: four source from an IMPORT, so
+          // the source is in no roster at all; the fifth,
+          // `const pendingDeltas = deltaFlusher.pendingDeltas`, sources from a
+          // roster entry but binds a PROPERTY of it, so a `pendingDeltas.set(k, v)`
+          // is attributed to nothing. Both forms lose the coverage outright.
+          //
+          // What actually separates them is the hit rate. Four of those five
+          // are interval constants — exactly the standing-warning noise the
+          // rule exists to suppress — whereas a destructured name carries no
+          // such presumption: `const { cache } = registry` binds a container,
+          // and mutating it in place is the only write shape a `const` has.
+          // The single-name dotted alias losing real state is a REAL residual
+          // hole, filed rather than folded; it is not evidence for keeping the
+          // pattern form inside the rule.
+          const isPattern = /^[{[]/.test(raw.trim())
           for (const name of names) {
-            if (m[2] !== 'const' || (init !== null && !isConstantInitializer(init))) {
+            if (m[2] !== 'const' || isPattern || (init !== null && !isConstantInitializer(init))) {
               found.push({
                 name,
                 index: listStart + rawAt + identifierOffset(raw, name),
