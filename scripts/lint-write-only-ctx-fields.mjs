@@ -1123,23 +1123,248 @@ function isConstantInitializer(init) {
  * Module-level `let`/`const` STATE declared in one ALREADY comment-stripped,
  * clause-blanked source.
  *
- * Returns `[{ name, index, exported, keyword }]`, where `index` is the offset
- * of the declared NAME (so the classifier can skip the declaration itself).
+ * Returns entries of TWO shapes, and a caller must branch on which:
+ *   - `{ name, index, exported, keyword }` — a binding. `index` is the offset
+ *     of the declared NAME, so the classifier can skip the declaration itself.
+ *   - `{ name: null, unparsed, index, exported, keyword }` — a declarator this
+ *     could not read, reported instead of dropped. `analyzeModuleBindings`
+ *     collects these and emits a `::warning::` per declarator.
  *
  * Only brace-depth 0 counts: a `let` inside a function is a local, and
  * TypeScript's own `noUnusedLocals` already covers it.
  *
+ * SEEN since #7533, having been listed here as NOT SEEN before it: every
+ * declarator of `let a = 1, b = 2`, and every binding of a ONE-LEVEL
+ * destructuring declaration (`const { a, b } = o`) in its renamed, defaulted
+ * and rest forms. A NESTED pattern is not read — it is reported through the
+ * second shape above, which is why "including nested" was wrong here until
+ * Copilot caught it on #7687, in a paragraph written to fix a different
+ * overclaim in this same docblock. `declaratorNames` below does the reading;
+ * this function only finds the declaration LIST and hands each declarator to
+ * it.
+ *
  * NOT SEEN, deliberately stated rather than implied:
- *   - a destructuring declaration (`const { a, b } = o`) contributes nothing;
- *   - only the FIRST declarator of `let a = 1, b = 2` is seen;
- *   - `declare`/ambient declarations are treated like any other.
+ *   - `declare`/ambient declarations are treated like any other;
+ *   - a declarator shape `declaratorNames` cannot read contributes no name —
+ *     it is REPORTED through `unparsed` rather than dropped (see there).
  * Each of those is missing COVERAGE, never a false green on a binding that is
  * in the roster.
  */
+/**
+ * The identifiers a declarator BINDS, and the shapes this does not understand.
+ *
+ * `let a = 1, b = 2` bound only `a` and `const { a, b } = f()` bound nothing at
+ * all until #7533 — not false greens on anything in the roster, but missing
+ * COVERAGE, and coverage that disappears by DECLARATION FORM is the same defect
+ * as a hardcoded roster beside a growing set, one level down: writing
+ * `let pendingA = null, pendingB = null` would quietly halve what the lint sees
+ * and nothing would go red.
+ *
+ * A parser introduces the hazard it is meant to close, so this REPORTS what it
+ * could not read rather than dropping it. A declarator that yields no name is
+ * returned in `unparsed`, and `analyzeModuleBindings` emits a `::warning::`
+ * naming it and carries on — it does not fail the build, and the doc said it
+ * did until Copilot caught the mismatch on #7687.
+ *
+ * Not fatal for a measured reason: the previous extractor did not read those
+ * declarations either — it emitted entries literally named `const` for them —
+ * so failing here would red the build over a shape this change did not
+ * introduce. The gap is the same either way; what changed is that it is now
+ * NAMED instead of silent, which is the whole point.
+ *
+ * One level deep, deliberately. `const { a: { b } } = f()` reports the nested
+ * pattern as unparsed rather than guessing, because a wrong name in the roster
+ * is worse than a named refusal: the classifier would judge a binding that does
+ * not exist.
+ *
+ * @param {string} text One declarator, e.g. `a = 1` or `{ a, b: c } = f()`.
+ * @returns {{names: string[], unparsed: string[]}}
+ */
+export function declaratorNames(text) {
+  const d = text.trim()
+  if (d === '') return { names: [], unparsed: [] }
+
+  if (!/^[{[]/.test(d)) {
+    const m = /^([A-Za-z_$][\w$]*)/.exec(d)
+    if (!m) return { names: [], unparsed: [d] }
+    // A reserved word is never a binding name; seeing one means the split
+    // landed somewhere it should not have. Main's roster carried two entries
+    // literally named `const` from exactly this — noise that gets CLASSIFIED,
+    // so it can produce a confusing verdict about a binding that does not
+    // exist. Reported rather than accepted (#7533).
+    return RESERVED_WORDS.has(m[1]) ? { names: [], unparsed: [d] } : { names: [m[1]], unparsed: [] }
+  }
+
+  // A binding pattern. Take its balanced span, then read the bound names out of
+  // it: `{ a }` -> a, `{ a: b }` -> b (the RENAME binds, not the key),
+  // `{ a = 1 }` -> a, `[x, y]` -> x/y, `...rest` -> rest.
+  const close = matchingBracket(d)
+  if (close === -1) return { names: [], unparsed: [d] }
+  const inner = d.slice(1, close)
+  const names = []
+  const unparsed = []
+  for (const rawPart of splitTopLevel(inner, ',')) {
+    const part = rawPart.trim().replace(/^\.\.\./, '')
+    if (part === '') continue
+    if (/^[{[]/.test(part)) { unparsed.push(part); continue }
+    // `key: bound` binds the RIGHT side; `bound = default` binds the left.
+    //
+    // The rename colon can only appear BEFORE the default, so look for it
+    // there and NOWHERE else. A default value carries colons of its own — a
+    // ternary is the ordinary case — and splitting the whole part reads
+    // `{ a = cond ? 1 : 2 }` as renaming `a = cond ? 1` to `2`, which fails
+    // the identifier test and loses `a` to `unparsed`. Reported, not silent,
+    // but still coverage this claims to have (#7687 review).
+    const beforeDefault = splitTopLevel(part, '=')[0]
+    const renamed = splitTopLevel(beforeDefault, ':')
+    const target = (renamed.length > 1 ? renamed.slice(1).join(':') : beforeDefault).trim()
+    if (/^[{[]/.test(target)) { unparsed.push(part); continue }
+    const m = /^([A-Za-z_$][\w$]*)/.exec(target)
+    if (m && !RESERVED_WORDS.has(m[1])) names.push(m[1])
+    else unparsed.push(part)
+  }
+  return { names, unparsed }
+}
+
+/** Words that can never be a binding name — a declarator yielding one of these
+ *  is a parse artifact, not a discovery. */
+const RESERVED_WORDS = new Set([
+  'const', 'let', 'var', 'function', 'class', 'return', 'await', 'new', 'typeof',
+  'export', 'import', 'default', 'if', 'else', 'for', 'while', 'do', 'switch',
+  'case', 'break', 'continue', 'throw', 'try', 'catch', 'finally', 'yield',
+  'delete', 'void', 'in', 'instanceof', 'this', 'super', 'null', 'true', 'false',
+])
+// NOT here, and each for a reason a future reader will want to re-litigate:
+//   - `of` was, wrongly (#7687 review). It is only CONTEXTUALLY a keyword, in
+//     `for (x of y)`; `let of = 1` is legal in a module, so listing it refused
+//     a real binding. Nothing in the shipped targets declares it, so the cost
+//     was zero — but a refusal this list cannot justify is the same defect as
+//     a name it cannot justify accepting.
+//   - `await` IS here and must stay. It is legal in a plain function, so the
+//     obvious probe (`new Function('let await = 1')`) says it is fine and is
+//     WRONG: the targets are ES modules, where `await` is reserved. Checked
+//     with `node --check` on an actual `.mjs`, which is the only probe that
+//     reproduces the scanned context.
+
+/** The index of the bracket closing the one at position 0, or -1. */
+function matchingBracket(s) {
+  const open = s[0]
+  const shut = open === '{' ? '}' : ']'
+  let depth = 0
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === open) depth++
+    else if (s[i] === shut) { depth--; if (depth === 0) return i }
+  }
+  return -1
+}
+
+/** The end of the string, template or regex literal starting at `i`, or `i`
+ *  if none starts there.
+ *
+ *  `stripComments` deliberately leaves literal CONTENT byte-identical, so every
+ *  scanner below has to step OVER a literal rather than count its characters.
+ *  Skipping this is not theoretical: the comma inside `/a,b/` was split on and
+ *  the remainder `b/` accepted as a binding named `b`; `` `${x},${y}` `` yielded
+ *  one named `$`. A roster entry gets CLASSIFIED, so an invented name can fail
+ *  the build over state that does not exist (#7687 review). */
+function literalEnd(s, i) {
+  const c = s[i]
+  if (c === '"' || c === "'" || c === '`') {
+    for (let j = i + 1; j < s.length; j++) {
+      if (s[j] === '\\') { j++; continue }
+      if (s[j] === c) return j + 1
+      // A quoted string cannot span a newline; a template can.
+      if (c !== '`' && s[j] === '\n') return j
+    }
+    return s.length
+  }
+  if (c !== '/') return i
+  // `/` divides unless what precedes it can only be followed by a value.
+  const prev = (s.slice(0, i).match(/\S$/) ?? [''])[0]
+  if (prev && !'=([,:;!&|?+-*%~^<>{}'.includes(prev)) return i
+  for (let j = i + 1; j < s.length; j++) {
+    if (s[j] === '\\') { j++; continue }
+    if (s[j] === '[') { while (j < s.length && s[j] !== ']') { if (s[j] === '\\') j++; j++ } continue }
+    if (s[j] === '/') return j + 1
+    if (s[j] === '\n') return i
+  }
+  return i
+}
+
+/** Split on `sep` at bracket depth 0, ignoring separators inside nesting. */
+function splitTopLevel(s, sep) {
+  return splitTopLevelWithOffsets(s, sep).map(p => p.text)
+}
+
+/** The same split, keeping each piece's offset in `s` — callers need it to
+ *  report a binding's position in the ORIGINAL source, not within its own
+ *  declarator (#7533: `let a = 1, b = 2` put `b` at the offset of `a`). */
+function splitTopLevelWithOffsets(s, sep) {
+  const out = []
+  let depth = 0
+  // TypeScript generics are nesting too, and forgetting that was a real
+  // regression, not a hypothetical: `const counts: Record<string, number> = {}`
+  // split at the comma INSIDE the annotation and yielded `number` as the
+  // binding, dropping `counts` entirely — the harness case for #7537 caught it.
+  //
+  // `<` opens only after an identifier or a closing `>` (a generic argument
+  // list); `>` closes only when one is open and it is not the tail of `=>`.
+  // That keeps comparisons and arrow functions from unbalancing the counter.
+  let angle = 0
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    const lit = literalEnd(s, i)
+    if (lit > i) { i = lit - 1; continue }
+    const c = s[i]
+    if ('{[('.includes(c)) depth++
+    else if ('}])'.includes(c)) depth--
+    // A `<` opens a type-argument list only if one actually CLOSES: `a = b < c`
+    // has an identifier before it exactly like `Record<string, number>` does,
+    // so the character before cannot decide this on its own. Requiring the `>`
+    // is what separates them — and it is why fixing `prev` (which used to
+    // return '' whenever a space preceded the `<`, silently exempting every
+    // spaced comparison) did not break `let a = b < c, d = 2`.
+    //
+    // After `=` the shape must be a generic ARROW's parameter list,
+    // `const f = <T, U = T>(x: T) => x` — `<...>` immediately before a `(`.
+    // Missing it split on the comma inside `<T, U>` and put the type parameter
+    // `U` in the roster as a binding (#7687 review).
+    else if (c === '<' && /^<[^;\n]*?>/.test(s.slice(i)) && (() => {
+      // Computed HERE, not per character: this walks backwards over `s`, so
+      // hoisting it out of the `<` branch made the whole split O(n^2) and
+      // wedged the harness at >120s (it runs in ~1s).
+      //
+      // The last non-space character, which is NOT what `/\S$/` finds — that
+      // anchors at the very end, so any space before the operator yields ''.
+      // `Record<string, number>` has none and worked; `= <T, U = T>(` has one,
+      // and the generic arrow went unrecognised because of it.
+      const prev = (s.slice(0, i).match(/(\S)\s*$/) ?? ['', ''])[1]
+      return /[\w$>]/.test(prev) || (prev === '=' && /^<[^;\n]*?>\s*\(/.test(s.slice(i)))
+    })()) angle++
+    else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
+    else if (depth === 0 && angle === 0 && c === sep) {
+      out.push({ text: s.slice(start, i), offset: start })
+      start = i + 1
+    }
+  }
+  out.push({ text: s.slice(start), offset: start })
+  return out
+}
+
+/** Where `name` appears in `text` as a whole identifier, or 0. A bare
+ *  `indexOf` finds `b` inside `ba` — wrong binding, wrong offset. */
+function identifierOffset(text, name) {
+  const m = new RegExp(`(^|[^\\w$])(${name.replace(/[$]/g, '\\$')})(?![\\w$])`).exec(text)
+  return m ? m.index + m[1].length : 0
+}
+
 export function extractModuleBindings(strippedText) {
   const s = strippedText
   const found = []
-  const decl = /(export\s+)?(let|const|var)\s+([A-Za-z_$][\w$]*)/y
+  // Matches the KEYWORD only. It used to require an identifier immediately
+  // after, which is why `const { a, b } = f()` contributed nothing: the regex
+  // did not match at all. The declarator LIST is parsed below (#7533).
+  const decl = /(export\s+)?(let|const|var)\s+/y
   let depth = 0
   let i = 0
   while (i < s.length) {
@@ -1163,27 +1388,93 @@ export function extractModuleBindings(strippedText) {
       decl.lastIndex = i
       const m = decl.exec(s)
       if (m) {
-        const name = m[3]
-        const nameIndex = m.index + m[0].length - name.length
-        // Walk to this declarator's `=` at nesting depth 0 to read its
-        // initializer; stop at `;` or a newline if there is none.
-        let k = m.index + m[0].length
+        // The whole declaration: from after the keyword to the top-level `;`,
+        // or a newline that is not inside nesting. One `let a = 1, b = 2` is a
+        // single declaration with two declarators, and both must be emitted.
+        const listStart = m.index + m[0].length
+        let k = listStart
         let nest = 0
-        let init = null
+        let lastSig = ''
         while (k < s.length) {
+          const lit = literalEnd(s, k)
+          if (lit > k) { lastSig = s[lit - 1]; k = lit; continue }
           const d = s[k]
-          if (d === '(' || d === '[' || d === '{' || d === '<') nest++
-          else if (d === ')' || d === ']' || d === '}' || d === '>') nest--
-          else if (nest === 0 && d === '=' && s[k + 1] !== '=' && !'=!<>'.includes(s[k - 1])) {
-            init = s.slice(k + 1, k + 200)
-            break
-          } else if (nest === 0 && (d === ';' || d === '\n')) break
+          if (d === '(' || d === '[' || d === '{') nest++
+          else if (d === ')' || d === ']' || d === '}') nest--
+          else if (nest === 0 && d === ';') break
+          // A declaration may WRAP: `let a = 1,\n    b = 2`. Ending at the
+          // newline dropped every declarator past the first line — the exact
+          // shape #7533 exists to see, and the reason the fix looked complete
+          // while missing the formatting this repo actually uses.
+          //
+          // A trailing `,` or `=` continues the list, and the set stops there
+          // deliberately. `=` is the in-tree shape (`export const X =\n '...'`,
+          // scheduledTaskRequests.ts) and is always a continuation: every
+          // operator ending in `=` — `>=`, `!==`, `+=` — is binary, and `=>`
+          // ends in `>`.
+          //
+          // A wider set is NOT safe, and the reason is DUPLICATION rather than
+          // the swallow it looks like. With `+` added, `let a = b++\nlet c =
+          // f(), d = f()` runs the two statements together; `i = listStart`
+          // undoes the swallow by re-walking, but the over-long list is still
+          // SPLIT first, so `d` is emitted from the bogus list AND from the
+          // real one — measured `a,d,c,d`. The duplicate carries a skipIndex
+          // that does not match its own declaration, so that declaration stays
+          // in the scanned text and reads as a reference: the false-GREEN
+          // direction. Everything else that legitimately wraps (a `.` chain, a
+          // `+` concatenation) either sits inside brackets or ends its line on
+          // a token that can also END a statement, so it cannot be told apart
+          // here without a parser.
+          else if (nest === 0 && d === '\n' && lastSig !== ',' && lastSig !== '=') break
+          if (!/\s/.test(d)) lastSig = d
           k++
         }
-        if (m[2] !== 'const' || (init !== null && !isConstantInitializer(init))) {
-          found.push({ name, index: nameIndex, exported: Boolean(m[1]), keyword: m[2] })
+        const list = s.slice(listStart, k)
+
+        for (const { text: raw, offset: rawAt } of splitTopLevelWithOffsets(list, ',')) {
+          const { names, unparsed } = declaratorNames(raw)
+          for (const bad of unparsed) {
+            // NAMED, never dropped. A declarator shape this cannot read would
+            // otherwise leave its bindings unjudged and the run honestly green
+            // about the ones it did judge — the silent-coverage-loss this
+            // change exists to close (#7533).
+            found.push({
+              name: null,
+              unparsed: bad,
+              index: listStart + rawAt + Math.max(raw.indexOf(bad), 0),
+              exported: Boolean(m[1]),
+              keyword: m[2],
+            })
+          }
+          // A destructured binding has no initializer of its own; it inherits
+          // the declarator's, which is what follows the pattern's `=`.
+          const eq = splitTopLevel(raw, '=')
+          const init = eq.length > 1 ? eq.slice(1).join('=').slice(0, 200) : null
+          for (const name of names) {
+            if (m[2] !== 'const' || (init !== null && !isConstantInitializer(init))) {
+              found.push({
+                name,
+                index: listStart + rawAt + identifierOffset(raw, name),
+                exported: Boolean(m[1]),
+                keyword: m[2],
+              })
+            }
+          }
         }
-        i = m.index + m[0].length
+        // Resume at the START of the declarator list, NOT at its end. The end
+        // scan above tracks brackets but NOT string spans, so a `{` or `}`
+        // inside a string literal skews it — and jumping `i` past that region
+        // means the OUTER loop (which does skip strings) never counts those
+        // braces, leaving `depth` wrong for the whole rest of the file.
+        //
+        // Measured: with `i = k`, `connection.ts` lost SIX production state
+        // bindings — `_prevConnectionPhase`, `_prevActiveServerId`,
+        // `_prevActiveSessionId`, `_prevMessageCounts`,
+        // `_prevTerminalBufferLen`, `_prevSessions` — because depth went
+        // negative earlier in the file and never returned to 0. Losing coverage
+        // is the unsafe direction, and it is exactly what this change was
+        // written to prevent one level down.
+        i = listStart
         continue
       }
     }
@@ -1348,10 +1639,22 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
   // bare-identifier scan cannot tell which one an importer meant, and the
   // wrong answer would be a silent rescue. Refuse rather than guess.
   const exportedSeen = new Map()
+  const unreadable = []
   const keys = []
   const perName = new Map()
   for (const decl of declPrepared) {
     for (const b of extractModuleBindings(decl.text)) {
+      if (b.name === null) {
+        // A declarator the extractor could not read. REPORTED, never dropped:
+        // its bindings go unjudged either way, and the difference between a
+        // silent gap and a named one is the whole point of #7533. Not fatal —
+        // main's extractor did not read these declarations either (it emitted
+        // entries literally named `const` for them), so failing here would red
+        // the build over a shape this change did not introduce. Tracked for
+        // tightening; see the declaration-slice note in #7533's follow-up.
+        unreadable.push(`${decl.path}: ${b.unparsed.replace(/\s+/g, ' ').slice(0, 80)}`)
+        continue
+      }
       if (b.exported) {
         if (exportedSeen.has(b.name)) {
           throw new CannotCheckError(
@@ -1392,6 +1695,21 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
       'hold no state any more or the extractor no longer understands their shape — both are ' +
       '"cannot check", not "clean".',
     )
+  }
+
+  if (unreadable.length > 0) {
+    // Printed, not swallowed. These declarations contribute no roster entries,
+    // so their bindings are unjudged — the same gap #7533 closed for
+    // destructuring and multi-declarator forms, in the shapes still unread.
+    // Naming them is the difference between a known gap and a silent one.
+    // As a `::warning::`, like every other diagnostic here. It was a bare
+    // `console.log` until #7687's review: the one line in this file that CI
+    // renders nowhere, announcing the one thing the run did not check.
+    console.warn(
+      `::warning::[write-only-ctx] ${unreadable.length} declarator(s) could not be read and ` +
+      'are therefore unjudged — their bindings are outside the roster.',
+    )
+    for (const u of unreadable) console.warn(`::warning::[write-only-ctx] unread declarator: ${u}`)
   }
 
   return judge({

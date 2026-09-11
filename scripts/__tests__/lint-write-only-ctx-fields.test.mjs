@@ -1269,6 +1269,163 @@ test('the roster records the declaration OFFSET, not just the name', () => {
   assert(b.exported === false && b.keyword === 'let', JSON.stringify(b))
 })
 
+// Each name below occurs EXACTLY ONCE in its declaration — asserted, so
+// `indexOf` is an unambiguous independent answer for where the entry should
+// point rather than merely the first of several candidates. #7533's acceptance
+// criterion is per-declarator offsets, and until this table the only thing
+// pinning them was the CLI verdict, which a name pointing at the wrong column
+// still satisfies: the classifier skips `index..index+name.length` to avoid
+// counting the declaration as a read, so a drifted offset leaves the real
+// declaration IN the scanned text and reads as a first reference.
+const offsetRoster = [
+  ['a multi-declarator `let`', 'let alpha = 1, beta = 2;\n', ['alpha', 'beta']],
+  ['a destructuring `const`', 'const { alpha, beta } = make();\n', ['alpha', 'beta']],
+  ['a RENAMED destructuring', 'const { a: alpha, b: beta } = make();\n', ['alpha', 'beta']],
+  ['a DEFAULTED destructuring', 'const { alpha = 1, beta = 2 } = make();\n', ['alpha', 'beta']],
+  ['an array pattern with a REST element', 'const [alpha, ...beta] = make();\n', ['alpha', 'beta']],
+]
+for (const [label, decl, names] of offsetRoster) {
+  test(`the roster records a per-declarator offset for ${label} (#7533)`, () => {
+    const found = extractModuleBindings(stripComments(decl))
+    assert(found.length === names.length, `got ${found.length} binding(s), want ${names.length}: ${decl}`)
+    assert(
+      found.map((b) => b.name).join(',') === names.join(','),
+      `names ${found.map((b) => b.name).join(',')} !== ${names.join(',')}`,
+    )
+    for (const [i, name] of names.entries()) {
+      assert(decl.split(name).length === 2, `${name} is not unique in ${JSON.stringify(decl)}`)
+      assert(
+        found[i].index === decl.indexOf(name),
+        `${name}: index ${found[i].index} !== ${decl.indexOf(name)} in ${JSON.stringify(decl)}`,
+      )
+    }
+  })
+}
+
+test('the second declarator of `let a = 1, b = 2` lands on its own column (#7533)', () => {
+  // The criterion's own example, with the arithmetic spelled out rather than
+  // derived, so the table above cannot agree with a wrong `indexOf` unnoticed.
+  const [a, b] = extractModuleBindings('let a = 1, b = 2;\n')
+  assert(a.name === 'a' && a.index === 4, JSON.stringify(a))
+  assert(b.name === 'b' && b.index === 11, JSON.stringify(b))
+})
+
+test('a renamed binding whose name is a SUBSTRING of the key it renames (#7533)', () => {
+  // Why `identifierOffset` is a whole-identifier match and not `indexOf`: in
+  // `{ alpha: pha }` the string `pha` first occurs INSIDE `alpha`, three
+  // columns early. `indexOf` survives every case in the table above — none of
+  // their names is a substring of anything to its left — so without this case
+  // the offset math would be pinned only where it cannot be wrong.
+  const decl = 'const { alpha: pha } = make();\n'
+  assert(decl.indexOf('pha') === 10, 'fixture no longer has the ambiguity it is for')
+  const [b] = extractModuleBindings(stripComments(decl))
+  assert(b.name === 'pha', JSON.stringify(b))
+  assert(b.index === 15, `index ${b.index} !== 15 — pointed inside \`alpha\`?`)
+})
+
+// A default value carries colons of its own, and the rename split used to read
+// the first of them as `key: bound`. `{ a = cond ? 1 : 2 }` became "rename
+// `a = cond ? 1` to `2`", which fails the identifier test and drops `a` into
+// `unparsed`. Reported rather than silent — but still coverage the docblock
+// claims. The offsetRoster's defaulted case uses `= 1`, which has no colon, so
+// none of it exercised this.
+const ternaryDefaults = [
+  ['an object pattern', 'let { a = cond ? 1 : 2, b } = make();\n', ['a', 'b']],
+  ['an array pattern', 'const [a = flag ? 1 : 2, b] = make();\n', ['a', 'b']],
+  ['a RENAMED binding with a ternary default', 'const { k: a = cond ? 1 : 2 } = make();\n', ['a']],
+  ['a nested ternary', 'let { a = p ? q ? 1 : 2 : 3 } = make();\n', ['a']],
+]
+for (const [label, decl, names] of ternaryDefaults) {
+  test(`a ternary default does not read as a rename in ${label} (#7687)`, () => {
+    const found = extractModuleBindings(stripComments(decl))
+    const got = found.map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+    assert(got.join(',') === names.join(','), `got ${got.join(',')}, want ${names.join(',')}: ${decl}`)
+  })
+}
+
+test('a declarator that cannot be read is REPORTED, not dropped (#7533)', () => {
+  // The `unparsed` channel had no test at all until #7687's review — the one
+  // path whose documented behaviour had already been wrong once. A nested
+  // pattern is the shape that still reaches it.
+  const found = extractModuleBindings(stripComments('let { a: { deep } } = make();\n'))
+  assert(found.length === 1, `got ${found.length} entries: ${JSON.stringify(found)}`)
+  assert(found[0].name === null, `expected a null name, got ${JSON.stringify(found[0])}`)
+  assert(/deep/.test(found[0].unparsed), `unparsed text lost the declarator: ${JSON.stringify(found[0])}`)
+})
+
+test('an unreadable declarator surfaces as a CI ::warning::, and is NOT fatal (#7687)', () => {
+  // Both halves matter. It must be VISIBLE — it was the only diagnostic in the
+  // script emitted as a bare `console.log`, which CI renders nowhere, and it
+  // announces the one thing the run did not check. And it must NOT fail: the
+  // previous extractor did not read these declarations either, so failing here
+  // would red the build over a shape #7533 did not introduce.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { a: { deep } } = make();\n` +
+      'export function f(): number { return 1; }\n',
+  }))
+  assert(r.status === 0, `exit ${r.status} — an unread declarator must not fail the run\n${r.stderr}`)
+  assert(/::warning::/.test(r.stderr), `no CI annotation: ${r.stderr}`)
+  assert(/unread declarator: .*deep/.test(r.stderr), `the declarator text was not named: ${r.stderr}`)
+})
+
+// `stripComments` leaves literal CONTENT byte-identical by design, so a comma,
+// semicolon or brace inside a string, template or regex reaches the declarator
+// scanners raw. Uncounted, those characters either TRUNCATE the declaration
+// list (losing a sibling) or split it in the wrong place — and a fragment that
+// happens to start with an identifier character is then accepted as a binding.
+// An invented name is the ACCUSE direction: it gets classified, and can fail
+// the build over state that does not exist. Each row's `want` was checked
+// against main, which produces none of the phantoms.
+const literalAndWrapRoster = [
+  ['a regex literal holding a comma', 'let re = /a,b/, c = compute();\n', 're,c'],
+  ['a template holding interpolated commas', 'let a = `${x},${y}`, b = compute();\n', 'a,b'],
+  ['a string holding an unbalanced brace', "let a = '{', b = compute();\n", 'a,b'],
+  ['a string holding a semicolon', "let a = ';', b = compute();\n", 'a,b'],
+  ['a generic ARROW parameter list', 'const id = <T, U = T>(x: T): U => x, z = compute();\n', 'id,z'],
+  ['a declaration WRAPPED across lines', 'let a = 1,\n    b = compute();\n', 'a,b'],
+  // Controls. Each one is a shape a plausible fix for the rows above breaks,
+  // and three of them broke while this was being written.
+  ['a spaced comparison, not a generic', 'let a = b < c, d = compute();\n', 'a,d'],
+  ['a generic type ANNOTATION', 'let counts: Record<string, number> = {}, z = compute();\n', 'counts,z'],
+  ['a division, not a regex', 'let a = x / y, b = compute();\n', 'a,b'],
+  ['a statement that really does end at the newline', 'let a = compute()\nlet b = compute()\n', 'a,b'],
+  ['a comparison with no `<` at all', 'let isBig = count > 10, z = compute();\n', 'isBig,z'],
+  // An initializer beginning on the NEXT line. In-tree as
+  // `export const SCHEDULER_TIMEOUT_ERROR =\n  '...'`
+  // (packages/dashboard/src/store/scheduledTaskRequests.ts). Breaking the list
+  // at that newline left `init` empty, so `isConstantInitializer` never saw the
+  // string and four literal constants entered the real roster as state — where
+  // they get CLASSIFIED and can be reported as unreferenced state. They are all
+  // read today, so the lint stayed green: inert by luck, not by design.
+  ['a `const` whose string initializer starts on the next line', "export const X =\n  'literal';\n", ''],
+  ['a wrapped initializer with a real sibling', 'let a =\n  compute(), b = compute();\n', 'a,b'],
+  // Why the continuation set is `,` and `=` and stops there. Widening it to `+`
+  // continues across `let a = b++` into the NEXT statement — and the damage is
+  // not the swallow, which `i = listStart` undoes by re-walking: it is that the
+  // over-long list ALSO gets split, so `d` is emitted once from the bogus list
+  // and again from the real one. Measured with `+` added: `a,d,c,d`. A
+  // duplicate roster entry is classified twice, and the copy carries a
+  // skipIndex that does not match its own declaration — so that declaration
+  // stays in the scanned text and reads as a reference, which is the false-GREEN
+  // direction. The single-statement form below is inert; this one is not.
+  ['a POSTFIX increment ending the line', 'let a = b++\nlet c = compute(), d = compute();\n', 'a,c,d'],
+  // `of` is only contextually a keyword (`for (x of y)`); `let of = 1` is legal
+  // in a module, and listing it as reserved refused a real binding (#7687
+  // review). The pair below pins BOTH directions of that list: a word that is
+  // not reserved must bind, and one that is must still be refused.
+  ['a binding named `of`, which is NOT reserved', 'let of = compute(), b = compute();\n', 'of,b'],
+  ['a declarator named `await`, which IS reserved in a module', 'let a = 1, await = 2;\n', 'a,UNPARSED(await = 2)'],
+]
+for (const [label, decl, want] of literalAndWrapRoster) {
+  test(`the declarator scan reads ${label} (#7687)`, () => {
+    const got = extractModuleBindings(stripComments(decl))
+      .map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+      .join(',')
+    assert(got === want, `got [${got}], want [${want}] from ${JSON.stringify(decl)}`)
+  })
+}
+
 test('an EXPORTED binding is marked as such', () => {
   const [b] = extractModuleBindings('export let n = 0;\n')
   assert(b.exported === true, JSON.stringify(b))
@@ -1470,6 +1627,34 @@ test('CLI exits 1 on a dashboard counter mutated only by counts[k]++ (#7553)', (
   }))
   assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
   assert(/store\/message-handler\.ts::counts is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on the SECOND declarator of a multi-declarator, written and never read (#7533)', () => {
+  // `let a = 1, b = 2` used to yield only `a`, so `b` was never judged. Not a
+  // false green on anything in the roster — missing COVERAGE, which is the same
+  // defect as a hardcoded roster beside a growing set, one level down: a
+  // refactor writing `let pendingA = null, pendingB = null` would quietly halve
+  // what this lint sees and nothing would go red.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let readMe = 1, writeOnly = 2;\n` +
+      'export function f(): number { writeOnly = 3; return readMe; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
+})
+
+test('CLI exits 1 on a DESTRUCTURED binding written and never read (#7533)', () => {
+  // `const { a, b } = f()` yielded nothing at all — the old regex required an
+  // identifier immediately after the keyword, so it did not match the
+  // declaration in the first place.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { readMe, writeOnly } = make();\n` +
+      'export function f(): number { writeOnly = 3; return readMe; }\n',
+  }))
+  assert(r.status === 1, `exit ${r.status}\n${r.stdout}${r.stderr}`)
+  assert(/store\/message-handler\.ts::writeOnly is WRITE-ONLY/.test(r.stderr), r.stderr)
 })
 
 test('CLI exits 1 on a counter mutated only by counts.hits++ (#7553, property form)', () => {
