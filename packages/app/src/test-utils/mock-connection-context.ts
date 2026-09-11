@@ -43,8 +43,11 @@ export function createMockConnectionContext<
     // sites onto the OTHER branch, silently: measured, that change left all 503
     // tests across those files passing, exit 0. The pin is
     // "#7525 — the factory DEFAULT url classifies as tunnel" in
-    // __tests__/auth-ok-handler.test.ts, and it asserts the CLASSIFICATION, not
-    // just this string — a string check would only catch a rename.
+    // __tests__/auth-ok-handler.test.ts. It asserts the classification AND this
+    // string, because each catches something the other does not: the string
+    // also catches a host change, and the classification is the half that
+    // survives someone flipping the scheme and updating the string expectation
+    // to match. The measured table is in that test's comment.
     url: 'wss://test.example.com',
     token: 'test-token',
     isReconnect: false,
