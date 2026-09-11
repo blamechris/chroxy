@@ -240,8 +240,18 @@
  * And for the module-bindings kind specifically:
  *
  *   - SHADOWING. A local, parameter or catch binding sharing a module-level
- *     binding's name reads as a reference to it. That direction is safe (it
- *     rescues rather than accuses) but it is a real gap.
+ *     binding's name reads as a reference to it. This bullet said "that
+ *     direction is safe (it rescues rather than accuses)" until #7691's review,
+ *     and only half of that is true: a spurious READ rescues, but a spurious
+ *     WRITE accuses, and a shadowing local that is ASSIGNED produces one.
+ *     Measured — a module-level `let seen` with no real reference, beside
+ *     `function f() { let seen = 0; seen = 1 }`, is reported WRITE-ONLY, a
+ *     FAILURE, on a binding nothing touches.
+ *
+ *     Not live: the roster's 39 shadowed names are all `pending`, which is
+ *     PRIVATE and therefore scanned only inside its own module, and that module
+ *     has zero in-module shadows. Filed rather than folded; this bullet is the
+ *     one place a reader would otherwise be told the opposite.
  *   - A PRIVATE binding is scanned in its OWN module only, which is what the
  *     language guarantees and what stops a same-named local in an unrelated
  *     file from rescuing it. An EXPORTED binding is scanned across the whole
@@ -316,7 +326,13 @@
  *     covered the whole list is the comment-stronger-than-the-code shape this
  *     file catalogues.
  *
- *     NO CLASSIFIER RULE IS EXEMPT ANY MORE, since #7691 settled the last one.
+ *     NO CLASSIFIER RULE IS EXEMPT FROM THE FLAG ANY MORE, since #7691 settled
+ *     the last one. That is narrower than it first read here, and the narrowing
+ *     is the point: the five in-place spellings now agree, which is a claim
+ *     about the RULES. It is not a claim that nothing can accuse — the
+ *     SHADOWING entry above can, by attributing a shadowing local's write to
+ *     the binding it hides, and that was true before this change and stays true
+ *     after it.
  *     `DELETE_BEHIND` was tested before the flag and before the statement
  *     gate, so `delete o[k]` was a write on both kinds unconditionally. `delete
  *     o` on a bare binding is a strict-mode SyntaxError and every scanned file
@@ -385,8 +401,13 @@
  *     reassignable property, so `_ctx.field = …` already reaches the failure
  *     bucket for it, which is the argument that forced the rule on `const`
  *     bindings. #7532 owns turning it on, and now owns both shapes.
- *     `delete _ctx.map[k]` IS a write on BOTH kinds — the `delete` rule is
- *     older than either, and consults neither the flag nor statement position.
+ *     `delete _ctx.map[k]` rides the same flag since #7691, so it is a write
+ *     on both kinds only because both targets set the flag ON today. Until
+ *     then the `delete` rule was older than either and consulted neither the
+ *     flag nor statement position, which made it the one in-place shape that
+ *     could ACCUSE on a target that had deliberately opted out. The DIRECT
+ *     form is a different event and is unchanged: `delete _ctx.field` removes
+ *     the field, so it is a write exactly as `_ctx.field = v` is.
  *
  * ALLOWLIST
  * ---------
@@ -846,10 +867,18 @@ const MUTATOR_AHEAD = new RegExp(`^\\s*\\??\\s*\\.\\s*(?:${MUTATORS.join('|')})\
  * several times over; one longer than that reads as a READ, which is the
  * rescue direction. Both sides are pinned.
  *
- * ONE window, BOTH accessor predicates: `o[k] = v` (#7537) and `o[k]++` (#7553)
- * are separated from their operator by the same arbitrary index expression, so
- * a second number here would be a second thing to drift. Both sides of 256 are
- * pinned for each predicate.
+ * ONE window, THREE accessor predicates: `o[k] = v` (#7537), `o[k]++` (#7553)
+ * and `delete o[k]` (#7691) are separated from their operator — or from the end
+ * of the expression — by the same arbitrary index expression, so a second
+ * number here would be a second thing to drift. Both sides of 256 are pinned
+ * for each.
+ *
+ * The PREFIX increment is the one that is NOT on it: `++o[k]` reaches
+ * `mutatesAtFirstAccessorStep` through the 64-byte operator slice it inherited
+ * from #7558, so a key longer than ~62 characters makes it a read where its
+ * three siblings are writes. Rescue-direction, pre-existing, and filed rather
+ * than folded — `delete` was moved onto 256 here because this PR is what put it
+ * on a window at all.
  */
 const ACCESSOR_ASSIGN_WINDOW = 256
 
@@ -956,8 +985,15 @@ export function incrementsThroughAccessor(after) {
 }
 
 /**
- * A PREFIX increment whose target is what the binding HOLDS, one step out:
- * `++o[k]`, `++o.f`.
+ * IS THIS THE LAST ACCESSOR STEP? — i.e. does the operation target what the
+ * binding HOLDS, one step out, rather than something deeper?
+ *
+ *   ++o[k]      ++o.f      delete o[k]      delete o.f      -> yes
+ *   ++o.a.b     ++o[i][j]  delete o.a.b     delete o[i][j]  -> no, `o` is READ
+ *
+ * Two callers ask it, and the docblock opened "A PREFIX increment" until #7691
+ * gave it the second. The increment-specific reasoning below is kept because it
+ * is where the rule was derived, not because it is the only case.
  *
  * The mirror of `incrementsThroughAccessor`. That one asks what sits PAST the
  * accessor step and finds the operator there; a prefix `++` sits on the other
@@ -976,7 +1012,9 @@ export function incrementsThroughAccessor(after) {
  *
  * A `(` past the step is refused for the same reason: `++o.f()` increments a
  * CALL RESULT, which is not a reference — it throws at runtime and TypeScript
- * rejects it — so `o` is read there, as it is in `o.f()++`.
+ * rejects it — so `o` is read there, as it is in `o.f()++`. For the DELETE
+ * caller the reason differs and the answer is the same: `delete o.f()` is legal
+ * and deletes nothing, so `o` is read there too.
  *
  * NAMED FOR THE QUESTION, not for one caller, since #7691: `delete` asks the
  * identical thing. `delete o[k]` removes a property OF what `o` holds, while
@@ -987,7 +1025,23 @@ export function incrementsThroughAccessor(after) {
  */
 export function mutatesAtFirstAccessorStep(after) {
   const i = accessorStepEnd(after)
-  return i >= 0 && !/^\s*[.[(]/.test(after.slice(i))
+  // `?.` CONTINUES the chain, so it belongs in this set (#7699 review). Without
+  // it `delete o.a?.b` reads as a one-step mutation and is filed as a write of
+  // `o`, when what it removes is a property of `o.a` — the accuse direction,
+  // and inconsistent with the `delete o.a.b` it is spelled beside.
+  //
+  // The bug predates this function's second caller and was UNREACHABLE through
+  // the first: `++o.a?.b` is a SyntaxError (`node --check` rejects it), so no
+  // increment could ever land here. `delete o.a?.b` is legal, so reusing the
+  // predicate for `delete` is what made it reachable — a latent hole becoming
+  // live by acquiring a caller, which is worth the sentence.
+  //
+  // `\?\.` and not a bare `?`: `delete o.a ? x : y` parses as
+  // `(delete o.a) ? x : y` and IS a one-step mutation of `o`, so a ternary must
+  // stay a write. The one shape this gets wrong is `?.` followed by a digit,
+  // which the spec says is a ternary and not an optional chain — it reads as a
+  // continuation and yields a READ, the rescue direction.
+  return i >= 0 && !/^\s*(?:\?\.|[.[(])/.test(after.slice(i))
 }
 
 // A statement's left edge: the last significant character before the reference
@@ -1193,17 +1247,70 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
   //
   // There is no direct-delete case this could be correct about. `delete o` on
   // a bare binding is a strict-mode SyntaxError and every scanned file is an
-  // ES module, so this rule only ever fires through an accessor. The bare form
-  // is kept a write anyway, for the same reason `++o` is: if it somehow
-  // appears, it is not an in-place mutation and the flag has nothing to say
-  // about it.
+  // ES module, so this rule only ever fires through an accessor — which is why
+  // everything that is NOT a plain accessor step falls through to a read
+  // below, rather than to the unconditional write the first version of this
+  // branch gave it. That version's reasoning named the bare binding and its
+  // code caught `delete o!.f` too (#7699 review).
   if (DELETE_BEHIND.test(before)) {
-    // `delete o?.[k]` is legal, unlike `++o?.f`, but the accessor scan cannot
-    // read an optional step, so it is a READ — the rescue direction, and the
-    // same answer `o?.field++` already gives.
-    if (OPTIONAL_CHAIN_AHEAD.test(after)) return false
-    if (!ACCESSOR_AHEAD.test(after)) return true
-    return mutatesAtFirstAccessorStep(after) && inPlaceMutationIsWrite && atStatementStart(text, index)
+    // ANYTHING BUT A PLAIN ACCESSOR STEP IS A READ, which is the rule the rest
+    // of this file already states: "A PARENTHESISED OR ASSERTED BASE IS A READ"
+    // (#7548 F3) — `(o)[k] = v`, `o![k] = v` and `(o as T)[k] = v` are all
+    // reads, because the scan starts at the character after the IDENTIFIER and
+    // finds `)`, `!` or ` as`. An optional step lands here too: `delete o?.[k]`
+    // is legal where `++o?.f` is a SyntaxError, and it is a read for the same
+    // reason `o?.field++` is.
+    //
+    // The first version of this branch returned TRUE here instead, reasoning
+    // that `delete o` on a bare binding is a SyntaxError so the arm was
+    // unreachable. The arm is not what that reasoning described: `delete o!.f`
+    // also fails `ACCESSOR_AHEAD`, so a TS non-null assertion took an
+    // unconditional write — past the flag, past the one-accessor-step
+    // invariant and past the statement gate, on today's flag-ON config, in the
+    // ACCUSE direction and against this file's own documented convention
+    // (#7699 review).
+    //
+    // Falling through to a read costs nothing the reasoning wanted: `delete o`
+    // still cannot occur in a module, and an unreachable shape answering
+    // rescue-direction is what this file prefers everywhere else.
+    if (ACCESSOR_AHEAD.test(after)) {
+      // The WIDE window, like `o[k] = v` and `o[k]++` — not the 64-byte one
+      // #7558's prefix path handed this predicate. An index expression is
+      // arbitrary source, which is the reason `ACCESSOR_ASSIGN_WINDOW` exists,
+      // and it applies verbatim here: with 64, `accessorStepEnd` hits an
+      // unbalanced `[` on any key longer than ~62 characters and returns -1, so
+      // `delete o[<long key>]` read as a READ while `o[<long key>] = v` and
+      // `o[<long key>]++` were WRITEs (#7699 review).
+      //
+      // The PRESENCE test above can stay on the 64-byte slice: an accessor
+      // either starts immediately or does not start at all.
+      return mutatesAtFirstAccessorStep(text.slice(end, end + ACCESSOR_ASSIGN_WINDOW)) &&
+        inPlaceMutationIsWrite && atStatementStart(text, index)
+    }
+    // A continuation the scan CANNOT READ — a non-null assertion, an optional
+    // step, a parenthesised base, an `as` cast, a call, a tagged template. READ,
+    // which is the rule the header already states for `o![k] = v`, `(o)[k] = v`
+    // and `(o as T)[k] = v`: the scan starts at the character after the
+    // IDENTIFIER and finds `)`, `!` or ` as`, so it cannot see the base at all
+    // (#7548 F3, rescue-only).
+    // A `)` counts only when an accessor follows it — that is the
+    // parenthesised-base shape `delete (o)[k]`. A bare `)` is the close of an
+    // ENCLOSING paren, as in `if (delete _ctx.n)`, where the field really is
+    // deleted; treating that as unreadable made a direct delete a read while
+    // `if ((_ctx.n = v))` stayed a write, which is the inconsistency this arm
+    // exists to remove.
+    if (/^\s*(?:\?\.|as\b|\)\s*[.[]|[!`(])/.test(after)) return false
+    // Nothing continues the expression, so this deletes the REFERENCE ITSELF.
+    //
+    // That case exists, and the first version of this branch denied it. Its
+    // comment said "there is no direct-delete case this could be correct
+    // about", which is true of a BARE BINDING — `delete o` is a strict-mode
+    // SyntaxError — and false of the interface kind, whose reference is
+    // `receiver.field`: `delete _ctx.field` removes the field and is pinned as
+    // a write 600 lines above. Deleting a field is a direct write exactly as
+    // `_ctx.field = v` is, so it is unconditional for the same reason
+    // `ASSIGN_AHEAD` is — no flag, no statement gate (#7699 review).
+    return true
   }
   // An increment is a write ONLY at statement position. `n++;` and
   // `for (;; n++)` qualify; `return n++` and `String(++n)` do not and are
