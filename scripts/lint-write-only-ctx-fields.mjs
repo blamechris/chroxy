@@ -245,18 +245,33 @@
  *     arm is out for the mirror reason — `:` is also a ternary and an object
  *     value, so the CHARACTER cannot be admitted and the keyword form needs a
  *     parse of the case expression. Zero live instances of either; both pinned.
- *   - A PREFIX INCREMENT THROUGH AN ACCESSOR IS A WRITE WITH THE FLAG OFF.
- *     `++o[k]` reaches `isWriteAt` through `INCDEC_BEHIND`, which is checked
+ *   - A PREFIX INCREMENT THROUGH AN ACCESSOR — CLOSED by #7558, and kept here
+ *     because what it establishes about the LIST outlives the entry.
+ *     `++o[k]` reached `isWriteAt` through `INCDEC_BEHIND`, which is tested
  *     before either in-place rule and consults NEITHER the per-target flag nor
  *     the accessor scan — so on the INTERFACE kind, where in-place mutation is
- *     deliberately not a write, `++_ctx.map[k]` is counted as a write of
- *     `_ctx.map` while `_ctx.map[k] = v` and `_ctx.map[k]++` are reads. That is
- *     the ACCUSE direction, and it is pinned as such. No such reference exists
- *     on either roster today (#7558 owns closing it; #7532 owns the flag).
+ *     deliberately not a write, `++_ctx.map[k]` was counted as a write of
+ *     `_ctx.map` while `_ctx.map[k] = v` and `_ctx.map[k]++` were reads. It now
+ *     takes the same flag and the same statement gate as the other three
+ *     spellings; `++o` itself is untouched, because no accessor follows it and
+ *     it rebinds rather than mutating. (#7532 still owns the flag.)
  *
- *     IT IS THE ONLY SHAPE ON THIS LIST THAT RUNS THAT WAY, and that claim is
- *     load-bearing rather than decorative — every other entry here is a missed
- *     write, which can only rescue a binding from the failure bucket. The first
+ *     EVERY ENTRY ON THIS LIST IS NOW RESCUE-ONLY — a missed write, which can
+ *     only lift a binding OUT of the failure bucket. That is the invariant the
+ *     entry above used to be the single exception to, and it is load-bearing
+ *     rather than decorative: an entry that ACCUSES turns a documented limit
+ *     into a false red on real code.
+ *
+ *     One rule is still tested before the flag and is NOT on this list:
+ *     `DELETE_BEHIND`. `delete o` on a bare binding is a strict-mode
+ *     SyntaxError, so it only ever fires through an accessor — meaning
+ *     `delete _ctx.map[k]` is a write on the interface kind for the same
+ *     structural reason `++_ctx.map[k]` was. #7537 adjudicated it as a genuine
+ *     mutation rather than an oversight, and nothing on either roster deletes
+ *     through a scanned receiver, so it is not live. #7691 owns re-deciding it
+ *     against the interface model now that it is the last one standing.
+ *
+ *     The first
  *     push of #7560 wrote the claim while breaking it twice, and review caught
  *     both: `INCDEC_AHEAD` crossed a line terminator, so `o[k]` ⏎ `++x` — two
  *     statements, because postfix `++` is a restricted production — was filed
@@ -666,6 +681,15 @@ const ASSIGN_AHEAD = /^\s*(?:=(?![=>])|\+=|-=|\*\*=|\*=|\/=|%=|<<=|>>>=|>>=|&&=|
  */
 const INCDEC_AHEAD = /^[^\S\n\r\u2028\u2029]*(?:\+\+|--)/
 const INCDEC_BEHIND = /(?:\+\+|--)\s*$/
+/**
+ * An ACCESSOR immediately follows the reference — `o[k]`, `o.f`, `o?.f`.
+ *
+ * Newline-tolerant for the same reason `ASSIGN_AHEAD` is: member access is not
+ * a restricted production, so `o` ⏎ `[k]` and `o` ⏎ `.f` are one expression.
+ * Only the POSTFIX increment is restricted, and that is `INCDEC_AHEAD`'s
+ * problem, not this one.
+ */
+const ACCESSOR_AHEAD = /^\s*\??\s*[.[]/
 const DELETE_BEHIND = /\bdelete\s+$/
 
 /**
@@ -986,6 +1010,32 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
   // discarded": `void n++` and `c && n++` discard it and still classify as
   // reads. Rescue-only, and pinned as such (#7530 F2).
   if (INCDEC_AHEAD.test(after) || INCDEC_BEHIND.test(before)) {
+    // PREFIX INCREMENT THROUGH AN ACCESSOR (#7558). `++o[k]` and `++o.f`
+    // mutate what the binding HOLDS, not the binding — the same event as
+    // `o[k] = v` (#7537) and `o[k]++` (#7553), written a fourth way. Reaching
+    // here through `INCDEC_BEHIND`, which is tested before either in-place
+    // rule and consults neither the flag nor the accessor scan, made it the
+    // one spelling that did not obey `inPlaceMutationIsWrite`:
+    //
+    //                     flag ON     flag OFF
+    //   o[k] = v;         WRITE       read
+    //   o[k] += 1;        WRITE       read
+    //   o[k]++;           WRITE       read
+    //   ++o[k];           WRITE       WRITE   <- and `++o.f` with it
+    //
+    // Every other gap in WHAT IT CANNOT SEE is rescue-only: an unseen write is
+    // filed as a read, which can only lift a binding OUT of the failure
+    // bucket. This one ran the other way — a context field whose only other
+    // reference was `++_ctx.f[k]` would be called write-only and FAIL, on a
+    // mutation the interface target deliberately treats as a read. It is the
+    // single ACCUSE-direction gap, which is why it is worth a branch here
+    // rather than a row in the list of known limits.
+    //
+    // `++o` itself is untouched: no accessor follows, so it stays a direct
+    // mutation of the binding and a write on both targets.
+    if (INCDEC_BEHIND.test(before) && ACCESSOR_AHEAD.test(after)) {
+      return inPlaceMutationIsWrite && atStatementStart(text, index)
+    }
     return atStatementStart(text, index)
   }
   if (inPlaceMutationIsWrite && MUTATOR_AHEAD.test(after)) return atStatementStart(text, index)

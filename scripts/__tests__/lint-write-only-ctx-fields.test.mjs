@@ -847,15 +847,34 @@ const accessorAssignCases = [
   ['o[k] - -1 is a READ — a minus is not a decrement', 'const x = o[k] - -1;', 'o', true, 1, 0],
   ['o[k]++; is a READ with the flag OFF (control) (#7553)', 'o[k]++;', 'o', false, 1, 0],
   ['o.field++; is a READ with the flag OFF (control) (#7553)', 'o.field++;', 'o', false, 1, 0],
-  // …and the PREFIX form is NOT symmetric with it, which is the one in-place
-  // shape on the list running in the ACCUSE direction. `++o[k]` reaches
-  // isWriteAt through INCDEC_BEHIND, checked before either in-place rule and
-  // consulting neither the flag nor the accessor scan, so with the flag OFF it
-  // is a write while `o[k] = v` and `o[k]++` are reads. Pinned so the asymmetry
-  // is a recorded decision; no such reference exists on either roster today
-  // (swept: zero `++X[` / `++X.` in packages/{dashboard,app}/src). #7558.
-  ['++o[k]; is a WRITE with the flag OFF too — the accuse-direction asymmetry (#7558)', '++o[k];', 'o', false, 0, 1],
-  ['++o.field; is a WRITE with the flag OFF too (#7558)', '++o.field;', 'o', false, 0, 1],
+  // …and since #7558 the PREFIX form IS symmetric with it. These two rows were
+  // inverted by that fix: they pinned the asymmetry deliberately so the fix
+  // would be visible instead of silent, and flipping them is what makes it so.
+  //
+  // `++o[k]` reached isWriteAt through INCDEC_BEHIND, which is tested before
+  // either in-place rule and consults neither the flag nor the accessor scan.
+  // With the flag OFF it was a write while `o[k] = v`, `o[k] += 1` and `o[k]++`
+  // were reads — the one shape on the list running in the ACCUSE direction, so
+  // a context field whose only other reference was `++_ctx.f[k]` would be
+  // called write-only and FAIL.
+  //
+  // The old comment here claimed "swept: zero `++X[` / `++X.` in
+  // packages/{dashboard,app}/src". That is false as written — `++requestIdRef.current`
+  // appears five times in packages/app/src. It is true only of the RECEIVERS
+  // this lint scans (`_ctx`/`ctx`) and of module-level bindings, which is the
+  // claim it meant to make and not the claim it made.
+  ['++o[k]; is a READ with the flag OFF — symmetric with o[k]++ since #7558', '++o[k];', 'o', false, 1, 0],
+  ['++o.field; is a READ with the flag OFF (#7558)', '++o.field;', 'o', false, 1, 0],
+  ['++o[k]; is still a WRITE with the flag ON (#7558)', '++o[k];', 'o', true, 0, 1],
+  ['++o.field; is still a WRITE with the flag ON (#7558)', '++o.field;', 'o', true, 0, 1],
+  // The controls that keep the fix from over-reaching. A prefix increment of
+  // the BINDING is not an in-place mutation of what it holds — it rebinds —
+  // so it stays a write on both targets, flag or no flag.
+  ['++o; is a WRITE with the flag OFF — no accessor follows (#7558)', '++o;', 'o', false, 0, 1],
+  ['o++; is a WRITE with the flag OFF — no accessor follows (#7558)', 'o++;', 'o', false, 0, 1],
+  // And statement position still gates it: a prefix increment whose value is
+  // USED is a read, exactly as `o[k]++` in the same position is.
+  ['const id = ++o.field; is a READ — value used, not statement position (#7558)', 'const id = ++o.field;', 'o', true, 1, 0],
   // The index expression is arbitrary source, so the scan must actually parse
   // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
   // as reads — one rescued write silences a whole binding.
