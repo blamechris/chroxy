@@ -1292,10 +1292,14 @@ export function blankModuleClauses(text) {
  * ASKED ONLY OF A SINGLE-NAME DECLARATOR, since #7688. The caller skips this
  * for a destructuring declarator, because what follows a pattern's `=` is the
  * SOURCE being destructured rather than the declarator's value — so the
- * question this function answers is not the one that declarator poses. See the
- * `isPattern` guard at the call site for why suppressing a single-name alias
- * loses nothing while suppressing a destructured name loses the coverage
- * outright.
+ * question this function answers is not the one that declarator poses.
+ *
+ * The NOISE argument above is the whole justification, and it is worth saying
+ * what it is NOT. An earlier draft of this paragraph added "and excluding it
+ * loses nothing, because the source is in the roster and gets judged there".
+ * That is false — measured, see the `isPattern` note at the call site — and
+ * both forms lose their coverage outright. What separates them is the hit
+ * rate, not a rescue.
  */
 function isConstantInitializer(init) {
   const t = init.trimStart()
@@ -1423,7 +1427,12 @@ export function declaratorNames(text) {
   // that both look EXPORTED abort the whole target with CannotCheckError.
   //
   // `=>` and `==` are excluded: neither is an initializer.
-  if (!/^\s*=(?![=>])/.test(d.slice(close + 1))) return { names: [], unparsed: [d] }
+  // The annotation is part of the shape: `const { a }: Ctx = x` puts a TYPE
+  // between the closing bracket and the `=`. Requiring the `=` immediately was
+  // a REGRESSION found in review — main read `let { readMe, writeOnly }: Ctx =
+  // ctx` correctly and that version refused it, which is coverage loss, the
+  // unsafe direction.
+  if (!/^\s*(?::[^=]*)?=(?![=>])/.test(d.slice(close + 1))) return { names: [], unparsed: [d] }
   const inner = d.slice(1, close)
   const names = []
   const unparsed = []
@@ -1470,14 +1479,24 @@ const RESERVED_WORDS = new Set([
 //     with `node --check` on an actual `.mjs`, which is the only probe that
 //     reproduces the scanned context.
 
-/** The index of the bracket closing the one at position 0, or -1. */
+/** The index of the bracket closing the one at position 0, or -1.
+ *
+ *  Steps over string and template literals, like every other bracket walker in
+ *  this file. It was the one that did not, and the gap was reachable: a default
+ *  value inside a pattern can hold a brace, so `let { readMe = '}', writeOnly }
+ *  = ctx` closed on the `}` INSIDE the quotes. Main got partial coverage from
+ *  that (`readMe`); once a mis-closed span no longer lands on an `=`, the
+ *  initializer check below refuses the whole declarator and the coverage goes
+ *  to zero (#7688 review). */
 function matchingBracket(s) {
   const open = s[0]
   const shut = open === '{' ? '}' : ']'
   let depth = 0
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === open) depth++
-    else if (s[i] === shut) { depth--; if (depth === 0) return i }
+    const c = s[i]
+    if (c === '"' || c === "'" || c === '`') { i = literalEnd(s, i) - 1; continue }
+    if (c === open) depth++
+    else if (c === shut) { depth--; if (depth === 0) return i }
   }
   return -1
 }
@@ -1549,36 +1568,78 @@ function literalEnd(s, i) {
  * and adding a second brace level to the regex is the same trade at a third.
  * Brace nesting is not a regular property; a scanner is the honest shape.
  *
- * The rule, stated so it can be checked against the code:
- *   - step OVER a string or template literal, so the `{` in `Map<'{', number>`
- *     is not counted (the same class `literalEnd`'s own docblock records);
- *   - `{`/`}` nest, and a `;` is disqualifying ONLY at brace depth 0 — that is
- *     the one behaviour this changes, and it is exactly `a < b; c > d`, which
- *     must stay a comparison;
- *   - a `>` at brace depth 0 closes it, matching the old regex's LAZY match:
- *     `<Map<string, number>>` closed at the inner `>` before and still does,
- *     because the caller counts `<` and `>` itself;
- *   - a NEWLINE is disqualifying at any depth, exactly as `[^;\n]` made it. A
- *     generic wrapped across lines was not recognised before and still is not;
- *     it is bounded rather than fixed here, which is also what keeps this scan
- *     O(line) per `<`.
+ * The rule, stated so it can be checked against the code — SIX clauses, each
+ * with a test that fails when you delete it (`genericEndCases` /
+ * `genericEndCallCases` in the suite; all six mutations die):
+ *
+ *   1. A string or template literal is stepped over FOR BRACE COUNTING ONLY,
+ *      so the `{` in `Map<'{', number>` is not counted. Its content still
+ *      participates in the `;`/newline bound — skipping it wholesale let
+ *      `let a = b < ';', c = d > e` read as a generic and silently swallow `c`.
+ *   2. `{`/`}` nest, and a `;` is disqualifying ONLY at brace depth 0. That is
+ *      the one behaviour this changes, and it is exactly `a < b; c > d`, which
+ *      must stay a comparison.
+ *   3. A `}` at brace depth 0 disqualifies: the scan has left the expression.
+ *      Letting the counter go NEGATIVE instead lets a later `{` bring it back
+ *      to 0, where a `>` then manufactures a generic out of a stray brace.
+ *   4. A `>` at brace depth 0 closes it, matching the old regex's LAZY match:
+ *      `<Map<string, number>>` closed at the inner `>` before and still does,
+ *      because the caller counts `<` and `>` itself.
+ *   5. EXCEPT in `requireCall` mode, which keeps scanning past a `>` that is
+ *      not followed by `(`. The old regex was lazy, so the engine BACKTRACKED
+ *      to satisfy `>\s*\(`; a first-match scan does not, and losing that put
+ *      the type parameter of `<T extends Array<string>, U>(…)` into the roster
+ *      as a binding.
+ *   6. A NEWLINE is disqualifying at any depth, exactly as `[^;\n]` made it. A
+ *      generic wrapped across lines was not recognised before and still is not;
+ *      it is bounded rather than fixed here, which is also what keeps this scan
+ *      O(line) per `<`.
  *
  * Index-based on purpose: the regex form ran `s.slice(i)` at every `<`, which
  * allocated a copy of the remaining file each time.
  */
-function genericEnd(s, i) {
+export function genericEnd(s, i, { requireCall = false } = {}) {
   let brace = 0
   for (let j = i + 1; j < s.length; j++) {
     const c = s[j]
     // Quotes only. A regex literal cannot appear in a type, and `literalEnd`'s
     // `/` branch scans BACKWARDS over the whole file to decide division-vs-regex
     // — the documented O(n^2) hazard in this function's neighbourhood.
-    if (c === '"' || c === "'" || c === '`') { j = literalEnd(s, j) - 1; continue }
+    if (c === '"' || c === "'" || c === '`') {
+      const e = literalEnd(s, j)
+      // The literal is stepped over for BRACE COUNTING only. Its content still
+      // participates in the `;`/newline bound, exactly as `[^;\n]` made it —
+      // skipping it wholesale was a REGRESSION found in review: on
+      // `let a = b < ';', c = d > e` the `;` inside the quotes stopped
+      // disqualifying the `<`, so `angle` opened on a comparison and swallowed
+      // the comma. Main yields `a,c`; that version yielded `a`, silently, with
+      // no `unparsed` entry — the purest false-green direction of the three.
+      const span = s.slice(j, e)
+      if (span.includes(';') || span.includes('\n')) return -1
+      j = e - 1
+      continue
+    }
     if (c === '\n') return -1
     if (c === '{') brace++
     else if (c === '}') { if (brace === 0) return -1; brace-- }
     else if (brace === 0) {
-      if (c === '>') return j + 1
+      if (c === '>') {
+        if (!requireCall) return j + 1
+        // The regex this replaced was LAZY, so the engine BACKTRACKED: it
+        // needed a `>` followed by `(`, and kept trying later ones. Returning
+        // the FIRST `>` loses that, and losing it is not cosmetic —
+        // `const f = <T extends Array<string>, U>(x: T) => x` closes at
+        // `Array<string>`'s `>`, fails the `(` test, and the comma inside the
+        // type-parameter list splits the declarator: main yields `f`, the
+        // first version of this scan yielded `f, U`. A phantom named after a
+        // TYPE PARAMETER is the exact bug this whole change removes, put back
+        // one layer down — and `export const f = ...` makes it `exported`, so
+        // two such files abort the target with CannotCheckError.
+        let k = j + 1
+        while (k < s.length && /\s/.test(s[k])) k++
+        if (s[k] === '(') return j + 1
+        continue
+      }
       if (c === ';') return -1
     }
   }
@@ -1637,8 +1698,8 @@ function splitTopLevelWithOffsets(s, sep) {
       // immediately before a `(`. This is the SECOND call site of the scan and
       // needs its own pin: the `<T, U = T>` fixture has no braces, so it is
       // satisfied by the old regex and cannot witness a revert of this half.
-      const ge = genericEnd(s, i)
-      return /[\w$>]/.test(prev) || (prev === '=' && ge !== -1 && /^\s*\(/.test(s.slice(ge, ge + 40)))
+      if (/[\w$>]/.test(prev)) return true
+      return prev === '=' && genericEnd(s, i, { requireCall: true }) !== -1
     })()) angle++
     else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
     else if (depth === 0 && angle === 0 && c === sep) {

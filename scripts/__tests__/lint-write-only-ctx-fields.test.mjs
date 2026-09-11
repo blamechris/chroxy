@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 374
+const MIN_CASES = 401
 
 let pass = 0
 let fail = 0
@@ -198,6 +198,7 @@ const {
   extractInterfaceFields,
   extractModuleBindings,
   declaratorNames,
+  genericEnd,
   incrementsThroughAccessor,
   stripComments,
 } = await import(pathToFileURL(SCRIPT).href)
@@ -1631,16 +1632,116 @@ for (const [label, decl, want, issue = '#7687'] of literalAndWrapRoster) {
   })
 }
 
+// `genericEnd` — CLAUSE BY CLAUSE, driven directly (#7688 review).
+//
+// It is exported for this. The first version of it was pinned only through the
+// extractor, and a reachability probe showed THREE of its clauses — the `;`
+// rule, the newline bail and the unbalanced-`}` bail — were never executed by
+// any of the suite's cases, while 6 of 9 mutations to it survived green. The
+// `;` rule is the one behaviour this change deliberately alters, and the row
+// added as its control provably could not reach it: the declaration-end scan
+// breaks on a top-level `;` before the splitter ever sees one.
+//
+// A guard nobody can make fire is a guard nobody can prove.
+const GE = (src) => genericEnd(src, src.indexOf('<'))
+const GE_CALL = (src) => genericEnd(src, src.indexOf('<'), { requireCall: true })
+
+const genericEndCases = [
+  // [label, input, closes?]
+  ['a plain type-argument list', '<string, number>', true],
+  ['a `;` at the generic’s OWN depth, which is a comparison', 'a < b; c > d', false],
+  ['a `;` INSIDE braces, which is a type-member separator', '<string, { a: 1; b: 2 }>', true],
+  ['braces nested two deep', '<string, { a: { b: 1 } }>', true],
+  ['braces nested three deep', '<string, { a: { b: { c: 1 } } }>', true],
+  ['a NEWLINE, disqualifying at any depth', '<string,\n  number>', false],
+  ['a newline INSIDE braces, also disqualifying', '<string, {\n  a: 1\n}>', false],
+  // The unbalanced-`}` bail, in the ONLY spelling that discriminates. The
+  // obvious fixture `<string } number>` passes with the bail DELETED — the
+  // counter just goes to -1 and no later `>` sits at 0 — so it proves nothing.
+  // Here a following `{` brings the mutated counter back to 0, the `>` closes,
+  // and a stray brace has manufactured a generic. That is what the bail is for:
+  // a depth-0 `}` means the scan has left the expression, and letting the
+  // counter go negative lets it wander back in.
+  ['an unbalanced `}` that a later `{` would compensate', '<a } { b > c', false],
+  ['an unbalanced `}` at depth 0', '<string } number>', false],
+  ['a brace inside a STRING literal, not counted', "<'{', number>", true],
+  ['a `;` inside a string literal, still disqualifying', "<';', number>", false],
+  ['a newline inside a TEMPLATE literal, still disqualifying', '<`a\nb`, number>', false],
+  ['no closing `>` at all', '<string, number', false],
+]
+for (const [label, src, closes] of genericEndCases) {
+  test(`genericEnd handles ${label} (#7688)`, () => {
+    const got = GE(src)
+    assert((got !== -1) === closes, `got ${got} from ${JSON.stringify(src)}, expected ${closes ? 'a close' : '-1'}`)
+  })
+}
+
+test('genericEnd returns the index PAST the closing `>` (#7688)', () => {
+  // The call site slices from this index to test for a following `(`. Off by
+  // one and it reads the `>` itself, so every generic arrow stops being one.
+  // `return j` instead of `j + 1` is a mutation the suite DID kill; this states
+  // the contract directly rather than relying on that.
+  const src = '<string, number>(x)'
+  const end = GE(src)
+  assert(src[end - 1] === '>', `index ${end} does not sit just past a '>': ${JSON.stringify(src.slice(0, end))}`)
+  assert(src[end] === '(', `expected '(' at ${end}, got ${JSON.stringify(src[end])}`)
+})
+
+const genericEndCallCases = [
+  ['a type-parameter list followed by `(`', '<T, U>(x: T) => x', true],
+  ['a type-parameter list NOT followed by `(`', '<T, U> x', false],
+  // The BACKTRACKING clause. The regex this replaced was lazy, so the engine
+  // retried later `>` until one was followed by `(`. Returning the FIRST `>`
+  // closed at `Array<string>` and put the type parameter `U` in the roster as a
+  // binding — the exact phantom class this PR removes, one layer down, and
+  // `exported` on an `export const`, which aborts the target as a duplicate.
+  ['a nested generic before the `(`', '<T extends Array<string>, U>(x: T) => x', true],
+  ['a defaulted nested generic before the `(`', '<T = Map<string, number>, U>(x: T) => x', true],
+  ['a function type before the `(`', '<T extends (a: number) => void, U>(x: T) => x', true],
+  ['whitespace between the `>` and the `(`', '<T, U>  (x: T) => x', true],
+]
+for (const [label, src, closes] of genericEndCallCases) {
+  test(`genericEnd in requireCall mode handles ${label} (#7688)`, () => {
+    const got = GE_CALL(src)
+    assert((got !== -1) === closes, `got ${got} from ${JSON.stringify(src)}, expected ${closes ? 'a close' : '-1'}`)
+  })
+}
+
+// The four REGRESSIONS the review panel found in the first version of this
+// change, each measured against main. Every row here was CORRECT on main and
+// wrong on that version, so each is a control in the direction that matters:
+// they must stay green if this scan is ever touched again.
+const reviewRegressions = [
+  ['a generic ARROW whose type parameter nests a generic', 'const f = <T extends Array<string>, U>(x: T) => x, z = compute();\n', 'f,z'],
+  ['the EXPORTED spelling of that arrow', 'export const f = <T extends Array<string>, U>(x: T) => x;\n', 'f'],
+  ['a destructuring declarator with a TYPE ANNOTATION', 'let { readMe, writeOnly }: Ctx = ctx;\n', 'readMe,writeOnly'],
+  ['an ARRAY pattern with a type annotation', 'const [first, second]: T[] = tuple;\n', 'first,second'],
+  ['a comparison whose operand is a string holding a `;`', "let a = b < ';', c = d > e;\n", 'a,c'],
+  ['a pattern whose DEFAULT value holds a brace', "let { readMe = '}', writeOnly } = ctx;\n", 'readMe,writeOnly'],
+]
+for (const [label, decl, want] of reviewRegressions) {
+  test(`the declarator scan reads ${label} (#7688 review)`, () => {
+    const got = extractModuleBindings(stripComments(decl))
+      .map((b) => (b.name === null ? `UNPARSED(${b.unparsed})` : b.name))
+      .join(',')
+    assert(got === want, `got [${got}], want [${want}] from ${JSON.stringify(decl)}`)
+  })
+}
+
 // The pattern-needs-an-initializer guard (#7688), tested where it is
 // REACHABLE. A lexical destructuring declarator with no `=` is a SyntaxError,
 // so a `{`- or `[`-leading fragment without one was FABRICATED by the splitter
 // and is not a declarator at all. It must be refused BY NAME, never read for
 // bindings.
 //
-// Driven through `declaratorNames` directly rather than through
-// `extractModuleBindings`: with `genericEnd` in place no input reaches it via
-// the extractor today, and a guard nobody can make fire is a guard nobody can
-// prove. This is defence in depth behind the scan — the layer that keeps a
+// Driven through `declaratorNames` directly because that is where every shape
+// is constructible. It IS reachable through the extractor — `const { a } ;` is
+// a pattern with no initializer and arrives here — and the row below pins that,
+// but most of the fragments this must refuse are ones only a mis-split can
+// produce. An earlier version of this comment claimed the extractor could not
+// reach it at all; that was wrong, and it is why the annotated-declarator
+// regression below went unmeasured until review. This is defence in depth
+// behind the scan — the layer that keeps a
 // residual mis-split from becoming a phantom now that the alias rule no longer
 // drops these fragments by accident (it used to, as a side effect of their
 // having no `=`: the same test written in the wrong place, by luck).
@@ -1658,6 +1759,18 @@ for (const [label, fragment] of fabricatedFragments) {
     assert(unparsed.length === 1, `the refusal was not reported: ${JSON.stringify(unparsed)}`)
   })
 }
+
+test('the EXTRACTOR reaches the refusal too, and reports rather than invents (#7688 review)', () => {
+  // `const { a } ;` is a pattern with no initializer — a SyntaxError, so it
+  // cannot be a real declaration — and it arrives at the guard through the
+  // normal extractor path. Pinned because the comment above used to claim the
+  // extractor could not reach this code at all, which is how the annotated
+  // declarator `let { a }: T = x` was refused for three review rounds without
+  // anyone measuring it.
+  const found = extractModuleBindings(stripComments('const { a } ;\n'))
+  assert(found.length === 1, `got ${JSON.stringify(found)}`)
+  assert(found[0].name === null, `a name was invented: ${JSON.stringify(found[0])}`)
+})
 
 test('declaratorNames still reads a REAL pattern, so the refusal did not widen (#7688)', () => {
   // The control. Delete the guard and every row above passes anyway unless this
