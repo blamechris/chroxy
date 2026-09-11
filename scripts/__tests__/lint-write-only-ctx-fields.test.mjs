@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 401
+const MIN_CASES = 409
 
 let pass = 0
 let fail = 0
@@ -1011,15 +1011,40 @@ const accessorAssignCases = [
   ['const alias = o; is a READ — assignment through an ALIAS is out of model', 'const alias = o;\nalias[k] = v;', 'o', true, 1, 0],
   ['({ x: o.k } = obj); is a READ — destructuring writes are the #7464 S2 gap', '({ x: o.k } = obj);', 'o', true, 1, 0],
   ['[o[k]] = arr; is a READ — same S2 gap, array form', '[o[k]] = arr;', 'o', true, 1, 0],
-  // DELETE was already a write before #7537 and still is — on BOTH kinds, and
-  // regardless of the flag or of statement position, because DELETE_BEHIND is
-  // checked before either. `delete o[k]` IS a mutation of `o`, so the answer is
-  // right; it is pinned here because #7537 asked for it to be adjudicated
-  // rather than assumed, and because the asymmetry with `o[k] = v` (which does
-  // consult both) is a real one a reader should not have to rediscover.
-  ['delete o[k]; is a WRITE — and was before #7537', 'delete o[k];', 'o', true, 0, 1],
-  ['delete o[k] is a WRITE with the flag OFF too — it predates the flag', 'delete o[k];', 'o', false, 0, 1],
-  ['if (delete o[k]) is STILL a WRITE — delete ignores statement position', 'if (delete o[k]) f();', 'o', true, 0, 1],
+  // DELETE THROUGH AN ACCESSOR, RE-DECIDED by #7691. It was a write regardless
+  // of the flag and of statement position, because `DELETE_BEHIND` was checked
+  // before both — the last rule here that classified an in-place mutation
+  // unconditionally. #7537 adjudicated it as a genuine mutation, which is true
+  // and was not the question: `o[k] = v` is a genuine mutation too, and the
+  // flag exists to say whether a TARGET counts mutations of the held object as
+  // writes of the binding.
+  //
+  // It now takes the same flag, the same one-accessor-step invariant and the
+  // same statement-position gate as its four siblings. BOTH columns are pinned
+  // here, as #7553 and #7558 did for theirs, because a one-column pin is how
+  // the asymmetry survived three issues.
+  ['delete o[k]; is a WRITE with the flag ON', 'delete o[k];', 'o', true, 0, 1],
+  ['delete o.f; is a WRITE with the flag ON — the property spelling', 'delete o.f;', 'o', true, 0, 1],
+  ['delete o[k]; is a READ with the flag OFF (#7691)', 'delete o[k];', 'o', false, 1, 0],
+  ['delete o.f; is a READ with the flag OFF (#7691)', 'delete o.f;', 'o', false, 1, 0],
+  // The one-accessor-step invariant, the shape #7692 had to add for `++`.
+  // `delete o.a.b` removes a property of what `o.a` holds, so it only READS
+  // `o` — on both columns, exactly as `o.a.b = v` and `++o.a.b` do.
+  ['delete o.a.b; is a READ — it deletes from o.a, not from o', 'delete o.a.b;', 'o', true, 1, 0],
+  ['delete o[i][j]; is a READ — the index spelling of the same', 'delete o[i][j];', 'o', true, 1, 0],
+  // Statement position. `if (delete o[k])` CONSUMES the boolean the operator
+  // returns, so it is a read for the same reason `if ((o[k] = v))` and
+  // `const x = m.delete(k)` are. This needed `atStatementStart` to learn that
+  // `delete` is a prefix operator: without that it answers FALSE for a plain
+  // `delete o[k];` too, and the write bucket would be unreachable rather than
+  // narrower.
+  ['if (delete o[k]) is a READ — the result is consumed (#7691)', 'if (delete o[k]) f();', 'o', true, 1, 0],
+  ['const x = delete o[k]; is a READ — same gate', 'const x = delete o[k];', 'o', true, 1, 0],
+  ['a plain delete at statement position is still a WRITE (the control)', 'delete o[k];', 'o', true, 0, 1],
+  // `delete o?.[k]` is legal, unlike `++o?.f`. The accessor scan cannot read an
+  // optional step, so it is a READ — the rescue direction, and the same answer
+  // `o?.field++` gives.
+  ['delete o?.[k]; is a READ — an optional step is not scanned', 'delete o?.[k];', 'o', true, 1, 0],
   // The two-sided control. With the flag off the SAME source has zero writes,
   // which is what made the bucket unreachable in the first place.
   ['o[k] = v; is a READ with the flag OFF (control)', 'o[k] = v;', 'o', false, 1, 0],
@@ -1149,9 +1174,31 @@ test('the INTERFACE kind still classifies _ctx.map[k] = v as a READ (#7532 owns 
   assert(set.reads.length === 1 && set.writes.length === 0, `set: ${set.reads.length}r`)
 })
 
-test('delete _ctx.map[k] IS a write on the interface kind — the asymmetry is real', () => {
-  const { reads, writes } = classifyReferences(stripComments('delete _ctx.map[k];'), 'map', RECEIVERS)
-  assert(writes.length === 1 && reads.length === 0, `got ${reads.length}r ${writes.length}w`)
+test('delete _ctx.map[k] follows the target flag on the interface kind (#7691)', () => {
+  // The asymmetry this used to pin is gone. The interface kind's model is that
+  // a context field is a REASSIGNABLE property — `_ctx.field = v` already
+  // reaches the failure bucket — so mutating the container is a read of the
+  // field. Under that model `delete _ctx.map[k]` making a field write-only was
+  // a false RED: the accuse direction, on a mutation the model deliberately
+  // treats as a read.
+  //
+  // Both columns, because the default is what the interface kind ran with
+  // before #7532 and the flag is a target setting, not a constant.
+  const off = classifyReferences(stripComments('delete _ctx.map[k];'), 'map', RECEIVERS)
+  assert(off.reads.length === 1 && off.writes.length === 0, `flag OFF: got ${off.reads.length}r ${off.writes.length}w`)
+  const on = classifyReferences(stripComments('delete _ctx.map[k];'), 'map', RECEIVERS, { inPlaceMutationIsWrite: true })
+  assert(on.writes.length === 1 && on.reads.length === 0, `flag ON: got ${on.reads.length}r ${on.writes.length}w`)
+})
+
+test('atStatementStart locates the whole `delete` expression, not the binding (#7691)', () => {
+  // The enabling change, stated directly. Without it the walk lands on the `e`
+  // of the keyword — neither a statement boundary nor a primary-expression end
+  // — so a plain `delete o[k];` answers FALSE and gating on it would make the
+  // delete write bucket unreachable instead of narrower.
+  assert(atStatementStart('delete o[k];', 7) === true, 'plain delete statement')
+  assert(atStatementStart('{ delete o[k]; }', 9) === true, 'after a brace')
+  assert(atStatementStart('if (delete o[k]) f();', 11) === false, 'the result is consumed')
+  assert(atStatementStart('const x = delete o[k];', 17) === false, 'assigned')
 })
 
 test('a comment-padded increment still classifies as a WRITE (C1 window, binding side)', () => {

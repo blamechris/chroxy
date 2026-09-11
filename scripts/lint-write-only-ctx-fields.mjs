@@ -316,14 +316,36 @@
  *     covered the whole list is the comment-stronger-than-the-code shape this
  *     file catalogues.
  *
- *     One rule is still tested before the flag and is NOT on this list:
- *     `DELETE_BEHIND`. `delete o` on a bare binding is a strict-mode
- *     SyntaxError, so it only ever fires through an accessor — meaning
- *     `delete _ctx.map[k]` is a write on the interface kind for the same
- *     structural reason `++_ctx.map[k]` was. #7537 adjudicated it as a genuine
- *     mutation rather than an oversight, and nothing on either roster deletes
- *     through a scanned receiver, so it is not live. #7691 owns re-deciding it
- *     against the interface model now that it is the last one standing.
+ *     NO CLASSIFIER RULE IS EXEMPT ANY MORE, since #7691 settled the last one.
+ *     `DELETE_BEHIND` was tested before the flag and before the statement
+ *     gate, so `delete o[k]` was a write on both kinds unconditionally. `delete
+ *     o` on a bare binding is a strict-mode SyntaxError and every scanned file
+ *     is an ES module, so that rule only ever fires THROUGH AN ACCESSOR —
+ *     there was no direct-delete case it could have been correct about, and it
+ *     was the one thing that could still falsify the paragraph above.
+ *
+ *     #7537 adjudicated it as a genuine mutation rather than an oversight,
+ *     which is true and was never the question. `o[k] = v` is a genuine
+ *     mutation too; the flag exists to say whether a TARGET counts mutations
+ *     of the HELD object as writes of the binding, and five spellings of one
+ *     event were answering that question four different ways. `delete` now
+ *     takes the same flag, the same one-accessor-step invariant and the same
+ *     statement-position gate as `o[k] = v`, `o[k] += 1`, `o[k]++` and
+ *     `++o[k]` — so `delete o.a.b` and `if (delete o[k])` are reads, on both
+ *     columns, exactly as their siblings are.
+ *
+ *     Measured behaviour-neutral on the shipped config, per BINDING rather
+ *     than per summary: both targets set the flag ON today, and a `--verbose`
+ *     diff against main is byte-identical. The asymmetry was latent, which is
+ *     why it survived three issues — and why it was worth closing before a
+ *     `delete _ctx.map[k]` appeared and turned it into a false red.
+ *
+ *     This needed `atStatementStart` to learn that `delete` is a prefix
+ *     operator, like `++` and `--`. Without that the walk lands on the `e` of
+ *     the keyword, a plain `delete o[k];` answers FALSE, and gating on it
+ *     would have made the delete write bucket UNREACHABLE rather than
+ *     narrower — the unfailable-by-construction shape #7467, #7537 and #7553
+ *     each closed for a different spelling.
  *
  *     The first
  *     push of #7560 wrote the claim while breaking it twice, and review caught
@@ -955,8 +977,15 @@ export function incrementsThroughAccessor(after) {
  * A `(` past the step is refused for the same reason: `++o.f()` increments a
  * CALL RESULT, which is not a reference — it throws at runtime and TypeScript
  * rejects it — so `o` is read there, as it is in `o.f()++`.
+ *
+ * NAMED FOR THE QUESTION, not for one caller, since #7691: `delete` asks the
+ * identical thing. `delete o[k]` removes a property OF what `o` holds, while
+ * `delete o.a.b` removes one from what `o.a` holds and only READS `o` — the
+ * same one-step invariant, and the same reason a second copy of it would be
+ * the drift this file exists to catch. It was `incrementsIntoAccessor` while
+ * increments were its only caller.
  */
-export function incrementsIntoAccessor(after) {
+export function mutatesAtFirstAccessorStep(after) {
   const i = accessorStepEnd(after)
   return i >= 0 && !/^\s*[.[(]/.test(after.slice(i))
 }
@@ -1090,6 +1119,19 @@ export function atStatementStart(text, index) {
     start = i - 1
     i -= 2
     while (i >= 0 && /\s/.test(text[i])) i--
+  } else if (wordEndingAt(text, i) === 'delete') {
+    // `delete` is a prefix operator too, and it is the reason this branch is
+    // not just about `++` (#7691). Without it `delete o[k];` reports FALSE —
+    // the walk lands on the `e` of the keyword, which is neither a statement
+    // boundary nor a primary-expression end — so gating the delete rule on
+    // statement position would make its write bucket unreachable rather than
+    // narrower. The question the gate actually asks is whether the RESULT is
+    // consumed, and for `if (delete o[k])` it is; that is a property of the
+    // whole `delete o[k]` expression, so the whole expression is what must be
+    // located.
+    start = i - 'delete'.length + 1
+    i = start - 1
+    while (i >= 0 && /\s/.test(text[i])) i--
   }
   if (i < 0 || STATEMENT_BOUNDARY.has(text[i])) return true
   if (STATEMENT_KEYWORD_BOUNDARY.has(wordEndingAt(text, i))) return true
@@ -1124,7 +1166,45 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
   const after = text.slice(end, end + 64)
   const before = text.slice(Math.max(0, index - 64), index)
   if (ASSIGN_AHEAD.test(after)) return true
-  if (DELETE_BEHIND.test(before)) return true
+  // DELETE THROUGH AN ACCESSOR (#7691). `delete o[k]` removes a property of the
+  // object the binding HOLDS — the same event as `o[k] = v` (#7537),
+  // `o[k]++` (#7553) and `++o[k]` (#7558), written a fifth way — so it takes
+  // the same flag, the same one-accessor-step invariant and the same
+  // statement-position gate they do.
+  //
+  // It was the LAST rule here classifying an in-place mutation as a write
+  // regardless of the flag:
+  //
+  //                     flag ON     flag OFF
+  //   o[k] = v;         WRITE       read
+  //   o[k] += 1;        WRITE       read
+  //   o[k]++;           WRITE       read
+  //   ++o[k];           WRITE       read     (#7558)
+  //   delete o[k];      WRITE       WRITE    <- until #7691
+  //
+  // #7537 adjudicated it as a genuine mutation rather than an oversight, which
+  // is true and is not the question: `o[k] = v` is a genuine mutation too, and
+  // the flag exists to say whether THIS TARGET counts mutations of the held
+  // object as writes of the binding. The interface kind's model is that a
+  // context field is a reassignable property, so mutating the container is a
+  // READ of the field — under which `delete _ctx.map[k]` calling a field
+  // write-only is a false RED, the accuse direction, on a mutation that model
+  // deliberately treats as a read.
+  //
+  // There is no direct-delete case this could be correct about. `delete o` on
+  // a bare binding is a strict-mode SyntaxError and every scanned file is an
+  // ES module, so this rule only ever fires through an accessor. The bare form
+  // is kept a write anyway, for the same reason `++o` is: if it somehow
+  // appears, it is not an in-place mutation and the flag has nothing to say
+  // about it.
+  if (DELETE_BEHIND.test(before)) {
+    // `delete o?.[k]` is legal, unlike `++o?.f`, but the accessor scan cannot
+    // read an optional step, so it is a READ — the rescue direction, and the
+    // same answer `o?.field++` already gives.
+    if (OPTIONAL_CHAIN_AHEAD.test(after)) return false
+    if (!ACCESSOR_AHEAD.test(after)) return true
+    return mutatesAtFirstAccessorStep(after) && inPlaceMutationIsWrite && atStatementStart(text, index)
+  }
   // An increment is a write ONLY at statement position. `n++;` and
   // `for (;; n++)` qualify; `return n++` and `String(++n)` do not and are
   // therefore reads as well, so they must not be filed as writes. Both live
@@ -1165,7 +1245,7 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
         // An accessor follows, so this is not a rebind of the binding. Whether
         // it is a mutation OF the binding depends on the step being the last
         // one — `++o.a.b` reaches past it and only READS `o`.
-        return incrementsIntoAccessor(after) && inPlaceMutationIsWrite && atStatementStart(text, index)
+        return mutatesAtFirstAccessorStep(after) && inPlaceMutationIsWrite && atStatementStart(text, index)
       }
     }
     return atStatementStart(text, index)
