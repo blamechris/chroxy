@@ -38,7 +38,14 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 
 // Every case in this file. Bump it when you add one — a case that vanishes
 // should break the run rather than quietly shrink it (#7447).
-const MIN_CASES = 179
+//
+// It had said 179 since #7548 while the suite grew to 341, so the floor sat 162
+// cases loose and the instruction above described a guard nobody was running.
+// Measured on #7692: deleting ALL TEN rows that PR added — including three that
+// pin a regression it had just fixed — left the run green at 320/320, exit 0.
+// A floor that trails the count is the shape this whole file exists to catch:
+// it passes, and what it is checking is not what it says.
+const MIN_CASES = 341
 
 let pass = 0
 let fail = 0
@@ -818,6 +825,10 @@ const accessorAssignCases = [
   // `_encryptionState` (message-handler.ts:680, `_encryptionState.sendNonce++`)
   // was the live instance: 7r/5w before, 6r/6w now, masked either way by five
   // plain reassignments rather than by anything the lint understood.
+  // These two are ALSO #7558's flag-ON pins. #7692's review found the PR had
+  // added a byte-identical pair further down and called them new controls; they
+  // are removed and cross-referenced here instead, because two rows asserting
+  // the same tuple kill the same mutants and overstate coverage.
   ['++o[k]; is a WRITE — the prefix form is seen (INCDEC_BEHIND)', '++o[k];', 'o', true, 0, 1],
   ['++o.field; is a WRITE — same, property form', '++o.field;', 'o', true, 0, 1],
   ['o[k]++; is a WRITE — the postfix form, through the accessor (#7553)', 'o[k]++;', 'o', true, 0, 1],
@@ -847,15 +858,74 @@ const accessorAssignCases = [
   ['o[k] - -1 is a READ — a minus is not a decrement', 'const x = o[k] - -1;', 'o', true, 1, 0],
   ['o[k]++; is a READ with the flag OFF (control) (#7553)', 'o[k]++;', 'o', false, 1, 0],
   ['o.field++; is a READ with the flag OFF (control) (#7553)', 'o.field++;', 'o', false, 1, 0],
-  // …and the PREFIX form is NOT symmetric with it, which is the one in-place
-  // shape on the list running in the ACCUSE direction. `++o[k]` reaches
-  // isWriteAt through INCDEC_BEHIND, checked before either in-place rule and
-  // consulting neither the flag nor the accessor scan, so with the flag OFF it
-  // is a write while `o[k] = v` and `o[k]++` are reads. Pinned so the asymmetry
-  // is a recorded decision; no such reference exists on either roster today
-  // (swept: zero `++X[` / `++X.` in packages/{dashboard,app}/src). #7558.
-  ['++o[k]; is a WRITE with the flag OFF too — the accuse-direction asymmetry (#7558)', '++o[k];', 'o', false, 0, 1],
-  ['++o.field; is a WRITE with the flag OFF too (#7558)', '++o.field;', 'o', false, 0, 1],
+  // …and since #7558 the PREFIX form IS symmetric with it. These two rows were
+  // inverted by that fix: they pinned the asymmetry deliberately so the fix
+  // would be visible instead of silent, and flipping them is what makes it so.
+  //
+  // `++o[k]` reached isWriteAt through INCDEC_BEHIND, which is tested before
+  // either in-place rule and consults neither the flag nor the accessor scan.
+  // With the flag OFF it was a write while `o[k] = v`, `o[k] += 1` and `o[k]++`
+  // were reads — the one shape on the list running in the ACCUSE direction, so
+  // a context field whose only other reference was `++_ctx.f[k]` would be
+  // called write-only and FAIL.
+  //
+  // The old comment here claimed "swept: zero `++X[` / `++X.` in
+  // packages/{dashboard,app}/src". That is false as written — `++requestIdRef.current`
+  // appears five times in packages/app/src. It is true only of the RECEIVERS
+  // this lint scans (`_ctx`/`ctx`) and of module-level bindings, which is the
+  // claim it meant to make and not the claim it made.
+  ['++o[k]; is a READ with the flag OFF — symmetric with o[k]++ since #7558', '++o[k];', 'o', false, 1, 0],
+  ['++o.field; is a READ with the flag OFF (#7558)', '++o.field;', 'o', false, 1, 0],
+  // The controls that keep the fix from over-reaching. A prefix increment of
+  // the BINDING is not an in-place mutation of what it holds — it rebinds —
+  // so it stays a write on both targets, flag or no flag.
+  ['++o; is a WRITE with the flag OFF — no accessor follows (#7558)', '++o;', 'o', false, 0, 1],
+  // Postfix does NOT reach #7558's branch — it arrives through INCDEC_AHEAD,
+  // which tests the text after the reference. Kept as a regression fence for a
+  // future refactor that merges the two paths, and labelled as one: #7692's
+  // review showed no mutation confined to #7558's diff can red it, so calling
+  // it a control FOR that fix was wrong.
+  ['o++; is a WRITE with the flag OFF — reaches isWriteAt via INCDEC_AHEAD, not #7558s branch', 'o++;', 'o', false, 0, 1],
+  // DECREMENT. `INCDEC_AHEAD`/`INCDEC_BEHIND` union `++` and `--`, so this is
+  // free — and untested by name, while the docstring table spells out only
+  // `++`. Free behaviour that nothing pins is behaviour a refactor can take.
+  ['--o[k]; is a READ with the flag OFF — same union as ++ (#7692)', '--o[k];', 'o', false, 1, 0],
+  ['--o.field; is a READ with the flag OFF (#7692)', '--o.field;', 'o', false, 1, 0],
+  ['--o[k]; is a WRITE with the flag ON (#7692)', '--o[k];', 'o', true, 0, 1],
+  ['--o; is a WRITE with the flag OFF — no accessor follows (#7692)', '--o;', 'o', false, 0, 1],
+  // ACCESSOR_AHEAD's docstring claims newline tolerance, on the grounds that
+  // member access is not a restricted production. Nothing pinned it. This file
+  // pins every other predicate's claimed newline behaviour (the F1/F5 review
+  // rows), and an unpinned claim in a docstring is the overclaim class.
+  ['++o\n[k]; is a READ with the flag OFF — member access spans the newline (#7692)', '++o\n[k];', 'o', false, 1, 0],
+  ['++o\n.field; is a READ with the flag OFF — same (#7692)', '++o\n.field;', 'o', false, 1, 0],
+  ['++o\n[k]; is a WRITE with the flag ON (#7692)', '++o\n[k];', 'o', true, 0, 1],
+  // And statement position still gates it: a prefix increment whose value is
+  // USED is a read, exactly as `o[k]++` in the same position is.
+  ['const id = ++o.field; is a READ — value used, not statement position (#7558)', 'const id = ++o.field;', 'o', true, 1, 0],
+  // An optional chain is not a mutation target in ANY spelling — `++o?.f`,
+  // `o?.f++` and `o?.f = 1` are all SyntaxErrors. The postfix row above pinned
+  // that for `o?.field++`; these pin the prefix form, which #7692's review
+  // found `ACCESSOR_AHEAD` describing as reachable when it is not.
+  ['++o?.field; is a READ — an optional chain is not a mutation target (#7692)', '++o?.field;', 'o', true, 1, 0],
+  ['++o?.[k]; is a READ — same, computed form (#7692)', '++o?.[k];', 'o', true, 1, 0],
+  ['++o?.[k]; is a READ with the flag OFF too (#7692)', '++o?.[k];', 'o', false, 1, 0],
+  // THE ONE-ACCESSOR-STEP INVARIANT, for the prefix form. `++o.a.b` mutates
+  // `o.a`; `o` is only read to reach it — which is already how `o.a.b = v` and
+  // `o.a.b++` are classified two rows apart in this same table. #7558's first
+  // implementation tested only the FIRST character after the reference, so with
+  // the flag ON it called `++o.a.b` a WRITE of `o` while both siblings read it:
+  // the same accuse direction #7558 exists to close, one level deeper.
+  ['++o.a.b; is a READ — it mutates o.a, and o is only read to reach it (#7692)', '++o.a.b;', 'o', true, 1, 0],
+  ['++o[i][j]; is a READ — same, computed form (#7692)', '++o[i][j];', 'o', true, 1, 0],
+  ['++o.a.b; is a READ with the flag OFF too (#7692)', '++o.a.b;', 'o', false, 1, 0],
+  // A call result is not a reference: `++o.f()` throws at runtime and TS
+  // rejects it, so `o` is read — as it already is in `o.f()++`.
+  ['++o.f(); is a READ — a call result is not a reference (#7692)', '++o.f();', 'o', true, 1, 0],
+  // The control that keeps the invariant from over-reaching: exactly ONE step
+  // still reaches the flag gate.
+  ['++o.a; is a WRITE with the flag ON — one step, unchained (#7692)', '++o.a;', 'o', true, 0, 1],
+  ['++o?.field; is a READ with the flag OFF too (#7692)', '++o?.field;', 'o', false, 1, 0],
   // The index expression is arbitrary source, so the scan must actually parse
   // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
   // as reads — one rescued write silences a whole binding.
