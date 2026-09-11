@@ -875,6 +875,13 @@ const accessorAssignCases = [
   // And statement position still gates it: a prefix increment whose value is
   // USED is a read, exactly as `o[k]++` in the same position is.
   ['const id = ++o.field; is a READ — value used, not statement position (#7558)', 'const id = ++o.field;', 'o', true, 1, 0],
+  // An optional chain is not a mutation target in ANY spelling — `++o?.f`,
+  // `o?.f++` and `o?.f = 1` are all SyntaxErrors. The postfix row above pinned
+  // that for `o?.field++`; these pin the prefix form, which #7692's review
+  // found `ACCESSOR_AHEAD` describing as reachable when it is not.
+  ['++o?.field; is a READ — an optional chain is not a mutation target (#7692)', '++o?.field;', 'o', true, 1, 0],
+  ['++o?.[k]; is a READ — same, computed form (#7692)', '++o?.[k];', 'o', true, 1, 0],
+  ['++o?.field; is a READ with the flag OFF too (#7692)', '++o?.field;', 'o', false, 1, 0],
   // The index expression is arbitrary source, so the scan must actually parse
   // it. A naive `\[[^\]]*\]` stops at the FIRST `]` and files both of these
   // as reads — one rescued write silences a whole binding.

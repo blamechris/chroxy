@@ -682,14 +682,33 @@ const ASSIGN_AHEAD = /^\s*(?:=(?![=>])|\+=|-=|\*\*=|\*=|\/=|%=|<<=|>>>=|>>=|&&=|
 const INCDEC_AHEAD = /^[^\S\n\r\u2028\u2029]*(?:\+\+|--)/
 const INCDEC_BEHIND = /(?:\+\+|--)\s*$/
 /**
- * An ACCESSOR immediately follows the reference — `o[k]`, `o.f`, `o?.f`.
+ * An ACCESSOR immediately follows the reference — `o[k]` or `o.f`.
  *
  * Newline-tolerant for the same reason `ASSIGN_AHEAD` is: member access is not
  * a restricted production, so `o` ⏎ `[k]` and `o` ⏎ `.f` are one expression.
  * Only the POSTFIX increment is restricted, and that is `INCDEC_AHEAD`'s
  * problem, not this one.
+ *
+ * `?.` is deliberately NOT accepted, matching `accessorStepEnd`. This predicate
+ * only ever runs where a MUTATION target is being identified, and optional
+ * chaining can never be one: `++o?.f` and `o?.f = 1` are both SyntaxErrors
+ * ("Invalid left-hand side"). Accepting it described a shape no valid program
+ * can contain — harmless, but a predicate that claims reach it cannot have is
+ * the same overclaim this file exists to catch (#7692 review).
+ *
+ * Optional chaining in a READ is unaffected and still counted: `_ctx?.field`
+ * is matched by `classifyReferences`'s receiver regex, which is a different
+ * predicate with a different job.
  */
-const ACCESSOR_AHEAD = /^\s*\??\s*[.[]/
+const ACCESSOR_AHEAD = /^\s*[.[]/
+/**
+ * An OPTIONAL chain follows — `o?.f`, `o?.[k]`. Never a mutation target, in any
+ * spelling: `++o?.f`, `o?.f++` and `o?.f = 1` are all SyntaxErrors. The postfix
+ * form was already a read (`accessorStepEnd` refuses `?.`, pinned at
+ * "o?.field++; is a READ"); this makes the PREFIX form agree instead of
+ * inheriting the bare-binding answer.
+ */
+const OPTIONAL_CHAIN_AHEAD = /^\s*\?\./
 const DELETE_BEHIND = /\bdelete\s+$/
 
 /**
@@ -1033,8 +1052,14 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
     //
     // `++o` itself is untouched: no accessor follows, so it stays a direct
     // mutation of the binding and a write on both targets.
-    if (INCDEC_BEHIND.test(before) && ACCESSOR_AHEAD.test(after)) {
-      return inPlaceMutationIsWrite && atStatementStart(text, index)
+    if (INCDEC_BEHIND.test(before)) {
+      // An optional chain is not a mutation target at all, so this is neither
+      // a rebind nor an in-place mutation — it is a read, agreeing with
+      // `o?.field++` rather than falling through to the bare-binding answer.
+      if (OPTIONAL_CHAIN_AHEAD.test(after)) return false
+      if (ACCESSOR_AHEAD.test(after)) {
+        return inPlaceMutationIsWrite && atStatementStart(text, index)
+      }
     }
     return atStatementStart(text, index)
   }
