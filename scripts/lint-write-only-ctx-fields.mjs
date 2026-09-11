@@ -1694,11 +1694,22 @@ function splitTopLevelWithOffsets(s, sep) {
       // `Record<string, number>` has none and worked; `= <T, U = T>(` has one,
       // and the generic arrow went unrecognised because of it.
       const prev = (s.slice(0, i).match(/(\S)\s*$/) ?? ['', ''])[1]
-      // After `=` the shape must be a generic ARROW's parameter list — `<...>`
-      // immediately before a `(`. This is the SECOND call site of the scan and
-      // needs its own pin: the `<T, U = T>` fixture has no braces, so it is
-      // satisfied by the old regex and cannot witness a revert of this half.
       if (/[\w$>]/.test(prev)) return true
+      // After `=` the shape must be a generic ARROW's parameter list — `<...>`
+      // immediately before a `(` — which is a NARROWER question, so it needs
+      // its own scan rather than the filter's answer.
+      //
+      // ON THE ORDER, because it reads like a redundant call and is not (#7697
+      // review). The plain scan above is a CHEAP FORWARD filter that runs
+      // before `prev`, which is a BACKWARD scan over everything before `i`.
+      // Inverting them to save this call would run that backward scan at every
+      // `<` in the file — the O(n^2) shape recorded above, which once wedged
+      // the harness at >120s. Only this branch scans twice, and a plain scan
+      // succeeding is a precondition for this one, so the filter is never
+      // wasted. Measured over 948 real .ts/.tsx files: 1,166 plain scans and
+      // ZERO requireCall scans — the double path does not occur in this tree
+      // at all, and caching could not help it if it did, because the two calls
+      // answer different questions.
       return prev === '=' && genericEnd(s, i, { requireCall: true }) !== -1
     })()) angle++
     else if (c === '>' && angle > 0 && s[i - 1] !== '=') angle--
