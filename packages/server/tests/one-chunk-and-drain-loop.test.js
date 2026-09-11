@@ -119,9 +119,26 @@ const MACHINERY = [
  */
 function scanForHandRolledCopies(src, owners = []) {
   const offenders = []
-  for (const region of topLevelRegions(src)) {
+  const regions = topLevelRegions(src)
+  // An owner name must identify exactly ONE region. `owners.includes(name)` is
+  // membership, not identity: a second region carrying an owner's name is
+  // excused on the strength of a name it minted for itself. `TOP_LEVEL_DECL` is
+  // a column-0 regex with no brace awareness, so a BLOCK-SCOPED
+  // `{ function scheduleAfterDrain(…) {…} }` — legal, executable, a distinct
+  // binding — opens a second region with the owner's name whose body slices
+  // cleanly, so it never reaches the stale-anchor net either. Measured against
+  // the real file: a complete hand-rolled loop inside one scored [] (#7498
+  // review). Excusing a region for the name it CLAIMS is the whole shape this
+  // function is about, one step over from the indentation trick below.
+  const byName = new Map()
+  for (const r of regions) byName.set(r.name, (byName.get(r.name) ?? 0) + 1)
+  for (const region of regions) {
     let text = region.text
-    if (owners.includes(region.name)) {
+    if (owners.includes(region.name) && (byName.get(region.name) ?? 0) > 1) {
+      // Report AND scan in full: once the name is ambiguous, nothing here is
+      // known to be an owner body, so nothing may be excluded.
+      offenders.push(`${region.name}: DUPLICATE OWNER REGION — an owner name must identify exactly one region`)
+    } else if (owners.includes(region.name)) {
       // An owner's OWN body is allowed to carry the machinery — it IS the loop.
       // The REST of its region is not, and skipping the whole region handed
       // every hand-rolled copy a place to stand: `topLevelRegions` attributes
@@ -230,6 +247,51 @@ describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source
       src.slice(owner.end)
     assert.notDeepEqual(scanForHandRolledCopies(forged, LOOP_OWNERS), [],
       'a forged owner header scored CLEAN — a region can be excused by a name it minted for itself')
+  })
+
+  it('a block-scoped decoy carrying an owner NAME cannot be excused (#7498 review)', () => {
+    // `owners.includes(region.name)` is membership, not identity. TOP_LEVEL_DECL
+    // is a column-0 regex with no brace awareness, so a BLOCK-SCOPED
+    // `{ function scheduleAfterDrain(…) {…} }` — legal, executable, a distinct
+    // binding — mints a second region with the owner's name. Its body slices
+    // cleanly, so it never reaches the stale-anchor net: it is excused on the
+    // strength of a name it minted for itself. Measured: [] before this check.
+    const forged = read(WS_HISTORY) + `
+{
+function scheduleAfterDrain(ws2, entries2) {
+  let offset = 0
+  const step = () => {
+    if (ws2.bufferedAmount > 262144) { scheduleAfterDrain(ws2, step); return }
+    offset += 20
+    if (offset < entries2.length) scheduleAfterDrain(ws2, step)
+  }
+  step()
+}
+}
+`
+    const found = scanForHandRolledCopies(forged, LOOP_OWNERS)
+    assert.ok(found.some((f) => /DUPLICATE OWNER REGION/.test(f)),
+      `a second region carrying an owner's name was excused: ${JSON.stringify(found)}`)
+    assert.ok(found.some((f) => /reads bufferedAmount/.test(f)),
+      `the decoy's machinery was not named once the region stopped being excused: ${JSON.stringify(found)}`)
+  })
+
+  it('an owner reshaped away from `function NAME(` REPORTS rather than excusing (#7498)', () => {
+    // The stale-anchor path, pinned on its own. It used to be reachable through
+    // the forged-header case above, which now trips the sharper DUPLICATE check
+    // first — so without this the path would keep passing while nothing
+    // exercised it. "Cannot tell what to exclude" must never become "nothing to
+    // exclude", and that is exactly what a rewrite to an arrow-const would make
+    // it, silently, on a day nobody was looking at this file.
+    const src = read(WS_HISTORY)
+    const owner = sliceTopLevelFunction(src, 'scheduleAfterDrain')
+    assert.ok(owner, 'anchor is stale')
+    const reshaped = src.slice(0, owner.start) +
+      'const scheduleAfterDrain = (ws, cb) => {\n  if (ws.bufferedAmount > 0) return\n  cb()\n}\n' +
+      src.slice(owner.end)
+    const found = scanForHandRolledCopies(reshaped, LOOP_OWNERS)
+    assert.ok(found.some((f) => /OWNER ANCHOR STALE/.test(f)),
+      `an owner whose body cannot be located was excused instead of reported: ${JSON.stringify(found)}`)
   })
 
   it('excluding an owner BODY does not make the real file report offenders (#7498)', () => {
