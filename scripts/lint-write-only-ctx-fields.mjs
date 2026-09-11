@@ -1537,7 +1537,15 @@ function isConstantInitializer(init) {
  * NOT SEEN, deliberately stated rather than implied:
  *   - `declare`/ambient declarations are treated like any other;
  *   - a declarator shape `declaratorNames` cannot read contributes no name —
- *     it is REPORTED through `unparsed` rather than dropped (see there);
+ *     it is REPORTED through `unparsed` rather than dropped (see there), and
+ *     since #7689 it is FATAL rather than a warning. The count is what decided
+ *     it: both shipped targets contain ZERO unreadable declarators, so #7533's
+ *     argument for warning — that the previous extractor did not read these
+ *     either, so failing would red the build over a shape it did not introduce
+ *     — has nothing left to grandfather. What it closes is PARTIAL EROSION: a
+ *     roster of exactly zero already raises CannotCheckError, but that is one
+ *     direction only, and misses a refactor that pushes most of the roster into
+ *     this bucket and leaves the run green over what remains;
  *   - a declaration whose GENERIC wraps across lines. `genericEnd` bails on a
  *     newline, exactly as the regex it replaced did. The outcome is safe but
  *     not obvious, so it is pinned: the declaration-end scan stops at that same
@@ -2295,27 +2303,47 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
     }
   }
 
+  if (unreadable.length > 0) {
+    // FATAL since #7689, and the count is why. A declarator this cannot read
+    // contributes NO roster entries, so its bindings are unjudged while the run
+    // reports on the ones it did judge — "cannot check" read as "nothing to
+    // check", which is the first entry in docs/false-safety-guards.md.
+    //
+    // It was a `::warning::` until now, on #7533's reasoning that the previous
+    // extractor did not read these declarations either, so failing would red
+    // the build over a shape that change did not introduce. That argument has
+    // expired: both shipped targets contain ZERO unreadable declarators today,
+    // so there is nothing to grandfather and every future one is new.
+    //
+    // The hazard it closes is PARTIAL EROSION. A roster of exactly zero already
+    // raises CannotCheckError — but that is a one-direction check, catching
+    // total collapse and missing the case where a refactor pushes most of the
+    // roster into this bucket and leaves the lint green over what little
+    // remains. The repo has filed that shape four times under a different name
+    // (a roster checked in only one direction).
+    //
+    // Exit 2, not 1: this is not "the state is write-only", it is "I could not
+    // check it". No budget knob — a threshold that is always zero is a second
+    // thing to drift, and the honest response to hitting this is to flatten the
+    // pattern or teach `declaratorNames` to read it.
+    throw new CannotCheckError(
+      `${unreadable.length} declarator(s) could not be read, so their bindings are outside the ` +
+      'roster and go unjudged while everything else reports clean. Flatten the pattern, or ' +
+      'extend declaratorNames to read it:\n' +
+      unreadable.map((u) => `      unread declarator: ${u}`).join('\n'),
+    )
+  }
+
+  // AFTER the unreadable check, deliberately. When a refactor makes every
+  // declaration unreadable both conditions hold, and "ZERO bindings" is the
+  // less useful of the two reports: it says the roster is empty without saying
+  // why, while the one above names each declarator it could not read (#7689).
   if (keys.length === 0) {
     throw new CannotCheckError(
       `${declSources.length} declaring file(s) yielded ZERO module-level bindings. Either they ` +
       'hold no state any more or the extractor no longer understands their shape — both are ' +
       '"cannot check", not "clean".',
     )
-  }
-
-  if (unreadable.length > 0) {
-    // Printed, not swallowed. These declarations contribute no roster entries,
-    // so their bindings are unjudged — the same gap #7533 closed for
-    // destructuring and multi-declarator forms, in the shapes still unread.
-    // Naming them is the difference between a known gap and a silent one.
-    // As a `::warning::`, like every other diagnostic here. It was a bare
-    // `console.log` until #7687's review: the one line in this file that CI
-    // renders nowhere, announcing the one thing the run did not check.
-    console.warn(
-      `::warning::[write-only-ctx] ${unreadable.length} declarator(s) could not be read and ` +
-      'are therefore unjudged — their bindings are outside the roster.',
-    )
-    for (const u of unreadable) console.warn(`::warning::[write-only-ctx] unread declarator: ${u}`)
   }
 
   return judge({

@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 424
+const MIN_CASES = 436
 
 let pass = 0
 let fail = 0
@@ -1649,20 +1649,68 @@ test('a declarator that cannot be read is REPORTED, not dropped (#7533)', () => 
   assert(/deep/.test(found[0].unparsed), `unparsed text lost the declarator: ${JSON.stringify(found[0])}`)
 })
 
-test('an unreadable declarator surfaces as a CI ::warning::, and is NOT fatal (#7687)', () => {
-  // Both halves matter. It must be VISIBLE — it was the only diagnostic in the
-  // script emitted as a bare `console.log`, which CI renders nowhere, and it
-  // announces the one thing the run did not check. And it must NOT fail: the
-  // previous extractor did not read these declarations either, so failing here
-  // would red the build over a shape #7533 did not introduce.
+test('an unreadable declarator is FATAL — exit 2, and it NAMES the declarator (#7689)', () => {
+  // RE-DECIDED. It was a `::warning::` on #7533's reasoning that the previous
+  // extractor did not read these declarations either, so failing would red the
+  // build over a shape that change did not introduce. That argument expired
+  // once the count reached zero: both shipped targets contain NO unreadable
+  // declarators today, so there is nothing to grandfather.
+  //
+  // Exit 2 and not 1, because this is "I could not check it" rather than "the
+  // state is write-only" — the distinction the CLI already draws everywhere
+  // else.
   const r = runCliOn(fixtureRoot(CLEAN_DECL, {
     [DASH_DECL_REL]:
       `${DASH_TEST_EXPORTS}let { a: { deep } } = make();\n` +
       'export function f(): number { return 1; }\n',
   }))
-  assert(r.status === 0, `exit ${r.status} — an unread declarator must not fail the run\n${r.stderr}`)
-  assert(/::warning::/.test(r.stderr), `no CI annotation: ${r.stderr}`)
+  assert(r.status === 2, `exit ${r.status} — an unread declarator is a cannot-check\n${r.stderr}`)
+  assert(/CANNOT CHECK/.test(r.stderr), `not reported as a cannot-check: ${r.stderr}`)
   assert(/unread declarator: .*deep/.test(r.stderr), `the declarator text was not named: ${r.stderr}`)
+})
+
+test('a tree with NO unreadable declarator still exits 0 — the other direction (#7689)', () => {
+  // The control. Without it the case above passes for a guard that refuses
+  // everything, which is its own catalogued false-safety shape: a check that
+  // denies universally has negative tests that pass for the wrong reason and
+  // keeps passing if the check is deleted outright.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { readMe, alsoRead } = make();\n` +
+      'export function f(): number { return readMe + alsoRead; }\n',
+  }))
+  assert(r.status === 0, `exit ${r.status} — a readable destructuring must not fail\n${r.stderr}`)
+  assert(!/CANNOT CHECK/.test(r.stderr), `spurious cannot-check: ${r.stderr}`)
+})
+
+test('the unreadable ACCUMULATION carries every declarator and its count (#7689)', () => {
+  // §1 of #7689: the channel was tested only at the CLI, one declarator at a
+  // time, so nothing pinned that `analyzeModuleBindings` accumulates ACROSS
+  // declarators and files. A collector that reported only the first would look
+  // identical at the CLI, and would understate the very number the fatality
+  // decision rests on.
+  // Each file also declares a READABLE binding, so the roster is non-empty and
+  // this exercises the unreadable channel rather than the zero-roster guard.
+  const a = 'let keepA = 0;\nlet { x: { deepOne } } = make();\nlet { y: { deepTwo } } = make();\n' +
+    'export function ga(): number { keepA = 1; return keepA; }\n'
+  const b = 'let keepB = 0;\nlet { z: { deepThree } } = make();\n' +
+    'export function gb(): number { keepB = 1; return keepB; }\n'
+  let err = null
+  try {
+    analyzeTarget({
+      kind: 'module-bindings',
+      declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+      sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+      inPlaceMutationIsWrite: true,
+    })
+  } catch (e) { err = e }
+  assert(err instanceof CannotCheckError, `expected a cannot-check, got ${err}`)
+  assert(/^3 declarator\(s\)/.test(err.message), `the count is wrong or missing: ${err.message}`)
+  for (const name of ['deepOne', 'deepTwo', 'deepThree']) {
+    assert(err.message.includes(name), `${name} missing from the report: ${err.message}`)
+  }
+  // ...and BOTH files, so the accumulation is not per-file.
+  assert(/store\/a\.ts/.test(err.message) && /store\/b\.ts/.test(err.message), err.message)
 })
 
 // `stripComments` leaves literal CONTENT byte-identical by design, so a comma,
@@ -1712,6 +1760,26 @@ const literalAndWrapRoster = [
   // not reserved must bind, and one that is must still be refused.
   ['a binding named `of`, which is NOT reserved', 'let of = compute(), b = compute();\n', 'of,b'],
   ['a declarator named `await`, which IS reserved in a module', 'let a = 1, await = 2;\n', 'a,UNPARSED(await = 2)'],
+  // #7689 §3. None of these was broken — they were UNPROTECTED, which is the
+  // point: this parser has been rewritten twice (#7533, #7688) and will be
+  // again, and a shape with no row is a shape a rewrite can drop silently.
+  // Each expectation was derived from what the rule SHOULD say and then checked
+  // against the tree, not copied off the implementation.
+  ['a `var` object pattern', 'var { a, b } = f();\n', 'a,b', '#7689'],
+  ['a `var` array pattern', 'var [a, b] = f();\n', 'a,b', '#7689'],
+  ['an EXPORTED destructuring, which also feeds the exported-dedup path', 'export const { a, b } = f();\n', 'a,b', '#7689'],
+  ['a plain array pattern with no rest', 'const [a, b] = f();\n', 'a,b', '#7689'],
+  // One level deep, deliberately: the inner pattern is REPORTED rather than
+  // guessed at, because a wrong name in the roster gets classified.
+  ['a NESTED array pattern, refused one level in', 'const [[a, b], c] = f();\n', 'UNPARSED([a, b]),c', '#7689'],
+  // The default-value shapes. Each carries a character the declarator splitter
+  // also uses as a separator — a comma, then a brace — so each is a place a
+  // naive split lands inside the default.
+  ['a default holding a comma-bearing CALL', 'const { a = f(1, 2), b } = f();\n', 'a,b', '#7689'],
+  ['a default holding a BRACE', 'const { a = { x: 1 }, b } = f();\n', 'a,b', '#7689'],
+  ['a default holding a GENERIC — the two newest parsers intersecting', 'const { a = new Map<string, number>() } = f();\n', 'a', '#7689'],
+  ['a pattern with a trailing generic ANNOTATION', 'const { a, b }: Foo<X, Y> = f();\n', 'a,b', '#7689'],
+  ['TWO destructured declarators in one statement', 'const { a } = f(), { b } = f();\n', 'a,b', '#7689'],
   // #7688. A destructuring declarator has NO initializer of its own — what
   // follows its `=` is the SOURCE — so the alias rule was reading that source
   // as the declarator's value and suppressing EVERY name in the pattern. On
