@@ -120,8 +120,29 @@ const MACHINERY = [
 function scanForHandRolledCopies(src, owners = []) {
   const offenders = []
   for (const region of topLevelRegions(src)) {
-    if (owners.includes(region.name)) continue
-    const body = stripLineComments(region.text)
+    let text = region.text
+    if (owners.includes(region.name)) {
+      // An owner's OWN body is allowed to carry the machinery — it IS the loop.
+      // The REST of its region is not, and skipping the whole region handed
+      // every hand-rolled copy a place to stand: `topLevelRegions` attributes
+      // any declaration that does not begin at column 0 to the nearest
+      // PRECEDING one, so a copy indented after the owner's closing brace was
+      // excused along with the owner (#7498). Two evasions were reproduced
+      // against the real file and both scored clean — an indented arrow-const
+      // wedged after the brace, and a template literal forging a column-0
+      // `function sendChunkedWithBackpressure(` header to start a fresh region
+      // that the owner list then excuses by NAME.
+      const own = sliceTopLevelFunction(region.text, region.name)
+      if (!own) {
+        // Not "nothing to exclude" — "cannot tell what to exclude". Excusing
+        // the region here would restore the hole this closes, silently, the
+        // first time an owner stops being a `function NAME(` declaration.
+        offenders.push(`${region.name}: OWNER ANCHOR STALE — cannot separate its body from its region`)
+        continue
+      }
+      text = region.text.slice(0, own.start) + region.text.slice(own.end)
+    }
+    const body = stripLineComments(text)
     for (const [re, what] of MACHINERY) {
       if (re.test(body)) offenders.push(`${region.name}: ${what}`)
     }
@@ -170,6 +191,54 @@ describe('#7485 — exactly ONE chunk-and-drain loop, re-derived from the source
   it('no OTHER region in ws-history.js reads bufferedAmount, parks on a drain, or declares a chunk size', () => {
     assert.deepEqual(scanForHandRolledCopies(read(WS_HISTORY), LOOP_OWNERS), [],
       'a second copy of the #4833 chunk-and-drain loop has appeared in ws-history.js — route it through sendChunkedWithBackpressure instead (#7460, #7480, #7485)')
+  })
+
+  it('an indented copy wedged INSIDE an owner region is caught (#7498)', () => {
+    // The hole this closes. `topLevelRegions` attributes any declaration that
+    // does not begin at column 0 to the nearest PRECEDING one, so a copy
+    // indented after an owner's closing brace lived inside the owner's region
+    // — and the scan excused whole owner regions by name. Reproduced against
+    // the REAL file rather than a synthetic module, because the attribution
+    // that creates the hole is a property of this file's actual layout.
+    const src = read(WS_HISTORY)
+    const owner = sliceTopLevelFunction(src, 'scheduleAfterDrain')
+    assert.ok(owner, 'anchor is stale — scheduleAfterDrain must be a top-level function')
+    const wedged = src.slice(0, owner.end) +
+      '\n  const drainAgain = (ws, entries) => {\n' +
+      '    while (ws.bufferedAmount > 0) { scheduleAfterDrain(ws, () => {}) }\n' +
+      '  }\n' +
+      src.slice(owner.end)
+    const found = scanForHandRolledCopies(wedged, LOOP_OWNERS)
+    assert.ok(found.length > 0,
+      'a complete hand-rolled loop indented inside an owner region scored CLEAN — the scan is back to excusing whole regions')
+    assert.ok(found.some((f) => /reads bufferedAmount/.test(f)),
+      `expected the bufferedAmount read to be named, got ${JSON.stringify(found)}`)
+  })
+
+  it('a forged column-0 header inside a template cannot buy an owner name (#7498)', () => {
+    // The second evasion. A template literal can put `function
+    // sendChunkedWithBackpressure(` at column 0, starting a region the owner
+    // list then excuses BY NAME. It must not read as clean: either the region's
+    // body is separable and gets scanned, or the anchor is unusable and that is
+    // reported. "Cannot tell" must never collapse into "nothing to check".
+    const src = read(WS_HISTORY)
+    const owner = sliceTopLevelFunction(src, 'scheduleAfterDrain')
+    assert.ok(owner, 'anchor is stale')
+    const forged = src.slice(0, owner.end) +
+      '\n  const doc = `\nfunction sendChunkedWithBackpressure(fake) {\n`\n' +
+      '  const sneaky = (ws) => { while (ws.bufferedAmount) {} }\n' +
+      src.slice(owner.end)
+    assert.notDeepEqual(scanForHandRolledCopies(forged, LOOP_OWNERS), [],
+      'a forged owner header scored CLEAN — a region can be excused by a name it minted for itself')
+  })
+
+  it('excluding an owner BODY does not make the real file report offenders (#7498)', () => {
+    // The control for the two above. Scanning the owner-region remainder is
+    // only a fix if the remainder of the REAL file is genuinely clean; if it
+    // were not, the two cases above would pass for the wrong reason and this
+    // guard would be permanently red.
+    assert.deepEqual(scanForHandRolledCopies(read(WS_HISTORY), LOOP_OWNERS), [],
+      'the owner-region remainder carries machinery — the trailing text after an owner is not comment-only any more')
   })
 
   it('ws-history.js declares exactly ONE chunk-size constant, and it is REPLAY_CHUNK_SIZE', () => {
