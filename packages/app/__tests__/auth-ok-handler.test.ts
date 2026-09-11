@@ -576,6 +576,41 @@ describe('auth_ok handler', () => {
       expect(saved.lanVerified).toBe(true);
     });
 
+    it('#7525 — the factory DEFAULT url classifies as tunnel, and that is load-bearing', () => {
+      // Every row in THIS block passes an explicit url, so none of them pins
+      // the factory's DEFAULT — and 230 of the 256 call sites across 11 files
+      // in this package rely on it. (Rows elsewhere in the file do take the
+      // default; none asserts it.) The scheme is not decoration: auth_ok reads
+      // it to choose the transport (`ws://` -> lan, `wss://` -> tunnel), so
+      // flipping the default silently re-points every one of those sites onto
+      // the OTHER branch.
+      //
+      // Measured before this row existed, across all 11 files (503 tests):
+      // changing the default to `wss://MUTANT.invalid`, and then flipping it to
+      // `ws://mutant.invalid:1`, each left every one of them passing, exit 0.
+      //
+      // BOTH assertions below are load-bearing, and not in the way the first
+      // draft of this comment claimed — it said only the classification catches
+      // a scheme flip, which is backwards. Measured, each half alone:
+      //
+      //                                      string   classification
+      //   host change, scheme intact         catches  MISSES
+      //   scheme flip                        catches  catches
+      //   scheme flip + this string updated  MISSES   catches
+      //     to match (the usual way a pin
+      //     is defeated: "fix" the test)
+      //
+      // So the string is the stronger detector and the classification is the
+      // one that survives someone editing the expectation to agree with the
+      // change. It is asserted first so the failure names the CONSEQUENCE —
+      // `Expected: "tunnel", Received: "lan"` — rather than only the changed
+      // string.
+      const ctx = createMockConnectionContext({ token: 'tok', socket: mockSocket });
+      handleMessage(createAuthOkMessage(), ctx);
+      expect(mockSetActivePath).toHaveBeenCalledWith('tunnel');
+      expect(ctx.url).toBe('wss://test.example.com');
+    });
+
     it('#5518 — sets activePath to tunnel for a wss:// connect', () => {
       const ctx = createMockConnectionContext({ url: 'wss://my.server.com', token: 'my-tok', socket: mockSocket });
       handleMessage(createAuthOkMessage(), ctx);
