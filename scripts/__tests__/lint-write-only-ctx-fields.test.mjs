@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 341
+const MIN_CASES = 344
 
 let pass = 0
 let fail = 0
@@ -327,10 +327,63 @@ for (const [label, body] of readShapes) {
 }
 
 test('the real-world read shapes are COUNTED, not merely tolerated', () => {
+  // The flag-OFF behaviour of the FUNCTION, which is still its default. The
+  // SHIPPED interface target no longer runs this way — see the companion below.
   const stripped = stripComments('_ctx.set.clear(); if (_ctx.set) {} const a = _ctx.set;')
   const { reads, writes } = classifyReferences(stripped, 'set', RECEIVERS)
   assert(reads.length === 3, `expected 3 reads, got ${reads.length}`)
   assert(writes.length === 0, `expected 0 writes, got ${writes.length}`)
+})
+
+test('with the flag ON, `_ctx.set.clear()` is a WRITE — the shipped app setting (#7532)', () => {
+  // The companion, and the reason the row above is not simply wrong now: the
+  // FUNCTION still defaults OFF, and the TARGET turns it on. Asserting only the
+  // default would leave the shipped configuration unexercised, which is how a
+  // flag becomes a no-op nobody notices — this one already was one, because the
+  // interface path never threaded it at all.
+  const stripped = stripComments('_ctx.set.clear(); if (_ctx.set) {} const a = _ctx.set;')
+  const { reads, writes } = classifyReferences(stripped, 'set', RECEIVERS, { inPlaceMutationIsWrite: true })
+  assert(writes.length === 1, `expected 1 write, got ${writes.length}`)
+  assert(reads.length === 2, `expected 2 reads, got ${reads.length}`)
+})
+
+test('a context field populated and cleared with NOTHING reading it now FAILS (#7532)', () => {
+  // The red proof the decision is for. Before #7532 this field was rescued by
+  // its own reset assignment and never judged on whether anything reads the
+  // container's CONTENTS — the #7421 class, one level in.
+  const decl = 'export interface Ctx {\n  replaying: Set<string>;\n}\n'
+  const src = [
+    'export function begin(id: string): void { _ctx.replaying.add(id); }',
+    'export function reset(): void { _ctx.replaying.clear(); }',
+    'export function wipe(): void { _ctx.replaying = new Set(); }',
+  ].join('\n')
+  const r = analyzeTarget({
+    declText: decl,
+    interfaceName: 'Ctx',
+    receivers: RECEIVERS,
+    sources: [{ path: 'a.ts', text: src }],
+    inPlaceMutationIsWrite: true,
+  })
+  assert(r.failures.length === 1, `expected 1 failure, got ${JSON.stringify(r.failures)}`)
+  assert(/replaying/.test(r.failures[0]), `the field was not named: ${r.failures[0]}`)
+})
+
+test('...and the SAME field is rescued with the flag OFF — the control (#7532)', () => {
+  // Without this the case above could pass because the fixture is malformed
+  // rather than because the flag changed the verdict.
+  const decl = 'export interface Ctx {\n  replaying: Set<string>;\n}\n'
+  const src = [
+    'export function begin(id: string): void { _ctx.replaying.add(id); }',
+    'export function reset(): void { _ctx.replaying.clear(); }',
+    'export function wipe(): void { _ctx.replaying = new Set(); }',
+  ].join('\n')
+  const r = analyzeTarget({
+    declText: decl,
+    interfaceName: 'Ctx',
+    receivers: RECEIVERS,
+    sources: [{ path: 'a.ts', text: src }],
+  })
+  assert(r.failures.length === 0, `expected no failure with the flag OFF, got ${JSON.stringify(r.failures)}`)
 })
 
 // ---------------------------------------------------------------------------
@@ -1790,10 +1843,15 @@ test('the SHIPPED TARGETS table still covers both kinds', () => {
     'assignment — as writes; without it every const binding is unfailable by construction',
   )
   const app = TARGETS.find((t) => t.kind === 'interface')
+  // INVERTED by #7532. This row pinned the asymmetry so the decision would be
+  // visible instead of inherited, and flipping it is what makes it so. Both
+  // kinds now treat in-place mutation as a write; the interface path did not
+  // merely default the flag OFF before, it never THREADED it, so setting it
+  // here was a silent no-op.
   assert(
-    app.inPlaceMutationIsWrite === undefined,
-    'the app target deliberately leaves in-place mutation as a READ — #7532 owns changing that, ' +
-    'and both shapes ride this one flag',
+    app.inPlaceMutationIsWrite === true,
+    'the app target must treat in-place mutation as a write too (#7532) — a container field ' +
+    'populated and cleared with nothing reading its contents is the #7421 class',
   )
   assert(
     dash.declDirs.includes('packages/dashboard/src/store'),

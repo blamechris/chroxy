@@ -134,13 +134,46 @@
  * into or mutate the object held in `o.a` / `o[i]`, so `o` itself is genuinely
  * read there. One scan enforces that for every operator.
  *
- * Both shapes ride ONE per-target flag, `inPlaceMutationIsWrite` — on for the
- * dashboard's module bindings, off for the app's interface target, where a
- * context field IS reassignable and the failure bucket is therefore reachable
- * without either rule. Turning it on there is #7532, which now decides both
- * shapes together; measured while #7537 landed, doing so reclassifies SEVEN app
- * fields — six of them purely from the new index/property rule — and leaves
- * that target green.
+ * Both shapes ride ONE per-target flag, `inPlaceMutationIsWrite`, and since
+ * #7532 it is ON FOR BOTH TARGETS. The decision, recorded rather than
+ * inherited:
+ *
+ *   - The module-bindings kind NEEDS it. A `const` cannot be reassigned, so
+ *     without it write-only is unreachable by construction for every
+ *     `const _x = new Map()` and every `const o: Record<string, T> = {}`.
+ *   - The interface kind never needed it — a context field IS reassignable, so
+ *     `_ctx.f = v` already reaches the failure bucket. But "did not need it" is
+ *     not "should not have it", and the difference had hardened into documented
+ *     semantics that nothing had ever chosen. What it buys is the #7421 class
+ *     for a field that HOLDS a container: `_ctx.replayingSessions.add(id)` plus
+ *     `.clear()` with no `.has()` anywhere was rescued by its own reset
+ *     assignment and so never JUDGED on whether anything reads the contents.
+ *   - It cost nothing live. Measured at the flip: 16 fields, 16 read, 0
+ *     write-only — the same SUMMARY as the flag off. Not the same underneath,
+ *     and the difference is worth stating rather than rounding away: EIGHT
+ *     fields shift composition, because a mutator call that used to count as a
+ *     read now counts as a write. No field crosses into the failure bucket,
+ *     which is what "cost nothing" means here.
+ *   - It costs something future, and that is the honest half: the read-side
+ *     gaps in WHAT IT CANNOT SEE now have teeth on this target too. A field
+ *     whose only reader is a SPREAD (`{ ..._ctx.set }` yields zero references)
+ *     would be called write-only. That was already true for the binding kind.
+ *
+ *     Three fields are one refactor from it, having lost the cushion of
+ *     mutator-calls-counting-as-reads: `postPermissionSplits` (5r/0w -> 1r/4w),
+ *     `tokenToRender` and `clientRender` (both 2r/0w -> 1r/1w). Each now rests
+ *     on a SINGLE read reference — `postPermissionSplits` on the hand-off that
+ *     passes the Set by reference into the shared-delta context, the other two
+ *     on one `.summary()` call. Rewrite that one line as a destructure or a
+ *     spread, or drop it while the mutations survive, and the field is called
+ *     write-only. Naming them is the point: this is a documented cost, and a
+ *     documented cost nobody can locate is just a sentence.
+ *
+ * Until #7532 the interface path did not merely default the flag off — it
+ * never THREADED it. `classifyReferences` took no options, so setting
+ * `inPlaceMutationIsWrite` on an interface TARGET changed nothing and said
+ * nothing. A configuration key that is silently inert is the shape this file
+ * exists to catch, so it is wired on both kinds now whatever its value.
  *
  * A field with NO reference at all is a WARNING, not a failure — and the
  * distinction is load-bearing rather than squeamish. Zero references is the
@@ -392,6 +425,28 @@ export const TARGETS = [
     followExtends: true,
     receivers: ['_ctx', 'ctx'],
     scanDirs: ['packages/app/src'],
+    // ON here too since #7532, and the decision is recorded rather than
+    // inherited. The dashboard kind NEEDS this flag — a `const` cannot be
+    // reassigned, so without it write-only is unreachable for every
+    // `const _x = new Map()`. The interface kind never needed it: a context
+    // field IS reassignable, so `_ctx.f = v` already reaches the failure
+    // bucket. "Did not need it" is not "should not have it", and the
+    // difference had hardened into documented semantics that nothing had
+    // chosen.
+    //
+    // What it buys: the #7421 class for a field that HOLDS a container.
+    // `_ctx.replayingSessions.add(id)` plus `.clear()` with no `.has()`
+    // anywhere is state populated and emptied and never consulted. It was
+    // rescued by its own reset assignment, so it was never JUDGED on whether
+    // anything reads the container's contents; now it is.
+    //
+    // What it costs, stated because it is real: the read-side gaps in WHAT IT
+    // CANNOT SEE now have teeth here too. A field whose only reader is a
+    // SPREAD (`{ ..._ctx.set }` yields zero references) would be called
+    // write-only. Measured before flipping it: 16 fields, 16 read, 0
+    // write-only — identical to the flag OFF, so nothing live depends on the
+    // difference and the risk is future-only.
+    inPlaceMutationIsWrite: true,
     // field: 'why it is legitimately write-only'
     allow: {},
   },
@@ -1124,7 +1179,7 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
  * Classify every `<receiver>.<field>` in one ALREADY comment-stripped source.
  * Returns `{ reads, writes }`, each an array of 1-based line numbers.
  */
-export function classifyReferences(strippedText, field, receivers) {
+export function classifyReferences(strippedText, field, receivers, { inPlaceMutationIsWrite = false } = {}) {
   const recv = receivers.map((r) => r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
   // Newline-tolerant on BOTH separators: `_ctx\n  .field` and `_ctx?.\n field`
   // are the same reference as `_ctx.field`. Never match line by line.
@@ -1134,7 +1189,7 @@ export function classifyReferences(strippedText, field, receivers) {
   let m
   while ((m = re.exec(strippedText)) !== null) {
     const end = m.index + m[0].length
-    const isWrite = isWriteAt(strippedText, m.index, end)
+    const isWrite = isWriteAt(strippedText, m.index, end, { inPlaceMutationIsWrite })
     ;(isWrite ? writes : reads).push(lineOf(strippedText, m.index))
   }
   return { reads, writes }
@@ -1666,7 +1721,13 @@ function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedT
  * Analyse one target from in-memory sources.
  *
  * kind 'interface' (the default) takes `{declText, interfaceName, followExtends,
- * receivers, sources, allow}`.
+ * receivers, sources, inPlaceMutationIsWrite, allow}`.
+ *
+ * `inPlaceMutationIsWrite` was module-bindings-only until #7532, and the
+ * interface path did not merely default it OFF — it never threaded it, so
+ * setting it on an interface TARGET was a silent no-op. A configuration key
+ * that changes nothing and says nothing is the shape this file exists to
+ * catch, so it is wired on both kinds now whatever its value.
  *
  * kind 'module-bindings' takes `{declSources, sources, inPlaceMutationIsWrite, allow}`,
  * where `declSources` are the files whose module-level state forms the roster
@@ -1681,7 +1742,7 @@ export function analyzeTarget(opts) {
     : analyzeInterfaceTarget(opts)
 }
 
-function analyzeInterfaceTarget({ declText, interfaceName, followExtends = false, receivers, sources, allow = {} }) {
+function analyzeInterfaceTarget({ declText, interfaceName, followExtends = false, receivers, sources, inPlaceMutationIsWrite = false, allow = {} }) {
   if (!sources || sources.length === 0) {
     throw new CannotCheckError(
       `${interfaceName}: no source files to scan. An empty scan set reports every field clean, ` +
@@ -1696,7 +1757,7 @@ function analyzeInterfaceTarget({ declText, interfaceName, followExtends = false
     const reads = []
     const writes = []
     for (const s of stripped) {
-      const r = classifyReferences(s.text, field, receivers)
+      const r = classifyReferences(s.text, field, receivers, { inPlaceMutationIsWrite })
       for (const line of r.reads) reads.push(`${s.path}:${line}`)
       for (const line of r.writes) writes.push(`${s.path}:${line}`)
     }
@@ -1899,6 +1960,7 @@ export function runCli(argv = process.argv.slice(2)) {
           interfaceName: target.interfaceName,
           followExtends: target.followExtends,
           receivers: target.receivers,
+          inPlaceMutationIsWrite: target.inPlaceMutationIsWrite,
           allow: target.allow,
           sources: paths.map(readSource),
         })
