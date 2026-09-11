@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 436
+const MIN_CASES = 443
 
 let pass = 0
 let fail = 0
@@ -1683,34 +1683,72 @@ test('a tree with NO unreadable declarator still exits 0 — the other direction
   assert(!/CANNOT CHECK/.test(r.stderr), `spurious cannot-check: ${r.stderr}`)
 })
 
-test('the unreadable ACCUMULATION carries every declarator and its count (#7689)', () => {
+test('the unreadable ACCUMULATION carries every declarator, across files (#7689)', () => {
   // §1 of #7689: the channel was tested only at the CLI, one declarator at a
   // time, so nothing pinned that `analyzeModuleBindings` accumulates ACROSS
   // declarators and files. A collector that reported only the first would look
   // identical at the CLI, and would understate the very number the fatality
   // decision rests on.
+  //
   // Each file also declares a READABLE binding, so the roster is non-empty and
   // this exercises the unreadable channel rather than the zero-roster guard.
   const a = 'let keepA = 0;\nlet { x: { deepOne } } = make();\nlet { y: { deepTwo } } = make();\n' +
     'export function ga(): number { keepA = 1; return keepA; }\n'
   const b = 'let keepB = 0;\nlet { z: { deepThree } } = make();\n' +
     'export function gb(): number { keepB = 1; return keepB; }\n'
-  let err = null
-  try {
-    analyzeTarget({
-      kind: 'module-bindings',
-      declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
-      sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
-      inPlaceMutationIsWrite: true,
-    })
-  } catch (e) { err = e }
-  assert(err instanceof CannotCheckError, `expected a cannot-check, got ${err}`)
-  assert(/^3 declarator\(s\)/.test(err.message), `the count is wrong or missing: ${err.message}`)
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    inPlaceMutationIsWrite: true,
+  })
+  assert(r.unreadable.length === 3, `expected 3, got ${r.unreadable.length}: ${JSON.stringify(r.unreadable)}`)
+  const joined = r.unreadable.join(' | ')
   for (const name of ['deepOne', 'deepTwo', 'deepThree']) {
-    assert(err.message.includes(name), `${name} missing from the report: ${err.message}`)
+    assert(joined.includes(name), `${name} missing: ${joined}`)
   }
-  // ...and BOTH files, so the accumulation is not per-file.
-  assert(/store\/a\.ts/.test(err.message) && /store\/b\.ts/.test(err.message), err.message)
+  // BOTH files, so the accumulation is not per-file.
+  assert(/store\/a\.ts/.test(joined) && /store\/b\.ts/.test(joined), joined)
+  // The readable bindings were still judged — the unreadable ones did not
+  // abort the analysis.
+  assert(has(r, 'keepA') && has(r, 'keepB'), `readable bindings were lost: ${JSON.stringify(r.fields)}`)
+})
+
+test('an unreadable declarator does NOT mask a real finding elsewhere (#7689)', () => {
+  // The reason this is data on the result rather than a throw. An earlier draft
+  // threw CannotCheckError from the analysis, which pre-empted `judge()`:
+  // measured, an unreadable declarator in one file SUPPRESSED a genuine
+  // `store/b.ts::deadState is WRITE-ONLY` in another. One problem hiding
+  // another is not an improvement on one problem being silent.
+  const a = 'let keepA = 0;\nlet { x: { deep } } = make();\n' +
+    'export function ga(): number { keepA = 1; return keepA; }\n'
+  const b = 'let deadState = new Map();\nexport function f(): void { deadState.set(1, 2); }\n'
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    sources: [{ path: 'store/a.ts', text: a }, { path: 'store/b.ts', text: b }],
+    inPlaceMutationIsWrite: true,
+  })
+  assert(r.unreadable.length === 1, `expected the unread declarator: ${JSON.stringify(r.unreadable)}`)
+  assert(
+    r.failures.some((f) => f.includes('deadState')),
+    `the write-only finding was masked: ${JSON.stringify(r.failures)}`,
+  )
+})
+
+test('the CLI reports BOTH, and exits 2 because cannot-check outranks a finding (#7689)', () => {
+  // End to end through the shipped config. Exit 2 and not 1, because "I could
+  // not check part of this" is the stronger verdict — and both messages must be
+  // on stderr, which is what separates this from the throw it replaced.
+  const r = runCliOn(fixtureRoot(CLEAN_DECL, {
+    [DASH_DECL_REL]:
+      `${DASH_TEST_EXPORTS}let { a: { deep } } = make();\n` +
+      'let deadState = new Map();\n' +
+      'export function f(): void { deadState.set(1, 2); }\n',
+  }))
+  assert(r.status === 2, `exit ${r.status} — cannot-check must outrank the finding\n${r.stderr}`)
+  assert(/CANNOT CHECK — unread declarator: .*deep/.test(r.stderr), `the declarator was not named: ${r.stderr}`)
+  assert(/deadState is WRITE-ONLY/.test(r.stderr), `the finding was masked: ${r.stderr}`)
 })
 
 // `stripComments` leaves literal CONTENT byte-identical by design, so a comma,
@@ -1780,6 +1818,25 @@ const literalAndWrapRoster = [
   ['a default holding a GENERIC — the two newest parsers intersecting', 'const { a = new Map<string, number>() } = f();\n', 'a', '#7689'],
   ['a pattern with a trailing generic ANNOTATION', 'const { a, b }: Foo<X, Y> = f();\n', 'a,b', '#7689'],
   ['TWO destructured declarators in one statement', 'const { a } = f(), { b } = f();\n', 'a,b', '#7689'],
+  // `as const` is a TYPE ASSERTION, and its `const` matched the declaration
+  // regex because the character before it is a space. The scan then read the
+  // NEXT statement as a declarator list. Main emits
+  // `A, UNPARSED('export const B = mk()'), B` here — `B` survives, because
+  // `i = listStart` re-walks, so this was NOISE rather than lost coverage and
+  // was invisible while the unreadable channel was only a warning.
+  //
+  // It stops being invisible in this same change, and it is not rare: it
+  // accounted for ALL THIRTY unreadable declarators in packages/ before this
+  // fix and zero after, and connection.ts already writes `as const` five times
+  // at brace depth > 0 — one dedent from the roster's own directory.
+  ['`as const`, which is an assertion and not a declaration', 'export const A = [1] as const\nexport const B = mk();\n', 'A,B', '#7689'],
+  ['`as const` wrapped across lines', 'export const A = [\n  1,\n] as const\n\nexport const B = mk();\n', 'A,B', '#7689'],
+  ['`as const` followed by real STATE, which must still be seen', 'export const A = [1] as const\nlet pendingThing = new Map();\n', 'A,pendingThing', '#7689'],
+  // Controls for the lookbehind. It must not swallow a REAL declaration whose
+  // initializer merely ends in an `as` cast, and `o.as` is not the keyword —
+  // the same distinction `wordEndingAt` grew in #7560 F5.
+  ['a real declaration after an `as` CAST', 'const x = y as T;\nconst z = mk();\n', 'x,z', '#7689'],
+  ['a property named `as` does not suppress the next declaration', 'const o = { as: 1 };\nexport const B = mk();\n', 'o,B', '#7689'],
   // #7688. A destructuring declarator has NO initializer of its own — what
   // follows its `=` is the SOURCE — so the alias rule was reading that source
   // as the declarator's value and suppressing EVERY name in the pattern. On

@@ -1951,6 +1951,24 @@ export function extractModuleBindings(strippedText) {
       continue
     }
     if (depth === 0 && /[A-Za-z_$]/.test(c) && !/[\w$.]/.test(s[i - 1] ?? '\n')) {
+      // `as const` is a TYPE ASSERTION, not a declaration, and the `const` in it
+      // matched here because the character before it is a space (#7689). The
+      // scan then treated whatever followed as a declarator list and swallowed
+      // the NEXT statement, emitting it as an unreadable declarator:
+      //
+      //   export const A = [1] as const
+      //   export const B = mk()          ->  A, UNPARSED('export const B = mk()'), B
+      //
+      // `B` survives, because `i = listStart` re-walks — so this was noise
+      // rather than lost coverage, and invisible while the unreadable channel
+      // was only a warning. It stops being invisible in this same change, and
+      // `as const` is idiomatic: 30 declarations repo-wide hit it, and
+      // `packages/dashboard/src/store/connection.ts` already uses it five times
+      // at brace depth > 0, one dedent from the roster's own directory.
+      //
+      // The lookbehind excludes a property access for the same reason
+      // `wordEndingAt` grew one in #7560 F5: `o.as` is not the keyword.
+      if (/(?<![.\w$])as\s+$/.test(s.slice(Math.max(0, i - 12), i))) { i++; continue }
       decl.lastIndex = i
       const m = decl.exec(s)
       if (m) {
@@ -2103,7 +2121,7 @@ export function extractModuleBindings(strippedText) {
  * `perName` maps a roster KEY to `{reads, writes}`; `subject(key)` renders that
  * key for a human.
  */
-function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedTail, fileCount }) {
+function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedTail, fileCount, unreadable = [] }) {
   // Allowlist hygiene FIRST: a bad entry means the lint's own configuration no
   // longer describes the code, which is a cannot-check rather than a finding.
   for (const [key, why] of Object.entries(allow)) {
@@ -2151,6 +2169,10 @@ function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedT
     perName,
     failures,
     warnings,
+    // Declarators the extractor could not read. Reported by the CLI as errors
+    // and forced to exit 2, but kept SEPARATE from `failures` so a write-only
+    // finding is never renamed into a cannot-check, and vice versa (#7689).
+    unreadable,
     stats: {
       noun,
       fields: keys.length,
@@ -2303,36 +2325,28 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
     }
   }
 
-  if (unreadable.length > 0) {
-    // FATAL since #7689, and the count is why. A declarator this cannot read
-    // contributes NO roster entries, so its bindings are unjudged while the run
-    // reports on the ones it did judge — "cannot check" read as "nothing to
-    // check", which is the first entry in docs/false-safety-guards.md.
-    //
-    // It was a `::warning::` until now, on #7533's reasoning that the previous
-    // extractor did not read these declarations either, so failing would red
-    // the build over a shape that change did not introduce. That argument has
-    // expired: both shipped targets contain ZERO unreadable declarators today,
-    // so there is nothing to grandfather and every future one is new.
-    //
-    // The hazard it closes is PARTIAL EROSION. A roster of exactly zero already
-    // raises CannotCheckError — but that is a one-direction check, catching
-    // total collapse and missing the case where a refactor pushes most of the
-    // roster into this bucket and leaves the lint green over what little
-    // remains. The repo has filed that shape four times under a different name
-    // (a roster checked in only one direction).
-    //
-    // Exit 2, not 1: this is not "the state is write-only", it is "I could not
-    // check it". No budget knob — a threshold that is always zero is a second
-    // thing to drift, and the honest response to hitting this is to flatten the
-    // pattern or teach `declaratorNames` to read it.
-    throw new CannotCheckError(
-      `${unreadable.length} declarator(s) could not be read, so their bindings are outside the ` +
-      'roster and go unjudged while everything else reports clean. Flatten the pattern, or ' +
-      'extend declaratorNames to read it:\n' +
-      unreadable.map((u) => `      unread declarator: ${u}`).join('\n'),
-    )
-  }
+  // NOT A THROW, and that is the whole design (#7689). An unreadable declarator
+  // must RED the run — its bindings are unjudged while everything else reports
+  // clean, which is "cannot check" read as "nothing to check" — but throwing
+  // here pre-empts `judge()` and MASKS real findings. Measured: an unreadable
+  // declarator in one file suppressed a genuine
+  // `store/b.ts::deadState is WRITE-ONLY` in another. One problem hiding
+  // another is not an improvement on one problem being silent.
+  //
+  // So it is DATA on the result, and the CLI decides the exit code: failures
+  // print as themselves, unreadable declarators print as themselves, and the
+  // run exits 2 because "I could not check part of this" outranks "I checked it
+  // and it is wrong". It also lets the OTHER target finish, which a throw did
+  // not.
+  //
+  // FATAL rather than the `::warning::` it was, because the count decided it:
+  // both shipped targets contain ZERO unreadable declarators today, so #7533's
+  // argument — that the previous extractor did not read these either, and
+  // failing would red the build over a shape it did not introduce — has nothing
+  // left to grandfather. What it closes is PARTIAL EROSION: a roster of exactly
+  // zero already raises CannotCheckError, but that is one direction only, and
+  // misses a refactor that pushes most of the roster into this bucket and
+  // leaves the run green over what remains.
 
   // AFTER the unreadable check, deliberately. When a refactor makes every
   // declaration unreadable both conditions hold, and "ZERO bindings" is the
@@ -2347,6 +2361,7 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
   }
 
   return judge({
+    unreadable,
     keys,
     perName,
     allow,
@@ -2392,6 +2407,11 @@ export function runCli(argv = process.argv.slice(2)) {
   const log = (...a) => { if (!quiet) console.log(...a) }
 
   let failed = 0
+  // Counted separately from `failed`, because they are different verdicts and
+  // the exit code has to say which: 2 ("I could not check part of this")
+  // outranks 1 ("I checked it and it is wrong"). Accumulated across targets so
+  // one target's gap cannot stop the other from being reported (#7689).
+  let uncheckable = 0
   for (const target of TARGETS) {
     const kind = target.kind ?? 'interface'
     const readSource = (rel) => ({ path: rel, text: readFileSync(join(root, rel), 'utf8') })
@@ -2456,6 +2476,18 @@ export function runCli(argv = process.argv.slice(2)) {
       failed++
       console.error(`::error::[write-only-ctx] ${target.id}: ${f}`)
     }
+    // AFTER the failures, not instead of them. These are declarators the
+    // extractor could not read: their bindings are unjudged while everything
+    // above reports clean, so the run must red — but it must not swallow the
+    // findings it DID make, which is what throwing from the analysis did.
+    for (const u of result.unreadable ?? []) {
+      uncheckable++
+      console.error(
+        `::error::[write-only-ctx] ${target.id}: CANNOT CHECK — unread declarator: ${u}\n` +
+        '      Its bindings are outside the roster and go unjudged. Flatten the pattern, or ' +
+        'extend declaratorNames to read it.',
+      )
+    }
   }
 
   if (failed > 0) {
@@ -2463,8 +2495,19 @@ export function runCli(argv = process.argv.slice(2)) {
       `\n[write-only-ctx] FAIL — ${failed} field(s)/binding(s) written but never read. See the ` +
       'header of scripts/lint-write-only-ctx-fields.mjs for the heuristic and its limits.',
     )
-    return 1
   }
+  // Checked AFTER the failure report so both are visible, and returned FIRST so
+  // the exit code names the stronger verdict: a run that could not check part
+  // of its subject is not merely a run with findings (#7689).
+  if (uncheckable > 0) {
+    console.error(
+      `\n[write-only-ctx] CANNOT CHECK — ${uncheckable} declarator(s) could not be read, so ` +
+      'their bindings were never judged. A guard that reports clean over state it did not ' +
+      'look at is the failure mode this lint exists to catch.',
+    )
+    return 2
+  }
+  if (failed > 0) return 1
   log('[write-only-ctx] OK — no guarded state is written without a reader.')
   return 0
 }
