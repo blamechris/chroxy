@@ -857,6 +857,34 @@ export function incrementsThroughAccessor(after) {
   return i >= 0 && INCDEC_AHEAD.test(after.slice(i))
 }
 
+/**
+ * A PREFIX increment whose target is what the binding HOLDS, one step out:
+ * `++o[k]`, `++o.f`.
+ *
+ * The mirror of `incrementsThroughAccessor`. That one asks what sits PAST the
+ * accessor step and finds the operator there; a prefix `++` sits on the other
+ * side of the identifier, so there is no operator to find and the question
+ * becomes whether the step is the LAST one.
+ *
+ * That distinction is the ONE-ACCESSOR-STEP invariant, and it is why this is a
+ * predicate rather than a regex. `++o.a.b` mutates `o.a`, not `o` — `o` is only
+ * read to reach it — exactly as `o.a.b++` and `o.a.b = v` do, both of which
+ * already read `o` because their predicates look for the operator immediately
+ * past ONE step and do not find it. Testing only the FIRST character skipped
+ * that invariant and made the prefix form the odd one out again, one accessor
+ * level deeper than #7558 — the same accuse direction, since with the flag ON
+ * `++o.a.b` became a write of `o` while its two siblings stayed reads
+ * (#7692 review).
+ *
+ * A `(` past the step is refused for the same reason: `++o.f()` increments a
+ * CALL RESULT, which is not a reference — it throws at runtime and TypeScript
+ * rejects it — so `o` is read there, as it is in `o.f()++`.
+ */
+export function incrementsIntoAccessor(after) {
+  const i = accessorStepEnd(after)
+  return i >= 0 && !/^\s*[.[(]/.test(after.slice(i))
+}
+
 // A statement's left edge: the last significant character before the reference
 // closed the previous statement (or there is none). `)` is in the set for
 // `if (x) n++;` and `for (;; n++)`. `=`, `>` (an arrow's concise body), `(`,
@@ -1058,7 +1086,10 @@ function isWriteAt(text, index, end, { inPlaceMutationIsWrite = false } = {}) {
       // `o?.field++` rather than falling through to the bare-binding answer.
       if (OPTIONAL_CHAIN_AHEAD.test(after)) return false
       if (ACCESSOR_AHEAD.test(after)) {
-        return inPlaceMutationIsWrite && atStatementStart(text, index)
+        // An accessor follows, so this is not a rebind of the binding. Whether
+        // it is a mutation OF the binding depends on the step being the last
+        // one — `++o.a.b` reaches past it and only READS `o`.
+        return incrementsIntoAccessor(after) && inPlaceMutationIsWrite && atStatementStart(text, index)
       }
     }
     return atStatementStart(text, index)
