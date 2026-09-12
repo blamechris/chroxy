@@ -259,8 +259,9 @@ OPENAI_API_KEY=sk-... chroxy start --provider codex
 ### Common pitfalls
 
 - **Empty streams on stderr warnings**: Codex writes occasional `WARN`/`ERROR` lines to stderr that Chroxy logs but doesn't propagate as session errors unless the process exits non-zero.
-- **No conversation memory**: Codex sessions do not carry state between messages. Each `sendMessage` is a fresh `codex exec`. See "Known limits".
-- **Model flag format**: Chroxy passes `-c 'model="<id>"'` to Codex — changing `this.model` takes effect on the next message (no process to restart).
+- **The picker is short, or not the list you expected, until the binary answers**: the model roster comes from the installed `codex` binary, not from a Chroxy release — see [Where the model list comes from](#where-the-model-list-comes-from-modellist). Until an answer lands you see the hand-maintained seed rows; it does not go empty, because a probe that failed and a binary that answered with zero rows both leave the previous roster standing.
+- **The context meter is dashed on a brand-new session**: `model/list` carries no context window at all, so unless the Codex CLI's own cache happens to name one, nothing knows the window until the first turn reports it. See [The context window and the meter](#the-context-window-and-the-meter).
+- **How the model id is passed depends on the driver**: the default app-server driver sends `model` as a JSON-RPC param on `thread/start` and on **every** `turn/start`, so a mid-session switch takes effect on the next message. The legacy exec driver passes `-c 'model="<id>"'` on the next `codex exec` instead. Either way there is no process to restart.
 
 ### Sandbox & write surfaces
 
@@ -314,13 +315,6 @@ The override is read on each turn, so changing the env applies on the
 *next* message — but already-running `codex exec` subprocesses are
 unaffected. This is a stopgap until the per-session sandbox selector
 (#3837) lands.
-
-Chroxy also unconditionally passes `--skip-git-repo-check` so Codex
-will accept non-git cwds (#3834). This is correct today because
-chroxy's cwd-picker is itself the trust signal — but if a directory-trust
-prompt is ever added (#3840), the flag should be gated on that
-confirmation so Codex's git-repo heuristic can act as a second line of
-defense for untrusted directories.
 
 Chroxy also unconditionally passes `--skip-git-repo-check` so Codex
 will accept non-git cwds (#3834). This is correct today because
@@ -395,6 +389,139 @@ the requested scope. Approve grants exactly that scope for the current turn,
 "always allow" grants it for the session, and deny grants nothing. Like `shell`,
 sandbox escalations can never be permanently rule-whitelisted — they always
 prompt.
+
+### Where the model list comes from (`model/list`)
+
+The codex picker is **not** a list Chroxy ships. Since #7726/#7727 the roster is
+whatever the installed `codex` binary says it can run, asked over the app-server's
+own `model/list` method. The sources, and what each one is good for:
+
+| # | Source | When it is used | What it contributes |
+|---|---|---|---|
+| 1 | `~/.chroxy/models.json` **overlay** | Always, and it is the operator's escape hatch: overlay rows are never part of the seed, so a learned roster's REPLACE does not drop them | Labels, short ids, context windows, and brand-new ids — over the seed and the heuristic. Read the caveat below before assuming it overrides a model the binary itself reported. See [model-overlay.md](guides/model-overlay.md). |
+| 2 | `model/list` on a **live session** | Fired right after `thread/start`, on the client that is already up — fire-and-forget (a wedged or old binary must not delay `ready`) and TTL-gated by the same 5-minute discovery slot as #3, so a burst of new sessions asks once | The roster: id, label, description, `supportedReasoningEfforts`, `defaultReasoningEffort`. Stamped `provenance: 'discovered'`. |
+| 3 | `model/list` on a **cold-start probe** | The no-session path (the dashboard asks for `available_models` before any codex session exists, and create-session validation runs there too) — a short-lived `codex app-server` is spawned, asked, and killed. Bounded by one 5 s deadline across spawn + handshake + request, and TTL-cached for 5 minutes across **successes and failures** so a reconnect burst spawns at most one probe | Same rows as #2 |
+| 4 | `$CODEX_HOME/models_cache.json` (default `~/.codex/models_cache.json`) | Best-effort, **read-only**, after a roster is in hand | Context windows **only** — the one thing `model/list` does not carry. Never written; a row without an integer `context_window` is skipped rather than defaulted |
+| 5 | The **labelled seed** in `codex-session.js` (`gpt-5-codex`, `gpt-5`, `gpt-4.1`, `gpt-4o`, `o1`, `o3`) | Only while no roster has been learned — cold boot, an unresolved probe, a probe that failed, a binary below the `model/list` floor | Keeps the picker useful. Stamped `provenance: 'catalogued'` so a hand-maintained row is **labelled** as hand-maintained instead of masquerading as provider truth |
+
+Rules that matter when you are reading a picker and wondering what you are seeing:
+
+- **A learned roster REPLACES, it does not union.** Once the binary has answered,
+  the seed rows are gone from `available_models` — a model OpenAI retired must be
+  able to disappear (#7761/#7765 scoped the old fallback union away from any
+  provider that reports its own roster, and the `[1m]` variant synthesis — a
+  Claude-CLI id convention — to the Claude registry outright. A provider with no
+  discovery seam at all, and ollama, whose seed is a list of models to pull
+  rather than a roster claim, still union).
+- **"Could not ask" and "there is nothing there" are different states.** A failed
+  or unparseable answer leaves the previous roster exactly as it was; only a
+  well-formed answer with zero rows records an empty one.
+- **Provenance rides the wire.** Each entry may carry `provenance` —
+  `discovered` (the binary said so) or `catalogued` (the in-repo seed). Codex is
+  currently the only provider that stamps it; the protocol also defines `manual`
+  for operator-supplied rows, which nothing stamps yet. Clients keep the value in
+  their model info; no picker chip renders it today.
+- **The overlay's reach is "ids the roster does not carry".** An overlay row is
+  merged into the picker when the learned roster has no row with that `fullId`;
+  where the binary already reports the model, its own label and window are what
+  you see and the overlay row is skipped with the row it was decorating. That is
+  [#7777](https://github.com/blamechris/chroxy/issues/7777), stated here rather
+  than implied: the overlay is how you **add** a model (or decorate one before any
+  roster is learned), not how you relabel one codex already serves. A context
+  window learned from a live turn also sits **above** an overlay `contextWindow`,
+  since it is the binary's own authoritative answer.
+- **Validation follows the same tri-state.** With a catalog in hand, its ids are
+  the allowlist; with none, codex is **unrestricted** and any id passes through to
+  the binary. `providers.allowAnyModel: ["codex"]` is therefore no longer needed
+  to serve a new OpenAI model — see
+  [Serving a new model without a release](#serving-a-new-model-without-a-release-providersallowanymodel).
+
+### The context window and the meter
+
+`model/list` carries **no context window** — this is a protocol fact, verified
+against codex-cli 0.154.0, not a gap in Chroxy's parsing. The only in-protocol
+source is `thread/tokenUsage/updated.tokenUsage.modelContextWindow`, which does
+not arrive until a turn has run.
+
+So on a brand-new codex session the context meter is **dashed** unless the Codex
+CLI's own `models_cache.json` happened to name a window for that model. Chroxy
+deliberately does not substitute a default: a fabricated 200k is worse than an
+honest blank (#5444). After the first turn the binary's own reported window is
+written to the codex registry as authoritative (and persisted, so a restart keeps
+it); when a turn reports no window, the shared learn-loop can only ratchet the
+window **up** off the observed prompt size. That write reaches other clients on
+the next roster refresh rather than immediately — a session-scoped push is #7774.
+
+### Reasoning effort (the codex thinking-level control)
+
+Codex has a real reasoning control and the app-server driver reaches it, so
+`thinkingLevel` is `true` for that driver (and `false` for the exec driver, which
+has no way to send one).
+
+- **The levels are per-MODEL, not repo-wide.** Each `model/list` row advertises
+  its own `supportedReasoningEfforts` plus a `defaultReasoningEffort`, and
+  `ReasoningEffort` is a free non-empty **string** in the app-server schema —
+  values already in the wild include `low`, `medium`, `high`, `xhigh`, `max` and
+  `ultra`, and they differ per model. Chroxy validates a `set_thinking_level`
+  against **the active model's** advertised levels (`handlers/settings-handlers.js`),
+  which is why no fixed enum lives anywhere on this path any more (#7730/#7782).
+  Claude providers are unaffected: a row with no advertised levels falls back to
+  the legacy `default | high | max` triple, and that fallback is refused on any
+  non-Claude provider rather than being handed the Claude vocabulary by accident.
+- **Seeding is ASYMMETRIC between the two RPCs, and this is easy to get wrong.**
+  `thread/start` has **no** top-level `effort` field: the value goes through the
+  generic `config` map as `model_reasoning_effort`, spelled exactly as
+  `~/.codex/config.toml` spells it. A top-level `effort` there is silently
+  ignored. `turn/start`, by contrast, takes `effort` as a first-class param, and
+  Chroxy sends it on **every** turn (like `model`) so a mid-session change takes
+  effect and a seeded thread cannot drift back to the binary's default later.
+- **Nothing is pushed on the switch itself.** There is no "set the effort" RPC
+  that works on an idle thread, so a new level rides the next `turn/start`.
+  (`turn/settings/update` changes the effort of a turn already running; it is
+  deliberately not used.)
+- **What the control shows before you touch it** is the effort codex resolved for
+  itself at `thread/start` (from your `~/.codex/config.toml`), echoed back. If it
+  echoed none, the control shows nothing rather than claiming a level nobody set.
+- **The Claude magic keywords do nothing here.** `thinkingKeywords` is `false` on
+  both codex drivers — typing `ultrathink` at codex is plain prose (#7725/#7735).
+
+### Protocol version floor (0.128.0) and what each gate degrades to
+
+The app-server's `initialize` handshake reports a `userAgent` shaped
+`<originator>/<version> (<os> <osversion>; <arch>) …`, and that is the **only**
+in-band version signal — it describes the binary actually serving this session
+rather than whatever `codex` is on `PATH`, which is why Chroxy never shells out
+to `codex --version` here. **The leading token is the originator, which is the
+name the CLIENT sent**, not `codex`: Chroxy identifies itself as `chroxy`
+(`codex-app-server-client.js`), so a live handshake reads
+`chroxy/0.154.0 (Mac OS 26.6.2; arm64) …` and the version after the slash is
+codex's. The parser is anchored at the start of the string for exactly that
+reason — the platform parens carry a second dotted-numeric run (`Mac OS 26.6.2`)
+that an unanchored scan would happily report as the codex version. The floor is **0.128.0**: every method Chroxy calls today
+exists at that version (verified against `codex-rs/app-server-protocol` at tag
+`rust-v0.128.0`). One gate sits above it — the per-turn `model` / `effort`
+overrides are recorded at **0.154.0**, the lowest version this repo has evidence
+for rather than the version they landed in.
+
+Three rules govern the gate, and they are the reason a mismatch is rarely fatal:
+
+1. **It gates FEATURES, never the connection.** Nothing here can refuse to start a
+   session. A binary below the floor still starts a thread and still sends turns —
+   the picker degrades instead.
+2. **A cannot-check is not a no.** An absent or unparseable `userAgent` yields
+   `unknown` for every gate, never `false`, and the caller falls through to a
+   one-shot runtime probe that asks the binary itself.
+3. **The probe switches on the error SHAPE, never on message text.** The live
+   0.154.0 binary answers an unknown method with JSON-RPC `-32600`
+   ("unknown variant"), **not** the `-32601` the spec would suggest, so any error
+   response is treated as a degrade.
+
+Concretely today, `supportsModelList` is the one gate with a consumer: a binary
+known to be below the floor skips the per-session `model/list` refresh entirely
+and the picker falls back to the labelled seed (source #5 above). The remaining
+rows in the table are recorded for the features that will read them; nothing else
+branches on them yet, so a below-floor binary behaves exactly like one whose
+version could not be read.
 
 ### `CHROXY_CODEX_RECONNECT_DEADLINE_MS` env override (#6856 / #6967)
 
@@ -780,7 +907,7 @@ Notes:
 - **A restart is required** — the opt-in is read at startup (it seeds `SessionManager`).
 - **Pricing/context** for an unlisted model is `null` until you add it to the model table or the [`~/.chroxy/models.json` overlay](guides/model-overlay.md) — serving still works; cost just reads `0`.
 - **`codex` is still accepted here and still short-circuits both gates**, ahead of the catalog — the opt-out is kept deliberately (#7727) so an operator can bypass a catalog that is wrong or unreachable. It is just no longer the way to serve a new OpenAI model, and leaving codex listed while dogfooding will hide a catalog that never arrived.
-- **Until [#7761](https://github.com/blamechris/chroxy/issues/7761) lands, the codex picker offers rows that are no longer selectable.** The models registry snapshots the hand-maintained seed ids at construction — always before the first `model/list` probe resolves — and then unions them back in on every refresh, so the picker shows *discovered ∪ seed*. Validation reads the catalog **directly**, so once a catalog is in hand one of those seed rows (`gpt-4o`, `o1`, …) is rejected at **both** gates: `MODEL_NOT_SUPPORTED_BY_PROVIDER` from `set_model`, `ProviderModelNotSupportedError` at session creation. That is the intended direction — the picker must not make a model the binary does not serve selectable — but it is visible as an offered-then-refused model until the registry stops re-adding the seed. `providers.allowAnyModel: ["codex"]` short-circuits it in the meantime.
+- **The picker no longer offers seed rows a catalog has replaced** ([#7761](https://github.com/blamechris/chroxy/issues/7761)/[#7765](https://github.com/blamechris/chroxy/pull/7765)). The registry's fallback union — which used to re-add the hand-maintained seed ids (`gpt-4o`, `o1`, …) on top of every refresh, making them offered-then-refused — is now scoped to the Claude registry, along with the `[1m]` variant synthesis that minted a `gpt-4.1[1m]` chip no catalog contained. A discovered codex roster replaces at the wire, not just at validation. One residue, stated rather than implied: a pre-fix build **persisted** those ids to the model cache, and the cache is what boots — `loadCache` drops them on a non-Claude registry via a one-time migration ([#7776](https://github.com/blamechris/chroxy/issues/7776)), so they disappear at the next daemon start rather than the moment you upgrade.
 - This is the runtime escape hatch for the remaining release-bound providers; codex maintains its own list via live discovery (#7726/#7727), and doing the same for `gemini`/`deepseek` is tracked separately.
 
 ## Selecting a provider
@@ -823,22 +950,24 @@ Rows marked **(capability)** come directly from each session class's `static get
 
 | Capability | `claude-sdk` | `claude-cli` | `claude-tui` | `claude-channel` | `codex` | `gemini` | `claude-byok` | `deepseek` | `ollama` |
 |------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | — | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
-| **(capability)** In-process permissions | Yes | — | — | — | — | — | Yes | Yes | Yes |
+| **(capability)** Permissions (`canUseTool` / hook) | Yes | Yes | Yes (HTTP hook) | Yes (channel relay) | Yes (app-server) | — | Yes (in-process) | Yes (in-process) | Yes (in-process) |
+| **(capability)** In-process permissions | Yes | — | — | — | Yes (app-server) | — | Yes | Yes | Yes |
 | **(capability)** Live model switch | Yes | Yes | — | — | Yes | Yes | Yes | Yes | Yes |
-| **(capability)** Live permission-mode switch | Yes | Yes (sidecar file) | Yes (sidecar file) | — | — | — | Yes | Yes | Yes |
+| **(capability)** Live permission-mode switch | Yes | Yes (sidecar file) | Yes (sidecar file) | — | Yes (app-server) | — | Yes | Yes | Yes |
 | **(capability)** Plan mode | — | **Yes** | — | — | — | — | — | — | — |
 | **(capability)** Resume (`resumeSessionId`) | Yes | Yes | Yes | — | — | — | — | — | — |
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
-| **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Thinking level control | Yes | — | — | — | Yes (app-server, per-model) | — | — | — | — |
 | **(capability)** Thinking keyword escalation (`thinkingKeywords`) | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
 | **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
-| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — | — | — |
+| **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | Yes (app-server) | — | — | — | — |
 | **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (per-token API) | Yes (per-token API) | Yes (always $0) |
 | **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | **No** | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
+| **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | Yes (persistent thread) | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
+
+> **The `codex` column is the DEFAULT app-server driver** (`CodexAppServerSession`), the class `getProvider('codex')` returns unless `CHROXY_CODEX_APPSERVER=0` opts out (#6616). Cells marked *(app-server)* are exactly the ones the legacy `codex exec` driver (`CodexSession`) does not have: `permissions`, `inProcessPermissions`, `permissionModeSwitch` and `thinkingLevel` are all `false` in its capability object, and attachments — a **(behavioural)** row, not a capability key on either class — are rejected with a session-level error on that path. Everything else in the column is identical on both drivers — including **conversation continuity**, which the exec driver keeps by resuming its own thread on every turn (`codex exec resume <id>`, #3865) rather than by holding a process open.
 
 > The `claude-byok`, `deepseek`, and `ollama` columns share one session class — `deepseek-session.js` and `ollama-session.js` subclass `ClaudeByokSession` (`byok-session.js`), overriding only credentials, endpoint, model registry, and pricing — so their **(capability)** rows are identical by construction. Behaviourally they differ in cost reporting: `claude-byok` and `deepseek` compute real per-token API cost from their pricing tables, while `ollama` reports an honest $0 (local inference). Attachments are dropped with a session-level error ("does not yet materialise attachments") on all three; in-memory history means continuity within the server process but no cross-restart resume (`resume: false`, tracked in #4047).
 >
@@ -914,11 +1043,27 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 ### `codex`
 
-- **No conversation continuity** — Codex is invoked as a one-shot `codex exec` per message. No system prompt, no persistent context, no resume.
-- **No permission handling** — the provider reports `permissions: false`. Tools run under whatever policy Codex itself enforces.
-- **No plan mode, no attachments, no agent tracking.**
-- **No cost reporting** — `result.cost` is always `null`. Usage tokens are emitted if present in Codex's `turn.completed` event.
-- **Session ID is always `null`** — downstream features that key off `sessionId` (e.g. resume) are unavailable.
+Both drivers:
+
+- **No plan mode** — codex has no plan enforcement; the `plan` permission mode behaves like `approve`.
+- **No resume across a daemon restart** — a restored session starts a fresh thread (`resume: false` on both classes), so a restart loses the transcript even though memory holds *within* a session.
+- **No cost reporting** — `result.cost` is always `null`. Token usage is emitted when the binary reports it.
+- **No agent tracking** (spawned/completed sub-agent events) and **no skill toggle**.
+- **No context window until a turn has run**, unless the Codex CLI's own cache names one — see [The context window and the meter](#the-context-window-and-the-meter).
+- **The model roster is the installed binary's**, not a Chroxy release — an old binary, or one that cannot be asked, leaves you on the labelled seed rows. See [Where the model list comes from](#where-the-model-list-comes-from-modellist).
+
+Default app-server driver only:
+
+- **No conversation id is surfaced** — `resumeSessionId` is deliberately left unset (#6608): `capabilities.resume` is `false`, and `SessionManager` would otherwise persist it as the conversation id. Downstream features that key off a session id are therefore unavailable on this path, even though the thread itself is live.
+- **A deny reason does not reach the model** — the approval RPC response carries only the decision, so free-text you type when denying is dropped (`denyReason: false`; tracked in #6885).
+- **No Chroxy session rules** — "always allow" maps to codex's *own* session-scoped grant, not a persisted Chroxy rule, and `shell` / sandbox escalations can never be rule-whitelisted. See [the permission model](design/codex-permission-model.md).
+
+Legacy `codex exec` driver only (`CHROXY_CODEX_APPSERVER=0`):
+
+- **No permission handling** — it reports `permissions: false`. Tools run under whatever policy Codex's own sandbox enforces; there is no Chroxy approval prompt.
+- **No permission-mode switching and no reasoning-effort control.**
+- **Attachments are rejected** — an attachment on this path is a session-level error.
+- It does keep **intra-session memory**: each turn is a fresh subprocess that resumes the same thread via `codex exec resume <id>` (#3865), and it *does* report that thread id as the session id — the opposite of the app-server path above.
 
 ### `gemini`
 

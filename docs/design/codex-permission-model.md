@@ -121,9 +121,29 @@ Consequences:
 `CHROXY_CODEX_SANDBOX` selects one of `CODEX_SANDBOX_MODES` =
 `read-only` | `workspace-write` | `danger-full-access`, default
 `workspace-write` (`CODEX_DEFAULT_SANDBOX`; the #3846 stopgap so fresh sessions
-can edit files). Applied **once at thread start** — the per-turn parameter is the
-`approvalPolicy` (§2), not the sandbox, so a mid-session sandbox change would need
-a new thread.
+can edit files). Applied **once at thread start** — the sandbox is **not** a
+per-turn parameter, so a mid-session sandbox change would need a new thread.
+
+Other things *are* per-turn, and that list has grown since this section was
+written — so it is not restated here as a count. `_buildTurnParams` in
+`codex-app-server-session.js` is the one place that spells it out, and this
+table tracks it:
+
+| `turn/start` param | Why it rides every turn |
+|---|---|
+| `approvalPolicy` (§2) | Tracks permission-mode changes made mid-session. |
+| `model` (#6608) | So a mid-session `set_model` actually takes effect. It is deliberately the operator's explicit `this.model`, never the model codex resolved for itself — echoing codex's own answer back would pin a thread codex had re-routed (`model/rerouted`) to the model it moved *away* from. |
+| `effort` (#7730) | The reasoning effort, for the same reason: a mid-session change must take effect, and a thread seeded at start must not drift back to the binary's default on a later turn. Note the asymmetry — `thread/start` has no top-level `effort` field, so the seed goes through its generic `config` map as `model_reasoning_effort`. |
+
+The per-turn `model` is also why "model-switch is a no-op on codex" (as #6608 was
+originally scoped) is **not** true of the app-server driver: `modelSwitch` is
+`true`, the switch is sent, and it applies from the next turn.
+
+> **The sandbox-on-resume paragraph below stays as written** — it describes
+> today's behaviour, where `resume` is unsupported and a restore starts a fresh
+> thread. #7721 Phase 2 (CDX-9) adds `thread/resume`, at which point the
+> per-session sandbox choice becomes something a restored thread has to carry
+> rather than something a fresh thread re-derives. Revisit it there, not here.
 
 This is a **Codex-only concept** with no Claude equivalent. The env var is the
 server-wide default; since #6638 a session can **override it at creation** via the
