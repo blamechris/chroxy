@@ -236,13 +236,19 @@ export function _resetModelDiscoveryStateForTests() {
  * @param {boolean} [opts.publishEmptyCatalog] - opt in to publishing a
  *   successfully-fetched but ZERO-ROW catalog to `applyCatalog` (#7757 review).
  *   Default false, which is this function's historical behaviour: an empty
- *   roster returns early and the sink never sees it, so a provider that blips
- *   to zero models cannot empty a picker. A sink that DISTINGUISHES "asked,
- *   zero models" from "never asked" — codex's UNSET sentinel — sets this true,
- *   otherwise its documented `empty` state is unreachable from the only caller
- *   that exists and the tests asserting it assert a state production cannot
- *   produce. Either way nothing is broadcast for an empty roster: the return
- *   is still null.
+ *   roster returns early and the sink never sees it. Note what that default
+ *   does NOT currently protect (#7757 re-review): both shipped HTTP formats
+ *   collapse zero rows to `null` before this point — `parseOpenRouter` and
+ *   `parseOpenAi` each return null rather than an empty array — so
+ *   `catalog.models.length === 0` is only reachable for a source that returns
+ *   an empty array, which today means codex, which opts in. The default branch
+ *   therefore has no live caller; it is the documented behaviour for the next
+ *   source, not the thing keeping an HTTP provider's blip out of the picker.
+ *   A sink that DISTINGUISHES "asked, zero models" from "never asked" —
+ *   codex's UNSET sentinel — sets this true, otherwise its documented `empty`
+ *   state is unreachable from the only caller that exists and the tests
+ *   asserting it assert a state production cannot produce. Either way nothing
+ *   is broadcast for an empty roster: the return is still null.
  * @returns {Promise<Array<Object>|null>}
  */
 export async function refreshDiscoveredModels(opts = {}) {
