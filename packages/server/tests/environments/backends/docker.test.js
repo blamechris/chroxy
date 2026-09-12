@@ -1005,7 +1005,7 @@ describe('DockerBackend.execInEnvironment()', () => {
   })
 
   it('rejects when the command exits non-zero (stderr message)', async () => {
-    const mockExec = createMockExecFile({
+    const _mockExec = createMockExecFile({
       errors: { exec: new Error('command failed') },
     })
     // Override to also supply stderr text

@@ -90,7 +90,7 @@ describe('resume_budget handler', () => {
   let ctx, client, ws
 
   beforeEach(() => {
-    const { manager, sessionsMap } = createMockSessionManager([
+    const { manager, sessionsMap: _sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     manager.isBudgetPaused = () => true
@@ -463,7 +463,7 @@ describe('create_checkpoint handler', () => {
   })
 
   it('sends error when no resumeSessionId', async () => {
-    const { manager, sessionsMap } = createMockSessionManager([
+    const { manager, sessionsMap: _sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     // resumeSessionId is undefined by default

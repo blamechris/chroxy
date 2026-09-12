@@ -2486,7 +2486,7 @@ describe('#1091 — destroy-while-streaming event leak', () => {
 
 describe('Session ID generation (#1856)', () => {
   it('generates 32-character hex session IDs (128-bit)', async () => {
-    const { randomBytes } = await import('crypto')
+    const { randomBytes: _randomBytes } = await import('crypto')
     const { registerProvider } = await import('../src/providers.js')
 
     class TestProvider extends EventEmitter {

@@ -429,7 +429,7 @@ export class PtyDriverMixin {
     //   - APC payloads (iTerm2 proprietary commands)
     const stripped = []
     text = text.replace(
-      // eslint-disable-next-line no-control-regex
+       
       /\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x1b[\]PX^_][\s\S]*?(?:\x07|\x1b\\)|\x1b.?|[\x00-\x08\x0b-\x1f\x7f]/g,
       (match) => {
         stripped.push(match)

@@ -172,10 +172,10 @@ describe('EnvironmentManager.create()', () => {
 
   it('cleans up container when setup fails after start', async () => {
     // docker run succeeds, but exec (setup) fails
-    let callCount = 0
+    let _callCount = 0
     function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
-      callCount++
+      _callCount++
       if (args[0] === 'run') {
         cb(null, 'orphan-ctr\n', '')
         return
@@ -1263,10 +1263,10 @@ describe('EnvironmentManager.create() with compose', () => {
 
   it('creates a compose environment with docker compose up', async () => {
     // Mock: compose -> up succeeds, ps returns JSON, exec succeeds (setup + install + prefix)
-    let callCount = 0
+    let _callCount = 0
     function mockExec(_cmd, args, opts, cb) {
       if (typeof opts === 'function') { cb = opts; opts = {} }
-      callCount++
+      _callCount++
       if (args[0] === 'compose' && args.includes('up')) {
         cb(null, '', '')
         return

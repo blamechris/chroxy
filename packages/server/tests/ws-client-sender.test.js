@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createClientSender } from '../src/ws-client-sender.js'
 import { metrics } from '../src/metrics.js'
-import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
+import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 
 describe('createClientSender', () => {
   let log

@@ -399,7 +399,7 @@ export function migrateToken(config, service = DEFAULT_SERVICE) {
   }
 
   // Return config without apiToken
-  const { apiToken, ...rest } = config
+  const { apiToken: _apiToken, ...rest } = config
   return { migrated: true, config: rest }
 }
 

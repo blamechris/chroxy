@@ -1,6 +1,6 @@
-import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once, EventEmitter } from 'node:events'
+import { once } from 'node:events'
 import { WsServer as _WsServer, MIN_PROTOCOL_VERSION, SERVER_PROTOCOL_VERSION } from '../src/ws-server.js'
 import { MAX_AUTH_FAILURE_ENTRIES } from '../src/ws-auth.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
@@ -68,7 +68,7 @@ async function createClient(port, expectAuth = true) {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })
@@ -1243,7 +1243,7 @@ describe('WsServer with TokenManager', () => {
     const port = await startServerAndGetPort(server)
 
     // Rotate the token
-    const newToken = tokenManager.rotate()
+    const _newToken = tokenManager.rotate()
 
     // Auth with OLD token should still work (grace period)
     const { ws, messages } = await createClient(port, false)

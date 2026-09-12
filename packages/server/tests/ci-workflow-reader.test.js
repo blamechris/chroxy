@@ -12,7 +12,6 @@ import {
   jobTimeout,
   workflowTriggers,
   invokes,
-  isCommandPosition,
   withoutHeredocBodies,
   heredocDelimiter,
   maskQuotedData,

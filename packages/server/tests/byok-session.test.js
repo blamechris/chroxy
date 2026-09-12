@@ -1963,7 +1963,7 @@ describe('ClaudeByokSession', () => {
       session._client = {
         messages: {
           stream: () => ({
-            // eslint-disable-next-line require-yield
+             
             async *[Symbol.asyncIterator]() {
               // Yield a tool_use start so the map gets populated,
               // then throw — finalMessage() never runs, so the
@@ -3524,7 +3524,7 @@ describe('ClaudeByokSession', () => {
       let childRound = 0
       session._client = {
         messages: {
-          stream: ({ messages }) => {
+          stream: ({ messages: _messages }) => {
             parentRound += 1
             if (parentRound === 1) {
               return fakeStream(
@@ -3563,9 +3563,9 @@ describe('ClaudeByokSession', () => {
       // returns the parent stream on the first 2 calls (round 1 + 2)
       // and the child stream impl on subsequent calls.
       const parentStreamFactory = session._client.messages.stream
-      let totalCalls = 0
+      let _totalCalls = 0
       session._client.messages.stream = (...streamArgs) => {
-        totalCalls += 1
+        _totalCalls += 1
         // Parent emits exactly 1 stream call BEFORE the Task dispatches
         // (round 1 producing the tool_use), then exactly 1 stream call
         // AFTER (round 2 with the tool_result). The child fires its
@@ -3876,7 +3876,7 @@ describe('ClaudeByokSession', () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
       let taskCalled = false
-      session._executeTaskTool = async ({ toolUseId }) => {
+      session._executeTaskTool = async ({ toolUseId: _toolUseId }) => {
         taskCalled = true
         return { content: 'routed ok', isError: false }
       }
@@ -4788,7 +4788,7 @@ describe('ClaudeByokSession', () => {
       // pending prompts so the user isn't left staring at modals.
       // BUT MCP trust prompts MUST NOT persist via the bypass — they
       // get denied so ~/.chroxy/mcp-trust.json stays untouched.
-      const { existsSync, readFileSync } = await import('node:fs')
+      const { existsSync, readFileSync: _readFileSync } = await import('node:fs')
       const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       session._client = { messages: { stream: () => fakeStream([]) } }
       await session.start()

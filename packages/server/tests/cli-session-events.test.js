@@ -1,4 +1,4 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { CliSession } from '../src/cli-session.js'
@@ -380,7 +380,7 @@ describe('CliSession stream-event handling', () => {
     it('does not emit user_question for invalid JSON', () => {
       const session = createSession()
       const events = []
-      const errors = []
+      const _errors = []
       session.on('user_question', (data) => events.push(data))
 
       session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_bad'))

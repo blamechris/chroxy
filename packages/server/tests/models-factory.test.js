@@ -614,7 +614,7 @@ describe('canonicalStringify', () => {
         omitUndefined: undefined,
         omitFunction: () => 'ignored',
       },
-      // eslint-disable-next-line no-sparse-arrays
+       
       list: [1, undefined, () => 'ignored', , 5],
     }
 

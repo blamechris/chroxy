@@ -4131,7 +4131,7 @@ describe('SidecarProcess stdin wiring (#3336)', () => {
 
   it('writes before WS opens are buffered and flushed on open', async () => {
     // Dial returns a WS that is NOT yet open (readyState=0) — open fires async.
-    const { ws: realWs, controller } = createFakeWs()
+    const { ws: realWs, controller: _controller } = createFakeWs()
     // Simulate a WS that starts in CONNECTING state.
     const pendingOpenListeners = []
     const connectingWs = {
@@ -4216,7 +4216,7 @@ describe('SidecarProcess stdin wiring (#3336)', () => {
     // (ws2) should receive only a `resume` frame, never a `stdin` frame, even
     // if the consumer writes to proc.stdin after reconnection.
     const { ws: ws1, controller: ctrl1 } = createFakeWs()
-    const { ws: ws2, controller: ctrl2 } = createFakeWs()
+    const { ws: ws2, controller: _ctrl2 } = createFakeWs()
 
     let dialCount = 0
     const backend = new K8sBackend({

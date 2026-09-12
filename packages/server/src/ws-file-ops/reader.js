@@ -1,4 +1,4 @@
-import { readFile, writeFile as fsWriteFile, stat, mkdir, realpath, open } from 'fs/promises'
+import { readFile, stat, mkdir, realpath, open } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'

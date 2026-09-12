@@ -7,7 +7,6 @@ import {
   SetModelSchema,
   SetPermissionModeSchema,
   SetPromptEvaluatorSchema,
-  SetChroxyContextHintSchema,
   SetSessionPreambleSchema,
   PermissionResponseSchema,
   ListSessionsSchema,

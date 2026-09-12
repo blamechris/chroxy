@@ -31,7 +31,6 @@ import {
   deriveSharedKey,
   deriveConnectionKey,
   generateConnectionSalt,
-  encrypt,
   decrypt,
   DIRECTION_SERVER,
 } from '@chroxy/store-core/crypto'

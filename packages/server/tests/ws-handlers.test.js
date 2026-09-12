@@ -1,4 +1,4 @@
-import { describe, it, before, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import WebSocket from 'ws'
 import { WsServer as _WsServer } from '../src/ws-server.js'
@@ -61,7 +61,7 @@ async function waitForMessage(messages, type, timeout = 1000) {
   return messages.find(m => m.type === type)
 }
 
-async function waitForMessages(messages, type, count, timeout = 1000) {
+async function _waitForMessages(messages, type, count, timeout = 1000) {
   await withTimeout(
     (async () => { while (messages.filter(m => m.type === type).length < count) await new Promise(r => setTimeout(r, 10)) })(),
     timeout, `Timeout waiting for ${count} messages of type: ${type}`

@@ -477,7 +477,7 @@ describe('readConversationHistoryWithMetaAsync — parsed message shapes (#7520:
 describe('readConversationHistoryWithMetaAsync — read behaviour', () => {
   let tempDir
 
-  function writeJsonl(filename, entries) {
+  function _writeJsonl(filename, entries) {
     const filePath = join(tempDir, filename)
     const content = entries.map(e => JSON.stringify(e)).join('\n')
     writeFileSync(filePath, content)

@@ -1,6 +1,6 @@
-import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once, EventEmitter } from 'node:events'
+import {  EventEmitter } from 'node:events'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
@@ -61,7 +61,7 @@ async function createClient(port, expectAuth = true) {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })

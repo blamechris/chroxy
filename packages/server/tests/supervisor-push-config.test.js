@@ -21,7 +21,6 @@
 import { describe, it, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'path'
-import { homedir } from 'os'
 
 // ── Guard: skip silently if mock.module is not available ──────────────────
 // mock.module requires --experimental-test-module-mocks. The test runner

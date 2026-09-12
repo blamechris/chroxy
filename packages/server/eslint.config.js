@@ -50,7 +50,21 @@ const NODE_GLOBALS = {
  * standard than the tree that was.
  */
 const SHARED_RULES = {
-  'no-unused-vars': ['warn', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+  // ERROR since #7680, and the promotion is the point of that change rather than
+  // a flourish on it. #7664 brought `tests/` under ESLint and left 164 warnings;
+  // at `warn` nothing stops that number growing back, and a standing warning on
+  // every green run is how a bucket stops being read at all — the same argument
+  // `isConstantInitializer` makes in scripts/lint-write-only-ctx-fields.mjs, and
+  // the reason THIS count reached 164 unnoticed in the first place.
+  //
+  // Promoted only once the count was zero, so it reds nothing on landing.
+  //
+  // The escape hatch is the naming convention, not a suppression comment: a
+  // deliberately-unused binding is spelled `_name` and the three ignore patterns
+  // below accept it. That is strictly better than an `eslint-disable` line,
+  // because it says WHICH binding is intentional and cannot silently widen to
+  // cover a second problem on the same line.
+  'no-unused-vars': ['error', { argsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
   'no-undef': 'error',
   'no-console': 'off',
 }

@@ -139,9 +139,9 @@ describe('normal respawn still works (regression)', () => {
     session._respawning = false
     session._destroying = false
 
-    let startCalled = 0
+    let _startCalled = 0
     session.start = () => {
-      startCalled++
+      _startCalled++
       // Clean up
       session._destroying = true
       done()

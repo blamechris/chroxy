@@ -148,7 +148,7 @@ describe('handleSessionMessage — extension_message', () => {
     const ctx = makeCtx()
     const client = makeClient({ activeSessionId: 'sess-1' })
     const handleExtensionMessage = mock.fn()
-    const entry = addSession(ctx, 'sess-1', {
+    const _entry = addSession(ctx, 'sess-1', {
       session: Object.assign(createMockSession(), { handleExtensionMessage }),
       cwd: '/tmp',
     })

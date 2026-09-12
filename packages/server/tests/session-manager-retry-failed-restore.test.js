@@ -250,7 +250,7 @@ describe('SessionManager.retryFailedRestore (#7625)', () => {
     makeSm()
     // A malformed id: createSession's /^[a-f0-9]{32}$/ guard rejects it and
     // mints a random one instead.
-    const saved = park(sm, dir, { id: 'NOT-A-VALID-HEX-ID' })
+    const _saved = park(sm, dir, { id: 'NOT-A-VALID-HEX-ID' })
     const original = sm._advanceSessionCounterPast.bind(sm)
     let injected = false
     sm._advanceSessionCounterPast = (name) => {
