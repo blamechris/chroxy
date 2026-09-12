@@ -2,6 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "automerge": false,
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 1,
   "customManagers": [
     {
       "customType": "regex",
