@@ -28,8 +28,9 @@ import {
   // on every change-handler call.
   isVoiceInputMode,
   // #7728 — one roster per provider; the default-model picker reads the
-  // default PROVIDER's.
-  selectModelsForProvider,
+  // default PROVIDER's OWN roster (evidence side: what it offers has to be
+  // what create-time will accept, and an untagged roster proves nothing).
+  selectOwnModelsForProvider,
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import { isMacPlatform } from '../utils/platform'
@@ -752,15 +753,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
-  // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
-  // just above it, so it reads that provider's roster instead of whichever
-  // provider broadcast last. Empty (field hidden) until that roster arrives —
-  // offering another provider's ids as a default is what this replaces.
   const modelsByProvider = useConnectionStore(s => s.modelsByProvider)
-  const availableModels = useMemo(
-    () => selectModelsForProvider(modelsByProvider, defaultProvider).models,
-    [modelsByProvider, defaultProvider],
-  )
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)
@@ -1218,6 +1211,26 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     }
     return defaultProvider
   }, [availableProviders, defaultProvider])
+
+  // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
+  // just above it, so it reads that provider's roster instead of whichever
+  // provider broadcast last. Empty (field hidden) until that roster arrives —
+  // offering another provider's ids as a default is what this replaces.
+  //
+  // Two deliberate details (PR #7758 review):
+  //  - `effectiveProvider`, not `defaultProvider`. The <select> below renders
+  //    `effectiveProvider`, so reading the raw persisted value would compute the
+  //    roster for a provider the server does not offer — one that by
+  //    construction can never have broadcast a roster — and the field would
+  //    vanish whenever the two diverge.
+  //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
+  //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
+  //    catalog to contain the id. Offering ids from an untagged roster here
+  //    would let Settings show a default that create-time silently drops.
+  const availableModels = useMemo(
+    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
+    [modelsByProvider, effectiveProvider],
+  )
 
   const handleSelectTheme = useCallback((themeId: string) => {
     setTheme(themeId)
