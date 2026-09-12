@@ -361,6 +361,136 @@ describe('overlay override of a static id survives a refresh (#7777)', () => {
     }
   })
 
+  it('…but a declared id the provider REPORTS keeps being persisted, learned window and all (#7799 round 2)', () => {
+    // The over-application the first cut of the withholding guard shipped. It
+    // keyed on IDENTITY — static-seed id ∩ declared id — so it could not tell a
+    // row the union put back from one the binary actually reported. An operator
+    // with a `pricing`-only entry (the shape the guide now advertises by name)
+    // for a model codex still serves therefore lost, on EVERY restart:
+    //   - the context window a live turn ratcheted (utils/context-window-learn.js
+    //     calls saveCache() explicitly "so a server restart doesn't lose the
+    //     learned window"), and
+    //   - the provider's own live label,
+    // both handed back to this repo's in-repo seed table by loadCache's union.
+    // `makeMetaRegistry` is the shape that has that table, so it is the fixture
+    // that can see the loss.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-reported-persist-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      const declaration = overlayMap({ 'base-1': { pricing: { input: 1, output: 2 } } })
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(declaration)
+      // The binary REPORTS the declared id…
+      reg.updateModels([
+        { value: 'base-1', displayName: 'Base 1' },
+        { value: 'gpt-9', displayName: 'GPT 9' },
+      ])
+      // …and a live turn ratchets its window.
+      assert.equal(reg.updateContextWindow('base-1', 272000), true)
+
+      assert.equal(reg.saveCache(cachePath), true)
+      const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+      const saved = payload.models.find((m) => m.fullId === 'base-1')
+      assert.ok(saved, 'a row the provider reported must still reach disk')
+      assert.equal(saved.contextWindow, 272000, 'with the LEARNED window, not the seed 1000')
+      assert.equal(saved.label, 'Base 1', 'and the live label')
+
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(declaration)
+      assert.equal(restarted.loadCache(cachePath), true)
+      const row = restarted.getModels().find((m) => m.fullId === 'base-1')
+      assert.ok(row, 'still in the picker after a restart')
+      assert.equal(row.contextWindow, 272000, 'and the learned window survived the restart')
+      assert.equal(row.label, 'Base 1', 'as did the live label')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('…and survives the operator DELETING that entry, because the binary serves it (#7799 round 2)', () => {
+    // Sharper than the window loss: withhold a reported row and the next
+    // restart has nothing to re-add it with — `unionableSeedRows()` filters the
+    // now-undeclared static — so a model the binary genuinely serves vanishes
+    // from the picker until a refresh succeeds, which on an unreachable binary
+    // is never.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-reported-persist-undeclared-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(overlayMap({ 'base-1': { pricing: { input: 1, output: 2 } } }))
+      reg.updateModels([
+        { value: 'base-1', displayName: 'Base 1' },
+        { value: 'gpt-9', displayName: 'GPT 9' },
+      ])
+      assert.equal(reg.saveCache(cachePath), true)
+
+      // Entry removed (it was only a re-price); daemon restarts, binary unreachable.
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(new Map())
+      assert.equal(restarted.loadCache(cachePath), true)
+      assert.deepEqual(restarted.getModels().map((m) => m.fullId).sort(), ['base-1', 'gpt-9'],
+        'a model the binary reported is still offered after the declaration goes away')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('an overlay-ONLY id is not persisted either — the round trip the docs promise (#7799 round 2)', () => {
+    // The half the identity guard left uncovered, and the shape
+    // docs/guides/model-overlay.md leads with: a brand-new fullId the operator
+    // seeds. It is not in `staticFallbackFullIds`, so the first cut exempted
+    // nothing — and `loadCache` keeps every well-formed non-Claude row that is
+    // neither `[1m]` nor a static, so `migrateLegacyStaticSeed` could not reach
+    // it either. Declare, refresh, delete the entry, restart: the picker still
+    // offered it, which on codex is a chip the catalog-backed validator 400s.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-only-persist-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(overlayMap({ 'gpt-5.5': { label: 'GPT 5.5', contextWindow: 99000 } }))
+      reg.updateModels([{ value: 'gpt-9', displayName: 'GPT 9' }])
+      assert.ok(reg.getModels().some((m) => m.fullId === 'gpt-5.5'), 'live in-process while declared')
+
+      assert.equal(reg.saveCache(cachePath), true)
+      const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+      assert.deepEqual(payload.models.map((m) => m.fullId), ['gpt-9'],
+        'the declaration must not reach disk — nothing on the load path can ever remove it')
+
+      // "Delete the entry to let it drop again" — the guide's own instruction.
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(new Map())
+      assert.equal(restarted.loadCache(cachePath), true)
+      assert.equal(restarted.getModels().some((m) => m.fullId === 'gpt-5.5'), false,
+        'and it does not come back after a restart')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('…and an overlay-ONLY id is reconstructed at boot while it is still declared (#7799 round 2)', () => {
+    // Withholding costs the operator nothing here either: `loadCache`'s union
+    // reads `unionableSeedRows()`, which always carries overlay-only rows.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-only-persist-kept-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      const declaration = overlayMap({ 'gpt-5.5': { label: 'GPT 5.5', contextWindow: 99000 } })
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(declaration)
+      reg.updateModels([{ value: 'gpt-9', displayName: 'GPT 9' }])
+      assert.equal(reg.saveCache(cachePath), true)
+
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(declaration)
+      assert.equal(restarted.loadCache(cachePath), true)
+      const row = restarted.getModels().find((m) => m.fullId === 'gpt-5.5')
+      assert.ok(row, 'still declared → still in the picker after a restart')
+      assert.equal(row.label, 'GPT 5.5', 'with the operator label')
+      assert.equal(row.contextWindow, 99000, 'and the operator window')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('still drops an UNDECLARED static — #7761 is not reopened', () => {
     // The other direction, on the same registry in the same state: declaring
     // one id must not restore the seed wholesale. Two statics, one declared.

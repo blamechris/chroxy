@@ -729,30 +729,64 @@ export function createModelsRegistry(hooks = {}) {
   }
 
   /**
-   * True for a static-seed id that `unionableSeedRows()` admits ONLY because
-   * the operator's overlay declares it.
+   * The fullIds in the CURRENT roster that a PROVIDER put there — the `value`s
+   * of the last `updateModels()` refresh, or the rows the last `loadCache()`
+   * read off disk, in both cases taken BEFORE the seed union runs. Empty until
+   * one of those two happens (CLI-only / pre-init), and cleared by
+   * `resetModels()`.
    *
-   * #7799 review — such a row must never be PERSISTED. `saveCache()` writes
-   * `activeModels` under the CURRENT schema marker, and `loadCache`'s one-time
-   * `migrateLegacyStaticSeed` pass can only clear a payload written by an older
-   * build — so a declared static that reaches disk outlives the declaration
-   * that justified it: delete the entry from `models.json`, restart, and the
-   * row is served forever from a cache no code path can clean, with no
-   * declaration anywhere. That is #7761's exact failure mode ("a retired model
-   * reached available_models forever, in every process, with no path that could
-   * ever clear it") reached through the cache file instead of the seed.
+   * This is the provenance half of `isUnpersistableDeclaredRow()` below, and it
+   * is deliberately a record of HOW a row got into `activeModels` rather than a
+   * test on the id itself (#7799 round 2).
+   */
+  let providerReportedFullIds = new Set()
+
+  /**
+   * True for a row that is in the roster ONLY because the operator's overlay
+   * declares its id — the union pass put it back, no provider reported it.
+   * Such a row must never be PERSISTED.
+   *
+   * #7799 review — `saveCache()` writes `activeModels` under the CURRENT schema
+   * marker, and `loadCache`'s one-time `migrateLegacyStaticSeed` pass can only
+   * clear a payload written by an older build — so a declaration-only row that
+   * reaches disk outlives the declaration that justified it: delete the entry
+   * from `models.json`, restart, and the row is served forever from a cache no
+   * code path can clean, with no declaration anywhere. That is #7761's exact
+   * failure mode ("a retired model reached available_models forever, in every
+   * process, with no path that could ever clear it") reached through the cache
+   * file instead of the seed.
    *
    * Nothing is lost by leaving it out: the row is fully reconstructible at
    * boot, because `loadCache` runs the SAME union over `unionableSeedRows()`
    * and re-adds it whenever the declaration is still there. The inverse fix —
-   * dropping cached static ids on load — is wrong: it would also delete static
-   * ids the provider genuinely still reports, which the undeclared-static
-   * filter would then refuse to re-add.
+   * dropping declared ids on load — is wrong: it would also delete ids the
+   * provider genuinely still reports, which the undeclared-static filter would
+   * then refuse to re-add.
+   *
+   * #7799 ROUND 2 — the first cut of this keyed on IDENTITY (a static-seed id ∩
+   * a declared id) rather than on provenance, and both halves of that were
+   * wrong:
+   *
+   *  - It withheld rows the provider REPORTED. An operator with a `pricing`-only
+   *    entry for an id the binary still serves lost the ratchet-learned context
+   *    window (`utils/context-window-learn.js` calls `saveCache()` explicitly
+   *    "so a server restart doesn't lose the learned window") and the live label
+   *    on EVERY restart, and lost the model outright the moment the entry was
+   *    deleted — `unionableSeedRows()` then filters the undeclared static, so
+   *    nothing re-added a model the binary genuinely serves.
+   *  - It withheld NOTHING for an overlay-only id, the guide's own headline
+   *    shape, because such an id is not in `staticFallbackFullIds`. Declare
+   *    `gpt-5.5`, refresh, delete the entry, restart: `loadCache` keeps every
+   *    well-formed non-Claude row, so the picker still offered it — the very
+   *    leak the guard was written to close, and the thing the docs assert does
+   *    not happen.
+   *
+   * Provenance covers both: a reported row keeps being persisted with whatever
+   * the provider (and the ratchet) taught it, and a declaration-only row is held
+   * out whether its id is in the static seed or not.
    */
-  function isOverlayExemptedSeedId(fullId) {
-    return !unionsStaticFallbacks
-      && staticFallbackFullIds.has(fullId)
-      && overlayDeclaredFullIds.has(fullId)
+  function isUnpersistableDeclaredRow(fullId) {
+    return overlayDeclaredFullIds.has(fullId) && !providerReportedFullIds.has(fullId)
   }
 
   let activeModels = fallbackModels
@@ -866,12 +900,14 @@ export function createModelsRegistry(hooks = {}) {
         // carries the unioned static seed. Written on every registry (the
         // Claude loader ignores it) so there is exactly one save path.
         v: MODELS_CACHE_SCHEMA_VERSION,
-        // …and the overlay-declared statics are held OUT of that payload for the
-        // same reason the marker exists (#7799 review — see
-        // `isOverlayExemptedSeedId`): a declaration is live operator state, and
-        // persisting a row that only exists because of it is how the row
-        // outlives the declaration.
-        models: activeModels.filter((m) => !isOverlayExemptedSeedId(m.fullId)),
+        // …and the rows that are here ONLY because the operator declared them
+        // are held OUT of that payload for the same reason the marker exists
+        // (#7799 review — see `isUnpersistableDeclaredRow`): a declaration is
+        // live operator state, and persisting a row that only exists because of
+        // it is how the row outlives the declaration. A row the PROVIDER
+        // reported is persisted as it always was, learned context window
+        // included, whether or not an overlay entry also names its id.
+        models: activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId)),
         defaultModelId,
         savedAt: Date.now(),
       }, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
@@ -1067,6 +1103,10 @@ export function createModelsRegistry(hooks = {}) {
       // back, so the row came back renamed and re-windowed from this repo's own
       // static table.
       const seenFullIds = new Set(converted.map(m => m.fullId))
+      // #7799 round 2 — provenance, recorded BEFORE the union adds to it: these
+      // are the ids the provider itself reported, and they stay persistable
+      // however the overlay decorates them (`isUnpersistableDeclaredRow`).
+      providerReportedFullIds = new Set(seenFullIds)
       for (const fb of unionableSeedRows()) {
         if (!seenFullIds.has(fb.fullId)) {
           // Re-derive the short id with the registry's hook so non-Claude
@@ -1233,6 +1273,10 @@ export function createModelsRegistry(hooks = {}) {
       // SDK/cache data).
       lastSdkModels = null
       lastCacheModels = null
+      // #7799 round 2: and the provenance record with them — a reset has
+      // nothing a provider reported, so every declared row is declaration-only
+      // again until the next refresh or cache load.
+      providerReportedFullIds = new Set()
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
@@ -1416,6 +1460,13 @@ export function createModelsRegistry(hooks = {}) {
         // (`unionsStaticFallbacks`, ollama). Both are read through
         // `unionableSeedRows()`; neither is a provider-name check.
         const seenFullIds = new Set(models.map(m => m.fullId))
+        // #7799 round 2 — same provenance record as the `updateModels` copy,
+        // taken BEFORE the union: a cache file is what a provider reported, so
+        // the rows read off disk carry provider provenance and the ones this
+        // loop appends do not. `applyOverlay`'s cache-warmed branch deliberately
+        // leaves this alone — re-folding an overlay does not change what the
+        // provider once said.
+        providerReportedFullIds = new Set(seenFullIds)
         for (const fb of unionableSeedRows()) {
           if (!seenFullIds.has(fb.fullId)) {
             // Same operator-outranks-static-table precedence as the

@@ -432,9 +432,16 @@ Rules that matter when you are reading a picker and wondering what you are seein
   than implied: the overlay is how you **add or keep** a model, not how you
   relabel one codex already serves. A context window learned from a live turn
   still sits **above** an overlay `contextWindow`, since it is the binary's own
-  authoritative answer. The declaration is live operator state and is never
-  written to `models-cache.codex.json`, so deleting the entry drops the row on
-  the next reload and it does not come back after a restart.
+  authoritative answer. The declaration is live operator state: a row that is
+  in the roster **only because an overlay entry names it** is held out of
+  `models-cache.codex.json`, so deleting the entry drops the row on the next
+  reload and it does not come back after a restart. The withholding is keyed on
+  where the row came from, not on its id — a model the binary still reports is
+  persisted as it always was, with whatever context window a live turn taught
+  it, whether or not an entry also names it. (One narrow residue,
+  [#7808](https://github.com/blamechris/chroxy/issues/7808): while the roster is
+  the one `loadCache` read and no refresh has landed yet, a hot overlay reload
+  can override such a row's live label and window with the operator's.)
 - **Validation follows the same tri-state.** With a catalog in hand, its ids are
   the allowlist; with none, codex is **unrestricted** and any id passes through to
   the binary. `providers.allowAnyModel: ["codex"]` is therefore no longer needed
