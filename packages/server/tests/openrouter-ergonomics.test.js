@@ -240,6 +240,38 @@ describe('refreshDiscoveredModels cache + change detection (#5548)', () => {
     assert.equal(fetchFn.calls.length, 2)
   })
 
+  // #7757 re-review — `publishEmptyCatalog` is a NEW two-state flag whose FALSE
+  // direction (the default) was asserted nowhere: both shipped HTTP parsers
+  // already collapse zero rows to null before `refreshDiscoveredModels` sees
+  // them, so `models.length === 0` is unreachable for every caller except
+  // codex — which opts IN. Deleting `&& opts.publishEmptyCatalog !== true`
+  // therefore left the whole suite green. This drives the default branch
+  // directly through the `fetchCatalog` seam.
+  it('an EMPTY catalog is not published to the sink without the opt-in (the default branch)', async () => {
+    const registry = makeRegistry()
+    let appliedCalls = 0
+    const out = await refreshDiscoveredModels({
+      id: 'empty-default',
+      registry,
+      applyCatalog: () => { appliedCalls++ },
+      fetchCatalog: async () => ({ models: [], pricing: {} }),
+    })
+    assert.equal(out, null, 'an empty roster has nothing to broadcast')
+    assert.equal(appliedCalls, 0, 'without the opt-in the sink must never see a zero-row catalog')
+
+    // …and the opt-in is what flips it — the same input, one flag apart, so
+    // the assertion above is about the flag and not about the empty array.
+    const out2 = await refreshDiscoveredModels({
+      id: 'empty-optin',
+      registry,
+      applyCatalog: () => { appliedCalls++ },
+      fetchCatalog: async () => ({ models: [], pricing: {} }),
+      publishEmptyCatalog: true,
+    })
+    assert.equal(out2, null, 'still nothing to broadcast — only the RECORD differs')
+    assert.equal(appliedCalls, 1, 'the opt-in publishes the zero-row answer to the sink')
+  })
+
   it('returns null when the model set is unchanged across probes', async () => {
     const fetchFn = makeFetch(openRouterBody())
     const registry = makeRegistry()

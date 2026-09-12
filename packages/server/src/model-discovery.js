@@ -230,6 +230,25 @@ export function _resetModelDiscoveryStateForTests() {
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.ttlMs]
  * @param {() => number} [opts.now] - injectable clock for tests
+ * @param {(opts: Object) => Promise<{models:Array,pricing:Object}|null>} [opts.fetchCatalog]
+ *   Catalog SOURCE override (#7726). Defaults to the HTTP `fetchModelCatalog`;
+ *   codex supplies a JSON-RPC probe instead and reuses everything else here.
+ * @param {boolean} [opts.publishEmptyCatalog] - opt in to publishing a
+ *   successfully-fetched but ZERO-ROW catalog to `applyCatalog` (#7757 review).
+ *   Default false, which is this function's historical behaviour: an empty
+ *   roster returns early and the sink never sees it. Note what that default
+ *   does NOT currently protect (#7757 re-review): both shipped HTTP formats
+ *   collapse zero rows to `null` before this point — `parseOpenRouter` and
+ *   `parseOpenAi` each return null rather than an empty array — so
+ *   `catalog.models.length === 0` is only reachable for a source that returns
+ *   an empty array, which today means codex, which opts in. The default branch
+ *   therefore has no live caller; it is the documented behaviour for the next
+ *   source, not the thing keeping an HTTP provider's blip out of the picker.
+ *   A sink that DISTINGUISHES "asked, zero models" from "never asked" —
+ *   codex's UNSET sentinel — sets this true, otherwise its documented `empty`
+ *   state is unreachable from the only caller that exists and the tests
+ *   asserting it assert a state production cannot produce. Either way nothing
+ *   is broadcast for an empty roster: the return is still null.
  * @returns {Promise<Array<Object>|null>}
  */
 export async function refreshDiscoveredModels(opts = {}) {
@@ -240,11 +259,28 @@ export async function refreshDiscoveredModels(opts = {}) {
   const slot = slotFor(id)
   if (slot.inflight) return slot.inflight
   if (now() - slot.lastProbeAt < ttlMs) return null
+  // #7726 — the catalog SOURCE is injectable. Everything below this line (the
+  // per-entry TTL slot, the single in-flight probe, the order-insensitive
+  // change key, the applyCatalog-then-updateModels ordering) is transport
+  // agnostic, and codex's catalog arrives over JSON-RPC on a spawned child
+  // rather than over HTTP. Re-implementing the slot machinery for it would be
+  // a second copy of the part that is easy to get wrong; the HTTP fetch is the
+  // part that differs, so that is the part that is swapped.
+  const fetchCatalog = typeof opts.fetchCatalog === 'function' ? opts.fetchCatalog : fetchModelCatalog
   slot.inflight = (async () => {
     try {
-      const catalog = await fetchModelCatalog(opts)
+      const catalog = await fetchCatalog(opts)
       slot.lastProbeAt = now()
-      if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) return null
+      if (!catalog || !Array.isArray(catalog.models)) return null
+      // #7757 review (Copilot, and the review panel independently): a
+      // successfully-fetched but EMPTY catalog used to return here, BEFORE the
+      // applyCatalog publish below — which collapsed "the provider answered
+      // with zero models" into the same no-op as "the fetch failed" at every
+      // sink. For codex that silently made `getCodexCatalogState() === 'empty'`
+      // unreachable in production while four tests asserted it. Sinks that tell
+      // the two apart opt in; every other caller keeps the old early return.
+      const isEmpty = catalog.models.length === 0
+      if (isEmpty && opts.publishEmptyCatalog !== true) return null
       // Publish the catalog to the session class FIRST (cheap, idempotent) so
       // its getModelMetadata/getAllowedModels/_getPricing reflect the discovered
       // ids + context windows + per-model pricing before updateModels() (which
@@ -258,6 +294,10 @@ export async function refreshDiscoveredModels(opts = {}) {
           log.debug(`discovery: applyCatalog for ${id} threw: ${err?.message || err}`)
         }
       }
+      // An empty roster is now RECORDED (above) but still never broadcast:
+      // there are no rows to put in the picker, and updateModels([]) would
+      // "keep existing models" anyway. Same return as before, one line later.
+      if (isEmpty) return null
       // Change-detection key: order-insensitive (a reorder of the same set
       // isn't a change) and metadata-aware (a label / context-window update on
       // an existing id IS a change the registry must pick up — updateModels()
@@ -278,7 +318,7 @@ export async function refreshDiscoveredModels(opts = {}) {
       )
       if (!Array.isArray(converted) || converted.length === 0) return null
       slot.lastAppliedKey = key
-      log.info(`discovered ${catalog.models.length} models for '${id}' via ${opts.format} catalog`)
+      log.info(`discovered ${catalog.models.length} models for '${id}' via ${opts.format || 'provider'} catalog`)
       return typeof registry.getModels === 'function' ? registry.getModels() : converted
     } finally {
       slot.inflight = null

@@ -43,12 +43,16 @@ function jsonRpcError(error) {
  * nothing onto Chroxy's session contract; CodexAppServerSession does that.
  */
 export class CodexAppServerClient extends EventEmitter {
-  constructor({ bin, cwd, env, logger } = {}) {
+  constructor({ bin, cwd, env, logger, spawnFn } = {}) {
     super()
     this._bin = bin
     this._cwd = cwd
     this._env = env
     this._log = logger || log
+    // #7726 — injectable spawn, so a test can assert the REAL argv literal
+    // below instead of a copy of it. Defaults to child_process.spawn; nothing
+    // in production passes this.
+    this._spawn = typeof spawnFn === 'function' ? spawnFn : spawn
     this._child = null
     this._buf = ''
     this._nextId = 1
@@ -64,7 +68,11 @@ export class CodexAppServerClient extends EventEmitter {
    * dies or the handshake errors.
    */
   async initialize(clientInfo = { name: 'chroxy', version: '1' }) {
-    this._child = spawn(this._bin, ['app-server'], { cwd: this._cwd, env: this._env })
+    // ARGV INVARIANT: exactly `['app-server']`, forever. Every knob the
+    // protocol exposes — model lists, reasoning effort, sandbox, approval
+    // policy — is a JSON-RPC param over stdin, so no capability may ever add a
+    // CLI flag here (#7726). A test pins this literal via `spawnFn`.
+    this._child = this._spawn(this._bin, ['app-server'], { cwd: this._cwd, env: this._env })
     this._child.stdout.on('data', (d) => this._onData(d))
     this._child.stderr.on('data', (d) => this._onStderr(d))
     this._child.on('exit', (code, signal) => this._onExit(code, signal))

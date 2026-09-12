@@ -153,6 +153,14 @@ export class CodexAppServerSession extends BaseSession {
   static getAllowedModels() { return CodexSession.getAllowedModels() }
   static getFallbackModels() { return CodexSession.getFallbackModels() }
   static getModelMetadata(id) { return CodexSession.getModelMetadata(id) }
+  // #7726 — REQUIRED, not decorative. `providers.js` registers
+  // `PROVIDERS['codex'] = CodexSession` with the models registry, but
+  // `getProvider('codex')` returns THIS class (#6616) and that is what
+  // `scheduleProviderModelsRefresh` (ws-history.js) resolves and calls. A
+  // `refreshModels` that exists only on CodexSession is therefore never
+  // invoked, and the symptom is a picker that looks like flaky discovery
+  // rather than a wiring bug.
+  static refreshModels(deps) { return CodexSession.refreshModels(deps) }
 
   static get capabilities() {
     return {
@@ -326,7 +334,38 @@ export class CodexAppServerSession extends BaseSession {
     this._log = loggerForSession('codex-app-server', this._threadId || 'no-thread')
     this._processReady = true
     ;(this._log || log).info(`codex app-server ready (thread=${this._threadId} sandbox=${sandbox})`)
+    // #7726 — ask THIS binary for its own model roster, on the client that is
+    // already up. Fire-and-forget on purpose: a wedged or old binary must not
+    // delay `ready`, and every failure path inside leaves the previous catalog
+    // untouched. Deliberately AFTER thread/start, so a catalog probe can never
+    // be what breaks session creation.
+    this._refreshModelCatalog()
     this.emit('ready', { model: this.model })
+  }
+
+  /**
+   * #7726 — refresh the codex model catalog from this live session's client.
+   *
+   * Capability-gated the #7724 way: a binary KNOWN not to serve `model/list`
+   * (a parsed version below the floor) is not asked, while UNKNOWN — an absent
+   * or unparseable userAgent — still probes, because a cannot-check must not
+   * read as a no. Any error from the call itself degrades identically
+   * (`probeMethod`), whatever JSON-RPC code it carries.
+   *
+   * @returns {Promise<Array<Object>|null>} always resolves; never throws.
+   */
+  _refreshModelCatalog() {
+    if (!this._client) return Promise.resolve(null)
+    if (this.codexCapabilities?.supportsModelList === false) {
+      ;(this._log || log).debug('codex model catalog skipped: this binary is below the model/list floor')
+      return Promise.resolve(null)
+    }
+    return Promise.resolve()
+      .then(() => CodexAppServerSession.refreshModels({ client: this._client }))
+      .catch((err) => {
+        ;(this._log || log).debug(`codex model catalog refresh failed: ${err?.message || err}`)
+        return null
+      })
   }
 
   /**
