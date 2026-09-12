@@ -421,11 +421,18 @@ export class CodexAppServerSession extends BaseSession {
   /**
    * #7729 — record the model codex resolved, from the `thread/start` response.
    *
-   * Verified against live codex-cli 0.154.0: the response carries the resolved
-   * `model` at the top level AND on `thread.model`
-   * (`{model, reasoningEffort, modelProvider, sandbox, approvalPolicy, thread:{id, model, …}}`).
-   * Top level wins; `thread.model` is the fallback for a build that carries
-   * only the nested copy.
+   * The TOP-LEVEL `model` is the observed field, and it is the only one. The
+   * live codex-cli 0.154.0 capture on #7721 is exactly
+   * `{model, reasoningEffort, modelProvider, sandbox, approvalPolicy}` — it
+   * carries NO `thread` object at all.
+   *
+   * `thread.model` is therefore a DEFENSIVE fallback whose warrant is the
+   * generated schema's nested thread object and the pre-existing
+   * `started?.thread?.id` read in `start()` (itself of unrecorded provenance) —
+   * NOT an observed payload. Do not re-cite it as "verified live": the claim
+   * gets inherited by the next reader, and docs are leads, not ground truth.
+   * Top level wins; the nested read costs one `??` and is kept for a build
+   * that carries only the nested copy.
    *
    * A response carrying NEITHER leaves `bootedModel` **null**, never
    * `undefined` — the badge, the usage split and the context-window lookup all
@@ -901,12 +908,18 @@ export class CodexAppServerSession extends BaseSession {
    *
    * Three properties are deliberate:
    *
-   *   - **No `models_updated` emit from either path.** That event is a GLOBAL
-   *     broadcast (`ws-forwarding.js` → `available_models` to every client), so
-   *     emitting one per turn pushes the whole roster over the tunnel on every
-   *     token update. #7728 fixed the client-side slot, which makes the
-   *     broadcast harmless, not free. The registry write persists via
-   *     `saveCache()` and reaches clients on the next roster refresh.
+   *   - **No `models_updated` emit from either path.** The reason is #7729's
+   *     AC, which rules the global broadcast out — NOT per-turn cost. The cost
+   *     argument would in fact be wrong: `if (!changed) return false` below
+   *     sits ahead of where any emit would go, so an emit would fire at most
+   *     once per model per WINDOW CHANGE, not on every token update. What it
+   *     would still be is a GLOBAL broadcast (`ws-forwarding.js` →
+   *     `available_models` to EVERY client) originated by one session's turn,
+   *     and that shape is what the AC forbids. #7728 fixed the client-side
+   *     slot, so such a broadcast is harmless — harmless is not the same as
+   *     wanted. The registry write persists via `saveCache()` and reaches
+   *     clients on the next roster refresh; closing that last hop with a
+   *     SESSION-scoped push is #7774.
    *   - **A missing/unusable window is a cannot-check, not a zero.** 0,
    *     negative, NaN and null all leave the registry entry exactly as it was
    *     and fall through to the ratchet — they never write, and they never

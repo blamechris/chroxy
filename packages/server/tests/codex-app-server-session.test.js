@@ -1654,7 +1654,14 @@ function stubClient(responses = {}) {
   return { client: c, calls }
 }
 
-// The live `thread/start` result, trimmed to the fields this session reads.
+// The live `thread/start` result PLUS a nested `thread` object.
+//
+// The live codex-cli 0.154.0 capture (#7721) is only
+// `{model, reasoningEffort, modelProvider, sandbox, approvalPolicy}` — it has
+// NO `thread` key. The nested object here is SYNTHETIC: it exercises
+// `start()`'s pre-existing `started?.thread?.id` read and gives
+// `_captureBootedModel`'s defensive `thread.model` fallback something to hit.
+// Calling this "the live result, trimmed" would be a false provenance claim.
 const THREAD_START_ECHO = Object.freeze({
   model: 'gpt-5.5',
   reasoningEffort: 'xhigh',
@@ -2095,6 +2102,37 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
       })
       assert.equal(windowOf('gpt-5-codex'), 272_000, 'the OVERRIDE is the id the window is keyed on')
       assert.equal(windowOf('gpt-5'), 400_000, 'and no near-miss id was touched')
+    }, { model: 'gpt-5-codex' })
+  })
+
+  it('an override SURVIVES a mid-turn reroute: the window stays keyed on the override, and the re-routed-to model is untouched', () => {
+    // Review of #7767: override + reroute was the one combination neither the
+    // reroute describe nor the window describe covered. It is pinned here
+    // rather than changed — `_effectiveModelId()` is override → booted → null
+    // on purpose, and session_info renders `model || bootedModel` in the SAME
+    // precedence (session-manager.js:1998), so label and measurement agree.
+    // Splitting them (a separate `_runningModelId()` for the registry key)
+    // would make this test red, which is the point of having it.
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5.5'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      // Codex re-routes the thread onto a model the registry DOES carry, so
+      // "untouched" below is an assertion about a real entry, not about undefined.
+      s._onNotification({
+        method: 'model/rerouted',
+        params: { threadId: 'th-1', turnId: 'tu-1', fromModel: 'gpt-5.5', toModel: 'gpt-5', reason: 'capacity' },
+      })
+      assert.equal(s.bootedModel, 'gpt-5', 'precondition: the reroute did move bootedModel')
+      assert.equal(s._effectiveModelId(), 'gpt-5-codex', 'precondition: the override still wins over the re-routed model')
+
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 10, outputTokens: 1 }, modelContextWindow: 272_000 }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 272_000,
+        'the override is still what the window is keyed on after a reroute')
+      assert.equal(windowOf('gpt-5'), 400_000,
+        'the re-routed-to model keeps its own window — this path never writes to it')
     }, { model: 'gpt-5-codex' })
   })
 
