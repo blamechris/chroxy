@@ -45,7 +45,7 @@ const SCRIPT = resolve(HERE, '..', 'lint-write-only-ctx-fields.mjs')
 // pin a regression it had just fixed — left the run green at 320/320, exit 0.
 // A floor that trails the count is the shape this whole file exists to catch:
 // it passes, and what it is checking is not what it says.
-const MIN_CASES = 443
+const MIN_CASES = 451
 
 let pass = 0
 let fail = 0
@@ -1714,6 +1714,64 @@ test('the unreadable ACCUMULATION carries every declarator, across files (#7689)
   assert(has(r, 'keepA') && has(r, 'keepB'), `readable bindings were lost: ${JSON.stringify(r.fields)}`)
 })
 
+test('the zero-roster throw NAMES the declarators that emptied it (#7689 review)', () => {
+  // Both conditions hold when a refactor makes every declaration unreadable,
+  // and this one THROWS, so it pre-empts the `unreadable` list the CLI would
+  // otherwise print. An earlier draft claimed reordering solved that; it did
+  // not — moving the naming into `runCli` put it BEHIND this throw. The
+  // declarators are named here instead.
+  const a = 'let { x: { deep } } = make();\nlet { y: { alsoDeep } } = make();\n'
+  throws(
+    () => analyzeTarget({
+      kind: 'module-bindings',
+      declSources: [{ path: 'store/a.ts', text: a }],
+      sources: [{ path: 'store/a.ts', text: a }],
+      inPlaceMutationIsWrite: true,
+    }),
+    CannotCheckError,
+    /ZERO module-level bindings/,
+  )
+  let msg = ''
+  try {
+    analyzeTarget({
+      kind: 'module-bindings',
+      declSources: [{ path: 'store/a.ts', text: a }],
+      sources: [{ path: 'store/a.ts', text: a }],
+      inPlaceMutationIsWrite: true,
+    })
+  } catch (e) { msg = e.message }
+  assert(/2 declarator\(s\) could not be read/.test(msg), `the count is missing: ${msg}`)
+  assert(msg.includes('deep') && msg.includes('alsoDeep'), `a declarator was not named: ${msg}`)
+})
+
+test('an EXPORTED destructured binding is marked exported (#7689 review)', () => {
+  // `b.exported` was read by no case for a PATTERN declarator, so
+  // `exported: Boolean(m[1]) && !isPattern` survived the whole suite — and that
+  // mutant makes an exported destructured binding PRIVATE, so a cross-file
+  // importer stops rescuing it and it reports WRITE-ONLY. A false accusation
+  // over healthy state, on the very shape this PR added a row for.
+  const [b] = extractModuleBindings(stripComments('export const { a } = f();\n'))
+  assert(b.exported === true, `an exported pattern was not marked: ${JSON.stringify(b)}`)
+  const [priv] = extractModuleBindings(stripComments('const { a } = f();\n'))
+  assert(priv.exported === false, `a private pattern was marked exported: ${JSON.stringify(priv)}`)
+})
+
+test('an exported destructured binding IS rescued by a cross-file reader (#7689 review)', () => {
+  // The harm the row above prevents, end to end: with `exported` wrong, the
+  // importer is never scanned and this fails.
+  const decl = 'export const { shared } = f();\nfunction w(): void { shared.set(1, 2); }\n'
+  const r = analyzeTarget({
+    kind: 'module-bindings',
+    declSources: [{ path: 'store/mod.ts', text: decl }],
+    sources: [
+      { path: 'store/mod.ts', text: decl },
+      { path: 'ui/panel.ts', text: "import { shared } from '../store/mod';\nexport const show = () => String(shared.size);\n" },
+    ],
+    inPlaceMutationIsWrite: true,
+  })
+  assert(r.failures.length === 0, `a cross-file reader did not rescue it: ${JSON.stringify(r.failures)}`)
+})
+
 test('an unreadable declarator does NOT mask a real finding elsewhere (#7689)', () => {
   // The reason this is data on the result rather than a throw. An earlier draft
   // threw CannotCheckError from the analysis, which pre-empted `judge()`:
@@ -1826,17 +1884,46 @@ const literalAndWrapRoster = [
   // was invisible while the unreadable channel was only a warning.
   //
   // It stops being invisible in this same change, and it is not rare: it
-  // accounted for ALL THIRTY unreadable declarators in packages/ before this
-  // fix and zero after, and connection.ts already writes `as const` five times
-  // at brace depth > 0 — one dedent from the roster's own directory.
+  // accounted for 30 of the 33 unreadable declarators under packages/ before
+  // this fix, and connection.ts already writes `as const` five times at brace
+  // depth > 0 — one dedent from the roster's own directory.
+  //
+  // The count is stated as a RANGE because the first version of this comment
+  // said "all thirty ... and zero after", which was measured over a sweep that
+  // skipped `dist/`. Including it the real figures are 33 -> 3, and the three
+  // survivors are generated `.d.ts` under packages/protocol/dist/ — tracked in
+  // git, outside both targets' declDirs, and unrelated to `as const`. The
+  // load-bearing half is unaffected: the shipped targets were zero before and
+  // are zero after.
   ['`as const`, which is an assertion and not a declaration', 'export const A = [1] as const\nexport const B = mk();\n', 'A,B', '#7689'],
   ['`as const` wrapped across lines', 'export const A = [\n  1,\n] as const\n\nexport const B = mk();\n', 'A,B', '#7689'],
   ['`as const` followed by real STATE, which must still be seen', 'export const A = [1] as const\nlet pendingThing = new Map();\n', 'A,pendingThing', '#7689'],
   // Controls for the lookbehind. It must not swallow a REAL declaration whose
   // initializer merely ends in an `as` cast, and `o.as` is not the keyword —
   // the same distinction `wordEndingAt` grew in #7560 F5.
+  //
+  // The two rows below this comment were the ORIGINAL controls and they are
+  // kept, but review showed they do not reach the guard at all: both end `;\n`
+  // before the next declaration, so `as` is never the preceding word either
+  // way. Deleting the property-access half left the suite at 443/443. The two
+  // rows AFTER them are the ones that discriminate — without it, `wordEndingAt`
+  // returns `as` for `o.as` and for `schemas`, the following declaration is
+  // skipped, and the roster comes out EMPTY.
   ['a real declaration after an `as` CAST', 'const x = y as T;\nconst z = mk();\n', 'x,z', '#7689'],
   ['a property named `as` does not suppress the next declaration', 'const o = { as: 1 };\nexport const B = mk();\n', 'o,B', '#7689'],
+  ['a MEMBER ACCESS `.as` ending a line, which is not the keyword', 'const q = o.as\nlet pending = new Map();\n', 'pending', '#7689'],
+  ['an identifier ENDING in `as`, which is not the keyword', 'const q = schemas\nlet pending = new Map();\n', 'pending', '#7689'],
+  // The width edges. The first version read a FIXED 12-character slice and had
+  // two bad ones: a gap of exactly 10 put the rejecting character outside the
+  // window, so the guard succeeded vacuously and the next declaration was
+  // skipped with no `unreadable` entry — a SILENTLY lost binding, and a
+  // regression against main; a gap of 11 or more let the mis-parse back in,
+  // which this same change makes exit 2. `stripComments` blanks a comment to
+  // same-length spaces, so both are reachable by writing a comment between the
+  // two words.
+  ['`as const` with a 10-space gap, the vacuous-success edge', 'const q = o.as' + ' '.repeat(10) + 'const pending = new Map();\n', 'q,pending', '#7689'],
+  ['`as const` with a 20-space gap, the out-of-window edge', 'export const A = [1] as' + ' '.repeat(20) + 'const\nexport const B = mk();\n', 'A,B', '#7689'],
+  ['`as const` behind a stripped COMMENT', 'export const A = [1] as /* a longer comment here */ const\nexport const B = mk();\n', 'A,B', '#7689'],
   // #7688. A destructuring declarator has NO initializer of its own — what
   // follows its `=` is the SOURCE — so the alias rule was reading that source
   // as the declarator's value and suppressing EVERY name in the pattern. On

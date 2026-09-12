@@ -1539,7 +1539,10 @@ function isConstantInitializer(init) {
  *   - a declarator shape `declaratorNames` cannot read contributes no name —
  *     it is REPORTED through `unparsed` rather than dropped (see there), and
  *     since #7689 it is FATAL rather than a warning. The count is what decided
- *     it: both shipped targets contain ZERO unreadable declarators, so #7533's
+ *     it — the count ON THE SHIPPED TARGETS, which is the one that governs:
+ *     both contain ZERO unreadable declarators. (Three remain elsewhere under
+ *     `packages/`, all generated `.d.ts` in `packages/protocol/dist/`, outside
+ *     either target's declDirs.) So #7533's
  *     argument for warning — that the previous extractor did not read these
  *     either, so failing would red the build over a shape it did not introduce
  *     — has nothing left to grandfather. What it closes is PARTIAL EROSION: a
@@ -1966,9 +1969,31 @@ export function extractModuleBindings(strippedText) {
       // `packages/dashboard/src/store/connection.ts` already uses it five times
       // at brace depth > 0, one dedent from the roster's own directory.
       //
-      // The lookbehind excludes a property access for the same reason
-      // `wordEndingAt` grew one in #7560 F5: `o.as` is not the keyword.
-      if (/(?<![.\w$])as\s+$/.test(s.slice(Math.max(0, i - 12), i))) { i++; continue }
+      // Scanned back to the preceding non-whitespace character, NOT read out of a
+      // fixed-width slice. The first version used `s.slice(i - 12, i)` and had
+      // two bad edges, both found in review and both measured:
+      //
+      //   gap of exactly 10  the `a` lands at slice index 0, so the character
+      //                      that would REJECT it (a `.` or a word char) falls
+      //                      outside the window, the lookbehind succeeds
+      //                      vacuously, and the next declaration is skipped with
+      //                      NO `unreadable` entry — a silently lost binding,
+      //                      and a regression against main
+      //   gap of 11 or more  the guard never fires and the mis-parse returns,
+      //                      which this same change makes exit 2
+      //
+      // `stripComments` blanks a comment to same-length spaces, so
+      // `as /*abcdef*/ const` reaches the second edge and `as /*abcde*/ const`
+      // the first. A CRLF line ending shifts the arithmetic by one as well
+      // (`\r` is whitespace), which is a third reason the width should not have
+      // been a constant.
+      //
+      // `wordEndingAt` is reused rather than reimplemented: it already refuses a
+      // property access, for the same reason it grew that lookback in #7560 F5
+      // — `o.else` is not the keyword, and `o.as` is not either.
+      let w = i - 1
+      while (w >= 0 && /\s/.test(s[w])) w--
+      if (wordEndingAt(s, w) === 'as') { i++; continue }
       decl.lastIndex = i
       const m = decl.exec(s)
       if (m) {
@@ -2283,11 +2308,12 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
       if (b.name === null) {
         // A declarator the extractor could not read. REPORTED, never dropped:
         // its bindings go unjudged either way, and the difference between a
-        // silent gap and a named one is the whole point of #7533. Not fatal —
-        // main's extractor did not read these declarations either (it emitted
-        // entries literally named `const` for them), so failing here would red
-        // the build over a shape this change did not introduce. Tracked for
-        // tightening; see the declaration-slice note in #7533's follow-up.
+        // silent gap and a named one is the whole point of #7533. It WAS not
+        // fatal, on the reasoning that main's extractor did not read these
+        // declarations either (it emitted entries literally named `const` for
+        // them), so failing would red the build over a shape #7533 did not
+        // introduce. #7689 is the tightening that note anticipated: the count
+        // reached a measured zero, so there was nothing left to grandfather.
         unreadable.push(`${decl.path}: ${b.unparsed.replace(/\s+/g, ' ').slice(0, 80)}`)
         continue
       }
@@ -2348,15 +2374,27 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
   // misses a refactor that pushes most of the roster into this bucket and
   // leaves the run green over what remains.
 
-  // AFTER the unreadable check, deliberately. When a refactor makes every
-  // declaration unreadable both conditions hold, and "ZERO bindings" is the
-  // less useful of the two reports: it says the roster is empty without saying
-  // why, while the one above names each declarator it could not read (#7689).
+  // This THROWS, so it pre-empts the `unreadable` list that `judge()` would
+  // otherwise carry to the CLI — and the case where both conditions hold is
+  // exactly the one where that list is the useful half: a refactor that makes
+  // every declaration unreadable empties the roster, and "ZERO bindings" says
+  // so without saying WHY.
+  //
+  // An earlier draft of this change claimed the ordering solved that. It did
+  // not: moving the naming into `runCli` put it BEHIND this throw rather than
+  // in front of it, and the comment asserting otherwise was a stronger claim
+  // than the code performed — the shape this file catalogues (#7689 review).
+  // The declarators are named HERE instead, so nothing is lost whichever
+  // condition fires first.
   if (keys.length === 0) {
     throw new CannotCheckError(
       `${declSources.length} declaring file(s) yielded ZERO module-level bindings. Either they ` +
       'hold no state any more or the extractor no longer understands their shape — both are ' +
-      '"cannot check", not "clean".',
+      '"cannot check", not "clean".' +
+      (unreadable.length > 0
+        ? `\n      ${unreadable.length} declarator(s) could not be read, which is probably why:\n` +
+          unreadable.map((u) => `      unread declarator: ${u}`).join('\n')
+        : ''),
     )
   }
 
