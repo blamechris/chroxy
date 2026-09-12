@@ -504,6 +504,13 @@ function usableContextWindow(source) {
  *   `~/.chroxy/models-cache.json`. Non-Claude providers should supply a
  *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
  *   default Claude cache stays untouched by per-provider learn-loops (#4413).
+ * @param {boolean} [hooks.unionsStaticFallbacks] - Opt in to the #3075 union
+ *   of this registry's STATIC seed on a NON-Claude registry: after every
+ *   `updateModels()`, seed rows the refresh omitted are merged back. Default
+ *   false off the Claude registry (#7761) — for a provider whose refresh IS
+ *   its own roster the union means a retired model never disappears. Set it
+ *   only where the seed is a RECOMMENDATION list rather than a roster claim
+ *   (ollama: models worth pulling that this machine has not pulled yet).
  * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
  *   loadModelsOverlayResult). Overlay entries SEED the registry like a
  *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
@@ -519,17 +526,45 @@ export function createModelsRegistry(hooks = {}) {
   const cachePathFn = typeof hooks.cachePath === 'function' ? hooks.cachePath : getDefaultCachePath
   const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
   const overlay = hooks.overlay instanceof Map ? hooks.overlay : new Map()
-  // #7723 — `loadCache()`'s stale-entry prune reads a CLAUDE grammar:
-  // `modelFamilyAndMinor` matches `claude-<family>-<major>[-<minor>]` and the
-  // filter keeps only families present in the fallback roster. Against a
-  // NON-Claude roster that grammar degenerates to "keep only ids literally in
-  // the static seed", so a discovered `gpt-5.5` is written by `saveCache()` and
-  // deleted on the next boot — taking its learned context window with it. The
-  // prune therefore applies exactly where its grammar came from: a registry
-  // seeded with Claude's own `FALLBACK_MODELS`. Identity, not a name check —
-  // the roster IS the thing the regex was written against, and a provider that
-  // passes its own list is by construction not it.
-  const prunesStaleClaudeFamilies = baseFallbackModels === FALLBACK_MODELS
+  // ONE discriminator for every rule in this registry whose PREMISE is a fact
+  // about Claude rather than about "a model registry". Identity, not a name
+  // check — the roster IS the thing each rule was written against, and a
+  // provider that passes its own list is by construction not it.
+  //
+  // Three rules read it:
+  //
+  //  - #7723 `loadCache()`'s stale-entry prune reads a CLAUDE grammar:
+  //    `modelFamilyAndMinor` matches `claude-<family>-<major>[-<minor>]` and
+  //    the filter keeps only families present in the fallback roster. Against a
+  //    NON-Claude roster that grammar degenerates to "keep only ids literally
+  //    in the static seed", so a discovered `gpt-5.5` is written by
+  //    `saveCache()` and deleted on the next boot — taking its learned context
+  //    window with it.
+  //  - #7761 `updateModels()`'s #3075 union re-adds every static fallback row a
+  //    refresh omitted. Its premise ("`supportedModels()` under-reports") is a
+  //    Claude-SDK fact; against a provider whose catalogue IS the producer's
+  //    own roster it silently converts REPLACE into UNION, so a model the
+  //    provider retired never disappears.
+  //  - #7747 the `<id>[1m]` variant synthesis mints a CLAUDE-CLI id convention.
+  //    Nothing strips the suffix on a non-Claude send path, so the chip 400s at
+  //    the provider the moment someone taps it.
+  const isClaudeRegistry = baseFallbackModels === FALLBACK_MODELS
+  // #7761 — the union is scoped to the STATIC seed, not to everything in
+  // `fallbackModels`: `computeFallbackModels()` also folds in operator OVERLAY
+  // rows, and an overlay entry is a deliberate user declaration ("this model
+  // exists, offer it") rather than a possibly-stale vendor table. Those keep
+  // riding the union on every registry — that is the `applyOverlay` → live-SDK
+  // re-merge contract (#5932 AC2). An overlay that merely OVERRIDES a static
+  // row's label/window is not such a declaration: it shares the base row's
+  // fullId, so it is skipped with the row it decorates.
+  const staticFallbackFullIds = new Set(baseFallbackModels.map((m) => m.fullId))
+  // …and one non-Claude provider OPTS BACK IN, because for it the seed is not
+  // a vendor roster at all: ollama's is a list of RECOMMENDED models to pull,
+  // so a machine with two models installed should still be offered the other
+  // three (#5421, pinned in ollama-tags.test.js). Explicit, because #7761's
+  // whole complaint is that the union was applied to registries whose premise
+  // it did not fit — and a silent default is how that happened.
+  const unionsStaticFallbacks = isClaudeRegistry || hooks.unionsStaticFallbacks === true
   // #6381: the CURRENT overlay (swapped by applyOverlay on hot-reload), retained
   // so getOverlayPricing() reflects live edits. The fallback rows don't carry
   // pricing, so pricing is read from this map directly.
@@ -849,8 +884,20 @@ export function createModelsRegistry(hooks = {}) {
       // where supportedModels() returned only the 4.6 family). Match on
       // fullId — fallback's id is a short alias (e.g. `opus`) that would
       // otherwise collide with a derived id of the same family.
+      //
+      // #7761 — the STATIC seed rides this union on the Claude registry, and
+      // on a non-Claude one only where the provider opts in
+      // (`unionsStaticFallbacks`). "supportedModels() under-reports" is a fact
+      // about the Claude CLI; a provider whose `model/list` IS its own roster
+      // does not under-report, and unioning its hand-maintained table back in
+      // meant a retired model (`gpt-4o`, `o1`, …) reached `available_models`
+      // forever, in every process, with no path that could ever clear it —
+      // REPLACE held at `CodexSession.getFallbackModels()` and nowhere a client
+      // could see. Operator overlay rows are NOT part of the seed and keep
+      // unioning everywhere (see `staticFallbackFullIds`).
       const seenFullIds = new Set(converted.map(m => m.fullId))
       for (const fb of fallbackModels) {
+        if (!unionsStaticFallbacks && staticFallbackFullIds.has(fb.fullId)) continue
         if (!seenFullIds.has(fb.fullId)) {
           // Re-derive the short id with the registry's hook so non-Claude
           // providers don't accidentally inherit Claude's `claude-` strip.
@@ -872,6 +919,18 @@ export function createModelsRegistry(hooks = {}) {
       // claude binary), so the picker should surface it as a distinct chip
       // even though `supportedModels()` doesn't list it (#3075).
       //
+      // #7747 — CLAUDE REGISTRY ONLY. `[1m]` is a Claude-CLI id convention and
+      // nothing on a non-Claude send path strips the suffix before the id goes
+      // upstream, so every synthesized chip was a 400/404 waiting for a tap:
+      // `gemini-2.5-pro[1m]` off gemini's own 2M static table, an OpenRouter
+      // `meta-llama/llama-4-scout[1m]` whose hardcoded 1_000_000 UNDERSTATES
+      // the real window 10x beside a correct base row, and `gpt-4.1[1m]` off
+      // the union this same commit scoped (#7761). The synthesized row also
+      // inherits the base entry's whole metadata roster, so after #7736 it
+      // would carry a `provenance` it did not earn — a row the SERVER invented,
+      // labelled as provider truth. The loop and the `claude-` pricing warn
+      // below it finally agree about who this block is for.
+      //
       // Pricing-table drift guard (#4106): the day Anthropic ships a 1M
       // variant of Sonnet/Haiku/any-future-model, `updateModels` will
       // synthesize the `[1m]` chip here, but if the pricing table at the
@@ -881,45 +940,50 @@ export function createModelsRegistry(hooks = {}) {
       // premium ratio is. Warn-once per variant so an operator notices
       // before the bills lie. Forward-compat only — no current breakage.
       const variants = []
-      for (const m of converted) {
-        if (!m.fullId || m.fullId.endsWith(ONE_M_SUFFIX)) continue
-        if (m.contextWindow < 1_000_000) continue
-        const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
-        if (seenFullIds.has(variantFullId)) continue
-        const variantId = `${m.id}${ONE_M_SUFFIX}`
-        // Consult the provider's metadata hook first so non-Claude registries
-        // that eventually ship a >=1M model get their authoritative label
-        // instead of the humanizeModelId mangling (#4441 follow-up to #4438).
-        // Currently unreachable for codex/gemini (no 1M models today) but
-        // keeps the synthesis path consistent with the five other call sites.
-        const providerMeta = getModelMetadataFn ? getModelMetadataFn(variantFullId) : null
-        // #7723: the synthesized variant is the SAME model at a longer window,
-        // so it inherits the base entry's metadata when the provider has none
-        // of its own for the variant id.
-        variants.push(withModelMetadata({
-          id: variantId,
-          label: providerMeta?.label || humanizeModelId(variantId),
-          fullId: variantFullId,
-          contextWindow: 1_000_000,
-        }, providerMeta, m))
-        seenFullIds.add(variantFullId)
-        // Drift detection (#4106 + #4116). Two failure modes both lose
-        // the premium tier in different ways:
-        //   (1) No `[1m]` entry at all → resolvePricingKey may return null
-        //       (cost=0) or fall back to the base family entry (no
-        //       longContext block) depending on the family.
-        //   (2) `[1m]` entry exists but lacks `longContext` → premium
-        //       block silently absent; >200K turns billed at base rates.
-        // Both produce undercounting; warn for either. Gate to `claude-*`
-        // so non-Claude registries don't get a Claude-pricing nag.
-        if (variantFullId.startsWith('claude-')) {
-          const entry = CLAUDE_PRICING_USD_PER_MTOK[variantFullId]
-          if ((!entry || !entry.longContext) && !pricingDriftWarned.has(variantFullId)) {
-            const reason = entry
-              ? `no longContext premium block; >200K turns will bill at base rates`
-              : `no entry in CLAUDE_PRICING_USD_PER_MTOK; cost may be 0 or fall back to base`
-            log.warn(`pricing-table drift: synthesized 1M variant ${variantFullId} ${reason}. Add an explicit entry (with longContext) in packages/server/src/claude-model-catalog.js.`)
-            pricingDriftWarned.add(variantFullId)
+      if (isClaudeRegistry) {
+        for (const m of converted) {
+          if (!m.fullId || m.fullId.endsWith(ONE_M_SUFFIX)) continue
+          if (m.contextWindow < 1_000_000) continue
+          const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
+          if (seenFullIds.has(variantFullId)) continue
+          const variantId = `${m.id}${ONE_M_SUFFIX}`
+          // Consult the metadata hook first so a registry that supplies one
+          // gets its authoritative label instead of the humanizeModelId
+          // mangling (#4441 follow-up to #4438). `getRegistryForProvider`
+          // wires that hook for NON-Claude providers only, and those no longer
+          // reach this loop — so the branch is forward-compat for a Claude
+          // registry constructed with a hook of its own, and keeps the
+          // synthesis path consistent with the five other call sites.
+          const providerMeta = getModelMetadataFn ? getModelMetadataFn(variantFullId) : null
+          // #7723: the synthesized variant is the SAME model at a longer window,
+          // so it inherits the base entry's metadata when the provider has none
+          // of its own for the variant id.
+          variants.push(withModelMetadata({
+            id: variantId,
+            label: providerMeta?.label || humanizeModelId(variantId),
+            fullId: variantFullId,
+            contextWindow: 1_000_000,
+          }, providerMeta, m))
+          seenFullIds.add(variantFullId)
+          // Drift detection (#4106 + #4116). Two failure modes both lose
+          // the premium tier in different ways:
+          //   (1) No `[1m]` entry at all → resolvePricingKey may return null
+          //       (cost=0) or fall back to the base family entry (no
+          //       longContext block) depending on the family.
+          //   (2) `[1m]` entry exists but lacks `longContext` → premium
+          //       block silently absent; >200K turns billed at base rates.
+          // Both produce undercounting; warn for either. Gate to `claude-*`
+          // so an OVERLAY-seeded row on this registry — the one remaining way
+          // a non-`claude-` id reaches here — doesn't get a Claude-pricing nag.
+          if (variantFullId.startsWith('claude-')) {
+            const entry = CLAUDE_PRICING_USD_PER_MTOK[variantFullId]
+            if ((!entry || !entry.longContext) && !pricingDriftWarned.has(variantFullId)) {
+              const reason = entry
+                ? `no longContext premium block; >200K turns will bill at base rates`
+                : `no entry in CLAUDE_PRICING_USD_PER_MTOK; cost may be 0 or fall back to base`
+              log.warn(`pricing-table drift: synthesized 1M variant ${variantFullId} ${reason}. Add an explicit entry (with longContext) in packages/server/src/claude-model-catalog.js.`)
+              pricingDriftWarned.add(variantFullId)
+            }
           }
         }
       }
@@ -1056,7 +1120,7 @@ export function createModelsRegistry(hooks = {}) {
             // — their ids carry no family/minor grammar for this filter to
             // read, so applying it would delete exactly the discovered models
             // the cache exists to remember.
-            if (!prunesStaleClaudeFamilies) return true
+            if (!isClaudeRegistry) return true
             const { family, minor } = modelFamilyAndMinor(m.fullId)
             if (!fallbackByFamily.has(family)) return false
             if (minor === null) return true
@@ -1531,6 +1595,9 @@ export function getRegistryForProvider(providerName) {
     // strip) — identity is the safest default. Providers can override via
     // `getModelMetadata()` when they want a different short id.
     deriveId: (fullId) => fullId,
+    // #7761: a non-Claude refresh REPLACES the static seed unless the provider
+    // declares that seed to be a recommendation list (ollama).
+    unionsStaticFallbacks: ProviderClass.staticModelsAreRecommendations === true,
     resolveContextWindow: (fullId) => {
       const meta = typeof ProviderClass.getModelMetadata === 'function'
         ? ProviderClass.getModelMetadata(fullId)

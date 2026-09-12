@@ -138,11 +138,17 @@ describe('createModelsRegistry(providerHooks)', () => {
     assert.equal(converted[0].fullId, 'gpt-5')
   })
 
-  it('1M variant synthesis consults provider getModelMetadata().label (#4441)', () => {
-    // Forward-compat: if a non-Claude provider ever ships a >=1M-context
-    // model, the variant-synthesis branch in updateModels() must defer to
-    // the provider's metadata label instead of humanizeModelId — same
-    // rule that #4438 applied to the cache-load + fallback-merge paths.
+  it('a non-Claude registry synthesizes NO 1M variant, whatever its window (#7747, retiring #4441)', () => {
+    // FLIPPED ON PURPOSE, and the old intent is recorded rather than erased.
+    // #4441 was forward-compat: "if a non-Claude provider ever ships a
+    // >=1M-context model, the synthesis branch must defer to the provider's
+    // metadata label instead of humanizeModelId". That premise is retired by
+    // #7747 — the branch does not run for a non-Claude registry at all, because
+    // `[1m]` is a Claude-CLI id convention and nothing on a non-Claude send
+    // path strips the suffix, so every chip it minted 400s at the provider the
+    // moment someone taps it. The label-deference assertion #4441 actually made
+    // is kept alive, on the one registry shape that still reaches that branch,
+    // in models-factory.test.js (`claudeRegistryWithMetadata`).
     const r = createModelsRegistry({
       fallbackModels: [],
       getModelMetadata: (id) => {
@@ -154,10 +160,12 @@ describe('createModelsRegistry(providerHooks)', () => {
     const converted = r.updateModels([
       { value: 'mega-model-9', displayName: 'Mega Model 9', description: '' },
     ])
-    const variant = converted.find(m => m.fullId === 'mega-model-9[1m]')
-    assert.ok(variant, 'synthesized 1M variant must be present')
-    assert.equal(variant.label, 'Mega Model 9 (1M)',
-      `expected provider-supplied 'Mega Model 9 (1M)' label, got '${variant.label}' — humanizeModelId would have produced 'Mega Model 9[1m]'`)
+    // Both directions: the base row landed (so the absence below is a real
+    // absence, not "updateModels did nothing"), and no variant rode with it —
+    // not even though the provider's own table declares a `[1m]` row.
+    assert.deepEqual(converted.map(m => m.fullId), ['mega-model-9'])
+    assert.equal(converted.some(m => m.fullId.endsWith('[1m]')), false,
+      `a [1m] id must never be synthesized on a non-Claude registry, got ${converted.map(m => m.fullId).join(',')}`)
   })
 
   it('1M variant synthesis still uses humanizeModelId when provider metadata returns no label (Claude path)', () => {

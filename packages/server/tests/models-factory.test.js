@@ -671,6 +671,21 @@ function nonClaudeRegistryWithMetadata(meta, cachePath) {
   })
 }
 
+// A CLAUDE registry (it passes no `fallbackModels`, so `baseFallbackModels ===
+// FALLBACK_MODELS` — the identity every Claude-only rule in models.js keys on)
+// that nonetheless supplies a getModelMetadata hook. `getRegistryForProvider`
+// never builds this shape — it wires the hook for non-Claude providers only —
+// but `createModelsRegistry` accepts it, and since #7747 scoped the `[1m]`
+// synthesis to the Claude registry it is the ONLY shape left that reaches the
+// hook consultation inside that loop. Without it the `providerMeta?.label ||`
+// there, and the argument ORDER of its `withModelMetadata` call, become
+// untested code that any mutation survives.
+function claudeRegistryWithMetadata(meta) {
+  return createModelsRegistry({
+    getModelMetadata: (fullId) => meta[fullId] ?? null,
+  })
+}
+
 describe('updateModels carries the caller-supplied metadata (#7723)', () => {
   it("a discovery result's contextWindow reaches getModels() with that exact number", () => {
     // #7723 is a PRECEDENCE CLARIFICATION, not a repair of a dropped window on
@@ -815,7 +830,12 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     // no getModelMetadata hook providerMeta is null and that ordering is
     // unasserted (swapping the two arguments stays green), so the hook is
     // wired here and the table row is keyed on `big-1[1m]`, not `big-1`.
-    const registry = nonClaudeRegistryWithMetadata({
+    //
+    // #7747 moved this off a NON-Claude registry: the synthesis loop no longer
+    // runs there at all, so the old shape would now assert the ordering of a
+    // call that never happens. `claudeRegistryWithMetadata` keeps a hook in
+    // front of the loop that does.
+    const registry = claudeRegistryWithMetadata({
       'big-1[1m]': {
         id: 'big-1[1m]',
         label: 'Table Big 1M',
@@ -974,5 +994,138 @@ describe('loadCache stale prune is scoped to the Claude registry (#7723)', () =>
     const r = nonClaudeRegistry(cachePath)
     assert.equal(r.loadCache(cachePath), true)
     assert.deepEqual(r.getModels().map((m) => m.fullId), ['gpt-5.5'])
+  })
+})
+
+describe('the Claude-only rules in updateModels are scoped to the Claude registry (#7761 / #7747)', () => {
+  // The shape a real non-Claude provider registry has: a static table captured
+  // at construction (`getRegistryForProvider` → `fallbackModels:
+  // ProviderClass.getFallbackModels()`), which for codex always happens while
+  // the live catalogue is still UNSET — so the captured roster is always the
+  // statics, in every process, and no path ever rebuilds it.
+  const STATIC_SEED = Object.freeze([
+    Object.freeze({ id: 'gpt-5-codex', label: 'GPT-5 Codex', fullId: 'gpt-5-codex', contextWindow: 400_000 }),
+    // A 1M window on purpose: this is the row whose re-admission minted the
+    // `gpt-4.1[1m]` chip (#7747) once the union (#7761) put it back.
+    Object.freeze({ id: 'gpt-4.1', label: 'GPT-4.1', fullId: 'gpt-4.1', contextWindow: 1_000_000 }),
+    Object.freeze({ id: 'o1', label: 'o1', fullId: 'o1', contextWindow: 200_000 }),
+  ])
+
+  function seededNonClaudeRegistry() {
+    return createModelsRegistry({
+      fallbackModels: STATIC_SEED,
+      deriveId: (id) => id,
+      resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+    })
+  }
+
+  // Snapshot of `getModels()` for a CLAUDE registry, captured on origin/main
+  // BEFORE the gate landed and pasted here verbatim. It carries both rules at
+  // once: `claude-sonnet-4-6` / `claude-fable-5` / `claude-haiku-4-5` are
+  // fallback rows the update omitted and the #3075 union re-added, and the
+  // three `[1m]` rows are the synthesis. Key ORDER is part of the assertion —
+  // this goes on the wire as `available_models`, and the point of the gate is
+  // that the Claude path does not move by one byte.
+  const CLAUDE_SNAPSHOT_BEFORE_THE_GATE = [
+    { id: 'opus-4-8', label: 'Opus 4.8', fullId: 'claude-opus-4-8', contextWindow: 1000000 },
+    { id: 'mega-1', label: 'Mega', fullId: 'claude-mega-1', contextWindow: 2000000 },
+    { id: 'sonnet-4-6', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
+    { id: 'fable-5', label: 'Fable 5', fullId: 'claude-fable-5', contextWindow: 1000000 },
+    { id: 'haiku-4-5', label: 'Haiku 4.5', fullId: 'claude-haiku-4-5', contextWindow: 200000 },
+    { id: 'opus-4-8[1m]', label: 'Opus 4.8 (1M)', fullId: 'claude-opus-4-8[1m]', contextWindow: 1000000 },
+    { id: 'mega-1[1m]', label: 'Mega 1 (1M)', fullId: 'claude-mega-1[1m]', contextWindow: 1000000 },
+    { id: 'fable-5[1m]', label: 'Fable 5 (1M)', fullId: 'claude-fable-5[1m]', contextWindow: 1000000 },
+  ]
+
+  it('the Claude registry still unions an omitted fallback row AND still mints claude-*[1m] — byte-identical', () => {
+    const registry = createModelsRegistry()
+    registry.updateModels([
+      // Omits sonnet / fable / haiku, so the #3075 union has work to do…
+      { value: 'claude-opus-4-8', displayName: 'Default (Opus 4.8)', description: '' },
+      // …and carries a >=1M window, so the synthesis does too.
+      { value: 'claude-mega-1', displayName: 'Mega', description: '', contextWindow: 2_000_000 },
+    ])
+    assert.equal(
+      JSON.stringify(registry.getModels()),
+      JSON.stringify(CLAUDE_SNAPSHOT_BEFORE_THE_GATE),
+      'the Claude path must not move by one byte — same rows, same order, same keys',
+    )
+    // …stated as directions too, so the intent survives a future roster edit
+    // that legitimately re-captures the snapshot above.
+    const ids = registry.getModels().map((m) => m.id)
+    assert.ok(ids.includes('sonnet-4-6'), `an omitted fallback row must still be unioned back, got ${ids.join(',')}`)
+    assert.ok(ids.includes('mega-1[1m]'), `a >=1M claude row must still mint its [1m] chip, got ${ids.join(',')}`)
+  })
+
+  it('a non-Claude registry handed a discovered roster produces EXACTLY that roster', () => {
+    const registry = seededNonClaudeRegistry()
+    registry.updateModels([
+      { value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: '' },
+      { value: 'gpt-5.5', displayName: 'GPT-5.5', description: '' },
+    ])
+    const ids = registry.getModels().map((m) => m.id).sort()
+    // Direction 1 — every discovered id is present. On its own this passes for
+    // a registry that ALSO carries the stale statics, which is how #7761 sat
+    // green (#7199/#7216/#7544/#7639 — four filings of the same one-direction
+    // roster check).
+    assert.deepEqual(ids, ['gpt-5.5', 'gpt-6-astra'])
+    // Direction 2 — nothing else is. Named individually so the failure says
+    // WHICH static came back rather than printing two arrays.
+    for (const stale of STATIC_SEED.map((m) => m.fullId)) {
+      assert.equal(ids.includes(stale), false,
+        `${stale} was not discovered on this refresh and must not reach getModels()`)
+    }
+  })
+
+  it('a non-Claude registry mints no [1m] variant for a 2M-window model', () => {
+    const registry = seededNonClaudeRegistry()
+    registry.updateModels([
+      { value: 'meta-llama/llama-4-scout', displayName: 'Llama 4 Scout', description: '', contextWindow: 2_000_000 },
+    ])
+    const entries = registry.getModels()
+    assert.deepEqual(entries.map((m) => m.fullId), ['meta-llama/llama-4-scout'],
+      'the 1M variant is a Claude-CLI id convention and must not be synthesized here')
+    // The base row must still be there with its REAL window — the synthesized
+    // row hardcoded 1_000_000, which for a 10M-window model sat beside the
+    // correct row understating it 10x (#7747). Asserting absence alone would
+    // also pass if updateModels had dropped everything.
+    assert.equal(entries[0].contextWindow, 2_000_000)
+  })
+
+  it('a non-Claude registry that OPTS IN keeps unioning its static seed', () => {
+    // The one provider whose seed is a recommendation list rather than a roster
+    // claim (ollama: models worth pulling, vs /api/tags = models pulled). The
+    // end-to-end wiring — `OllamaSession.staticModelsAreRecommendations` →
+    // `getRegistryForProvider` → here — is pinned in ollama-tags.test.js; this
+    // is the registry-level half, so the flag cannot become a no-op silently.
+    const registry = createModelsRegistry({
+      fallbackModels: STATIC_SEED,
+      deriveId: (id) => id,
+      resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+      unionsStaticFallbacks: true,
+    })
+    registry.updateModels([{ value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: '' }])
+    const ids = registry.getModels().map((m) => m.id).sort()
+    assert.deepEqual(ids, ['gpt-4.1', 'gpt-5-codex', 'gpt-6-astra', 'o1'])
+    // …and the opt-in buys the union ONLY. `[1m]` stays Claude-only, so the
+    // 1M-window `gpt-4.1` row still mints no chip (#7747) even here.
+    assert.equal(ids.some((id) => id.endsWith('[1m]')), false,
+      `opting into the union must not opt into the Claude id convention, got ${ids.join(',')}`)
+  })
+
+  it('an operator OVERLAY row still unions on a non-Claude registry (#5932 AC2)', () => {
+    // The union is scoped to the STATIC seed, not to everything in
+    // `fallbackModels`. An overlay entry is a deliberate operator declaration
+    // and `applyOverlay` re-merges it through updateModels, so scoping the
+    // whole loop would have silently deleted every overlay-added model for
+    // every non-Claude provider on the next refresh.
+    const registry = seededNonClaudeRegistry()
+    registry.applyOverlay(new Map([
+      ['custom-9', { fullId: 'custom-9', shortId: 'custom-9', label: 'Custom 9' }],
+    ]))
+    registry.updateModels([{ value: 'gpt-6-astra', displayName: 'GPT-6 Astra', description: '' }])
+    const ids = registry.getModels().map((m) => m.id).sort()
+    assert.deepEqual(ids, ['custom-9', 'gpt-6-astra'],
+      'the overlay row survives the refresh; the static seed does not')
   })
 })

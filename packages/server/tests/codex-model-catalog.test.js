@@ -762,37 +762,38 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
   // #7757 review (the critical) — the one-direction roster check is this
   // repo's four-times-filed defect (#7199/#7216/#7544/#7639): the test above
   // asserts the discovered ids are PRESENT and never asks what else is. Pin
-  // both directions, including the deviation, so #7761 cannot be "fixed"
-  // without a deliberate edit here.
-  it('the registry entry list is discovered UNION the constructor-captured statics — today\'s DEVIATION, pinned', async () => {
+  // both directions.
+  //
+  // #7761 FLIPPED THIS ON PURPOSE. It pinned the UNION as a known deviation
+  // ("when it becomes the two discovered ids, update it here on purpose") —
+  // this is that edit. `updateModels`' #3075 static-seed union is now scoped to
+  // the Claude registry, so a discovered codex roster REPLACES at the wire, and
+  // the `gpt-4.1[1m]` chip that rode in on the re-added `gpt-4.1` row (#7747)
+  // is gone with it.
+  it('the registry entry list is EXACTLY the discovered roster — no constructor-captured statics (#7761)', async () => {
     const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
     await getProvider('codex').refreshModels({ client, windows: new Map([['gpt-5.5', 272000]]) })
     const ids = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
     // REPLACE holds at CodexSession.getFallbackModels()…
     assert.deepEqual(CodexSession.getFallbackModels().map((m) => m.id), ['gpt-6-astra', 'gpt-5.5'])
-    // …and does NOT hold at the wire. `getRegistryForProvider` captured the
-    // six statics at construction (models.js:1526, always while the catalog is
-    // UNSET) and `updateModels` merges every one the refresh omitted back in
-    // (models.js:851-866). `gpt-4.1[1m]` is the 1M synthesis (models.js:869-905)
-    // firing on the re-added gpt-4.1 row — a Claude id convention on an OpenAI
-    // registry, tracked as #7747.
-    assert.deepEqual(ids, [
-      'gpt-4.1',
-      'gpt-4.1[1m]',
-      'gpt-4o',
-      'gpt-5',
-      'gpt-5-codex',
-      'gpt-5.5',
-      'gpt-6-astra',
-      'o1',
-      'o3',
-    ], 'this list is the DEVIATION #7761 fixes — when it becomes the two discovered ids, update it here on purpose')
+    // …and now holds at the wire too.
+    assert.deepEqual(ids, ['gpt-5.5', 'gpt-6-astra'],
+      'the wire roster must be the discovered one and nothing else')
     // Stated as a direction, not only as a literal, so the intent survives a
-    // future roster edit: every static the refresh did not discover is present.
+    // future roster edit: every static the refresh did NOT discover is absent.
+    // `getRegistryForProvider` still captures the six statics at construction
+    // (always while the catalog is UNSET) — the fix is that they no longer ride
+    // the union back in, so this is the assertion that goes red if the gate is
+    // dropped.
     for (const stale of ['gpt-5-codex', 'gpt-4.1', 'gpt-4o', 'o1', 'o3']) {
-      assert.equal(ids.includes(stale), true,
-        `${stale} is NOT in the discovered roster and still reaches the wire — that is #7761`)
+      assert.equal(ids.includes(stale), false,
+        `${stale} is NOT in the discovered roster and must not reach the wire — that is #7761`)
     }
+    // …and the Claude-only `[1m]` synthesis (#7747) minted `gpt-4.1[1m]` off
+    // the re-added `gpt-4.1` row's 1M window. No re-added row, and the gate
+    // besides: assert the convention itself never appears on this registry.
+    assert.equal(ids.some((id) => id.endsWith('[1m]')), false,
+      `a Claude-CLI [1m] id convention must never appear on the codex registry, got ${ids.join(',')}`)
   })
 
   // #7757 review — `CodexSession.resolvedBinary` re-runs execFileSync('which')
