@@ -287,6 +287,16 @@ the catalog and is deliberately kept for a catalog that is wrong or unreachable
 and leaving it set makes a catalog that never arrived indistinguishable from one
 that did.
 
+That tri-state is worth naming, because "unrestricted" and "restricted to six
+ids" are both wrong descriptions of codex today. **Catalog in hand** → its ids
+are authoritative at both gates (`set_model` and session creation). **No catalog**
+(cold daemon, an unresolved or failed probe, a binary below the `model/list`
+floor) → unrestricted; any id is passed through to the binary. The two are
+different facts and are never collapsed, so a probe that wedged does not silently
+empty the picker. Where the catalog comes from, and what it does and does not
+carry — notably **no context window** — is documented in
+[Where the model list comes from](../../docs/providers.md#where-the-model-list-comes-from-modellist).
+
 An opted-in provider passes the model id through verbatim and lets the upstream
 API be the validator. Default is **off** for every provider, so the
 misconfiguration-catching strictness is preserved unless you explicitly opt in.
