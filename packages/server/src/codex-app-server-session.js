@@ -155,6 +155,10 @@ export class CodexAppServerSession extends BaseSession {
   static getAllowedModels() { return CodexSession.getAllowedModels() }
   static getFallbackModels() { return CodexSession.getFallbackModels() }
   static getModelMetadata(id) { return CodexSession.getModelMetadata(id) }
+  // #7731 — delegated for the same reason `refreshModels` is: `getProvider('codex')`
+  // resolves THIS class, so a declaration that lives only on CodexSession is
+  // invisible to anything that asks the provider registry.
+  static get deprecatedSeedModelIds() { return CodexSession.deprecatedSeedModelIds }
   // #7726 — REQUIRED, not decorative. `providers.js` registers
   // `PROVIDERS['codex'] = CodexSession` with the models registry, but
   // `getProvider('codex')` returns THIS class (#6616) and that is what

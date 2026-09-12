@@ -356,6 +356,41 @@ const CODEX_MODEL_METADATA = Object.freeze({
   'o3':          { label: 'o3',           contextWindow: 200_000 },
 })
 
+/**
+ * #7731 (GUARD-1) — the ids of `CODEX_MODEL_METADATA` that the shipped binary
+ * NO LONGER OFFERS, declared rather than inferred.
+ *
+ * The seed above is a hand-maintained list sitting beside a set that moves with
+ * OpenAI's releases, which is this repo's #1 recurring defect shape. #7726
+ * removed its authority (the binary's `model/list` is the roster) but left it
+ * free to ROT: a row nothing serves any more keeps its label/window lookup and
+ * keeps seeding the cold-boot picker, and nothing goes red.
+ *
+ * This roster is what the parity guard (`tests/model-catalog-parity.test.js`)
+ * measures the seed against: every seed id must be either present in the
+ * producer's own catalog or named HERE, and every id named here must still be
+ * in the seed. A retired model therefore has to be declared in a diff instead
+ * of lingering, and a stale declaration cannot outlive the row it describes.
+ *
+ * All six are listed today because none of them is in the roster codex-cli
+ * 0.154.0 serves (`gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna,
+ * gpt-5.5, gpt-5.3-codex-spark` — recorded on epic #7721, comment 5644101381,
+ * and restated at the top of `codex-model-catalog.js`). "Deprecated" here means
+ * exactly that and nothing more: not offered by the binary this repo has
+ * evidence for, kept as a label/window LOOKUP for a historical id. Nothing
+ * reads this set at runtime — it changes no roster, no validation and no wire
+ * field, so a row's presence here is a claim about the producer, never a
+ * behaviour change.
+ */
+const CODEX_DEPRECATED_SEED_IDS = Object.freeze(new Set([
+  'gpt-5-codex',
+  'gpt-5',
+  'gpt-4.1',
+  'gpt-4o',
+  'o1',
+  'o3',
+]))
+
 // #7727 — `CODEX_ALLOWED_MODELS` is DELETED, not merely unreferenced. It was
 // `Object.keys(CODEX_MODEL_METADATA)`, returned verbatim by
 // `getAllowedModels()`, and it is the frozen-roster lockout this issue retires:
@@ -642,6 +677,21 @@ export class CodexSession extends JsonlSubprocessSession {
       return Object.freeze(getCodexCatalogRows().map((row) => Object.freeze(catalogEntry(row))))
     }
     return CODEX_FALLBACK_MODELS
+  }
+
+  /**
+   * #7731 — the ids of this provider's IN-REPO seed that the producer no longer
+   * offers (see `CODEX_DEPRECATED_SEED_IDS`). A fresh Set per call so a caller
+   * cannot widen the declaration for everyone; nothing in the runtime reads it.
+   *
+   * The parity guard treats "a provider with a catalog source AND an in-repo
+   * seed" as required to declare this — a provider that gains a catalog source
+   * and forgets it goes red rather than acquiring a seed nothing can retire.
+   *
+   * @returns {Set<string>}
+   */
+  static get deprecatedSeedModelIds() {
+    return new Set(CODEX_DEPRECATED_SEED_IDS)
   }
 
   /**
