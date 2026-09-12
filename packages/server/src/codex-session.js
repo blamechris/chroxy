@@ -192,11 +192,23 @@ export function resolveCodexSandbox(override) {
  * metacharacters can't escape.
  *
  * - `model` is interpolated into `-c model="${model}"` *without* re-validation
- *   here. **Callers MUST pre-validate the model ID against
- *   `CodexSession.getAllowedModels()` before calling.** The production gate is
- *   `handleSetModel` in `handlers/settings-handlers.js`, which rejects any
- *   value not in the per-provider allowlist before `session.setModel()`
- *   writes to `this.model`.
+ *   here. **The caller-side gate is TRI-STATE since #7727 and is NOT an
+ *   allowlist in general** — `CodexSession.getAllowedModels()` returns the
+ *   binary's own catalog ids when it has one and `null` (unrestricted) when it
+ *   does not, so pre-#7727 statements that this argument is always one of six
+ *   compiled-in ids are no longer true. Read that as: on the unrestricted
+ *   branch this receives an arbitrary non-empty string the operator asked for
+ *   (`handleSetModel` still rejects a non-string / whitespace-only id, and
+ *   `providers.allowAnyModel` could already produce exactly this before
+ *   #7727).
+ *
+ *   What keeps that safe is the invariant stated above and NOT the allowlist:
+ *   `spawn()` without a shell, so the value is one argv element and no shell
+ *   metacharacter can escape. A quote inside it does not split the element or
+ *   add a second `-c` override — it makes `model="…"…` an invalid TOML value
+ *   that Codex CLI rejects with its own error. `tests/codex-session.test.js`
+ *   pins that argv shape against a hostile id so the claim is executed rather
+ *   than asserted in prose.
  *
  * - `threadId` (#3865) is **trusted because it comes from Codex CLI's own
  *   `thread.started` JSONL stdout** — captured in `_processJsonlLine`, never
@@ -252,8 +264,12 @@ export function buildCodexArgs(text, model, threadId = null, sandboxOverride = u
 // stamped `provenance: 'catalogued'` so a hand-maintained row is LABELLED as
 // hand-maintained instead of masquerading as provider truth (the #7348 class).
 //
-// It is still the source of truth for `set_model` validation
-// (getAllowedModels) — making the catalog authoritative there is #7727.
+// #7727 finished the demotion: this table is NO LONGER a validation roster at
+// all. It is consumed by exactly two things — `CODEX_FALLBACK_MODELS` (the
+// cold-boot picker) and `getModelMetadata`'s label/window LOOKUP for a still-
+// known id. `getAllowedModels()` reads the catalog and nothing else; there is
+// deliberately no `CODEX_ALLOWED_MODELS` constant here for a future edit to
+// reach for.
 //
 // Context-window values come from the OpenAI model docs; `contextWindow` is
 // used both in the token-usage HUD and as the Codex-side override for the
@@ -278,9 +294,15 @@ const CODEX_MODEL_METADATA = Object.freeze({
   'o3':          { label: 'o3',           contextWindow: 200_000 },
 })
 
-const CODEX_ALLOWED_MODELS = Object.freeze(Object.keys(CODEX_MODEL_METADATA))
-
-const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
+// #7727 — `CODEX_ALLOWED_MODELS` is DELETED, not merely unreferenced. It was
+// `Object.keys(CODEX_MODEL_METADATA)`, returned verbatim by
+// `getAllowedModels()`, and it is the frozen-roster lockout this issue retires:
+// every model the binary actually serves today (gpt-5.5, gpt-6-astra, …) was
+// rejected by it, leaving `providers.allowAnyModel: ["codex"]` as the only way
+// to run codex at all (#6378). Removing the NAME is the structural half of the
+// fix — a later edit cannot `return` a constant that does not exist, and this
+// file no longer holds a six-id array for one to reach for.
+const CODEX_FALLBACK_MODELS = Object.freeze(Object.keys(CODEX_MODEL_METADATA).map(id => {
   const meta = CODEX_MODEL_METADATA[id]
   return Object.freeze({
     id,
@@ -446,12 +468,60 @@ export class CodexSession extends JsonlSubprocessSession {
   }
 
   /**
-   * Model IDs this provider accepts in `set_model`. Returns a plain array so
-   * the settings handler can surface it to the client on rejection.
-   * @returns {string[]}
+   * #7727 — TRI-STATE model validation, read by BOTH gates:
+   * `getProviderAllowedModels` (handlers/settings-handlers.js, the `set_model`
+   * path) and `_resolveCreateSessionPlan` (session-manager.js, the
+   * create-session path).
+   *
+   *   - **catalog in hand** → its ids, and they are AUTHORITATIVE. The binary
+   *     answered `model/list`; anything it did not name cannot be started, so
+   *     rejecting is the provider's own truth rather than a chroxy opinion.
+   *   - **no catalog** (never probed, probe failed, or the binary answered
+   *     with ZERO rows) → `null`, i.e. UNRESTRICTED. Both gates map a
+   *     non-array to "accept any non-empty id verbatim" — the ollama rule
+   *     (#5418) — and the id is then validated by codex itself.
+   *
+   * Two returns are forbidden here, and each has its own red-proof in
+   * `tests/codex-model-validation.test.js`:
+   *
+   *   - **the static seed.** "I could not ask" collapsing back into "these
+   *     six" is precisely the lockout #7726/#7727 exist to remove, and it is
+   *     the shape `anthropic-compatible-session.js:405-412` uses
+   *     (`catalogIds -> entry.models -> null`) — correct THERE, because its
+   *     middle rung is an operator-declared list, and wrong here, because
+   *     ours is a hand-maintained seed that no longer matches any shipped
+   *     binary. Deliberately NOT copied.
+   *   - **an empty array.** It is the dangerous near-miss: `session-manager`
+   *     skips it (`length > 0`) while `set_model` treats it as a DENY-ALL
+   *     (`[]` is truthy, `[].includes(x)` is false) — so the same value means
+   *     "unvalidated" at one gate and "nothing is allowed" at the other, and
+   *     it reads as an authoritative allowlist to every future reader. A
+   *     zero-row answer therefore takes the `null` branch, exactly like a
+   *     failed probe: `hasCodexCatalog()` is false for BOTH, and
+   *     `getCodexCatalogState()` is what tells them apart when that matters.
+   *
+   * The catalog is read DIRECTLY — not through `getFallbackModels()` and not
+   * through the models registry. The registry's roster is
+   * `discovered ∪ the statics captured at construction` (the #7761 deviation
+   * recorded on #7757: `createModelsRegistry` snapshots `getFallbackModels()`
+   * once, always before the first probe resolves, and `updateModels` merges
+   * the captured rows back), so validating against it would accept a stale
+   * hand-maintained id the binary does not serve. `tests/codex-model-
+   * validation.test.js` pins that divergence in both directions.
+   *
+   * `providers.allowAnyModel: ["codex"]` (#6378) is now a redundant
+   * workaround rather than the only way to run this provider — it still
+   * short-circuits both gates ahead of this method, and is deliberately kept.
+   *
+   * @returns {string[]|null} the catalog ids, or null = unrestricted.
    */
   static getAllowedModels() {
-    return CODEX_ALLOWED_MODELS
+    // A fresh array per call: the catalog rows are frozen, but the ARRAY a
+    // caller receives must not be a handle onto module state (the
+    // deepseek/anthropic-compatible rule — a caller `.push()`ing into the
+    // allowlist must not widen it for everyone).
+    if (hasCodexCatalog()) return getCodexCatalogRows().map((row) => row.id)
+    return null
   }
 
   /**

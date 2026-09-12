@@ -65,6 +65,19 @@ const PROVIDER_MODELS_UNRESTRICTED = Symbol('provider-models-unrestricted')
  *   - `null` — no method / unknown provider / method threw: use the
  *     global allowlist (conservative legacy behaviour).
  *
+ * A provider may move between the first two states at RUNTIME. `codex`
+ * (#7727) and the `anthropicCompatible` / `openaiCompatible` entries with
+ * live discovery return an array once their catalog is in hand and a
+ * non-array before that, so nothing here may cache the answer or assume a
+ * provider is permanently restricted.
+ *
+ * NOTE for anyone adding a provider: an EMPTY array is not "unrestricted"
+ * here. It is truthy, so it takes the allowlist branch below and
+ * `[].includes(model)` rejects every id — a total lockout, and one that
+ * `session-manager.js`'s copy of this gate does NOT reproduce (it guards on
+ * `length > 0` and skips validation instead). A provider with nothing to
+ * assert must return a NON-ARRAY, never `[]` (#7727).
+ *
  * @param {string|undefined} providerName - Session's registered provider name
  * @returns {string[]|typeof PROVIDER_MODELS_UNRESTRICTED|null}
  */

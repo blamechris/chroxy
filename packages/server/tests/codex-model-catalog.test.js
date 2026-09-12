@@ -719,10 +719,16 @@ describe('CodexSession — the catalog drives the picker statics', () => {
     assert.equal(meta.provenance, 'discovered')
   })
 
-  it('getAllowedModels is UNCHANGED by the catalog (validation semantics are #7727)', () => {
-    const before = CodexSession.getAllowedModels()
+  it('getAllowedModels MOVES with the catalog (#7727 flipped this: it used to be pinned as unchanged)', () => {
+    // #7726 shipped this assertion inverted — "the catalog does NOT move
+    // getAllowedModels" — because CDX-2 deliberately left validation alone and
+    // wanted a deliberate edit here when CDX-3 landed. This is that edit. The
+    // full tri-state (unrestricted when unset, both gates, the empty-array
+    // near-miss) lives in tests/codex-model-validation.test.js; what is pinned
+    // HERE is only that the catalog module is what feeds it.
+    assert.equal(CodexSession.getAllowedModels(), null, 'no catalog → unrestricted, NOT the six-row seed')
     applyCodexCatalog(stampContextWindows(parseModelListResult(LIVE_MODEL_LIST), new Map()))
-    assert.deepEqual(CodexSession.getAllowedModels(), before)
+    assert.deepEqual(CodexSession.getAllowedModels(), ['gpt-6-astra', 'gpt-5.5'])
   })
 })
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { CodexSession } from '../src/codex-session.js'
 
 // #6605 Phase 1 — the codex app-server DRIVING layer. These pin the JSON-RPC
 // transport routing and the app-server-notification → Chroxy-event mapping
@@ -304,7 +305,13 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     assert.equal(CodexAppServerSession.providerName, 'codex')
     assert.equal(CodexAppServerSession.apiKeyEnv, 'OPENAI_API_KEY')
     assert.ok(CodexAppServerSession.resolvedBinary, 'resolvedBinary delegates')
-    assert.ok(Array.isArray(CodexAppServerSession.getAllowedModels()))
+    // #7727 — getAllowedModels is TRI-STATE (catalog ids, else null =
+    // unrestricted), so `Array.isArray` is no longer the invariant; the
+    // DELEGATION is. Asserting identity with CodexSession's answer catches the
+    // failure this line was here for (a delegation that silently stops
+    // forwarding) in BOTH catalog states, where an isArray check now passes
+    // for a hardcoded array and fails for the correct unrestricted answer.
+    assert.deepEqual(CodexAppServerSession.getAllowedModels(), CodexSession.getAllowedModels())
   })
 })
 

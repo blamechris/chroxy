@@ -930,6 +930,24 @@ describe('CodexSession', () => {
       assert.equal(args[idx + 1], 'model="o3"')
     })
 
+    it('an off-roster model id stays ONE argv element — no split, no second -c (#7727)', () => {
+      // #7727 made getAllowedModels() tri-state, so this function's doc no
+      // longer gets to say its `model` argument is one of six compiled-in ids:
+      // on the unrestricted branch it is whatever the operator asked for. What
+      // actually keeps that safe is spawn-without-a-shell, and this executes
+      // that claim instead of asserting it in prose (#7646: a guard that only
+      // asserts a comment's spelling proves nothing).
+      const hostile = 'x" trust_level="trusted'
+      const args = buildCodexArgs('hi', hostile)
+      const cIdxs = args.reduce((acc, a, i) => (a === '-c' ? [...acc, i] : acc), [])
+      assert.equal(cIdxs.length, 1, `exactly one -c override: ${JSON.stringify(args)}`)
+      // The whole thing is a single argv element: nothing was split on the
+      // quote or the space, so no second config key was introduced. Codex's own
+      // TOML parse is what rejects the malformed value.
+      assert.equal(args[cIdxs[0] + 1], `model="${hostile}"`)
+      assert.equal(args.filter((a) => typeof a === 'string' && a.includes('trust_level')).length, 1)
+    })
+
     it('always passes --skip-git-repo-check (#3834)', () => {
       // Codex exec refuses non-trusted (non-git) dirs without this flag and
       // exits 1 with no diagnostic the user can see. Chroxy owns its own

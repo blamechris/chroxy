@@ -760,25 +760,27 @@ Most of Chroxy's stack already lets a new model flow through with **no Chroxy re
 - **Claude** (`claude-sdk`/`-cli`/`-tui`/docker) — the Agent SDK's live `supportedModels()` push refreshes the registry at runtime; a new `claude-*` id is servable immediately (a release is only needed for accurate *pricing*, which otherwise degrades to `cost=null`).
 - **`anthropicCompatible` / `openaiCompatible`** endpoints — add a model via the config `models` array or live [model discovery](#model-discovery).
 - **`ollama`** — any `ollama pull`ed id passes through; the local daemon validates.
+- **`codex`** (since #7727) — the app-server's own `model/list` **is** the allowlist. Chroxy accepts exactly what the installed `codex` binary reports it can run, and accepts **anything** while it has not been able to ask. `providers.allowAnyModel: ["codex"]` is no longer needed to serve a new OpenAI model and should be removed from configs that carry it only for that reason — a codex setup that still needs it is evidence the catalog is not reaching the validator, not a working configuration.
 
-The exception is the **static-allowlist subprocess providers — `gemini`, `codex`, `deepseek`** — whose accepted models are a fixed list compiled into the provider class. By default an unlisted id is hard-rejected (so a Claude id sent to a Gemini session can't silently respawn the CLI with a bad `-m` arg). To call a model the provider's API supports but Chroxy's list doesn't carry yet, opt the provider into **unrestricted** validation:
+The exception is the **static-allowlist subprocess providers — `gemini` and `deepseek`** — whose accepted models are a fixed list compiled into the provider class. By default an unlisted id is hard-rejected (so a Claude id sent to a Gemini session can't silently respawn the CLI with a bad `-m` arg). To call a model the provider's API supports but Chroxy's list doesn't carry yet, opt the provider into **unrestricted** validation:
 
 ```json
 {
   "providers": {
-    "allowAnyModel": ["gemini", "codex", "deepseek"]
+    "allowAnyModel": ["gemini", "deepseek"]
   }
 }
 ```
 
-Listed providers then behave like `ollama`: an unlisted-but-API-valid model id passes through **verbatim** at both session creation and live `set_model`, and the **upstream API becomes the validator** (an id it doesn't recognize surfaces as the provider's own error on the next turn). The list is **per-provider** — opting in `gemini` does not loosen `codex`.
+Listed providers then behave like `ollama`: an unlisted-but-API-valid model id passes through **verbatim** at both session creation and live `set_model`, and the **upstream API becomes the validator** (an id it doesn't recognize surfaces as the provider's own error on the next turn). The list is **per-provider** — opting in `gemini` does not loosen `deepseek`.
 
 Notes:
 
 - **Default OFF.** Omitting the key keeps the strict, misconfiguration-catching behaviour. Opt in only for providers whose API you track.
 - **A restart is required** — the opt-in is read at startup (it seeds `SessionManager`).
 - **Pricing/context** for an unlisted model is `null` until you add it to the model table or the [`~/.chroxy/models.json` overlay](guides/model-overlay.md) — serving still works; cost just reads `0`.
-- This is the runtime escape hatch for the three release-bound providers; per-provider live discovery (so the list maintains itself) is tracked separately.
+- **`codex` is still accepted here and still short-circuits both gates**, ahead of the catalog — the opt-out is kept deliberately (#7727) so an operator can bypass a catalog that is wrong or unreachable. It is just no longer the way to serve a new OpenAI model, and leaving codex listed while dogfooding will hide a catalog that never arrived.
+- This is the runtime escape hatch for the remaining release-bound providers; codex maintains its own list via live discovery (#7726/#7727), and doing the same for `gemini`/`deepseek` is tracked separately.
 
 ## Selecting a provider
 

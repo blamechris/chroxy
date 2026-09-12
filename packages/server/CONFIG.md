@@ -265,7 +265,7 @@ a typo in one of those is silently ignored rather than warned about.
 
 ### Unrestricted provider models (`providers.allowAnyModel`)
 
-The static-allowlist subprocess providers (e.g. `gemini`, `codex`, `deepseek`)
+The static-allowlist subprocess providers (`gemini`, `deepseek`)
 hard-reject a model id that is not in their built-in list, even when the upstream
 API already serves it — which otherwise forces a chroxy release just to add one.
 `providers.allowAnyModel` is an array of provider ids that opt out of that check
@@ -274,10 +274,18 @@ API already serves it — which otherwise forces a chroxy release just to add on
 ```json
 {
   "providers": {
-    "allowAnyModel": ["codex", "gemini"]
+    "allowAnyModel": ["gemini"]
   }
 }
 ```
+
+`codex` is no longer in that bucket (#7727): its allowlist is the installed
+binary's own `model/list` answer, and it accepts any id while it has not been
+able to ask. Listing `codex` here still works — the opt-out is checked ahead of
+the catalog and is deliberately kept for a catalog that is wrong or unreachable
+— but it is no longer needed to serve a model the OpenAI API already exposes,
+and leaving it set makes a catalog that never arrived indistinguishable from one
+that did.
 
 An opted-in provider passes the model id through verbatim and lets the upstream
 API be the validator. Default is **off** for every provider, so the
