@@ -11,13 +11,20 @@ const log = createLogger('codex-app-server')
  * than -32601, so a caller that wants to distinguish a protocol-level refusal
  * from a transport failure needs the code, not the wording. `jsonRpcCode` is
  * for LOGGING and diagnostics — `probeMethod` still degrades on ANY error.
+ *
+ * The numeric code goes on `jsonRpcCode` ONLY — never on `err.code`. That slot
+ * belongs to the session-start error contract: session-manager.js:1766 and
+ * :1804 stamp `if (err && !err.code) err.code = 'START_FAILED'` on a rejection
+ * from `start()`, and any truthy NUMBER parked there short-circuits the stamp.
+ * `session_create_failed.errorCode` would then carry -32600, ws-forwarding.js
+ * puts it on the wire as `session_error.code`, and both clients DROP it —
+ * `ServerSessionErrorSchema.code` is `z.string().optional()`, and store-core's
+ * `parseRawStringField` returns null for a non-string. A codex session that
+ * failed to start would lose its error code entirely.
  */
 function jsonRpcError(error) {
   const err = new Error(error.message || JSON.stringify(error))
-  if (typeof error.code === 'number') {
-    err.code = error.code
-    err.jsonRpcCode = error.code
-  }
+  if (typeof error.code === 'number') err.jsonRpcCode = error.code
   if (error.data !== undefined) err.data = error.data
   return err
 }

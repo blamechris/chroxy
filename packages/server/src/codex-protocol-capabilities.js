@@ -52,7 +52,15 @@ export const CAPABILITY_MIN_VERSIONS = Object.freeze({
   supportsThreadCompacted: CODEX_PROTOCOL_FLOOR,
   supportsMcpServerStatusList: CODEX_PROTOCOL_FLOOR,
   supportsServerRequestResolved: CODEX_PROTOCOL_FLOOR,
-  // Per-turn model/effort overrides that take effect mid-thread.
+  // Per-turn model/effort overrides that take effect mid-thread. Sourced the
+  // same way every floor row is: verified present in codex-cli 0.154.0 via
+  // `codex app-server generate-json-schema --out <dir>` → ClientRequest.json →
+  // `definitions.TurnStartParams`, whose `model` and `effort` are documented
+  // "Override the ... for this turn and subsequent turns". 0.154.0 is the
+  // LOWEST version this repo has evidence for, not the version the feature
+  // landed in — so a binary between the floor and 0.154.0 reads `false` here
+  // even if it in fact has the overrides. That is the conservative direction:
+  // the caller sends no override rather than sending one that is dropped.
   supportsMidTurnSettings: '0.154.0',
 })
 
@@ -161,6 +169,12 @@ export function capabilitiesForVersion(version) {
  * unsupported method as supported. The code is passed through for LOGGING only;
  * nothing branches on it, and nothing reads `error.message`.
  *
+ * The code is read off `jsonRpcCode`, which is where `CodexAppServerClient`
+ * puts it. `err.code` is deliberately NOT consulted: that slot is reserved for
+ * session-manager's `START_FAILED` stamp (see `jsonRpcError` in
+ * codex-app-server-client.js), so a value found there is a Chroxy error code
+ * string, not a JSON-RPC number.
+ *
  * @returns {Promise<{supported: true, result: any} | {supported: false, error: Error, code: number|null}>}
  */
 export async function probeMethod(client, method, params) {
@@ -168,7 +182,7 @@ export async function probeMethod(client, method, params) {
     const result = await client.request(method, params)
     return { supported: true, result }
   } catch (error) {
-    const code = typeof error?.code === 'number' ? error.code : null
+    const code = typeof error?.jsonRpcCode === 'number' ? error.jsonRpcCode : null
     return { supported: false, error, code }
   }
 }

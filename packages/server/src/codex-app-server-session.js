@@ -468,6 +468,15 @@ export class CodexAppServerSession extends BaseSession {
     // handshake, when there is no active turn — and the switch is unreachable in
     // exactly that window. A case down there would be a handler that cannot fire
     // for its own main case.
+    //
+    // This early return DELIBERATELY bypasses `_resetResultTimeout()` and the
+    // #6629/#6856 reconnect-backstop disarm below. Before this change a mid-turn
+    // deprecationNotice reached `default: break` AFTER both, so it counted as
+    // forward progress on the liveness path. It is not: the notice is emitted on
+    // the binary's own schedule and says nothing about whether codex is still
+    // streaming this turn, so treating it as a heartbeat would slide the result
+    // timeout and the reconnect watchdog out on a payload that carries no
+    // evidence of progress. A turn that has genuinely stalled must still time out.
     if (method === 'deprecationNotice') {
       this._onDeprecationNotice(params)
       return
@@ -551,11 +560,21 @@ export class CodexAppServerSession extends BaseSession {
    * #7724 — surface the app-server's own deprecation notice. Logged, not
    * emitted: it is operator-facing information about the codex binary, not a
    * turn event, and the switch's default arm used to swallow it entirely.
+   *
+   * The params shape is `{ summary: string (required), details: string|null }`,
+   * verified against the live codex-cli 0.154.0 binary with
+   * `codex app-server generate-json-schema --out <dir>` →
+   * `ServerNotification.json` → `definitions.DeprecationNoticeNotification`.
+   * There is no `message` field. The JSON.stringify fallback is kept for a
+   * payload that carries neither field (a fork, or a future rename), so a
+   * notice is never swallowed — but it is the FALLBACK, not the main path.
    */
   _onDeprecationNotice(params) {
-    const detail = typeof params?.message === 'string' && params.message
-      ? params.message
-      : JSON.stringify(params ?? null)
+    const summary = typeof params?.summary === 'string' && params.summary ? params.summary : null
+    const details = typeof params?.details === 'string' && params.details ? params.details : null
+    let detail
+    if (summary) detail = details ? `${summary} — ${details}` : summary
+    else detail = JSON.stringify(params ?? null)
     ;(this._log || log).warn(`codex app-server deprecation notice: ${String(detail).slice(0, 500)}`)
   }
 

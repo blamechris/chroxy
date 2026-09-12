@@ -1,5 +1,6 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'events'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -124,7 +125,11 @@ describe('capabilitiesForVersion (#7724)', () => {
   it('an UNPARSEABLE version leaves EVERY gate unknown, never false', () => {
     for (const bad of [null, undefined, '', 'nightly', '0.154']) {
       const caps = capabilitiesForVersion(bad)
-      assert.deepEqual(Object.keys(caps).sort(), [...CAPABILITY_NAMES].sort(), 'every named gate is present')
+      // NO `deepEqual(Object.keys(caps), CAPABILITY_NAMES)` here. `caps` is built
+      // by iterating CAPABILITY_NAMES, so that comparison has the same roster on
+      // both sides and cannot go red under any mutation — #7424 verbatim. The
+      // loop below carries the real coverage: a gate missing from `caps` reads
+      // back `undefined`, which is not UNKNOWN, so it fails on its own name.
       for (const name of CAPABILITY_NAMES) {
         assert.equal(caps[name], UNKNOWN, `${name} for ${JSON.stringify(bad)} must be a cannot-check, not a no`)
       }
@@ -148,7 +153,11 @@ describe('capabilitiesForVersion (#7724)', () => {
   })
 
   it('supportsMidTurnSettings turns on at 0.154.0, not before', () => {
-    assert.equal(CAPABILITY_MIN_VERSIONS.supportsMidTurnSettings, '0.154.0')
+    // No `assert.equal(CAPABILITY_MIN_VERSIONS.supportsMidTurnSettings, '0.154.0')`
+    // — that restates the table against its own literal and proves nothing. The
+    // boundary assertions below still go red if the row moves, and they describe
+    // the BEHAVIOUR the row exists for. The row's source is in the table comment:
+    // TurnStartParams.model/.effort, verified present in codex-cli 0.154.0.
     assert.equal(capabilitiesForVersion('0.153.9').supportsMidTurnSettings, false)
     assert.equal(capabilitiesForVersion('0.154.0-alpha.3').supportsMidTurnSettings, false, 'a prerelease of the gating version is below it')
     assert.equal(capabilitiesForVersion('0.154.0').supportsMidTurnSettings, true)
@@ -175,9 +184,13 @@ describe('probeMethod (#7724)', () => {
   function rejectingClient(error) {
     return { request: async () => { throw error } }
   }
+  // Mirrors what CodexAppServerClient's `jsonRpcError` actually produces: the
+  // numeric code lands on `jsonRpcCode`, and `err.code` is left FREE for
+  // session-manager's START_FAILED stamp. The round-trip test at the bottom of
+  // this describe drives a real client so this helper cannot drift from it.
   function jsonRpcErr(code, message) {
     const e = new Error(message)
-    e.code = code
+    e.jsonRpcCode = code
     return e
   }
 
@@ -225,7 +238,32 @@ describe('probeMethod (#7724)', () => {
   it('the numeric code is passed through for logging, and is null when absent', async () => {
     assert.equal((await probeMethod(rejectingClient(jsonRpcErr(-32600, 'x')), 'm')).code, -32600)
     assert.equal((await probeMethod(rejectingClient(new Error('boom')), 'm')).code, null)
-    assert.equal((await probeMethod(rejectingClient(Object.assign(new Error('boom'), { code: 'ENOENT' })), 'm')).code, null, 'a non-numeric code is not a JSON-RPC code')
+    assert.equal((await probeMethod(rejectingClient(Object.assign(new Error('boom'), { jsonRpcCode: 'ENOENT' })), 'm')).code, null, 'a non-numeric code is not a JSON-RPC code')
+  })
+
+  it('`err.code` is NOT read as a JSON-RPC code — that slot holds Chroxy error codes', async () => {
+    // session-manager.js:1766/:1804 stamp `err.code = 'START_FAILED'` onto any
+    // start() rejection, so an error that has been through that path carries a
+    // STRING there. If probeMethod ever reads `error.code` again, a numeric one
+    // parked there by a future client change would also break the stamp itself.
+    const stamped = Object.assign(new Error('codex app-server exited (code=1)'), { code: -32600 })
+    const r = await probeMethod(rejectingClient(stamped), 'model/list', {})
+    assert.equal(r.supported, false, 'still a degrade — ANY error is')
+    assert.equal(r.code, null, '`code` is not where the JSON-RPC code lives')
+  })
+
+  it('a REAL client rejection round-trips into probeMethod (the helper cannot drift)', async () => {
+    // Built by the production path rather than by hand: if `jsonRpcError` stops
+    // setting `jsonRpcCode`, or moves it back onto `code`, this goes red even
+    // though every hand-rolled fixture above would keep passing.
+    const c = new CodexAppServerClient({})
+    c._child = { stdin: { write: () => {} } }
+    const pending = c.request('model/list', {})
+    c._dispatch({ jsonrpc: '2.0', id: 1, error: { code: -32600, message: 'Invalid request: unknown variant `model/list`' } })
+    const real = await pending.then(() => null, (e) => e)
+    const r = await probeMethod(rejectingClient(real), 'model/list', {})
+    assert.equal(r.supported, false)
+    assert.equal(r.code, -32600, 'the code the real client set is the one probeMethod reports')
   })
 
   it('a handshake with NO version string still gets a catalog via the probe', async () => {
@@ -256,9 +294,10 @@ describe('CodexAppServerClient — JSON-RPC error codes (#7724)', () => {
     const err = await p.then(() => null, (e) => e)
     assert.ok(err instanceof Error)
     assert.equal(err.message, 'Invalid request: unknown variant `model/list`')
-    assert.equal(err.code, -32600)
     assert.equal(err.jsonRpcCode, -32600)
     assert.deepEqual(err.data, { hint: 'x' })
+    assert.equal(err.code, undefined,
+      '`code` MUST stay free — session-manager.js:1766 only stamps START_FAILED when it is falsy')
   })
 
   it('an error response with no code still rejects (message preserved)', async () => {
@@ -269,6 +308,55 @@ describe('CodexAppServerClient — JSON-RPC error codes (#7724)', () => {
     const err = await p.then(() => null, (e) => e)
     assert.equal(err.message, 'boom')
     assert.equal(err.code, undefined)
+    assert.equal(err.jsonRpcCode, undefined)
+  })
+
+  it('a JSON-RPC rejection from start() still reaches session_create_failed as START_FAILED', async () => {
+    // The contract the `code`/`jsonRpcCode` split exists for, asserted at the
+    // REAL site rather than by restating session-manager's stamp here. The
+    // rejection is produced by the production client path, handed to a provider
+    // whose start() throws it, and read back off the emitted event.
+    const { SessionManager } = await import('../src/session-manager.js')
+    const { registerProvider } = await import('../src/providers.js')
+
+    const c = new CodexAppServerClient({})
+    c._child = { stdin: { write: () => {} } }
+    const pending = c.request('thread/start', {})
+    c._dispatch({ jsonrpc: '2.0', id: 1, error: { code: -32600, message: 'Invalid request: unknown variant `thread/start`' } })
+    const rejection = await pending.then(() => null, (e) => e)
+    assert.equal(rejection.jsonRpcCode, -32600, 'precondition: the rejection really carries a JSON-RPC code')
+
+    class CodexRejectProvider extends EventEmitter {
+      constructor(opts) {
+        super()
+        this.cwd = opts.cwd
+        this.model = opts.model || null
+        this.permissionMode = opts.permissionMode || 'approve'
+        this.isRunning = false
+        this.resumeSessionId = opts.resumeSessionId || null
+        this.bootedModel = null
+      }
+      static get capabilities() { return {} }
+      async start() { throw rejection }
+      destroy() {}
+      interrupt() {}
+      sendMessage() {}
+      setModel() {}
+      setPermissionMode() {}
+    }
+    registerProvider('test-cdx1-jsonrpc-start-fail', CodexRejectProvider)
+
+    const stateFile = join(mkdtempSync(join(tmpdir(), 'chroxy-cdx1-sm-')), 'state.json')
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const events = []
+    mgr.on('session_create_failed', (e) => events.push(e))
+    mgr.createSession({ cwd: '/tmp', provider: 'test-cdx1-jsonrpc-start-fail' })
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    assert.equal(events.length, 1, 'the fresh-session failure surfaced')
+    assert.equal(events[0].errorCode, 'START_FAILED',
+      'a numeric JSON-RPC code on `err.code` would short-circuit the stamp and put -32600 on the wire, where ServerSessionErrorSchema.code (z.string()) drops it')
   })
 })
 
@@ -277,10 +365,15 @@ describe('CodexAppServerClient — JSON-RPC error codes (#7724)', () => {
 // refuse a session.
 // ---------------------------------------------------------------------------
 
-function mkSession(extraOpts = {}) {
+/**
+ * Cleanup is registered with `t.after`, NOT returned for the test body to call
+ * as its last statement: a failing assertion aborts the body and would strand
+ * the chroxy-cdx1-* tmpdir. `t.after` runs on the failing path too.
+ */
+function mkSession(t, extraOpts = {}) {
   const sk = mkdtempSync(join(tmpdir(), 'chroxy-cdx1-'))
-  const s = new CodexAppServerSession({ cwd: '/tmp', skillsDir: sk, repoSkillsDir: null, ...extraOpts })
-  return { s, cleanup: () => rmSync(sk, { recursive: true, force: true }) }
+  t.after(() => rmSync(sk, { recursive: true, force: true }))
+  return new CodexAppServerSession({ cwd: '/tmp', skillsDir: sk, repoSkillsDir: null, ...extraOpts })
 }
 
 /**
@@ -301,35 +394,33 @@ function stubTransport({ userAgent, requests }) {
 }
 
 describe('CodexAppServerSession — handshake capture (#7724)', () => {
-  it('a fresh session is all-UNKNOWN before the handshake', () => {
-    const { s, cleanup } = mkSession()
+  it('a fresh session is all-UNKNOWN before the handshake', (t) => {
+    const s = mkSession(t)
     assert.equal(s.codexVersion, null)
     assert.equal(s.codexUserAgent, null)
     for (const name of CAPABILITY_NAMES) {
       assert.equal(s.codexCapabilities[name], UNKNOWN, `${name} is unknown before initialize()`)
     }
-    cleanup()
   })
 
   it('start() captures the version and derives the capabilities', async (t) => {
     t.after(() => mock.restoreAll())
     const requests = []
     stubTransport({ userAgent: LIVE_0_154, requests })
-    const { s, cleanup } = mkSession()
+    const s = mkSession(t)
     await s.start()
     assert.equal(s.codexVersion, '0.154.0')
     assert.equal(s.codexUserAgent, LIVE_0_154)
     assert.equal(s.codexCapabilities.supportsMidTurnSettings, true)
     assert.equal(s.codexCapabilities.supportsModelList, true)
     assert.equal(s._threadId, 'thr-1', 'the thread still started')
-    cleanup()
   })
 
   it('a version BELOW the floor still starts a session AND still sends turn/start', async (t) => {
     t.after(() => mock.restoreAll())
     const requests = []
     stubTransport({ userAgent: 'codex/0.100.3 (Mac OS 15.0; arm64) unknown', requests })
-    const { s, cleanup } = mkSession()
+    const s = mkSession(t)
     await s.start()
     assert.equal(s._threadId, 'thr-1', 'a low version NEVER refuses the connection')
     assert.equal(s._processReady, true)
@@ -339,79 +430,116 @@ describe('CodexAppServerSession — handshake capture (#7724)', () => {
     const methods = requests.map(([m]) => m)
     assert.ok(methods.includes('thread/start'), '...the thread still started')
     assert.ok(methods.includes('turn/start'), '...and the turn still went out')
-    cleanup()
   })
 
   it('an UNPARSEABLE userAgent still starts a session, and leaves the gates unknown', async (t) => {
     t.after(() => mock.restoreAll())
     const requests = []
     stubTransport({ userAgent: 'unknown (Mac OS 26.6.2; arm64) unknown', requests })
-    const { s, cleanup } = mkSession()
+    const s = mkSession(t)
     await s.start()
     assert.equal(s._threadId, 'thr-1')
     assert.equal(s.codexVersion, null)
     for (const name of CAPABILITY_NAMES) {
       assert.equal(s.codexCapabilities[name], UNKNOWN, `${name} falls through to a probe`)
     }
-    cleanup()
   })
 
   it('a handshake result with NO userAgent field at all still starts a session', async (t) => {
     t.after(() => mock.restoreAll())
     const requests = []
     stubTransport({ userAgent: undefined, requests })
-    const { s, cleanup } = mkSession()
+    const s = mkSession(t)
     await s.start()
     assert.equal(s._threadId, 'thr-1')
     assert.equal(s.codexVersion, null)
     assert.equal(s.codexUserAgent, null)
     assert.equal(s.codexCapabilities.supportsModelList, UNKNOWN)
-    cleanup()
   })
 })
 
+// The params shape below is the VERBATIM schema of the live codex-cli 0.154.0
+// binary: `codex app-server generate-json-schema --out <dir>` →
+// ServerNotification.json → definitions.DeprecationNoticeNotification is
+//   { "properties": { "summary": {"type":"string"},
+//                     "details": {"type":["string","null"]} },
+//     "required": ["summary"] }
+// There is no `message` field. An earlier revision of this file invented one,
+// so all four fixtures exercised a payload the binary never sends and the
+// handler's primary branch was dead against every real notice — the log only
+// worked via the JSON.stringify fallback, truncating a JSON blob at 500 chars
+// instead of printing a human summary. Prove-it-red for this: flip the handler
+// back to `params?.message` and the two `summary` rows below go red.
 describe('CodexAppServerSession — deprecationNotice (#7724)', () => {
-  function mkLogged() {
-    const { s, cleanup } = mkSession()
+  function mkLogged(t) {
+    const s = mkSession(t)
     const lines = []
     s._log = { info: (m) => lines.push(['info', m]), warn: (m) => lines.push(['warn', m]), error: (m) => lines.push(['error', m]), debug: () => {} }
-    return { s, cleanup, lines }
+    return { s, lines }
   }
+  const warnings = (lines) => lines.filter(([lvl, m]) => lvl === 'warn' && /deprecation/i.test(m))
+  // WHOLE-LINE equality, not `includes`. A substring assertion passes via the
+  // JSON.stringify fallback — the payload text is in there either way — so it
+  // cannot tell "read the summary field" from "stringify the whole params".
+  // That is exactly how the invented `{message}` shape survived four tests.
+  const line = (summary) => `codex app-server deprecation notice: ${summary}`
 
-  it('is logged when it arrives BETWEEN turns (the handshake window)', () => {
-    const { s, cleanup, lines } = mkLogged()
+  it('is logged when it arrives BETWEEN turns (the handshake window)', (t) => {
+    const { s, lines } = mkLogged(t)
     assert.equal(s._activeTurn, null, 'no active turn — the switch below is unreachable here')
-    s._onNotification({ method: 'deprecationNotice', params: { message: 'app-server v1 is deprecated; migrate to v2' } })
-    const warned = lines.filter(([lvl, m]) => lvl === 'warn' && /deprecation/i.test(m))
+    s._onNotification({ method: 'deprecationNotice', params: { summary: 'app-server v1 is deprecated; migrate to v2', details: null } })
+    const warned = warnings(lines)
     assert.equal(warned.length, 1, 'exactly one deprecation warning')
-    assert.ok(warned[0][1].includes('app-server v1 is deprecated'), 'the notice text is carried into the log')
-    cleanup()
+    assert.equal(warned[0][1], line('app-server v1 is deprecated; migrate to v2'),
+      'the summary field is what reaches the log — not a stringified payload')
   })
 
-  it('is logged DURING a turn too, and is not mistaken for turn content', () => {
-    const { s, cleanup, lines } = mkLogged()
+  it('the optional `details` are appended to the summary', (t) => {
+    const { s, lines } = mkLogged(t)
+    s._onNotification({
+      method: 'deprecationNotice',
+      params: { summary: 'thread/start.config is going away', details: 'pass the fields on turn/start instead' },
+    })
+    const warned = warnings(lines)
+    assert.equal(warned.length, 1)
+    assert.equal(warned[0][1], line('thread/start.config is going away — pass the fields on turn/start instead'))
+  })
+
+  it('is logged DURING a turn too, and is not mistaken for turn content', (t) => {
+    const { s, lines } = mkLogged(t)
     const events = []
     for (const e of ['stream_delta', 'error', 'tool_start']) s.on(e, (p) => events.push([e, p]))
     s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
-    s._onNotification({ method: 'deprecationNotice', params: { message: 'thread/start.config is going away' } })
-    assert.equal(lines.filter(([lvl, m]) => lvl === 'warn' && /deprecation/i.test(m)).length, 1)
+    s._onNotification({ method: 'deprecationNotice', params: { summary: 'thread/start.config is going away', details: null } })
+    const warned = warnings(lines)
+    assert.equal(warned.length, 1)
+    assert.equal(warned[0][1], line('thread/start.config is going away'), 'the summary reaches the log mid-turn too')
     assert.deepEqual(events, [], 'it emits no session events')
-    cleanup()
   })
 
-  it('a notice with no message field logs the payload rather than swallowing it', () => {
-    const { s, cleanup, lines } = mkLogged()
+  it('a notice matching NEITHER field logs the payload rather than swallowing it', (t) => {
+    // The fallback, for a fork or a future rename — deliberately NOT the path
+    // the real binary takes.
+    const { s, lines } = mkLogged(t)
     s._onNotification({ method: 'deprecationNotice', params: { deprecated: 'turn/start.summary' } })
-    const warned = lines.filter(([lvl, m]) => lvl === 'warn' && /deprecation/i.test(m))
+    const warned = warnings(lines)
     assert.equal(warned.length, 1)
     assert.ok(warned[0][1].includes('turn/start.summary'), 'the raw payload is preserved')
-    cleanup()
   })
 
-  it('an unrelated between-turns notification is still ignored', () => {
-    const { s, cleanup, lines } = mkLogged()
+  it('a non-string / empty summary falls back rather than logging an empty notice', (t) => {
+    const { s, lines } = mkLogged(t)
+    s._onNotification({ method: 'deprecationNotice', params: { summary: '', details: 'only details' } })
+    s._onNotification({ method: 'deprecationNotice', params: { summary: { nested: 'object' } } })
+    const warned = warnings(lines)
+    assert.equal(warned.length, 2)
+    assert.ok(warned[0][1].includes('only details'), 'an empty summary still surfaces the payload')
+    assert.ok(warned[1][1].includes('nested'), 'a non-string summary still surfaces the payload')
+  })
+
+  it('an unrelated between-turns notification is still ignored', (t) => {
+    const { s, lines } = mkLogged(t)
     s._onNotification({ method: 'item/started', params: { item: { type: 'commandExecution', id: 'i1' } } })
-    assert.equal(lines.filter(([lvl, m]) => lvl === 'warn' && /deprecation/i.test(m)).length, 0)
-    cleanup()
+    assert.equal(warnings(lines).length, 0)
   })
 })
