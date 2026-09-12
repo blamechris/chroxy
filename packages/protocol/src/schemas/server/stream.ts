@@ -420,7 +420,58 @@ export const ServerAvailableModelsEntrySchema = z.object({
   // value drops the field but does NOT reject the whole entry. Preserves
   // prior behaviour: malformed `contextWindow` is tolerated, not fatal.
   contextWindow: z.unknown().optional(),
+  // #7723 — additive optional metadata. Same fail-soft contract as
+  // `contextWindow`: `z.unknown()` here so a value of an unexpected shape
+  // (or a `provenance` string a NEWER server invented) can never reject the
+  // whole entry on an OLDER client; the handler narrows each field and drops
+  // only the field it cannot use. See MODEL_ENTRY_METADATA_KEYS.
+  provenance: z.unknown().optional(),
+  reasoningLevels: z.unknown().optional(),
+  defaultReasoningLevel: z.unknown().optional(),
 })
+
+/**
+ * How a model row got into the registry (#7723, epic #7721).
+ *
+ * - `discovered` — reported by the provider at runtime (a live model list).
+ * - `catalogued` — read from a static in-repo catalogue for that provider.
+ * - `manual` — supplied by the operator (the `~/.chroxy/models.json` overlay).
+ *
+ * Carried so a hand-maintained row can stay in the picker while being
+ * LABELLED as hand-maintained, instead of masquerading as provider truth
+ * (the #7348 class). Producers only ever STAMP a value they know; nothing
+ * infers one, so an entry with no `provenance` means "not recorded", never
+ * "manual".
+ *
+ * The wire schema deliberately does NOT `z.enum()` this: a value outside the
+ * union must drop the FIELD, not the model, so an older client keeps working
+ * against a newer server. `handleAvailableModels` in `@chroxy/store-core` is
+ * the one place that narrows against this list.
+ */
+export const MODEL_PROVENANCE_VALUES = Object.freeze([
+  'discovered',
+  'catalogued',
+  'manual',
+] as const)
+
+export type ModelProvenance = (typeof MODEL_PROVENANCE_VALUES)[number]
+
+/**
+ * The optional metadata keys an `available_models` entry may carry ON TOP of
+ * the `{id,label,fullId}` identity and `contextWindow` (#7723).
+ *
+ * One roster, consumed by every layer that has to move these fields as a
+ * GROUP rather than individually: the server registry copies them through
+ * `updateModels`/`loadCache` with it, and the protocol test asserts it stays
+ * equal to the schema's own optional-metadata keys — so adding a field to
+ * `ServerAvailableModelsEntrySchema` without adding it here goes red instead
+ * of being silently dropped on the way to the wire.
+ */
+export const MODEL_ENTRY_METADATA_KEYS = Object.freeze([
+  'provenance',
+  'reasoningLevels',
+  'defaultReasoningLevel',
+] as const)
 
 export const ServerAvailableModelsSchema = z.object({
   type: z.literal('available_models'),

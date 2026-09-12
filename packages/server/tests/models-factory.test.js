@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, statSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createModelsRegistry, canonicalStringify } from '../src/models.js'
+import { createModelsRegistry, canonicalStringify, DEFAULT_CONTEXT_WINDOW, FALLBACK_MODELS } from '../src/models.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 import { POSIX_PERM_SKIP } from './test-helpers.js'
 
@@ -633,5 +633,346 @@ describe('canonicalStringify', () => {
     const obj = { a: 1 }
     obj.self = obj
     assert.throws(() => canonicalStringify(obj), /circular/i)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7723 — model entries carry the caller's contextWindow and the additive
+// metadata fields, and loadCache()'s stale prune is scoped to the registry
+// whose grammar it was written for.
+// ---------------------------------------------------------------------------
+
+// A non-Claude-shaped registry, matching what getRegistryForProvider() builds
+// for a provider with no static metadata entry for the id: identity deriveId
+// and the 200k default window.
+function nonClaudeRegistry(cachePath) {
+  return createModelsRegistry({
+    fallbackModels: [],
+    deriveId: (id) => id,
+    resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+    ...(cachePath ? { cachePath: () => cachePath } : {}),
+  })
+}
+
+// The same registry WITH a getModelMetadata hook — the shape
+// getRegistryForProvider() actually builds for a real non-Claude provider,
+// whose session class publishes a discovered catalogue through applyCatalog()
+// before updateModels() runs. Without a hook every `providerMeta` in
+// withModelMetadata() is null, so the precedence between the caller's entry
+// and the provider's metadata is unasserted whichever way it is written
+// (#7749). `meta` is a plain object keyed by fullId.
+function nonClaudeRegistryWithMetadata(meta, cachePath) {
+  return createModelsRegistry({
+    fallbackModels: [],
+    deriveId: (id) => id,
+    resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+    getModelMetadata: (fullId) => meta[fullId] ?? null,
+    ...(cachePath ? { cachePath: () => cachePath } : {}),
+  })
+}
+
+describe('updateModels carries the caller-supplied metadata (#7723)', () => {
+  it("a discovery result's contextWindow reaches getModels() with that exact number", () => {
+    // #7723 is a PRECEDENCE CLARIFICATION, not a repair of a dropped window on
+    // the live path: `refreshDiscoveredModels()` publishes the catalogue through
+    // `applyCatalog` BEFORE it calls updateModels (model-discovery.js), so the
+    // discovered window already reached the chain one slot below, as
+    // `providerMeta.contextWindow`. What the caller's own key additionally
+    // carries is (a) a window that sink refuses — `applyCatalog` stores only
+    // `Number.isInteger` values, so a fractional one became null and fell
+    // through to the 200k default — and (b) any caller with no provider
+    // metadata hook at all, which is the shape this test exercises.
+    const registry = nonClaudeRegistry()
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.ok(entry, 'the discovered model should be in the registry')
+    assert.equal(entry.contextWindow, 272_000,
+      `expected the caller's 272000, got ${entry.contextWindow} (${DEFAULT_CONTEXT_WINDOW} means the caller's value was discarded)`)
+  })
+
+  it('an SDK-learned override still beats the caller-supplied window', () => {
+    const registry = nonClaudeRegistry()
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
+    // A window observed from real usage is authoritative and must survive the
+    // next refresh even when that refresh reports a smaller catalogue number.
+    assert.equal(registry.updateContextWindow('gpt-5.5', 400_000), true)
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 400_000)
+  })
+
+  it('an unusable caller window falls through to the registry heuristic', () => {
+    const registry = nonClaudeRegistry()
+    registry.updateModels([
+      { value: 'a', displayName: 'A', contextWindow: 0 },
+      { value: 'b', displayName: 'B', contextWindow: '272000' },
+      { value: 'c', displayName: 'C', contextWindow: null },
+      { value: 'd', displayName: 'D' },
+      // Infinity is the only row whose REJECTION DEPENDS on the
+      // Number.isFinite() clause: every other guard in usableContextWindow()
+      // passes it through (it is a number and it is > 0). NaN reaches that
+      // clause too — `typeof NaN === 'number'` — but it is independently
+      // rejected by `cw > 0`, so it cannot pin the clause. Without this row
+      // that clause is untested code (deleting it leaves the suite green).
+      { value: 'e', displayName: 'E', contextWindow: Infinity },
+      { value: 'f', displayName: 'F', contextWindow: NaN },
+    ])
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      const entry = registry.getModels().find((m) => m.fullId === id)
+      assert.equal(entry.contextWindow, DEFAULT_CONTEXT_WINDOW, `${id} should fall back to the heuristic`)
+    }
+  })
+
+  it('carries provenance / reasoningLevels / defaultReasoningLevel through to getModels()', () => {
+    const registry = nonClaudeRegistry()
+    registry.updateModels([{
+      value: 'gpt-5.5',
+      displayName: 'GPT-5.5',
+      contextWindow: 272_000,
+      provenance: 'discovered',
+      reasoningLevels: ['low', 'medium', 'high', 'xhigh'],
+      defaultReasoningLevel: 'medium',
+    }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.provenance, 'discovered')
+    assert.deepEqual(entry.reasoningLevels, ['low', 'medium', 'high', 'xhigh'])
+    assert.equal(entry.defaultReasoningLevel, 'medium')
+  })
+
+  it("the caller's metadata beats the provider's static table, field by field (#7749)", () => {
+    // withModelMetadata(entry, m, providerMeta) — the CALLER first. With no
+    // getModelMetadata hook providerMeta is null at every site and this
+    // ordering is unasserted; swapping the two arguments stays green.
+    const registry = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low'],
+        defaultReasoningLevel: 'low',
+      },
+    })
+    registry.updateModels([{
+      value: 'gpt-5.5',
+      displayName: 'GPT-5.5',
+      contextWindow: 272_000,
+      provenance: 'discovered',
+      reasoningLevels: ['low', 'high'],
+      defaultReasoningLevel: 'high',
+    }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 272_000, 'the live discovery window must beat the static table')
+    assert.equal(entry.provenance, 'discovered', "the caller's provenance must beat the table's")
+    assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
+    assert.equal(entry.defaultReasoningLevel, 'high')
+  })
+
+  it("the provider's table fills a field the caller omits (#7749)", () => {
+    // The other half of the same precedence: first source that CARRIES a
+    // usable value wins, so an absent caller key falls through rather than
+    // blanking the field.
+    const registry = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low', 'medium'],
+      },
+    })
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5' }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 128_000, "the table's window fills in when the caller sends none")
+    assert.equal(entry.provenance, 'catalogued')
+    assert.deepEqual(entry.reasoningLevels, ['low', 'medium'])
+    // `assert.equal(…, undefined)` would also pass for a key PRESENT as
+    // undefined, which is not what the message claims — test the key's
+    // existence, not its value.
+    assert.ok(!('defaultReasoningLevel' in entry),
+      `a key NEITHER source carries must stay absent, got keys ${Object.keys(entry).join(',')}`)
+  })
+
+  it('an entry whose source carries none of the new fields gains no new keys', () => {
+    // The additive fields must stay ABSENT rather than materialise as
+    // undefined — the Claude path emits this shape on every refresh and its
+    // wire payload must not change.
+    const registry = createModelsRegistry()
+    registry.updateModels([{ value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' }])
+    for (const entry of registry.getModels()) {
+      assert.deepEqual(Object.keys(entry), ['id', 'label', 'fullId', 'contextWindow'],
+        `unexpected keys on ${entry.fullId}: ${Object.keys(entry).join(',')}`)
+    }
+  })
+
+  it("a synthesized [1m] variant takes the provider's table over the base entry (#7749)", () => {
+    // The synthesis site is the ONE withModelMetadata() call that puts
+    // providerMeta FIRST — `withModelMetadata({…}, providerMeta, m)` — because
+    // a table row keyed on the VARIANT id is about that variant specifically,
+    // while the base entry is only an inheritance fallback. On a registry with
+    // no getModelMetadata hook providerMeta is null and that ordering is
+    // unasserted (swapping the two arguments stays green), so the hook is
+    // wired here and the table row is keyed on `big-1[1m]`, not `big-1`.
+    const registry = nonClaudeRegistryWithMetadata({
+      'big-1[1m]': {
+        id: 'big-1[1m]',
+        label: 'Table Big 1M',
+        fullId: 'big-1[1m]',
+        // Deliberately NO reasoningLevels: the second assertion below proves
+        // the base entry still fills a field the table omits, so this test
+        // pins the ordering AND the inheritance it replaced.
+        provenance: 'catalogued',
+      },
+    })
+    registry.updateModels([{
+      value: 'big-1',
+      displayName: 'Big',
+      contextWindow: 2_000_000,
+      provenance: 'discovered',
+      reasoningLevels: ['low', 'high'],
+    }])
+    const base = registry.getModels().find((m) => m.fullId === 'big-1')
+    assert.equal(base.provenance, 'discovered', 'the base entry keeps its own provenance')
+    const variant = registry.getModels().find((m) => m.fullId === 'big-1[1m]')
+    assert.ok(variant, 'the 1M variant should be synthesized')
+    assert.equal(variant.provenance, 'catalogued',
+      `the variant's table row must beat the base entry, got ${variant.provenance} ('discovered' means the two withModelMetadata sources are swapped)`)
+    assert.deepEqual(variant.reasoningLevels, ['low', 'high'],
+      'a field the table omits still falls through to the base entry')
+  })
+})
+
+describe('loadCache stale prune is scoped to the Claude registry (#7723)', () => {
+  let dir
+  let cachePath
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-models-cache-scope-'))
+    cachePath = join(dir, 'models-cache.json')
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('a discovered non-Claude id AND its window survive a save then load', () => {
+    // The Claude grammar (`claude-<family>-<major>`) matches nothing here, so
+    // an unscoped prune degenerates to "keep only ids literally in the static
+    // seed" and deletes every discovered model on the next boot — taking the
+    // learned window with it.
+    const r1 = nonClaudeRegistry(cachePath)
+    r1.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
+    assert.equal(r1.saveCache(cachePath), true)
+
+    const r2 = nonClaudeRegistry(cachePath)
+    assert.equal(r2.loadCache(cachePath), true, 'the cached non-Claude entry should not be pruned')
+    const entry = r2.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.ok(entry, `gpt-5.5 should survive the reload, got ${r2.getModels().map((m) => m.fullId).join(',')}`)
+    assert.equal(entry.contextWindow, 272_000, 'the learned window should survive the reload')
+  })
+
+  it('the additive metadata survives a save then load', () => {
+    const r1 = nonClaudeRegistry(cachePath)
+    r1.updateModels([{
+      value: 'gpt-5.5',
+      displayName: 'GPT-5.5',
+      contextWindow: 272_000,
+      provenance: 'discovered',
+      reasoningLevels: ['low', 'high'],
+      defaultReasoningLevel: 'high',
+    }])
+    assert.equal(r1.saveCache(cachePath), true)
+
+    const r2 = nonClaudeRegistry(cachePath)
+    assert.equal(r2.loadCache(cachePath), true)
+    const entry = r2.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.provenance, 'discovered')
+    assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
+    assert.equal(entry.defaultReasoningLevel, 'high')
+  })
+
+  it("the cached entry's metadata beats the provider's static table on reload (#7749)", () => {
+    // loadCache's withModelMetadata(entry, m, providerMeta) — the CACHED row
+    // first: the cache is what the provider REPORTED, the table is what the
+    // repo happens to know. Needs a getModelMetadata hook to be assertable at
+    // all; without one providerMeta is null and either ordering passes.
+    writeFileSync(cachePath, JSON.stringify({
+      models: [{
+        id: 'gpt-5.5',
+        fullId: 'gpt-5.5',
+        label: 'GPT-5.5',
+        contextWindow: 272_000,
+        provenance: 'discovered',
+        reasoningLevels: ['low', 'high'],
+      }],
+    }))
+    const r = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low'],
+        defaultReasoningLevel: 'low',
+      },
+    }, cachePath)
+    assert.equal(r.loadCache(cachePath), true)
+    const entry = r.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 272_000, 'the cached window must beat the static table')
+    assert.equal(entry.provenance, 'discovered', "the cached row's provenance must beat the table's")
+    assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
+    assert.equal(entry.defaultReasoningLevel, 'low',
+      'a key only the table carries still fills in')
+  })
+
+  it('the Claude registry STILL drops a retired claude family', () => {
+    // Scoping the prune must not have weakened it where it applies.
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
+        { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
+      ],
+      defaultModelId: 'sonnet-4-6',
+    }))
+    const r = createModelsRegistry()
+    assert.equal(r.loadCache(cachePath), true)
+    const loaded = r.getModels().map((m) => m.fullId)
+    assert.ok(!loaded.includes('claude-sonnet-3-5-20240620'),
+      `the retired sonnet-3-5 family should be dropped, got ${loaded.join(',')}`)
+    assert.ok(loaded.includes('claude-sonnet-4-6'), 'the current family should be kept')
+  })
+
+  it('a registry seeded with the Claude roster itself prunes too', () => {
+    // The discriminator is the ROSTER, not the provider name: a registry handed
+    // the Claude roster gets the Claude grammar.
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
+        { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
+      ],
+    }))
+    const r = createModelsRegistry({ fallbackModels: FALLBACK_MODELS })
+    assert.equal(r.loadCache(cachePath), true)
+    const loaded = r.getModels().map((m) => m.fullId)
+    assert.ok(!loaded.includes('claude-sonnet-3-5-20240620'),
+      `the retired family should be dropped, got ${loaded.join(',')}`)
+  })
+
+  it('a non-Claude registry still drops entries missing the identity fields', () => {
+    // Scoping removes the FAMILY prune, not the well-formedness filter.
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'gpt-5.5', fullId: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 },
+        { id: 'no-fullid', label: 'Broken' },
+        { fullId: 'no-id', label: 'Broken' },
+        { id: 7, fullId: 'bad-types', label: 'Broken' },
+      ],
+    }))
+    const r = nonClaudeRegistry(cachePath)
+    assert.equal(r.loadCache(cachePath), true)
+    assert.deepEqual(r.getModels().map((m) => m.fullId), ['gpt-5.5'])
   })
 })
