@@ -22,6 +22,7 @@ import { describe, it, expect } from 'vitest'
 import { DISPATCH_FIXTURES, type ContractFixture, type FixtureExpectation } from './fixtures'
 import {
   makeClientEnv,
+  DASHBOARD_FLAT_MIRROR_KEYS,
   type AdapterResult,
   type ClientKind,
 } from './client-adapters'
@@ -181,6 +182,27 @@ describe('behavioral-contract fixtures — shared dispatch table (#5556.5)', () 
       const stable = (m: { type?: unknown; content?: unknown }) => ({ type: m.type, content: m.content })
       expect(app.added.map(stable), `${fx.name}: addMessage parity`).toEqual(dash.added.map(stable))
       expect(Object.keys(app.sessions).sort()).toEqual(Object.keys(dash.sessions).sort())
+      // 3. The FLAT writes are compared client-to-client, not merely each
+      // against the fixture. `assertExpectation` uses toMatchObject for object
+      // slices, so a client that writes an EXTRA flat field — exactly the
+      // dashboard-only `extendModelsPatch` divergence #7728 removed — stays
+      // green against the shared expectation while the two stores drift. Without
+      // this, the guard against re-divergence is the deletion of that hook
+      // rather than a test.
+      //
+      // The dashboard's active-session flat-mirror is the ONE documented flat
+      // divergence (`DASHBOARD_FLAT_MIRROR_KEYS`, applied by its `updateSession`
+      // and not by the app's), so those keys are excluded — from the DASHBOARD
+      // side only, so an app handler that starts writing one of them directly
+      // still goes red. Everything else must be byte-identical.
+      const withoutDashboardMirror = Object.fromEntries(
+        Object.entries(dash.flat).filter(
+          ([k]) => !(DASHBOARD_FLAT_MIRROR_KEYS as readonly string[]).includes(k),
+        ),
+      )
+      expect(app.flat, `${fx.name}: flat parity (outside the dashboard mirror)`).toEqual(
+        withoutDashboardMirror,
+      )
     })
   }
 })

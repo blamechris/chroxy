@@ -1308,10 +1308,29 @@ describe('shared dispatch table', () => {
       expect(byProvider.codex.models.map((m) => m.id)).toEqual(['gpt-5.5'])
     })
 
-    it('available_models is owned-but-no-op for a non-array payload (preserves the rosters)', () => {
+    it('available_models is owned-but-no-op for a non-array payload (writes nothing at all)', () => {
       const env = makeAdapter()
       expect(dispatch(env, { type: 'available_models' })).toBe(true)
       expect(env.flat.modelsByProvider).toBeUndefined()
+    })
+
+    it('a non-array payload PRESERVES the rosters already stored', () => {
+      // The assertion above starts from a fresh adapter, so "preserves" was not
+      // what it tested — absence without a control. Seed a real roster first and
+      // require it to come back byte-identical.
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        defaultModel: 'gpt-5.5',
+        provider: 'codex',
+      })
+      const before = JSON.parse(JSON.stringify(env.flat.modelsByProvider))
+      expect(Object.keys(before)).toEqual(['codex'])
+
+      expect(dispatch(env, { type: 'available_models' })).toBe(true)
+      expect(dispatch(env, { type: 'available_models', models: 'nope', provider: 'codex' })).toBe(true)
+      expect(env.flat.modelsByProvider).toEqual(before)
     })
 
     it('cost_update applies the per-session sessionCost patch + app mirror when wired', () => {
