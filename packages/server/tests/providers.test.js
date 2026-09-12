@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, unlinkSync, statSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
@@ -202,18 +203,66 @@ describe('Provider Registry', () => {
   // both directions (a one-direction roster check is how #7199/#7216/#7544
   // each survived). Subclasses that spread a parent's capabilities (docker-sdk)
   // declare nothing literally and correctly appear in neither set.
+  //
+  // Three things the first cut of this test got wrong, all of the
+  // docs/false-safety-guards.md kind — the comment claimed more than the code
+  // performed (#7290/#7291):
+  //   1. it read only the FLAT `src/*.js`, so the 14 subdirectories were
+  //      invisible: a session class under `src/channels/` that scanned for the
+  //      keyword and omitted the flag would be in neither set, and the
+  //      both-directions invariant would be satisfied by the omission. It now
+  //      walks `src/**` and reports paths relative to `src/`.
+  //   2. the importer regex matched only a single-quoted static `'./…'`
+  //      specifier, so a dynamic `import()`, a double-quoted specifier, a
+  //      re-export or (now) a `'../detect-thinking-keyword.js'` from a
+  //      subdirectory dropped the module out of `importers` — a miss on the
+  //      DANGEROUS side, since failing to declare the flag then reads green.
+  //      It now matches the module's filename anywhere in the source.
+  //   3. both regexes ran over raw source, so a COMMENT was evidence. That
+  //      cuts both ways now that (2) is loose: three session classes mention
+  //      detect-thinking-keyword.js in prose, and a future "inherits
+  //      thinkingKeywords: true from the parent" note would have joined
+  //      `declarers`. Comments are stripped before either regex runs.
   it('thinkingKeywords: true is declared by exactly the modules that import detect-thinking-keyword.js', () => {
-    const srcDir = new URL('../src/', import.meta.url)
+    const srcRoot = fileURLToPath(new URL('../src/', import.meta.url))
+
+    // Strip comments so neither regex can be satisfied by prose. Block
+    // comments go wholesale; a `//` run-on only when it is NOT the `//` of a
+    // URL scheme, so `'https://…'` in a string survives intact.
+    const stripComments = (text) => text
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+
+    const walk = (dir, prefix = '') => {
+      const out = []
+      for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const rel = prefix + entry.name
+        if (entry.isDirectory()) out.push(...walk(join(dir, entry.name), rel + '/'))
+        else if (entry.name.endsWith('.js')) out.push(rel)
+      }
+      return out
+    }
+
+    const files = walk(srcRoot)
+    assert.ok(files.length > 50,
+      `expected the src walk to find the whole tree, got ${files.length} files — a walk that returned nothing would make both sets empty and this test vacuous`)
+
     const importers = []
     const declarers = []
-    for (const name of readdirSync(srcDir).filter(f => f.endsWith('.js')).sort()) {
-      if (name === 'detect-thinking-keyword.js') continue
-      const src = readFileSync(new URL(name, srcDir), 'utf8')
-      if (/from\s+'\.\/detect-thinking-keyword\.js'/.test(src)) importers.push(name)
-      if (/\bthinkingKeywords:\s*true\b/.test(src)) declarers.push(name)
+    for (const rel of files) {
+      if (rel === 'detect-thinking-keyword.js') continue
+      const src = stripComments(readFileSync(join(srcRoot, rel), 'utf8'))
+      if (/detect-thinking-keyword\.js/.test(src)) importers.push(rel)
+      if (/\bthinkingKeywords:\s*true\b/.test(src)) declarers.push(rel)
     }
     assert.ok(importers.length > 0,
       'expected at least one src module to import detect-thinking-keyword.js — an empty roster would satisfy this test for the wrong reason')
+    // A known positive, not a roster: if the comment stripper ever ate a real
+    // import AND the declaration beside it, both sets would shrink together
+    // and the deepEqual below would still pass. This is the one file that must
+    // always be in `importers`, so that failure mode goes red instead.
+    assert.ok(importers.includes('sdk-session.js'),
+      'sdk-session.js imports detect-thinking-keyword.js — if it is missing here the scan itself is broken, not the source')
     assert.deepEqual(declarers, importers,
       'every module that scans for the magic keyword must declare thinkingKeywords: true, and no module that does not scan may declare it')
   })
