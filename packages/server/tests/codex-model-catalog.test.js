@@ -789,30 +789,34 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
     const ids = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
     // REPLACE holds at CodexSession.getFallbackModels()…
     assert.deepEqual(CodexSession.getFallbackModels().map((m) => m.id), ['gpt-6-astra', 'gpt-5.5'])
-    // …and now holds at the wire too.
-    assert.deepEqual(ids, ['gpt-5.5', 'gpt-6-astra'],
-      'the wire roster must be the discovered one and nothing else')
-    // Stated as a direction, not only as a literal, so the intent survives a
-    // future roster edit: every static the refresh did NOT discover is absent.
-    // `getRegistryForProvider` still captures the statics at construction
-    // (always while the catalog is UNSET) — the fix is that they no longer ride
-    // the union back in, so this is the assertion that goes red if the gate is
-    // dropped.
+
+    // Stated as a direction FIRST, so the failure names WHICH static came back
+    // instead of printing two arrays — and so this loop is the assertion that
+    // actually fires when the gate is dropped, rather than dying behind the
+    // exact-roster `deepEqual` below. `getRegistryForProvider` still captures
+    // the statics at construction (always while the catalog is UNSET); the fix
+    // is that they no longer ride the union back in.
     //
-    // #7765 review — DERIVED from the roster, not transcribed beside it. The
-    // hand-written list here named five ids where CODEX_MODEL_METADATA has six
-    // (`gpt-5` was missing), which is docs/false-safety-guards.md's first
-    // recurring cause — a hardcoded list beside a set that grows — in the very
-    // assertion written to be the roster's both-directions check.
-    const stale = statics.filter((id) => !ids.includes(id))
+    // #7765 re-review — the stale roster is derived from this test's own INPUT,
+    // never from the subject's output. `statics.filter((id) => !ids.includes(id))`
+    // followed by `assert.equal(ids.includes(id), false)` asserts the predicate
+    // the list was filtered by: it cannot go red for ANY value of `ids`, which
+    // is docs/false-safety-guards.md's #7424 shape (an expectation derived from
+    // its own subject). `DISCOVERED` is the fixture handed to the stub client,
+    // so the loop is independent of the registry and reds when a static returns.
+    // Transcribing the roster instead is the OTHER false-safety shape (#7192, a
+    // hardcoded list beside a set that grows) — hence derived from both ends.
+    const DISCOVERED = LIVE_MODEL_LIST.data.filter((row) => !row.hidden).map((row) => row.id)
+    const stale = statics.filter((id) => !DISCOVERED.includes(id))
     assert.ok(stale.length > 0, 'the seed must contain ids this refresh did not discover, or this loop asserts nothing')
     for (const id of stale) {
       assert.equal(ids.includes(id), false,
         `${id} is NOT in the discovered roster and must not reach the wire — that is #7761`)
     }
-    // …and the derivation above cannot hide a static that DID come back: the
-    // exact-roster assertion two lines up already fixes `ids`, so a re-added
-    // static would be excluded from `stale` and caught there instead.
+    // …and now the exact pin, which also closes the other direction (a
+    // discovered id that went MISSING).
+    assert.deepEqual(ids, [...DISCOVERED].sort(),
+      'the wire roster must be the discovered one and nothing else')
     // …and the Claude-only `[1m]` synthesis (#7747) minted `gpt-4.1[1m]` off
     // the re-added `gpt-4.1` row's 1M window. No re-added row, and the gate
     // besides: assert the convention itself never appears on this registry.
