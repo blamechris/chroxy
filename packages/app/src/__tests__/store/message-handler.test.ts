@@ -7177,3 +7177,74 @@ describe('sendIfOpen — uninitialized store guard (#5657)', () => {
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });
+
+// Issue #7696: the factory's `silent` default is a BRANCH SELECTOR, and nothing
+// pinned it.
+//
+// `message-handler.ts` reads `ctx.silent` at three sites — the identity-refusal
+// path, `auth_fail` and `pair_fail` — where it gates whether `Alert.alert(...)`
+// fires at all. Measured before these rows existed: flipping the factory default
+// from `false` to `true` left **all 2446 tests across 185 suites passing**, exit
+// 0. Every call site that takes the default would have moved onto the other
+// branch, silently.
+//
+// It was filed rather than folded into #7525 because it was INERT: none of the
+// then-257 call sites exercised those three message types, so the flip changed
+// no verdict. These rows are what make it non-inert — they take the default
+// deliberately, which is the whole point, so passing an explicit `silent: false`
+// here would restore the gap while looking like coverage.
+//
+// The contrast, measured at the same time: `isReconnect: false` is ALSO a branch
+// selector and IS pinned — flipping it reds 3 cases. So the factory is not
+// uniformly unpinned; `silent` was the outstanding one.
+describe('#7696 — the factory DEFAULT silent gates the failure alerts', () => {
+  it('auth_fail alerts when silent takes its default', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    setStore(createMockStore({}) as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'auth_fail', reason: 'bad token' });
+
+    expect(alertSpy).toHaveBeenCalled();
+    expect(String(alertSpy.mock.calls[0][0])).toBe('Auth Failed');
+  });
+
+  it('pair_fail alerts when silent takes its default', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    setStore(createMockStore({}) as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    _testMessageHandler.handle({ type: 'pair_fail', reason: 'pairing_failed' });
+
+    expect(alertSpy).toHaveBeenCalled();
+    expect(String(alertSpy.mock.calls[0][0])).toBe('Pairing Failed');
+  });
+
+  // The OTHER direction, and it is not decoration: without it both rows above
+  // pass for a handler that alerts unconditionally — i.e. with the `!ctx.silent`
+  // guard deleted outright. An assertion that something fires needs the case
+  // where it must not.
+  it('auth_fail does NOT alert when silent is explicitly true', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    setStore(createMockStore({}) as any);
+    _testMessageHandler.setContext(createMockConnectionContext({ silent: true }));
+
+    _testMessageHandler.handle({ type: 'auth_fail', reason: 'bad token' });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('pair_fail does NOT alert when silent is explicitly true', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    setStore(createMockStore({}) as any);
+    _testMessageHandler.setContext(createMockConnectionContext({ silent: true }));
+
+    _testMessageHandler.handle({ type: 'pair_fail', reason: 'pairing_failed' });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+});

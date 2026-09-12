@@ -24,6 +24,26 @@ import type { ConnectionContext } from '../store/types';
  * Pass `overrides` for the per-suite differences that are load-bearing (a
  * reconnect context, a socket whose `send` a test asserts against, …) so the
  * intent stays visible at the call site rather than hiding in a private copy.
+ *
+ * WHICH DEFAULTS GET A PIN, decided in #7696 so the next one is not a fresh
+ * discovery: the ones that SELECT A BRANCH, not all of them. A default the
+ * handler never branches on has nothing to assert about it — a pin there
+ * asserts a string for its own sake, and a test that cannot fail meaningfully
+ * is the thing this repo keeps filing.
+ *
+ * Audited by flipping each default and running the whole app suite:
+ *
+ *   default       flipped to                 result
+ *   url           'ws://mutant.invalid:1'    1 failed   PINNED (#7525)
+ *   isReconnect   true                       3 failed   PINNED (pre-existing)
+ *   silent        true                       2 failed   PINNED (#7696)
+ *   token         'MUTANT-token'             0 failed   not a branch selector
+ *
+ * `token` is carried on the context but never branched on, and `socket` is a
+ * cast stub whose identity each suite overrides when it matters — so neither is
+ * pinned, deliberately. If a handler ever starts branching on one, it joins the
+ * first three: the test to write is the one that goes RED when the default is
+ * flipped, and it must take the default rather than pass the value explicitly.
  */
 export function createMockConnectionContext<
   // Review on #7463 (S1): a typed-return factory checks the BASE literal, but
@@ -51,6 +71,14 @@ export function createMockConnectionContext<
     url: 'wss://test.example.com',
     token: 'test-token',
     isReconnect: false,
+    // PINNED since #7696, and for the same reason `url` is: it SELECTS A
+    // BRANCH. `message-handler.ts` reads it at three sites — the
+    // identity-refusal path, `auth_fail` and `pair_fail` — where it gates
+    // whether `Alert.alert(...)` fires at all. The pin is
+    // "#7696 — the factory DEFAULT silent gates the failure alerts" in
+    // __tests__/store/message-handler.test.ts, and it asserts BOTH directions,
+    // because rows that only assert an alert FIRES also pass for a handler that
+    // alerts unconditionally.
     silent: false,
     // A real WebSocket can't be constructed under jest, and the handler only
     // ever touches `readyState` / `send` / `close` on it. This is the one cast
