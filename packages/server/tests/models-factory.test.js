@@ -673,9 +673,15 @@ function nonClaudeRegistryWithMetadata(meta, cachePath) {
 
 describe('updateModels carries the caller-supplied metadata (#7723)', () => {
   it("a discovery result's contextWindow reaches getModels() with that exact number", () => {
-    // Before #7723 the `contextWindow` key refreshDiscoveredModels() passes was
-    // read by nothing: the window resolved from overrides/providerMeta/heuristic
-    // and every discovered value was replaced by the 200k default.
+    // #7723 is a PRECEDENCE CLARIFICATION, not a repair of a dropped window on
+    // the live path: `refreshDiscoveredModels()` publishes the catalogue through
+    // `applyCatalog` BEFORE it calls updateModels (model-discovery.js), so the
+    // discovered window already reached the chain one slot below, as
+    // `providerMeta.contextWindow`. What the caller's own key additionally
+    // carries is (a) a window that sink refuses — `applyCatalog` stores only
+    // `Number.isInteger` values, so a fractional one became null and fell
+    // through to the 200k default — and (b) any caller with no provider
+    // metadata hook at all, which is the shape this test exercises.
     const registry = nonClaudeRegistry()
     registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
     const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
@@ -702,10 +708,12 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
       { value: 'b', displayName: 'B', contextWindow: '272000' },
       { value: 'c', displayName: 'C', contextWindow: null },
       { value: 'd', displayName: 'D' },
-      // Infinity is the ONLY row here that reaches the Number.isFinite()
-      // clause: it is a number and it is > 0, so every other guard in
-      // usableContextWindow() passes it through. Without this row that
-      // clause is untested code (deleting it leaves the suite green).
+      // Infinity is the only row whose REJECTION DEPENDS on the
+      // Number.isFinite() clause: every other guard in usableContextWindow()
+      // passes it through (it is a number and it is > 0). NaN reaches that
+      // clause too — `typeof NaN === 'number'` — but it is independently
+      // rejected by `cw > 0`, so it cannot pin the clause. Without this row
+      // that clause is untested code (deleting it leaves the suite green).
       { value: 'e', displayName: 'E', contextWindow: Infinity },
       { value: 'f', displayName: 'F', contextWindow: NaN },
     ])
@@ -780,8 +788,11 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     assert.equal(entry.contextWindow, 128_000, "the table's window fills in when the caller sends none")
     assert.equal(entry.provenance, 'catalogued')
     assert.deepEqual(entry.reasoningLevels, ['low', 'medium'])
-    assert.equal(entry.defaultReasoningLevel, undefined,
-      'a key NEITHER source carries must stay absent')
+    // `assert.equal(…, undefined)` would also pass for a key PRESENT as
+    // undefined, which is not what the message claims — test the key's
+    // existence, not its value.
+    assert.ok(!('defaultReasoningLevel' in entry),
+      `a key NEITHER source carries must stay absent, got keys ${Object.keys(entry).join(',')}`)
   })
 
   it('an entry whose source carries none of the new fields gains no new keys', () => {
@@ -796,8 +807,25 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     }
   })
 
-  it('a synthesized [1m] variant inherits the base entry metadata', () => {
-    const registry = nonClaudeRegistry()
+  it("a synthesized [1m] variant takes the provider's table over the base entry (#7749)", () => {
+    // The synthesis site is the ONE withModelMetadata() call that puts
+    // providerMeta FIRST — `withModelMetadata({…}, providerMeta, m)` — because
+    // a table row keyed on the VARIANT id is about that variant specifically,
+    // while the base entry is only an inheritance fallback. On a registry with
+    // no getModelMetadata hook providerMeta is null and that ordering is
+    // unasserted (swapping the two arguments stays green), so the hook is
+    // wired here and the table row is keyed on `big-1[1m]`, not `big-1`.
+    const registry = nonClaudeRegistryWithMetadata({
+      'big-1[1m]': {
+        id: 'big-1[1m]',
+        label: 'Table Big 1M',
+        fullId: 'big-1[1m]',
+        // Deliberately NO reasoningLevels: the second assertion below proves
+        // the base entry still fills a field the table omits, so this test
+        // pins the ordering AND the inheritance it replaced.
+        provenance: 'catalogued',
+      },
+    })
     registry.updateModels([{
       value: 'big-1',
       displayName: 'Big',
@@ -805,10 +833,14 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
       provenance: 'discovered',
       reasoningLevels: ['low', 'high'],
     }])
+    const base = registry.getModels().find((m) => m.fullId === 'big-1')
+    assert.equal(base.provenance, 'discovered', 'the base entry keeps its own provenance')
     const variant = registry.getModels().find((m) => m.fullId === 'big-1[1m]')
     assert.ok(variant, 'the 1M variant should be synthesized')
-    assert.equal(variant.provenance, 'discovered')
-    assert.deepEqual(variant.reasoningLevels, ['low', 'high'])
+    assert.equal(variant.provenance, 'catalogued',
+      `the variant's table row must beat the base entry, got ${variant.provenance} ('discovered' means the two withModelMetadata sources are swapped)`)
+    assert.deepEqual(variant.reasoningLevels, ['low', 'high'],
+      'a field the table omits still falls through to the base entry')
   })
 })
 
