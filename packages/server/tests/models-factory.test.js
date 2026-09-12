@@ -1198,19 +1198,27 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
 
     it('a cache written by a PRE-FIX build does not re-serve its [1m] rows', () => {
       // `saveCache()` persists `activeModels`, which on a pre-#7747 build
-      // included the synthesized variants — so `gpt-4.1[1m]` is already on disk
+      // included the synthesized variants — so `<id>[1m]` is already on disk
       // for exactly the installs that hit the bug, and the Claude-only prune
       // (#7723) re-served it verbatim after the upgrade.
+      //
+      // #7765 re-review — the base row is a DISCOVERED id, not a member of
+      // STATIC_SEED. The legacy-payload migration below drops the seed rows from
+      // exactly this kind of file, so a seed row here would make the `[1m]`
+      // absence pass because the load emptied out ("a precondition that is
+      // false, so the body never runs"). A discovered 1M row is the faithful
+      // fixture anyway: the synthesis fired off any >=1M row, discovered ones
+      // included.
       writeFileSync(cachePath, JSON.stringify({
         models: [
-          { id: 'gpt-4.1', fullId: 'gpt-4.1', label: 'GPT-4.1', contextWindow: 1_000_000 },
-          { id: 'gpt-4.1[1m]', fullId: 'gpt-4.1[1m]', label: 'GPT-4.1 (1M)', contextWindow: 1_000_000 },
+          { id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 1_000_000 },
+          { id: 'gpt-6-astra[1m]', fullId: 'gpt-6-astra[1m]', label: 'GPT-6 Astra (1M)', contextWindow: 1_000_000 },
         ],
       }))
       const registry = seededNonClaudeRegistry(cachePath)
       assert.equal(registry.loadCache(cachePath), true)
       const ids = registry.getModels().map((m) => m.id)
-      assert.deepEqual(ids, ['gpt-4.1'],
+      assert.deepEqual(ids, ['gpt-6-astra'],
         'the [1m] row is a Claude-CLI id convention no non-Claude send path strips — it must not survive a cache load')
       // Asserted alongside the base row so the absence cannot pass because the
       // load dropped everything (the #7747 test's own discipline).
@@ -1250,6 +1258,156 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
       assert.equal(registry.loadCache(cachePath), true)
       assert.deepEqual(registry.getModels().map((m) => m.id).sort(),
         ['gpt-4.1', 'gpt-5-codex', 'gpt-6-astra', 'o1'])
+    })
+
+    // -----------------------------------------------------------------------
+    // #7765 re-review (the critical) — gating the union closed the re-ADD. The
+    // rows a PRE-FIX build already wrote are still in the file, and the file is
+    // what boots: `saveCache()` persists `activeModels`, which then held
+    // `discovered ∪ statics`, and the non-Claude load keeps every well-formed
+    // row that does not end in `[1m]`. So the six statics were served at boot
+    // and until the first successful refresh — indefinitely when the probe never
+    // succeeds — and once #7766 lands the catalog-backed validator rejects them,
+    // making each an offered chip that 400s.
+    //
+    // The fix is a one-time migration keyed on a schema marker written by
+    // `saveCache()`, healed through the existing prune rewrite. These pin both
+    // states of that marker plus the untouched Claude path.
+    // -----------------------------------------------------------------------
+    describe('a LEGACY cache is migrated once (#7765 re-review)', () => {
+      // A pre-fix payload: two ids the provider actually reported, plus the
+      // static seed the old union folded in on top of them. No `v` marker —
+      // that is what makes it legacy.
+      const LEGACY_PAYLOAD = {
+        models: [
+          { id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 400_000 },
+          { id: 'gpt-5.5', fullId: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 },
+          ...STATIC_SEED.map((m) => ({ ...m })),
+        ],
+      }
+
+      it('drops the static seed, keeps the discovered roster, and heals the file to the current marker', () => {
+        writeFileSync(cachePath, JSON.stringify(LEGACY_PAYLOAD))
+        const registry = seededNonClaudeRegistry(cachePath)
+        assert.equal(registry.loadCache(cachePath), true)
+
+        const ids = registry.getModels().map((m) => m.id).sort()
+        // Direction 1 — the discovered rows (and their learned windows) survive;
+        // the migration must not be a "drop everything" that passes the absence
+        // check for the wrong reason.
+        assert.deepEqual(ids, ['gpt-5.5', 'gpt-6-astra'],
+          'the discovered roster must survive the migration')
+        assert.equal(registry.getModels().find((m) => m.id === 'gpt-5.5').contextWindow, 272_000,
+          'a learned context window must ride through the migration')
+        // Direction 2 — every seed row is gone, named individually.
+        for (const stale of STATIC_SEED.map((m) => m.fullId)) {
+          assert.equal(ids.includes(stale), false,
+            `${stale} was written by a pre-fix build's union and must not be served at boot — that is the #7765 re-review critical`)
+        }
+
+        // …and the file itself is healed, so this is ONE pass and not a filter
+        // that re-runs against the same rows forever.
+        const healed = JSON.parse(readFileSync(cachePath, 'utf8'))
+        assert.equal(healed.v, 2, 'the healed payload must carry the current schema marker')
+        assert.deepEqual(healed.models.map((m) => m.fullId).sort(), ['gpt-5.5', 'gpt-6-astra'],
+          'the healed payload must no longer contain the static seed')
+      })
+
+      it('a payload carrying the current marker is loaded verbatim', () => {
+        // The marker is the whole discriminator: same rows, same registry, and
+        // the statics are now a roster claim the provider reported rather than
+        // the old union's residue.
+        writeFileSync(cachePath, JSON.stringify({ ...LEGACY_PAYLOAD, v: 2 }))
+        const registry = seededNonClaudeRegistry(cachePath)
+        assert.equal(registry.loadCache(cachePath), true)
+        assert.deepEqual(
+          registry.getModels().map((m) => m.fullId).sort(),
+          LEGACY_PAYLOAD.models.map((m) => m.fullId).sort(),
+          'a current-marker payload must be served exactly as written',
+        )
+      })
+
+      it('the CLAUDE path is byte-identical with and without the marker', () => {
+        // The migration is scoped to registries that REPLACE; the Claude loader
+        // must not read the marker at all. Compared against the SAME payload
+        // carrying the marker rather than against a transcribed snapshot, so the
+        // control cannot rot when FALLBACK_MODELS moves — and it goes red the
+        // moment the migration stops being non-Claude-scoped.
+        const claudePayload = {
+          models: [
+            { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
+            { id: 'opus-4-8[1m]', fullId: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', contextWindow: 1_000_000 },
+          ],
+        }
+        const loadClaude = (payload) => {
+          const path = join(dir, `claude-${Math.random().toString(36).slice(2)}.json`)
+          writeFileSync(path, JSON.stringify(payload))
+          const registry = createModelsRegistry({ cachePath: () => path })
+          assert.equal(registry.loadCache(path), true)
+          return JSON.stringify(registry.getModels())
+        }
+        const legacy = loadClaude(claudePayload)
+        assert.equal(legacy, loadClaude({ ...claudePayload, v: 2 }),
+          'the schema marker must change nothing on the Claude path')
+        // …and neither load is the empty/failed one that would make the equality
+        // vacuous: the seed union and the [1m] row both still land.
+        assert.ok(legacy.includes('claude-sonnet-4-6'),
+          `the Claude seed must still be unioned into a legacy payload, got ${legacy}`)
+        assert.ok(legacy.includes('claude-opus-4-8[1m]'),
+          `a Claude [1m] cache row must survive a legacy load, got ${legacy}`)
+      })
+    })
+
+    // -----------------------------------------------------------------------
+    // #7765 re-review — the exemption tracks "has a discovery seam", not
+    // "non-Claude". A provider that declares no `refreshModels` (gemini,
+    // deepseek) never has `updateModels` called on its registry, so its cache is
+    // a snapshot of THIS REPO'S static table, not a roster the provider
+    // reported: REPLACE there means a model added to the static table by a later
+    // release never reaches the picker on an install that has the file.
+    // -----------------------------------------------------------------------
+    describe('a registry with NO discovery seam keeps unioning its seed (#7765 re-review)', () => {
+      // What an install written by an OLDER release holds: one discovered/learned
+      // row plus the statics that existed then. `gpt-4.1` is the row a LATER
+      // release added to the static table.
+      const OLD_RELEASE_CACHE = {
+        models: [
+          { id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 400_000 },
+          { id: 'gpt-5-codex', fullId: 'gpt-5-codex', label: 'GPT-5 Codex', contextWindow: 400_000 },
+          { id: 'o1', fullId: 'o1', label: 'o1', contextWindow: 200_000 },
+        ],
+      }
+
+      it('a NEW static row still reaches the picker through a persisted cache', () => {
+        writeFileSync(cachePath, JSON.stringify(OLD_RELEASE_CACHE))
+        const registry = createModelsRegistry({
+          fallbackModels: STATIC_SEED,
+          deriveId: (id) => id,
+          resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+          hasDiscoverySeam: false,
+          cachePath: () => cachePath,
+        })
+        assert.equal(registry.loadCache(cachePath), true)
+        const ids = registry.getModels().map((m) => m.id).sort()
+        assert.ok(ids.includes('gpt-4.1'),
+          `a static row added after this cache was written must still reach the picker — nothing will ever re-publish it, got ${ids.join(',')}`)
+        assert.deepEqual(ids, ['gpt-4.1', 'gpt-5-codex', 'gpt-6-astra', 'o1'],
+          'the seed unions on top of the cached roster, and the cached rows are preserved')
+      })
+
+      it('…and the SAME cache on a registry WITH a seam replaces instead', () => {
+        // The control, same payload and same seed: a provider that can
+        // re-publish gets #7761's REPLACE, and the legacy migration takes the
+        // seed rows out of the file with it.
+        writeFileSync(cachePath, JSON.stringify(OLD_RELEASE_CACHE))
+        const registry = seededNonClaudeRegistry(cachePath)
+        assert.equal(registry.loadCache(cachePath), true)
+        const ids = registry.getModels().map((m) => m.id).sort()
+        assert.equal(ids.includes('gpt-4.1'), false,
+          `a registry whose provider re-publishes its roster must not union the seed, got ${ids.join(',')}`)
+        assert.deepEqual(ids, ['gpt-6-astra'],
+          'the discovered row is the roster; the statics the old union wrote are migrated out')
+      })
     })
 
     it('an overlay reload in the cache-warmed window does not re-seed the statics', () => {

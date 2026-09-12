@@ -36,6 +36,15 @@ export { DEFAULT_CONTEXT_WINDOW, ONE_M_SUFFIX, resolveClaudeContextWindow, claud
 // for a future disallow — do NOT delete it as dead code.
 export const DISALLOWED_MODEL_IDS = Object.freeze(new Set())
 
+// Schema version stamped into every cache payload `saveCache()` writes (#7776
+// re-review). A payload WITHOUT this marker was written by a build that still
+// unioned the static seed into `activeModels` on every registry, so on a
+// registry that REPLACES its seed the file holds rows the picker must no longer
+// offer — see the one-time migration in `loadCache()`. Bump it only for a
+// change that needs another such migration; the loader treats "marker >= this"
+// as current and anything else as legacy.
+export const MODELS_CACHE_SCHEMA_VERSION = 2
+
 /**
  * True when a model id resolves to a disallowed fullId, normalising the same id
  * shapes the rest of this module supports: a trailing `[1m]` long-context suffix
@@ -514,6 +523,14 @@ function usableContextWindow(source) {
  *   its own roster the union means a retired model never disappears. Set it
  *   only where the seed is a RECOMMENDATION list rather than a roster claim
  *   (ollama: models worth pulling that this machine has not pulled yet).
+ * @param {boolean} [hooks.hasDiscoverySeam] - Whether this provider can ever
+ *   RE-PUBLISH a roster (a static `refreshModels`, or an `updateModels` caller).
+ *   Defaults to true, which is the #7761 behaviour: the refresh is the roster
+ *   and it REPLACES the static seed. Pass false for a provider with no such
+ *   seam (gemini, deepseek) — its cache can only ever be a snapshot of this
+ *   repo's own static table, so the seed keeps unioning at all three sites and
+ *   a statically-added row still reaches the picker on an install that already
+ *   has a cache file.
  * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
  *   loadModelsOverlayResult). Overlay entries SEED the registry like a
  *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
@@ -567,7 +584,24 @@ export function createModelsRegistry(hooks = {}) {
   // three (#5421, pinned in ollama-tags.test.js). Explicit, because #7761's
   // whole complaint is that the union was applied to registries whose premise
   // it did not fit — and a silent default is how that happened.
-  const unionsStaticFallbacks = isClaudeRegistry || hooks.unionsStaticFallbacks === true
+  //
+  // …and so does every provider that has NO DISCOVERY SEAM at all (#7776
+  // re-review). The gate's premise — "a non-Claude roster is what the provider
+  // itself reported" — needs something that reports. `GeminiSession` and
+  // `DeepSeekSession` declare no static `refreshModels`, nothing ever calls
+  // `updateModels` on their registries, and `models-cache.gemini.json` is
+  // therefore a snapshot of THIS REPO'S OWN static table plus learned context
+  // windows, not a provider claim. REPLACE against that file means a row added
+  // to `GEMINI_MODEL_METADATA` by a later release never reaches the picker on
+  // an install that has the file, because no refresh will ever re-publish it —
+  // while `GeminiSession.getAllowedModels()` still accepts it. Derived from the
+  // seam (`hasDiscoverySeam`, wired from `typeof ProviderClass.refreshModels
+  // === 'function'` at `getRegistryForProvider`), never from a list of provider
+  // names, so a provider that GAINS a seam flips automatically.
+  const hasDiscoverySeam = hooks.hasDiscoverySeam !== false
+  const unionsStaticFallbacks = isClaudeRegistry
+    || hooks.unionsStaticFallbacks === true
+    || !hasDiscoverySeam
   // #6381: the CURRENT overlay (swapped by applyOverlay on hot-reload), retained
   // so getOverlayPricing() reflects live edits. The fallback rows don't carry
   // pricing, so pricing is read from this map directly.
@@ -754,6 +788,11 @@ export function createModelsRegistry(hooks = {}) {
       // host. writeFileRestricted handles atomic rename + cleanup
       // internally; no manual rename/unlink wrapper is needed here.
       writeFileRestricted(path, JSON.stringify({
+        // #7776 re-review: the schema marker is what tells the next `loadCache`
+        // this payload was written by a build whose `activeModels` no longer
+        // carries the unioned static seed. Written on every registry (the
+        // Claude loader ignores it) so there is exactly one save path.
+        v: MODELS_CACHE_SCHEMA_VERSION,
         models: activeModels,
         defaultModelId,
         savedAt: Date.now(),
@@ -1157,6 +1196,33 @@ export function createModelsRegistry(hooks = {}) {
           if (minor !== null) fallbackByFamily.get(family).add(minor)
         }
 
+        // #7776 re-review (the critical) — a payload written by a PRE-FIX
+        // build holds `discovered ∪ statics` in `models`, because that is what
+        // `activeModels` was and `saveCache()` persists `activeModels` (written
+        // in production by the context-window ratchet, codex-session.js:794 →
+        // context-window-learn.js:138). Gating the union closed the re-ADD; the
+        // rows were already on disk, so on a registry that REPLACES they were
+        // served at boot and until the first successful refresh — indefinitely
+        // when the probe never succeeds, which is the whole reason `loadCache`
+        // was in scope. Once #7766 lands the catalog-backed validator REJECTS
+        // them, so each is an offered chip that 400s.
+        //
+        // So: on a legacy payload, drop the static seed alongside the `[1m]`
+        // filter below. One-time — the heal-on-prune rewrite at the bottom of
+        // this function persists the result with the current marker, so there
+        // is no second code path and no second pass. A discovered row whose id
+        // COINCIDES with a static is dropped too (a pre-fix payload cannot tell
+        // the two apart); the next refresh re-publishes it, and until then it is
+        // absent rather than offered-and-rejected.
+        //
+        // Scoped to registries that REPLACE: where the seed still unions
+        // (Claude, ollama's recommendation list, a provider with no discovery
+        // seam) the rows are legitimate and the union would re-add them anyway.
+        const payloadSchemaVersion = typeof parsed.v === 'number' ? parsed.v : 0
+        const migrateLegacyStaticSeed = !isClaudeRegistry
+          && !unionsStaticFallbacks
+          && payloadSchemaVersion < MODELS_CACHE_SCHEMA_VERSION
+
         const valid = parsed.models.filter(m =>
           m && typeof m.id === 'string' && typeof m.fullId === 'string',
         )
@@ -1178,7 +1244,12 @@ export function createModelsRegistry(hooks = {}) {
             // id is a 400/404 wherever it appears here: drop it on load. A
             // provider that genuinely ships an id ending in `[1m]` will
             // re-publish it through discovery, which does not route here.
-            if (!isClaudeRegistry) return !m.fullId.endsWith(ONE_M_SUFFIX)
+            if (!isClaudeRegistry) {
+              if (m.fullId.endsWith(ONE_M_SUFFIX)) return false
+              // …and the static seed on a legacy payload (see above).
+              if (migrateLegacyStaticSeed && staticFallbackFullIds.has(m.fullId)) return false
+              return true
+            }
             const { family, minor } = modelFamilyAndMinor(m.fullId)
             if (!fallbackByFamily.has(family)) return false
             if (minor === null) return true
@@ -1211,7 +1282,12 @@ export function createModelsRegistry(hooks = {}) {
 
         const droppedStaleCount = valid.length - models.length
         if (droppedStaleCount > 0) {
-          log.info(`loadCache: dropped ${droppedStaleCount} cache entr${droppedStaleCount === 1 ? 'y' : 'ies'} ${isClaudeRegistry ? 'not in FALLBACK_MODELS' : 'carrying the Claude-only [1m] id convention'}`)
+          const droppedReason = isClaudeRegistry
+            ? 'not in FALLBACK_MODELS'
+            : (migrateLegacyStaticSeed
+              ? 'carrying the Claude-only [1m] id convention or a pre-#7776 static-seed row (one-time cache migration)'
+              : 'carrying the Claude-only [1m] id convention')
+          log.info(`loadCache: dropped ${droppedStaleCount} cache entr${droppedStaleCount === 1 ? 'y' : 'ies'} ${droppedReason}`)
         }
 
         if (models.length === 0) {
@@ -1230,10 +1306,19 @@ export function createModelsRegistry(hooks = {}) {
         // populate them anyway.
         //
         // #7776 — this is the SAME #3075 union as `updateModels`, and #7761
-        // gated only that copy. A non-Claude cache is a roster the provider
-        // itself reported, so re-seeding the statics on top of it restores
-        // exactly what #7761 removed, at boot, for the whole window before the
-        // first successful refresh. Both copies read `unionableSeedRows()` now.
+        // gated only that copy. All three read `unionableSeedRows()` now.
+        //
+        // The direction the gate encodes here, stated rather than assumed: the
+        // seed is dropped on top of a cache for a provider that CAN re-publish
+        // a roster — the cache is then what discovery last reported, and
+        // re-seeding the statics restores exactly what #7761 removed, at boot,
+        // for the whole window before the first successful refresh. It is KEPT
+        // for a provider with no discovery seam, where the cache can only ever
+        // be a snapshot of this repo's own static table and nothing will ever
+        // re-publish a newly-added static row (`hasDiscoverySeam`), and for one
+        // whose seed is a recommendation list rather than a roster claim
+        // (`unionsStaticFallbacks`, ollama). Both are read through
+        // `unionableSeedRows()`; neither is a provider-name check.
         const seenFullIds = new Set(models.map(m => m.fullId))
         for (const fb of unionableSeedRows()) {
           if (!seenFullIds.has(fb.fullId)) {
@@ -1662,6 +1747,13 @@ export function getRegistryForProvider(providerName) {
     // #7761: a non-Claude refresh REPLACES the static seed unless the provider
     // declares that seed to be a recommendation list (ollama).
     unionsStaticFallbacks: ProviderClass.staticModelsAreRecommendations === true,
+    // #7776 re-review: …and REPLACE needs something that can re-publish. A
+    // provider with no static `refreshModels` (gemini, deepseek) never has
+    // `updateModels` called on its registry, so its cache is a snapshot of this
+    // repo's own static table — the seed must keep unioning there or a
+    // statically-added model never reaches the picker on an install that has a
+    // cache file. Derived from the seam, not from a provider-name list.
+    hasDiscoverySeam: typeof ProviderClass.refreshModels === 'function',
     resolveContextWindow: (fullId) => {
       const meta = typeof ProviderClass.getModelMetadata === 'function'
         ? ProviderClass.getModelMetadata(fullId)
