@@ -26,6 +26,6 @@
     "tweetnacl-util": "^0.15.1"
   },
   "devDependencies": {
-    "vitest": "^3.2.1"
+    "vitest": "^4.0.0"
   }
 }
