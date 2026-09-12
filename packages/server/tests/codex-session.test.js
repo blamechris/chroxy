@@ -994,6 +994,28 @@ describe('CodexSession', () => {
         assert.equal(toTomlBasicString('a\u007Fb'), '"a\\u007Fb"')
       })
 
+      it('a lone surrogate is escaped, not sanitised — a CLOSED failure, pinned (#7766)', () => {
+        // The SECOND place JSON's escape set and TOML's disagree, and the one
+        // this helper does NOT fix. ES2019 well-formed JSON.stringify emits
+        // `\udXXX` for an unpaired surrogate; TOML's \uXXXX must name a
+        // Unicode scalar value, which a surrogate is not — so codex's parser
+        // rejects the override and the turn fails CLOSED. Nothing escapes: it
+        // is still one argv element, no shell, no second -c.
+        //
+        // Pinned rather than fixed on purpose. Stripping or replacing the
+        // surrogate would silently mangle an operator-supplied id; the
+        // contract here is escaped-not-sanitised (see the hostile-payload test
+        // above), so this records the observed bytes and the docblock on
+        // toTomlBasicString records why.
+        assert.equal(toTomlBasicString('a\uD800b'), '"a\\ud800b"')
+        // Still one element, still one -c — the invariant that makes the
+        // failure closed rather than an injection.
+        const args = buildCodexArgs('hi', 'a\uD800b')
+        assert.equal(args.filter((a) => a === '-c').length, 1)
+        assert.deepEqual(args.filter((a) => typeof a === 'string' && a.startsWith('model=')),
+          ['model="a\\ud800b"'])
+      })
+
       it('the escaped value still reaches argv as exactly one element', () => {
         const args = buildCodexArgs('hi', 'gpt-5"\n[a]\nb = "c')
         assert.equal(args.filter((a) => a === '-c').length, 1)
@@ -1011,6 +1033,19 @@ describe('CodexSession', () => {
       // (1) prepareSpawn, on both platforms — the win32 branch is the one that
       //     rewrites the command line, so it is the plausible place for a
       //     shell option to appear.
+      //
+      //     The positive control comes FIRST. Three of the four (platform,
+      //     command) combos below take prepareSpawn's passthrough branch and
+      //     return `{}`, so if the opts bag were renamed or the signature
+      //     changed, every combo would passthrough on a POSIX host and the
+      //     absence-assertion would pass over nothing — an absence proved
+      //     against a function that is no longer being reached
+      //     (docs/false-safety-guards.md). This pins that the one rewriting
+      //     branch is genuinely entered.
+      assert.equal(
+        prepareSpawn('C:\\npm\\codex.cmd', [], { platform: 'win32' }).options.windowsVerbatimArguments,
+        true,
+        'control: the win32 .cmd rewrite branch must actually be reached')
       for (const platform of ['darwin', 'win32']) {
         for (const command of ['/usr/local/bin/codex', 'C:\\npm\\codex.cmd']) {
           const { options } = prepareSpawn(command, buildCodexArgs('hi', 'o3'), { platform })

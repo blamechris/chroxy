@@ -21,6 +21,18 @@ const DELEGATION_MODEL_LIST = Object.freeze({
   nextCursor: null,
 })
 
+{
+  // Control for the comment above (#7766), mirroring the sibling in
+  // codex-model-validation.test.js. Without it, adding `gpt-6-astra` to the
+  // hand-maintained seed would make "came from the catalog" and "came from the
+  // seed" indistinguishable here while the comment still claimed otherwise.
+  const seedIds = CodexSession.getFallbackModels().map((m) => m.id)
+  assert.ok(seedIds.length > 0, 'the seed must be non-empty, or the disjointness control asserts nothing')
+  const fixtureIds = DELEGATION_MODEL_LIST.data.map((m) => m.id)
+  assert.deepEqual(seedIds.filter((id) => fixtureIds.includes(id)), [],
+    'the fixture must share no id with the seed, or "came from the catalog" is untestable')
+}
+
 // #6605 Phase 1 — the codex app-server DRIVING layer. These pin the JSON-RPC
 // transport routing and the app-server-notification → Chroxy-event mapping
 // WITHOUT spawning a real `codex app-server` (the live end-to-end round-trip is
