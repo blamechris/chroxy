@@ -18,6 +18,7 @@ import {
   _resetEagerDerivationBudgetForTests,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
+import { EventNormalizer } from '../src/event-normalizer.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
 // Importing providers.js triggers built-in provider registration, which in turn
@@ -1795,6 +1796,73 @@ describe('sendSessionInfo', () => {
     sendSessionInfo(ctx, ws, 'sess-1')
     const thinkMsg = ctx._sends.find(m => m.type === 'thinking_level_changed')
     assert.ok(!thinkMsg)
+  })
+
+  // ── #7792 review — the two implementations of ONE contract ────────────────
+  //
+  // `undefined` means "this provider has no thinking level, send nothing";
+  // any other falsy value means "supported but unknown, send 'default'". That
+  // rule is now written out TWICE, by hand: here in `sendSessionInfo` (the
+  // reconnect / tab-switch replay) and in the event-normalizer's `ready` burst
+  // (#7792, the only moment that can carry a fresh codex session's booted
+  // effort to the client that created it). The #7792 PR comment claims "the
+  // two paths can never disagree" and, before this block, nothing failed when
+  // they did — the shape CLAUDE.md calls out for permission-floor.js (#7004).
+  //
+  // So drive the SAME session object through BOTH paths and compare. Each case
+  // also pins the EXPECTED level rather than only asserting the two agree: two
+  // paths that both stop emitting, or both emit the wrong level, would satisfy
+  // a bare parity assertion while the contract is broken.
+  describe('#7792 — the ready burst and the session_info replay agree', () => {
+    // [label, session.thinkingLevel, expected wire level | null for "no message"]
+    const CASES = [
+      ['a real codex effort', 'xhigh', 'xhigh'],
+      ['the legacy Claude level', 'high', 'high'],
+      ['null — supported, but codex named none', null, 'default'],
+      ['empty string — supported, but unknown', '', 'default'],
+      ['undefined — provider has no thinking level', undefined, null],
+    ]
+
+    for (const [label, thinkingLevel, expected] of CASES) {
+      it(`${label}: both paths ${expected === null ? 'emit nothing' : `emit level '${expected}'`}`, () => {
+        const { manager, sessionsMap } = createMockSessionManager([
+          { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
+        ])
+        const entry = sessionsMap.get('sess-1')
+        if (thinkingLevel === undefined) delete entry.session.thinkingLevel
+        else entry.session.thinkingLevel = thinkingLevel
+
+        // Path 1 — the replay (ws-history.js `sendSessionInfo`).
+        const ws = makeFakeWs()
+        const ctx = makeCtx({ sessionManager: manager })
+        registerClient(ctx, ws)
+        sendSessionInfo(ctx, ws, 'sess-1')
+        const replayLevel = ctx._sends.find((m) => m.type === 'thinking_level_changed')?.level ?? null
+
+        // Path 2 — the ready burst (event-normalizer.js), same entry object.
+        const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+        let readyLevel = null
+        try {
+          const result = normalizer.normalize('ready', {}, {
+            sessionId: 'sess-1',
+            mode: 'multi',
+            getSessionEntry: () => entry,
+          })
+          readyLevel = (result?.messages ?? []).find((m) => m.msg.type === 'thinking_level_changed')?.msg.level ?? null
+        } finally {
+          normalizer.destroy()
+        }
+
+        assert.equal(
+          readyLevel,
+          replayLevel,
+          `ready burst emitted ${JSON.stringify(readyLevel)} but the session_info replay emitted ` +
+            `${JSON.stringify(replayLevel)} for the same session — the two hand-written copies of the ` +
+            `undefined-skips / falsy-sends-'default' contract have drifted`,
+        )
+        assert.equal(replayLevel, expected, 'both paths agree, but on the WRONG level')
+      })
+    }
   })
 })
 

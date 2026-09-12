@@ -282,6 +282,11 @@ export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_mode_changed">;
     mode: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerThinkingLevelChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"thinking_level_changed">;
+    level: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerPermissionRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_request">;
     requestId: z.ZodString;

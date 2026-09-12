@@ -5,6 +5,7 @@ import {
   ServerClaudeReadySchema,
   ServerModelChangedSchema,
   ServerPermissionModeChangedSchema,
+  ServerThinkingLevelChangedSchema,
   ServerStreamStartSchema,
   ServerStreamDeltaSchema,
   ServerStreamEndSchema,
@@ -67,13 +68,14 @@ import { FORWARDED_CLI_EVENTS } from '../src/ws-forwarding.js'
 
 // Every wire `type` the normalizer can emit → the schema that governs it.
 // Sub-messages a single emitter fans out (ready → claude_ready + model_changed +
-// permission_mode_changed; stream_start → stream_start + agent_busy; result →
-// result + agent_idle) each get their own entry so every message on the wire is
-// checked, not just the first.
+// permission_mode_changed + thinking_level_changed; stream_start → stream_start
+// + agent_busy; result → result + agent_idle) each get their own entry so every
+// message on the wire is checked, not just the first.
 const SCHEMA_BY_TYPE = {
   claude_ready: ServerClaudeReadySchema,
   model_changed: ServerModelChangedSchema,
   permission_mode_changed: ServerPermissionModeChangedSchema,
+  thinking_level_changed: ServerThinkingLevelChangedSchema,
   stream_start: ServerStreamStartSchema,
   stream_delta: ServerStreamDeltaSchema,
   stream_end: ServerStreamEndSchema,
@@ -155,6 +157,27 @@ const activityEntry = { id: 'a1', kind: 'tool', label: 'Read', status: 'running'
 // lockstep with EVENT_MAP, so a future emitter forces a fixture here.
 const FIXTURES = [
   ['ready', {}, makeCtx()],
+  // #7792 — the `ready` burst pushes `thinking_level_changed` ONLY for a
+  // provider whose `thinkingLevel` getter is defined (codex app-server, the SDK
+  // sessions); `BaseSession`'s default is `undefined` and the branch is skipped.
+  // The fixture above has no `thinkingLevel` key, so WITHOUT this second row the
+  // new branch is never driven through `validateMessage` and both meta-tests
+  // below would pass on zero rows — the repo's "a filter whose terms match
+  // nothing, so the gate is satisfied by zero rows" class
+  // (docs/false-safety-guards.md, #7503). `xhigh` is a real codex effort, and an
+  // OPEN string on purpose: the level is whatever `thread/start` echoed.
+  [
+    'ready',
+    {},
+    makeCtx({
+      getSessionEntry: () => ({
+        session: { model: 'gpt-5.1-codex', permissionMode: 'approve', thinkingLevel: 'xhigh' },
+        name: 'Codex Session',
+        cwd: '/tmp/test',
+      }),
+    }),
+    'ready (provider with a thinkingLevel)',
+  ],
   ['background_tasks_changed', { backgroundTasks: [backgroundTask], scheduledWakeup: { at: 1781068600000, reason: 'watching CI' } }, makeCtx()],
   ['conversation_id', { conversationId: 'conv-1' }, makeCtx()],
   ['stream_start', { messageId: 'm1' }, makeCtx()],
@@ -245,8 +268,11 @@ describe('EventNormalizer output → Server*Schema round-trip (#6841)', () => {
   // Per-emitter round-trip: drive the input through the normalizer and parse
   // every emitted wire message against its schema. One `it()` per event so a
   // failure names the offending emitter.
-  for (const [event, data, ctx] of FIXTURES) {
-    it(`${event}: every emitted wire message validates against its Server*Schema`, () => {
+  // `label` (4th element, optional) disambiguates two fixtures for the SAME
+  // emitter — otherwise the two `ready` rows produce two identically-named
+  // tests and a failure can't be traced to the row that caused it.
+  for (const [event, data, ctx, label] of FIXTURES) {
+    it(`${label || event}: every emitted wire message validates against its Server*Schema`, () => {
       const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
       try {
         const result = normalizer.normalize(event, data, ctx)
@@ -441,9 +467,9 @@ describe('#7096 forwarded emitters under the legacy-cli context', () => {
     )
   })
 
-  for (const [event, data, ctx] of FIXTURES) {
+  for (const [event, data, ctx, label] of FIXTURES) {
     if (!forwarded.has(event)) continue
-    it(`${event}: emits wire-legal messages when sessionId is null`, () => {
+    it(`${label || event}: emits wire-legal messages when sessionId is null`, () => {
       const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
       try {
         const result = normalizer.normalize(event, data, legacyCtx(ctx))
