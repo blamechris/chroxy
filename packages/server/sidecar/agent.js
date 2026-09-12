@@ -862,6 +862,15 @@ export class PodAgent {
       activeWs: ws,
       seq: 0,
       buffer: [],
+      // INERT TODAY, and kept deliberately. A stderr frame is emitted
+      // immediately after spawn, and `_emitSessionFrame` re-stamps
+      // `lastActiveAt`, so this initial value is overwritten before anything
+      // can read it — measured by tracing every write on a real spawn, and the
+      // reason a mutant that swaps this one call for `Date.now()` survives the
+      // suite while the other two do not (#7690 review). It stays on `_nowFn`
+      // because a field initialised from a different clock than it is updated
+      // from is a trap for the first path that creates a session without
+      // emitting, not because a test can currently tell.
       lastActiveAt: this._nowFn(),
       createdSeq: ++this._sessionSeq,
       idleTimer: null,

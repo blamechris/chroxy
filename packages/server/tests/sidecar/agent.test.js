@@ -3450,15 +3450,79 @@ describe('PodAgent', () => {
       }
     })
 
-    it('createdSeq is assigned in creation order by the agent itself (#7690)', () => {
-      // The tie-break is only as good as the field feeding it, and both rows
-      // above set `createdSeq` by hand. This is the one that checks the AGENT
-      // assigns it, and monotonically — without it a constant `createdSeq`
-      // would satisfy every assertion above.
-      const agent = new PodAgent({ token: TOKEN })
-      assert.equal(agent._sessionSeq, 0, 'counter starts at zero')
-      const seen = [agent._sessionSeq += 1, agent._sessionSeq += 1, agent._sessionSeq += 1]
-      assert.deepEqual(seen, [1, 2, 3], 'the counter must increase for every session')
+    it('the AGENT assigns createdSeq, in creation order, across real spawns (#7690)', async () => {
+      // This row replaced a TAUTOLOGY. The first version hand-incremented
+      // `agent._sessionSeq` and asserted that `+= 1` three times yields
+      // [1,2,3] — a statement about the `+=` operator, not about the agent.
+      // Proven in review: deleting `createdSeq: ++this._sessionSeq` from
+      // agent.js outright left that test GREEN, while the PR claimed it was
+      // exactly what stops a constant `createdSeq`.
+      //
+      // Nothing here is hand-set: three sessions are spawned through the real
+      // WS protocol and the field is read back off the agent.
+      const spawnFn = () => createMockSpawn().child
+      const { agent, port } = await startAgent({ spawnFn, maxSessions: 10 })
+      try {
+        assert.equal(agent._sessionSeq, 0, 'a fresh agent starts its counter at zero')
+        const ids = []
+        for (let i = 0; i < 3; i++) {
+          const ws = connect(port, TOKEN)
+          await waitOpen(ws)
+          const started = waitForSessionStarted(ws)
+          ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+          ids.push(await started)
+          ws.close()
+          await waitFor(() => agent._sessions.get(ids[i])?.activeWs === null, { label: 'ws detach' })
+        }
+        const seqs = ids.map((id) => agent._sessions.get(id).createdSeq)
+        assert.deepEqual(seqs, [1, 2, 3], `agent-assigned createdSeq, got ${JSON.stringify(seqs)}`)
+        assert.equal(agent._sessionSeq, 3, 'the counter tracks the number of sessions created')
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('a RESUME stamps lastActiveAt from the injected clock too (#7690)', async () => {
+      // The gap this closes: `nowFn` is threaded at THREE sites, and only the
+      // `_emitSessionFrame` one had a test. Reverting the RESUME site survived
+      // the whole suite in review — and it is load-bearing, because the resume
+      // path bumps `lastActiveAt` exactly like a frame does, so a wall-clock
+      // stamp there re-creates the inversion this change exists to remove, one
+      // code path over.
+      const clock = makeFakeClock()
+      const spawnFn = () => createMockSpawn().child
+      const { agent, port } = await startAgent({
+        spawnFn, maxSessions: 10, resumeTimeoutMs: 999_999, nowFn: clock.now,
+      })
+      try {
+        const ws1 = connect(port, TOKEN)
+        await waitOpen(ws1)
+        const started = waitForSessionStarted(ws1)
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        const sessionId = await started
+        // Creation stamped from the injected clock, not the wall clock.
+        assert.equal(
+          agent._sessions.get(sessionId).lastActiveAt, clock.now(),
+          'creation must stamp from nowFn',
+        )
+
+        ws1.close()
+        await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, { label: 'ws detach' })
+
+        clock.advance(5000)
+        const ws2 = connect(port, TOKEN)
+        await waitOpen(ws2)
+        ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+        await waitFor(() => agent._sessions.get(sessionId)?.activeWs !== null, { label: 'resume attach' })
+
+        assert.equal(
+          agent._sessions.get(sessionId).lastActiveAt, clock.now(),
+          'resume must stamp from nowFn — a wall-clock stamp here re-creates the inversion',
+        )
+        ws2.close()
+      } finally {
+        await agent.close()
+      }
     })
 
     it('falls back to evicting oldest active session when all sessions are active', async () => {
