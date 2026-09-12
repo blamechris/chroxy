@@ -47,14 +47,19 @@
 #     spelling the three levels out is a copy of the roster that goes stale
 #     silently (two such lines were found when this lint was first run).
 #
-# FAIL-CLOSED: the scan asserts it walked at least --min-files files. A filter
-# that matches nothing reports "no second roster" for the same reason a clean
-# repo does (#7503), and this guard's whole value is in the files it reaches.
+# FAIL-CLOSED, in two directions. The scan asserts it walked at least
+# --min-files files: a filter that matches nothing reports "no second roster"
+# for the same reason a clean repo does (#7503), and this guard's whole value is
+# in the files it reaches. And a file it could not OPEN is reported and refused
+# rather than counted — counting it would let unreadable files satisfy the very
+# floor that exists to catch a scan which reached nothing, which is "could not
+# check" reading as "nothing to check" (#7195/#7210).
 #
 # Pure bash + perl — no deps, no node. CI runs it under bash in the bash-lint job.
 #
 # Run:  bash scripts/lint-thinking-level-roster.sh
-# Exit: 0 clean, 1 on a second roster or on a scan that could not run.
+# Exit: 0 clean, 1 on a second roster, on an unreadable file, or on a scan that
+#       could not run.
 
 set -euo pipefail
 
@@ -105,12 +110,16 @@ scan_out="$(file_list | LINT_THINKING_ALLOW="$ALLOW" perl -0 -ne '
   next if $f =~ m{(?:^|/)(?:tests?|__tests__)/};
   next if $f =~ /\.test\.[a-z]+$/;
   next if $f =~ m{(?:^|/)dist/};
-  $scanned++;
-  next if $allow{$f};
-  open(my $fh, "<", $f) or next;
+  # A file that could NOT be read is reported, never counted. Counting it would
+  # let an unreadable tree satisfy the floor below — the floor whose entire job
+  # is to detect a scan that reached nothing — which is "could not check" read
+  # as "nothing to check" (#7195/#7210) inside the guard written against it.
+  open(my $fh, "<", $f) or do { print "UNREADABLE=", $f, "\n"; next };
   my $data = do { local $/; <$fh> };
   close $fh;
-  next unless defined $data;
+  unless (defined $data) { print "UNREADABLE=", $f, "\n"; next }
+  $scanned++;
+  next if $allow{$f};
   my @hits;
   while ($data =~ /$roster/g) {
     my $end = pos($data);
@@ -123,7 +132,15 @@ scan_out="$(file_list | LINT_THINKING_ALLOW="$ALLOW" perl -0 -ne '
 ')"
 
 scanned="$(printf '%s\n' "$scan_out" | sed -n 's/^SCANNED=//p')"
-hits="$(printf '%s\n' "$scan_out" | grep -v '^SCANNED=' || true)"
+unreadable="$(printf '%s\n' "$scan_out" | sed -n 's/^UNREADABLE=//p')"
+hits="$(printf '%s\n' "$scan_out" | grep -v '^SCANNED=' | grep -v '^UNREADABLE=' || true)"
+
+if [ -n "$unreadable" ]; then
+  echo "::error::lint-thinking-level-roster could not READ these tracked source files, so it cannot say whether they carry a second roster:"
+  printf '%s\n' "$unreadable" | sed 's/^/    /'
+  echo "    A file that cannot be checked is not a file with nothing in it — fix the permissions or drop the file from the scan's pathspecs."
+  exit 1
+fi
 
 if [ -z "$scanned" ]; then
   echo "::error::lint-thinking-level-roster could not run — the scan reported no file count at all. The GUARD is broken, not necessarily the code."
