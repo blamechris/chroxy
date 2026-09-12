@@ -200,6 +200,9 @@ export function createAcpSessionClass(rawEntry) {
         // fs/* and terminal/* client methods are not implemented yet — #7306.
         terminal: false,
         thinkingLevel: false,
+        // #7725: the spawned ACP agent chooses its own reasoning behaviour and
+        // Chroxy never scans the prompt for the Claude magic keywords.
+        thinkingKeywords: false,
         streaming: true,
       }
     }

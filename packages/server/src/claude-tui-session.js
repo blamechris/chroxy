@@ -168,6 +168,11 @@ export class ClaudeTuiSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: false,
+      // #7725: the TUI forwards the prompt to a PTY verbatim. Whatever the
+      // upstream `claude` binary does with a magic keyword is opaque to the
+      // daemon, and Chroxy does not run detect-thinking-keyword.js on this
+      // path, so it must not advertise the escalation.
+      thinkingKeywords: false,
       streaming: false,
       tools: true,
       // #5791 — advertise whether the server will actually honor a single

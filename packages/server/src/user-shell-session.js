@@ -101,6 +101,9 @@ export class UserShellSession extends BaseSession {
       resume: false,
       terminal: true,
       thinkingLevel: false,
+      // #7725: a raw $SHELL PTY. There is no model, so there is nothing to
+      // escalate — the magic keywords would just be shell words.
+      thinkingKeywords: false,
       streaming: false,
       tools: false,
     }

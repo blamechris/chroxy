@@ -184,6 +184,9 @@ export class GeminiSession extends JsonlSubprocessSession {
       resume: false,
       terminal: false,
       thinkingLevel: false,
+      // #7725: Gemini never sees detect-thinking-keyword.js — the magic words
+      // are plain prose on this path.
+      thinkingKeywords: false,
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,

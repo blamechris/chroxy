@@ -85,6 +85,8 @@ describe('ClaudeChannelSession scaffold (#3953)', () => {
       assert.equal(caps.resume, false)
       assert.equal(caps.terminal, false)
       assert.equal(caps.thinkingLevel, false)
+      // #7725: no magic-keyword scan on the channel path either.
+      assert.equal(caps.thinkingKeywords, false)
     })
   })
 

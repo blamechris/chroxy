@@ -166,6 +166,14 @@ export interface ProviderCapabilities {
   resume: boolean;
   terminal: boolean;
   thinkingLevel?: boolean;
+  // #7725: true only when the SERVER escalates on the Claude magic keywords
+  // ("think" / "think hard" / "ultrathink") — i.e. the provider's session class
+  // runs detect-thinking-keyword.js and maps the hit to a per-turn thinking
+  // budget. Deliberately separate from `thinkingLevel`: a provider can offer a
+  // reasoning-effort dropdown (codex) without honouring the keywords, and the
+  // composer's keyword highlight must never promise an escalation that isn't
+  // happening. Gates `highlightThinkingKeywords` on InputBar.
+  thinkingKeywords?: boolean;
   // True if the provider supports session-scoped permission rules
   // (i.e. the "Allow for Session" affordance). Derived server-side from
   // method existence — only providers whose session class implements

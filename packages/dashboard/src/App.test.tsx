@@ -903,6 +903,75 @@ describe('App', () => {
     })
   })
 
+  // #7725 — the composer's magic-keyword highlight and the thinking-level
+  // dropdown are two DIFFERENT affordances that used to read one capability
+  // (`thinkingLevel`). Flipping that on for codex (#7730) would have started
+  // highlighting `ultrathink` for a provider whose server path never scans for
+  // it. These two pin the split at the wiring level: the highlight follows
+  // `capabilities.thinkingKeywords`, the select follows `thinkingLevel`.
+  describe('thinking-keyword highlight is separate from thinking level (#7725)', () => {
+    const sessionWithProvider = (provider: string) => ({
+      sessionId: 's1',
+      name: 'Test',
+      cwd: '/tmp',
+      type: 'cli' as const,
+      provider,
+      hasTerminal: true,
+      model: null,
+      permissionMode: null,
+      isBusy: false,
+      createdAt: Date.now(),
+      conversationId: null,
+    })
+
+    it('codex (thinkingLevel only) shows the thinking-level select and NO keyword overlay', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [sessionWithProvider('codex')],
+        activeSessionId: 's1',
+        availableProviders: [
+          { name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false } },
+        ],
+      }
+      render(<App />)
+      // The dropdown is offered — codex does take a reasoning-effort setting…
+      expect(screen.getByLabelText('Thinking level')).toBeInTheDocument()
+      // …but the composer must not imply that typing `ultrathink` escalates.
+      expect(screen.queryByTestId('thinking-keyword-overlay')).not.toBeInTheDocument()
+    })
+
+    it('claude-sdk (both) shows the thinking-level select AND the keyword overlay', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [sessionWithProvider('claude-sdk')],
+        activeSessionId: 's1',
+        availableProviders: [
+          { name: 'claude-sdk', capabilities: { thinkingLevel: true, thinkingKeywords: true } },
+        ],
+      }
+      render(<App />)
+      expect(screen.getByLabelText('Thinking level')).toBeInTheDocument()
+      expect(screen.getByTestId('thinking-keyword-overlay')).toBeInTheDocument()
+    })
+
+    // The other direction, so the highlight cannot be satisfied by "always on":
+    // a provider that scans for the keyword but exposes no budget dropdown
+    // still gets the highlight.
+    it('a provider with thinkingKeywords but no thinkingLevel still gets the overlay', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: [sessionWithProvider('claude-sdk')],
+        activeSessionId: 's1',
+        availableProviders: [
+          { name: 'claude-sdk', capabilities: { thinkingLevel: false, thinkingKeywords: true } },
+        ],
+      }
+      render(<App />)
+      expect(screen.getByTestId('thinking-keyword-overlay')).toBeInTheDocument()
+      expect(screen.queryByLabelText('Thinking level')).not.toBeInTheDocument()
+    })
+  })
+
   // #6861 / PR #6878 (Copilot review thread) — the `#`-prefix quick-append must
   // be SKIPPED for PTY-backed sessions (claude-tui / user-shell): the composer
   // routes to the terminal there, where a leading `#` is a shell comment, not a

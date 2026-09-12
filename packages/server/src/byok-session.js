@@ -183,6 +183,11 @@ export class ClaudeByokSession extends BaseSession {
       // Thinking config supported by the SDK but not wired through the
       // chroxy UI yet — leave off until the toggle lands.
       thinkingLevel: false,
+      // #7725: BYOK builds its own request and never calls
+      // detectThinkingKeyword — the magic words reach the model as plain prose.
+      // Inherited by the anthropic-compatible / openai-compatible factories,
+      // DeepSeek, Ollama and docker-byok, which all extend this class.
+      thinkingKeywords: false,
       streaming: true,
       // We rebuild the system prompt on every turn from
       // _buildSystemPrompt(), so an activate/deactivate of a skill
