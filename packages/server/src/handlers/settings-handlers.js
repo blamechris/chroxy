@@ -631,16 +631,29 @@ function handleListProviders(ws, client, msg, ctx) {
  * claude-sdk keeps accepting exactly `default | high | max` and mapping them to
  * `maxThinkingTokens`. Nothing about the Claude path changes.
  *
- * Fails OPEN to that same legacy triple when the provider or the model cannot
- * be resolved (unknown provider name, a `getModelMetadata` that throws, a
- * session whose model codex has not echoed yet). That is a deliberate choice
- * and the cost is stated plainly: a codex session whose row is momentarily
- * unreadable would accept `high` — a level codex does offer — rather than
- * rejecting everything and leaving the operator with a dead dropdown. It is a
- * cannot-check falling back to the one roster that is true of most sessions,
- * never a cannot-check silently reading as "everything is fine".
+ * When the row cannot be read at all (unknown provider name, a
+ * `getModelMetadata` that throws, a session whose model codex has not echoed
+ * yet) `resolveThinkingLevels` returns the legacy triple with
+ * `source: 'legacy'`. That is the CLAUDE roster, and it is only an answer for a
+ * Claude session — so `claudeFamily` is resolved here alongside it and the
+ * caller refuses the legacy fallback on any other provider. A codex row that is
+ * momentarily unreadable is a cannot-check, and handing a cannot-check the
+ * Claude three would let `default` (offered by NO codex model) and `max` (not
+ * offered by gpt-5.5 or gpt-5.3-codex-spark) through to `turn/start.effort` as
+ * if a model had advertised them — "could not check" reading as "nothing to
+ * check", cause #2 in docs/false-safety-guards.md. The reachability is not
+ * hypothetical: `CodexSession.getModelMetadata` falls back to the
+ * `CODEX_MODEL_METADATA` seed, whose six rows carry no `reasoningLevels` at
+ * all, and `_refreshModelCatalog()` is skipped permanently when the binary
+ * reports `supportsModelList === false`.
  *
- * @returns {{levels: string[], defaultLevel: string, source: 'model'|'legacy', modelId: string|null}}
+ * `claudeFamily` prefers the registry class and falls back to the live
+ * session's own constructor, so a session whose `entry.provider` is missing or
+ * unregistered is still classified by the class that is actually running
+ * (`isClaudeProvider` treats a passed class's `static claudeFamily` as
+ * authoritative).
+ *
+ * @returns {{levels: string[], defaultLevel: string, source: 'model'|'legacy', modelId: string|null, claudeFamily: boolean}}
  */
 function resolveSessionThinkingLevels(entry) {
   const session = entry?.session
@@ -653,20 +666,29 @@ function resolveSessionThinkingLevels(entry) {
     : ((typeof session?.bootedModel === 'string' && session.bootedModel.length > 0) ? session.bootedModel : null)
 
   let row = null
-  if (modelId && typeof entry?.provider === 'string' && entry.provider.length > 0) {
+  let ProviderClass = null
+  if (typeof entry?.provider === 'string' && entry.provider.length > 0) {
     try {
-      const ProviderClass = getProvider(entry.provider)
-      if (ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
+      ProviderClass = getProvider(entry.provider) || null
+      if (modelId && ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
         row = ProviderClass.getModelMetadata(modelId)
       }
-    } catch {
-      // Unknown provider, or a provider whose metadata lookup threw. Falls
-      // through to the legacy roster below — see the docblock.
+    } catch (err) {
+      // Unknown provider, or a provider whose metadata lookup threw. This is a
+      // cannot-check and it is LOGGED rather than swallowed: without this line a
+      // deployment whose lookup is permanently broken is indistinguishable in
+      // every log from one that is working (docs/false-safety-guards.md #2).
+      log.warn(`Thinking-level roster lookup failed for provider '${entry.provider}' model '${modelId || 'unknown'}': ${err?.message || err}`)
+      ProviderClass = null
       row = null
     }
   }
 
-  return { ...resolveThinkingLevels(row), modelId }
+  return {
+    ...resolveThinkingLevels(row),
+    modelId,
+    claudeFamily: isClaudeProvider(entry?.provider, ProviderClass || entry?.session?.constructor || null),
+  }
 }
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
@@ -710,6 +732,26 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // the session and the model it is running, which is the only scope in which
   // the question has an answer (see resolveSessionThinkingLevels above).
   const offered = resolveSessionThinkingLevels(entry)
+  // The legacy triple is the CLAUDE roster, not a neutral default. Offering it
+  // to a provider that simply has not advertised its own levels yet would let
+  // `default` — which NO codex model offers, and which the picker renders first
+  // as 'Auto' — ride out on `turn/start.effort`, with a cannot-check
+  // masquerading as a model's own answer. Reject instead, with the same typed
+  // code every other path uses so the #5731 optimistic rollback still fires.
+  // The Claude path is untouched: claudeFamily is true there, and a codex row
+  // that DID advertise levels has source 'model' and never reaches this branch.
+  if (offered.source === 'legacy' && !offered.claudeFamily) {
+    ;sessionLogger(sessionId).warn(`Rejected thinking level '${level}' on ${entry.provider || 'unknown-provider'} session ${sessionId} from ${client.id}: model ${offered.modelId || 'unknown'} has advertised no reasoning levels, and the legacy roster is Claude-only`)
+    sendError(
+      ws,
+      requestId,
+      'THINKING_LEVEL_NOT_APPLIED',
+      `Model '${offered.modelId || 'unknown'}' has not advertised its reasoning levels yet, so no level can be applied on ${entry.provider || 'this provider'}.`,
+      undefined,
+      ctx,
+    )
+    return
+  }
   if (!offered.levels.includes(level)) {
     ;sessionLogger(sessionId).warn(`Rejected thinking level '${level}' on ${entry.provider || 'unknown-provider'} session ${sessionId} from ${client.id}: model ${offered.modelId || 'unknown'} offers ${offered.levels.join(', ')} (${offered.source})`)
     sendError(
