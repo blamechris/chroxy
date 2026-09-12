@@ -468,6 +468,13 @@ export function App() {
       readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
+      // #7725: the composer's magic-keyword highlight is a SEPARATE question
+      // from "does this provider take a thinking budget". It reads the
+      // capability the server sets only where it actually scans the prompt
+      // (detect-thinking-keyword.js), so a provider with a reasoning-effort
+      // dropdown but no keyword scan (codex, #7730) gets the dropdown and no
+      // highlight.
+      highlightThinkingKeywords: !!caps?.thinkingKeywords,
     }
   }, [activeSessionProvider, availableProviders, availableModelsProvider, activeModel])
 
@@ -3024,13 +3031,15 @@ export function App() {
               onInspectPastedText={handleInspectPastedText}
               onRemovePastedText={handleRemovePastedText}
               userMessageHistory={userMessageHistory}
-              // #4306 — only highlight when the active provider actually
-              // honours the magic thinking keyword. Reuses `showThinkingLevel`
-              // (capabilities.thinkingLevel) as the truth-source: if the
-              // dropdown is hidden because the provider can't take a thinking
-              // budget, the keyword wouldn't escalate either — so we must
-              // not visually imply otherwise.
-              highlightThinkingKeywords={dropdownFlags.showThinkingLevel}
+              // #4306 / #7725 — only highlight when the active provider
+              // actually honours the magic thinking keyword. Driven by
+              // `capabilities.thinkingKeywords`, which the server sets true
+              // only on the classes that run detect-thinking-keyword.js. It
+              // used to reuse `showThinkingLevel` (capabilities.thinkingLevel),
+              // but those are two different affordances: a provider can take a
+              // reasoning-effort setting without honouring the keywords, and
+              // highlighting there promises an escalation that never happens.
+              highlightThinkingKeywords={dropdownFlags.highlightThinkingKeywords}
             />
           </>
         )}

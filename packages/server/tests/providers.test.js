@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, unlinkSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, unlinkSync, statSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames } from '../src/providers.js'
@@ -13,6 +13,14 @@ import { GeminiSession } from '../src/gemini-session.js'
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
 const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+
+// #7725 — the SHIPPED provider names, snapshotted at import time. Tests further
+// down register throwaway fixtures (`test-roundtrip`, …) into the same global
+// registry, so a later `listProviders()` is a mix of product and scaffolding.
+// Reading it here — before any `it()` body has run — gives a roster that is
+// derived from providers.js rather than typed out, so a genuinely new provider
+// joins it automatically.
+const BUILTIN_PROVIDER_NAMES = listProviders().map(p => p.name)
 
 describe('Provider Registry', () => {
   it('has claude-cli and claude-sdk pre-registered', () => {
@@ -157,6 +165,57 @@ describe('Provider Registry', () => {
       assert.equal(tuiEntry.capabilities.interruptsTurnOnAutoSwitch, false,
         'claude-tui rewrites a sidecar (no PTY restart) so should report interruptsTurnOnAutoSwitch: false')
     }
+  })
+
+  // #7725: `thinkingKeywords` is the Claude-only magic-keyword escalation
+  // ("think" / "think hard" / "ultrathink"), split off `thinkingLevel` so a
+  // provider that gains a reasoning-effort dropdown (codex, #7730) does not
+  // also get a client-side keyword highlight promising an escalation the
+  // server never performs. Declared explicitly on every provider — same rule
+  // as `streaming` (#3932) — so a new provider that omits it goes red here
+  // rather than silently defaulting to "unknown".
+  it('listProviders declares thinkingKeywords explicitly on every provider', () => {
+    const list = listProviders().filter(p => BUILTIN_PROVIDER_NAMES.includes(p.name))
+    assert.equal(list.length, BUILTIN_PROVIDER_NAMES.length,
+      'every shipped provider must still be listable — a missing one would shrink this check silently')
+    assert.ok(list.length > 0, 'expected at least one registered provider')
+    for (const entry of list) {
+      assert.equal(typeof entry.capabilities.thinkingKeywords, 'boolean',
+        `provider "${entry.name}" must declare capabilities.thinkingKeywords (true only where the server escalates on the magic keyword)`)
+    }
+
+    const sdkEntry = list.find(p => p.name === 'claude-sdk')
+    assert.ok(sdkEntry, 'claude-sdk provider should be registered')
+    assert.equal(sdkEntry.capabilities.thinkingKeywords, true,
+      'claude-sdk maps a detected keyword to a per-turn maxThinkingTokens budget, so it is the one provider that may advertise this')
+
+    const codexEntry = list.find(p => p.name === 'codex')
+    assert.ok(codexEntry, 'codex provider should be registered')
+    assert.equal(codexEntry.capabilities.thinkingKeywords, false,
+      'codex has its own reasoning-effort knob but no magic-keyword scan; thinkingKeywords must stay false when #7730 flips thinkingLevel')
+  })
+
+  // #7725: the flag has to track the CODE, not a roster that drifts. The only
+  // thing that makes a magic keyword escalate is a call into
+  // detect-thinking-keyword.js, so the set of src modules importing it and the
+  // set declaring `thinkingKeywords: true` must be the SAME set, checked in
+  // both directions (a one-direction roster check is how #7199/#7216/#7544
+  // each survived). Subclasses that spread a parent's capabilities (docker-sdk)
+  // declare nothing literally and correctly appear in neither set.
+  it('thinkingKeywords: true is declared by exactly the modules that import detect-thinking-keyword.js', () => {
+    const srcDir = new URL('../src/', import.meta.url)
+    const importers = []
+    const declarers = []
+    for (const name of readdirSync(srcDir).filter(f => f.endsWith('.js')).sort()) {
+      if (name === 'detect-thinking-keyword.js') continue
+      const src = readFileSync(new URL(name, srcDir), 'utf8')
+      if (/from\s+'\.\/detect-thinking-keyword\.js'/.test(src)) importers.push(name)
+      if (/\bthinkingKeywords:\s*true\b/.test(src)) declarers.push(name)
+    }
+    assert.ok(importers.length > 0,
+      'expected at least one src module to import detect-thinking-keyword.js — an empty roster would satisfy this test for the wrong reason')
+    assert.deepEqual(declarers, importers,
+      'every module that scans for the magic keyword must declare thinkingKeywords: true, and no module that does not scan may declare it')
   })
 
   // #3072: clients gate the "Allow for Session" affordance on this capability
@@ -844,6 +903,8 @@ describe('claude-channel provider scaffold (#3953)', () => {
     assert.equal(entry.capabilities.resume, false)
     assert.equal(entry.capabilities.terminal, false)
     assert.equal(entry.capabilities.thinkingLevel, false)
+    // #7725: the channel transport runs no magic-keyword scan.
+    assert.equal(entry.capabilities.thinkingKeywords, false)
     assert.equal(entry.capabilities.streaming, true)
     assert.equal(entry.capabilities.tools, true)
     // Derived: scaffold does not implement setPermissionRules.

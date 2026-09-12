@@ -195,6 +195,24 @@ export interface ProviderCapabilities {
   resume?: boolean;
   terminal?: boolean;
   thinkingLevel?: boolean;
+  // #7725: true only when the SERVER escalates on the Claude magic keywords
+  // ("think" / "think hard" / "ultrathink") — i.e. the provider's session class
+  // runs detect-thinking-keyword.js and maps the hit to a per-turn thinking
+  // budget. Deliberately separate from `thinkingLevel`: a provider can offer a
+  // reasoning-effort dropdown (codex) without honouring the keywords, so a
+  // client must not derive a keyword affordance from the dropdown's flag.
+  thinkingKeywords?: boolean;
+  // #5026: true when the provider runs sessions inside an isolated Docker
+  // container (docker-cli, docker-sdk, docker-byok). Surfaced as a badge +
+  // container settings knobs in the New Session flow.
+  containerized?: boolean;
+  // #6888: true when an operator's free-text deny reason actually reaches the
+  // agent. SDK/BYOK (+ their Docker variants, DeepSeek, Ollama) report true —
+  // the reason feeds back as the tool's denial message on the in-process
+  // PermissionManager path. Legacy CLI, claude-tui, Gemini and the legacy codex
+  // `exec` driver omit it (falsy); codex app-server explicitly reports false
+  // (its RPC response drops the message — #6885).
+  denyReason?: boolean;
   // True if the provider supports session-scoped permission rules
   // (i.e. the "Allow for Session" affordance). Derived server-side from
   // method existence — only providers whose session class implements

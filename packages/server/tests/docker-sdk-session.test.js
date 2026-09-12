@@ -41,6 +41,9 @@ class FakeDockerSdkSession extends EventEmitter {
       resume: true,
       terminal: false,
       thinkingLevel: true,
+      // #7725: mirrors the spread in docker-sdk-session.js — the container
+      // still runs SdkSession, which is the one keyword-scanning class.
+      thinkingKeywords: true,
       containerized: true,
     }
   }
@@ -358,6 +361,9 @@ describe('DockerSdkSession capabilities', () => {
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
     assert.equal(caps.thinkingLevel, true)
+    // #7725: the containerized SDK is still SdkSession, which scans for the
+    // magic keyword, so the escalation capability comes across the spread too.
+    assert.equal(caps.thinkingKeywords, true)
   })
 })
 

@@ -170,6 +170,9 @@ describe('CodexSession', () => {
       assert.equal(caps.resume, false)
       assert.equal(caps.terminal, false)
       assert.equal(caps.thinkingLevel, false)
+      // #7725: separate flag — the Claude magic keywords never escalate on
+      // codex, so this stays false even once #7730 flips thinkingLevel.
+      assert.equal(caps.thinkingKeywords, false)
     })
   })
 

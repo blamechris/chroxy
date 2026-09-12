@@ -137,6 +137,15 @@ export class SdkSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: true,
+      // #7725: true ONLY where the SERVER escalates on the magic keywords
+      // ("think" / "think hard" / "ultrathink" …). SdkSession is the sole
+      // importer of detect-thinking-keyword.js — it maps a detected keyword to
+      // a per-turn maxThinkingTokens budget in _callQuery. Every other provider
+      // declares false: the keyword is just prose to them, so a client that
+      // highlighted it there would promise an escalation that never happens.
+      // Separate from `thinkingLevel` on purpose — a provider can accept a
+      // reasoning-effort dropdown without honouring the Claude-only keywords.
+      thinkingKeywords: true,
       // #3932: explicit `streaming` so the capability matrix is uniform across
       // providers — claude-tui sets this to false (deliver-on-complete), all
       // others stream incremental deltas via stream_delta during a turn.

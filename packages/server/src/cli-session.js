@@ -265,6 +265,11 @@ export class CliSession extends BaseSession {
       resume: true,
       terminal: false,
       thinkingLevel: false,
+      // #7725: the legacy `claude -p` subprocess never runs
+      // detect-thinking-keyword.js, so typing `ultrathink` escalates nothing
+      // here. Declared explicitly (like `streaming`) so the matrix stays
+      // uniform rather than leaving the flag's absence to be guessed.
+      thinkingKeywords: false,
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,

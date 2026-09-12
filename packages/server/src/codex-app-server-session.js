@@ -165,6 +165,10 @@ export class CodexAppServerSession extends BaseSession {
       resume: false, // matches exec CodexSession; app-server resume is a follow-up
       terminal: false,
       thinkingLevel: false,
+      // #7725: same as the exec driver — the Claude magic keywords are not
+      // scanned for on any codex path. Explicit so #7730's `thinkingLevel`
+      // flip cannot drag the keyword highlight along with it.
+      thinkingKeywords: false,
       streaming: true,
       // #6888: despite inProcessPermissions:true (this session's
       // respondToPermission delegates to the shared PermissionManager, which DOES

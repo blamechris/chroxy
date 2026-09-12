@@ -385,6 +385,11 @@ export class CodexSession extends JsonlSubprocessSession {
       resume: false,
       terminal: false,
       thinkingLevel: false,
+      // #7725: codex has its own reasoning-effort knob, but the Claude magic
+      // keywords mean nothing to it and the daemon never scans for them here.
+      // Kept SEPARATE from `thinkingLevel` precisely so #7730 can flip that one
+      // on without the client also promising keyword escalation.
+      thinkingKeywords: false,
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,

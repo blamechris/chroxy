@@ -742,6 +742,14 @@ describe('CliSession — thinking keyword is a structural no-op (#4306)', () => 
       'cli-session has no per-turn thinking budget hook; keyword escalation must remain a no-op')
   })
 
+  // #7725 — the highlight gate now reads its OWN capability instead of
+  // borrowing `thinkingLevel`, so the no-op has to be asserted on the flag the
+  // dashboard actually consumes.
+  it('declares thinkingKeywords: false in static capabilities', () => {
+    assert.equal(CliSession.capabilities.thinkingKeywords, false,
+      'cli-session never calls detectThinkingKeyword; the client must not highlight a keyword that escalates nothing')
+  })
+
   it('does not expose setThinkingLevel on session instances', () => {
     const session = createSession()
     assert.equal(typeof session.setThinkingLevel, 'undefined',
