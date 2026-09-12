@@ -680,6 +680,15 @@ function nonClaudeRegistryWithMetadata(meta, cachePath) {
 // hook consultation inside that loop. Without it the `providerMeta?.label ||`
 // there, and the argument ORDER of its `withModelMetadata` call, become
 // untested code that any mutation survives.
+//
+// Those are two SEPARATE claims and each needs its own assertion — `label` is
+// NOT in MODEL_ENTRY_METADATA_KEYS (provenance / reasoningLevels /
+// defaultReasoningLevel), so `withModelMetadata` cannot carry it and the
+// argument-order assertion below says nothing about the label at all. #7765
+// review caught exactly that: the moved #7749 test asserted provenance and
+// reasoningLevels only, and mutating the synthesis site to
+// `label: humanizeModelId(variantId)` survived the whole suite. The label
+// assertion is in that test too, named as its own claim.
 function claudeRegistryWithMetadata(meta) {
   return createModelsRegistry({
     getModelMetadata: (fullId) => meta[fullId] ?? null,
@@ -857,6 +866,15 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     assert.equal(base.provenance, 'discovered', 'the base entry keeps its own provenance')
     const variant = registry.getModels().find((m) => m.fullId === 'big-1[1m]')
     assert.ok(variant, 'the 1M variant should be synthesized')
+    // The #4441 claim, restored (#7765 review). `label` travels by the object
+    // literal at the synthesis site (`providerMeta?.label || humanizeModelId`),
+    // NOT by withModelMetadata — MODEL_ENTRY_METADATA_KEYS is provenance /
+    // reasoningLevels / defaultReasoningLevel — so the two assertions below
+    // leave it entirely unasserted. This is the only assertion in the repo that
+    // the table label beats the humanize mangling at this site; deleting
+    // `providerMeta?.label ||` from models.js reds exactly this line.
+    assert.equal(variant.label, 'Table Big 1M',
+      `the variant's table label must beat humanizeModelId — 'Big 1[1m]' means providerMeta?.label was dropped (#4441)`)
     assert.equal(variant.provenance, 'catalogued',
       `the variant's table row must beat the base entry, got ${variant.provenance} ('discovered' means the two withModelMetadata sources are swapped)`)
     assert.deepEqual(variant.reasoningLevels, ['low', 'high'],
