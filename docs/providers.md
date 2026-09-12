@@ -484,11 +484,17 @@ has no way to send one).
 
 ### Protocol version floor (0.128.0) and what each gate degrades to
 
-The app-server's `initialize` handshake reports a `userAgent` like
-`codex/0.154.0 (Mac OS 26.6.2; arm64) …`, and that is the **only** in-band version
-signal — it describes the binary actually serving this session rather than
-whatever `codex` is on `PATH`, which is why Chroxy never shells out to
-`codex --version` here. The floor is **0.128.0**: every method Chroxy calls today
+The app-server's `initialize` handshake reports a `userAgent` shaped
+`<originator>/<version> (<os> <osversion>; <arch>) …`, and that is the **only**
+in-band version signal — it describes the binary actually serving this session
+rather than whatever `codex` is on `PATH`, which is why Chroxy never shells out
+to `codex --version` here. **The leading token is the originator, which is the
+name the CLIENT sent**, not `codex`: Chroxy identifies itself as `chroxy`
+(`codex-app-server-client.js`), so a live handshake reads
+`chroxy/0.154.0 (Mac OS 26.6.2; arm64) …` and the version after the slash is
+codex's. The parser is anchored at the start of the string for exactly that
+reason — the platform parens carry a second dotted-numeric run (`Mac OS 26.6.2`)
+that an unanchored scan would happily report as the codex version. The floor is **0.128.0**: every method Chroxy calls today
 exists at that version (verified against `codex-rs/app-server-protocol` at tag
 `rust-v0.128.0`). One gate sits above it — the per-turn `model` / `effort`
 overrides are recorded at **0.154.0**, the lowest version this repo has evidence
