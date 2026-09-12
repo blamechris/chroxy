@@ -668,19 +668,31 @@ function resolveSessionThinkingLevels(entry) {
   let row = null
   let ProviderClass = null
   if (typeof entry?.provider === 'string' && entry.provider.length > 0) {
+    // TWO lookups, TWO try blocks, because they fail for different reasons and
+    // only one of them says anything about which FAMILY the session belongs to.
     try {
       ProviderClass = getProvider(entry.provider) || null
-      if (modelId && ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
-        row = ProviderClass.getModelMetadata(modelId)
-      }
     } catch (err) {
-      // Unknown provider, or a provider whose metadata lookup threw. This is a
-      // cannot-check and it is LOGGED rather than swallowed: without this line a
-      // deployment whose lookup is permanently broken is indistinguishable in
-      // every log from one that is working (docs/false-safety-guards.md #2).
-      log.warn(`Thinking-level roster lookup failed for provider '${entry.provider}' model '${modelId || 'unknown'}': ${err?.message || err}`)
+      // The provider NAME did not resolve to a class. A cannot-check, and it is
+      // LOGGED rather than swallowed: without this line a deployment whose
+      // registry lookup is permanently broken is indistinguishable in every log
+      // from one that is working (docs/false-safety-guards.md #2).
+      log.warn(`Thinking-level provider lookup failed for provider '${entry.provider}': ${err?.message || err}`)
       ProviderClass = null
-      row = null
+    }
+    if (modelId && ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
+      try {
+        row = ProviderClass.getModelMetadata(modelId)
+      } catch (err) {
+        // The MODEL ROW is unavailable — and that is all. `ProviderClass` stays
+        // set on purpose: it really resolved, and isClaudeProvider treats a
+        // passed class as authoritative, so nulling it here would downgrade a
+        // Claude session to its live constructor and then to the name map
+        // because of a failure one call LATER. The roster falls back (row null
+        // -> source 'legacy'); the FAMILY does not have to.
+        log.warn(`Thinking-level roster lookup failed for provider '${entry.provider}' model '${modelId}': ${err?.message || err}`)
+        row = null
+      }
     }
   }
 

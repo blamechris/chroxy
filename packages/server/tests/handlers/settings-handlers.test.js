@@ -2879,9 +2879,15 @@ describe('settings-handlers', () => {
 
       it('a CLAUDE provider whose getModelMetadata THROWS still gets the legacy triple', async () => {
         // The other half of the narrowing: the fallback is retained where it is
-        // the provider's REAL roster. Deleting the `!offered.claudeFamily`
-        // clause reds the non-Claude cases above; deleting the `source ===
-        // legacy` clause reds this one.
+        // the provider's REAL roster. The guard is
+        // `source === 'legacy' && !claudeFamily`, so each clause reds a
+        // DISJOINT set (the #7273 pairing), and this is which is which:
+        // deleting `!offered.claudeFamily` leaves `source === 'legacy'`, which
+        // now rejects a Claude legacy row — it reds THIS test and the Claude
+        // triple beside it. Deleting `offered.source === 'legacy'` leaves
+        // `!claudeFamily`, which now rejects a non-Claude row that DID
+        // advertise levels — it reds the invented-level ACCEPTs above, not
+        // this one (claudeFamily is true here, so this test stays green).
         class ThrowingClaudeSession extends LegacyRosterProviderSession {
           static getModelMetadata() { throw new Error('lookup exploded') }
         }
@@ -2899,6 +2905,41 @@ describe('settings-handlers', () => {
 
         assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
           "the Claude path keeps its fallback — it is that family's real roster")
+        assert.equal(session.setThinkingLevel.lastCall[0], 'high')
+      })
+
+      it('a THROWING getModelMetadata leaves the RESOLVED CLASS authoritative', async () => {
+        // Two lookups, two failure meanings: `getProvider` resolving is what
+        // says "Claude family"; `getModelMetadata` says only what the model ROW
+        // is. Re-merging them into one try/catch — the shape that nulled
+        // `ProviderClass` whenever either threw — reds this test: the live
+        // session's constructor here is deliberately a class that declares
+        // `claudeFamily = false`, and isClaudeProvider treats a passed class as
+        // authoritative, so the downgraded classification answers false, the
+        // legacy narrowing fires, and `high` is rejected on a provider whose
+        // registry class says Claude. The name map cannot rescue it either — it
+        // is never consulted once a class with a boolean flag is passed.
+        class ThrowingRowClaudeSession extends LegacyRosterProviderSession {
+          static getModelMetadata() { throw new Error('row lookup exploded') }
+        }
+        class NotClaudeWrapperSession { static claudeFamily = false }
+        registerProvider('test-throwing-claude-class', ThrowingRowClaudeSession)
+        const session = createMockSession()
+        // Own property, so the mock's prototype chain is untouched while
+        // `session.constructor` reports the non-Claude wrapper.
+        Object.defineProperty(session, 'constructor', { value: NotClaudeWrapperSession, configurable: true })
+        session.model = 'claude-sonnet-4-6'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-claude-class' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-claude-throw-class' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
+          'a class that really RESOLVED must stay authoritative when a LATER call throws')
         assert.equal(session.setThinkingLevel.lastCall[0], 'high')
       })
 
