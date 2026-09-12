@@ -173,14 +173,30 @@ export function resolveCodexSandbox(override) {
  * under. That is the "validated value handed on to something that parses it
  * under a different grammar" entry in `docs/false-safety-guards.md`.
  *
- * JSON's string escaping is a SUBSET of TOML 1.0's basic-string escaping:
- * `JSON.stringify` escapes `"` and the backslash, emits the short forms
- * `\\b \\f \\n \\r \\t` that TOML also defines, and `\\uXXXX` for every other
- * control character — all of which TOML accepts. The one character TOML
- * forbids raw in a basic string but JSON leaves alone is DEL (U+007F), so it
- * is escaped afterwards. Everything else passes through unchanged, which is
- * why an ordinary id still round-trips to the byte-identical
- * `model="gpt-5-codex"` this produced before.
+ * JSON's string escaping is a SUBSET of TOML 1.0's basic-string escaping with
+ * exactly two known exceptions, both listed below: `JSON.stringify` escapes
+ * `"` and the backslash, emits the short forms `\\b \\f \\n \\r \\t` that TOML
+ * also defines, and `\\uXXXX` for every other control character — all of which
+ * TOML accepts. Everything else passes through unchanged, which is why an
+ * ordinary id still round-trips to the byte-identical `model="gpt-5-codex"`
+ * this produced before.
+ *
+ * Exception 1 — DEL (U+007F). The one character TOML forbids raw in a basic
+ * string but JSON leaves alone, so it is escaped afterwards by the `.replace`
+ * below.
+ *
+ * Exception 2 — a LONE SURROGATE, and it is NOT fixed here. ES2019
+ * well-formed `JSON.stringify` emits `\\udXXX` for an unpaired surrogate
+ * (`toTomlBasicString('a\\uD800b')` → `"a\\ud800b"`), but TOML's `\\uXXXX`
+ * must name a Unicode SCALAR value and a surrogate is not one, so that output
+ * is invalid TOML. Reachable post-#7727: on the unrestricted branch
+ * `handleSetModel` only trims and checks non-empty, so a client can send
+ * `{"model":"\\ud800"}`. The outcome is a CLOSED failure — codex's own TOML
+ * parser rejects the `-c` override and the turn errors out; the value is still
+ * one argv element, there is no shell, and no second `-c` appears, so nothing
+ * escapes into the grammar. It is deliberately NOT stripped or replaced: the
+ * contract these tests pin is escaped-not-sanitised, and silently rewriting an
+ * id would mangle a value the operator supplied rather than surface a bad one.
  *
  * @param {string} value
  * @returns {string} a quoted, escaped TOML basic string
