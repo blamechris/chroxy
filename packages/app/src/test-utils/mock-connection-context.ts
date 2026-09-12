@@ -34,16 +34,38 @@ import type { ConnectionContext } from '../store/types';
  * Audited by flipping each default and running the whole app suite:
  *
  *   default       flipped to                 result
- *   url           'ws://mutant.invalid:1'    1 failed   PINNED (#7525)
- *   isReconnect   true                       3 failed   PINNED (pre-existing)
- *   silent        true                       2 failed   PINNED (#7696)
- *   token         'MUTANT-token'             0 failed   not a branch selector
+ *   url           'ws://mutant.invalid:1'    1 failed,  total 2450   PINNED (#7525)
+ *   isReconnect   true                       3 failed,  total 2197   PINNED, see below
+ *   silent        true                       2 failed,  total 2450   PINNED (#7696)
+ *   token         'MUTANT-token'             0 failed,  total 2450   not a branch selector
  *
- * `token` is carried on the context but never branched on, and `socket` is a
- * cast stub whose identity each suite overrides when it matters — so neither is
- * pinned, deliberately. If a handler ever starts branching on one, it joins the
- * first three: the test to write is the one that goes RED when the default is
- * flipped, and it must take the default rather than pass the value explicitly.
+ * THE TOTAL IS IN THE TABLE BECAUSE ONE ROW NEEDS IT. The `isReconnect` flip
+ * does not merely fail 3 cases: it makes THIS FILE'S pinning suite
+ * (__tests__/store/message-handler.test.ts) fail to RUN at all, so 253 tests
+ * never execute and the total drops 2450 -> 2197. The 3 failures are in other
+ * files (AutoResumeOnReconnect, auth-ok-handler), which is what pins it. The
+ * crash is a pre-existing unhandled rejection on the reconnect branch —
+ * `TypeError: (0, _persistence.loadLastConversationId) is not a function` at
+ * message-handler.ts:2317 — reproducible with this file reverted to base, so it
+ * is not this change's doing. Recorded because "3 failed" alone reads as a
+ * healthy run, and a suite that CRASHED is different evidence from cases that
+ * FAILED (#7704 review).
+ *
+ * `token` is carried on the context but never branched on — it is a `??`
+ * fallback value at message-handler.ts:1995 and :2229 — so it is not pinned,
+ * deliberately.
+ *
+ * `socket` is not pinned either, but NOT for the reason this note first gave.
+ * It said "a cast stub whose identity each suite overrides when it matters",
+ * and that is measurably false: 47 of the 261 call sites override `socket`, and
+ * two that do NOT — both `auth_bootstrap (#5555)` rows — assert against the
+ * default's `send` spy, so replacing it with a plain no-op reds them. That is
+ * an incidental pin rather than a deliberate one, which is the honest
+ * description, and it is why no explicit row is added here.
+ *
+ * If a handler ever starts branching on one of these, it joins the first three:
+ * the test to write is the one that goes RED when the default is flipped, and
+ * it must TAKE the default rather than pass the value explicitly.
  */
 export function createMockConnectionContext<
   // Review on #7463 (S1): a typed-return factory checks the BASE literal, but
@@ -80,10 +102,16 @@ export function createMockConnectionContext<
     // because rows that only assert an alert FIRES also pass for a handler that
     // alerts unconditionally.
     silent: false,
-    // A real WebSocket can't be constructed under jest, and the handler only
-    // ever touches `readyState` / `send` / `close` on it. This is the one cast
-    // in the factory and it is scoped to this single field — everything else
-    // is checked against the real type.
+    // A real WebSocket can't be constructed under jest. This is the one cast in
+    // the factory and it is scoped to this single field — everything else is
+    // checked against the real type.
+    //
+    // This said the handler "only ever touches `readyState` / `send` / `close`"
+    // on it. `send` and `close` are right; `readyState` is read ZERO times off
+    // the CONTEXT's socket — `sendIfOpen` reads the STORE's socket instead — and
+    // flipping this `1` to `3` reds nothing (#7704 review). Kept at 1 because a
+    // stub that claims to be closed would be a trap for the first handler that
+    // does read it.
     socket: { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket,
   };
   return { ...base, ...(overrides ?? {}) };
