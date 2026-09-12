@@ -30,6 +30,20 @@ export {
   CONTEXT_AUTO_COMPACT_RESERVE,
 } from './context-window'
 
+// #7728: provider-keyed model rosters. `available_models` is a GLOBAL broadcast
+// tagged with the emitting provider, so one flat slot let a Claude roster hide
+// the codex picker (dashboard) and send Claude ids to a codex session (mobile).
+// Both clients now store every roster and read the ACTIVE session's provider
+// through `selectModelsForProvider`.
+export {
+  UNTAGGED_MODELS_PROVIDER,
+  EMPTY_MODEL_ROSTER,
+  mergeModelsByProvider,
+  selectModelsForProvider,
+  selectOwnModelsForProvider,
+} from './models-by-provider'
+export type { ModelsByProvider, ProviderModelRoster } from './models-by-provider'
+
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
 // exhaustive `Record<VoiceInputMode, true>` so widening the union is a
 // TS error in the guard, not a silent drop at the call site.
@@ -942,6 +956,13 @@ export type {
   FixtureExpectation,
   FixtureFieldMatcher,
 } from './contract-fixtures/fixtures'
+// PR #7758 review — the harness's model of the dashboard's active-session flat
+// mirror. Exported so the DASHBOARD suite can pin it against the real, DERIVED
+// `UPDATE_SESSION_MIRRORED_FIELDS`: store-core cannot import the dashboard, so
+// the only place the two rosters can be compared is a dashboard test, and
+// without that comparison this list is a hand copy beside a set that grows
+// (it was already one short — `contextOccupancy`).
+export { DASHBOARD_FLAT_MIRROR_KEYS } from './contract-fixtures/client-adapters'
 
 // epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real
 // client handshake state machine + a fake server holding real test keypairs;

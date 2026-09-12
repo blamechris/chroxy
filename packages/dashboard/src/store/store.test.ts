@@ -398,7 +398,7 @@ describe('useConnectionStore', () => {
     expect(state.activeSessionId).toBeNull();
     expect(state.sessionStates).toEqual({});
     expect(state.messages).toEqual([]);
-    expect(state.availableModels).toEqual([]);
+    expect(state.modelsByProvider).toEqual({});
     expect(state.viewMode).toBe('chat');
   });
 

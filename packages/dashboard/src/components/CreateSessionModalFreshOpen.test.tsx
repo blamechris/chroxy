@@ -27,8 +27,7 @@ function setStoreState(overrides: Record<string, unknown> = {}) {
   storeState = {
     defaultProvider: 'claude-sdk',
     defaultModel: null,
-    availableModels: [],
-    availableModelsProvider: null,
+    modelsByProvider: {},
     availableProviders: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
@@ -192,11 +191,15 @@ describe('CreateSessionModal fresh-open guard (#2679)', () => {
     setStoreState({
       defaultProvider: 'claude-sdk',
       defaultModel: 'opus-4-6',
-      availableModelsProvider: 'claude-sdk',
-      availableModels: [
-        { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
-        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
-      ],
+      modelsByProvider: {
+        'claude-sdk': {
+          models: [
+            { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
+            { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
+          ],
+          defaultModelId: null,
+        },
+      },
       availableProviders: [
         { name: 'claude-sdk', capabilities: {} },
         { name: 'codex', capabilities: {} },
@@ -229,11 +232,15 @@ describe('CreateSessionModal fresh-open guard (#2679)', () => {
     setStoreState({
       defaultProvider: 'claude-sdk',
       defaultModel: 'opus',
-      availableModelsProvider: 'claude-sdk',
-      availableModels: [
-        { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
-        { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
-      ],
+      modelsByProvider: {
+        'claude-sdk': {
+          models: [
+            { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6' },
+            { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7' },
+          ],
+          defaultModelId: null,
+        },
+      },
       availableProviders: [
         { name: 'claude-sdk', capabilities: {} },
         { name: 'codex', capabilities: {} },

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import fs from 'node:fs'
 import path from 'node:path'
+import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
@@ -208,6 +209,76 @@ describe('SettingsPanel', () => {
   it('shows default provider selector', () => {
     render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
     expect(screen.getByLabelText('Default provider')).toBeInTheDocument()
+  })
+
+  // #7728 / PR #7758 review — the Default-model <select> was the ONE migrated
+  // call site with no guard: a mutation to `selectModelsForProvider(map, null)`
+  // survived the whole dashboard suite, because nothing here rendered the field
+  // at all. These four pin what it must offer.
+  describe('Default model select reads the default provider OWN roster (#7728)', () => {
+    const opus = { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }
+    const gpt = { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5-2026-01' }
+    const codexRoster = { models: [gpt], defaultModelId: 'gpt-5.5' }
+    const claudeRoster = { models: [opus], defaultModelId: 'opus' }
+
+    const optionLabels = () =>
+      Array.from(screen.getByLabelText('Default model').querySelectorAll('option')).map(
+        o => o.textContent,
+      )
+
+    it('lists ONLY the default provider ids when two rosters are in play', () => {
+      setMockState({
+        defaultProvider: 'codex',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
+    })
+
+    it('hides the field entirely when the default provider has no roster of its own', () => {
+      // Not "falls back to the Claude list" — an id this provider cannot run is
+      // worse than no default at all, since create-time drops it silently.
+      setMockState({
+        defaultProvider: 'codex',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        modelsByProvider: { 'claude-sdk': claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    })
+
+    it('follows the NORMALIZED provider the <select> above actually shows', () => {
+      // The persisted defaultProvider is absent from the server's list, so the
+      // provider <select> renders availableProviders[0]. Reading the raw
+      // persisted value here computed the roster for a provider that by
+      // construction can never have broadcast one, and the field vanished.
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
+    })
+
+    it('offers NOTHING from an untagged roster (this block feeds an evidence-side consumer)', () => {
+      // `defaultModel` is consumed by resolveCreateSessionModel, which forwards
+      // it only when the provider's OWN catalog contains it. Offering untagged
+      // ids here would show a default that create-time silently drops.
+      setMockState({
+        defaultProvider: 'codex',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }],
+        modelsByProvider: { [UNTAGGED_MODELS_PROVIDER]: claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    })
   })
 
   it('shows send shortcut selector', () => {

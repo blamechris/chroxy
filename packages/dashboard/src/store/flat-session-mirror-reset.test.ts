@@ -432,6 +432,34 @@ describe('#7555 the flat session mirror is derived, not hand-listed', () => {
     }
   })
 
+  it("the store-core contract harness mirrors the SAME roster this store does", async () => {
+    // PR #7758 review. `DASHBOARD_FLAT_MIRROR_KEYS` (store-core
+    // `contract-fixtures/client-adapters.ts`) is the contract harness's model of
+    // THIS store's active-session flat mirror: it drives the harness's own
+    // `updateSession` write AND the app-vs-dashboard divergence exclusion in
+    // `contract.test.ts`. It was a hand copy of a DERIVED list, so it could only
+    // ever drift — and it already had: `contextOccupancy` was missing, which
+    // silently narrowed the harness's mirror and widened the fields the contract
+    // demanded the two clients agree on.
+    //
+    // store-core cannot import the dashboard (that is the dependency direction),
+    // so this is the only place the two rosters meet. Both sides of this
+    // assertion are the REAL values — neither is re-typed here — so a future
+    // flat field lands in `UPDATE_SESSION_MIRRORED_FIELDS` for free and turns
+    // this cell red until the harness is told about it.
+    const { UPDATE_SESSION_MIRRORED_FIELDS } = await import('./utils')
+    const { DASHBOARD_FLAT_MIRROR_KEYS } = await import('@chroxy/store-core')
+    expect(
+      [...DASHBOARD_FLAT_MIRROR_KEYS].sort(),
+      'DASHBOARD_FLAT_MIRROR_KEYS (store-core contract-fixtures/client-adapters.ts) has drifted from ' +
+      "the dashboard's derived UPDATE_SESSION_MIRRORED_FIELDS (store/utils.ts = FLAT_SESSION_FIELDS " +
+      'minus FLAT_SESSION_FIELDS_NOT_MIRRORED). The contract harness is now mirroring a different set ' +
+      'of fields than this store does. #7728 / PR #7758 review',
+    ).toEqual([...UPDATE_SESSION_MIRRORED_FIELDS].sort())
+    // Non-vacuous: neither roster is empty, so the comparison is doing work.
+    expect(DASHBOARD_FLAT_MIRROR_KEYS.length).toBeGreaterThan(0)
+  })
+
   it('the exclusion filter reads OWN properties, not the prototype chain', () => {
     // `in` would exclude a flat field named `toString` / `constructor` /
     // `valueOf` on the strength of Object.prototype alone, silently dropping it

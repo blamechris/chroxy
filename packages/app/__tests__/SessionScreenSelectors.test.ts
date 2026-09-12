@@ -18,7 +18,6 @@ describe('SessionScreen selective store usage (#1923)', () => {
     // Fields that still use inline selectors from useConnectionStore
     const inlineSelectors = [
       'viewMode',
-      'availableModels',
       'availablePermissionModes',
       'inputSettings',
     ];
@@ -37,6 +36,10 @@ describe('SessionScreen selective store usage (#1923)', () => {
       'selectActiveModel',
       'selectPermissionMode',
       'selectIsIdle',
+      // #7728 — the model roster is stored per PROVIDER, and the screen reads
+      // the ACTIVE session's through a session-aware selector rather than
+      // subscribing to a flat `availableModels` field.
+      'selectActiveProviderModels',
     ];
 
     for (const fn of selectorFunctions) {

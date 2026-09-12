@@ -892,6 +892,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // class — getRegistryForProvider returns a provider-scoped registry
     // seeded from that list. Claude providers share the default registry
     // that is fed by `supportedModels()` on each SDK init.
+    // #7728/#7759 — `activeProvider` is null on any post-auth connect with no
+    // active session, and `getRegistryForProvider(null)` answers with the
+    // CLAUDE default registry. The client files a null-tagged roster as
+    // UNTAGGED, which it serves to a session of any provider while it is the
+    // only roster it knows — i.e. this send labels a Claude roster "could be
+    // anyone's". Naming the registry that actually answered is #7759.
     const activeProvider = entry?.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)
     send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
@@ -1110,12 +1116,18 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     send(ws, { type: 'claude_ready', sessionId })
   }
   // #4302: push the new session's provider-scoped model list on every
-  // switch. Without this, the dashboard's `availableModelsProvider` stays
-  // tagged with whichever provider the client saw last (set on auth via
-  // `sendPostAuthInfo`), and `modelsMatchProvider` in App.tsx suppresses
-  // the model picker for any session whose provider differs from the
-  // initial one — most visibly, a claude-cli session created after a
-  // TUI/SDK session loses its picker entirely.
+  // switch. Without this a client never learns the roster of a provider it
+  // did not see at auth time (`sendPostAuthInfo`) — pre-#7728 that showed up
+  // as the dashboard's single `availableModelsProvider` tag staying pinned to
+  // the provider seen last, suppressing the picker for every other session;
+  // since #7728 each roster is keyed by provider, so what a missing push
+  // leaves behind is an EMPTY roster for that provider — no picker, and no
+  // ids belonging to a provider that TAGGED its broadcast. One exception, and
+  // it is this file's own doing: `sendPostAuthInfo` sends `provider: null`
+  // when there is no active session (and `getRegistryForProvider(null)`
+  // answers with the CLAUDE registry), which the client files as UNTAGGED and
+  // still serves to any provider while it is the only roster it knows.
+  // Tagging that send is #7759.
   if (!opts.skipModels) {
     const activeProvider = entry.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)

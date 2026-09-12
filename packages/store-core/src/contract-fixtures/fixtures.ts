@@ -729,13 +729,14 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
-  // 4h. models / cost cases (#5618 Batch 5a). available_models shares the flat
-  // {availableModels, defaultModelId} write; the dashboard adds
-  // availableModelsProvider via extendModelsPatch (divergent). cost_update shares
-  // the per-session sessionCost patch; the app's flat/cost-store mirror is
-  // out-of-contract (covered by dispatch-table.test.ts units).
+  // 4h. models / cost cases (#5618 Batch 5a, #7728). available_models writes the
+  // emitting provider's roster into the shared `modelsByProvider` map — IDENTICAL
+  // in both clients since #7728 retired the dashboard-only `extendModelsPatch`
+  // (the app's missing copy of that hook is what sent Claude model ids to a codex
+  // session). cost_update shares the per-session sessionCost patch; the app's
+  // flat/cost-store mirror is out-of-contract (covered by dispatch-table.test.ts).
   {
-    name: 'available_models replaces the flat list (app vs dashboard provider divergence)',
+    name: 'available_models writes the roster under its provider tag (identical in both clients)',
     type: 'available_models',
     message: {
       type: 'available_models',
@@ -743,25 +744,19 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       defaultModel: 'opus',
       provider: 'claude-tui',
     },
-    divergent: {
-      app: {
-        flat: {
-          availableModels: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
-          defaultModelId: 'opus',
+    expect: {
+      flat: {
+        modelsByProvider: {
+          'claude-tui': {
+            models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+            defaultModelId: 'opus',
+          },
         },
       },
-      dashboard: {
-        flat: {
-          availableModels: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
-          defaultModelId: 'opus',
-          availableModelsProvider: 'claude-tui',
-        },
-      },
-      reason: 'dashboard tracks availableModelsProvider via extendModelsPatch; the app omits it',
     },
   },
   {
-    name: 'available_models is a no-op for a non-array payload (preserves the existing list)',
+    name: 'available_models is a no-op for a non-array payload (preserves the existing rosters)',
     type: 'available_models',
     message: { type: 'available_models' },
     expect: { noop: true },

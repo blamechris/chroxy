@@ -112,7 +112,8 @@ import type {
   InputSettings,
   LogEntry,
   MessageAttachment,
-  ModelInfo,
+  // #7728: one provider's model roster (the provider-keyed map's value type).
+  ProviderModelRoster,
   GitFileStatus,
   GitBranch,
   PendingPermissionConfirm,
@@ -1466,12 +1467,19 @@ export interface ConnectionState {
   // Available providers from server
   availableProviders: ProviderInfo[];
 
-  // Available models from server (CLI mode)
-  availableModels: ModelInfo[];
-  // Provider that sourced the current availableModels list.
-  availableModelsProvider: string | null;
-  // Server-reported default model short id (from SDK)
-  defaultModelId: string | null;
+  // #7728 — available models from the server, keyed by the PROVIDER whose
+  // registry broadcast them (each roster carries that provider's default model
+  // id). `models_updated` is machine-wide, so a single list plus a provider tag
+  // meant the last broadcast won: with a Claude and a codex session open, the
+  // codex picker vanished whenever the Claude roster landed last. Read it with
+  // `selectModelsForProvider(modelsByProvider, <active session's provider>)`,
+  // never by picking a key directly.
+  // Spelled as the Record it is, not as the `ModelsByProvider` alias: the
+  // #7470 roster guard extracts Record/Set/array-shaped members from this
+  // interface by SHAPE, and a named alias is in its documented blind spot
+  // (#7579) — a collection that hides behind an alias is never asked the
+  // session-lifetime question.
+  modelsByProvider: Record<string, ProviderModelRoster>;
 
   // Available permission modes from server (CLI mode).
   // #4019: PermissionMode is the typed shape from store-core; the optional

@@ -38,8 +38,10 @@ import { parseUnknownArrayField, resolveSessionId } from './_shared'
  * Heavy state-merge logic (GC of removed sessions, flat-field sync, auto-
  * subscribe, conversationId persistence) stays at the call site — those
  * concerns are platform-specific (the dashboard syncs `activeModel` against
- * `availableModels`; the app additionally auto-subscribes via WS and persists
- * the last conversationId to disk).
+ * that session's provider roster — `selectModelsForProvider(modelsByProvider,
+ * …)` since #7728, a single global `availableModels` list before it; the app
+ * additionally auto-subscribes via WS and persists the last conversationId to
+ * disk).
  */
 export function handleSessionList(msg: Record<string, unknown>): SessionInfo[] | null {
   if (!Array.isArray(msg.sessions)) return null
@@ -228,8 +230,9 @@ export function cumulativeUsageEquals(
  * Consumer-specific behaviour stays at the call site:
  * - The app's `loadLastConversationId()` auto-resume on empty list +
  *   reconnect (L1196-1207).
- * - The dashboard's `activeModel` lookup against `availableModels`
- *   (L2188-2197). Its `isBusy → isIdle` resync (#4639) is no longer call-site
+ * - The dashboard's `activeModel` lookup against the ACTIVE SESSION's provider
+ *   roster (`selectModelsForProvider(modelsByProvider, session.provider)` since
+ *   #7728; a single global `availableModels` list before it). Its `isBusy → isIdle` resync (#4639) is no longer call-site
  *   -only: the DERIVATION moved here as `isIdlePatches` in #7518, when the
  *   mobile app adopted the same resync, so the two clients cannot drift on
  *   which snapshot entries are authoritative.

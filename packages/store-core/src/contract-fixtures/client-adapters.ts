@@ -101,10 +101,24 @@ export interface AdapterResult {
 export type ClientKind = 'app' | 'dashboard'
 
 /**
- * The dashboard's active-session flat-mirror allow-list
- * (`updateSession`, dashboard message-handler.ts). Exported so the contract test
- * can document it; kept in lock-step with the real client by the fixtures that
- * cover the active-session path.
+ * The dashboard's active-session flat-mirror allow-list (`updateSession`,
+ * dashboard message-handler.ts). Drives this harness's own mirror write below
+ * AND the app-vs-dashboard divergence exclusion in `contract.test.ts`.
+ *
+ * The real list is DERIVED — `UPDATE_SESSION_MIRRORED_FIELDS` in
+ * `packages/dashboard/src/store/utils.ts` is `FLAT_SESSION_FIELDS` minus
+ * `FLAT_SESSION_FIELDS_NOT_MIRRORED` — so this copy could only ever drift, and
+ * it had: `contextOccupancy` was missing (PR #7758 review), which narrowed the
+ * harness's mirror and widened the fields the contract demanded both clients
+ * agree on. "Kept in lock-step by the fixtures that cover the active-session
+ * path" was the claim; no fixture patches that field, so nothing was checking.
+ *
+ * store-core cannot import the dashboard, so the pin lives on the dashboard
+ * side: `flat-session-mirror-reset.test.ts` ("the store-core contract harness
+ * mirrors the SAME roster this store does") imports THIS constant and the real
+ * derived one and compares them. That is why this is exported from the package
+ * index. Adding a flat field to the dashboard turns that cell red until this
+ * list is updated with it.
  */
 export const DASHBOARD_FLAT_MIRROR_KEYS = [
   'messages',
@@ -113,6 +127,7 @@ export const DASHBOARD_FLAT_MIRROR_KEYS = [
   'activeModel',
   'permissionMode',
   'contextUsage',
+  'contextOccupancy',
   'lastResultCost',
   'lastResultDuration',
   'isIdle',
@@ -283,15 +298,14 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // (#4878); the app OMITS `addInfoNotification` (#4879). Record it on the
     // dashboard side so a unit/contract assertion can observe the divergence;
     // the app's empty array IS the contract for that case.
-    // #5618 Batch 5a — only the DASHBOARD contributes availableModelsProvider to
-    // the available_models patch (the app omits the hook). Locked by a divergent
-    // fixture (dashboard flat carries the extra field; app's does not).
+    // #7728 — available_models used to diverge here: only the DASHBOARD wired
+    // `extendModelsPatch` to record which provider the roster came from, and the
+    // app's missing copy is what let a Claude roster render as codex chips. The
+    // provider tag now lives in the SHARED `modelsByProvider` map, so the hook
+    // is gone and that fixture is no longer divergent.
     ...(kind === 'dashboard'
       ? {
           addInfoNotification: (message: string) => infoNotifications.push(message),
-          extendModelsPatch: (msg: Record<string, unknown>) => ({
-            availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
-          }),
         }
       : {}),
   }

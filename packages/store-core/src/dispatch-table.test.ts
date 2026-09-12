@@ -92,12 +92,6 @@ function makeAdapter(init?: {
   /** Seed for `getFollowMode` (only when `multiClient`). */
   followMode?: boolean
   /**
-   * When true, the adapter wires `extendModelsPatch` (the dashboard's
-   * availableModelsProvider contribution, #5618 Batch 5a). When omitted, the
-   * available_models patch carries only the shared fields (the app's behaviour).
-   */
-  extendModels?: boolean
-  /**
    * When true, the adapter wires `setCostUpdate` (records into `costUpdates`) —
    * cost_update's app-only flat/cost-store mirror (#5618 Batch 5a). When omitted,
    * cost_update applies only the shared sessionCost patch (the dashboard).
@@ -191,13 +185,6 @@ function makeAdapter(init?: {
           getFollowMode: () => followMode,
           switchSession: (sessionId: string) => switchedSessions.push(sessionId),
           setPrimaryClientId: (clientId: string | null) => primaryClientIds.push(clientId),
-        }
-      : {}),
-    ...(init?.extendModels
-      ? {
-          extendModelsPatch: (msg: Record<string, unknown>) => ({
-            availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
-          }),
         }
       : {}),
     ...(init?.costMirror
@@ -1254,26 +1241,99 @@ describe('shared dispatch table', () => {
       provider: 'claude-tui',
     }
 
-    it('available_models replaces the flat list + default (app: no provider field)', () => {
+    it('available_models writes the roster under the broadcast provider tag', () => {
       const env = makeAdapter()
       const handled = dispatch(env, modelsMsg)
       expect(handled).toBe(true)
-      expect(env.flat.availableModels).toEqual([{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }])
-      expect(env.flat.defaultModelId).toBe('opus')
-      expect(env.flat.availableModelsProvider).toBeUndefined()
+      expect(env.flat.modelsByProvider).toEqual({
+        'claude-tui': {
+          models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+          defaultModelId: 'opus',
+        },
+      })
     })
 
-    it('available_models adds availableModelsProvider when extendModelsPatch is wired (dashboard)', () => {
-      const env = makeAdapter({ extendModels: true })
-      dispatch(env, modelsMsg)
-      expect(env.flat.availableModelsProvider).toBe('claude-tui')
+    // #7728 — THE regression. `models_updated` is a machine-wide broadcast tagged
+    // with the emitting registry, so with a Claude session and a codex session
+    // open, whichever roster arrived last used to own the single slot: the
+    // dashboard hid the codex picker and the app offered Claude ids to codex.
+    it('a second available_models for another provider leaves BOTH rosters readable', () => {
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+        defaultModel: 'opus',
+        provider: 'claude-sdk',
+      })
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        defaultModel: 'gpt-5.5',
+        provider: 'codex',
+      })
+      const byProvider = env.flat.modelsByProvider as Record<string, { models: Array<{ id: string }>; defaultModelId: string | null }>
+      expect(byProvider['claude-sdk'].models.map((m) => m.id)).toEqual(['opus'])
+      expect(byProvider['claude-sdk'].defaultModelId).toBe('opus')
+      expect(byProvider.codex.models.map((m) => m.id)).toEqual(['gpt-5.5'])
+      expect(byProvider.codex.defaultModelId).toBe('gpt-5.5')
+      // And the reverse order, so the assertion is not satisfied by "the last
+      // one wins" happening to be the one we looked at.
+      const reversed = makeAdapter()
+      dispatch(reversed, {
+        type: 'available_models',
+        models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        provider: 'codex',
+      })
+      dispatch(reversed, {
+        type: 'available_models',
+        models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+        provider: 'claude-sdk',
+      })
+      expect(Object.keys(reversed.flat.modelsByProvider as object).sort()).toEqual(['claude-sdk', 'codex'])
     })
 
-    it('available_models is owned-but-no-op for a non-array payload (preserves the list)', () => {
+    it('a second available_models for the SAME provider replaces that roster', () => {
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'gone', label: 'Gone', fullId: 'gone' }],
+        provider: 'codex',
+      })
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        provider: 'codex',
+      })
+      const byProvider = env.flat.modelsByProvider as Record<string, { models: Array<{ id: string }> }>
+      expect(byProvider.codex.models.map((m) => m.id)).toEqual(['gpt-5.5'])
+    })
+
+    it('available_models is owned-but-no-op for a non-array payload (writes nothing at all)', () => {
       const env = makeAdapter()
       expect(dispatch(env, { type: 'available_models' })).toBe(true)
-      expect(env.flat.availableModels).toBeUndefined()
-      expect(env.flat.defaultModelId).toBeUndefined()
+      expect(env.flat.modelsByProvider).toBeUndefined()
+    })
+
+    it('a non-array payload PRESERVES the rosters already stored', () => {
+      // The assertion above starts from a fresh adapter, so "preserves" was not
+      // what it tested — absence without a control. Seed a real roster first and
+      // require it to come back byte-identical.
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'available_models',
+        models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        defaultModel: 'gpt-5.5',
+        provider: 'codex',
+      })
+      // The REFERENCE, not a clone: `toEqual` against a JSON copy would pass for
+      // a handler that rebuilt an equal-but-new map, losing the referential
+      // stability both clients' zustand selectors memoize on (PR #7758 review).
+      const before = env.flat.modelsByProvider
+      expect(Object.keys(before as object)).toEqual(['codex'])
+
+      expect(dispatch(env, { type: 'available_models' })).toBe(true)
+      expect(dispatch(env, { type: 'available_models', models: 'nope', provider: 'codex' })).toBe(true)
+      expect(env.flat.modelsByProvider).toBe(before)
     })
 
     it('cost_update applies the per-session sessionCost patch + app mirror when wired', () => {

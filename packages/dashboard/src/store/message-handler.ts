@@ -173,6 +173,8 @@ import {
   // (byte-identical wording with the mobile app).
   handleAppendMemoryResult as sharedAppendMemoryResult,
   formatMemoryAppendNotice,
+  // #7728 — read a roster for ONE provider out of the provider-keyed map.
+  selectModelsForProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
@@ -1600,13 +1602,11 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // follow-mode looked guarded while still being able to walk onto a session
   // this client no longer has a tab for.
   switchSession: (sessionId) => void getStore().getState().switchSession(sessionId),
-  // #5618 Batch 5a — the dashboard tracks which provider the available_models
-  // list is for; contribute it to the single available_models patch. The app
-  // omits this hook (no availableModelsProvider field). The dashboard omits
-  // setCostUpdate (cost_update's flat/cost-store mirror is app-only).
-  extendModelsPatch: (msg) => ({
-    availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
-  }),
+  // #7728 — the dashboard-only `extendModelsPatch` hook is gone: the provider
+  // tag is now part of the SHARED `modelsByProvider` write, so both clients key
+  // rosters by provider instead of one of them tracking a tag the other ignored.
+  // The dashboard still omits setCostUpdate (cost_update's flat/cost-store
+  // mirror is app-only).
   // #5618 Batch 5b — repoint the localStorage server-registry entry after a
   // quick-tunnel rotation (tunnel_url_changed / auth_bootstrap). Consults
   // previousUrl to match the right entry (the app ignores it).
@@ -5050,13 +5050,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       set({ sessions: sessionList });
       // Sync activeModel from session list to prevent dropdown reset.
       // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
-      // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
+      // dropdown uses short IDs (e.g. sonnet). Resolve against THAT SESSION's
+      // provider roster (#7728) — resolving against whichever roster was
+      // broadcast last could only ever match by coincidence on a mixed-provider
+      // machine.
       const activeSessionId = get().activeSessionId;
       if (activeSessionId) {
         const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
         if (activeSessionInfo?.model) {
           const fullId = activeSessionInfo.model as string;
-          const models = get().availableModels;
+          const models = selectModelsForProvider(
+            get().modelsByProvider,
+            (activeSessionInfo as { provider?: string | null }).provider ?? null,
+          ).models;
           const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
           set({ activeModel: matched ? matched.id : fullId });
         }
@@ -5895,8 +5901,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     // available_models — migrated to the shared dispatch table (#5618 Batch 5a;
     // handled by runDispatch before this switch). Non-array payloads are a no-op
-    // that preserves the existing list. The dashboard's availableModelsProvider
-    // rides on the `extendModelsPatch` adapter hook (single set).
+    // that preserves the existing rosters. #7728: the roster lands under the
+    // broadcasting provider's key in `modelsByProvider` (one shared write; the
+    // dashboard-only `extendModelsPatch` hook is retired).
 
     // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 

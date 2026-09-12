@@ -166,7 +166,7 @@ const DISCONNECT_PRESERVES = ELEVEN.filter((f) => !CLEARED_BY_DISCONNECT.has(f))
  */
 const ROSTER_EXPECTED = [
   'permissionInputs', 'resolvedPermissions', 'serverCapabilities', 'availableProviders',
-  'availableModels', 'availablePermissionModes', 'connectedClients', 'webTasks',
+  'modelsByProvider', 'availablePermissionModes', 'connectedClients', 'webTasks',
   'slashCommands', 'filePickerFiles', 'mcpResources', 'customAgents', 'conversationHistory',
   'searchResults', 'checkpoints', 'environments',
   'infoNotifications',
@@ -195,7 +195,7 @@ function serverAState(): Record<string, unknown> {
     resolvedPermissions: { 'req-a3': 'allow' },
     serverCapabilities: { fileOps: true, teleport: true },
     availableProviders: [{ name: 'claude-a', displayName: 'A' }],
-    availableModels: [{ id: 'model-a', fullId: 'a/model-a', name: 'A' }],
+    modelsByProvider: { 'claude-a': { models: [{ id: 'model-a', fullId: 'a/model-a', label: 'A' }], defaultModelId: 'model-a' } },
     availablePermissionModes: [{ id: 'yolo-a', label: 'Server A only mode' }],
     connectedClients: [{ clientId: 'client-a', deviceName: 'A' }],
     webTasks: [{ taskId: 'task-a', status: 'running' }],

@@ -26,8 +26,7 @@ function mockStore(environments: unknown[] = []) {
       selector({
         defaultProvider: 'claude-tui',
         defaultModel: null,
-        availableModels: [],
-        availableModelsProvider: null,
+        modelsByProvider: {},
         availableProviders: [TUI_PROVIDER],
         availablePermissionModes: [],
         environments,

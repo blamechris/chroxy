@@ -84,8 +84,7 @@ beforeEach(() => {
   Object.assign(mockStoreState, {
     defaultProvider: 'claude-sdk',
     defaultModel: null,
-    availableModels: [],
-    availableModelsProvider: null,
+    modelsByProvider: {},
     availableProviders: [SDK_READY, CODEX_UNREADY, GEMINI_UNREADY],
     availablePermissionModes: [],
     environments: [],
