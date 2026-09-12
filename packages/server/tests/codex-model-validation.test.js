@@ -65,8 +65,31 @@ const LIVE_MODEL_LIST = Object.freeze({
   nextCursor: null,
 })
 
-/** The ids of the hand-maintained seed — the roster #7727 retires. */
-const SEED_IDS = ['gpt-5-codex', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o1', 'o3']
+/**
+ * The ids of the hand-maintained seed — the roster #7727 retires.
+ *
+ * DERIVED, not transcribed (#7766). A six-id literal sitting beside a table
+ * that is expected to shrink is the #7192/#7197/#7267 shape — a hardcoded list
+ * next to a set that moves — in the one file whose job is to hunt it. Captured
+ * at module scope, before any test applies a catalog, which is exactly the
+ * state in which `getFallbackModels()` returns the seed.
+ *
+ * This is NOT the #7424 self-derivation trap: the subject under test is
+ * `getAllowedModels()`, and the expectation comes from `getFallbackModels()`
+ * — a different function, reading the seed table the subject must now ignore.
+ * The two controls below are what make that a real comparison.
+ */
+const SEED_IDS = CodexSession.getFallbackModels().map((m) => m.id)
+
+{
+  // Controls for the derivation above. Without these, a seed that went empty —
+  // or that started listing the very ids the live fixture serves — would make
+  // every SEED_IDS assertion below pass over nothing.
+  assert.ok(SEED_IDS.length > 0, 'the seed must be non-empty, or the seed-exclusion tests assert nothing')
+  const liveIds = LIVE_MODEL_LIST.data.map((m) => m.id)
+  assert.deepEqual(SEED_IDS.filter((id) => liveIds.includes(id)), [],
+    'the fixture must share no id with the seed, or "absent from the allowlist" is untestable')
+}
 
 function applyLiveCatalog() {
   const ok = applyCodexCatalog(stampContextWindows(parseModelListResult(LIVE_MODEL_LIST), new Map()))
@@ -129,10 +152,25 @@ describe('#7727 CodexSession.getAllowedModels — the tri-state contract', () =>
     // #6616 makes the app-server driver the default, so THIS is the class both
     // gates actually call. A delegation that stopped forwarding would leave the
     // gates reading a different answer than the one under test above.
-    assert.equal(getProvider('codex'), CodexAppServerSession)
-    assert.equal(CodexAppServerSession.getAllowedModels(), null)
-    applyLiveCatalog()
-    assert.deepEqual(CodexAppServerSession.getAllowedModels(), CodexSession.getAllowedModels())
+    //
+    // #7766 — the env var is PINNED, not assumed. `getProvider` re-reads
+    // CHROXY_CODEX_APPSERVER on every call (providers.js:186), so an ambient
+    // `=0` in a developer shell or a CI job would resolve CodexSession here and
+    // redden this test for a reason that has nothing to do with delegation.
+    const orig = process.env.CHROXY_CODEX_APPSERVER
+    try {
+      delete process.env.CHROXY_CODEX_APPSERVER
+      assert.equal(getProvider('codex'), CodexAppServerSession)
+      assert.equal(CodexAppServerSession.getAllowedModels(), null)
+      applyLiveCatalog()
+      const ids = CodexSession.getAllowedModels()
+      assert.ok(Array.isArray(ids) && ids.length > 0,
+        'control: the populated half must compare two real arrays, not null to null')
+      assert.deepEqual(CodexAppServerSession.getAllowedModels(), ids)
+    } finally {
+      if (orig === undefined) delete process.env.CHROXY_CODEX_APPSERVER
+      else process.env.CHROXY_CODEX_APPSERVER = orig
+    }
   })
 })
 
@@ -338,6 +376,18 @@ describe('#7727 validation reads the CATALOG DIRECTLY, never the models registry
     // different observables all the way to the gate.
     const out = await getProvider('codex').refreshModels({ client: stubClient(null), windows: new Map() })
     assert.equal(out, null)
+
+    // #7766 — the roster is READ here, as the sibling test above reads it.
+    // Without this the test never touches a registry and so re-asserts the
+    // base case from section A by a longer route; the name promises a CONTRAST
+    // with the roster, and a contrast needs both sides. The roster is non-empty
+    // (the seed snapshot survives a failed probe), and validation is still
+    // unrestricted — which is the whole claim.
+    const rosterIds = getRegistryForProvider('codex').getModels().map((m) => m.id)
+    assert.ok(rosterIds.length > 0,
+      'control: the registry must still hold the seed snapshot, or "not pinned to it" is vacuous')
+    assert.deepEqual([...rosterIds].sort(), [...SEED_IDS].sort(),
+      'a failed probe leaves the roster exactly the captured seed — that is the list it must NOT become')
     assert.equal(CodexSession.getAllowedModels(), null)
   })
 })
