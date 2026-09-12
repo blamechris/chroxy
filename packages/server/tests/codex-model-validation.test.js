@@ -343,14 +343,14 @@ describe('#7727 validation reads the CATALOG DIRECTLY, never the models registry
   beforeEach(resetAll)
   afterEach(resetAll)
 
-  it('the registry roster still lists a stale seed row — and the validator does not accept it', async () => {
+  it('a stale row in the registry roster is never accepted — validation reads the catalog, not the roster', async () => {
     // The deviation #7757 recorded, reproduced end-to-end rather than asserted:
     // `createModelsRegistry` snapshots `getFallbackModels()` ONCE at
     // construction — always before the first probe resolves, so always the six
     // statics — and `updateModels` then merges every captured fallback the
-    // refresh omitted (the #3075 under-reporting union). The registry roster
-    // is therefore `discovered ∪ seed`, permanently, in every process. #7761
-    // fixes that half.
+    // refresh omitted (the #3075 under-reporting union) — until #7765 scoped
+    // that union to the Claude registry. The roster no longer diverges on its
+    // own, so this test plants the divergence deliberately.
     //
     // If `getAllowedModels()` read the registry (or `getFallbackModels()`
     // through it), that union would silently become the allowlist and a model
@@ -360,9 +360,22 @@ describe('#7727 validation reads the CATALOG DIRECTLY, never the models registry
     const out = await getProvider('codex').refreshModels({ client: stubClient(LIVE_MODEL_LIST), windows: new Map() })
     assert.ok(Array.isArray(out) && out.length > 0, 'the refresh must have reported a changed picker')
 
+    // #7765 scoped the #3075 union to the Claude registry, so the roster no
+    // longer re-adds the seed by itself — pin that, or a returning union is
+    // invisible here.
+    const afterRefresh = getRegistryForProvider('codex').getModels().map((m) => m.id)
+    assert.equal(afterRefresh.includes('gpt-4o'), false,
+      `the registry union is Claude-only since #7765; got ${afterRefresh.join(',')}`)
+    // Then plant a stale row in the REGISTRY directly — the only way a roster
+    // can still diverge from the catalogue now — so the assertion below is
+    // about where validation READS, not about what the union happens to do.
+    getRegistryForProvider('codex').updateModels([
+      ...LIVE_MODEL_LIST.data.map((m) => ({ value: m.id, displayName: m.displayName })),
+      { value: 'gpt-4o', displayName: 'GPT-4o' },
+    ])
     const rosterIds = getRegistryForProvider('codex').getModels().map((m) => m.id)
-    assert.ok(rosterIds.includes('gpt-4o'), `today's registry union re-adds the seed rows; got ${rosterIds.join(',')}`)
-    assert.ok(rosterIds.includes('gpt-6-astra'), 'and carries the discovered rows')
+    assert.ok(rosterIds.includes('gpt-4o'), `the planted stale row must be in the roster; got ${rosterIds.join(',')}`)
+    assert.ok(rosterIds.includes('gpt-6-astra'), 'and the roster carries the discovered rows')
 
     const allowed = CodexSession.getAllowedModels()
     assert.equal(allowed.includes('gpt-4o'), false,

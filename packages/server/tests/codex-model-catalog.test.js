@@ -785,7 +785,10 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
     // it the way production does (`server-cli.js:880` / `refreshModels`'s eager
     // `getRegistryForProvider('codex')`, both while the catalogue is UNSET) and
     // pin that the captured roster really is the six statics.
-    const statics = CodexSession.getAllowedModels()
+    // #7766 made `getAllowedModels()` TRI-STATE — null while the catalogue is
+    // UNSET — so the seed must be read from the seed roster itself, which is
+    // what the registry constructor snapshots.
+    const statics = CodexSession.getFallbackModels().map((m) => m.id)
     const seeded = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
     assert.deepEqual(seeded, [...statics].sort(),
       `pre-refresh the codex registry must carry exactly the static seed, else every absence below is vacuous — got ${seeded.join(',')}`)
