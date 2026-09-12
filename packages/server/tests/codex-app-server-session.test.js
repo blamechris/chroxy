@@ -2211,30 +2211,61 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
   // #7773 — this test used to assert the breakdown was read straight off
   // `last`, on the theory that `last` IS the turn. It is not: `last` is one
   // model RESPONSE. The turn is the DELTA of the cumulative `total` since turn
-  // start, which is what the suite below pins. The anti-compounding rationale
-  // the old assertion carried is preserved here: the reported figure must not
-  // be the running total either.
-  it('the token breakdown is neither the raw cumulative `total` nor one response (#7773)', () => {
-    withCodexSession((s) => {
-      s.bootedModel = 'gpt-5-codex'
-      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
-      // Turn 1 of the thread: nothing accumulated yet, so the baseline is
-      // zero and the turn's delta IS `total`.
+  // start, which is what the suite below pins.
+  //
+  // This MUST be a two-turn test, driven through the real `sendMessage()`
+  // path so `_turnBaselineTotals` actually freezes at a non-zero value
+  // (review finding #2 on #7798): a single-turn fixture pokes `_activeTurn`
+  // directly, leaves the baseline null, and falls through to raw `total` —
+  // so it passed under `last`, under raw `total`, AND under the delta, and
+  // discriminated none of the three readings its own name claims to.
+  it('the token breakdown is neither the raw cumulative `total` nor one response (#7773)', async () => {
+    const { s, cleanup } = mkSession({ model: 'gpt-5-codex' })
+    s._processReady = true
+    s._threadId = 'th-1'
+    s._client = { request: async () => ({ turn: { id: 'tu-1' } }) }
+    try {
+      // Turn 1: nothing accumulated yet, so the baseline freezes at zero.
+      await s.sendMessage('one')
       s._onNotification({
         method: 'thread/tokenUsage/updated',
         params: tokenUsageParams({
           last: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
           total: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
-          modelContextWindow: 272_000,
+        }),
+      })
+      s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 1 } } })
+
+      // Turn 2: a tool round-trip inside the turn, so `last` (this turn's
+      // final response alone) and `total` (the whole THREAD's cumulative sum,
+      // including turn 1) are both wrong, and both a different number from
+      // the correct turn-2-only delta.
+      await s.sendMessage('two')
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({
+          last: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 10 },
+          total: { inputTokens: 1500, cachedInputTokens: 900, outputTokens: 90 },
         }),
       })
       assert.deepEqual(s._lastUsage, {
-        input_tokens: 400,
-        output_tokens: 42,
-        cache_read_input_tokens: 600,
-        cached_input_tokens: 600,
-      }, 'session-manager ACCUMULATES result.usage — a running total here would compound every turn')
-    })
+        input_tokens: 200, // (1500-900) - (1000-600)
+        output_tokens: 48, // 90 - 42
+        cache_read_input_tokens: 300, // 900 - 600
+        cached_input_tokens: 300,
+      }, 'turn 2 reports only turn 2 — a running total here would compound every turn')
+      assert.notEqual(s._lastUsage.input_tokens, 250,
+        'control: raw `last` alone (this turn\'s final response) maps to a DIFFERENT input_tokens, so reverting to `last` would be caught')
+      assert.notEqual(s._lastUsage.output_tokens, 10,
+        'control: raw `last` alone maps to a DIFFERENT output_tokens too')
+      assert.notEqual(s._lastUsage.input_tokens, 600,
+        'control: the raw cumulative `total` (ignoring the baseline) maps to a DIFFERENT input_tokens, so reverting to `total` would be caught')
+      assert.notEqual(s._lastUsage.cache_read_input_tokens, 900,
+        'control: the raw cumulative `total`\'s cache figure is different too')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
   })
 
   it('a payload WITHOUT modelContextWindow leaves the entry unchanged and falls through to the ratchet', () => {
@@ -2460,7 +2491,12 @@ describe('CodexAppServerSession — usage accounting (#7773 / #7769 / #7794)', (
       // _finishTurn's _clearMessageState clears _isBusy, so the next send is
       // not queued — no manual flag poking.
       finish: () => s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 7 } } }),
-      cleanup: () => { s.destroy(); cleanup() },
+      // The codex models registry is a process-global (several tests below
+      // feed a `modelContextWindow`, which writes into it) — put it back the
+      // same way `withCodexSession` above does, or a test appended after this
+      // suite inherits whatever window the last test here left behind
+      // (review finding #4 on #7798).
+      cleanup: () => { s.destroy(); cleanup(); getRegistryForProvider('codex').resetModels() },
     }
   }
 
