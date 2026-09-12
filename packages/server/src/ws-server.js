@@ -2596,6 +2596,19 @@ export class WsServer {
   }
 
   /**
+   * #7722 — public filtered broadcast: deliver to every authenticated, open
+   * client for which `filter(client)` is true. A thin non-underscore name over
+   * `_broadcast`, for callers outside the class (the models-overlay hot-reload
+   * in server-cli.js) that must address a SUBSET of clients rather than all of
+   * them. Adds no semantics: WsBroadcaster already skips unauthenticated and
+   * closed sockets, and already isolates a throwing filter to the one client
+   * (warn once, broadcast continues).
+   */
+  broadcastFiltered(message, filter) {
+    this._broadcast(message, filter)
+  }
+
+  /**
    * Broadcast a message only to authenticated clients that advertised at
    * least `minProtocolVersion` during auth. See WsBroadcaster for details.
    */

@@ -3565,3 +3565,71 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 })
+
+// #7722 (MC-0) — a models-overlay hot-reload used to broadcast the Claude
+// roster to every client tagged `claude-sdk`, which flips `modelsMatchProvider`
+// false on an active codex session and HIDES its model picker until reconnect.
+// The server now routes a codex-tagged roster to codex clients, so the picker
+// must stay up.
+//
+// Both cases below share ONE fixture and differ in exactly one field —
+// `availableModelsProvider`. That is load-bearing, because `modelsMatchProvider`
+// (App.tsx) treats a NULL/absent models-provider as a match. The base mock in
+// this file does not define the field at all, so a fixture copied from any
+// other provider test renders with that escape hatch OPEN and would pass with
+// the whole fix deleted. Case B is the control that proves the hatch is shut:
+// with a mismatched tag on the same session the picker must be ABSENT.
+//
+// `availableModels` is NON-EMPTY in both cases for the same reason. "Hidden" is
+// implemented by passing an empty array down to AppHeader, and
+// ChatSettingsDropdown gates the trigger on `availableModels.length > 0` — so
+// an empty fixture would produce "hidden" regardless of the provider tag, and
+// both cases would be green for the wrong reason.
+describe('codex model picker survives an overlay reload (#7722)', () => {
+  const codexSession = {
+    sessionId: 's1',
+    name: 'Codex',
+    cwd: '/tmp',
+    type: 'cli' as const,
+    hasTerminal: true,
+    model: 'gpt-5.5',
+    permissionMode: 'approve',
+    isBusy: false,
+    createdAt: 1,
+    conversationId: null,
+    provider: 'codex',
+  }
+  const codexFixture = (availableModelsProvider: string) => ({
+    connectionPhase: 'connected' as const,
+    sessions: [codexSession],
+    activeSessionId: 's1',
+    availableProviders: [{ name: 'codex', capabilities: { modelSwitch: true } }],
+    availableModels: [
+      { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5', contextWindow: 272000 },
+    ],
+    availablePermissionModes: [{ id: 'approve', label: 'Approve' }],
+    availableModelsProvider,
+  })
+
+  it('stays VISIBLE when the roster is tagged with the session own provider', () => {
+    stateOverrides = codexFixture('codex')
+    const { container } = render(<App />)
+    const header = container.querySelector('#header')
+    expect(header, '#header must render').toBeTruthy()
+    // Asserted on RENDERED OUTPUT, not on the showModelPicker prop: that prop is
+    // never rendered — AppHeader converts a false value into an empty array —
+    // so a prop assertion would only prove a memo computed a boolean.
+    expect(within(header as HTMLElement).getByTestId('chat-settings-trigger')).toBeInTheDocument()
+  })
+
+  it('is HIDDEN when the roster is tagged for a different provider (proves the null-tag hatch is shut)', () => {
+    stateOverrides = codexFixture('claude-sdk')
+    const { container } = render(<App />)
+    const header = container.querySelector('#header')
+    expect(header, '#header must render').toBeTruthy()
+    expect(within(header as HTMLElement).queryByTestId('chat-settings-trigger')).toBeNull()
+    // And not merely swapped for the read-only badge, which renders only when
+    // the provider declares modelSwitch:false — not the case here.
+    expect(within(header as HTMLElement).queryByTestId('active-model-badge')).toBeNull()
+  })
+})

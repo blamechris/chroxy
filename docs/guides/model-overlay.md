@@ -68,7 +68,7 @@ Add a `provider` field to route an entry to that provider's own registry instead
 
 - A tagged entry seeds/overrides **that** provider's picker + allowlist and is **isolated** — a `gemini` entry never bleeds into Codex or Claude.
 - Routing is by the field's **presence**, not by validating the name; a Claude provider name (or omitting the field) lands on the Claude registry, so just omit `provider` for Claude models.
-- Tagged entries hot-reload like Claude ones — already-running provider sessions pick up the change on the next models fetch.
+- Tagged entries hot-reload like Claude ones, and since [#7722](https://github.com/blamechris/chroxy/issues/7722) the new roster is **pushed** on save — a connected client on that provider's session sees it in the picker immediately, with no reconnect and no refetch.
 - **`pricing` applies wherever the provider reports per-token cost** — e.g. a `provider: "deepseek"` entry re-prices a DeepSeek model with no release ([#6381](https://github.com/blamechris/chroxy/issues/6381)), overriding the shipped static rate. Ollama is `$0` by design; Gemini/Codex don't report token cost; config-driven endpoints carry their own `pricing`.
 - To *serve* (not just list) a new model on a static-allowlist provider, you still want [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) — the overlay makes it appear in the picker; `allowAnyModel` lets an unlisted id through validation.
 
@@ -79,6 +79,21 @@ The overlay is watched and re-folded into the registry on change ([#5932](https:
 - **Malformed JSON** (or a non-object root) is rejected with a warning and the **last-good overlay is kept** — a typo mid-edit never wipes your overrides.
 - **Deleting the file** legitimately **clears** the overlay (an explicit operator action).
 - If the directory can't be watched, edits fall back to needing a restart (a warning says so).
+
+Each affected registry's roster is pushed to the clients on **that provider's** sessions
+([#7722](https://github.com/blamechris/chroxy/issues/7722)), so a save touching a
+`provider: "codex"` entry refreshes codex pickers and leaves Claude sessions alone. Before
+that fix every reload broadcast the Claude roster to everyone, which hid the picker on an
+active non-Claude session until it reconnected.
+
+Two limits are worth knowing:
+
+- A client viewing a provider whose rows did **not** change receives nothing — by design, so
+  an unrelated save never disturbs its picker.
+- A reload that is **rejected** (malformed JSON) pushes nothing at all. If a save appears to
+  do nothing, check the daemon log for `Models overlay reloaded: <ids>` — its absence means
+  the file was rejected or the watcher never fired, which otherwise looks the same as a
+  reload that changed nothing.
 
 ## Notes & limits
 

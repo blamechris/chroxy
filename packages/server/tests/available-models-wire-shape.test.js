@@ -1,7 +1,18 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { ServerAvailableModelsSchema } from '@chroxy/protocol'
-import { createModelsRegistry } from '../src/models.js'
+// Registers the real provider classes so the #7722 block below gets a genuine
+// codex registry rather than a fall-through to the Claude one.
+import '../src/providers.js'
+import {
+  createModelsRegistry,
+  reloadModelsOverlay,
+  _resetModelsOverlayForTests,
+  _resetProviderRegistryCacheForTests,
+} from '../src/models.js'
 
 /**
  * #7089 — `available_models` sent `defaultModel: null` against a non-nullable
@@ -55,5 +66,58 @@ describe('#7089 available_models wire shape', () => {
       const r = ServerAvailableModelsSchema.safeParse({ ...payloadFrom(createModelsRegistry({})), defaultModel: bad })
       assert.equal(r.success, false, `defaultModel: ${JSON.stringify(bad)} must still be rejected`)
     }
+  })
+})
+
+/**
+ * #7722 — the overlay hot-reload became a second REAL sender of
+ * `available_models`, emitting one payload per affected registry. This file's
+ * remit is proving a payload built by a real sender is wire-legal, so the new
+ * sender belongs here: a codex registry has no SDK-reported default, so its
+ * payload carries `defaultModel: null` — the exact #7089 condition a literal
+ * fixture cannot reproduce.
+ */
+describe('#7722 overlay reload payloads are wire-legal', () => {
+  let dir
+  const overlay = (obj) => {
+    dir = mkdtempSync(join(tmpdir(), 'overlay-wire-'))
+    const path = join(dir, 'models.json')
+    writeFileSync(path, JSON.stringify(obj))
+    return path
+  }
+  beforeEach(() => {
+    _resetProviderRegistryCacheForTests()
+    _resetModelsOverlayForTests()
+  })
+  afterEach(() => {
+    _resetProviderRegistryCacheForTests()
+    _resetModelsOverlayForTests()
+    if (dir) { rmSync(dir, { recursive: true, force: true }); dir = null }
+  })
+
+  it('every payload from a real reload satisfies the schema', () => {
+    const path = overlay({
+      'codex-wire-9': { provider: 'codex', label: 'Codex Wire 9' },
+      'claude-wire-9': { label: 'Claude Wire 9' },
+    })
+    const { broadcasts } = reloadModelsOverlay(path)
+    assert.ok(broadcasts.length >= 2, 'precondition: more than the Claude roster was built')
+    for (const payload of broadcasts) {
+      const result = ServerAvailableModelsSchema.safeParse(payload)
+      assert.ok(
+        result.success,
+        `payload tagged ${payload.provider} is not wire-legal: ${result.success ? '' : JSON.stringify(result.error.issues)}`,
+      )
+    }
+  })
+
+  it("the codex payload's defaultModel is null and the schema accepts it", () => {
+    const path = overlay({ 'codex-wire-9': { provider: 'codex', label: 'Codex Wire 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    const codex = broadcasts.find((b) => b.provider === 'codex')
+    assert.ok(codex, 'precondition: a codex payload was built')
+    // The #7089 shape, reached through a real sender rather than a literal.
+    assert.equal(codex.defaultModel, null)
+    assert.ok(ServerAvailableModelsSchema.safeParse(codex).success)
   })
 })

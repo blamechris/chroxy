@@ -111,3 +111,157 @@ describe('#6377 per-provider model overlay', () => {
     assert.ok(!codex.getModels().some((m) => m.fullId === FAKE), 'gemini overlay must not bleed into codex')
   })
 })
+
+/**
+ * #7722 (MC-0) — `reloadModelsOverlay` now also returns the per-provider
+ * `available_models` payloads the reload should push, so the hot-reload
+ * broadcast stops being hardcoded to the Claude registry.
+ *
+ * Every assertion here is written against a failure mode that a looser one
+ * would miss, and each case names the one-line mutation that must turn it red:
+ *
+ *   - The ordered TAG ARRAY, never a count. `broadcasts.length === 2` is
+ *     satisfied by two claude-sdk payloads carrying identical models — it
+ *     survives the exact mutation the issue's acceptance criteria names.
+ *   - PROVENANCE, four facts per pair. A codex-tagged payload built from the
+ *     default registry satisfies any tag-only assertion while handing codex
+ *     clients the Claude roster, which is the most dangerous way for this to be
+ *     wrong.
+ *   - BOTH roster directions. Addition-from-cold and removal fail under
+ *     opposite halves of the union, and a test that pre-warms the registry
+ *     cache cannot see the cold bug at all.
+ *   - The reality-to-roster direction: an overlay with no provider-tagged rows
+ *     must produce exactly ONE payload. An implementation that emits one per
+ *     registered provider passes every positive case above and spams every
+ *     client on every unrelated save.
+ */
+describe('#7722 overlay reload broadcasts', () => {
+  // Guards the whole file: getRegistryForProvider falls through to the DEFAULT
+  // Claude registry for a name with no registered class. Without the
+  // `import '../src/providers.js'` at the top of this file, EVERY assertion
+  // below would pass for the wrong reason — a 'codex' payload would exist and
+  // would carry Claude's models. Its own `it()` so it never warms the cache for
+  // the cold-start case, which needs it empty.
+  it('the codex registry is distinct from the Claude one (else every case below is vacuous)', () => {
+    assert.notEqual(
+      getRegistryForProvider('codex'),
+      getRegistryForProvider('claude-sdk'),
+      'codex must resolve its own registry — a fall-through to the default registry makes the provenance assertions meaningless',
+    )
+  })
+
+  it('a codex-tagged row and an untagged row produce a codex payload and a claude-sdk payload, in that order', () => {
+    // Deliberately NOT pre-warmed: no getRegistryForProvider() call before the
+    // reload. This is the production case — a fresh provider-tagged row on a
+    // daemon that has never created a codex session — and it is the only
+    // arrangement under which a cache-only implementation fails.
+    const path = writeOverlay({
+      'codex-recon-9': { provider: 'codex', label: 'Codex Recon 9' },
+      'claude-recon-9': { label: 'Claude Recon 9' },
+    })
+    const res = reloadModelsOverlay(path)
+    assert.equal(res.reloaded, true)
+
+    // RED under: `provider: name` -> `provider: 'claude-sdk'` (tags collapse),
+    // and under either half of the union being dropped (a tag disappears).
+    assert.deepEqual(
+      res.broadcasts.map((b) => b.provider),
+      ['codex', 'claude-sdk'],
+      'one payload per affected registry, providers sorted, the Claude roster last',
+    )
+  })
+
+  it('each payload carries its OWN registry models — a swap fails four times', () => {
+    const path = writeOverlay({
+      'codex-recon-9': { provider: 'codex', label: 'Codex Recon 9' },
+      'claude-recon-9': { label: 'Claude Recon 9' },
+    })
+    const { broadcasts } = reloadModelsOverlay(path)
+    const ids = (provider) => {
+      const msg = broadcasts.find((b) => b.provider === provider)
+      assert.ok(msg, `a ${provider}-tagged payload exists`)
+      return msg.models.map((m) => m.fullId)
+    }
+    // Mapped to fullId before comparing: asserting against the whole model
+    // array would carry multi-KB of payload into any failure message.
+    const codexIds = ids('codex')
+    const claudeIds = ids('claude-sdk')
+
+    // RED under: `getRegistryForProvider(name)` -> `defaultRegistry` in the
+    // build loop. Both codex assertions fail, which is the mutation that
+    // catches a codex client being handed the Claude roster.
+    assert.ok(codexIds.includes('codex-recon-9'), 'codex payload carries the codex-tagged row')
+    assert.ok(!codexIds.includes('claude-recon-9'), 'codex payload does NOT carry the untagged Claude row')
+    assert.ok(claudeIds.includes('claude-recon-9'), 'claude payload carries the untagged row')
+    assert.ok(!claudeIds.includes('codex-recon-9'), 'claude payload does NOT carry the codex-tagged row')
+  })
+
+  it('still broadcasts a codex payload after the LAST codex row is removed', () => {
+    const path = writeOverlay({ 'codex-recon-9': { provider: 'codex', label: 'Codex Recon 9' } })
+    const first = reloadModelsOverlay(path)
+    assert.ok(first.broadcasts.some((b) => b.provider === 'codex'), 'precondition: the addition broadcast')
+
+    // The operator deletes the row. The daemon's own codex registry has already
+    // dropped it (the re-fold above this function), so the clients still
+    // offering it are the ones that need the push most — and `byProvider` no
+    // longer has a 'codex' key to notice.
+    writeFileSync(path, JSON.stringify({ 'claude-recon-9': { label: 'Claude Recon 9' } }))
+    const second = reloadModelsOverlay(path)
+
+    // RED under: union -> `new Set(result.byProvider.keys())` (the cache half
+    // dropped). No codex payload is emitted and the removal is silent.
+    const codex = second.broadcasts.find((b) => b.provider === 'codex')
+    assert.ok(codex, 'a removal still notifies the codex clients')
+    assert.ok(
+      !codex.models.map((m) => m.fullId).includes('codex-recon-9'),
+      'and the payload reflects the shrunken roster',
+    )
+  })
+
+  it('an overlay with no provider-tagged rows produces EXACTLY one payload', () => {
+    const path = writeOverlay({ 'claude-recon-9': { label: 'Claude Recon 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    // RED under: replacing the union with an enumeration of every registered
+    // provider. This is the direction silence hides — an implementation that
+    // broadcasts per known provider passes every case above.
+    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+  })
+
+  it('skips a row tagged with an unknown provider instead of mislabelling the Claude roster', () => {
+    const path = writeOverlay({ 'x-recon-9': { provider: 'codxx', label: 'Typo 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    // RED under: dropping `if (registry === defaultRegistry) continue`. The
+    // emitted payload would be `{ provider: 'codxx', models: <every Claude
+    // model> }` — a roster tagged with a name no session can ever match, which
+    // sets availableModelsProvider on every receiving dashboard and hides the
+    // picker everywhere.
+    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+  })
+
+  it('skips a row tagged with a Claude-family provider instead of duplicating the default payload', () => {
+    // Routing into byProvider is by PRESENCE of the tag, so a Claude name lands
+    // in a per-provider slice whose registry IS the default one — the row is a
+    // documented no-op. The identity guard must collapse it, not emit a second
+    // claude-sdk payload that makes a dead row look live.
+    const path = writeOverlay({ 'y-recon-9': { provider: 'claude-sdk', label: 'Tagged Claude 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+  })
+
+  it('a registered provider whose class has no fallback models is skipped too (identity, not name membership)', () => {
+    // `user-shell` is a REAL registered provider name, so a guard written as
+    // "is this a known provider?" would let it through — and it resolves to the
+    // default registry, so it would ship the Claude roster tagged 'user-shell'.
+    const path = writeOverlay({ 'z-recon-9': { provider: 'user-shell', label: 'Shell 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+  })
+
+  it('a malformed overlay produces no broadcasts at all (last-good kept)', () => {
+    const path = overlayPath()
+    writeFileSync(path, '{ not json')
+    const res = reloadModelsOverlay(path)
+    assert.equal(res.reloaded, false)
+    assert.equal(res.broadcasts, undefined, 'a rejected reload must not push a roster')
+  })
+})

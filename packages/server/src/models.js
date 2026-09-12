@@ -36,6 +36,17 @@ export { DEFAULT_CONTEXT_WINDOW, ONE_M_SUFFIX, resolveClaudeContextWindow, claud
 export const DISALLOWED_MODEL_IDS = Object.freeze(new Set())
 
 /**
+ * #7722 — the `provider` tag the DEFAULT (Claude) registry's roster is
+ * broadcast under. Matches the fallback the `models_updated` forwarder has used
+ * since #2993 (`ws-forwarding.js`), so the overlay path and the session path
+ * advertise the Claude registry under one name. Deliberately a literal rather
+ * than `DEFAULT_PROVIDER` from @chroxy/protocol: that constant is the default
+ * SESSION provider (`claude-tui` since #5819) and would silently re-tag this
+ * roster if it ever moved again.
+ */
+const CLAUDE_OVERLAY_BROADCAST_PROVIDER = 'claude-sdk'
+
+/**
  * True when a model id resolves to a disallowed fullId, normalising the same id
  * shapes the rest of this module supports: a trailing `[1m]` long-context suffix
  * and/or a trailing `-YYYYMMDD` date stamp (the SDK's `Model` enum surfaces dated
@@ -1100,7 +1111,7 @@ const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
  * action). Never throws.
  *
  * @param {string} [path]
- * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null }}
+ * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null, broadcasts?: object[] }}
  */
 export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   const result = loadModelsOverlayResult(path)
@@ -1123,7 +1134,81 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
     reloaded: true,
     models: defaultRegistry.getModels(),
     defaultModelId: defaultRegistry.getDefaultModelId(),
+    broadcasts: buildOverlayBroadcasts(result.byProvider),
   }
+}
+
+/**
+ * #7722 (MC-0) — the `available_models` payloads a successful overlay reload
+ * should push, one per registry whose roster the operator may have just
+ * changed. The caller routes them (see `buildModelsOverlayReloadCallback` in
+ * server-cli.js); this function only decides WHICH rosters exist and what each
+ * one carries. It lives here because the three inputs it needs —
+ * `providerRegistryCache`, `providerOverlays` and `defaultRegistry` — are all
+ * module-private, so a builder anywhere else would have to re-derive the
+ * per-provider routing that `loadModelsOverlayResult` already owns.
+ *
+ * The candidate set is the UNION of two rosters, and each half covers a failure
+ * the other cannot see:
+ *
+ *   - `byProvider.keys()` — providers with overlay rows NOW. Covers the COLD
+ *     case: a fresh `provider:"codex"` row on a daemon that has never built a
+ *     codex registry (no codex session yet) is absent from the cache, and a
+ *     cache-only read would emit nothing for it. That is the case production
+ *     actually hits after an edit.
+ *   - `providerRegistryCache.keys()` — providers whose registry is already
+ *     built, so one that just LOST its last row still gets a payload carrying
+ *     the shrunken list. A byProvider-only read would be silent on every
+ *     REMOVAL, leaving connected clients offering a model the daemon's own
+ *     registry has already dropped.
+ *
+ * Reading one direction only is the repo's catalogued one-direction-roster
+ * defect (docs/false-safety-guards.md entry 28, filed four times) and both
+ * directions are covered by their own test, including one that deliberately
+ * leaves the cache cold — pre-warming it would let the cache-only bug pass.
+ *
+ * Every candidate is resolved through `getRegistryForProvider()` and SKIPPED
+ * when that hands back the default registry. Identity is the only sound guard
+ * here, not name membership: the fall-through fires for a Claude-family name
+ * (where a tagged row is a documented no-op), for an operator typo, AND for a
+ * genuinely registered provider whose class has no `getFallbackModels` — e.g.
+ * `user-shell`. Without the check, a `provider:"codxx"` row would broadcast the
+ * entire CLAUDE roster labelled `codxx`, which no session can match.
+ *
+ * Providers are emitted in sorted order with the default (Claude) payload LAST,
+ * so the order is deterministic to assert and so a caller that ever loses the
+ * routing degrades to today's behaviour (Claude correct) rather than to a fresh
+ * Claude regression.
+ *
+ * @param {Map<string, Map<string, object>>} [byProvider] per-provider overlay slices
+ * @returns {Array<{ type: 'available_models', models: object[], defaultModel: string|null, provider: string }>}
+ */
+export function buildOverlayBroadcasts(byProvider) {
+  const candidates = new Set([
+    ...providerRegistryCache.keys(),
+    ...(byProvider instanceof Map ? byProvider.keys() : []),
+  ])
+  const broadcasts = []
+  for (const name of [...candidates].sort()) {
+    const registry = getRegistryForProvider(name)
+    if (registry === defaultRegistry) {
+      log.debug(`buildOverlayBroadcasts: overlay provider '${name}' has no registry of its own — skipping (rows tagged '${name}' are inert)`)
+      continue
+    }
+    broadcasts.push({
+      type: 'available_models',
+      models: registry.getModels(),
+      defaultModel: registry.getDefaultModelId(),
+      provider: name,
+    })
+  }
+  broadcasts.push({
+    type: 'available_models',
+    models: defaultRegistry.getModels(),
+    defaultModel: defaultRegistry.getDefaultModelId(),
+    provider: CLAUDE_OVERLAY_BROADCAST_PROVIDER,
+  })
+  return broadcasts
 }
 
 /**

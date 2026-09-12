@@ -45,7 +45,7 @@ import { registerOpenAiCompatibleProviders } from './openai-compatible-session.j
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay, isClaudeProvider } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -131,6 +131,13 @@ export function persistTokenToConfigFile(configFile, newToken, { durable = false
  * @param {Function} [opts._write] - test seam, forwarded to persistTokenToConfigFile
  * @returns {(newToken: string, ctx?: { reason?: string }) => void}
  */
+/**
+ * #7722 — the tag `buildOverlayBroadcasts` puts on the DEFAULT (Claude)
+ * registry's roster. Kept in step with models.js's own constant; the routing
+ * below has to recognise that one payload to widen its recipient set.
+ */
+const CLAUDE_OVERLAY_ROSTER_PROVIDER = 'claude-sdk'
+
 export function buildTokenPersistCallback({
   configFile,
   logger = log,
@@ -232,6 +239,61 @@ export function buildTunnelReadyStatus({ tunnelUrl, tunnelMode }) {
  * @param {{ version: string, provider?: string }} args
  * @returns {string} Banner line (no outer box, no padding)
  */
+/**
+ * #7722 (MC-0) — build the `watchModelsOverlay` onReload callback.
+ *
+ * The overlay reload now hands us one `available_models` payload per affected
+ * registry (`buildOverlayBroadcasts` in models.js). Each is ROUTED to the
+ * clients whose ACTIVE session is that provider, so every client receives AT
+ * MOST ONE message per reload.
+ *
+ * Routing, not fan-out, is what makes this a fix. The clients keep a single
+ * `availableModels` slot, overwritten unconditionally on every message, so two
+ * unfiltered broadcasts are last-write-wins on every connected client: Claude
+ * last leaves the codex picker exactly as broken as before, and codex last
+ * hides the picker on every CLAUDE session instead (the dashboard suppresses
+ * the picker when the roster's provider tag does not match the active
+ * session's). On mobile there is no provider tag at all, so the losing roster
+ * renders with no signal and the model chips would send the wrong provider's
+ * ids. Addressing each roster to its own provider's clients removes the race
+ * rather than picking a winner.
+ *
+ * Same recipient rule as the per-client `available_models` sends already in
+ * `handlers/session-handlers.js` and `ws-history.js`.
+ *
+ * Exported (rather than inlined at the registration site) so the routing is
+ * reachable from a test: the registration lives inside `startCliServer`, which
+ * is deliberately never booted in tests, and a guard that cannot be executed is
+ * a guard whose failure branch is never taken.
+ *
+ * @param {{ wsServer: object, sessionManager: object, log?: object }} deps
+ * @returns {(result: { models: object[], broadcasts: object[] }) => void}
+ */
+export function buildModelsOverlayReloadCallback({ wsServer, sessionManager, log: logger = log }) {
+  const providerForClient = (client) => {
+    const sessionId = client?.activeSessionId
+    if (!sessionId) return null
+    return sessionManager?.getSession?.(sessionId)?.provider ?? null
+  }
+  return ({ models, broadcasts }) => {
+    logger.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
+    for (const message of broadcasts ?? []) {
+      // The default roster's recipients are the Claude-family sessions AND the
+      // clients with no active session at all (an unbound host-level dashboard
+      // legitimately expects a list, and is what the pre-#7722 unconditional
+      // broadcast served). Matched via isClaudeProvider rather than a literal
+      // compare so claude-cli / claude-tui are not starved.
+      const isDefaultRoster = message.provider === CLAUDE_OVERLAY_ROSTER_PROVIDER
+      wsServer.broadcastFiltered(message, (client) => {
+        const provider = providerForClient(client)
+        return isDefaultRoster
+          ? (provider == null || isClaudeProvider(provider))
+          : provider === message.provider
+      })
+    }
+  }
+}
+
 export function buildServerBanner({ version, provider }) {
   const providerType = provider || DEFAULT_PROVIDER
   const modeStr = resolveProviderLabel(providerType)
@@ -1260,10 +1322,7 @@ export async function startCliServer(config) {
   // reload, re-broadcast `available_models` for the default (Claude) registry so
   // connected pickers refresh live. A malformed save is ignored (last-good kept).
   const modelsOverlayWatcher = watchModelsOverlay({
-    onReload: ({ models, defaultModelId }) => {
-      log.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
-      wsServer.broadcast({ type: 'available_models', models, defaultModel: defaultModelId, provider: 'claude-sdk' })
-    },
+    onReload: buildModelsOverlayReloadCallback({ wsServer, sessionManager }),
   })
 
   // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
