@@ -86,10 +86,17 @@ Each affected registry's roster is pushed to the clients on **that provider's** 
 that fix every reload broadcast the Claude roster to everyone, which hid the picker on an
 active non-Claude session until it reconnected.
 
-Two limits are worth knowing:
+Precisely who gets a push, since "the affected provider" is coarser than it sounds:
 
-- A client viewing a provider whose rows did **not** change receives nothing — by design, so
-  an unrelated save never disturbs its picker.
+- Every provider the daemon has **already built a registry for** gets its roster re-pushed on
+  every save, plus every provider **named in the overlay**. Whether that provider's own rows
+  actually changed is not checked — so a save touching only a Claude row still re-pushes the
+  unchanged gemini roster to gemini clients. The content is correct, just redundant.
+- A client on a provider that is in **neither** set receives nothing, so its picker is left
+  alone.
+- The Claude roster is sent **untagged** (`provider: null`) because every Claude-family
+  provider shares one registry — a `claude-cli` session and a `claude-sdk` session get the same
+  list, and tagging it with either name would hide the picker on the other.
 - A reload that is **rejected** (malformed JSON) pushes nothing at all. If a save appears to
   do nothing, check the daemon log for `Models overlay reloaded: <ids>` — its absence means
   the file was rejected or the watcher never fired, which otherwise looks the same as a

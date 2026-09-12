@@ -35,16 +35,6 @@ export { DEFAULT_CONTEXT_WINDOW, ONE_M_SUFFIX, resolveClaudeContextWindow, claud
 // for a future disallow — do NOT delete it as dead code.
 export const DISALLOWED_MODEL_IDS = Object.freeze(new Set())
 
-/**
- * #7722 — the `provider` tag the DEFAULT (Claude) registry's roster is
- * broadcast under. Matches the fallback the `models_updated` forwarder has used
- * since #2993 (`ws-forwarding.js`), so the overlay path and the session path
- * advertise the Claude registry under one name. Deliberately a literal rather
- * than `DEFAULT_PROVIDER` from @chroxy/protocol: that constant is the default
- * SESSION provider (`claude-tui` since #5819) and would silently re-tag this
- * roster if it ever moved again.
- */
-const CLAUDE_OVERLAY_BROADCAST_PROVIDER = 'claude-sdk'
 
 /**
  * True when a model id resolves to a disallowed fullId, normalising the same id
@@ -1180,8 +1170,14 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
  * routing degrades to today's behaviour (Claude correct) rather than to a fresh
  * Claude regression.
  *
+ * Each entry is a DESCRIPTOR, not a bare payload: `isDefault` tells the caller
+ * which recipient rule to apply without having to re-derive it by string-matching
+ * the wire payload's `provider` field. That keeps the routing decision out of
+ * user-visible wire data — and it is what lets the default roster be tagged
+ * `null`, since the caller no longer needs a name to recognise it by.
+ *
  * @param {Map<string, Map<string, object>>} [byProvider] per-provider overlay slices
- * @returns {Array<{ type: 'available_models', models: object[], defaultModel: string|null, provider: string }>}
+ * @returns {Array<{ isDefault: boolean, message: { type: 'available_models', models: object[], defaultModel: string|null, provider: string|null } }>}
  */
 export function buildOverlayBroadcasts(byProvider) {
   const candidates = new Set([
@@ -1196,17 +1192,33 @@ export function buildOverlayBroadcasts(byProvider) {
       continue
     }
     broadcasts.push({
-      type: 'available_models',
-      models: registry.getModels(),
-      defaultModel: registry.getDefaultModelId(),
-      provider: name,
+      isDefault: false,
+      message: {
+        type: 'available_models',
+        models: registry.getModels(),
+        defaultModel: registry.getDefaultModelId(),
+        provider: name,
+      },
     })
   }
   broadcasts.push({
-    type: 'available_models',
-    models: defaultRegistry.getModels(),
-    defaultModel: defaultRegistry.getDefaultModelId(),
-    provider: CLAUDE_OVERLAY_BROADCAST_PROVIDER,
+    isDefault: true,
+    message: {
+      type: 'available_models',
+      models: defaultRegistry.getModels(),
+      defaultModel: defaultRegistry.getDefaultModelId(),
+      // NOT tagged 'claude-sdk'. Every Claude-family provider shares this one
+      // registry, so this roster is correct for a claude-sdk, claude-cli,
+      // claude-byok or claude-tui session alike — but the dashboard compares the
+      // tag to its OWN session's provider string, so any single name it could
+      // carry would flip `modelsMatchProvider` false on the other three and hide
+      // their picker. `null` means "unscoped — applies to you", which the
+      // dashboard already treats as a match, mobile ignores, and the wire schema
+      // already permits (`provider` is nullable). It is also what ws-history.js
+      // sends for the unscoped roster, so this is the existing convention rather
+      // than a new one.
+      provider: null,
+    },
   })
   return broadcasts
 }

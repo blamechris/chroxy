@@ -67,6 +67,12 @@ const SESSIONS = {
   's-tui': { provider: 'claude-tui' },
   's-sdk': { provider: 'claude-sdk' },
   's-gemini': { provider: 'gemini' },
+  // `user-shell` is the case where a name rule and a registry rule DISAGREE: it
+  // is a registered provider, so a name check reads it as non-Claude, but it has
+  // no getFallbackModels so it resolves to the default registry. The producer
+  // already classifies it as owning no registry, so the consumer must serve it
+  // the default roster rather than nothing.
+  's-shell': { provider: 'user-shell' },
 }
 const fakeSessionManager = { getSession: (id) => SESSIONS[id] }
 const silentLog = { info() {}, warn() {}, debug() {} }
@@ -84,7 +90,7 @@ function routeOverlay(overlay) {
 /** Which recipients does the payload tagged `provider` accept? */
 function recipients(sent, provider) {
   const entry = sent.find((s) => s.message.provider === provider)
-  assert.ok(entry, `a ${provider}-tagged message was sent`)
+  assert.ok(entry, `a ${provider === null ? 'default (unscoped)' : provider}-tagged message was sent`)
   // RED under: broadcastFiltered(...) -> broadcast(message). The filter is then
   // undefined and every routing assertion below becomes unaskable — which is
   // the point: an unaddressed message is the bug, not a detail.
@@ -115,14 +121,18 @@ describe('#7722 overlay reload routing', () => {
       'codex-route-9': { provider: 'codex', label: 'Codex Route 9' },
       'claude-route-9': { label: 'Claude Route 9' },
     })
-    const accepts = recipients(sent, 'claude-sdk')
+    const accepts = recipients(sent, null)
 
     assert.equal(accepts('s-sdk'), true, 'claude-sdk receives the default roster')
-    // RED under: the default branch `(p == null || isClaudeProvider(p))` ->
-    // `p === 'claude-sdk'`. claude-tui / claude-cli sessions share the default
-    // registry, so a literal compare would starve them of overlay updates.
+    // RED under: narrowing the default branch to a literal name compare.
+    // claude-tui / claude-cli share the default registry, so a name rule would
+    // starve them of overlay updates.
     assert.equal(accepts('s-tui'), true, 'claude-tui shares the default registry, so it receives it too')
     assert.equal(accepts(null), true, 'an unbound host-level client still gets a roster (pre-#7722 behaviour)')
+    // The producer/consumer symmetry case: user-shell owns no registry, so the
+    // default roster is the only one that can serve it. RED under: an
+    // isClaudeProvider name check, which reads user-shell as non-Claude.
+    assert.equal(accepts('s-shell'), true, 'user-shell owns no registry, so the default roster serves it')
     assert.equal(accepts('s-codex'), false, 'a codex session must NOT receive the Claude roster')
   })
 
@@ -144,13 +154,29 @@ describe('#7722 overlay reload routing', () => {
     }
   })
 
+  it('a client on a provider with NO payload receives nothing — the real limit, asserted not assumed', () => {
+    // The fixture tags only codex, so no gemini payload is built. A gemini
+    // client therefore matches nothing. That is correct — its roster did not
+    // change — and it is strictly better than the pre-#7722 behaviour, where it
+    // received the CLAUDE roster and hid its own picker. But it means
+    // "at most one" above is genuinely <=, not ==, and the zero case is a real
+    // reachable state rather than an artefact of the fixture. Asserting it here
+    // keeps the limit visible instead of buried inside an inequality.
+    const sent = routeOverlay({
+      'codex-route-9': { provider: 'codex', label: 'Codex Route 9' },
+      'claude-route-9': { label: 'Claude Route 9' },
+    })
+    const matched = sent.filter((s) => s.filter({ activeSessionId: 's-gemini' }))
+    assert.equal(matched.length, 0, 'a gemini client is not sent another provider roster')
+  })
+
   it('a filter is resilient to a client whose session has already been destroyed', () => {
     // getSession returns undefined mid-teardown. The predicate must resolve to
     // "no provider" and fall to the default roster rather than throwing — a
     // throwing filter is isolated by WsBroadcaster, but it would silently drop
     // that client's update.
     const sent = routeOverlay({ 'claude-route-9': { label: 'Claude Route 9' } })
-    const accepts = recipients(sent, 'claude-sdk')
+    const accepts = recipients(sent, null)
     assert.equal(accepts('s-vanished'), true, 'an unknown session id falls back to the default roster')
   })
 

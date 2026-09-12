@@ -45,7 +45,7 @@ import { registerOpenAiCompatibleProviders } from './openai-compatible-session.j
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay, isClaudeProvider } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -131,13 +131,6 @@ export function persistTokenToConfigFile(configFile, newToken, { durable = false
  * @param {Function} [opts._write] - test seam, forwarded to persistTokenToConfigFile
  * @returns {(newToken: string, ctx?: { reason?: string }) => void}
  */
-/**
- * #7722 — the tag `buildOverlayBroadcasts` puts on the DEFAULT (Claude)
- * registry's roster. Kept in step with models.js's own constant; the routing
- * below has to recognise that one payload to widen its recipient set.
- */
-const CLAUDE_OVERLAY_ROSTER_PROVIDER = 'claude-sdk'
-
 export function buildTokenPersistCallback({
   configFile,
   logger = log,
@@ -275,19 +268,26 @@ export function buildModelsOverlayReloadCallback({ wsServer, sessionManager, log
     if (!sessionId) return null
     return sessionManager?.getSession?.(sessionId)?.provider ?? null
   }
+  // The default roster's recipients are every client whose provider does NOT own
+  // a registry of its own, plus the clients with no active session at all (an
+  // unbound host-level dashboard legitimately expects a list, and is what the
+  // pre-#7722 unconditional broadcast served).
+  //
+  // This is the SAME rule buildOverlayBroadcasts uses to decide which providers
+  // get their own payload — registry identity, not name membership — so producer
+  // and consumer cannot disagree about a provider. A name check would: it would
+  // read `user-shell` as non-Claude and route it nothing, while the producer has
+  // already classified it as having no registry of its own. Deriving both sides
+  // from one question keeps every provider served by exactly one roster.
+  const servedByDefaultRegistry = (provider) =>
+    provider == null || getRegistryForProvider(provider) === getRegistryForProvider('claude-sdk')
   return ({ models, broadcasts }) => {
     logger.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
-    for (const message of broadcasts ?? []) {
-      // The default roster's recipients are the Claude-family sessions AND the
-      // clients with no active session at all (an unbound host-level dashboard
-      // legitimately expects a list, and is what the pre-#7722 unconditional
-      // broadcast served). Matched via isClaudeProvider rather than a literal
-      // compare so claude-cli / claude-tui are not starved.
-      const isDefaultRoster = message.provider === CLAUDE_OVERLAY_ROSTER_PROVIDER
+    for (const { message, isDefault } of broadcasts ?? []) {
       wsServer.broadcastFiltered(message, (client) => {
         const provider = providerForClient(client)
-        return isDefaultRoster
-          ? (provider == null || isClaudeProvider(provider))
+        return isDefault
+          ? servedByDefaultRegistry(provider)
           : provider === message.provider
       })
     }

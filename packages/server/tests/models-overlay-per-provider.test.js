@@ -165,9 +165,9 @@ describe('#7722 overlay reload broadcasts', () => {
     // RED under: `provider: name` -> `provider: 'claude-sdk'` (tags collapse),
     // and under either half of the union being dropped (a tag disappears).
     assert.deepEqual(
-      res.broadcasts.map((b) => b.provider),
-      ['codex', 'claude-sdk'],
-      'one payload per affected registry, providers sorted, the Claude roster last',
+      res.broadcasts.map((b) => b.message.provider),
+      ['codex', null],
+      'one payload per affected registry, providers sorted, the Claude roster last and UNSCOPED (null)',
     )
   })
 
@@ -178,14 +178,14 @@ describe('#7722 overlay reload broadcasts', () => {
     })
     const { broadcasts } = reloadModelsOverlay(path)
     const ids = (provider) => {
-      const msg = broadcasts.find((b) => b.provider === provider)
+      const msg = broadcasts.find((b) => b.message.provider === provider)
       assert.ok(msg, `a ${provider}-tagged payload exists`)
-      return msg.models.map((m) => m.fullId)
+      return msg.message.models.map((m) => m.fullId)
     }
     // Mapped to fullId before comparing: asserting against the whole model
     // array would carry multi-KB of payload into any failure message.
     const codexIds = ids('codex')
-    const claudeIds = ids('claude-sdk')
+    const claudeIds = ids(null)
 
     // RED under: `getRegistryForProvider(name)` -> `defaultRegistry` in the
     // build loop. Both codex assertions fail, which is the mutation that
@@ -199,7 +199,7 @@ describe('#7722 overlay reload broadcasts', () => {
   it('still broadcasts a codex payload after the LAST codex row is removed', () => {
     const path = writeOverlay({ 'codex-recon-9': { provider: 'codex', label: 'Codex Recon 9' } })
     const first = reloadModelsOverlay(path)
-    assert.ok(first.broadcasts.some((b) => b.provider === 'codex'), 'precondition: the addition broadcast')
+    assert.ok(first.broadcasts.some((b) => b.message.provider === 'codex'), 'precondition: the addition broadcast')
 
     // The operator deletes the row. The daemon's own codex registry has already
     // dropped it (the re-fold above this function), so the clients still
@@ -210,10 +210,10 @@ describe('#7722 overlay reload broadcasts', () => {
 
     // RED under: union -> `new Set(result.byProvider.keys())` (the cache half
     // dropped). No codex payload is emitted and the removal is silent.
-    const codex = second.broadcasts.find((b) => b.provider === 'codex')
+    const codex = second.broadcasts.find((b) => b.message.provider === 'codex')
     assert.ok(codex, 'a removal still notifies the codex clients')
     assert.ok(
-      !codex.models.map((m) => m.fullId).includes('codex-recon-9'),
+      !codex.message.models.map((m) => m.fullId).includes('codex-recon-9'),
       'and the payload reflects the shrunken roster',
     )
   })
@@ -224,7 +224,7 @@ describe('#7722 overlay reload broadcasts', () => {
     // RED under: replacing the union with an enumeration of every registered
     // provider. This is the direction silence hides — an implementation that
     // broadcasts per known provider passes every case above.
-    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), [null])
   })
 
   it('skips a row tagged with an unknown provider instead of mislabelling the Claude roster', () => {
@@ -235,7 +235,7 @@ describe('#7722 overlay reload broadcasts', () => {
     // model> }` — a roster tagged with a name no session can ever match, which
     // sets availableModelsProvider on every receiving dashboard and hides the
     // picker everywhere.
-    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), [null])
   })
 
   it('skips a row tagged with a Claude-family provider instead of duplicating the default payload', () => {
@@ -245,7 +245,7 @@ describe('#7722 overlay reload broadcasts', () => {
     // claude-sdk payload that makes a dead row look live.
     const path = writeOverlay({ 'y-recon-9': { provider: 'claude-sdk', label: 'Tagged Claude 9' } })
     const { broadcasts } = reloadModelsOverlay(path)
-    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), [null])
   })
 
   it('a registered provider whose class has no fallback models is skipped too (identity, not name membership)', () => {
@@ -254,7 +254,7 @@ describe('#7722 overlay reload broadcasts', () => {
     // default registry, so it would ship the Claude roster tagged 'user-shell'.
     const path = writeOverlay({ 'z-recon-9': { provider: 'user-shell', label: 'Shell 9' } })
     const { broadcasts } = reloadModelsOverlay(path)
-    assert.deepEqual(broadcasts.map((b) => b.provider), ['claude-sdk'])
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), [null])
   })
 
   it('a malformed overlay produces no broadcasts at all (last-good kept)', () => {
@@ -263,5 +263,57 @@ describe('#7722 overlay reload broadcasts', () => {
     const res = reloadModelsOverlay(path)
     assert.equal(res.reloaded, false)
     assert.equal(res.broadcasts, undefined, 'a rejected reload must not push a roster')
+  })
+
+  it('TWO tagged providers each get their own payload, in sorted order', () => {
+    // Every other fixture has at most ONE non-default candidate, so
+    // ['codex', null] cannot tell sorted order from insertion order from reverse
+    // — dropping `.sort()` would survive them all and the docblock's ordering
+    // claim would go unverified. Two providers is the smallest fixture that
+    // pins it, and it is also the only one that proves "one payload per
+    // affected registry" for more than one registry at a time.
+    const path = writeOverlay({
+      'zz-gemini-9': { provider: 'gemini', label: 'Gemini 9' },
+      'aa-codex-9': { provider: 'codex', label: 'Codex 9' },
+      'claude-recon-9': { label: 'Claude Recon 9' },
+    })
+    const { broadcasts } = reloadModelsOverlay(path)
+    // Sorted by PROVIDER name (codex < gemini), which is deliberately the
+    // opposite of the overlay keys' order (aa- < zz- puts codex first only by
+    // luck; the gemini KEY sorts first). RED under: removing `.sort()`.
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), ['codex', 'gemini', null])
+    const byProvider = new Map(broadcasts.map((b) => [b.message.provider, b.message.models.map((m) => m.fullId)]))
+    assert.ok(byProvider.get('codex').includes('aa-codex-9'))
+    assert.ok(!byProvider.get('codex').includes('zz-gemini-9'), 'no cross-contamination between two tagged providers')
+    assert.ok(byProvider.get('gemini').includes('zz-gemini-9'))
+    assert.ok(!byProvider.get('gemini').includes('aa-codex-9'))
+  })
+
+  it('one save that ADDS to one provider and REMOVES from another reports both', () => {
+    // The union's two halves are each covered alone, but nothing exercised them
+    // in the same reload — where one provider is known only via byProvider and
+    // the other only via the registry cache.
+    const path = writeOverlay({ 'aa-codex-9': { provider: 'codex', label: 'Codex 9' } })
+    reloadModelsOverlay(path)
+
+    writeFileSync(path, JSON.stringify({ 'zz-gemini-9': { provider: 'gemini', label: 'Gemini 9' } }))
+    const { broadcasts } = reloadModelsOverlay(path)
+    assert.deepEqual(broadcasts.map((b) => b.message.provider), ['codex', 'gemini', null])
+    const codex = broadcasts.find((b) => b.message.provider === 'codex').message
+    const gemini = broadcasts.find((b) => b.message.provider === 'gemini').message
+    assert.ok(!codex.models.map((m) => m.fullId).includes('aa-codex-9'), 'the loss is reported (cache half)')
+    assert.ok(gemini.models.map((m) => m.fullId).includes('zz-gemini-9'), 'the gain is reported (byProvider half)')
+  })
+
+  it('the default payload is UNSCOPED (provider null), not tagged with one Claude name', () => {
+    // Every Claude-family provider shares the default registry, so any single
+    // name this payload could carry would flip modelsMatchProvider false on the
+    // other three and hide their picker. RED under: tagging it 'claude-sdk'.
+    const path = writeOverlay({ 'claude-recon-9': { label: 'Claude Recon 9' } })
+    const { broadcasts } = reloadModelsOverlay(path)
+    const dflt = broadcasts.find((b) => b.isDefault)
+    assert.ok(dflt, 'a default-roster descriptor exists')
+    assert.equal(dflt.message.provider, null)
+    assert.equal(broadcasts.filter((b) => b.isDefault).length, 1, 'exactly one default roster')
   })
 })

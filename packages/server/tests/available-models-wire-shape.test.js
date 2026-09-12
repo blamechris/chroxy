@@ -10,6 +10,9 @@ import '../src/providers.js'
 import {
   createModelsRegistry,
   reloadModelsOverlay,
+  updateModels,
+  resetModels,
+  getRegistryForProvider,
   _resetModelsOverlayForTests,
   _resetProviderRegistryCacheForTests,
 } from '../src/models.js'
@@ -85,13 +88,24 @@ describe('#7722 overlay reload payloads are wire-legal', () => {
     writeFileSync(path, JSON.stringify(obj))
     return path
   }
+  // A bare test process has NO SDK feed, so EVERY registry's getDefaultModelId()
+  // is null — including the Claude one. An assertion that the codex payload's
+  // defaultModel is null would then hold even if the builder hardcoded null for
+  // every payload, because nothing in the harness can tell the two apart. Seed a
+  // real Claude default so the field carries information.
   beforeEach(() => {
     _resetProviderRegistryCacheForTests()
     _resetModelsOverlayForTests()
+    resetModels()
+    updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: 'seeded' },
+      { value: 'claude-opus-4-8', displayName: 'Default (Opus 4.8)', description: 'seeded' },
+    ])
   })
   afterEach(() => {
     _resetProviderRegistryCacheForTests()
     _resetModelsOverlayForTests()
+    resetModels()
     if (dir) { rmSync(dir, { recursive: true, force: true }); dir = null }
   })
 
@@ -102,22 +116,35 @@ describe('#7722 overlay reload payloads are wire-legal', () => {
     })
     const { broadcasts } = reloadModelsOverlay(path)
     assert.ok(broadcasts.length >= 2, 'precondition: more than the Claude roster was built')
-    for (const payload of broadcasts) {
-      const result = ServerAvailableModelsSchema.safeParse(payload)
+    for (const { message } of broadcasts) {
+      const result = ServerAvailableModelsSchema.safeParse(message)
       assert.ok(
         result.success,
-        `payload tagged ${payload.provider} is not wire-legal: ${result.success ? '' : JSON.stringify(result.error.issues)}`,
+        `payload tagged ${message.provider} is not wire-legal: ${result.success ? '' : JSON.stringify(result.error.issues)}`,
       )
     }
   })
 
-  it("the codex payload's defaultModel is null and the schema accepts it", () => {
-    const path = overlay({ 'codex-wire-9': { provider: 'codex', label: 'Codex Wire 9' } })
+  it('each payload carries ITS OWN registry default — null for codex, the seeded id for Claude', () => {
+    const path = overlay({
+      'codex-wire-9': { provider: 'codex', label: 'Codex Wire 9' },
+      'claude-wire-9': { label: 'Claude Wire 9' },
+    })
     const { broadcasts } = reloadModelsOverlay(path)
-    const codex = broadcasts.find((b) => b.provider === 'codex')
-    assert.ok(codex, 'precondition: a codex payload was built')
+    const codex = broadcasts.find((b) => b.message.provider === 'codex')?.message
+    const dflt = broadcasts.find((b) => b.isDefault)?.message
+    assert.ok(codex && dflt, 'precondition: both payloads were built')
+
+    // The precondition that makes the next two assertions mean something: the
+    // two registries genuinely disagree about their default.
+    assert.equal(getRegistryForProvider('claude-sdk').getDefaultModelId(), 'opus-4-8', 'the seed took')
+    assert.equal(getRegistryForProvider('codex').getDefaultModelId(), null, 'codex has no SDK-reported default')
+
+    // RED under: hardcoding `defaultModel: null` on either payload, or swapping
+    // the two registries' defaults.
+    assert.equal(dflt.defaultModel, 'opus-4-8')
     // The #7089 shape, reached through a real sender rather than a literal.
     assert.equal(codex.defaultModel, null)
-    assert.ok(ServerAvailableModelsSchema.safeParse(codex).success)
+    assert.ok(ServerAvailableModelsSchema.safeParse(codex).success, 'a null default is wire-legal')
   })
 })

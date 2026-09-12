@@ -3566,11 +3566,18 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
   })
 })
 
-// #7722 (MC-0) — a models-overlay hot-reload used to broadcast the Claude
-// roster to every client tagged `claude-sdk`, which flips `modelsMatchProvider`
-// false on an active codex session and HIDES its model picker until reconnect.
-// The server now routes a codex-tagged roster to codex clients, so the picker
-// must stay up.
+// #7722 (MC-0) — CHARACTERIZATION of the client-side mechanism that motivates
+// the server-side routing. Be clear about what this does and does not prove:
+// the #7722 diff changes no dashboard source, so both cases below pass
+// identically on main, and reverting the entire server fix leaves them green.
+// They are not part of that fix's mutation coverage.
+//
+// What they DO pin is the client behaviour the server has to respect: an
+// `available_models` roster tagged for a provider other than the active
+// session's hides that session's model picker. That is the whole reason the
+// server must address each roster rather than broadcast it, and it is currently
+// asserted nowhere else — so a later change to `modelsMatchProvider` could
+// silently remove the constraint the server is built around.
 //
 // Both cases below share ONE fixture and differ in exactly one field —
 // `availableModelsProvider`. That is load-bearing, because `modelsMatchProvider`
