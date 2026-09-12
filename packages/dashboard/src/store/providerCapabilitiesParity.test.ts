@@ -40,20 +40,52 @@ import appTypesSrc from '../../../app/src/store/types.ts?raw'
  * because keys can be dropped from both sides one at a time.
  */
 function providerCapabilityKeys(src: string, label: string): string[] {
-  const start = src.indexOf('export interface ProviderCapabilities {')
+  const header = 'export interface ProviderCapabilities {'
+  const start = src.indexOf(header)
   if (start === -1) throw new Error(`no ProviderCapabilities interface in ${label}`)
-  const end = src.indexOf('\n}', start)
-  if (end === -1) throw new Error(`unterminated ProviderCapabilities interface in ${label}`)
-  // slice(1) drops the `export interface ProviderCapabilities {` line itself.
-  const body = src.slice(start, end).split('\n').slice(1)
+  // Walk to the interface's OWN closing brace with a depth counter. The first
+  // cut used `src.indexOf('\n}', start)`, which ends the body at the first
+  // column-0 `}` — a field whose type is an inline object literal
+  // (`limits: {\n  maxFoo: number\n}`) would truncate the body there and every
+  // key after it would vanish from the roster with NO unparsed line to throw
+  // on. Both mirrors would have to share the shape for that to pass silently,
+  // which is the normal case for these files — the same "could not check reads
+  // as nothing to check" class (#7195/#7210) this test closes one layer up.
+  const bodyStart = start + header.length
+  let depth = 1
+  let end = -1
+  for (let i = bodyStart; i < src.length; i++) {
+    const ch = src[i]
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) { end = i; break }
+    }
+  }
+  if (end === -1) throw new Error(`unterminated ProviderCapabilities interface in ${label} — braces never balanced`)
+  const body = src.slice(bodyStart, end).split('\n').slice(1)
   const keys: string[] = []
   const unparsed: string[] = []
+  // A second depth counter, now per line: only a line that STARTS at the
+  // interface's own level declares a key. Lines nested inside a field's inline
+  // object type belong to that field (whose name was already captured on the
+  // opening line), so they are neither keys nor unparsed.
+  let lineDepth = 0
   for (const raw of body) {
+    const startedAt = lineDepth
+    for (const ch of raw) {
+      if (ch === '{') lineDepth++
+      else if (ch === '}') lineDepth--
+    }
+    if (startedAt > 0) continue
     const line = raw.trim()
     if (line === '' || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) continue
     const match = /^([A-Za-z_$][\w$]*)\s*\??\s*:\s*\S/.exec(line)
     if (match) keys.push(match[1]!)
     else unparsed.push(line)
+  }
+  if (lineDepth !== 0) {
+    throw new Error(`ProviderCapabilities body in ${label} has unbalanced braces (depth ${lineDepth}) — the extracted body is not the whole interface`)
   }
   if (unparsed.length > 0) {
     throw new Error(
