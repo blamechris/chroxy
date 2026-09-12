@@ -867,6 +867,42 @@ describe('App', () => {
     })
   })
 
+  // #7722 — a models-overlay hot-reload broadcast that is tagged with the WRONG
+  // provider doesn't just deliver the wrong list: `modelsMatchProvider` goes
+  // false and the picker DISAPPEARS from a live session until reconnect. The
+  // server now tags each overlay-reload roster with the registry it came from;
+  // these two assert the visible consequence from the dashboard's side, so a
+  // regression to a single `claude-sdk`-tagged broadcast is not silent.
+  describe('model picker visibility vs the available_models provider tag (#7722)', () => {
+    const codexState = {
+      connectionPhase: 'connected' as const,
+      sessions: [{ sessionId: 's1', name: 'Codex', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider: 'codex' }],
+      activeSessionId: 's1',
+      availableProviders: [{ name: 'codex', capabilities: { modelSwitch: true } }],
+      availableModels: [{ id: 'gpt-5.5', label: 'GPT-5.5' }],
+    }
+
+    it('keeps the picker VISIBLE on a codex session when the roster is tagged codex', () => {
+      stateOverrides = { ...codexState, availableModelsProvider: 'codex' }
+      render(<App />)
+      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+      expect(screen.getByTestId('model-picker-item-gpt-5.5')).toBeInTheDocument()
+    })
+
+    it('HIDES the picker on a codex session when the same roster is tagged claude-sdk', () => {
+      // The pre-#7722 behaviour, kept as the control: without it the test above
+      // would pass just as well with the provider tag ignored entirely.
+      stateOverrides = { ...codexState, availableModelsProvider: 'claude-sdk' }
+      render(<App />)
+      // The header passes an EMPTY model list down when the tag mismatches, so
+      // the settings dropdown has nothing to render and drops out entirely —
+      // click it only if it survived.
+      const trigger = screen.queryByTestId('chat-settings-trigger')
+      if (trigger) fireEvent.click(trigger)
+      expect(screen.queryByTestId('model-picker-item-gpt-5.5')).not.toBeInTheDocument()
+    })
+  })
+
   // #6861 / PR #6878 (Copilot review thread) — the `#`-prefix quick-append must
   // be SKIPPED for PTY-backed sessions (claude-tui / user-shell): the composer
   // routes to the terminal there, where a leading `#` is a shell comment, not a

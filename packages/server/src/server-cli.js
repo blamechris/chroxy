@@ -239,6 +239,46 @@ export function buildServerBanner({ version, provider }) {
 }
 
 /**
+ * #7722 — build the `available_models` broadcasts for one models-overlay
+ * hot-reload (`watchModelsOverlay`'s `onReload`).
+ *
+ * The reload re-folds the default (Claude) registry AND every per-provider
+ * registry the overlay touches (#6377), so it produces ONE roster per affected
+ * registry — not one. Broadcasting only the Claude roster (and labelling it
+ * `claude-sdk`, as this did before) had two failures on a live codex session: a
+ * `provider: "codex"` overlay row never reached the codex client at all, and the
+ * claude-sdk tag flipped the dashboard's `modelsMatchProvider` false, which HIDES
+ * the model picker until the client reconnects.
+ *
+ * The wire shape is unchanged — each entry is the same provider-tagged
+ * `available_models` message every other sender emits.
+ *
+ * Exported so tests can assert the broadcast set without executing
+ * `startCliServer()` end-to-end.
+ *
+ * @param {{ models?: object[], defaultModelId?: string|null, providers?: {provider: string, models: object[], defaultModelId: string|null}[] }} reload
+ * @returns {{ type: 'available_models', models: object[], defaultModel: string|null, provider: string }[]}
+ */
+export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers } = {}) {
+  const out = [{
+    type: 'available_models',
+    models: models || [],
+    defaultModel: defaultModelId ?? null,
+    provider: 'claude-sdk',
+  }]
+  for (const entry of providers || []) {
+    if (!entry || typeof entry.provider !== 'string' || entry.provider.length === 0) continue
+    out.push({
+      type: 'available_models',
+      models: entry.models || [],
+      defaultModel: entry.defaultModelId ?? null,
+      provider: entry.provider,
+    })
+  }
+  return out
+}
+
+/**
  * Run `environmentManager.reconnect()` and log a startup summary (#3464).
  *
  * Always emits the existing `info` summary so the healthy-startup line stays
@@ -1257,12 +1297,16 @@ export async function startCliServer(config) {
   // #5932: hot-reload the ~/.chroxy/models.json overlay on edit — surfacing a
   // new model id (or a label/contextWindow/pricing override) is "a config entry,
   // not a code change", so it must not require a daemon restart. On a successful
-  // reload, re-broadcast `available_models` for the default (Claude) registry so
-  // connected pickers refresh live. A malformed save is ignored (last-good kept).
+  // reload, re-broadcast `available_models` for EVERY registry the overlay
+  // touched — the default (Claude) one plus each provider-tagged slice (#7722)
+  // — so connected pickers refresh live. A malformed save is ignored
+  // (last-good kept).
   const modelsOverlayWatcher = watchModelsOverlay({
-    onReload: ({ models, defaultModelId }) => {
-      log.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
-      wsServer.broadcast({ type: 'available_models', models, defaultModel: defaultModelId, provider: 'claude-sdk' })
+    onReload: (reload) => {
+      for (const msg of buildOverlayReloadBroadcasts(reload)) {
+        log.info(`Models overlay reloaded (${msg.provider}): ${msg.models.map((m) => m.id).join(', ')}`)
+        wsServer.broadcast(msg)
+      }
     },
   })
 

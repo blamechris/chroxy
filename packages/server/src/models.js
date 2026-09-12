@@ -1099,8 +1099,13 @@ const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
  * deleted/absent file legitimately CLEARS the overlay (an explicit operator
  * action). Never throws.
  *
+ * #7722: the result also carries `providers` — one `{ provider, models,
+ * defaultModelId }` snapshot per NON-Claude registry this reload touched — so
+ * the caller can emit a provider-tagged `available_models` broadcast for each
+ * instead of labelling every roster `claude-sdk`.
+ *
  * @param {string} [path]
- * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null }}
+ * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null, providers?: {provider: string, models: object[], defaultModelId: string|null}[] }}
  */
 export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   const result = loadModelsOverlayResult(path)
@@ -1110,6 +1115,16 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   }
   defaultOverlay = result.overlay
   defaultRegistry.applyOverlay(result.overlay)
+  // #7722: the provider registries this reload TOUCHED — the union of the names
+  // the NEW overlay carries, the names the PREVIOUS overlay carried (a provider
+  // that lost all its rows changed too, and its overlay-only models drop), and
+  // every already-built registry re-folded below. Collected BEFORE
+  // `providerOverlays` is reassigned so the previous names are still readable.
+  const touched = new Set([
+    ...providerOverlays.keys(),
+    ...result.byProvider.keys(),
+    ...providerRegistryCache.keys(),
+  ])
   // #6377: re-fold the per-provider slices into every ALREADY-BUILT non-Claude
   // registry. A provider whose registry hasn't been built yet picks up its slice
   // lazily on first getRegistryForProvider() (which reads providerOverlays), so
@@ -1119,10 +1134,27 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   for (const [name, registry] of providerRegistryCache) {
     registry.applyOverlay(providerOverlays.get(name) ?? new Map())
   }
+  // #7722: snapshot each touched provider's roster. getRegistryForProvider()
+  // folds the new slice into a registry that had not been built yet, and returns
+  // the DEFAULT registry for a Claude-family / unknown / unregistered name —
+  // those are skipped, so a mistyped `provider` field can never broadcast the
+  // Claude roster under that tag, and a Claude-tagged row (a documented no-op)
+  // can't produce a duplicate of the default broadcast the caller already sends.
+  const providers = []
+  for (const name of touched) {
+    const registry = getRegistryForProvider(name)
+    if (registry === defaultRegistry) continue
+    providers.push({
+      provider: name,
+      models: registry.getModels(),
+      defaultModelId: registry.getDefaultModelId(),
+    })
+  }
   return {
     reloaded: true,
     models: defaultRegistry.getModels(),
     defaultModelId: defaultRegistry.getDefaultModelId(),
+    providers,
   }
 }
 
@@ -1131,8 +1163,9 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
  * containing DIRECTORY (not the file inode) so an editor's atomic
  * write-temp-then-rename still fires, filters to the overlay filename, and
  * debounces the burst of events a single save emits. On a successful reload the
- * `onReload({ models, defaultModelId })` callback fires (the caller broadcasts
- * `available_models`). A malformed save is ignored (last-good kept, no callback).
+ * `onReload({ models, defaultModelId, providers })` callback fires — the caller
+ * broadcasts one provider-tagged `available_models` per roster (#7722). A
+ * malformed save is ignored (last-good kept, no callback).
  *
  * Returns a `{ close() }` handle; call it on daemon shutdown. Never throws — a
  * watch that can't be established (e.g. unsupported FS) logs a warn and returns
