@@ -21,6 +21,42 @@ import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 
 let registerProvider
 
+// #7729 — a stub CodexAppServerClient (EventEmitter + initialize/request/kill),
+// so the REAL start() can run without spawning `codex app-server`. The response
+// shapes are the live codex-cli 0.154.0 ones recorded on the epic
+// (github.com/blamechris/chroxy/issues/7721#issuecomment-5644101381).
+function stubClientFactory(threadStart) {
+  const calls = []
+  const client = new EventEmitter()
+  client.initialize = async () => ({ userAgent: 'codex_cli_rs/0.154.0 (x) chroxy' })
+  client.request = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'thread/start') {
+      return threadStart || { model: 'gpt-5.5', reasoningEffort: 'xhigh', thread: { id: 'th-1', model: 'gpt-5.5' } }
+    }
+    return {}
+  }
+  client.kill = () => {}
+  return { factory: () => client, calls, client }
+}
+
+// A CodexAppServerSession pre-bound to the stub client, registered as a
+// provider so SessionManager.createSession() drives the real class end to end.
+// `startPromise` is exposed because createSession() fires start() and does not
+// await it.
+class StubbedCodexAppServer extends CodexAppServerSession {
+  constructor(opts) {
+    super({ ...opts, clientFactory: stubClientFactory(StubbedCodexAppServer.threadStart).factory })
+    StubbedCodexAppServer.last = this
+  }
+  start() {
+    this.startPromise = super.start()
+    return this.startPromise
+  }
+}
+StubbedCodexAppServer.threadStart = null
+StubbedCodexAppServer.last = null
+
 before(async () => {
   ({ registerProvider } = await import('../src/providers.js'))
   // A codex-like provider: exposes getCodexSandbox() (the contract listSessions
@@ -64,6 +100,7 @@ before(async () => {
   }
   registerProvider('test-fake-codex', FakeCodexProvider)
   registerProvider('test-plain', PlainProvider)
+  registerProvider('test-codex-appserver', StubbedCodexAppServer)
 })
 
 function makeMgr() {
@@ -209,29 +246,69 @@ describe('getCodexSandbox() is fixed at start, not re-resolved on env change (#6
     }
   })
 
-  // start() itself spawns a real `codex app-server` child process (via
-  // CodexAppServerClient.initialize()), so it isn't exercised directly in this
-  // unit suite (no codex binary in CI). What IS under test here is the actual
-  // fix: start()'s FIRST statement is
-  //   `this._resolvedCodexSandbox = resolveCodexSandbox(this._codexSandbox)`
-  // (see codex-app-server-session.js) — i.e. the resolve+store happens before
-  // anything else, at the exact `thread/start` apply site. This reproduces
-  // that assignment (the one line start() runs for sandbox purposes) and then
-  // asserts getCodexSandbox() reads the STORED value, not a live re-resolve.
-  it('CodexAppServerSession: captured at start(); a later env change does not drift it', () => {
+  // #7729 — this test used to REPRODUCE start()'s sandbox line
+  // (`s._resolvedCodexSandbox = resolveCodexSandbox(s._codexSandbox)`) because
+  // start() built a real CodexAppServerClient and would have spawned `codex
+  // app-server`. A test that reimplements its subject cannot go red for the
+  // subject's bugs — reorder start(), drop the assignment, send a different
+  // value to `thread/start`, and the reproduction stays green. The
+  // `clientFactory` seam (#7729) removes the excuse: the REAL start() now runs
+  // over a stub client, and the assertion is on the sandbox that actually
+  // reached the `thread/start` params.
+  it('CodexAppServerSession: captured at start(); a later env change does not drift it', async () => {
     const prev = process.env.CHROXY_CODEX_SANDBOX
     process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    const { factory, calls } = stubClientFactory()
+    const s = new CodexAppServerSession({ cwd: '/tmp', clientFactory: factory })
     try {
-      const s = new CodexAppServerSession({ cwd: '/tmp' })
-      s._resolvedCodexSandbox = resolveCodexSandbox(s._codexSandbox) // start()'s apply-site line
-      assert.equal(s.getCodexSandbox(), 'read-only', 'resolved at "start" time')
+      await s.start()
+      assert.equal(calls.find(([m]) => m === 'thread/start')[1].sandbox, 'read-only',
+        'the resolved sandbox is what thread/start was actually sent')
+      assert.equal(s.getCodexSandbox(), 'read-only', 'resolved at start time')
 
       process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
       assert.equal(s.getCodexSandbox(), 'read-only',
         'still the value resolved at start — must not drift with the env')
     } finally {
+      s.destroy()
       if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
       else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+})
+
+// #7729 — a default codex session is constructed with `model: null` on purpose
+// (so codex falls back to ~/.codex/config.toml), and session_info renders
+// `model || bootedModel || null` — so before the thread/start echo was
+// captured, every such session reported a null model and the dashboard badge
+// was blank. This drives the REAL SessionManager render path.
+describe('session_info reports the model codex resolved (#7729)', () => {
+  it('a thread/start echo of gpt-5.5 reaches listSessions()', async () => {
+    const mgr = makeMgr()
+    try {
+      const id = mgr.createSession({ cwd: '/tmp', provider: 'test-codex-appserver' })
+      await StubbedCodexAppServer.last.startPromise
+      const entry = mgr.listSessions().find((s) => s.sessionId === id)
+      assert.ok(entry, 'session listed')
+      assert.equal(entry.model, 'gpt-5.5',
+        'session_info names what codex is running, not the null this session was constructed with')
+    } finally {
+      cleanup(mgr)
+    }
+  })
+
+  it('a thread/start response with no model echo still reports null — never a fabricated id', async () => {
+    const mgr = makeMgr()
+    StubbedCodexAppServer.threadStart = { thread: { id: 'th-none' } }
+    try {
+      const id = mgr.createSession({ cwd: '/tmp', provider: 'test-codex-appserver' })
+      await StubbedCodexAppServer.last.startPromise
+      const entry = mgr.listSessions().find((s) => s.sessionId === id)
+      assert.equal(entry.model, null)
+      assert.equal(StubbedCodexAppServer.last.bootedModel, null)
+    } finally {
+      StubbedCodexAppServer.threadStart = null
+      cleanup(mgr)
     }
   })
 })

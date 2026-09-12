@@ -3,15 +3,24 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { EventEmitter } from 'node:events'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
-import { CodexSession } from '../src/codex-session.js'
+import { CodexSession, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
 import {
   applyCodexCatalog,
   parseModelListResult,
   stampContextWindows,
   _resetCodexCatalogForTests,
 } from '../src/codex-model-catalog.js'
+// #7729 — importing providers.js REGISTERS the codex models registry. Without
+// it `getRegistryForProvider('codex')` falls through to the default Claude
+// registry and the context-window assertions below would be testing the wrong
+// registry (and passing for the wrong reason).
+import '../src/providers.js'
+import { getRegistryForProvider, DEFAULT_CONTEXT_WINDOW } from '../src/models.js'
+import { setupForwarding } from '../src/ws-forwarding.js'
+import { EventNormalizer } from '../src/event-normalizer.js'
 
 // #7766 — a trimmed `model/list` answer, enough to put the catalog module in
 // its POPULATED state. Not one id is in the hand-maintained seed, so an
@@ -1607,5 +1616,576 @@ describe('CodexAppServerSession — permission rule accessors (#6829)', () => {
       s.destroy()
       cleanup()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7729 — start() under test for the FIRST time.
+//
+// Until now `start()` had no unit coverage at all: it builds a real
+// CodexAppServerClient (which spawns `codex app-server`), so the suite could
+// only reach around it. `session-manager-codex-sandbox.test.js` said so in a
+// comment and REPRODUCED start()'s sandbox line instead of calling it — a test
+// that reimplements its subject cannot go red for the subject's bugs. The
+// `clientFactory` seam replaces that: the stub below answers JSON-RPC with the
+// shapes the live binary answers (codex-cli 0.154.0, recorded on the epic:
+// github.com/blamechris/chroxy/issues/7721#issuecomment-5644101381), and the
+// real start() runs over it. No test spawns a binary.
+// ---------------------------------------------------------------------------
+
+// A stub CodexAppServerClient: an EventEmitter with initialize/request/kill.
+// `calls` records every (method, params) pair so a test can assert the EXACT
+// wire params start() and sendMessage() send.
+function stubClient(responses = {}) {
+  const calls = []
+  const c = new EventEmitter()
+  c.initialize = async (params) => {
+    calls.push(['initialize', params])
+    return responses.initialize ?? { userAgent: 'codex_cli_rs/0.154.0 (x) chroxy' }
+  }
+  c.request = async (method, params) => {
+    calls.push([method, params])
+    if (Object.hasOwn(responses, method)) return responses[method]
+    // Anything unstubbed (e.g. the fire-and-forget model/list catalog probe)
+    // answers an empty object — a cannot-parse, which leaves the catalog UNSET.
+    return {}
+  }
+  c.kill = () => {}
+  return { client: c, calls }
+}
+
+// The live `thread/start` result, trimmed to the fields this session reads.
+//
+// Provenance is the UNTRIMMED codex-cli 0.154.0 capture,
+// https://github.com/blamechris/chroxy/issues/7721#issuecomment-5646200933 —
+// which carries the nested `thread` object (`id`, `model`, `reasoningEffort`,
+// `cliVersion`, …) alongside the top-level fields, with `thread.model` /
+// `thread.reasoningEffort` MIRRORING the top-level `model` /
+// `reasoningEffort`. `thread` is in `ThreadStartResponse.required`. Nothing
+// here is synthetic: the nested object is what exercises `start()`'s
+// `started?.thread?.id` read (the sole source of `_threadId`) and
+// `_captureBootedModel`'s `thread.model` branch, so do not trim it away on the
+// belief that it was invented.
+const THREAD_START_ECHO = Object.freeze({
+  model: 'gpt-5.5',
+  reasoningEffort: 'xhigh',
+  modelProvider: 'openai',
+  approvalPolicy: 'on-request',
+  thread: { id: 'th-1', model: 'gpt-5.5', reasoningEffort: 'xhigh', cliVersion: '0.154.0' },
+})
+
+function mkStartedSession(extraOpts = {}, responses = {}) {
+  const stub = stubClient(responses)
+  const { s, cleanup } = mkSession({ clientFactory: () => stub.client, ...extraOpts })
+  return { s, cleanup, ...stub }
+}
+
+describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
+  it('sends thread/start the EXACT param shape the inline object used to build', async () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    delete process.env.CHROXY_CODEX_SANDBOX
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      const threadCall = calls.find(([m]) => m === 'thread/start')
+      assert.ok(threadCall, 'thread/start was sent')
+      assert.deepEqual(threadCall[1], {
+        approvalPolicy: 'on-request',
+        cwd: '/tmp',
+        sandbox: CODEX_DEFAULT_SANDBOX,
+      }, 'no `model` key when the operator set none — codex falls back to ~/.codex/config.toml')
+      assert.deepEqual(Object.keys(threadCall[1]), ['approvalPolicy', 'cwd', 'sandbox'])
+    } finally {
+      s.destroy()
+      cleanup()
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('an operator model override rides thread/start', async () => {
+    const { s, cleanup, calls } = mkStartedSession({ model: 'gpt-5-codex' }, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      const params = calls.find(([m]) => m === 'thread/start')[1]
+      assert.equal(params.model, 'gpt-5-codex')
+      assert.deepEqual(Object.keys(params), ['approvalPolicy', 'cwd', 'sandbox', 'model'])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('the thread/start echo sets bootedModel and `ready` names the resolved model', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    const ready = []
+    s.on('ready', (p) => ready.push(p))
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5.5', 'bootedModel comes from the thread/start echo')
+      assert.deepEqual(ready, [{ model: 'gpt-5.5' }],
+        'ready names the model codex actually resolved, not the null this session was constructed with')
+      assert.equal(s._effectiveModelId(), 'gpt-5.5')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('falls back to thread.model when the top-level echo is absent', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-2', model: 'gpt-5.4' } } })
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5.4')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a response with NO model field leaves bootedModel null — never undefined-coerced', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-3' } } })
+    const ready = []
+    s.on('ready', (p) => ready.push(p))
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, null)
+      assert.equal(s.bootedModel === undefined, false, 'null, not undefined — a cannot-check must stay readable')
+      assert.deepEqual(ready, [{ model: null }], 'ready reports null rather than fabricating a model')
+      assert.equal(s._threadId, 'th-3', 'the thread still started')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('an empty-string / non-string echo is NOT a model id', async () => {
+    for (const bad of ['', 42, null, {}]) {
+      const { s, cleanup } = mkStartedSession({}, { 'thread/start': { model: bad, thread: { id: 'th' } } })
+      try {
+        await s.start()
+        assert.equal(s.bootedModel, null, `echo ${JSON.stringify(bad)} must not become a model id`)
+      } finally {
+        s.destroy()
+        cleanup()
+      }
+    }
+  })
+
+  it('the operator override WINS over the echo for the effective model', async () => {
+    const { s, cleanup } = mkStartedSession({ model: 'gpt-5-codex' }, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5.5', 'what codex resolved is still recorded')
+      assert.equal(s._effectiveModelId(), 'gpt-5-codex', 'the explicit override is what the session is described by')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('start() stores the resolved sandbox and getCodexSandbox() does not drift with a later env change', async () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      assert.equal(calls.find(([m]) => m === 'thread/start')[1].sandbox, 'read-only')
+      assert.equal(s.getCodexSandbox(), 'read-only')
+      process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+      assert.equal(s.getCodexSandbox(), 'read-only', 'captured at start — must not follow the env')
+    } finally {
+      s.destroy()
+      cleanup()
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+})
+
+describe('CodexAppServerSession — param builders (#7729)', () => {
+  it('_buildThreadParams matches the inline shape, and omits `model` when there is none', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      assert.deepEqual(s._buildThreadParams('workspace-write'), {
+        approvalPolicy: 'on-request',
+        cwd: '/tmp',
+        sandbox: 'workspace-write',
+      })
+      s.model = 'gpt-5.5'
+      assert.deepEqual(s._buildThreadParams('read-only'), {
+        approvalPolicy: 'on-request',
+        cwd: '/tmp',
+        sandbox: 'read-only',
+        model: 'gpt-5.5',
+      })
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('_buildTurnParams matches the inline shape, and omits `model` when there is none', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s._threadId = 'th-9'
+      const input = [{ type: 'text', text: 'hi' }]
+      assert.deepEqual(s._buildTurnParams(input), {
+        threadId: 'th-9',
+        approvalPolicy: 'on-request',
+        input,
+      })
+      s.model = 'gpt-5.5'
+      assert.deepEqual(s._buildTurnParams(input), {
+        threadId: 'th-9',
+        approvalPolicy: 'on-request',
+        input,
+        model: 'gpt-5.5',
+      })
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('the approvalPolicy tracks the permission mode on BOTH builders', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s.permissionMode = 'auto'
+      assert.equal(s._buildThreadParams('read-only').approvalPolicy, 'never')
+      assert.equal(s._buildTurnParams([]).approvalPolicy, 'never')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('turn/start is SENT the builder output (the builder is wired, not merely correct)', async () => {
+    const { s, cleanup, calls } = mkStartedSession({ model: 'gpt-5-codex' }, { 'thread/start': THREAD_START_ECHO, 'turn/start': { turn: { id: 'tu-1' } } })
+    try {
+      await s.start()
+      await s.sendMessage('hello')
+      const turnCall = calls.find(([m]) => m === 'turn/start')
+      assert.ok(turnCall, 'turn/start was sent')
+      assert.deepEqual(Object.keys(turnCall[1]), ['threadId', 'approvalPolicy', 'input', 'model'])
+      assert.equal(turnCall[1].threadId, 'th-1')
+      assert.equal(turnCall[1].model, 'gpt-5-codex')
+      assert.equal(turnCall[1].input[0].text, 'hello')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a re-routed thread does NOT pin turn/start back to the model codex moved away from', async () => {
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO, 'turn/start': { turn: { id: 'tu-1' } } })
+    try {
+      await s.start()
+      s._onModelRerouted({ fromModel: 'gpt-5.5', toModel: 'gpt-5.4-mini', reason: 'capacity' })
+      await s.sendMessage('hello')
+      const params = calls.find(([m]) => m === 'turn/start')[1]
+      assert.equal('model' in params, false,
+        'no operator override → no model on the turn; echoing the resolved model back would pin a re-routed thread')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
+describe('CodexAppServerSession — model/rerouted (#7729)', () => {
+  it('a mid-turn reroute moves bootedModel and the per-model usage split', () => {
+    const { s, cleanup } = mkSession()
+    const ev = capture(s, ['result'])
+    try {
+      s.bootedModel = 'gpt-5.5'
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+      s._onNotification({ method: 'model/rerouted', params: { threadId: 'th', turnId: 't1', fromModel: 'gpt-5.5', toModel: 'gpt-5.4-mini', reason: 'capacity' } })
+      assert.equal(s.bootedModel, 'gpt-5.4-mini')
+      s._onNotification({ method: 'thread/tokenUsage/updated', params: { usage: { inputTokens: 10, outputTokens: 2 } } })
+      s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 1 } } })
+      assert.notEqual(ev[0][1].modelUsage, null,
+        'a session with no operator override must still produce a per-model usage split')
+      assert.deepEqual(Object.keys(ev[0][1].modelUsage), ['gpt-5.4-mini'],
+        'usage is keyed on the model the turn actually ran on')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a reroute BETWEEN turns is still consumed (no active turn)', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s.bootedModel = 'gpt-5.5'
+      assert.equal(s._activeTurn, null)
+      s._onNotification({ method: 'model/rerouted', params: { toModel: 'gpt-5.4' } })
+      assert.equal(s.bootedModel, 'gpt-5.4')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a reroute with no usable toModel leaves the known model ALONE', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s.bootedModel = 'gpt-5.5'
+      for (const params of [{}, { toModel: '' }, { toModel: null }, { fromModel: 'gpt-5.5' }]) {
+        assert.equal(s._onModelRerouted(params), false)
+        assert.equal(s.bootedModel, 'gpt-5.5', 'a cannot-read must never blank a model id we already know')
+      }
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7729 — the context window comes from codex itself.
+//
+// `model/list` carries NO context window, so `thread/tokenUsage/updated`'s
+// `modelContextWindow` is the ONLY authoritative source that exists. It is
+// written straight to the codex registry; the observed-tokens ratchet
+// (utils/context-window-learn.js) stays as the fallback for a build that does
+// not report one. Neither path emits `models_updated`, so neither pushes the
+// whole roster over the tunnel once per turn.
+// ---------------------------------------------------------------------------
+
+// The live notification shape, verified against codex-cli 0.154.0 (epic record
+// github.com/blamechris/chroxy/issues/7721#issuecomment-5644101381):
+//   { threadId, turnId, tokenUsage: { total, last, modelContextWindow } }
+function tokenUsageParams({ last, total, modelContextWindow } = {}) {
+  const breakdown = (o) => ({
+    totalTokens: 0, inputTokens: 0, cachedInputTokens: 0,
+    outputTokens: 0, reasoningOutputTokens: 0, cacheWriteInputTokens: 0,
+    ...o,
+  })
+  const tokenUsage = { total: breakdown(total), last: breakdown(last) }
+  if (modelContextWindow !== undefined) tokenUsage.modelContextWindow = modelContextWindow
+  return { threadId: 'th-1', turnId: 'tu-1', tokenUsage }
+}
+
+describe('CodexAppServerSession — authoritative context window (#7729)', () => {
+  const registry = getRegistryForProvider('codex')
+  const windowOf = (id) => registry.getModels().find((m) => m.id === id)?.contextWindow
+
+  function withCodexSession(fn, opts = {}) {
+    const { s, cleanup } = mkSession(opts)
+    // The registry is a process-global; put it back however the test ends.
+    try {
+      return fn(s)
+    } finally {
+      registry.resetModels()
+      s.destroy()
+      cleanup()
+    }
+  }
+
+  it('the seed window this suite ratchets against is the one the registry really holds', () => {
+    assert.equal(windowOf('gpt-5-codex'), 400_000,
+      'if this changes, the 272000 / 550000 expectations below need re-deriving')
+  })
+
+  it('modelContextWindow is written to the registry — including DOWNWARD (authoritative, not a ratchet)', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 }, modelContextWindow: 272_000 }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 272_000,
+        'codex is the authority on its own window — a smaller reported window must win over the static 400k')
+    })
+  })
+
+  it('the token breakdown is read from `last`, never the thread-cumulative `total`', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({
+          last: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
+          total: { inputTokens: 900_000, cachedInputTokens: 0, outputTokens: 9_999 },
+          modelContextWindow: 272_000,
+        }),
+      })
+      assert.deepEqual(s._lastUsage, {
+        input_tokens: 400,
+        output_tokens: 42,
+        cache_read_input_tokens: 600,
+        cached_input_tokens: 600,
+      }, 'session-manager ACCUMULATES result.usage — a running total here would compound every turn')
+    })
+  })
+
+  it('a payload WITHOUT modelContextWindow leaves the entry unchanged and falls through to the ratchet', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 42 } }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 400_000,
+        'no reported window is a CANNOT-CHECK: the entry keeps its value and nothing is substituted for it')
+      assert.notEqual(windowOf('gpt-5-codex'), DEFAULT_CONTEXT_WINDOW,
+        '"no meter" and "wrong meter" must not be the same green')
+    })
+  })
+
+  it('the ratchet still runs when codex reports no window (a prompt past the entry bumps it UP)', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 500_000, cachedInputTokens: 0, outputTokens: 1 } }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 550_000, '500000 * 1.1, rounded up to the nearest 1k')
+    })
+  })
+
+  it('the ratchet is fed the WHOLE prompt, not the disjoint uncached half the accounting split emits', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      // A cache-heavy turn: 500k prompt of which 450k was cached. The emitted
+      // accounting usage is the 50k uncached remainder — but the model still
+      // held 500k of context, so that is what the window must be learned from.
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 500_000, cachedInputTokens: 450_000, outputTokens: 1 } }),
+      })
+      assert.equal(s._lastUsage.input_tokens, 50_000, 'accounting still reports the disjoint split')
+      assert.equal(windowOf('gpt-5-codex'), 550_000, 'the window is learned from the FULL prompt')
+    })
+  })
+
+  it('0 / negative / NaN / null / non-number windows leave the entry unchanged', () => {
+    for (const bad of [0, -1, Number.NaN, null, '272000', Infinity]) {
+      withCodexSession((s) => {
+        s.bootedModel = 'gpt-5-codex'
+        s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+        s._onNotification({
+          method: 'thread/tokenUsage/updated',
+          // A tiny prompt, so the ratchet fallback is itself a no-op and this
+          // assertion is about the reported window alone.
+          params: tokenUsageParams({ last: { inputTokens: 10, outputTokens: 1 }, modelContextWindow: bad }),
+        })
+        assert.equal(windowOf('gpt-5-codex'), 400_000, `modelContextWindow ${String(bad)} must not be written`)
+      })
+    }
+  })
+
+  it('a session with NO model id writes nothing — a brand-new meter stays dashed, never fabricated', () => {
+    withCodexSession((s) => {
+      assert.equal(s._effectiveModelId(), null, 'no override, no thread/start echo yet')
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      const before = registry.getModels().map((m) => [m.id, m.contextWindow])
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 1000, outputTokens: 1 }, modelContextWindow: 272_000 }),
+      })
+      assert.deepEqual(registry.getModels().map((m) => [m.id, m.contextWindow]), before,
+        'nothing to key a window on — and nothing invented to stand in for it')
+    })
+  })
+
+  it('an operator override is what the window is keyed on when there is one', () => {
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5.5' // what codex resolved; not in the registry
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 10, outputTokens: 1 }, modelContextWindow: 272_000 }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 272_000, 'the OVERRIDE is the id the window is keyed on')
+      assert.equal(windowOf('gpt-5'), 400_000, 'and no near-miss id was touched')
+    }, { model: 'gpt-5-codex' })
+  })
+
+  it('an override SURVIVES a mid-turn reroute: the window stays keyed on the override, and the re-routed-to model is untouched', () => {
+    // Review of #7767: override + reroute was the one combination neither the
+    // reroute describe nor the window describe covered. It is pinned here
+    // rather than changed — `_effectiveModelId()` is override → booted → null
+    // on purpose, and session_info renders `model || bootedModel` in the SAME
+    // precedence (session-manager.js:1998), so label and measurement agree.
+    // Splitting them (a separate `_runningModelId()` for the registry key)
+    // would make this test red, which is the point of having it.
+    withCodexSession((s) => {
+      s.bootedModel = 'gpt-5.5'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      // Codex re-routes the thread onto a model the registry DOES carry, so
+      // "untouched" below is an assertion about a real entry, not about undefined.
+      s._onNotification({
+        method: 'model/rerouted',
+        params: { threadId: 'th-1', turnId: 'tu-1', fromModel: 'gpt-5.5', toModel: 'gpt-5', reason: 'capacity' },
+      })
+      assert.equal(s.bootedModel, 'gpt-5', 'precondition: the reroute did move bootedModel')
+      assert.equal(s._effectiveModelId(), 'gpt-5-codex', 'precondition: the override still wins over the re-routed model')
+
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 10, outputTokens: 1 }, modelContextWindow: 272_000 }),
+      })
+      assert.equal(windowOf('gpt-5-codex'), 272_000,
+        'the override is still what the window is keyed on after a reroute')
+      assert.equal(windowOf('gpt-5'), 400_000,
+        'the re-routed-to model keeps its own window — this path never writes to it')
+    }, { model: 'gpt-5-codex' })
+  })
+
+  it('a codex tokenUsage update produces ZERO global available_models broadcasts', () => {
+    const broadcasts = []
+    const sm = new EventEmitter()
+    sm.getSession = () => ({ provider: 'codex' })
+    sm.listSessions = () => []
+    sm.getSessionContext = async () => null
+    const devPreview = new EventEmitter()
+    devPreview.handleToolResult = () => {}
+    devPreview.closeSession = () => {}
+    setupForwarding({
+      normalizer: new EventNormalizer(),
+      sessionManager: sm,
+      cliSession: null,
+      devPreview,
+      checkpointManager: new EventEmitter(),
+      pushManager: null,
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      broadcast: (m) => broadcasts.push(m),
+      broadcastToSession: () => {},
+    })
+
+    withCodexSession((s) => {
+      // The ONE line session-manager.js:3928-3929 uses to forward this event.
+      s.on('models_updated', (data) => sm.emit('session_event', { sessionId: 'sess-1', event: 'models_updated', data }))
+      s.bootedModel = 'gpt-5-codex'
+      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      // Both paths: the authoritative write, then the ratchet fallback.
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 1000, outputTokens: 1 }, modelContextWindow: 272_000 }),
+      })
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({ last: { inputTokens: 900_000, outputTokens: 1 } }),
+      })
+      // 900000 * 1.1 is 990000.0000000001 in IEEE754, so the 1k round-up lands on 991k.
+      assert.equal(windowOf('gpt-5-codex'), 991_000, 'both paths actually did write — this is not vacuous')
+      assert.deepEqual(broadcasts.filter((m) => m.type === 'available_models'), [],
+        'a per-turn global roster push is waste over a tunnel; the write reaches clients on the next roster refresh')
+
+      // Positive control: the harness DOES broadcast when a models_updated is
+      // emitted, so the assertion above is armed rather than vacuously green.
+      s.emit('models_updated', { models: registry.getModels() })
+      assert.equal(broadcasts.filter((m) => m.type === 'available_models').length, 1,
+        'control: this wiring broadcasts available_models when models_updated fires')
+    })
   })
 })
