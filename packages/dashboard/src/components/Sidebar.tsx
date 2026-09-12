@@ -8,6 +8,7 @@ import { useState, useCallback, useRef, useMemo } from 'react'
 import type { CumulativeUsage, McpServer, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
@@ -265,20 +266,32 @@ export function Sidebar({
   // takes another `session_list` to land, which can be "until reload".
   // Read the live map here and overlay it below; same "live overlays
   // snapshot" shape as App.tsx's `sidebarCumulativeUsage` (#4120), built
-  // for the sibling per-session cost badge. Deliberately a PLAIN selector
-  // (like `activeMcpServers` above), not `useShallow` — this file is
-  // rendered by several test suites that mock `useConnectionStore` as a
-  // bare `(selector) => selector(store)` without a real Zustand/React tree
-  // underneath it, and the real `useShallow` needs `React.useRef` to be
-  // callable through that same mocked path.
-  const liveCumulativeUsage = useConnectionStore((s) => {
-    const out: Record<string, CumulativeUsage | null | undefined> = {}
-    const states = s.sessionStates ?? {}
-    for (const id in states) {
-      out[id] = states[id]!.cumulativeUsage
-    }
-    return out
-  })
+  // for the sibling per-session cost badge.
+  //
+  // `useShallow` is LOAD-BEARING, not idiom (#7797 review). This selector
+  // allocates a fresh `Record` on every call, and zustand 5 subscribes
+  // through `useSyncExternalStore`, which re-invokes `getSnapshot` to check
+  // store consistency and force-re-renders whenever the result is not
+  // reference-equal to the last one. Unwrapped, that is an unbounded render
+  // loop: `Maximum update depth exceeded` (minified React #185 in a
+  // production build) on Sidebar MOUNT — including the empty-`sessionStates`
+  // case, i.e. every fresh page load — which main.tsx's root ErrorBoundary
+  // then turns into a blank dashboard. `activeMcpServers` above can be a
+  // plain selector precisely because it returns an EXISTING reference or the
+  // module-level `EMPTY_MCP_SERVERS` constant; this one cannot.
+  //
+  // Guarded by SidebarRealStore.test.tsx, which renders against the real
+  // store; the store-mocking suites in this package cannot see the loop.
+  const liveCumulativeUsage = useConnectionStore(
+    useShallow((s) => {
+      const out: Record<string, CumulativeUsage | null | undefined> = {}
+      const states = s.sessionStates ?? {}
+      for (const id in states) {
+        out[id] = states[id]!.cumulativeUsage
+      }
+      return out
+    }),
+  )
 
   // Sessions with the live cumulativeUsage overlaid — this, not the raw
   // `sessions` snapshot prop, is what the Tokens panel reads.

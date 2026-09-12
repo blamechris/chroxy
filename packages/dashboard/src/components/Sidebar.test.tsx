@@ -716,6 +716,13 @@ describe('Sidebar — Tokens panel reads live session_usage, not just the snapsh
     expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('15.2K tokens')
   })
 
+  // FALLBACK REGRESSION GUARD — NOT part of the red proof (#7797 review).
+  // The snapshot row here already carries LIVE_USAGE, so pre-#7793 code (which
+  // passed `sessions` straight through to SidebarTokenView) renders the same
+  // '15.2K tokens'. Revert the whole overlay and this test still passes. It
+  // exists only to catch a future change that blanks the snapshot value out
+  // when the live map has no entry; the "shows the live sessionStates total"
+  // test above (0 -> 15.2K) is the one that cannot pass against pre-fix code.
   it('falls back to the session_list snapshot when no live sessionStates entry exists yet', () => {
     mockSessionStates = {}
     const sessions = [makeSessionInfo({ sessionId: 's1', provider: 'codex', cumulativeUsage: LIVE_USAGE })]
