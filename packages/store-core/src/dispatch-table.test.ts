@@ -1325,12 +1325,15 @@ describe('shared dispatch table', () => {
         defaultModel: 'gpt-5.5',
         provider: 'codex',
       })
-      const before = JSON.parse(JSON.stringify(env.flat.modelsByProvider))
-      expect(Object.keys(before)).toEqual(['codex'])
+      // The REFERENCE, not a clone: `toEqual` against a JSON copy would pass for
+      // a handler that rebuilt an equal-but-new map, losing the referential
+      // stability both clients' zustand selectors memoize on (PR #7758 review).
+      const before = env.flat.modelsByProvider
+      expect(Object.keys(before as object)).toEqual(['codex'])
 
       expect(dispatch(env, { type: 'available_models' })).toBe(true)
       expect(dispatch(env, { type: 'available_models', models: 'nope', provider: 'codex' })).toBe(true)
-      expect(env.flat.modelsByProvider).toEqual(before)
+      expect(env.flat.modelsByProvider).toBe(before)
     })
 
     it('cost_update applies the per-session sessionCost patch + app mirror when wired', () => {
