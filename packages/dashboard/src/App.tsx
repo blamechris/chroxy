@@ -469,6 +469,16 @@ export function App() {
   // still in flight, a model the roster does not carry) resolves to the same
   // legacy triple rather than to an empty list: an empty list would blank the
   // control on a provider whose levels simply have not arrived.
+  //
+  // #7784 — this and the SERVER's gate read the model row from two different
+  // sources: the picker matches `availableModels` (the modelsByProvider wire
+  // rows), while `resolveSessionThinkingLevels` calls the provider class's
+  // `getModelMetadata` directly. codex-model-catalog.js documents a
+  // populated -> empty divergence in which they disagree by construction, and
+  // since the server now REFUSES the legacy fallback on a non-Claude provider,
+  // that state shows a picker offering Auto/High/Max whose every selection
+  // bounces. Reconciling the two sources is #7784; recorded here rather than
+  // left for the next reader to rediscover.
   const activeModelThinkingLevels = useMemo(() => {
     const row = availableModels.find(m => m.fullId === activeModel || m.id === activeModel) ?? null
     return thinkingLevelOptions(row)

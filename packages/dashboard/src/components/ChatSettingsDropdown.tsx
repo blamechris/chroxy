@@ -18,6 +18,7 @@ import {
   CODEX_SANDBOX_MODE_META,
   type CodexSandboxMode,
   thinkingLevelOptions,
+  formatThinkingLevelLabel,
   type ThinkingLevelOption,
 } from '@chroxy/protocol'
 import { ModelPickerModal } from './ModelPickerModal'
@@ -140,12 +141,20 @@ export function ChatSettingsDropdown({
   // level is not in the offered list (a stale value mid-model-switch, or a
   // Claude `default` on a codex row), it is APPENDED rather than dropped, so
   // the control keeps naming what the session is actually at.
+  //
+  // The appended option is labelled through `formatThinkingLevelLabel`, the same
+  // formatter `thinkingLevelOptions` uses, rather than by echoing the raw id.
+  // This is the COMMON codex path, not an edge: a fresh codex session has
+  // `get thinkingLevel === null`, so ws-history replays `level: thinkingLevel ||
+  // 'default'` and the append branch runs with `default` — which would otherwise
+  // render lowercase and raw here while the identical id renders as 'Auto' on
+  // every Claude session.
   const thinkingLevelChoices = useMemo(() => {
     const options = thinkingLevels && thinkingLevels.length > 0 ? thinkingLevels : thinkingLevelOptions(null)
     const current = thinkingLevel && thinkingLevel.length > 0 ? thinkingLevel : options[0]!.id
     return options.some(o => o.id === current)
       ? { options, selected: current }
-      : { options: [...options, { id: current, label: current }], selected: current }
+      : { options: [...options, { id: current, label: formatThinkingLevelLabel(current) }], selected: current }
   }, [thinkingLevels, thinkingLevel])
 
   // #3888: hover tooltip on the active-model pill so users can see the full

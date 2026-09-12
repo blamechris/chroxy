@@ -201,6 +201,11 @@ describe('ChatSettingsDropdown', () => {
       })
       expect(optionValues()).toEqual(['low', 'xhigh', 'default'])
       expect(thinkingSelect().value).toBe('default')
+      // The LABEL matters as much as the value, and pinning only values is what
+      // let the appended option render its raw id: `default` is 'Auto'
+      // everywhere else in this control, and this is the path a fresh codex
+      // session takes (ws-history replays `thinkingLevel || 'default'`).
+      expect(Array.from(thinkingSelect().options).map(o => o.textContent)).toEqual(['Low', 'Xhigh', 'Auto'])
     })
   })
 
