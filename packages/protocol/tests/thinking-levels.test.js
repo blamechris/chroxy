@@ -105,6 +105,50 @@ describe('@chroxy/protocol resolveThinkingLevels (#7730)', () => {
     assert.deepEqual(advertised.levels, ['default', 'high', 'max'])
     assert.equal(advertised.source, 'model', '"the model said so" must not read as "nothing was said"')
   })
+
+  // #7784 — `legacyFallback` is the per-provider fact the picker and the
+  // server's gate both feed in, so that they resolve the same roster from the
+  // same code. These pin the three answers it can produce.
+  it('legacyFallback:false turns a row that advertised nothing into an EMPTY roster', async () => {
+    const { resolveThinkingLevels } = await import('../src/thinking-levels.ts')
+    for (const row of [null, undefined, {}, { reasoningLevels: [] }, { reasoningLevels: 'high' }]) {
+      const got = resolveThinkingLevels(row, { legacyFallback: false })
+      assert.deepEqual(got.levels, [], `${JSON.stringify(row)} must offer nothing`)
+      assert.equal(got.source, 'none')
+      // `defaultLevel` is always a member of `levels`, and there is no member.
+      assert.equal(got.defaultLevel, '')
+    }
+  })
+
+  it('legacyFallback:false does NOT touch a row that DID advertise levels', async () => {
+    // The control that stops the option being a deny-everything switch (#7273):
+    // a flag that emptied every roster would satisfy the test above for the
+    // wrong reason and keep satisfying it if the advertised branch were deleted.
+    const { resolveThinkingLevels } = await import('../src/thinking-levels.ts')
+    const got = resolveThinkingLevels({ reasoningLevels: ['low', 'xhigh'], defaultReasoningLevel: 'xhigh' }, { legacyFallback: false })
+    assert.deepEqual(got.levels, ['low', 'xhigh'])
+    assert.equal(got.defaultLevel, 'xhigh')
+    assert.equal(got.source, 'model')
+  })
+
+  it('only an EXPLICIT false narrows — absent / undefined / true keep the fallback', async () => {
+    // An older daemon sends no capability, so the client's opts bag carries
+    // `undefined`. That must read as "keep doing what you did", or a new
+    // dashboard against an old server loses the Claude control entirely.
+    const { resolveThinkingLevels } = await import('../src/thinking-levels.ts')
+    for (const opts of [undefined, null, {}, { legacyFallback: undefined }, { legacyFallback: true }]) {
+      const got = resolveThinkingLevels(null, opts)
+      assert.deepEqual(got.levels, ['default', 'high', 'max'], `${JSON.stringify(opts)} must keep the fallback`)
+      assert.equal(got.source, 'legacy')
+    }
+  })
+
+  it('thinkingLevelOptions forwards the flag (the PICKER and the GATE are one function)', async () => {
+    const { thinkingLevelOptions } = await import('../src/thinking-levels.ts')
+    assert.deepEqual(thinkingLevelOptions(null, { legacyFallback: false }), [])
+    assert.deepEqual(thinkingLevelOptions({ reasoningLevels: ['low'] }, { legacyFallback: false }),
+      [{ id: 'low', label: 'Low' }])
+  })
 })
 
 describe('@chroxy/protocol thinkingLevelOptions / label (#7730)', () => {
