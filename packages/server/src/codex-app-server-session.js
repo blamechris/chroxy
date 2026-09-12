@@ -499,17 +499,31 @@ export class CodexAppServerSession extends BaseSession {
    * brand-new session, or a value `SessionManager.createSession()` pre-seeded
    * from the persisted restore snapshot before calling `start()` — and never
    * blanks a known id (#7770; mirrors `_onModelRerouted`'s identical rule for
-   * the same field, twelve lines below). A session with no prior value stays
+   * the same field — named, deliberately, WITHOUT a line offset: the "twelve
+   * lines below" this docblock first carried was copied from #7770's body,
+   * which quoted a pre-#7729 layout, and was ~87 lines wrong on arrival. A
+   * method name survives a refactor; an offset does not). A session with no
+   * prior value stays
    * `null`, never `undefined` — the badge, the usage split and the
    * context-window lookup all distinguish "codex did not say" from a model
    * id, and an `undefined` here would serialize away entirely rather than
    * reading as a cannot-check.
+   *
+   * The three log branches split on PROVENANCE, not on the resulting
+   * truthiness. A carried-over value is not an echo, and saying "thread/start
+   * echo" over one points an operator who changed `~/.codex/config.toml` at
+   * codex's config resolution instead of at chroxy's restore snapshot — so the
+   * cannot-read still warns (naming what it kept, `_onModelRerouted`'s shape)
+   * rather than disappearing behind the success line.
    */
   _captureBootedModel(started) {
     const echoed = this._readModelId(started?.model) ?? this._readModelId(started?.thread?.model)
+    const carried = echoed ? null : this.bootedModel || null
     this.bootedModel = echoed ?? this.bootedModel ?? null
-    if (this.bootedModel) {
-      ;(this._log || log).info(`codex resolved model=${this.bootedModel} (thread/start echo)`)
+    if (echoed) {
+      ;(this._log || log).info(`codex resolved model=${echoed} (thread/start echo)`)
+    } else if (carried) {
+      ;(this._log || log).warn(`codex thread/start carried no model echo; keeping ${carried} (restored before start)`)
     } else {
       ;(this._log || log).warn('codex thread/start carried no model echo; the session model stays unknown rather than guessed')
     }
@@ -633,6 +647,14 @@ export class CodexAppServerSession extends BaseSession {
    * probe) emits nothing — pushing an empty roster would blank a picker that
    * already has one.
    *
+   * The emit runs AFTER the probe's `.catch()`, with its own try/catch:
+   * `EventEmitter.emit` rethrows a synchronous listener throw, and inside the
+   * guarded chain that throw would be logged as `codex model catalog refresh
+   * failed` and flip the resolved value to `null` — attributing a downstream
+   * forwarding bug to the codex probe, which both succeeded and wrote the
+   * registry. Ordering the two stages so each reports its own failure is the
+   * point; do not collapse them back into one `.then().catch()`.
+   *
    * @returns {Promise<Array<Object>|null>} always resolves; never throws.
    */
   _refreshModelCatalog() {
@@ -643,13 +665,19 @@ export class CodexAppServerSession extends BaseSession {
     }
     return Promise.resolve()
       .then(() => CodexAppServerSession.refreshModels({ client: this._client }))
-      .then((models) => {
-        if (Array.isArray(models) && models.length > 0) this.emit('models_updated', { models })
-        return models
-      })
       .catch((err) => {
         ;(this._log || log).debug(`codex model catalog refresh failed: ${err?.message || err}`)
         return null
+      })
+      .then((models) => {
+        if (Array.isArray(models) && models.length > 0) {
+          try {
+            this.emit('models_updated', { models })
+          } catch (err) {
+            ;(this._log || log).debug(`codex models_updated listener threw: ${err?.message || err}`)
+          }
+        }
+        return models
       })
   }
 
