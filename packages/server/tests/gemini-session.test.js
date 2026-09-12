@@ -842,9 +842,16 @@ describe('GeminiSession', () => {
     })
 
     it('a pre-fix cache holding gemini-2.5-pro[1m] does not re-serve it', () => {
-      // `saveCache()` persisted `activeModels`, so the chip is already on disk
-      // for installs that ran a pre-fix build (#7776). The prune that removes
-      // it on load is non-Claude-scoped, so this is the provider-level half.
+      // #7765 re-review — stated precisely, because the premise written here
+      // first was counterfactual for gemini: the `[1m]` synthesis lives inside
+      // `updateModels`, nothing calls `updateModels` on the gemini registry in
+      // production (no `refreshModels` seam), so the chip never reached
+      // `activeModels` and `saveCache()` never wrote it here. On gemini the
+      // defect was LATENT, not live — the live half is codex/openrouter, where
+      // a refresh does run. What this test pins is the MECHANISM at the
+      // provider #7747 named: the load-time prune is non-Claude-scoped, so a
+      // `[1m]` row reaching this cache by any route (a hand-edited file, a
+      // future caller of `updateModels`) is dropped rather than served.
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-1m-cache-'))
       const cachePath = join(dir, 'models-cache.gemini.json')
       try {
@@ -860,6 +867,64 @@ describe('GeminiSession', () => {
         assert.ok(fullIds.includes('gemini-2.5-pro'), `the base row must survive the load, got ${fullIds.join(',')}`)
         assert.equal(fullIds.includes('gemini-2.5-pro[1m]'), false,
           `a cached [1m] row must be dropped on a non-Claude registry, got ${fullIds.join(',')}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  // #7765 re-review — #7761 scoped the #3075 static-seed union to "non-Claude
+  // REPLACES". That premise needs a provider that can RE-PUBLISH a roster, and
+  // gemini has no such seam: it declares no static `refreshModels` and nothing
+  // calls `updateModels` on its registry, so `models-cache.gemini.json` is a
+  // snapshot of THIS REPO'S OWN static table plus learned windows. REPLACE there
+  // means a model added to `GEMINI_MODEL_METADATA` by a later release never
+  // reaches the picker on an install that already has that file.
+  //
+  // The exemption is derived from the seam at `getRegistryForProvider`
+  // (`typeof ProviderClass.refreshModels === 'function'`), never from a list of
+  // provider names — this is the end-to-end half of that wiring, so the
+  // derivation cannot become a no-op silently.
+  describe('the gemini registry has no discovery seam, so its static seed keeps unioning (#7765 re-review)', () => {
+    beforeEach(() => {
+      getRegistryForProvider('gemini').resetModels()
+    })
+
+    it('a persisted cache written by an older release still yields every current static row', () => {
+      // The premise, asserted rather than assumed: the day gemini gains a
+      // refresh seam this registry starts REPLACING, and this test must be
+      // revisited rather than quietly inverted.
+      assert.notEqual(typeof GeminiSession.refreshModels, 'function',
+        'gemini declares no discovery seam — the union exemption below is derived from exactly that')
+
+      const fallbackIds = GeminiSession.getFallbackModels().map((m) => m.fullId)
+      // What an older release wrote: one learned row plus a SUBSET of today's
+      // statics. Derived by dropping the first current static, so the fixture
+      // cannot go stale against the table it is a subset of.
+      const [newestStatic, ...carriedOver] = fallbackIds
+      assert.ok(carriedOver.length > 0, 'the static table must have more than one row, or the subset below is empty')
+
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-seed-union-'))
+      const cachePath = join(dir, 'models-cache.gemini.json')
+      try {
+        writeFileSync(cachePath, JSON.stringify({
+          models: [
+            { id: 'gemini-legacy-learned', fullId: 'gemini-legacy-learned', label: 'Learned', contextWindow: 123_456 },
+            ...carriedOver.map((id) => ({ id, fullId: id, label: id, contextWindow: 1_000_000 })),
+          ],
+        }))
+        const r = getRegistryForProvider('gemini')
+        assert.equal(r.loadCache(cachePath), true)
+        const fullIds = r.getModels().map((m) => m.fullId)
+        assert.ok(fullIds.includes(newestStatic),
+          `a static row this cache predates must still reach the picker — nothing on gemini will ever re-publish it, got ${fullIds.join(',')}`)
+        // …and the cached rows are preserved rather than replaced by the seed,
+        // so the union is a union and not a reset.
+        assert.ok(fullIds.includes('gemini-legacy-learned'),
+          `the cached roster must survive the union, got ${fullIds.join(',')}`)
+        for (const id of carriedOver) {
+          assert.ok(fullIds.includes(id), `${id} was in the cache and must still be served, got ${fullIds.join(',')}`)
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
