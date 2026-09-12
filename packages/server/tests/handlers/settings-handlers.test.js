@@ -2792,7 +2792,15 @@ describe('settings-handlers', () => {
         static claudeFamily = false
         static get capabilities() { return { thinkingLevel: true } }
         // The codex seed shape: a real row, honest label and window, and no
-        // reasoningLevels at all.
+        // reasoningLevels at all. `getRegistryForProvider` reads
+        // `getFallbackModels()`, not `getModelMetadata` — a class exposing
+        // only the latter never reaches the registry at all (it falls
+        // through to the Claude default registry), so the row has to come
+        // from here for the gate to actually see "a roster row that
+        // advertises none" rather than "no row".
+        static getFallbackModels() {
+          return [{ id: 'gpt-5-codex', label: 'Seeded', fullId: 'gpt-5-codex', contextWindow: 400000, provenance: 'catalogued' }]
+        }
         static getModelMetadata(modelId) {
           return { id: modelId, label: 'Seeded', fullId: modelId, contextWindow: 400000, provenance: 'catalogued' }
         }

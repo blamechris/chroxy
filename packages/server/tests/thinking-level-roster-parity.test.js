@@ -168,6 +168,18 @@ async function assertRostersAgree({ entry, sessions, provider, modelId, expect }
       `'${level}' is offered by the picker but the handler refused it: ${errors[0]?.message || ''}`)
     assert.deepEqual(applied, [level])
   }
+  // For an EMPTY roster, `qqq` alone proves only "something got refused" — a
+  // handler that refused every level unconditionally would satisfy that too.
+  // Pin the rejection to the empty-roster branch specifically, with a level a
+  // SIBLING populated case (the advertised-levels case above) does accept, so
+  // this fails if the empty-roster path ever starts reusing the generic
+  // "not offered" message instead of its own.
+  if (offered.length === 0) {
+    const { errors, applied } = await pushLevel(sessions, 'low')
+    assert.equal(applied.length, 0, "'low' must not apply when the roster is empty")
+    assert.match(errors[0]?.message || '', /has not advertised its reasoning levels yet/,
+      'an empty roster must be refused with the empty-roster message, not any refusal')
+  }
   // …and a level outside the set really does not. `qqq` is well-formed and is
   // offered by no model anywhere in this repo, so it is a control for BOTH
   // an empty roster (nothing is accepted) and a populated one.

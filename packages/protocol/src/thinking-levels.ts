@@ -125,8 +125,9 @@ export interface ThinkingLevelResolveOptions {
    * accepted none.
    *
    * Defaults to `true`, which is every pre-#7784 caller's behaviour: a caller
-   * that has no provider fact in hand (store-core's replay, the dropdown's own
-   * empty-list fallback) keeps the Claude path exactly as it was.
+   * that has no provider fact in hand (an older daemon that has not shipped
+   * the capability yet, or the dropdown's own empty-list fallback) keeps the
+   * Claude path exactly as it was.
    */
   legacyFallback?: boolean
 }

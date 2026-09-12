@@ -269,7 +269,6 @@ export function getProviderDataDirs() {
  * of which the gate accepted none, and giving the dashboard a list of provider
  * names to check instead would be the hardcoded-roster defect #7730 removed.
  *
-
  * `auth` (#3404 audit F1+F5) summarises whether the provider can actually run
  * sessions right now and which billing identity is on the hook. Lets the
  * dashboard grey-out unusable providers and surface a billing-confidence
