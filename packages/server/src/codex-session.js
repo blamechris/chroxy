@@ -161,6 +161,35 @@ export function resolveCodexSandbox(override) {
 }
 
 /**
+ * Serialize a string as a TOML **basic string** for a `codex exec -c key=<v>`
+ * override. Exported for unit testing.
+ *
+ * Why this exists (#7766): before #7727 the `model` id reaching
+ * `buildCodexArgs` was always one of six compiled-in literals, so raw
+ * interpolation into `model="${id}"` was safe by construction. Tri-state
+ * validation removed that construction — on the unrestricted branch the id is
+ * an arbitrary operator-supplied string — and argv-shape safety (one element,
+ * no shell) does NOT extend to the TOML grammar codex parses that element
+ * under. That is the "validated value handed on to something that parses it
+ * under a different grammar" entry in `docs/false-safety-guards.md`.
+ *
+ * JSON's string escaping is a SUBSET of TOML 1.0's basic-string escaping:
+ * `JSON.stringify` escapes `"` and the backslash, emits the short forms
+ * `\\b \\f \\n \\r \\t` that TOML also defines, and `\\uXXXX` for every other
+ * control character — all of which TOML accepts. The one character TOML
+ * forbids raw in a basic string but JSON leaves alone is DEL (U+007F), so it
+ * is escaped afterwards. Everything else passes through unchanged, which is
+ * why an ordinary id still round-trips to the byte-identical
+ * `model="gpt-5-codex"` this produced before.
+ *
+ * @param {string} value
+ * @returns {string} a quoted, escaped TOML basic string
+ */
+export function toTomlBasicString(value) {
+  return JSON.stringify(String(value)).replace(/\u007f/g, '\\u007F')
+}
+
+/**
  * Build the argv passed to `codex exec`. Exported for unit testing.
  *
  * `--skip-git-repo-check` is always passed: chroxy owns its own session-trust
@@ -191,24 +220,38 @@ export function resolveCodexSandbox(override) {
  * interpolated into argv passed directly to `spawn()` — no shell, so shell
  * metacharacters can't escape.
  *
- * - `model` is interpolated into `-c model="${model}"` *without* re-validation
- *   here. **The caller-side gate is TRI-STATE since #7727 and is NOT an
- *   allowlist in general** — `CodexSession.getAllowedModels()` returns the
- *   binary's own catalog ids when it has one and `null` (unrestricted) when it
- *   does not, so pre-#7727 statements that this argument is always one of six
- *   compiled-in ids are no longer true. Read that as: on the unrestricted
- *   branch this receives an arbitrary non-empty string the operator asked for
- *   (`handleSetModel` still rejects a non-string / whitespace-only id, and
- *   `providers.allowAnyModel` could already produce exactly this before
- *   #7727).
+ * - `model` is serialized into `-c model=<toml basic string>` *without*
+ *   re-validation here. **The caller-side gate is TRI-STATE since #7727 and is
+ *   NOT an allowlist in general** — `CodexSession.getAllowedModels()` returns
+ *   the binary's own catalog ids when it has one and `null` (unrestricted)
+ *   when it does not, so pre-#7727 statements that this argument is always one
+ *   of six compiled-in ids are no longer true. Read that as: on the
+ *   unrestricted branch this receives an arbitrary non-empty string the
+ *   operator asked for (`handleSetModel` still rejects a non-string /
+ *   whitespace-only id, and `providers.allowAnyModel` could already produce
+ *   exactly this before #7727).
  *
- *   What keeps that safe is the invariant stated above and NOT the allowlist:
- *   `spawn()` without a shell, so the value is one argv element and no shell
- *   metacharacter can escape. A quote inside it does not split the element or
- *   add a second `-c` override — it makes `model="…"…` an invalid TOML value
- *   that Codex CLI rejects with its own error. `tests/codex-session.test.js`
- *   pins that argv shape against a hostile id so the claim is executed rather
- *   than asserted in prose.
+ *   TWO independent things keep that safe, and the second is new in #7766
+ *   because the first was being asked to do work it cannot do:
+ *
+ *   1. `spawn()` without a shell, so the value is ONE argv element: no shell
+ *      metacharacter can escape into a second process, and no second `-c`
+ *      override can be introduced. That bounds the blast radius to "whatever
+ *      codex's own TOML parser makes of this one element".
+ *   2. `toTomlBasicString()` escapes the value, so it cannot escape the TOML
+ *      string EITHER. This prose used to stop at (1) and claim that a quote
+ *      merely produced "invalid TOML that Codex CLI rejects" — an unverified
+ *      claim about a third-party parser's error handling, standing in for
+ *      escaping we were not doing (`docs/false-safety-guards.md`: a guard
+ *      whose comment describes a stronger check than its code performs). A
+ *      `"` plus a newline is a plausible way to close the string and open a
+ *      second key INSIDE the same argv element, and an argv-shape assertion
+ *      says nothing about that. Escaping removes the question rather than
+ *      answering it.
+ *
+ *   `tests/codex-session.test.js` executes both halves against a hostile id —
+ *   the argv shape, the escaping, and the absence of a `shell` option on the
+ *   spawn path — so neither claim survives only in prose (#7646).
  *
  * - `threadId` (#3865) is **trusted because it comes from Codex CLI's own
  *   `thread.started` JSONL stdout** — captured in `_processJsonlLine`, never
@@ -223,10 +266,12 @@ export function resolveCodexSandbox(override) {
  * alternate spawn path), preserve these invariants or add validation here.
  *
  * @param {string} text   User prompt
- * @param {string|null} model  Optional model ID. Caller must validate against
- *                              `CodexSession.getAllowedModels()`. If falsy,
- *                              no `-c model=` flag is appended — Codex CLI
- *                              uses its own default.
+ * @param {string|null} model  Optional model ID. The caller-side gate is
+ *                              TRI-STATE since #7727, so this is NOT
+ *                              guaranteed to come from an allowlist — see the
+ *                              SECURITY INVARIANT above for what does hold. If
+ *                              falsy, no `-c model=` flag is appended — Codex
+ *                              CLI uses its own default.
  * @param {string|null} threadId  Optional Codex thread_id captured from a
  *                                 previous turn's `thread.started` event.
  *                                 When set, switches to `exec resume <id>`
@@ -248,7 +293,8 @@ export function buildCodexArgs(text, model, threadId = null, sandboxOverride = u
     ? ['exec', '--sandbox', sandbox, 'resume', threadId, text, '--json', '--skip-git-repo-check']
     : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', sandbox]
   if (model) {
-    args.push('-c', `model="${model}"`)
+    // #7766 — SERIALIZED, not interpolated. See the SECURITY INVARIANT above.
+    args.push('-c', `model=${toTomlBasicString(model)}`)
   }
   return args
 }
