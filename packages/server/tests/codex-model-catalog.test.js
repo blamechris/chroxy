@@ -8,6 +8,7 @@ import {
   CODEX_CATALOG_METHOD,
   applyCodexCatalog,
   codexHomeDir,
+  defaultCreateClient,
   fetchCodexCatalog,
   fetchCodexCatalogFromClient,
   getCodexCatalog,
@@ -388,6 +389,21 @@ describe('codex model catalog — the no-session spawn probe', () => {
     assert.deepEqual(created[0].env, { CODEX_HOME: '/fake/home' })
   })
 
+  // #7757 re-review — the `bin` thunk is called INSIDE the try. Outside it a
+  // throwing thunk escapes as a rejected promise, and neither caller catches
+  // one (`refreshDiscoveredModels` has only a `finally`;
+  // `_refreshModelCatalog`'s try/catch is synchronous and just returns the
+  // promise). `resolveBinary` cannot throw today — this pins the containment.
+  it('a THROWING bin thunk degrades to null, never a rejected promise', async () => {
+    let envCalls = 0
+    const rows = await probeCodexCatalog({
+      bin: () => { throw new Error('which(1) exploded') },
+      env: () => { envCalls++; return {} },
+    })
+    assert.equal(rows, null)
+    assert.equal(envCalls, 0, 'nothing downstream of the bin resolution may run')
+  })
+
   it('a bin thunk that resolves nothing is the same skip as a missing bin', async () => {
     let envCalls = 0
     assert.equal(await probeCodexCatalog({ bin: () => null, env: () => { envCalls++; return {} } }), null)
@@ -417,7 +433,13 @@ describe('codex model catalog — the no-session spawn probe', () => {
     assert.equal(client.killed, true)
   })
 
-  it('an already-exhausted budget still bounds the second request (never unbounded)', async () => {
+  // BOUNDED on purpose (#7757 re-review): withTimeout treats <=0 as "no bound
+  // at all", so dropping the Math.max clamp makes the probe never settle. With
+  // no per-test timeout this file's package runs node --test with node's
+  // default (Infinity), so that mutant would WEDGE the Server Tests job with an
+  // empty TAP stream — green or "flake", never red, which is catalogue entry 17
+  // (#7340). The 2s cap turns it into a legible failure instead.
+  it('an already-exhausted budget still bounds the second request (never unbounded)', { timeout: 2000 }, async () => {
     const client = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) })
     let clock = 1000
     client.initialize = () => { clock += 60_000; return Promise.resolve({ userAgent: 'chroxy/0.154.0 (…)' }) }
@@ -427,18 +449,53 @@ describe('codex model catalog — the no-session spawn probe', () => {
       timeoutMs: 5000,
       now: () => clock,
     })
-    // withTimeout treats <=0 as "no bound at all", so a negative remainder
-    // would make this test hang forever rather than fail.
     assert.equal(rows, null)
+  })
+
+  // #7757 re-review — `Math.max(1, NaN)` is NaN, and withTimeout reads NaN as
+  // "no bound at all", so the clamp did not survive a non-finite clock. Both
+  // halves are needed: the first kills a "clamp to 1ms" fix, the second kills
+  // the unguarded `Math.max` (which leaves model/list unbounded).
+  it('a non-finite clock keeps the FULL budget — neither shrunk to 1ms nor left unbounded', { timeout: 3000 }, async () => {
+    // Reading 1: the deadline. Every later reading is non-finite.
+    const nanClock = () => { let n = 0; return () => (n++ === 0 ? 1000 : NaN) }
+
+    // (1) a model/list that answers well inside the budget is still allowed to.
+    const slow = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise((r) => setTimeout(() => r(LIVE_MODEL_LIST), 60)) })
+    const rows = await probeCodexCatalog({
+      bin: '/fake/codex', createClient: () => slow, timeoutMs: 5000, now: nanClock(),
+    })
+    assert.deepEqual(rows?.map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'],
+      'a non-finite remainder must not shrink the second request to 1ms')
+
+    // (2) …and a wedged one is still BOUNDED by the full timeoutMs.
+    const wedged = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) })
+    const startedAt = Date.now()
+    const none = await probeCodexCatalog({
+      bin: '/fake/codex', createClient: () => wedged, timeoutMs: 200, now: nanClock(),
+    })
+    const elapsed = Date.now() - startedAt
+    assert.equal(none, null, 'a non-finite remainder must not leave model/list unbounded')
+    assert.ok(elapsed < 1500, `model/list must still be bounded, waited ${elapsed}ms`)
+    assert.equal(wedged.killed, true)
   })
 
   // #7757 review — the PR converted a hard-coded `new CodexAppServerClient(...)`
   // into a defaulted injection. Nothing covered the DEFAULT, so a broken one
   // would only show up as "no codex model ever discovered".
+  //
+  // Asserted DIRECTLY (#7757 re-review), mirroring the `spawnFn` default test
+  // below. The end-to-end half alone could not fail: `assert.equal(rows, null)`
+  // is also exactly what a BROKEN default produces — `() => null` makes
+  // `client.initialize` throw a TypeError straight into probeCodexCatalog's own
+  // catch, which returns null. Success and not-checking, the same observable.
   it('defaults createClient to a real CodexAppServerClient (the seam, exercised)', async () => {
-    // A binary that cannot exist: the real client spawns it, the child emits
-    // ENOENT, initialize() rejects, and the probe degrades to null — which is
-    // only reachable if defaultCreateClient built a real client at all.
+    assert.ok(defaultCreateClient({ bin: '/fake/codex' }) instanceof CodexAppServerClient,
+      'the default factory must build the production client, not a stub or null')
+
+    // …and end to end: a binary that cannot exist means the real client spawns
+    // it, the child emits ENOENT, initialize() rejects, and the probe degrades
+    // to null rather than throwing.
     const rows = await probeCodexCatalog({
       bin: '/nonexistent/chroxy-test-codex-does-not-exist',
       cwd: '/tmp',
@@ -794,8 +851,24 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
 })
 
 describe('CodexAppServerSession — the live-session catalog refresh', () => {
-  beforeEach(resetAll)
-  afterEach(resetAll)
+  // #7757 re-review — `_refreshModelCatalog()` takes no seams, so
+  // `fetchCodexCatalog` falls through to `readCodexModelsCacheWindows`, which
+  // defaults to `process.env` and would read the DEVELOPER's real
+  // $CODEX_HOME/models_cache.json (a machine-dependent input to an assertion).
+  // Point $CODEX_HOME at a path that cannot exist for every probe in here, not
+  // just the above-floor one: the read is on the same code path in all three.
+  const NO_CODEX_HOME = join('/nonexistent', 'chroxy-test-codex-home')
+  let savedCodexHome
+  beforeEach(() => {
+    savedCodexHome = process.env.CODEX_HOME
+    process.env.CODEX_HOME = NO_CODEX_HOME
+    resetAll()
+  })
+  afterEach(() => {
+    if (savedCodexHome === undefined) delete process.env.CODEX_HOME
+    else process.env.CODEX_HOME = savedCodexHome
+    resetAll()
+  })
 
   function mkSession() {
     return new CodexAppServerSession({ cwd: '/tmp', skillsDir: null, repoSkillsDir: null })
@@ -839,6 +912,8 @@ describe('CodexAppServerSession — the live-session catalog refresh', () => {
   })
 
   it('probes when the handshake is ABOVE the floor', async () => {
+    assert.equal(codexHomeDir(), NO_CODEX_HOME,
+      'the $CODEX_HOME redirect must be in force, or this test reads the developer’s own cache')
     const s = mkSession()
     const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
     s._client = client

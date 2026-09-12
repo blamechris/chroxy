@@ -25,6 +25,15 @@
  *      stored catalog exactly as it was. `applyCodexCatalog` is reached ONLY
  *      from a parsed, well-shaped response.
  *
+ * `populated → empty` is REACHABLE in production since #7757 (codex opts into
+ * `refreshDiscoveredModels`' `publishEmptyCatalog`): a binary that answers
+ * `model/list` with zero rows records the empty answer here. Nothing is
+ * broadcast for it — `refreshDiscoveredModels` still returns null and never
+ * calls `updateModels([])` — so the registry keeps listing the previously
+ * discovered ids while `getModelMetadata` for them now returns null. The two
+ * sources diverge until the next non-empty probe; no user-visible change, but
+ * it is a state the picker and the metadata table do not agree on.
+ *
  * Protocol facts (observed against live codex-cli 0.154.0 — the raw responses
  * are recorded on epic #7721, comment 5644101381):
  *
@@ -364,8 +373,17 @@ export async function fetchCodexCatalogFromClient(client, { timeoutMs = CODEX_CA
   return rows
 }
 
-/** Default factory — one place the short-lived probe client is constructed. */
-function defaultCreateClient(opts) {
+/**
+ * Default factory — one place the short-lived probe client is constructed.
+ *
+ * EXPORTED for the test that asserts what it builds (#7757 re-review). Driving
+ * it only through `probeCodexCatalog`'s degrade-to-null path proved nothing: a
+ * broken default returning `null` makes `client.initialize` throw a TypeError
+ * into the probe's own `catch`, which also returns null — success and
+ * not-checking as the same observable, recorded cause #2 in
+ * docs/false-safety-guards.md.
+ */
+export function defaultCreateClient(opts) {
   return new CodexAppServerClient(opts)
 }
 
@@ -392,13 +410,19 @@ function defaultCreateClient(opts) {
  * @returns {Promise<Array<Object>|null>}
  */
 export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultCreateClient, timeoutMs = CODEX_CATALOG_PROBE_TIMEOUT_MS, includeHidden = false, now = Date.now } = {}) {
-  const resolvedBin = typeof bin === 'function' ? bin() : bin
-  if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) {
-    log.debug('codex catalog probe skipped: no codex binary resolved')
-    return null
-  }
   let client = null
   try {
+    // The `bin` thunk is called INSIDE the try (#7757 re-review). `resolveBinary`
+    // cannot throw today, so this is theoretical — but outside it a throwing
+    // thunk escapes as a rejected promise, and neither caller catches one:
+    // `refreshDiscoveredModels` has only a `finally`, and
+    // `CodexAppServerSession._refreshModelCatalog`'s try/catch is synchronous.
+    // Before the thunk landed, that same call sat inside this try.
+    const resolvedBin = typeof bin === 'function' ? bin() : bin
+    if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) {
+      log.debug('codex catalog probe skipped: no codex binary resolved')
+      return null
+    }
     const resolvedEnv = typeof env === 'function' ? env() : env
     client = createClient({ bin: resolvedBin, cwd, env: resolvedEnv, logger: log })
     // ONE deadline across both requests. `timeoutMs` bounds the whole probe,
@@ -412,7 +436,14 @@ export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultC
     await withTimeout(client.initialize({ name: 'chroxy', version: '1' }), timeoutMs, 'initialize')
     // Never 0 or negative: withTimeout treats those as "no bound at all", which
     // would turn an ALREADY-EXHAUSTED budget into an unbounded second request.
-    const remainingMs = bounded ? Math.max(1, deadline - now()) : timeoutMs
+    // And never NaN (#7757 re-review): `Math.max(1, NaN)` is NaN, which
+    // withTimeout ALSO reads as "no bound at all", so the clamp did not survive
+    // a non-finite clock — `now` is the same injected seam the discovery slot
+    // uses for its TTL, so a test (or a monotonic-clock) reading that is not a
+    // finite number must fall back to the full budget, not to 1ms and not to
+    // unbounded.
+    const rem = deadline - now()
+    const remainingMs = bounded ? (Number.isFinite(rem) ? Math.max(1, rem) : timeoutMs) : timeoutMs
     return await fetchCodexCatalogFromClient(client, { timeoutMs: remainingMs, includeHidden })
   } catch (err) {
     log.debug(`codex catalog probe failed: ${err?.message || err}`)
