@@ -12,6 +12,7 @@ import {
   _resetModelsOverlayForTests,
   DISALLOWED_MODEL_IDS,
   isDisallowedModelId,
+  MODELS_CACHE_SCHEMA_VERSION,
 } from '../src/models.js'
 
 /**
@@ -138,6 +139,142 @@ describe('registry.applyOverlay (#5932)', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+// #7777 — the #7761 union gate is scoped to the STATIC seed so operator overlay
+// rows keep riding the union (#5932 AC2). `computeFallbackModels` merges an
+// overlay row that OVERRIDES a static id IN PLACE, under the base row's own
+// fullId, so the gate could not tell it from the undeclared static beside it
+// and dropped it — disabling the documented escape hatch
+// (docs/guides/model-overlay.md) for exactly the ids it exists for.
+//
+// `makeRegistry()` above is the shape the gate bites on: a non-Claude seed, no
+// `unionsStaticFallbacks`, and a `deriveId` hook — so `hasDiscoverySeam`
+// defaults true and `unionableSeedRows()` filters the statics.
+//
+// What is asserted is PRESENCE and the contextWindow override. The LABEL is
+// deliberately pinned as re-derived (`humanizeModelId`) rather than asserted to
+// be the overlay's: the union pass reads `fb.contextWindow` but not `fb.label`,
+// which is a PRE-EXISTING gap that predates both gates and applies to
+// overlay-ONLY rows too — a row declared `{label:'Custom'}` comes back from a
+// refresh labelled `Custom 9` on origin/main, where neither #7761 nor #7777
+// touches that path. Fixing it would change every static alias's label on the
+// Claude registry, so it is a separate issue, and these assertions say which
+// behaviour is the fix and which is merely the status quo.
+describe('overlay override of a static id survives a refresh (#7777)', () => {
+  it('keeps the overridden row when a refresh omits its id — updateModels', () => {
+    const reg = makeRegistry()
+    reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed', contextWindow: 99000 } }))
+    assert.equal(reg.getModels().find((m) => m.fullId === 'base-1')?.label, 'Renamed', 'override lands pre-refresh')
+
+    // The provider's own roster arrives and does NOT mention base-1.
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+
+    const row = reg.getModels().find((m) => m.fullId === 'base-1')
+    assert.ok(row, 'an operator-declared id must survive a refresh that omits it')
+    assert.equal(row.contextWindow, 99000, 'and keeps the overlay contextWindow, not the static 1000')
+    assert.ok(reg.getAllowedModelIds().has('base-1'), 'and stays selectable')
+    // Status quo, not an endorsement — see the block comment above.
+    assert.equal(row.label, 'Base 1', 'union pass re-derives the label (pre-existing, all overlay rows)')
+  })
+
+  it('keeps it when the overlay is applied AFTER the refresh', () => {
+    // Same union, reached through applyOverlay()'s lastSdkModels branch.
+    const reg = makeRegistry()
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+    assert.equal(reg.getModels().some((m) => m.fullId === 'base-1'), false, '#7761: the undeclared static is gone')
+
+    reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed', contextWindow: 99000 } }))
+
+    const row = reg.getModels().find((m) => m.fullId === 'base-1')
+    assert.ok(row, 'declaring the id in the overlay brings it back')
+    assert.equal(row.contextWindow, 99000, 'with the operator window')
+  })
+
+  it('keeps it when the roster comes from the disk cache — loadCache', () => {
+    // The third `unionableSeedRows()` call site (#7776). A non-Claude cache is
+    // what discovery last reported, so the statics do not re-seed from it —
+    // except the ones the operator declared.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-static-override-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'sdk-7', label: 'SDK 7', fullId: 'sdk-7', contextWindow: 4242 }],
+        defaultModelId: 'sdk-7',
+      }))
+      const reg = makeRegistry()
+      reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed', contextWindow: 99000 } }))
+      assert.equal(reg.loadCache(cachePath), true)
+
+      const row = reg.getModels().find((m) => m.fullId === 'base-1')
+      assert.ok(row, 'the declared id is unioned into a cache-loaded roster')
+      assert.equal(row.contextWindow, 99000, 'with the operator window')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('still drops an UNDECLARED static — #7761 is not reopened', () => {
+    // The other direction, on the same registry in the same state: declaring
+    // one id must not restore the seed wholesale. Two statics, one declared.
+    const reg = createModelsRegistry({
+      fallbackModels: [
+        { id: 'kept', label: 'Kept', fullId: 'kept-1', contextWindow: 1000 },
+        { id: 'retired', label: 'Retired', fullId: 'retired-1', contextWindow: 1000 },
+      ],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+    })
+    reg.applyOverlay(overlayMap({ 'kept-1': { label: 'Kept By Operator' } }))
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+
+    const ids = reg.getModels().map((m) => m.fullId)
+    assert.ok(ids.includes('kept-1'), 'the declared static rides the union')
+    assert.equal(ids.includes('retired-1'), false, 'the undeclared static does NOT — #7761 still holds')
+  })
+
+  it('an overlay entry that overrides NOTHING still declares the id', () => {
+    // A row with no label/contextWindow/shortId leaves the static row
+    // untouched (computeFallbackModels skips the in-place merge), but writing
+    // the id into models.json is the same assertion that it exists.
+    const reg = makeRegistry()
+    reg.applyOverlay(overlayMap({ 'base-1': { provider: 'stub' } }))
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+    assert.ok(reg.getModels().some((m) => m.fullId === 'base-1'), 'a bare declaration rides the union too')
+  })
+
+  it('removing the entry on reload drops the row again', () => {
+    // The declaration is recomputed on every applyOverlay, so the union pass
+    // follows the overlay rather than latching.
+    const reg = makeRegistry()
+    reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed' } }))
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+    assert.ok(reg.getModels().some((m) => m.fullId === 'base-1'))
+
+    reg.applyOverlay(new Map()) // operator deleted the entry
+
+    assert.equal(reg.getModels().some((m) => m.fullId === 'base-1'), false,
+      'an id nobody declares any more goes back to being dropped')
+  })
+
+  it('does not mint a [1m] variant for a declared id on a non-Claude registry (#7747)', () => {
+    // The aggravating half of #7761: a restored row whose window is >=1M used
+    // to synthesize `<id>[1m]`, a Claude-CLI convention no other provider
+    // accepts. That synthesis is gated on the Claude registry, so restoring
+    // the row via an overlay declaration cannot reach it.
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'wide', label: 'Wide', fullId: 'wide-1', contextWindow: 1_000_000 }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 1_000_000,
+    })
+    reg.applyOverlay(overlayMap({ 'wide-1': { label: 'Wide By Operator' } }))
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+
+    const ids = reg.getModels().map((m) => m.fullId)
+    assert.ok(ids.includes('wide-1'), 'the declared row is back')
+    assert.equal(ids.some((id) => id.endsWith('[1m]')), false, 'and no [1m] variant was invented for it')
   })
 })
 
