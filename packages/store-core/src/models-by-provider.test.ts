@@ -52,6 +52,30 @@ describe('mergeModelsByProvider (#7728)', () => {
     })
   }
 
+  it('canonicalizes a padded tag so the bucket is reachable by the bare name', () => {
+    // The write side decided "blank" with .trim() and then stored the RAW
+    // string, so ' codex ' keyed a bucket no lookup for 'codex' could reach —
+    // the roster arrived and was invisible (Copilot, PR #7758).
+    const map = mergeModelsByProvider(undefined, ' codex ', roster([gpt], 'gpt-5.5'))
+    expect(Object.keys(map)).toEqual(['codex'])
+    expect(selectOwnModelsForProvider(map, 'codex')?.models).toEqual([gpt])
+    expect(selectModelsForProvider(map, 'codex').models).toEqual([gpt])
+  })
+
+  it('a padded LOOKUP reaches the bucket written from the bare name', () => {
+    const map = mergeModelsByProvider(undefined, 'codex', roster([gpt], 'gpt-5.5'))
+    expect(selectOwnModelsForProvider(map, '  codex\t')?.models).toEqual([gpt])
+    expect(selectModelsForProvider(map, '  codex\t').models).toEqual([gpt])
+  })
+
+  it('folds a PADDED spelling of the sentinel into the untagged bucket', () => {
+    // Trimming widens the set of wire values that can spell the sentinel, so
+    // the fold has to run on the canonical form, not the raw one.
+    const map = mergeModelsByProvider(undefined, `  ${UNTAGGED_MODELS_PROVIDER}  `, roster([opus]))
+    expect(Object.keys(map)).toEqual([UNTAGGED_MODELS_PROVIDER])
+    expect(selectOwnModelsForProvider(map, `  ${UNTAGGED_MODELS_PROVIDER}  `)).toBeNull()
+  })
+
   it('folds a wire tag that spells the sentinel into the untagged bucket', () => {
     // The sentinel carries a NUL byte precisely so no provider name can reach
     // it; if one somehow does, it must not be able to plant a roster that the
@@ -107,6 +131,24 @@ describe('selectModelsForProvider (#7728)', () => {
     // same as "this provider has nothing".
     const withUntagged: ModelsByProvider = { [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus') }
     expect(selectModelsForProvider(withUntagged, 'codex').models).toEqual([opus])
+  })
+
+  it('stops serving the untagged roster once a SECOND roster is in play', () => {
+    // The #7728 headline case, reachable on a MODERN daemon: ws-history.js
+    // sends `provider: activeProvider`, null on a post-auth connect with no
+    // active session, and getRegistryForProvider(null) answers with the CLAUDE
+    // default registry — so the Claude roster lands untagged. An unconditional
+    // untagged fallback then served those Claude ids to a codex session that
+    // had not yet heard its own roster. Server-side tagging is #7759.
+    const claudeUntaggedPlusCodex: ModelsByProvider = {
+      [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus'),
+      codex: roster([gpt], 'gpt-5.5'),
+    }
+    expect(selectModelsForProvider(claudeUntaggedPlusCodex, 'gemini')).toBe(EMPTY_MODEL_ROSTER)
+    expect(selectModelsForProvider(claudeUntaggedPlusCodex, 'gemini').models).toEqual([])
+    // ...and the untagged roster is still global while it is the only one.
+    const onlyUntagged: ModelsByProvider = { [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus') }
+    expect(selectModelsForProvider(onlyUntagged, 'gemini').models).toEqual([opus])
   })
 
   it('prefers the provider-tagged roster over the untagged one', () => {
