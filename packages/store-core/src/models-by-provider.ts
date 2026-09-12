@@ -22,20 +22,24 @@
  * never served another registry's roster, and never an untagged one either: an
  * untagged broadcast is not evidence about a provider the client can name.
  *
- * That second half is load-bearing rather than pedantic, because a MODERN
- * daemon emits untagged broadcasts: `ws-history.js` sends
- * `provider: activeProvider`, which is null on any post-auth connect with no
- * active session, and `getRegistryForProvider(null)` answers with the CLAUDE
- * default registry. A client in that state holds exactly one roster — an
- * untagged Claude one — and switching to a codex session must render an empty
- * picker for the tunnel round trip before the codex roster arrives, not Claude
- * ids that `set_model` would then send to codex. Tagging those sends
- * server-side is #7759.
+ * That second half was load-bearing against the daemon of its own release,
+ * which emitted untagged broadcasts from a live code path: `ws-history.js` sent
+ * `provider: activeProvider`, null on any post-auth connect with no active
+ * session, and `getRegistryForProvider(null)` answers with the CLAUDE default
+ * registry. A client in that state held exactly one roster — an untagged Claude
+ * one — and switching to a codex session had to render an empty picker for the
+ * tunnel round trip rather than Claude ids that `set_model` would then send to
+ * codex. #7759 closed that at the producer: every server sender now tags a
+ * concrete provider (the session's own, or the daemon's resolved default when
+ * there is no session to read one off), so a CURRENT daemon writes nothing to
+ * the untagged bucket.
  *
- * What the fallback still covers is the pre-provider daemon, which tags neither
- * the roster NOR the session entry: its roster is untagged, its sessions report
- * no provider, so the lookup provider is null and the single-roster rule serves
- * it exactly as it was served before #7728.
+ * The rule stays, and stays tested, for the two clients this module cannot see:
+ * the pre-provider daemon, which tags neither the roster NOR the session entry
+ * — its lookup provider is null, so the single-roster rule serves it exactly as
+ * it was served before #7728 — and any future sender that reintroduces a null
+ * tag, which lands in a bucket no named provider can read rather than leaking
+ * one registry's ids into another's picker.
  */
 
 import type { ModelInfo } from './types'
@@ -191,19 +195,21 @@ export function selectOwnModelsForProvider(
  *    This is the ONLY fallback, and the untagged bucket gets no separate one.
  *    An earlier revision served the untagged roster to a KNOWN provider while
  *    it was the only roster in play; that condition is satisfied by the exact
- *    scenario #7728 names. A client that connects post-auth with no active
- *    session holds one roster — the untagged CLAUDE one `ws-history.js` sends
- *    for `provider: null` — and switching to a codex session then served Claude
- *    ids to codex for a whole tunnel round trip, with `set_model` live on tap.
- *    Requiring `key === null` made that step a strict SUBSET of this one, so it
- *    was deleted rather than narrowed. The pre-provider daemon it existed for
- *    is untouched: it tags neither its rosters nor its session entries, so its
- *    lookup provider is null and this step serves it.
+ *    scenario #7728 names. A client that connected post-auth with no active
+ *    session held one roster — the untagged CLAUDE one `ws-history.js` sent for
+ *    `provider: null`, before #7759 tagged it — and switching to a codex
+ *    session then served Claude ids to codex for a whole tunnel round trip,
+ *    with `set_model` live on tap. Requiring `key === null` made that step a
+ *    strict SUBSET of this one, so it was deleted rather than narrowed. The
+ *    pre-provider daemon it existed for is untouched: it tags neither its
+ *    rosters nor its session entries, so its lookup provider is null and this
+ *    step serves it.
  * 3. **Nothing.** A KNOWN provider with no roster of its own returns empty —
  *    including when the only roster in play is untagged — so the picker renders
  *    nothing rather than another registry's ids. `ws-history.js` sends the
- *    session's own tagged roster right behind the switch; the empty window is
- *    one round trip, and #7759 closes it at source.
+ *    session's own tagged roster right behind the switch, so the empty window
+ *    is one round trip; #7759 removed the case where the roster a client
+ *    already held was untagged rather than merely for another provider.
  */
 export function selectModelsForProvider(
   byProvider: ModelsByProvider | undefined | null,

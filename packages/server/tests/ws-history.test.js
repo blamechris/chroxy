@@ -18,7 +18,7 @@ import {
   _resetEagerDerivationBudgetForTests,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { MAX_SANE_DURATION_MS, DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
 // Importing providers.js triggers built-in provider registration, which in turn
 // calls registerProviderRegistry() so getRegistryForProvider('codex'/'gemini')
@@ -248,8 +248,107 @@ describe('sendPostAuthInfo — legacy available_models provider scoping (#6368)'
     const ids = avail.models.map((m) => m.id)
     // Default Claude registry roster (FALLBACK_MODELS) — unchanged behaviour.
     assert.ok(ids.includes('sonnet') && ids.includes('opus') && ids.includes('haiku'), `expected the Claude default roster, got ${JSON.stringify(ids)}`)
-    assert.equal(avail.provider, null)
+    // #7759 — the ROSTER is the same one (DEFAULT_PROVIDER is Claude-family, so
+    // it resolves to the same registry); what changed is that the send now
+    // NAMES it instead of tagging null, which the client filed as UNTAGGED.
+    assert.equal(avail.provider, DEFAULT_PROVIDER)
   })
+})
+
+// #7759 — no `available_models` sender may tag `provider: null`. A null tag is
+// filed in the client's UNTAGGED bucket (store-core/models-by-provider.ts),
+// which documents itself as "a pre-provider daemon that tags nothing" and is
+// served to a session of ANY provider while it is the only roster in play. The
+// CURRENT daemon wrote there from three live paths, all with the same
+// `|| null` shape, and `getRegistryForProvider(null)` answers every one of them
+// with the CLAUDE registry — so a codex session could render Claude chips with
+// `set_model` live on tap.
+//
+// Each assertion checks BOTH halves: the tag is concrete, AND the models came
+// from the registry that tag names. A tag naming a registry other than the one
+// that produced the rows is the same class of bug one layer over.
+describe('sendPostAuthInfo / sendSessionInfo — no roster is sent UNTAGGED (#7759)', () => {
+  class Stub7759Session {
+    static claudeFamily = false
+    static getFallbackModels() {
+      return [{ id: 'stub-7759', label: 'Stub 7759', fullId: 'stub-7759', contextWindow: 8000 }]
+    }
+    static getModelMetadata(id) {
+      return { id, label: id, fullId: id, contextWindow: 8000 }
+    }
+    sendMessage() {}
+    interrupt() {}
+    setModel() {}
+    setPermissionMode() {}
+    start() {}
+    destroy() {}
+  }
+
+  it('tags the no-active-session connect with the daemon default, not null', () => {
+    // Zero sessions on the daemon: `entry` is undefined, so pre-fix
+    // `activeProvider` was null and this send — the ONLY roster such a client
+    // receives — landed untagged.
+    const { manager } = createMockSessionManager([])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const avail = ctx._sends.find((m) => m.type === 'available_models')
+    assert.ok(avail, 'a connect with no sessions still pushes a roster')
+    assert.equal(typeof avail.provider, 'string', `provider must be a concrete name, got ${JSON.stringify(avail.provider)}`)
+    assert.equal(avail.provider, DEFAULT_PROVIDER)
+    assert.deepEqual(avail.models, getRegistryForProvider(avail.provider).getModels(),
+      'the rows must come from the registry the tag names')
+  })
+
+  it('names the daemon default provider when it is NOT Claude — tag and rows agree', () => {
+    // The tag has to name the registry that answered, not a hardcoded Claude
+    // name: `claude-sdk`/`claude-cli`/`claude-byok`/`claude-tui` share one
+    // registry but are four distinct bucket keys at the client.
+    registerProvider('stub-7759', Stub7759Session)
+    _resetProviderRegistryCacheForTests()
+    const { manager } = createMockSessionManager([])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, billingCanary: { defaultProvider: 'stub-7759' } })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const avail = ctx._sends.find((m) => m.type === 'available_models')
+    assert.equal(avail.provider, 'stub-7759')
+    const ids = avail.models.map((m) => m.id)
+    assert.ok(ids.includes('stub-7759'), `expected the default provider's roster, got ${JSON.stringify(ids)}`)
+    assert.ok(!ids.some((id) => ['sonnet', 'opus', 'haiku'].includes(id)),
+      `a non-Claude default must not be tagged over the Claude roster, got ${JSON.stringify(ids)}`)
+  })
+
+  it('still prefers the ACTIVE session provider when there is one', () => {
+    // The fallback must not shadow the real answer.
+    registerProvider('stub-7759', Stub7759Session)
+    _resetProviderRegistryCacheForTests()
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha', provider: 'stub-7759' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      sessionManager: manager,
+      defaultSessionId: 'sess-1',
+      // A DIFFERENT default, so a fallback that fired would be visible.
+      billingCanary: { defaultProvider: 'claude-sdk' },
+    })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const avail = ctx._sends.find((m) => m.type === 'available_models')
+    assert.equal(avail.provider, 'stub-7759', "the session's own provider wins over the daemon default")
+  })
+
+  // The third sender — `sendSessionInfo` on a provider-less entry — is pinned
+  // in the `available_models on session switch (#4302)` suite below, next to
+  // the tagged-entry case it is the counterpart of.
 })
 
 // #5622: under a reconnect storm, the eager X25519 fold is capped per event-loop
@@ -1590,16 +1689,15 @@ describe('sendSessionInfo', () => {
       assert.ok(modelsMsg.models.length > 0, 'claude-cli registry must yield non-empty models')
     })
 
-    it('uses a null provider when the session entry has none', () => {
+    it('tags the daemon default — never null — when the session entry has none', () => {
       // No mock provider — getRegistryForProvider falls back to the CLAUDE
-      // default registry, and the payload's provider is null. Pre-#7728 the
-      // dashboard read that null as "no tag" and unblocked the picker via the
-      // `availableModelsProvider == null` branch in App.tsx. Since #7728 the
-      // roster lands in the UNTAGGED bucket, which is served to a session of
-      // any provider only while it is the only roster the client knows — so a
-      // Claude roster sent under a null tag can no longer reach a codex
-      // session that has one of its own. Tagging these sends server-side
-      // (this is the last null-provider push left) is #7759.
+      // default registry. This send used to carry `provider: null`: pre-#7728
+      // the dashboard read that null as "no tag" and unblocked the picker via
+      // the `availableModelsProvider == null` branch in App.tsx, and since
+      // #7728 it lands in the client's UNTAGGED bucket, which is served to a
+      // session of any provider while it is the only roster the client knows.
+      // #7759 tags it with the daemon's resolved default instead, and resolves
+      // the registry from that same name so the tag describes the rows.
       const { manager } = createMockSessionManager([
         { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
       ])
@@ -1610,7 +1708,9 @@ describe('sendSessionInfo', () => {
       sendSessionInfo(ctx, ws, 'sess-1')
       const modelsMsg = ctx._sends.find(m => m.type === 'available_models')
       assert.ok(modelsMsg, 'available_models was not sent on session switch')
-      assert.equal(modelsMsg.provider, null)
+      assert.equal(modelsMsg.provider, DEFAULT_PROVIDER)
+      assert.deepEqual(modelsMsg.models, getRegistryForProvider(modelsMsg.provider).getModels(),
+        'the rows must come from the registry the tag names')
     })
 
     // #4315 — follow-up to #4310/#4302. The two tests above verify the

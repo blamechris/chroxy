@@ -1,6 +1,6 @@
 import { readFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { basename, dirname } from 'path'
-import { MODEL_ENTRY_METADATA_KEYS } from '@chroxy/protocol'
+import { MODEL_ENTRY_METADATA_KEYS, DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { configPath } from './config-dir.js'
@@ -574,10 +574,34 @@ export function createModelsRegistry(hooks = {}) {
   // rows, and an overlay entry is a deliberate user declaration ("this model
   // exists, offer it") rather than a possibly-stale vendor table. Those keep
   // riding the union on every registry — that is the `applyOverlay` → live-SDK
-  // re-merge contract (#5932 AC2). An overlay that merely OVERRIDES a static
-  // row's label/window is not such a declaration: it shares the base row's
-  // fullId, so it is skipped with the row it decorates.
+  // re-merge contract (#5932 AC2).
   const staticFallbackFullIds = new Set(baseFallbackModels.map((m) => m.fullId))
+  // #7777 — …and an overlay entry that OVERRIDES a static row is such a
+  // declaration too, which the id-set above cannot see on its own:
+  // `computeFallbackModels()` merges an override IN PLACE and keeps the base
+  // row's `fullId`, so the merged row is indistinguishable from the static it
+  // decorates and was dropped with it. That silently disabled the one
+  // documented escape hatch (`docs/guides/model-overlay.md`: "An existing id
+  // has its label / contextWindow / shortId overridden") for exactly the ids it
+  // exists for — an operator keeping a row the provider's refresh no longer
+  // reports — and made the row FLICKER for a connected client: present in the
+  // boot `applyModels(fallbackModels)` view, gone the moment the first refresh
+  // landed.
+  //
+  // So the declared ids are tracked separately from the static seed. This does
+  // NOT reopen #7761: that gate protects a provider-reported roster from THIS
+  // REPO'S hand-maintained table (`baseFallbackModels`), and this set is
+  // derived only from the operator's `models.json` — empty on every registry
+  // whose operator wrote no overlay, which is the whole production surface
+  // #7761 was filed about. `gpt-4o` comes back only when someone typed
+  // `gpt-4o` into their own overlay. #7747 stays closed the same way: the
+  // `[1m]` synthesis is gated on `isClaudeRegistry`, so an overlay-declared
+  // `gpt-4.1` cannot mint `gpt-4.1[1m]` on the codex registry.
+  //
+  // Recomputed by `computeFallbackModels` (construction + every
+  // `applyOverlay`), so removing the row from `models.json` removes the union
+  // pass with it.
+  let overlayDeclaredFullIds = new Set()
   // …and one non-Claude provider OPTS BACK IN, because for it the seed is not
   // a vendor roster at all: ollama's is a list of RECOMMENDED models to pull,
   // so a machine with two models installed should still be offered the other
@@ -625,9 +649,18 @@ export function createModelsRegistry(hooks = {}) {
     const overlayRows = []
     const overriddenBase = []
     const baseByFullId = new Map(baseFallbackModels.map((m) => [m.fullId, m]))
+    // #7777 — every fullId this overlay declares, whatever it does with it:
+    // seeds a new row, overrides a static row's label/window/shortId, or names
+    // a static row while overriding nothing (a pricing-only entry). All three
+    // are the operator asserting "this model exists, offer it", which is what
+    // the union gate keys on. Rebuilt from scratch here rather than mutated, so
+    // a reload that DROPS an entry drops its union pass.
+    const declaredFullIds = new Set()
     for (const entry of overlayMap.values()) {
       // #6219 — an overlay must not reintroduce a disallowed model (e.g. fable).
+      // A skipped row declares nothing, so it is recorded after this guard.
       if (isDisallowedModelId(entry.shortId) || isDisallowedModelId(entry.fullId)) continue
+      declaredFullIds.add(entry.fullId)
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
         // Override the base row's label/window from the overlay when supplied.
@@ -651,6 +684,7 @@ export function createModelsRegistry(hooks = {}) {
     }
     // Preserve base order, then append overlay-only rows.
     for (const m of baseFallbackModels) overriddenBase.push(baseByFullId.get(m.fullId))
+    overlayDeclaredFullIds = declaredFullIds
     return overlayRows.length > 0 || overriddenBase.some((m, i) => m !== baseFallbackModels[i])
       ? Object.freeze([...overriddenBase, ...overlayRows])
       : baseFallbackModels
@@ -675,11 +709,14 @@ export function createModelsRegistry(hooks = {}) {
    * and miss the others.
    *
    * The scoping is the STATIC seed only: operator OVERLAY rows are a deliberate
-   * declaration and keep unioning on every registry (#5932 AC2).
+   * declaration and keep unioning on every registry (#5932 AC2) — including
+   * (#7777) an overlay row that OVERRIDES a static id, which shares that row's
+   * fullId and so needs `overlayDeclaredFullIds` to be told apart from the
+   * undeclared static beside it.
    */
   function unionableSeedRows() {
     if (unionsStaticFallbacks) return fallbackModels
-    return fallbackModels.filter((m) => !staticFallbackFullIds.has(m.fullId))
+    return fallbackModels.filter((m) => !staticFallbackFullIds.has(m.fullId) || overlayDeclaredFullIds.has(m.fullId))
   }
 
   let activeModels = fallbackModels
@@ -976,11 +1013,11 @@ export function createModelsRegistry(hooks = {}) {
       // validation allowlist, so keeping the two in sync at the picker is the
       // consistent answer, not an override of the operator. An operator who
       // wants a row that discovery does not report declares it in the model
-      // OVERLAY — with one gap, stated rather than implied: an overlay entry
-      // that OVERRIDES an id already in the static seed shares that row's
-      // fullId (`computeFallbackModels` merges in place), so it is skipped with
-      // the row it decorates and the escape hatch does not work for exactly the
-      // ids this gate removes. That is #7777, not fixed here.
+      // OVERLAY — including by OVERRIDING an id already in the static seed,
+      // which `computeFallbackModels` merges in place under the base row's own
+      // fullId. That shape used to be dropped with the static it decorated
+      // (#7777); `unionableSeedRows()` now reads `overlayDeclaredFullIds`, so
+      // the escape hatch works for exactly the ids this gate removes.
       const seenFullIds = new Set(converted.map(m => m.fullId))
       for (const fb of unionableSeedRows()) {
         if (!seenFullIds.has(fb.fullId)) {
@@ -1805,6 +1842,49 @@ export function getRegistryForProvider(providerName) {
  */
 export function usesDefaultModelsRegistry(providerName) {
   return getRegistryForProvider(providerName) === defaultRegistry
+}
+
+/**
+ * #7759 — the provider name an `available_models` roster is TAGGED with, given
+ * the session's own provider (which may be absent) and this daemon's resolved
+ * default.
+ *
+ * Never null. Every `available_models` sender used to fall back to
+ * `provider: null` when it had no session to read a provider off — a post-auth
+ * connect with no active session, the legacy single-session bootstrap on a ctx
+ * with no billing canary, a session entry that carries no provider — and
+ * `getRegistryForProvider(null)` answers those with the CLAUDE default
+ * registry. The client files a null tag in its UNTAGGED bucket
+ * (`store-core/models-by-provider.ts`), whose docstring means "a pre-provider
+ * daemon that tags nothing"; a MODERN daemon writing there makes that bucket
+ * lie, and while it is the only roster in play the client serves it to a
+ * session of any provider — Claude chips in a codex session, with `set_model`
+ * live on tap.
+ *
+ * The caller must resolve its registry from THIS name, not from the raw
+ * session provider: the tag has to name the registry that actually produced
+ * the rows, or producer and consumer are answering different questions about
+ * the same message. Do NOT substitute a hardcoded Claude name for the absent
+ * case (`ws-forwarding.js` uses `'claude-sdk'`): `claude-sdk`, `claude-cli`,
+ * `claude-byok` and `claude-tui` share ONE registry but are four distinct
+ * bucket keys, so a single Claude name tags a roster that the other three
+ * cannot look up. The daemon's own default is the one concrete name that is
+ * also a TRUE statement about which registry answered.
+ *
+ * @param {string|null|undefined} sessionProvider - the session's provider, or
+ *   null/absent when there is no session (or it reports none).
+ * @param {string|null|undefined} defaultProvider - this daemon's resolved
+ *   default (`billingCanary.defaultProvider` / `config.provider`, both of which
+ *   are `config.provider || DEFAULT_PROVIDER`). Floored to DEFAULT_PROVIDER so
+ *   a ctx that carries neither still yields a concrete name.
+ * @returns {string}
+ */
+export function resolveRosterProvider(sessionProvider, defaultProvider) {
+  const fromSession = typeof sessionProvider === 'string' ? sessionProvider.trim() : ''
+  if (fromSession) return fromSession
+  const fromDefault = typeof defaultProvider === 'string' ? defaultProvider.trim() : ''
+  if (fromDefault) return fromDefault
+  return DEFAULT_PROVIDER
 }
 
 // Accept both short ids and full model IDs in set_model.

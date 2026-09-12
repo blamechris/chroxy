@@ -8,7 +8,7 @@ import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { isBoundClient } from '../environments/authority.js'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
-import { getRegistryForProvider } from '../models.js'
+import { getRegistryForProvider, resolveRosterProvider } from '../models.js'
 import { CODEX_SANDBOX_MODES } from '../codex-session.js'
 import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -80,9 +80,20 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // Re-send provider-scoped available_models so clients that switch from a
   // Claude session to a Codex/Gemini session (or vice-versa) update their
   // model dropdown immediately (#2956).
+  //
+  // #7759 — an entry that reports no provider used to tag this roster `null`,
+  // which `getRegistryForProvider` answers with the CLAUDE registry and the
+  // client files in its UNTAGGED bucket ("a pre-provider daemon"), then serves
+  // to a session of any provider. Tag the daemon's resolved default instead —
+  // `config.provider || DEFAULT_PROVIDER`, the same value
+  // `billingCanary.defaultProvider` carries to the ws-history senders — and
+  // resolve the registry from that same name so the tag names whatever
+  // produced the rows. `switchProvider` is unchanged for the permission-mode
+  // copy below, which must still describe the SESSION.
   const switchProvider = entry.provider || null
-  const switchRegistry = getRegistryForProvider(switchProvider)
-  ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
+  const switchRosterProvider = resolveRosterProvider(switchProvider, ctx.services.config?.provider)
+  const switchRegistry = getRegistryForProvider(switchRosterProvider)
+  ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchRosterProvider })
   // #6638: also re-send the permission-mode copy so switching to/from a Codex
   // session updates the mode descriptions (Codex has different tools + no plan mode).
   ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchProvider) })

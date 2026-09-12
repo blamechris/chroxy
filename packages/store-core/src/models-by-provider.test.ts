@@ -139,11 +139,13 @@ describe('selectModelsForProvider (#7728)', () => {
   })
 
   it('never serves the untagged roster to a known provider, with or without a second roster', () => {
-    // The #7728 headline case, reachable on a MODERN daemon: ws-history.js
-    // sends `provider: activeProvider`, null on a post-auth connect with no
-    // active session, and getRegistryForProvider(null) answers with the CLAUDE
-    // default registry — so the Claude roster lands untagged. Server-side
-    // tagging is #7759.
+    // The #7728 headline case. It was reachable on the daemon of that release:
+    // ws-history.js sent `provider: activeProvider`, null on a post-auth
+    // connect with no active session, and getRegistryForProvider(null) answers
+    // with the CLAUDE default registry — so the Claude roster landed untagged.
+    // #7759 tags every server sender, so this shape now reaches a current
+    // client only from a pre-provider daemon (or a sender that regresses), and
+    // the rule is asserted here rather than inferred from the producer.
     const claudeUntaggedPlusCodex: ModelsByProvider = {
       [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus'),
       codex: roster([gpt], 'gpt-5.5'),
