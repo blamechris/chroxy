@@ -771,6 +771,19 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
   // the `gpt-4.1[1m]` chip that rode in on the re-added `gpt-4.1` row (#7747)
   // is gone with it.
   it('the registry entry list is EXACTLY the discovered roster — no constructor-captured statics (#7761)', async () => {
+    // #7765 review — assert the test's own PREMISE first. Every assertion below
+    // is an ABSENCE, and an absence passes vacuously against a registry that was
+    // never seeded. The premise lived only in the comment above: the day
+    // something builds the codex registry AFTER a catalogue exists, this test
+    // stays green while the gate it exists for could be deleted outright. Seed
+    // it the way production does (`server-cli.js:880` / `refreshModels`'s eager
+    // `getRegistryForProvider('codex')`, both while the catalogue is UNSET) and
+    // pin that the captured roster really is the six statics.
+    const statics = CodexSession.getAllowedModels()
+    const seeded = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
+    assert.deepEqual(seeded, [...statics].sort(),
+      `pre-refresh the codex registry must carry exactly the static seed, else every absence below is vacuous — got ${seeded.join(',')}`)
+
     const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
     await getProvider('codex').refreshModels({ client, windows: new Map([['gpt-5.5', 272000]]) })
     const ids = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
@@ -781,14 +794,25 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
       'the wire roster must be the discovered one and nothing else')
     // Stated as a direction, not only as a literal, so the intent survives a
     // future roster edit: every static the refresh did NOT discover is absent.
-    // `getRegistryForProvider` still captures the six statics at construction
+    // `getRegistryForProvider` still captures the statics at construction
     // (always while the catalog is UNSET) — the fix is that they no longer ride
     // the union back in, so this is the assertion that goes red if the gate is
     // dropped.
-    for (const stale of ['gpt-5-codex', 'gpt-4.1', 'gpt-4o', 'o1', 'o3']) {
-      assert.equal(ids.includes(stale), false,
-        `${stale} is NOT in the discovered roster and must not reach the wire — that is #7761`)
+    //
+    // #7765 review — DERIVED from the roster, not transcribed beside it. The
+    // hand-written list here named five ids where CODEX_MODEL_METADATA has six
+    // (`gpt-5` was missing), which is docs/false-safety-guards.md's first
+    // recurring cause — a hardcoded list beside a set that grows — in the very
+    // assertion written to be the roster's both-directions check.
+    const stale = statics.filter((id) => !ids.includes(id))
+    assert.ok(stale.length > 0, 'the seed must contain ids this refresh did not discover, or this loop asserts nothing')
+    for (const id of stale) {
+      assert.equal(ids.includes(id), false,
+        `${id} is NOT in the discovered roster and must not reach the wire — that is #7761`)
     }
+    // …and the derivation above cannot hide a static that DID come back: the
+    // exact-roster assertion two lines up already fixes `ids`, so a re-added
+    // static would be excluded from `stale` and caught there instead.
     // …and the Claude-only `[1m]` synthesis (#7747) minted `gpt-4.1[1m]` off
     // the re-added `gpt-4.1` row's 1M window. No re-added row, and the gate
     // besides: assert the convention itself never appears on this registry.
