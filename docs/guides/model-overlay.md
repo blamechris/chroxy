@@ -70,7 +70,7 @@ Add a `provider` field to route an entry to that provider's own registry instead
 - Routing is by the field's **presence**, not by validating the name; a Claude provider name (or omitting the field) lands on the Claude registry, so just omit `provider` for Claude models.
 - Tagged entries hot-reload like Claude ones — already-running provider sessions pick up the change on the next models fetch.
 - **`pricing` applies wherever the provider reports per-token cost** — e.g. a `provider: "deepseek"` entry re-prices a DeepSeek model with no release ([#6381](https://github.com/blamechris/chroxy/issues/6381)), overriding the shipped static rate. Ollama is `$0` by design; Gemini/Codex don't report token cost; config-driven endpoints carry their own `pricing`.
-- To *serve* (not just list) a new model on a static-allowlist provider (`gemini`, `deepseek`), you still want [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) — the overlay makes it appear in the picker; `allowAnyModel` lets an unlisted id through validation. **Codex is no longer one of those** ([#7727](https://github.com/blamechris/chroxy/issues/7727)): it validates against the ids its own binary reported, so an overlay row for a model codex does not serve stays listed-but-unselectable rather than becoming servable.
+- To *serve* (not just list) a new model on a static-allowlist provider (`gemini`, `deepseek`), you still want [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) — the overlay makes it appear in the picker; `allowAnyModel` lets an unlisted id through validation. **Codex is no longer one of those** ([#7727](https://github.com/blamechris/chroxy/issues/7727)): **once the binary has answered `model/list`**, it validates against the ids that answer carried, so an overlay row for a model codex does not serve stays listed-but-unselectable rather than becoming servable. Before that answer arrives codex is **unrestricted** — a cold daemon, an unresolved probe, or a `codex` binary that cannot be reached — and in that window an overlay row for *any* id is servable, then stops being servable the moment a catalog lands. A host whose codex binary is permanently unreachable stays in that window permanently.
 
 ## Hot-reload
 
@@ -93,6 +93,6 @@ The overlay is watched and re-folded into the registry on change ([#5932](https:
 |------|-----|
 | Surface/relabel/price a **Claude** model now | this overlay |
 | Serve a new **Gemini/DeepSeek** model | [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) |
-| Serve a new **Codex** model | nothing — the binary's own `model/list` is the allowlist since [#7727](https://github.com/blamechris/chroxy/issues/7727) |
+| Serve a new **Codex** model | nothing — the binary's own `model/list` is the allowlist *once it has one* ([#7727](https://github.com/blamechris/chroxy/issues/7727)); until then codex accepts any id |
 | Add a model to a **config-driven endpoint** | the endpoint's `models` array or [`modelDiscovery`](../providers.md#model-discovery) |
 | Use a new **Ollama** model | just `ollama pull` it — already unrestricted |

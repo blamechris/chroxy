@@ -979,9 +979,14 @@ export function isUserShellApprovalRequired(config) {
 }
 
 // #6378: which providers may serve a model id that is NOT in their static
-// allowlist. The static-allowlist subprocess providers (gemini/codex/deepseek)
-// otherwise hard-reject an unlisted-but-API-valid model, forcing a code release
-// just to add one the upstream API already exposes. Opting a provider in here
+// allowlist. A static-allowlist subprocess provider (currently gemini and
+// deepseek — NOT codex since #7727, whose allowlist is the installed binary's
+// own model/list answer) otherwise hard-rejects an unlisted-but-API-valid
+// model, forcing a code release just to add one the upstream API already
+// exposes. This flag is keyed on the provider NAME and checked before any class
+// lookup, so it stays generic: the set of providers it matters for grows with
+// every provider that ships a compiled-in list, and the parenthetical above is
+// an inventory of today, not a closed roster. Opting a provider in here
 // makes it behave like ollama (#5418 PROVIDER_MODELS_UNRESTRICTED): the id
 // passes through verbatim and the upstream API becomes the validator. Returns a
 // Set of provider-name strings; a missing/non-array value → empty Set (the

@@ -265,7 +265,7 @@ a typo in one of those is silently ignored rather than warned about.
 
 ### Unrestricted provider models (`providers.allowAnyModel`)
 
-The static-allowlist subprocess providers (`gemini`, `deepseek`)
+The static-allowlist subprocess providers (currently `gemini` and `deepseek`)
 hard-reject a model id that is not in their built-in list, even when the upstream
 API already serves it — which otherwise forces a chroxy release just to add one.
 `providers.allowAnyModel` is an array of provider ids that opt out of that check

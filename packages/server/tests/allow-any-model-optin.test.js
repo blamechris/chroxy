@@ -13,9 +13,12 @@ import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
 
 /**
  * #6378 — `config.providers.allowAnyModel` opt-in. A static-allowlist provider
- * (gemini/codex/deepseek) listed here serves an unlisted-but-API-valid model id
- * verbatim (like ollama, #5418) instead of hard-rejecting it — so a new model
- * the upstream API already exposes needs no chroxy release. Covers the config
+ * (currently gemini and deepseek — codex left that bucket in #7727) listed here
+ * serves an unlisted-but-API-valid model id verbatim (like ollama, #5418)
+ * instead of hard-rejecting it — so a new model the upstream API already
+ * exposes needs no chroxy release. codex is still ACCEPTED here and still
+ * short-circuits both gates ahead of its catalog; it is just no longer the way
+ * to serve a new OpenAI model. Covers the config
  * helpers, the providers-block validation, and BOTH validation seams
  * (create-time preflight + set_model).
  */
