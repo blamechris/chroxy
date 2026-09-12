@@ -145,8 +145,13 @@ So apply **both** halves:
   later reviewer see it without reading resolved threads.
 - **File an issue** only when the fix exceeds ~15 minutes, needs a decision, or is
   **critical or security** severity. Those are exempt from this test entirely.
-- If something is worth mentioning but is neither worth 15 minutes nor worth an issue,
-  **say so in the review and move on.**
+- If something is worth mentioning but is neither worth 15 minutes nor worth an issue, put it in
+  the review comment's **narrative body** — never as an inline thread and never as a Deferred
+  Items row. **This is the one outcome with no tracked artifact, so it must not be left anywhere
+  `/check-pr` reads as a pending comment.** That file's taxonomy is total: every comment it sees
+  must end in FIX, FOLD, FALSE POSITIVE or FOLLOW-UP ISSUE, so an inline "just noting this"
+  thread does not stay untracked — it gets promoted back into a fix or an issue, which is the
+  filing pressure this section exists to relieve, re-entering by the side door.
 
 This does not reduce what a review *finds*. It changes a small finding's destination from a
 tracker row to a commit — which is strictly more work done, sooner.
