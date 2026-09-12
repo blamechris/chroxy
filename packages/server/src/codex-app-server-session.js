@@ -10,6 +10,8 @@ import { parseCodexUserAgent, capabilitiesForVersion } from './codex-protocol-ca
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { maybeRatchetContextWindow } from './utils/context-window-learn.js'
+import { getRegistryForProvider } from './models.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { createLogger, loggerForSession } from './logger.js'
 
@@ -199,6 +201,11 @@ export class CodexAppServerSession extends BaseSession {
     }))
     this._client = null
     this._threadId = null
+    // #7729 — injectable JSON-RPC client factory (subclass-local opt, read off
+    // `opts` directly; NOT a BaseSession opt). Production leaves it null and
+    // start() builds a real CodexAppServerClient; a test supplies a stub so
+    // start() can be executed rather than reproduced.
+    this._clientFactory = typeof opts.clientFactory === 'function' ? opts.clientFactory : null
     // #7724 — filled from the `initialize` handshake in start(). Null / all-UNKNOWN
     // before the handshake AND after an unparseable userAgent: a cannot-check must
     // not read as a no, so callers probe (probeMethod) instead of disabling.
@@ -286,7 +293,7 @@ export class CodexAppServerSession extends BaseSession {
     // _onClientExit — rather than a fresh re-resolve.
     const attemptedBinary = CodexAppServerSession.resolvedBinary
     this._spawnedBinary = attemptedBinary
-    this._client = new CodexAppServerClient({
+    this._client = this._createClient({
       bin: attemptedBinary,
       cwd: this.cwd,
       env: this._buildChildEnv(),
@@ -304,12 +311,7 @@ export class CodexAppServerSession extends BaseSession {
       // userAgent leaves every gate UNKNOWN so callers probe rather than assume.
       const init = await this._client.initialize({ name: 'chroxy', version: '1' })
       this._captureHandshake(init)
-      started = await this._client.request('thread/start', {
-        approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
-        cwd: this.cwd,
-        sandbox,
-        ...(this.model ? { model: this.model } : {}),
-      })
+      started = await this._client.request('thread/start', this._buildThreadParams(sandbox))
     } catch (err) {
       // #6708 — the app-server child is spawned inside initialize(); a missing/
       // quarantined codex binary surfaces here as an initialize rejection (the
@@ -326,6 +328,12 @@ export class CodexAppServerSession extends BaseSession {
       throw err
     }
     this._threadId = started?.thread?.id || null
+    // #7729 — the `thread/start` RESPONSE echoes the model codex actually
+    // resolved (from ~/.codex/config.toml when chroxy sent none). Capture it
+    // BEFORE `ready` so the emitted payload — and every later session_info
+    // render — names a real model instead of the null this session is
+    // constructed with by design.
+    this._captureBootedModel(started)
     // #6608 — do NOT set this.resumeSessionId in Phase 1: capabilities.resume is
     // false, and SessionManager persists resumeSessionId as the conversationId to
     // resume on restart. Leaving it null keeps the two consistent. The live thread
@@ -340,7 +348,128 @@ export class CodexAppServerSession extends BaseSession {
     // untouched. Deliberately AFTER thread/start, so a catalog probe can never
     // be what breaks session creation.
     this._refreshModelCatalog()
-    this.emit('ready', { model: this.model })
+    // #7729 — report the model this thread is REALLY running. `this.model` is
+    // the operator's explicit override and is null whenever codex was left to
+    // pick; `bootedModel` is what it picked. Same precedence as
+    // session-manager's session_info render, so the two cannot disagree.
+    this.emit('ready', { model: this._effectiveModelId() })
+  }
+
+  /**
+   * #7729 — the injectable client seam. Production builds a real
+   * `CodexAppServerClient` (which spawns `codex app-server`); a test hands in a
+   * stub so `start()` itself — the param builders, the handshake capture, the
+   * model echo — is under test instead of being REPRODUCED by a test that
+   * cannot go red for start()'s own bugs. Mirrors the `spawnFn` (#7726) and
+   * `setTimer` (#6856) injectable-seam pattern already in this file.
+   */
+  _createClient(config) {
+    return this._clientFactory ? this._clientFactory(config) : new CodexAppServerClient(config)
+  }
+
+  /**
+   * #7729 — the `thread/start` params. Extracted VERBATIM from the inline
+   * object start() used to build; the keys, their order and the conditional
+   * `model` spread are unchanged. Extraction is what gives the effort param
+   * (#7730) and the resume branch (CDX-9) one place to land, and what lets a
+   * test assert the shape without re-typing it.
+   *
+   * @param {string} sandbox  the RESOLVED sandbox mode (see start()).
+   */
+  _buildThreadParams(sandbox) {
+    return {
+      approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
+      cwd: this.cwd,
+      sandbox,
+      ...(this.model ? { model: this.model } : {}),
+    }
+  }
+
+  /**
+   * #7729 — the `turn/start` params, extracted verbatim from sendMessage()'s
+   * inline object (same keys, same order, same conditional spread).
+   *
+   * #6608 — the CURRENT model rides every turn (turn/start accepts it) so a
+   * mid-session set_model actually takes effect, matching the exec path's
+   * per-turn model. thread/start seeds the initial model; this tracks changes.
+   * Deliberately `this.model`, NOT `_effectiveModelId()`: echoing codex's own
+   * resolved model back at it on every turn would pin a thread that codex
+   * re-routed (`model/rerouted`) to the model it moved AWAY from.
+   *
+   * @param {Array<Object>} input  the codex UserInput items (see _buildTurnInput).
+   */
+  _buildTurnParams(input) {
+    return {
+      threadId: this._threadId,
+      approvalPolicy: this._approvalPolicy(), // #6605 P2 — per-turn, tracks mode changes
+      input,
+      ...(this.model ? { model: this.model } : {}),
+    }
+  }
+
+  /**
+   * #7729 — the model id this session should be DESCRIBED by: the operator's
+   * explicit override when there is one, else the model codex resolved at
+   * `thread/start` (or re-routed to mid-turn), else null. Never a fabricated
+   * default — a session whose binary told us nothing still reports null, and
+   * the badge stays blank rather than lying.
+   */
+  _effectiveModelId() {
+    return this.model || this.bootedModel || null
+  }
+
+  /**
+   * #7729 — record the model codex resolved, from the `thread/start` response.
+   *
+   * Verified against live codex-cli 0.154.0: the response carries the resolved
+   * `model` at the top level AND on `thread.model`
+   * (`{model, reasoningEffort, modelProvider, sandbox, approvalPolicy, thread:{id, model, …}}`).
+   * Top level wins; `thread.model` is the fallback for a build that carries
+   * only the nested copy.
+   *
+   * A response carrying NEITHER leaves `bootedModel` **null**, never
+   * `undefined` — the badge, the usage split and the context-window lookup all
+   * distinguish "codex did not say" from a model id, and an `undefined` here
+   * would serialize away entirely rather than reading as a cannot-check.
+   */
+  _captureBootedModel(started) {
+    const echoed = this._readModelId(started?.model) ?? this._readModelId(started?.thread?.model)
+    this.bootedModel = echoed ?? null
+    if (this.bootedModel) {
+      ;(this._log || log).info(`codex resolved model=${this.bootedModel} (thread/start echo)`)
+    } else {
+      ;(this._log || log).warn('codex thread/start carried no model echo; the session model stays unknown rather than guessed')
+    }
+    return this.bootedModel
+  }
+
+  /**
+   * #7729 — a non-empty string model id, or null. Kept as one helper so the
+   * echo, the reroute and any later resume branch cannot disagree about what
+   * counts as "codex named a model".
+   */
+  _readModelId(value) {
+    return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  /**
+   * #7729 — codex re-routed this thread to a different model server-side
+   * (`model/rerouted` = `{threadId, turnId, fromModel, toModel, reason}`).
+   * Track `toModel` so the badge follows the reroute instead of naming a model
+   * the thread stopped running. A notification with no usable `toModel` is a
+   * cannot-read and leaves the previous value ALONE — it must not blank a
+   * model id we already know.
+   */
+  _onModelRerouted(params) {
+    const to = this._readModelId(params?.toModel)
+    if (!to) {
+      ;(this._log || log).warn(`codex model/rerouted carried no toModel (${JSON.stringify(params ?? null).slice(0, 200)}); keeping ${this.bootedModel ?? 'unknown'}`)
+      return false
+    }
+    const from = this._readModelId(params?.fromModel) || this.bootedModel || 'unknown'
+    this.bootedModel = to
+    ;(this._log || log).info(`codex re-routed this thread ${from} → ${to}${params?.reason ? ` (${params.reason})` : ''}`)
+    return true
   }
 
   /**
@@ -423,15 +552,7 @@ export class CodexAppServerSession extends BaseSession {
 
     ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId} inputItems=${input.length})`)
     try {
-      const res = await this._client.request('turn/start', {
-        threadId: this._threadId,
-        approvalPolicy: this._approvalPolicy(), // #6605 P2 — per-turn, tracks mode changes
-        input,
-        // #6608 — pass the CURRENT model per turn (turn/start accepts it) so a
-        // mid-session set_model actually takes effect, matching the exec path's
-        // per-turn model. thread/start seeds the initial model; this tracks changes.
-        ...(this.model ? { model: this.model } : {}),
-      })
+      const res = await this._client.request('turn/start', this._buildTurnParams(input))
       this._skillsPrepended = true
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
@@ -525,8 +646,11 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     if (!this._activeTurn) {
-      // Between turns: only usage/errors matter; ignore stray item churn.
-      if (method === 'thread/tokenUsage/updated') this._lastUsage = this._mapUsage(params)
+      // Between turns: only usage/model/errors matter; ignore stray item churn.
+      // #7729 — a reroute and a usage update both describe the SESSION, not the
+      // turn, so they are still consumed here; anything else is churn.
+      if (method === 'thread/tokenUsage/updated') this._onTokenUsage(params)
+      else if (method === 'model/rerouted') this._onModelRerouted(params)
       return
     }
     this._resetResultTimeout()
@@ -556,7 +680,11 @@ export class CodexAppServerSession extends BaseSession {
         this._onItemCompleted(params?.item)
         break
       case 'thread/tokenUsage/updated':
-        this._lastUsage = this._mapUsage(params)
+        this._onTokenUsage(params)
+        break
+      // #7729 — codex moved this thread to another model server-side.
+      case 'model/rerouted':
+        this._onModelRerouted(params)
         break
       case 'turn/completed':
         this._finishTurn(params?.turn)
@@ -752,8 +880,99 @@ export class CodexAppServerSession extends BaseSession {
     this.emit('stream_start', { messageId: this._activeTurn.messageId })
   }
 
+  /**
+   * #7729 — the one consumer of `thread/tokenUsage/updated`. It carries TWO
+   * independent facts and they are handled separately:
+   *
+   *   - the token breakdown, mapped onto chroxy's accounting keys (unchanged);
+   *   - `tokenUsage.modelContextWindow`, which is the model's REAL window as
+   *     reported by the binary running it — authoritative, and the only source
+   *     that exists: `model/list` does not carry a window at all.
+   */
+  _onTokenUsage(params) {
+    this._lastUsage = this._mapUsage(params)
+    this._applyContextWindow(params)
+  }
+
+  /**
+   * #7729 — write codex's own `modelContextWindow` to the codex registry as
+   * authoritative, falling back to the observed-tokens ratchet when the binary
+   * did not report one.
+   *
+   * Three properties are deliberate:
+   *
+   *   - **No `models_updated` emit from either path.** That event is a GLOBAL
+   *     broadcast (`ws-forwarding.js` → `available_models` to every client), so
+   *     emitting one per turn pushes the whole roster over the tunnel on every
+   *     token update. #7728 fixed the client-side slot, which makes the
+   *     broadcast harmless, not free. The registry write persists via
+   *     `saveCache()` and reaches clients on the next roster refresh.
+   *   - **A missing/unusable window is a cannot-check, not a zero.** 0,
+   *     negative, NaN and null all leave the registry entry exactly as it was
+   *     and fall through to the ratchet — they never write, and they never
+   *     substitute a default. A brand-new session that has not completed a turn
+   *     therefore has NO window and its meter stays dashed; fabricating one
+   *     would be worse than none (#5444).
+   *   - **`Number.isFinite` guards the call.** `registry.updateContextWindow`
+   *     tests `typeof === 'number' && > 0`, which NaN passes (`NaN <= 0` is
+   *     false) — it would then write NaN, since `x !== NaN` is always true.
+   *
+   * @returns {boolean} true when the registry entry changed.
+   */
+  _applyContextWindow(params) {
+    const modelId = this._effectiveModelId()
+    // Unknown model → nothing to key the window on. The ratchet is equally
+    // inert here (it no-ops on an id the registry does not carry), so this is
+    // an early return, not a behaviour difference.
+    if (!modelId) return false
+
+    const reported = params?.tokenUsage?.modelContextWindow
+    if (!Number.isFinite(reported) || reported <= 0) {
+      // Codex did not report a window on this update — fall back to the shared
+      // learn-loop, which can only ratchet UP off an observed prompt size.
+      // Deliberately no emit callback: see above.
+      //
+      // The ratchet is fed the WHOLE prompt (codex's `inputTokens`, of which
+      // `cachedInputTokens` is a subset), NOT `_lastUsage.input_tokens` — that
+      // is the DISJOINT uncached half _mapUsage emits for accounting, and a
+      // cache-heavy turn still occupies the full prompt in the context window.
+      // codex-session.js:760 warns against conflating exactly these two.
+      const u = this._usageBreakdown(params)
+      const promptTokens = nonNegInt(u.inputTokens ?? u.input_tokens)
+      if (promptTokens <= 0) return false
+      return maybeRatchetContextWindow('codex', modelId, promptTokens)
+    }
+
+    const registry = getRegistryForProvider('codex')
+    if (!registry || typeof registry.updateContextWindow !== 'function') return false
+    const changed = registry.updateContextWindow(modelId, reported)
+    if (!changed) return false
+    // #4413 — persist so a restart keeps the authoritative window. Idempotent
+    // and warn-on-failure, like the ratchet's own save.
+    if (typeof registry.saveCache === 'function') registry.saveCache()
+    ;(this._log || log).info(`codex reported context window ${reported} for ${modelId} (authoritative)`)
+    return true
+  }
+
+  /**
+   * #7729 — the per-turn token breakdown inside a `thread/tokenUsage/updated`
+   * payload, for every shape this session has to read.
+   *
+   * The LIVE shape is `{threadId, turnId, tokenUsage: {total, last,
+   * modelContextWindow}}` (verified against codex-cli 0.154.0), so the
+   * pre-existing `params.usage` read found nothing there and every token count
+   * mapped to zero. `last` — THIS turn's breakdown — is what is read: `total`
+   * is the thread-cumulative figure, and session-manager ACCUMULATES every
+   * `result.usage` into `cumulativeUsage`, so feeding it a running total would
+   * compound the count on every turn. `params.usage` keeps its precedence for
+   * any caller/build still using the flat shape.
+   */
+  _usageBreakdown(params) {
+    return params?.usage || params?.tokenUsage?.last || params || {}
+  }
+
   _mapUsage(params) {
-    const u = params?.usage || params || {}
+    const u = this._usageBreakdown(params)
     const rawInput = nonNegInt(u.inputTokens ?? u.input_tokens)
     const cached = nonNegInt(u.cachedInputTokens ?? u.cached_input_tokens)
     return {
@@ -788,7 +1007,11 @@ export class CodexAppServerSession extends BaseSession {
         usage: this._lastUsage,
         // #6692: single-model split (codex runs one model per session; cost
         // is unknown at the source — pricing happens downstream).
-        modelUsage: synthesizeModelUsage(this.model, this._lastUsage),
+        // #7729: key on the EFFECTIVE model. `this.model` is null whenever the
+        // operator left codex to pick, and synthesizeModelUsage returns null
+        // for a null id — so before the thread/start echo was captured, every
+        // default codex session's per-model usage split was silently dropped.
+        modelUsage: synthesizeModelUsage(this._effectiveModelId(), this._lastUsage),
         sessionId: this._threadId,
       },
       'turn_ended_with_orphan_tool_start',
