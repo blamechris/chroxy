@@ -57,6 +57,15 @@ This matches CLAUDE.md's Unattended Merge Authority section as written — full 
 
 - **Prioritize** tractable, well-scoped issues first (from-review hardening, DRY dedups, lint guards, low/medium bugs), then medium features, then **decompose epics** into concrete sub-issues — decomposition itself is progress; do not one-shot an epic.
 - **Replenish** the queue between waves: pick up sub-issues created by decomposition plus any newly-tractable issue. Escalate strategy on retries: fresh context → alternative approach → simplify scope → documented-blocked comment.
+- **Old-debt quota — every wave must retire work it did not create.** At least **2 issues per
+  wave** must predate that wave by **30+ days**, and a `from-review` issue created during the
+  current session is **ineligible** to count toward a wave's completions. Measured over the 30
+  days to 2026-09-12: **208 of 209 closes (99.5%) were issues created inside that same window**,
+  exactly **one** close touched anything older, median age at close was **13.2 hours**, and
+  **122 of the 123 issues that were open 30 days ago are still open**. The pipeline was
+  consuming essentially the repo's entire closing capacity on its own same-generation output.
+  Unlike any restriction on filing, this cannot suppress a finding — it adds work rather than
+  removing it, which is why it is the rule that carries the burden here.
 - **Converge:** if a wave produces zero new completions on the remaining set, stop and summarize. (For the full wave/retry/convergence machinery, this composes `/tackle-issues` — call it; do not re-implement it here.)
 
 ## Session boundaries (context + cost discipline)

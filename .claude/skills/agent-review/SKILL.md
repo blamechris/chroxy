@@ -125,9 +125,29 @@ EOF
 
 ### 5. Create Follow-Up Issues for Deferred Items
 
-**MANDATORY: For any suggestion or nitpick that is valid but out of scope, create a tracked GitHub issue.**
+**Fold, don't file, when the fix is small.**
 
-Never leave deferred items as just review comments. If it's worth mentioning, it's worth tracking.
+The follow-on test has two halves — *in-scope* **and** *≤15 minutes*. Only the first half was
+ever implemented here, and the result is measurable: over the 30 days to 2026-09-12 this
+pipeline filed **208 of the repo's 361 new issues (57.6% of all intake)**, and a hand
+classification of a random sample found **half of them were ≤15-minute fixes**.
+
+So apply **both** halves:
+
+- **≤15 minutes → FIX IT IN THIS PR**, even when it sits outside the abstraction this PR owns.
+  Name it in the Deferred Items table with its commit SHA instead of an issue link.
+- **Scope-provenance is NOT a reason to file.** "It belongs to a different rule / path / layer"
+  is the rationale in **all 22** explicit fold-vs-file arguments sampled from those 208 issues,
+  and **none** of them mentions effort. Because a fix-PR's scope is by construction one
+  previously-filed issue, almost everything adjacent fails a provenance test — which is what
+  made the fold branch unreachable in practice.
+- **File an issue** only when the fix exceeds ~15 minutes, needs a decision, or is
+  **critical or security** severity. Those are exempt from this test entirely.
+- If something is worth mentioning but is neither worth 15 minutes nor worth an issue,
+  **say so in the review and move on.**
+
+This does not reduce what a review *finds*. It changes a small finding's destination from a
+tracker row to a commit — which is strictly more work done, sooner.
 
 ```bash
 ISSUE_URL=$(gh issue create \

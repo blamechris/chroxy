@@ -98,15 +98,26 @@ For each pending review comment (Copilot or human), you MUST do ALL of these ste
 
 **Default stance: FIX IT NOW** — Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
 
-**CRITICAL: There are ONLY THREE valid outcomes for each comment. Every comment MUST result in one of these:**
+**CRITICAL: There are ONLY FOUR valid outcomes for each comment. Every comment MUST result in one of these:**
 
 1. **FIX** — Make the code change, commit, reply with commit hash + before/after code
-2. **FALSE POSITIVE** — Reply explaining why the suggestion is incorrect, with evidence
-3. **FOLLOW-UP ISSUE** — Create a GitHub issue, reply with the issue URL
+2. **FOLD** — The fix is ≤15 minutes but sits outside this PR's stated scope. Make it anyway,
+   in this PR, and reply with the commit hash. **A FOLD reply without a commit SHA is invalid**
+   — that is the "acknowledge and move on" this file has always banned, wearing a new label.
+3. **FALSE POSITIVE** — Reply explaining why the suggestion is incorrect, with evidence
+4. **FOLLOW-UP ISSUE** — Create a GitHub issue, reply with the issue URL
 
-**There is NO "acknowledge and move on" option.** If a suggestion is valid but out of scope, you MUST create a follow-up issue. Never reply with "good idea, maybe later" without an issue link.
+**There is no silent "acknowledge and move on".** A valid finding must end in a FIX, a FOLD, a
+FALSE POSITIVE with evidence, or a FOLLOW-UP ISSUE. Never reply with "good idea, maybe later".
 
-**REPLY FORMAT IS NON-NEGOTIABLE.** Every reply MUST start with the bold label (`**FIX**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`) on its own line. Replies without this label are malformed and will be rejected.
+**Which of FOLD and FOLLOW-UP ISSUE applies is decided by effort, not by provenance.** A
+correct, trivial finding outside this PR's abstraction belongs in **FOLD**. Reserve
+FOLLOW-UP ISSUE for work that exceeds ~15 minutes, needs a decision, or is critical/security
+severity — those are exempt and must always be filed. Note that FALSE POSITIVE cannot absorb
+"correct but trivial": it requires proving the finding factually wrong, which is why, before
+FOLD existed, a valid two-minute nitpick outside scope had exactly one legal destination.
+
+**REPLY FORMAT IS NON-NEGOTIABLE.** Every reply MUST start with the bold label (`**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`) on its own line. Replies without this label are malformed and will be rejected.
 
 ### Reply Format Examples
 
