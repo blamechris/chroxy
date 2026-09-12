@@ -314,6 +314,13 @@ export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers
  * reporting, and a second copy here would be free to disagree about the
  * unknown-name and docker-* edges that motivate it.
  *
+ * It runs once per client per message, and resolves to a `providerRegistryCache`
+ * hit every time in production: `getRegistryForProvider` short-circuits on every
+ * Claude-family and unregistered name without building anything, and any OTHER
+ * name reaching here belongs to a live session — whose registry `ws-history.js`
+ * already built during that client's post-auth handshake. So no filter call can
+ * trigger the lazy build's `loadCache()` disk read on a connected daemon.
+ *
  * @param {{ provider?: string|null }} message  one entry from buildOverlayReloadBroadcasts
  * @param {string|null|undefined} activeProvider  the client's active session provider
  * @returns {boolean}
