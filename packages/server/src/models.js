@@ -505,8 +505,11 @@ function usableContextWindow(source) {
  *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
  *   default Claude cache stays untouched by per-provider learn-loops (#4413).
  * @param {boolean} [hooks.unionsStaticFallbacks] - Opt in to the #3075 union
- *   of this registry's STATIC seed on a NON-Claude registry: after every
- *   `updateModels()`, seed rows the refresh omitted are merged back. Default
+ *   of this registry's STATIC seed on a NON-Claude registry: wherever a roster
+ *   is learned from the provider — `updateModels()`, `loadCache()`, and
+ *   `applyOverlay()`'s cache-warmed branch, all three via
+ *   `unionableSeedRows()` (#7776) — seed rows that roster omitted are merged
+ *   back. Default
  *   false off the Claude registry (#7761) — for a provider whose refresh IS
  *   its own roster the union means a retired model never disappears. Set it
  *   only where the seed is a RECOMMENDATION list rather than a roster claim
@@ -621,6 +624,29 @@ export function createModelsRegistry(hooks = {}) {
 
   // #5932: `let` (was const) so applyOverlay() can swap in a re-folded set.
   let fallbackModels = computeFallbackModels(overlay)
+
+  /**
+   * The rows of `fallbackModels` that may be UNIONED back into a roster this
+   * registry learned from the provider (a discovery refresh, or a cache file
+   * written by one).
+   *
+   * #7761 gated that union at `updateModels`; #7776 is the same union written a
+   * SECOND time at `loadCache`, and a third time as `applyOverlay`'s
+   * cache-warmed re-seed. Two copies of one rule disagreeing is this repo's
+   * "guard wired to only some of its callers" (#7262), and the gap was not
+   * cosmetic: `loadCache` runs for every non-Claude provider at construction
+   * (`getRegistryForProvider`), so the statics came back at boot and stayed
+   * until the first successful refresh — indefinitely when the probe never
+   * succeeds. One helper, three call sites, so a future change cannot fix one
+   * and miss the others.
+   *
+   * The scoping is the STATIC seed only: operator OVERLAY rows are a deliberate
+   * declaration and keep unioning on every registry (#5932 AC2).
+   */
+  function unionableSeedRows() {
+    if (unionsStaticFallbacks) return fallbackModels
+    return fallbackModels.filter((m) => !staticFallbackFullIds.has(m.fullId))
+  }
 
   let activeModels = fallbackModels
   let defaultModelId = null
@@ -781,9 +807,15 @@ export function createModelsRegistry(hooks = {}) {
         // REMOVED still drops (it lives in fallbackModels, never lastCacheModels)
         // — matched on fullId so an overlay override of a cached/fallback row
         // still wins (it's in fallbackModels → the cache copy is skipped).
-        const byFullId = new Set(fallbackModels.map((m) => m.fullId))
+        //
+        // #7776 — the seed half of that list is the #3075 union's THIRD copy,
+        // so it reads `unionableSeedRows()` like the other two: on a non-Claude
+        // registry an overlay reload must not put back the statics that
+        // `loadCache`/`updateModels` just declined to.
+        const seed = unionableSeedRows()
+        const byFullId = new Set(seed.map((m) => m.fullId))
         const preserved = lastCacheModels.filter((m) => !byFullId.has(m.fullId))
-        const next = preserved.length > 0 ? Object.freeze([...fallbackModels, ...preserved]) : fallbackModels
+        const next = preserved.length > 0 ? Object.freeze([...seed, ...preserved]) : seed
         applyModels(next, defaultModelId)
       } else {
         applyModels(fallbackModels, defaultModelId)
@@ -895,9 +927,23 @@ export function createModelsRegistry(hooks = {}) {
       // REPLACE held at `CodexSession.getFallbackModels()` and nowhere a client
       // could see. Operator overlay rows are NOT part of the seed and keep
       // unioning everywhere (see `staticFallbackFullIds`).
+      //
+      // That rationale ("a vendor table this repo hand-maintains") is the
+      // codex/gemini one and is NOT why the config-driven family —
+      // anthropicCompatible / openaiCompatible — replaces. Their seed is the
+      // operator's own `models:` array, which is user input rather than a
+      // possibly-stale table. REPLACE is still right there for a different
+      // reason: a discovered catalogue already supersedes `models:` as the
+      // validation allowlist, so keeping the two in sync at the picker is the
+      // consistent answer, not an override of the operator. An operator who
+      // wants a row that discovery does not report declares it in the model
+      // OVERLAY — with one gap, stated rather than implied: an overlay entry
+      // that OVERRIDES an id already in the static seed shares that row's
+      // fullId (`computeFallbackModels` merges in place), so it is skipped with
+      // the row it decorates and the escape hatch does not work for exactly the
+      // ids this gate removes. That is #7777, not fixed here.
       const seenFullIds = new Set(converted.map(m => m.fullId))
-      for (const fb of fallbackModels) {
-        if (!unionsStaticFallbacks && staticFallbackFullIds.has(fb.fullId)) continue
+      for (const fb of unionableSeedRows()) {
         if (!seenFullIds.has(fb.fullId)) {
           // Re-derive the short id with the registry's hook so non-Claude
           // providers don't accidentally inherit Claude's `claude-` strip.
@@ -1120,7 +1166,19 @@ export function createModelsRegistry(hooks = {}) {
             // — their ids carry no family/minor grammar for this filter to
             // read, so applying it would delete exactly the discovered models
             // the cache exists to remember.
-            if (!isClaudeRegistry) return true
+            //
+            // …with ONE exclusion (#7776/#7747). `saveCache()` persists
+            // `activeModels`, which on a pre-fix build included the synthesized
+            // `[1m]` rows, so a cache written before this change already holds
+            // `gpt-4.1[1m]` / `gemini-2.5-pro[1m]` on disk. The synthesis is now
+            // Claude-only, but the row is re-served verbatim from that file at
+            // every boot — so the chip #7747 removed would come back for exactly
+            // the installs that hit the bug. `[1m]` is a Claude-CLI id
+            // convention and no non-Claude send path strips the suffix, so the
+            // id is a 400/404 wherever it appears here: drop it on load. A
+            // provider that genuinely ships an id ending in `[1m]` will
+            // re-publish it through discovery, which does not route here.
+            if (!isClaudeRegistry) return !m.fullId.endsWith(ONE_M_SUFFIX)
             const { family, minor } = modelFamilyAndMinor(m.fullId)
             if (!fallbackByFamily.has(family)) return false
             if (minor === null) return true
@@ -1153,7 +1211,7 @@ export function createModelsRegistry(hooks = {}) {
 
         const droppedStaleCount = valid.length - models.length
         if (droppedStaleCount > 0) {
-          log.info(`loadCache: dropped ${droppedStaleCount} stale cache entr${droppedStaleCount === 1 ? 'y' : 'ies'} not in FALLBACK_MODELS`)
+          log.info(`loadCache: dropped ${droppedStaleCount} cache entr${droppedStaleCount === 1 ? 'y' : 'ies'} ${isClaudeRegistry ? 'not in FALLBACK_MODELS' : 'carrying the Claude-only [1m] id convention'}`)
         }
 
         if (models.length === 0) {
@@ -1163,15 +1221,21 @@ export function createModelsRegistry(hooks = {}) {
           return false
         }
 
-        // Merge in any fallback entries the filtered cache doesn't cover
-        // so the picker always has the canonical sonnet/opus/haiku aliases
-        // even when the cache was mostly stale. The `[1m]` variant
-        // synthesis that updateModels() does is intentionally NOT repeated
-        // here — variants are already in the saved cache for SDK users,
-        // and CLI-only users would not have a working SDK call to populate
-        // them anyway.
+        // Merge in any seed entries the filtered cache doesn't cover so the
+        // picker always has the canonical aliases (on the Claude registry:
+        // sonnet/opus/haiku) even when the cache was mostly stale. The `[1m]`
+        // variant synthesis that updateModels() does is intentionally NOT
+        // repeated here — variants are already in the saved cache for SDK
+        // users, and CLI-only users would not have a working SDK call to
+        // populate them anyway.
+        //
+        // #7776 — this is the SAME #3075 union as `updateModels`, and #7761
+        // gated only that copy. A non-Claude cache is a roster the provider
+        // itself reported, so re-seeding the statics on top of it restores
+        // exactly what #7761 removed, at boot, for the whole window before the
+        // first successful refresh. Both copies read `unionableSeedRows()` now.
         const seenFullIds = new Set(models.map(m => m.fullId))
-        for (const fb of fallbackModels) {
+        for (const fb of unionableSeedRows()) {
           if (!seenFullIds.has(fb.fullId)) {
             const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
             const id = providerMeta?.id ?? deriveIdFn(fb.fullId)

@@ -811,6 +811,60 @@ describe('GeminiSession', () => {
         'Gemini cap should be 4M per CONTEXT_WINDOW_RATCHET_CAPS')
     })
   })
+
+  // #7747 named `gemini-2.5-pro[1m]` as the concrete defect, and until the
+  // #7765 review nothing pinned it AT THE PROVIDER THE ISSUE NAMED — the only
+  // end-to-end absence assertion was on the codex registry, and the generic
+  // models-factory test covers the gate MECHANISM on a synthetic registry.
+  // Gemini is the sharpest case in the repo: its own static table carries
+  // 2M and 1M windows (`gemini-session.js:63-68`), so the synthesis fired off
+  // the provider's own data with no discovery involved at all.
+  describe('the Claude-only [1m] synthesis never fires on the gemini registry (#7747)', () => {
+    beforeEach(() => {
+      getRegistryForProvider('gemini').resetModels()
+    })
+
+    it('a 2M and a 1M gemini row mint no [1m] chips', () => {
+      const r = getRegistryForProvider('gemini')
+      r.updateModels([
+        { value: 'gemini-2.5-pro', displayName: 'Gemini 2.5 Pro', description: '', contextWindow: 2_000_000 },
+        { value: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', description: '', contextWindow: 1_000_000 },
+      ])
+      const entries = r.getModels()
+      const ids = entries.map((m) => m.id)
+      assert.equal(ids.some((id) => id.endsWith('[1m]')), false,
+        `[1m] is a Claude-CLI id convention and no gemini send path strips it — got ${ids.join(',')}`)
+      // Asserted alongside the real windows so the absence cannot pass because
+      // updateModels dropped the rows outright (docs/false-safety-guards.md:
+      // "a precondition that is false, so the body never runs").
+      assert.equal(entries.find((m) => m.fullId === 'gemini-2.5-pro').contextWindow, 2_000_000)
+      assert.equal(entries.find((m) => m.fullId === 'gemini-2.5-flash').contextWindow, 1_000_000)
+    })
+
+    it('a pre-fix cache holding gemini-2.5-pro[1m] does not re-serve it', () => {
+      // `saveCache()` persisted `activeModels`, so the chip is already on disk
+      // for installs that ran a pre-fix build (#7776). The prune that removes
+      // it on load is non-Claude-scoped, so this is the provider-level half.
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-1m-cache-'))
+      const cachePath = join(dir, 'models-cache.gemini.json')
+      try {
+        writeFileSync(cachePath, JSON.stringify({
+          models: [
+            { id: 'gemini-2.5-pro', fullId: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', contextWindow: 2_000_000 },
+            { id: 'gemini-2.5-pro[1m]', fullId: 'gemini-2.5-pro[1m]', label: 'Gemini 2.5 Pro (1M)', contextWindow: 1_000_000 },
+          ],
+        }))
+        const r = getRegistryForProvider('gemini')
+        assert.equal(r.loadCache(cachePath), true)
+        const fullIds = r.getModels().map((m) => m.fullId)
+        assert.ok(fullIds.includes('gemini-2.5-pro'), `the base row must survive the load, got ${fullIds.join(',')}`)
+        assert.equal(fullIds.includes('gemini-2.5-pro[1m]'), false,
+          `a cached [1m] row must be dropped on a non-Claude registry, got ${fullIds.join(',')}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
 })
 
 // #6692 — gemini reports input/output only; the result payload gains a

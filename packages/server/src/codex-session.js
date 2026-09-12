@@ -489,6 +489,18 @@ export class CodexSession extends JsonlSubprocessSession {
     // ids are present AND every static the refresh did not discover is absent —
     // so a re-widening cannot land quietly. The captured roster is still stale
     // by construction; it is simply no longer consulted once a refresh lands.
+    //
+    // The precise scope, because "REPLACES at the wire" on its own overstates
+    // it: the statics ARE still what `available_models` carries BEFORE any
+    // roster is learned — cold boot with no cache, probe unresolved, probe
+    // failed — which is the seed doing its job, not the union. What #7761/#7776
+    // removed is the seed riding back in ON TOP of a roster the binary reported,
+    // and that now holds at all three merge sites in models.js (`updateModels`,
+    // `loadCache`, `applyOverlay`'s cache-warmed branch), so a cache file
+    // written by a pre-fix build no longer re-seeds them at the next boot
+    // either. Validation (`getAllowedModels`) is a separate roster and is
+    // untouched: #7727 is where the catalogue becomes authoritative there, so
+    // until it lands an id this function stopped OFFERING can still be ACCEPTED.
     if (hasCodexCatalog()) {
       return Object.freeze(getCodexCatalogRows().map((row) => Object.freeze(catalogEntry(row))))
     }

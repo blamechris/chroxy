@@ -1029,11 +1029,12 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
     Object.freeze({ id: 'o1', label: 'o1', fullId: 'o1', contextWindow: 200_000 }),
   ])
 
-  function seededNonClaudeRegistry() {
+  function seededNonClaudeRegistry(cachePath) {
     return createModelsRegistry({
       fallbackModels: STATIC_SEED,
       deriveId: (id) => id,
       resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+      ...(cachePath ? { cachePath: () => cachePath } : {}),
     })
   }
 
@@ -1056,6 +1057,13 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
   ]
 
   it('the Claude registry still unions an omitted fallback row AND still mints claude-*[1m] — byte-identical', () => {
+    // #7765 review — `createModelsRegistry()` with no hooks IS the shape the
+    // production Claude registry has (`defaultRegistry`, models.js), so this
+    // snapshot is on the real Claude path and not on a lookalike. The other end
+    // of that identity — that `getRegistryForProvider` hands every Claude
+    // provider name `defaultRegistry` itself — is held by
+    // models.test.js:379/411; stated here so a reader auditing "is this the
+    // registry that ships?" does not have to go find it.
     const registry = createModelsRegistry()
     registry.updateModels([
       // Omits sonnet / fable / haiku, so the #3075 union has work to do…
@@ -1145,5 +1153,121 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
     const ids = registry.getModels().map((m) => m.id).sort()
     assert.deepEqual(ids, ['custom-9', 'gpt-6-astra'],
       'the overlay row survives the refresh; the static seed does not')
+  })
+
+  // -------------------------------------------------------------------------
+  // #7776 — the #3075 union is written THREE times (updateModels, loadCache,
+  // applyOverlay's cache-warmed branch) and #7761 first gated only the one.
+  // These pin the other two, which no test in this file could previously reach:
+  // every loadCache test ran on `nonClaudeRegistry()`, whose `fallbackModels:
+  // []` makes the merge loop a no-op regardless of the gate, and
+  // `seededNonClaudeRegistry` never called loadCache.
+  // -------------------------------------------------------------------------
+  describe('the union gate holds on the BOOT-FROM-CACHE path too (#7776)', () => {
+    let dir
+    let cachePath
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'chroxy-models-union-boot-'))
+      cachePath = join(dir, 'models-cache.json')
+    })
+
+    afterEach(() => {
+      rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('loadCache on a seeded non-Claude registry serves the cached roster and nothing else', () => {
+      // `loadCache` runs for every non-Claude provider at construction
+      // (`getRegistryForProvider`), so an ungated copy here restored exactly
+      // what #7761 removed — at boot, for the whole window before the first
+      // successful refresh, and indefinitely when the probe never succeeds.
+      writeFileSync(cachePath, JSON.stringify({
+        models: [
+          { id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 400_000 },
+        ],
+      }))
+      const registry = seededNonClaudeRegistry(cachePath)
+      assert.equal(registry.loadCache(cachePath), true)
+      const ids = registry.getModels().map((m) => m.id).sort()
+      assert.deepEqual(ids, ['gpt-6-astra'], 'the cache IS the roster on a non-Claude registry')
+      for (const stale of STATIC_SEED.map((m) => m.fullId)) {
+        assert.equal(ids.includes(stale), false,
+          `${stale} is not in the cached roster and must not be re-seeded at boot — that is #7776`)
+      }
+    })
+
+    it('a cache written by a PRE-FIX build does not re-serve its [1m] rows', () => {
+      // `saveCache()` persists `activeModels`, which on a pre-#7747 build
+      // included the synthesized variants — so `gpt-4.1[1m]` is already on disk
+      // for exactly the installs that hit the bug, and the Claude-only prune
+      // (#7723) re-served it verbatim after the upgrade.
+      writeFileSync(cachePath, JSON.stringify({
+        models: [
+          { id: 'gpt-4.1', fullId: 'gpt-4.1', label: 'GPT-4.1', contextWindow: 1_000_000 },
+          { id: 'gpt-4.1[1m]', fullId: 'gpt-4.1[1m]', label: 'GPT-4.1 (1M)', contextWindow: 1_000_000 },
+        ],
+      }))
+      const registry = seededNonClaudeRegistry(cachePath)
+      assert.equal(registry.loadCache(cachePath), true)
+      const ids = registry.getModels().map((m) => m.id)
+      assert.deepEqual(ids, ['gpt-4.1'],
+        'the [1m] row is a Claude-CLI id convention no non-Claude send path strips — it must not survive a cache load')
+      // Asserted alongside the base row so the absence cannot pass because the
+      // load dropped everything (the #7747 test's own discipline).
+      assert.equal(registry.getModels()[0].contextWindow, 1_000_000)
+    })
+
+    it('the CLAUDE registry still unions its seed AND keeps [1m] rows on a cache load', () => {
+      // The control for both assertions above: same code path, opposite verdict.
+      writeFileSync(cachePath, JSON.stringify({
+        models: [
+          { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
+          { id: 'opus-4-8[1m]', fullId: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', contextWindow: 1_000_000 },
+        ],
+      }))
+      const registry = createModelsRegistry({ cachePath: () => cachePath })
+      assert.equal(registry.loadCache(cachePath), true)
+      const fullIds = registry.getModels().map((m) => m.fullId)
+      assert.ok(fullIds.includes('claude-opus-4-8[1m]'),
+        `a Claude [1m] cache row must survive the load, got ${fullIds.join(',')}`)
+      assert.ok(fullIds.includes('claude-sonnet-4-6'),
+        `the Claude seed must still be unioned into a partial cache, got ${fullIds.join(',')}`)
+    })
+
+    it('the opt-in registry still unions its seed on a cache load', () => {
+      // ollama's seed is a RECOMMENDATION list, so the flag must reach all
+      // three union sites, not just updateModels.
+      writeFileSync(cachePath, JSON.stringify({
+        models: [{ id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 400_000 }],
+      }))
+      const registry = createModelsRegistry({
+        fallbackModels: STATIC_SEED,
+        deriveId: (id) => id,
+        resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+        unionsStaticFallbacks: true,
+        cachePath: () => cachePath,
+      })
+      assert.equal(registry.loadCache(cachePath), true)
+      assert.deepEqual(registry.getModels().map((m) => m.id).sort(),
+        ['gpt-4.1', 'gpt-5-codex', 'gpt-6-astra', 'o1'])
+    })
+
+    it('an overlay reload in the cache-warmed window does not re-seed the statics', () => {
+      // `applyOverlay`'s `lastCacheModels` branch (no SDK refresh yet) is the
+      // THIRD copy of the union: it applied `fallbackModels` wholesale, so a
+      // hot-reloaded overlay put every static back one screen after loadCache
+      // declined to.
+      writeFileSync(cachePath, JSON.stringify({
+        models: [{ id: 'gpt-6-astra', fullId: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 400_000 }],
+      }))
+      const registry = seededNonClaudeRegistry(cachePath)
+      assert.equal(registry.loadCache(cachePath), true)
+      registry.applyOverlay(new Map([
+        ['custom-9', { fullId: 'custom-9', shortId: 'custom-9', label: 'Custom 9' }],
+      ]))
+      const ids = registry.getModels().map((m) => m.id).sort()
+      assert.deepEqual(ids, ['custom-9', 'gpt-6-astra'],
+        'the overlay row lands and the cached roster is preserved; the static seed stays out')
+    })
   })
 })
