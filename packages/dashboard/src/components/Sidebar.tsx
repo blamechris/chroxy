@@ -141,6 +141,38 @@ function abbreviateTunnel(url: string): string {
 // a referentially-stable identity across renders (avoids render loops).
 const EMPTY_MCP_SERVERS: McpServer[] = []
 
+/**
+ * #7793 — overlay live `sessionStates[id].cumulativeUsage` onto the
+ * `session_list` snapshot `sessions` array, preferring the live value
+ * whenever one exists for that session id.
+ *
+ * The `session_list` snapshot and the `session_usage` event stream are two
+ * separate store slices that update independently (see message-handler.ts:
+ * `session_list` replaces `sessions`, `session_usage` patches
+ * `sessionStates[id].cumulativeUsage`). On providers whose busy→idle
+ * `session_list` broadcast is emitted before usage accounting finishes for
+ * the turn (codex, per #7793), the snapshot's `cumulativeUsage` is stale —
+ * zero, on a session's first turn — until some later event triggers another
+ * `session_list`. The live map is always at least as fresh as the snapshot,
+ * so it wins whenever present; `null`/`undefined` in the live map (no
+ * `session_usage` received yet for that id) falls back to the snapshot's
+ * own value rather than blanking it out.
+ *
+ * Pure / no React deps so it's unit-testable in isolation from the selector
+ * that produces `liveUsage`.
+ */
+export function overlayLiveUsage(
+  sessions: SessionInfo[],
+  liveUsage: Record<string, CumulativeUsage | null | undefined>,
+): SessionInfo[] {
+  return sessions.map((session) => {
+    const live = liveUsage[session.sessionId]
+    if (live == null) return session
+    if (live === session.cumulativeUsage) return session
+    return { ...session, cumulativeUsage: live }
+  })
+}
+
 export function Sidebar({
   repos,
   activeSessionId,
@@ -224,6 +256,37 @@ export function Sidebar({
     return id && s.sessionStates[id] ? s.sessionStates[id].mcpServers : EMPTY_MCP_SERVERS
   })
 
+  // #7793 — the Tokens panel's source of truth must be the LIVE
+  // `sessionStates[id].cumulativeUsage` (patched by every `session_usage`
+  // event), not the `session_list` snapshot in `sessions`. On providers
+  // whose busy→idle `session_list` broadcast can race ahead of usage
+  // accounting (codex — see #7793) the snapshot still carries the previous
+  // turn's totals — zero, on a session's first turn — for as long as it
+  // takes another `session_list` to land, which can be "until reload".
+  // Read the live map here and overlay it below; same "live overlays
+  // snapshot" shape as App.tsx's `sidebarCumulativeUsage` (#4120), built
+  // for the sibling per-session cost badge. Deliberately a PLAIN selector
+  // (like `activeMcpServers` above), not `useShallow` — this file is
+  // rendered by several test suites that mock `useConnectionStore` as a
+  // bare `(selector) => selector(store)` without a real Zustand/React tree
+  // underneath it, and the real `useShallow` needs `React.useRef` to be
+  // callable through that same mocked path.
+  const liveCumulativeUsage = useConnectionStore((s) => {
+    const out: Record<string, CumulativeUsage | null | undefined> = {}
+    const states = s.sessionStates ?? {}
+    for (const id in states) {
+      out[id] = states[id]!.cumulativeUsage
+    }
+    return out
+  })
+
+  // Sessions with the live cumulativeUsage overlaid — this, not the raw
+  // `sessions` snapshot prop, is what the Tokens panel reads.
+  const tokenViewSessions = useMemo(
+    () => overlayLiveUsage(sessions, liveCumulativeUsage),
+    [sessions, liveCumulativeUsage],
+  )
+
   // #4303 — view registry. Order here = order in the tab strip. Adding a
   // future view (skills, etc.) is a one-entry append.
   const panelViews = useMemo<SidebarPanelView[]>(() => ([
@@ -232,13 +295,13 @@ export function Sidebar({
       label: 'Tokens',
       render: () => (
         <SidebarTokenView
-          sessions={sessions}
+          sessions={tokenViewSessions}
           activeSessionId={activeSessionId}
           onSessionClick={onSessionClick}
           monthlyBudget={monthlyBudget}
         />
       ),
-      collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
+      collapsedHeaderMetric: () => tokenViewCollapsedMetric(tokenViewSessions),
     },
     // #6820 — read-only MCP server list for the active session (name + status),
     // the desktop analogue of the mobile SettingsBar "MCP Servers (N)" section.
@@ -251,7 +314,7 @@ export function Sidebar({
     // #5176 (epic #5170) — the Control Room v1 sidebar panel was retired here;
     // the per-session activity tree now drills down inside the main-tab
     // ControlRoomSection (mapped repo → active session → activity tree).
-  ]), [sessions, activeSessionId, onSessionClick, monthlyBudget, activeMcpServers])
+  ]), [tokenViewSessions, activeSessionId, onSessionClick, monthlyBudget, activeMcpServers])
 
   // #5200 — Control Room launcher in the slot header. The host/repo table is
   // wide, so the launcher opens it in the main content area (via
