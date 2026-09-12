@@ -296,8 +296,8 @@ export declare const ServerProviderListSchema: z.ZodObject<{
         auth: z.ZodOptional<z.ZodObject<{
             ready: z.ZodBoolean;
             source: z.ZodEnum<{
-                env: "env";
                 none: "none";
+                env: "env";
                 oauth: "oauth";
             }>;
             envVar: z.ZodNullable<z.ZodString>;
@@ -320,8 +320,8 @@ export declare const ServerAuthBootstrapSchema: z.ZodObject<{
         auth: z.ZodOptional<z.ZodObject<{
             ready: z.ZodBoolean;
             source: z.ZodEnum<{
-                env: "env";
                 none: "none";
+                env: "env";
                 oauth: "oauth";
             }>;
             envVar: z.ZodNullable<z.ZodString>;
@@ -539,9 +539,9 @@ export declare const SessionPrCheckCountsSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const SessionPrChecksSchema: z.ZodObject<{
     state: z.ZodEnum<{
+        none: "none";
         unknown: "unknown";
         success: "success";
-        none: "none";
         pending: "pending";
         failure: "failure";
     }>;
@@ -585,9 +585,9 @@ export declare const ServerSessionPrStatusSchema: z.ZodObject<{
     }, z.core.$strip>>;
     checks: z.ZodNullable<z.ZodObject<{
         state: z.ZodEnum<{
+            none: "none";
             unknown: "unknown";
             success: "success";
-            none: "none";
             pending: "pending";
             failure: "failure";
         }>;
