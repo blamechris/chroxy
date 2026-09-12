@@ -956,6 +956,13 @@ export type {
   FixtureExpectation,
   FixtureFieldMatcher,
 } from './contract-fixtures/fixtures'
+// PR #7758 review — the harness's model of the dashboard's active-session flat
+// mirror. Exported so the DASHBOARD suite can pin it against the real, DERIVED
+// `UPDATE_SESSION_MIRRORED_FIELDS`: store-core cannot import the dashboard, so
+// the only place the two rosters can be compared is a dashboard test, and
+// without that comparison this list is a hand copy beside a set that grows
+// (it was already one short — `contextOccupancy`).
+export { DASHBOARD_FLAT_MIRROR_KEYS } from './contract-fixtures/client-adapters'
 
 // epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real
 // client handshake state machine + a fake server holding real test keypairs;
