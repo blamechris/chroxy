@@ -311,52 +311,107 @@ describe('CodexAppServerClient — JSON-RPC error codes (#7724)', () => {
     assert.equal(err.jsonRpcCode, undefined)
   })
 
-  it('a JSON-RPC rejection from start() still reaches session_create_failed as START_FAILED', async () => {
-    // The contract the `code`/`jsonRpcCode` split exists for, asserted at the
-    // REAL site rather than by restating session-manager's stamp here. The
-    // rejection is produced by the production client path, handed to a provider
-    // whose start() throws it, and read back off the emitted event.
-    const { SessionManager } = await import('../src/session-manager.js')
-    const { registerProvider } = await import('../src/providers.js')
+  // The contract the `code`/`jsonRpcCode` split exists for, asserted at the REAL
+  // sites rather than by restating session-manager's stamp here. The rejection is
+  // produced by the production client path, handed to a provider whose start()
+  // throws it, and read back off the emitted event.
+  //
+  // BOTH stamp sites get a case. They share the predicate
+  // `if (err && !err.code) err.code = 'START_FAILED'`, but they are not one line:
+  // the fresh path (session-manager.js:1766) emits session_create_failed and
+  // destroys, while the restore-rebind path (:1804) ALSO seeds `_failedRestores`,
+  // whose `getFailedRestores()` defaults a code-less error to 'RESTORE_FAILED' —
+  // so under the original bug a client reconnecting after the failure read
+  // -32600 from that surface too.
+  const REJECT_PROVIDER = 'test-cdx1-jsonrpc-start-fail'
+  // Set immediately before each createSession; the provider's start() throws it.
+  let nextRejection = null
 
+  class CodexRejectProvider extends EventEmitter {
+    constructor(opts) {
+      super()
+      this.cwd = opts.cwd
+      this.model = opts.model || null
+      this.permissionMode = opts.permissionMode || 'approve'
+      this.isRunning = false
+      this.resumeSessionId = opts.resumeSessionId || null
+      this.bootedModel = null
+    }
+    static get capabilities() { return {} }
+    async start() { throw nextRejection }
+    destroy() {}
+    interrupt() {}
+    sendMessage() {}
+    setModel() {}
+    setPermissionMode() {}
+  }
+
+  /**
+   * A FRESH rejection per case, off the production client path.
+   * `_handleAsyncStartFailure` MUTATES `err.code`, so a rejection shared between
+   * the two cases would arrive at the second one already stamped and would pass
+   * with the stamp at :1804 deleted outright.
+   */
+  async function freshJsonRpcRejection() {
     const c = new CodexAppServerClient({})
     c._child = { stdin: { write: () => {} } }
     const pending = c.request('thread/start', {})
     c._dispatch({ jsonrpc: '2.0', id: 1, error: { code: -32600, message: 'Invalid request: unknown variant `thread/start`' } })
-    const rejection = await pending.then(() => null, (e) => e)
-    assert.equal(rejection.jsonRpcCode, -32600, 'precondition: the rejection really carries a JSON-RPC code')
+    const err = await pending.then(() => null, (e) => e)
+    assert.equal(err.jsonRpcCode, -32600, 'precondition: the rejection really carries a JSON-RPC code')
+    assert.equal(err.code, undefined, 'precondition: nothing has stamped this rejection yet')
+    return err
+  }
 
-    class CodexRejectProvider extends EventEmitter {
-      constructor(opts) {
-        super()
-        this.cwd = opts.cwd
-        this.model = opts.model || null
-        this.permissionMode = opts.permissionMode || 'approve'
-        this.isRunning = false
-        this.resumeSessionId = opts.resumeSessionId || null
-        this.bootedModel = null
-      }
-      static get capabilities() { return {} }
-      async start() { throw rejection }
-      destroy() {}
-      interrupt() {}
-      sendMessage() {}
-      setModel() {}
-      setPermissionMode() {}
+  let providerRegistered = false
+  async function mkManager(t) {
+    const { SessionManager } = await import('../src/session-manager.js')
+    const { registerProvider } = await import('../src/providers.js')
+    // The registry entry is INTENTIONALLY left behind: providers.js has no
+    // unregister, the name is test-scoped, and nothing in this file enumerates
+    // providers. Registering once keeps it to a single leftover.
+    if (!providerRegistered) {
+      registerProvider(REJECT_PROVIDER, CodexRejectProvider)
+      providerRegistered = true
     }
-    registerProvider('test-cdx1-jsonrpc-start-fail', CodexRejectProvider)
-
     const stateFile = join(mkdtempSync(join(tmpdir(), 'chroxy-cdx1-sm-')), 'state.json')
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    // Registered with t.after, not called at the end of the body: a failing
+    // assertion aborts the body and would leave the manager's timers alive.
+    t.after(() => mgr.destroyAll())
+    return mgr
+  }
+
+  it('a JSON-RPC rejection from start() still reaches session_create_failed as START_FAILED', async (t) => {
+    nextRejection = await freshJsonRpcRejection()
+    const mgr = await mkManager(t)
     const events = []
     mgr.on('session_create_failed', (e) => events.push(e))
-    mgr.createSession({ cwd: '/tmp', provider: 'test-cdx1-jsonrpc-start-fail' })
+    mgr.createSession({ cwd: '/tmp', provider: REJECT_PROVIDER })
     await new Promise((r) => setImmediate(r))
     await new Promise((r) => setImmediate(r))
 
     assert.equal(events.length, 1, 'the fresh-session failure surfaced')
     assert.equal(events[0].errorCode, 'START_FAILED',
       'a numeric JSON-RPC code on `err.code` would short-circuit the stamp and put -32600 on the wire, where ServerSessionErrorSchema.code (z.string()) drops it')
+  })
+
+  it('the restore-rebind path stamps it too — on the event AND on getFailedRestores()', async (t) => {
+    nextRejection = await freshJsonRpcRejection()
+    const mgr = await mkManager(t)
+    const events = []
+    mgr.on('session_restore_failed', (e) => events.push(e))
+    mgr.createSession({ cwd: '/tmp', provider: REJECT_PROVIDER, isRestore: true })
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    assert.equal(events.length, 1, 'the restore-rebind failure surfaced')
+    assert.equal(events[0].errorCode, 'START_FAILED',
+      'session-manager.js:1804 stamps the same contract for a restore-rebind')
+    const failed = mgr.getFailedRestores()
+    assert.equal(failed.length, 1, 'the failed restore was parked for a retry')
+    assert.equal(failed[0].errorCode, 'START_FAILED',
+      'getFailedRestores() defaults a code-less error to RESTORE_FAILED, so a numeric `err.code` would surface -32600 to a client reconnecting after the failure')
   })
 })
 
@@ -519,22 +574,32 @@ describe('CodexAppServerSession — deprecationNotice (#7724)', () => {
 
   it('a notice matching NEITHER field logs the payload rather than swallowing it', (t) => {
     // The fallback, for a fork or a future rename — deliberately NOT the path
-    // the real binary takes.
+    // the real binary takes. Whole-line equality here too: `includes` would pin
+    // only "the text is in there somewhere", which a reformat or a truncation
+    // of the fallback payload satisfies just as well.
     const { s, lines } = mkLogged(t)
-    s._onNotification({ method: 'deprecationNotice', params: { deprecated: 'turn/start.summary' } })
+    const params = { deprecated: 'turn/start.summary' }
+    s._onNotification({ method: 'deprecationNotice', params })
     const warned = warnings(lines)
     assert.equal(warned.length, 1)
-    assert.ok(warned[0][1].includes('turn/start.summary'), 'the raw payload is preserved')
+    assert.equal(warned[0][1], line(JSON.stringify(params)), 'the raw payload is preserved verbatim')
   })
 
   it('a non-string / empty summary falls back rather than logging an empty notice', (t) => {
     const { s, lines } = mkLogged(t)
-    s._onNotification({ method: 'deprecationNotice', params: { summary: '', details: 'only details' } })
-    s._onNotification({ method: 'deprecationNotice', params: { summary: { nested: 'object' } } })
+    const emptySummary = { summary: '', details: 'only details' }
+    const objectSummary = { summary: { nested: 'object' } }
+    s._onNotification({ method: 'deprecationNotice', params: emptySummary })
+    s._onNotification({ method: 'deprecationNotice', params: objectSummary })
     const warned = warnings(lines)
     assert.equal(warned.length, 2)
-    assert.ok(warned[0][1].includes('only details'), 'an empty summary still surfaces the payload')
-    assert.ok(warned[1][1].includes('nested'), 'a non-string summary still surfaces the payload')
+    // Equality, not `includes`: `includes('only details')` would keep passing if
+    // the handler grew an `else if (details) detail = details` branch, which
+    // drops the rest of the payload. These rows pin the WHOLE fallback line.
+    assert.equal(warned[0][1], line(JSON.stringify(emptySummary)),
+      'an empty summary surfaces the whole payload, not just the details')
+    assert.equal(warned[1][1], line(JSON.stringify(objectSummary)),
+      'a non-string summary surfaces the whole payload')
   })
 
   it('an unrelated between-turns notification is still ignored', (t) => {
