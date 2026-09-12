@@ -2,7 +2,7 @@
  * Tests for shared stateless message handler functions.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { MAX_SANE_DURATION_MS, MODEL_ENTRY_METADATA_KEYS } from '@chroxy/protocol'
 import {
   resolveSessionId,
   handleModelChanged,
@@ -5000,6 +5000,46 @@ describe('handleAvailableModels', () => {
       { id: 'b', label: 'B', fullId: 'b' },
       { id: 'c', label: 'C', fullId: 'c' },
     ])
+  })
+
+  // #7748 — bind MODEL_ENTRY_METADATA_KEYS to THIS hop. The protocol test
+  // ties the roster to the schema in both directions and models.js copies
+  // entries through it, but handleAvailableModels narrows each field with its
+  // own hand-written `if` block, so a fourth roster key would pass the schema
+  // parity test, be copied by the server, reach the wire, and be silently
+  // dropped here with nothing red. The fixture table below is the binding:
+  // adding a roster key with no row fails the coverage assertion, and a row
+  // whose value the handler drops fails the survival assertion.
+  const ROSTER_WIRE_FIXTURES: Record<string, unknown> = {
+    provenance: 'discovered',
+    reasoningLevels: ['low', 'high'],
+    defaultReasoningLevel: 'high',
+  }
+
+  it('every MODEL_ENTRY_METADATA_KEYS key has a wire fixture, and no extras (#7748)', () => {
+    expect([...MODEL_ENTRY_METADATA_KEYS].sort()).toEqual(
+      Object.keys(ROSTER_WIRE_FIXTURES).sort(),
+    )
+  })
+
+  it('every MODEL_ENTRY_METADATA_KEYS key survives handleAvailableModels (#7748)', () => {
+    for (const key of MODEL_ENTRY_METADATA_KEYS) {
+      const value = ROSTER_WIRE_FIXTURES[key]
+      // Without this, a roster key with no fixture sends `undefined`, the
+      // handler drops it, and the survival assertion compares undefined to
+      // undefined and PASSES — a cannot-check reading as nothing-to-check.
+      // The coverage test above is the primary binding; this is its backstop
+      // inside the loop, so neither test alone can go quiet.
+      expect(value, `no wire fixture for roster key "${key}"`).toBeDefined()
+      const result = handleAvailableModels({
+        models: [{ id: 'a', label: 'A', fullId: 'a', [key]: value }],
+      })
+      expect(result.models).toHaveLength(1)
+      expect(
+        (result.models[0] as unknown as Record<string, unknown>)[key],
+        `handleAvailableModels dropped the roster key "${key}" — it is on the wire schema and the server copies it, so the client hop must narrow it too`,
+      ).toEqual(value)
+    }
   })
 
   it('a malformed new field never rejects the entry or its other fields', () => {
