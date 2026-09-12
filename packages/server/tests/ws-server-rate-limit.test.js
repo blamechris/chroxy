@@ -49,7 +49,7 @@ async function createClient(port, headers = {}) {
   ws.on('message', (data) => {
     try {
       messages.push(JSON.parse(data.toString()))
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })

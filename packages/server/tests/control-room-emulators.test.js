@@ -94,7 +94,7 @@ describe('surveyEmulators()', () => {
 
   it('still lists AVDs when adb is missing (running set empty)', async () => {
     const snap = await surveyEmulators({
-      _execFile: async (file, args) => {
+      _execFile: async (file, _args) => {
         if (file === 'emulator') return { stdout: 'Pixel_7_API_34\n' }
         throw new Error('adb not found')
       },

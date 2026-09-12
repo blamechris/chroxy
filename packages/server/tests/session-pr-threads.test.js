@@ -243,7 +243,7 @@ describe('#7430 — surveySessionPrThreads degrades honestly, never to a zero', 
 
   it('never shells out to gh at all when the status survey already degraded', async () => {
     const calls = []
-    const exec = async (file, args) => { calls.push(file); return { stdout: '', stderr: '' } }
+    const exec = async (file, _args) => { calls.push(file); return { stdout: '', stderr: '' } }
     await run({ status: { ...PR_STATUS, pr: null, repo: null, reason: GH_MISSING_REASON }, exec })
     assert.equal(calls.length, 0, 'a degraded resolution must not spend a subprocess')
   })

@@ -5,7 +5,7 @@
 // was a closure inside the god function. writeConnectionInfo is injected so no
 // ~/.chroxy write happens (the test sandbox guard would block it).
 
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { StartupDisplay, maskToken } from '../src/server-cli/startup-display.js'

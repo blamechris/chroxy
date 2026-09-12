@@ -131,7 +131,7 @@ describe('DevPreviewManager', () => {
       }
 
       // Use a real-ish _createPreviewTunnel that pre-registers then awaits
-      const origCreate = manager._createPreviewTunnel.bind(manager)
+      const _origCreate = manager._createPreviewTunnel.bind(manager)
       manager._createPreviewTunnel = async function(sessionId, port) {
         const tunnel = fakeTunnel
         if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
@@ -143,7 +143,7 @@ describe('DevPreviewManager', () => {
             return
           }
           this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
-        } catch (err) {
+        } catch (_err) {
           const sessionTunnels = this._tunnels.get(sessionId)
           if (sessionTunnels) {
             sessionTunnels.delete(port)

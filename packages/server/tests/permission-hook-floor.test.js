@@ -155,8 +155,8 @@ async function startRealDaemon({ promptDecision = 'allow', sessionCwd = CWD, res
 async function startBrokenFloorDaemon({ status = 500, body = '{"error":"boom"}', decision = 'allow' } = {}) {
   const stats = { floorRequests: 0, permissionRequests: 0 }
   const server = createServer((req, res) => {
-    let raw = ''
-    req.on('data', (c) => { raw += c })
+    let _raw = ''
+    req.on('data', (c) => { _raw += c })
     req.on('end', () => {
       if (req.url === '/permission-floor') {
         stats.floorRequests++

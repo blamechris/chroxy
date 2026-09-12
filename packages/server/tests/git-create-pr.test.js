@@ -59,11 +59,11 @@ function router(spec = {}) {
 
 describe('gitCreatePR (#6876)', () => {
   let tmpDir
-  let cwdReal
+  let _cwdReal
 
   before(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-pr-'))
-    cwdReal = await realpath(tmpDir)
+    _cwdReal = await realpath(tmpDir)
   })
 
   after(async () => {

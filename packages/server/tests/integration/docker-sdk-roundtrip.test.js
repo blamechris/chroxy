@@ -10,7 +10,7 @@
  *   - Network access to pull node:22-slim image (first run only)
  *   - ANTHROPIC_API_KEY in env (for full round-trip, not for container lifecycle tests)
  */
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, execFile } from 'child_process'
 
@@ -82,10 +82,10 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
 
       // The real start() calls super.start() which emits 'ready' via SdkSession
       // But SdkSession.start() sets _processReady — we can poll for it
-      const origStart = session.start.bind(session)
+      const _origStart = session.start.bind(session)
       // Intercept _startContainer callback to know when container is ready
       const origStartContainer = session._startContainer.bind(session)
-      session._startContainer = (cb) => {
+      session._startContainer = (_cb) => {
         origStartContainer((err) => {
           clearTimeout(timeout)
           if (err) {
@@ -125,7 +125,7 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
     assert.ok(cliPath, 'CLI path should be discovered')
     assert.ok(typeof cliPath === 'string' && cliPath.length > 0)
     // Use shell form so && is interpreted; silently catch if file doesn't exist
-    const { stdout: cliCheck } = await execFileAsync('docker', [
+    const { stdout: _cliCheck } = await execFileAsync('docker', [
       'exec', started, 'bash', '-c', `test -f ${cliPath} && echo exists`,
     ], { timeout: 5000 }).catch(() => ({ stdout: '' }))
 
@@ -165,7 +165,7 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
       })
 
       const origStartContainer = session._startContainer.bind(session)
-      session._startContainer = (cb) => {
+      session._startContainer = (_cb) => {
         origStartContainer((err) => {
           clearTimeout(timeout)
           if (err) reject(err)
@@ -227,7 +227,7 @@ describe('DockerSdkSession container lifecycle (integration)', { skip: SKIP }, (
       })
 
       const origStartContainer = session._startContainer.bind(session)
-      session._startContainer = (cb) => {
+      session._startContainer = (_cb) => {
         origStartContainer((err) => {
           clearTimeout(timeout)
           if (err) reject(err)

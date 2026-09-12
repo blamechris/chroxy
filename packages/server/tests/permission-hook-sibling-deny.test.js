@@ -222,7 +222,7 @@ describe('permission-hook.sh — sibling AskUserQuestion deny (#4668)', () => {
         const decisions = results.map((r) => {
           try {
             return JSON.parse(r.stdout.trim()).hookSpecificOutput.permissionDecision
-          } catch (err) {
+          } catch (_err) {
             assert.fail(`hook stdout did not parse as JSON: ${r.stdout} (stderr=${r.stderr})`)
           }
         })

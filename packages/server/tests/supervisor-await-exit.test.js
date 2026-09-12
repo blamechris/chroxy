@@ -140,9 +140,9 @@ describe('supervisor shutdown awaits child exit (#2407)', () => {
     child.simulateReady()
 
     // Override kill to simulate the child actually exiting when SIGKILL'd
-    let killCalled = false
+    let _killCalled = false
     child.kill = mock.fn(() => {
-      killCalled = true
+      _killCalled = true
       // Simulate the OS killing the child after SIGKILL
       setImmediate(() => child.simulateExit(null, 'SIGKILL'))
     })

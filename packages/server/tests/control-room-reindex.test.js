@@ -60,7 +60,7 @@ describe('parseRepoMemoryIndexCounts (#5500)', () => {
 
 describe('runRepoMemoryIndex (#5500)', () => {
   it('resolves the binary, runs `index <repoPath>` (NOT --quiet), and returns parsed counts', async () => {
-    const execSpy = createSpy(async (file, args) => {
+    const execSpy = createSpy(async (file, _args) => {
       if (file === 'which') return { stdout: '/usr/local/bin/repo-memory\n', stderr: '' }
       return { stdout: INDEX_STDOUT, stderr: '' }
     })

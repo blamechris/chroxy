@@ -127,7 +127,7 @@ describe('CliSession _scheduleRespawn guard', () => {
     assert.strictEqual(session._respawnScheduled, false, 'respawnScheduled flag should be cleared after destroy')
   })
 
-  it('respawn callback clears the scheduled flag so future respawns work', (t) => {
+  it('respawn callback clears the scheduled flag so future respawns work', (_t) => {
     // Verify the guard blocks a second call while scheduled
     session._scheduleRespawn()
     assert.strictEqual(session._respawnScheduled, true, 'flag should be set')

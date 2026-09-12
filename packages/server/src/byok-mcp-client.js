@@ -376,7 +376,7 @@ export class MCPClient extends EventEmitter {
       let msg
       try {
         msg = JSON.parse(line)
-      } catch (err) {
+      } catch (_err) {
         this._log.warn(`MCP server ${this.name}: non-JSON line: ${line.slice(0, 80)}`)
         continue
       }

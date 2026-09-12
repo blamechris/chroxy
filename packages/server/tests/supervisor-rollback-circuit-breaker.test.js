@@ -45,7 +45,7 @@ class TestSupervisor extends Supervisor {
     this._rollbackResult = false
   }
 
-  _fork(script, args, opts) {
+  _fork(_script, _args, _opts) {
     const child = createMockChild()
     this._mockChildren.push(child)
     return child

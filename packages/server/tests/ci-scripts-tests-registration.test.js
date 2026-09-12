@@ -2185,7 +2185,7 @@ describe('the call-site guard\'s own derivations go RED (#7640)', () => {
 })
 
 /** ci.yml, or a named assertion failure rather than an undefined deref. */
-function workflowsByName(workflows, name) {
+function _workflowsByName(workflows, name) {
   const found = workflows.find(w => w.name === name)
   assert.ok(found, `expected ${name} among the scanned workflows`)
   return found

@@ -26,7 +26,7 @@ import {
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 

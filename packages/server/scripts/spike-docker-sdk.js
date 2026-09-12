@@ -356,7 +356,7 @@ async function main() {
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       NODE_ENV: process.env.NODE_ENV,
     },
-    canUseTool: async (toolName, input, opts) => {
+    canUseTool: async (toolName, input, _opts) => {
       findings.canUseToolFired = true
       findings.canUseToolCalls.push({ toolName, inputKeys: Object.keys(input || {}) })
       log('step5', `canUseTool fired: tool=${toolName}`)

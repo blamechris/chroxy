@@ -5,7 +5,7 @@
  * aggregates them so conversation-scanner and ws-file-ops iterate
  * all active provider directories instead of hard-coding ~/.claude/.
  */
-import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'

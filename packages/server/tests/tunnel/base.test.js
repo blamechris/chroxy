@@ -306,11 +306,11 @@ describe('BaseTunnelAdapter', () => {
     })
 
     it('emits all tunnel_recovering events during the fast round', async () => {
-      let callCount = 0
+      let _callCount = 0
       const adapter = new TestAdapter({
         port: 3000,
         startBehavior: () => {
-          callCount++
+          _callCount++
           throw new Error('fail')
         },
       })

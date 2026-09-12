@@ -9,7 +9,7 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  symlinkSync, realpathSync, existsSync, statSync
+  symlinkSync, realpathSync, existsSync
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'

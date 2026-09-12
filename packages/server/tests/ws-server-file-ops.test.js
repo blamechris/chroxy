@@ -1,13 +1,12 @@
-import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once, EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
-import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
-import { createMockSession, createMockSessionManager, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
+import { createMockSession, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
@@ -68,7 +67,7 @@ async function createClient(port, expectAuth = true) {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })
@@ -115,7 +114,7 @@ async function waitForMessage(messages, type, timeout = 2000) {
 /**
  * Helper to wait for a message matching an arbitrary predicate.
  */
-async function waitForMessageMatch(messages, predicate, timeout = 2000, label = 'message match') {
+async function _waitForMessageMatch(messages, predicate, timeout = 2000, label = 'message match') {
   return waitFor(
     () => messages.find(predicate),
     { timeoutMs: timeout, label }

@@ -32,7 +32,7 @@ describe('fetchWithRetry', () => {
   it('aborts fetch after timeout', async () => {
     // Use a very short timeout by testing the AbortController behavior directly
     // We mock fetch to hang, and verify the abort signal fires
-    let abortedError = null
+    let _abortedError = null
     globalThis.fetch = mock.fn(async (_url, opts) => {
       return new Promise((_resolve, reject) => {
         opts.signal.addEventListener('abort', () => {

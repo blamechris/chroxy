@@ -94,7 +94,7 @@ function makeSessionManager(ownerSession) {
  * Run ONE scenario through the HTTP transport.
  * `tokenBinding`: map of token -> boundSessionId (null token = primary).
  */
-function runHttp({ requestId, decision, presentedToken, tokenBoundSessionId, mapEntry, ownerSession, sessionManager }) {
+function runHttp({ requestId, decision, presentedToken, tokenBoundSessionId, mapEntry, ownerSession: _ownerSession, sessionManager }) {
   const permissionSessionMap = new Map()
   if (mapEntry !== undefined) permissionSessionMap.set(requestId, mapEntry)
   const pendingPermissions = new Map()
@@ -120,7 +120,7 @@ function runHttp({ requestId, decision, presentedToken, tokenBoundSessionId, map
 }
 
 /** Run ONE scenario through the WS transport. */
-function runWs({ requestId, decision, boundSessionId, activeSessionId, subscribed, mapEntry, ownerSession, sessionManager }) {
+function runWs({ requestId, decision, boundSessionId, activeSessionId, subscribed, mapEntry, ownerSession: _ownerSession, sessionManager }) {
   const permissionSessionMap = new Map()
   if (mapEntry !== undefined) permissionSessionMap.set(requestId, mapEntry)
   const pendingPermissions = new Map()

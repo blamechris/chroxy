@@ -1,15 +1,14 @@
 import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { once, EventEmitter } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { tmpdir, homedir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
-import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 
@@ -76,7 +75,7 @@ async function createClient(port, expectAuth = true) {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })
@@ -329,7 +328,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages: _messages } = await createClient(port, true)
 
     // Enable draining
     server.setDraining(true)
@@ -358,7 +357,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages: _messages } = await createClient(port, true)
 
     // Enable draining
     server.setDraining(true)
@@ -418,7 +417,7 @@ describe('WsServer drain behavior (multi-session mode)', () => {
     })
     const port = await startServerAndGetPort(server)
 
-    const { ws, messages } = await createClient(port, true)
+    const { ws, messages: _messages } = await createClient(port, true)
 
     // Enable then disable draining
     server.setDraining(true)
@@ -1936,7 +1935,7 @@ describe('encryption integration (end-to-end)', () => {
     ws.on('message', (data) => {
       try {
         messages.push(JSON.parse(data.toString()))
-      } catch (err) {
+      } catch (_err) {
         console.error('Failed to parse message:', data.toString())
       }
     })
@@ -2308,7 +2307,7 @@ describe('encryption integration (end-to-end)', () => {
     ws.on('message', (data) => {
       try {
         messages.push(JSON.parse(data.toString()))
-      } catch (err) {
+      } catch (_err) {
         console.error('Failed to parse message:', data.toString())
       }
     })
@@ -3332,7 +3331,7 @@ describe('restore_checkpoint idle guard', () => {
     server._checkpointManager = checkpointMgr
 
     // Mock createSession on manager for the restore flow
-    mockManager.createSession = ({ name, cwd, resumeSessionId }) => {
+    mockManager.createSession = ({ name, cwd, resumeSessionId: _resumeSessionId }) => {
       const newId = 'session-new'
       const newSession = createMockSession()
       const entry = { session: newSession, name, cwd: cwd || '/tmp', type: 'cli' }

@@ -98,7 +98,7 @@ describe('host_status_request handler', () => {
 
     // The success payload (sans the echoed requestId, which is not part of the
     // wire contract schema) must parse against the protocol schema.
-    const { requestId, ...rest } = payload
+    const { requestId: _requestId, ...rest } = payload
     const parsed = ServerHostStatusSnapshotSchema.safeParse(rest)
     assert.ok(parsed.success, `snapshot should be schema-valid: ${JSON.stringify(parsed.error?.issues)}`)
     assert.equal(payload.root, SAMPLE_SNAPSHOT.root)
@@ -154,7 +154,7 @@ describe('host_status_request handler', () => {
     assert.equal(payload.error.code, 'FORBIDDEN')
     assert.equal(payload.requestId, 'r1')
     // Error replies must still satisfy the snapshot schema (empty survey).
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerHostStatusSnapshotSchema.safeParse(rest).success, 'FORBIDDEN reply must be a valid snapshot')
     assert.deepEqual(payload.repos, [])
     assert.deepEqual(payload.summary, { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 })
@@ -208,7 +208,7 @@ describe('host_status_request handler', () => {
     assert.equal(payload.error.code, 'SURVEY_FAILED')
     assert.match(payload.error.message, /git exploded/)
     assert.equal(payload.requestId, 'e1')
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerHostStatusSnapshotSchema.safeParse(rest).success, 'survey-failed reply must be a valid snapshot')
   })
 
@@ -293,7 +293,7 @@ describe('runner_status_request handler (#5253)', () => {
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'runner_status_snapshot')
     assert.equal(payload.requestId, 'r1')
-    const { requestId, ...rest } = payload
+    const { requestId: _requestId, ...rest } = payload
     assert.ok(ServerRunnerStatusSnapshotSchema.safeParse(rest).success, JSON.stringify(ServerRunnerStatusSnapshotSchema.safeParse(rest).error?.issues))
     assert.equal(payload.repos[0].runners.length, 2)
     assert.equal(payload.summary.total, 2)
@@ -337,7 +337,7 @@ describe('runner_status_request handler (#5253)', () => {
     assert.equal(ctx.surveyRunners.callCount, 0, 'must not survey for a bound client')
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.error.code, 'FORBIDDEN')
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerRunnerStatusSnapshotSchema.safeParse(rest).success)
     assert.deepEqual(payload.repos, [])
   })
@@ -361,7 +361,7 @@ describe('runner_status_request handler (#5253)', () => {
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.error.code, 'SURVEY_FAILED')
     assert.match(payload.error.message, /launchctl exploded/)
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerRunnerStatusSnapshotSchema.safeParse(rest).success)
   })
 
@@ -970,7 +970,7 @@ describe('integration_status_request handler (#5499)', () => {
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'integration_status_snapshot')
     assert.equal(payload.requestId, 'i1')
-    const { requestId, ...rest } = payload
+    const { requestId: _requestId, ...rest } = payload
     assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success, JSON.stringify(ServerIntegrationStatusSnapshotSchema.safeParse(rest).error?.issues))
     assert.equal(payload.repos.length, 2)
     assert.equal(payload.summary.configured, 1)
@@ -1017,7 +1017,7 @@ describe('integration_status_request handler (#5499)', () => {
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.error.code, 'FORBIDDEN')
     assert.equal(payload.requestId, 'i1')
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success, 'FORBIDDEN reply must be a valid snapshot')
     assert.deepEqual(payload.repos, [])
     assert.deepEqual(payload.summary, { total: 0, configured: 0, notConfigured: 0, degraded: 0 })
@@ -1044,7 +1044,7 @@ describe('integration_status_request handler (#5499)', () => {
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.error.code, 'SURVEY_FAILED')
     assert.match(payload.error.message, /stat exploded/)
-    const { requestId, error, ...rest } = payload
+    const { requestId: _requestId, error: _error, ...rest } = payload
     assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse(rest).success)
   })
 

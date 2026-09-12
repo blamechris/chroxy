@@ -875,7 +875,7 @@ describe('WsBroadcaster', () => {
       const sentOracle = []
       const oracleBroadcaster = new WsBroadcaster({
         clients: manager.clients,
-        sendFn: (ws, msg) => sentOracle.push(ws),
+        sendFn: (ws, _msg) => sentOracle.push(ws),
       })
 
       const live = () => [...manager.clients.values()]

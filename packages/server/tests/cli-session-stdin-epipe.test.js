@@ -159,7 +159,7 @@ describe('stdin error listener', () => {
     // Manually register a listener to mirror what _spawnPersistentProcess does.
     // The mock child has already been injected so we can confirm the pattern
     // works by checking no throw occurs when 'error' is emitted with a listener.
-    stdinEmitter.on('error', (err) => {
+    stdinEmitter.on('error', (_err) => {
       // listener present — no unhandled error
     })
 

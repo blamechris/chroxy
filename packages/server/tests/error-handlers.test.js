@@ -232,7 +232,7 @@ describe('--no-encrypt + tunnel guard (#1850)', () => {
   it('no-encrypt guard does not trigger when tunnel is none', async () => {
     // The guard condition: config.noEncrypt && config.tunnel && config.tunnel !== 'none'
     // When tunnel is 'none', exit(1) should NOT be called
-    const { noEncryptTunnelGuard } = await import('../src/server-cli-guard.js').catch(() => null) || {}
+    const { noEncryptTunnelGuard: _noEncryptTunnelGuard } = await import('../src/server-cli-guard.js').catch(() => null) || {}
     // If the guard is not exported separately, verify via the condition logic directly
     const shouldExit = (noEncrypt, tunnel) =>
       noEncrypt && tunnel && tunnel !== 'none'

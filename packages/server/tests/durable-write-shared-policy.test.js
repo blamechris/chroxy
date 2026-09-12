@@ -19,7 +19,7 @@ import { confirmRenameDurable } from '../src/platform.js'
  * a plain rename. It is the verdict that had to stop drifting.
  */
 describe('durable-write shared policy (#7054)', () => {
-  const IS_WINDOWS = process.platform === 'win32'
+  const _IS_WINDOWS = process.platform === 'win32'
 
   it('a clean directory fsync reports no caveat', () => {
     const calls = []

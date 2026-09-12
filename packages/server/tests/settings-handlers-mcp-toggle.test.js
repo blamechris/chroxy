@@ -9,7 +9,7 @@
  *  - payload validation (missing server, non-boolean enabled)
  *  - unknown server (found:false) → MCP_SERVER_NOT_FOUND, no persist
  */
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { nsCtx } from './test-helpers.js'

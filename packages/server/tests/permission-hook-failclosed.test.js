@@ -58,8 +58,8 @@ async function getClosedPort() {
 // recognizable "decision" field) to exercise the unparseable-response path.
 async function startNoDecisionServer() {
   const server = createServer((req, res) => {
-    let body = ''
-    req.on('data', (c) => { body += c })
+    let _body = ''
+    req.on('data', (c) => { _body += c })
     req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"status":"ok"}') })
   })
   await new Promise((r) => server.listen(0, r))

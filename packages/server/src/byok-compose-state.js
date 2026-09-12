@@ -149,7 +149,6 @@ export class ByokComposeStateStore {
       // Persistence is best-effort: a write failure must not take down the
       // session that triggered it. The worst case degrades back to the
       // pre-#5081 "in-memory only" behaviour.
-      // eslint-disable-next-line no-console
       console.warn(`[byok-compose-state] failed to persist: ${err.message}`)
     }
   }
@@ -223,7 +222,6 @@ export async function sweepOrphanedComposeStacks({ store, backend } = {}) {
       swept += 1
     } catch (err) {
       failed += 1
-      // eslint-disable-next-line no-console
       console.warn(
         `[byok-compose-state] sweep of ${stack.projectId} failed (will retry next boot): ${err.message}`,
       )

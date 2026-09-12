@@ -4,7 +4,7 @@
  * Tests handleAuthMessage, handlePairMessage, and handleKeyExchange in
  * isolation using mock context objects — no running WsServer required.
  */
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSpy } from './test-helpers.js'
 import {
@@ -1838,8 +1838,8 @@ describe('handleKeyExchange', () => {
 
     it('clears the key exchange timeout on wrong message type', () => {
       const ws = makeMockWs()
-      let cleared = false
-      const fakeTimeout = { _cleared: false }
+      let _cleared = false
+      const _fakeTimeout = { _cleared: false }
       // We cannot intercept clearTimeout directly, but we verify the code path
       // does not throw when called with a real (already-cleared) timeout reference
       const client = {

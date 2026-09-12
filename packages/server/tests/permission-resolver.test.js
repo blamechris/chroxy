@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 
 /**
@@ -268,7 +268,7 @@ describe('permission-resolver — #6830 tool + persist enrichment', () => {
       permissionSessionMap: new Map(),
       pendingPermissions,
       getSessionManager: () => null,
-      resolveLegacyPermission: (requestId, decision) => {
+      resolveLegacyPermission: (requestId, _decision) => {
         // Mirrors ws-permissions.js: the entry is gone from pendingPermissions
         // by the time resolveLegacyPermission's caller-side cleanup runs.
         pendingPermissions.delete(requestId)

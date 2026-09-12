@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WebTaskManager, WebTaskUnavailableError, buildRemoteTaskArgs } from '../src/web-task-manager.js'
 

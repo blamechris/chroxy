@@ -79,7 +79,7 @@ class ShimmedCodexSession extends CodexSession {
     this._shimBin = shimBin
   }
 
-  async sendMessage(text) {
+  async sendMessage(_text) {
     if (!this._processReady) {
       this.emit('error', { message: 'Session is not running' })
       return

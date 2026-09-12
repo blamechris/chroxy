@@ -164,7 +164,7 @@ describe('destroy() resets _intentionalStop', () => {
 })
 
 describe('natural child crash still triggers respawn (regression)', () => {
-  it('emits error + schedules respawn when _intentionalStop is false', (t) => {
+  it('emits error + schedules respawn when _intentionalStop is false', (_t) => {
     const session = createReadySession()
     session._intentionalStop = false
     session._destroying = false

@@ -1,7 +1,5 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
-import { once } from 'node:events'
 
 import { createPermissionHandler } from '../src/ws-permissions.js'
 
@@ -165,9 +163,9 @@ describe('createPermissionHandler — validateHookAuth integration', () => {
     })
 
     const req = { headers: { authorization: 'Bearer test' }, on() {} }
-    let statusCode = null
+    let _statusCode = null
     const res = {
-      writeHead(code) { statusCode = code },
+      writeHead(code) { _statusCode = code },
       end() {},
       on() {},
     }

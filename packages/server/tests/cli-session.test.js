@@ -635,7 +635,7 @@ describe('CliSession._handleStreamStall (#4467: stream-stall recovery)', () => {
 describe('CliSession.destroy', () => {
   it('sets destroying flag and nulls child', () => {
     const session = createReadySession()
-    const child = session._child
+    const _child = session._child
     session.destroy()
     assert.equal(session._destroying, true)
     // destroy() sets _child = null after calling stdin.end()

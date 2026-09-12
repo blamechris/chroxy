@@ -15,7 +15,7 @@
  * unchanged and continues to be covered by base-session.test.js +
  * jsonl-subprocess-session.test.js.
  */
-import { describe, it, beforeEach, mock } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -325,7 +325,7 @@ describe('buildPerSessionSettingHandler', () => {
     const session = { fooFlag: true, setFooFlag: mock.fn(() => true) }
     const ctx = makeCtx(session, {
       sessionManager: {
-        getSession: (id) => ({ session, name: 'test' }),
+        getSession: (_id) => ({ session, name: 'test' }),
         serializeState: mock.fn(() => { throw new Error('disk full') }),
       },
     })

@@ -61,7 +61,7 @@ async function createClient(port, expectAuth = true) {
     try {
       const msg = JSON.parse(data.toString())
       messages.push(msg)
-    } catch (err) {
+    } catch (_err) {
       console.error('Failed to parse message:', data.toString())
     }
   })

@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -2591,7 +2591,6 @@ describe('SdkSession', () => {
 
       // Kick off iteration so the query is "mid-stream" when interrupt fires.
       const iterationPromise = (async () => {
-        // eslint-disable-next-line no-unused-vars
         for await (const _ of session._query) { /* drain */ }
       })()
 
