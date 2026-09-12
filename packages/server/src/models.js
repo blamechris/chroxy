@@ -436,8 +436,15 @@ function humanizeModelId(id) {
  *
  * The key roster is `MODEL_ENTRY_METADATA_KEYS` from `@chroxy/protocol` — the
  * same list the wire schema declares — so a field added to the entry schema is
- * carried by every construction site here without a second list to keep in
- * sync. Nothing is synthesized: a source that never supplies a key leaves the
+ * carried by every construction site THAT CALLS THIS HELPER without a second
+ * list to keep in sync. That is not every entry literal in this file:
+ * `computeFallbackModels()` builds the overlay and base rows as bare
+ * `{id,label,fullId,contextWindow}` literals and does NOT route through here,
+ * because an overlay row's metadata (a `provenance: 'manual'` in particular)
+ * is a producer decision that belongs with the stamping work, not with this
+ * plumbing. Adding a roster key does NOT make those two literals carry it.
+ *
+ * Nothing is synthesized: a source that never supplies a key leaves the
  * key ABSENT, so an entry with none of these fields stays byte-identical to
  * what it was before this change (and to what older clients already parse).
  *
@@ -797,9 +804,19 @@ export function createModelsRegistry(hooks = {}) {
           // learned override and ABOVE the provider's static table: it is
           // what the provider reported for this id on THIS refresh (live
           // discovery), so it beats a hand-maintained table row and the
-          // heuristic. Until this line existed, the `contextWindow` key
-          // `refreshDiscoveredModels()` passes was read by nothing and every
-          // discovered window was silently replaced by the 200k default.
+          // heuristic.
+          //
+          // This is a PRECEDENCE CLARIFICATION, not a repair of a dropped
+          // window on the live path: `refreshDiscoveredModels()` publishes
+          // the catalogue through `applyCatalog` BEFORE it calls updateModels
+          // (model-discovery.js), so the discovered window already reached
+          // this chain one slot below, as `providerMeta.contextWindow`. What
+          // the caller's key now additionally carries is (a) a window that
+          // sink refuses — `applyCatalog` stores only `Number.isInteger`
+          // values, so a fractional one became null and fell through to the
+          // 200k default — and (b) any caller with no provider metadata hook
+          // at all, which is the shape the follow-on stamping producers and
+          // the cache-reload path feed.
           const contextWindow = contextWindowOverrides.get(fullId)
             ?? usableContextWindow(m)
             ?? providerMeta?.contextWindow
