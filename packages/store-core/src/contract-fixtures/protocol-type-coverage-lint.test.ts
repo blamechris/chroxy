@@ -154,6 +154,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'session_pr_status',          // #7344 session PR/CI status chip — dashboard-only for the display slice (the mobile app header has no equivalent chip); mobile parity is #7425
   'session_pr_threads',         // #7430 unresolved review-thread count for the CI prefill line — dashboard-only because its only consumer (the CI chip's prefill action) is; mobile parity rides with #7425
   'shell_pending_approval',     // #6277 host-local user-shell approval — "waiting for host approval" banner; dashboard-only for v1, mobile parity deferred
+  'thinking_level_changed',     // #7792/#7795 gave this frame its first wire contract (ServerThinkingLevelChangedSchema), which is what made this lint see it — the asymmetry is PRE-EXISTING, not introduced there. The dashboard maps it (message-handler.ts:4233); the mobile app only IMPORTS the shared handler (message-handler.ts:35) and never wires it, so it drops the frame from all three senders. Mobile parity is #7807
   // activity_snapshot / activity_delta removed — the mobile app now feeds them
   // too (#6246/#6247, the Phase-2 mobile-parity fast-follow per epic #5159), so
   // they are no longer dashboard-only.
