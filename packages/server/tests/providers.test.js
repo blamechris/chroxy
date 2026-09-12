@@ -226,12 +226,25 @@ describe('Provider Registry', () => {
   it('thinkingKeywords: true is declared by exactly the modules that import detect-thinking-keyword.js', () => {
     const srcRoot = fileURLToPath(new URL('../src/', import.meta.url))
 
-    // Strip comments so neither regex can be satisfied by prose. Block
-    // comments go wholesale; a `//` run-on only when it is NOT the `//` of a
+    // Strip comments so neither regex can be satisfied by prose. ORDER IS
+    // LOAD-BEARING and was wrong in the first cut of this fix: it removed block
+    // comments FIRST with `/\/\*[\s\S]*?\*\//g`, so a `/*` appearing inside a
+    // LINE comment or a STRING — every glob in the tree (`fs/*`, `**/*.ts`,
+    // `/api/shell/*`) — opened a fake block that ran to the next `*/` anywhere
+    // in the file. That blacked out 12 src files, 5-147 lines each, including
+    // `acp-session.js:205` — the `thinkingKeywords: false` this PR adds — so
+    // flipping it to `true` was invisible to the declarer regex and the
+    // mutation that had been red went green.
+    //
+    // So: line comments first, and a block comment may only OPEN at the start
+    // of a line (after indentation) or be closed on the same line it opened.
+    // A `/*` that appears mid-line inside code or a string can no longer start
+    // a run-on. The `//` run-on is removed only when it is NOT the `//` of a
     // URL scheme, so `'https://…'` in a string survives intact.
     const stripComments = (text) => text
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
       .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+      .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ' ')
+      .replace(/\/\*[^\n]*?\*\//g, ' ')
 
     const walk = (dir, prefix = '') => {
       const out = []
@@ -244,8 +257,50 @@ describe('Provider Registry', () => {
     }
 
     const files = walk(srcRoot)
-    assert.ok(files.length > 50,
-      `expected the src walk to find the whole tree, got ${files.length} files — a walk that returned nothing would make both sets empty and this test vacuous`)
+    // The flat `src/*.js` alone is 191 files, so a `> 50` floor could not go
+    // red for the very regression it was added beside — the #7290/#7291 shape
+    // (the message claims more than the code performs). Two assertions now:
+    // the walk must have DESCENDED, and the count must be near the real 321.
+    assert.ok(files.some(f => f.includes('/')),
+      'the walk returned no subdirectory paths — it is not walking src/**, it is reading the flat src/*.js')
+    assert.ok(files.length > 250,
+      `expected the src walk to find the whole tree (321 files at the time of writing), got ${files.length} — the flat src/*.js alone is 191, so anything near that is a walk that stopped descending`)
+
+    // A CONTROL ON THE STRIPPER, not a sentinel. The previous version of this
+    // was a single known-positive (`importers.includes('sdk-session.js')`),
+    // and sdk-session.js happens to lie outside every blackout span, so it
+    // could not detect the run-on-block-comment defect the anchor's own
+    // comment said it existed for. Instead: for EVERY src file, every raw line
+    // that either regex could match must survive stripping unless the line is
+    // itself a comment. This goes red on the old stripper (acp-session.js's
+    // `thinkingKeywords: false,` is eaten by the fake block opened at line 200
+    // by the `fs/*` inside a line comment).
+    const evidenceLine = /detect-thinking-keyword\.js|thinkingKeywords:/
+    const eaten = []
+    for (const rel of files) {
+      const raw = readFileSync(join(srcRoot, rel), 'utf8')
+      const survived = new Set(stripComments(raw).split('\n').map(s => s.trim()).filter(Boolean))
+      for (const line of raw.split('\n')) {
+        if (!evidenceLine.test(line)) continue
+        const trimmed = line.trim()
+        // A comment line is allowed to disappear — that is the point of the
+        // stripper. `*` covers the continuation lines of a block comment,
+        // whose `/*` opener is on an earlier line.
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
+        const expected = stripComments(line).trim()
+        if (expected === '') continue
+        if (!survived.has(expected)) eaten.push(`${rel}: ${trimmed}`)
+      }
+    }
+    assert.deepEqual(eaten, [],
+      `the comment stripper removed ${eaten.length} non-comment line(s) that one of the two regexes would have matched — every one of these is a silent green: the evidence the roster is built from never reaches the regex`)
+
+    // A second, concrete control: a non-comment line from inside the largest
+    // blackout the old stripper produced (acp-session.js 200-346). If this
+    // line is gone, the stripper is eating executable code again.
+    const acpStripped = stripComments(readFileSync(join(srcRoot, 'acp-session.js'), 'utf8'))
+    assert.ok(acpStripped.includes('static hasAlternativeCredentials() { return true }'),
+      'acp-session.js:209 is real code inside the span the old stripper blacked out (200-346) — if it is missing, a `/*` in a line comment or a string has opened a run-on block again')
 
     const importers = []
     const declarers = []
@@ -257,12 +312,6 @@ describe('Provider Registry', () => {
     }
     assert.ok(importers.length > 0,
       'expected at least one src module to import detect-thinking-keyword.js — an empty roster would satisfy this test for the wrong reason')
-    // A known positive, not a roster: if the comment stripper ever ate a real
-    // import AND the declaration beside it, both sets would shrink together
-    // and the deepEqual below would still pass. This is the one file that must
-    // always be in `importers`, so that failure mode goes red instead.
-    assert.ok(importers.includes('sdk-session.js'),
-      'sdk-session.js imports detect-thinking-keyword.js — if it is missing here the scan itself is broken, not the source')
     assert.deepEqual(declarers, importers,
       'every module that scans for the magic keyword must declare thinkingKeywords: true, and no module that does not scan may declare it')
   })
