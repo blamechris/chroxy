@@ -98,11 +98,37 @@ export interface ResolvedThinkingLevels {
   defaultLevel: string
   /**
    * `model` when the roster came from the model's own catalog row, `legacy`
-   * when it fell back to `LEGACY_THINKING_LEVELS`. Callers log it; the point is
+   * when it fell back to `LEGACY_THINKING_LEVELS`, `none` when the row
+   * advertised nothing and the caller declared that this provider has no
+   * fallback roster (`legacyFallback: false`). Callers log it; the point is
    * that "this model advertised nothing" stays distinguishable from "this model
-   * advertised exactly the Claude three".
+   * advertised exactly the Claude three" — and, since #7784, from "this model
+   * advertised nothing and nothing stands in for it".
    */
-  source: 'model' | 'legacy'
+  source: 'model' | 'legacy' | 'none'
+}
+
+/** Options for `resolveThinkingLevels` / `thinkingLevelOptions`. */
+export interface ThinkingLevelResolveOptions {
+  /**
+   * #7784 — does `LEGACY_THINKING_LEVELS` stand in for a row that advertised
+   * nothing?
+   *
+   * The fallback is the CLAUDE family's real roster, not a neutral default, so
+   * the answer is a per-provider fact that only the server can derive
+   * (`isClaudeProvider`, one derivation, shipped to clients as the
+   * `thinkingLevelLegacyFallback` capability). Passing it here is what lets the
+   * picker and the server's gate call this ONE function with the SAME inputs
+   * and therefore get the same roster — before #7784 the client always took the
+   * fallback and the gate refused it on any non-Claude provider, so a
+   * pre-catalog codex session was offered three levels of which the gate
+   * accepted none.
+   *
+   * Defaults to `true`, which is every pre-#7784 caller's behaviour: a caller
+   * that has no provider fact in hand (store-core's replay, the dropdown's own
+   * empty-list fallback) keeps the Claude path exactly as it was.
+   */
+  legacyFallback?: boolean
 }
 
 /**
@@ -112,26 +138,37 @@ export interface ResolvedThinkingLevels {
  * wins outright — that is the provider's own answer about its own model, and
  * it is the whole point of #7730. Anything else (no row, no field, a field of
  * the wrong shape, an array that survives no element) falls back to
- * `LEGACY_THINKING_LEVELS`.
+ * `LEGACY_THINKING_LEVELS` — unless `legacyFallback: false` says this provider
+ * has no fallback roster, in which case the answer is an EMPTY list.
  *
- * The fallback is deliberate rather than fail-closed: it is the Claude family's
- * REAL roster, and returning an empty list would take the working control away
- * from every provider that has one today. It does mean an unreadable codex row
- * degrades to the Claude three rather than to nothing — recorded here instead
- * of hidden, because the alternative (reject everything when the row cannot be
- * read) turns a discovery hiccup into a dead dropdown.
+ * The fallback is deliberate rather than fail-closed where it applies: it is
+ * the Claude family's REAL roster, and returning an empty list there would take
+ * the working control away from every provider that has one today. Where it
+ * does NOT apply the empty list is the honest answer, and it is what stops the
+ * picker from offering levels the model has never claimed (#7784).
  *
  * `defaultLevel` is the row's `defaultReasoningLevel` when that value is
  * actually one of the offered levels, else the first offered level. Never a
  * value outside `levels`: the picker renders it as the selected option, and a
- * selected option that is not in the list renders as blank.
+ * selected option that is not in the list renders as blank. With no levels at
+ * all it is the empty string — there is no level to name.
  */
-export function resolveThinkingLevels(row?: ThinkingLevelSource | null): ResolvedThinkingLevels {
+export function resolveThinkingLevels(
+  row?: ThinkingLevelSource | null,
+  opts?: ThinkingLevelResolveOptions | null,
+): ResolvedThinkingLevels {
   const advertised = Array.isArray(row?.reasoningLevels)
     ? (row!.reasoningLevels as unknown[]).filter((l): l is string => isWellFormedThinkingLevel(l))
     : []
 
   if (advertised.length === 0) {
+    // Only an EXPLICIT `false` narrows. `undefined` (no opts, or an opts bag
+    // built from a capability the server has not sent yet) keeps the legacy
+    // fallback, so an older daemon and every caller that cannot know the
+    // provider fact behave exactly as they did before #7784.
+    if (opts?.legacyFallback === false) {
+      return { levels: [], defaultLevel: '', source: 'none' }
+    }
     return {
       levels: [...LEGACY_THINKING_LEVELS],
       defaultLevel: LEGACY_DEFAULT_THINKING_LEVEL,
@@ -160,7 +197,17 @@ export function formatThinkingLevelLabel(level: string): string {
   return level.charAt(0).toUpperCase() + level.slice(1)
 }
 
-/** `resolveThinkingLevels` + labels, ready for a `<select>`. */
-export function thinkingLevelOptions(row?: ThinkingLevelSource | null): ThinkingLevelOption[] {
-  return resolveThinkingLevels(row).levels.map((id) => ({ id, label: formatThinkingLevelLabel(id) }))
+/**
+ * `resolveThinkingLevels` + labels, ready for a `<select>`.
+ *
+ * This is the PICKER's producer, and `resolveThinkingLevels` is the GATE's, so
+ * the two answer the same membership question from the same code on the same
+ * inputs. `packages/server/tests/thinking-level-roster-parity.test.js` drives a
+ * roster row through both and compares the sets in both directions (#7784).
+ */
+export function thinkingLevelOptions(
+  row?: ThinkingLevelSource | null,
+  opts?: ThinkingLevelResolveOptions | null,
+): ThinkingLevelOption[] {
+  return resolveThinkingLevels(row, opts).levels.map((id) => ({ id, label: formatThinkingLevelLabel(id) }))
 }

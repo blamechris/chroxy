@@ -983,8 +983,18 @@ describe('App', () => {
         sessions: [sessionWithProvider('codex')],
         activeSessionId: 's1',
         availableProviders: [
-          { name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false } },
+          { name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false, thinkingLevelLegacyFallback: false } },
         ],
+        // #7784: the select needs a roster row that ADVERTISES levels now — a
+        // codex model that has advertised none is offered nothing (the picker
+        // may not offer a roster the gate refuses), so pinning "codex gets the
+        // select" against an empty roster would pin the bug.
+        modelsByProvider: { codex: { models: [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5', reasoningLevels: ['low', 'high'] }], defaultModelId: null } },
+        getActiveSessionState: () => ({
+          messages: [], streamingMessageId: null, activeModel: 'gpt-5.5', permissionMode: null,
+          contextUsage: null, sessionCost: null, isIdle: true, activeAgents: [],
+          isPlanPending: false, thinkingLevel: null,
+        }),
       }
       render(<App />)
       // The dropdown is offered — codex does take a reasoning-effort setting…
@@ -999,7 +1009,10 @@ describe('App', () => {
         sessions: [sessionWithProvider('claude-sdk')],
         activeSessionId: 's1',
         availableProviders: [
-          { name: 'claude-sdk', capabilities: { thinkingLevel: true, thinkingKeywords: true } },
+          // #7784: claude-sdk's rows carry no reasoningLevels, so the legacy
+          // fallback is what fills this select — and whether it applies is the
+          // server's answer, not the client's.
+          { name: 'claude-sdk', capabilities: { thinkingLevel: true, thinkingKeywords: true, thinkingLevelLegacyFallback: true } },
         ],
       }
       render(<App />)
@@ -1036,12 +1049,16 @@ describe('App', () => {
       conversationId: null, provider: 'codex',
     }
 
-    function codexStateWith(models: unknown[], activeModel: string | null) {
+    // #7784: `thinkingLevelLegacyFallback: false` is what the server sends for
+    // every non-Claude provider — the legacy triple is the Claude family's
+    // roster, and the picker may not stand it in for a codex row that
+    // advertised nothing, because the gate refuses all three there.
+    function codexStateWith(models: unknown[], activeModel: string | null, legacyFallback = false) {
       return {
         connectionPhase: 'connected' as const,
         sessions: [codexSession],
         activeSessionId: 's1',
-        availableProviders: [{ name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false } }],
+        availableProviders: [{ name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false, thinkingLevelLegacyFallback: legacyFallback } }],
         modelsByProvider: { codex: { models, defaultModelId: null } },
         getActiveSessionState: () => ({
           messages: [],
@@ -1072,15 +1089,45 @@ describe('App', () => {
       expect(levelOptions()).toEqual(['low', 'zzz', 'xhigh'])
     })
 
-    it('falls back to the Claude triple for a model row that advertises none', () => {
+    it('falls back to the legacy triple for a model row that advertises none WHERE THAT FALLBACK APPLIES', () => {
       // The control. Without it, "the picker offers the model's levels" would
       // also pass for a picker that offers everything it has ever seen.
+      // `thinkingLevelLegacyFallback: true` is what the server sends for the
+      // Claude family, whose rows carry no reasoningLevels at all — the triple
+      // is that family's real roster and the gate accepts it there.
       stateOverrides = codexStateWith(
         [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
         'gpt-5.5',
+        true,
       )
       render(<App />)
       expect(levelOptions()).toEqual(['default', 'high', 'max'])
+    })
+
+    it('offers NOTHING — and drops the control — for a row that advertises none where it does NOT (#7784)', () => {
+      // The shipped pre-catalog codex state. The picker used to offer the
+      // Claude triple here while the server refused all three with
+      // THINKING_LEVEL_NOT_APPLIED, so every selection snapped back. The
+      // control disappearing is the honest answer: this model has claimed no
+      // levels. Same shape as #7728 dropping the MODEL picker on an empty
+      // roster — and this is the ONE pair of tests in this file that would both
+      // pass if the fallback flag were ignored in either direction, so they are
+      // kept adjacent.
+      stateOverrides = codexStateWith(
+        [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        'gpt-5.5',
+        false,
+      )
+      render(<App />)
+      expect(screen.queryByLabelText('Thinking level')).not.toBeInTheDocument()
+    })
+
+    it('drops the control while the roster is still in flight on a provider with no fallback', () => {
+      // No row for the active model yet. The old memo resolved that to the
+      // Claude triple too.
+      stateOverrides = codexStateWith([], 'gpt-5.5', false)
+      render(<App />)
+      expect(screen.queryByLabelText('Thinking level')).not.toBeInTheDocument()
     })
 
     it('matches the roster row on the FULL id as well as the short id', () => {

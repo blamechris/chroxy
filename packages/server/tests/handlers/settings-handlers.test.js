@@ -2636,19 +2636,28 @@ describe('settings-handlers', () => {
       // no enum, no Set, no union and no option list anywhere in this repo —
       // which is the point: if any of the six removed literals came back, this
       // provider's own answer about its own model would stop being honoured.
+      //
+      // #7784: the gate reads the ROSTER row — the rows `available_models`
+      // carried, i.e. `getRegistryForProvider(provider).getModels()` — so the
+      // row has to reach the registry, which for a non-Claude provider means
+      // `getFallbackModels()`. `getModelMetadata` is kept in step because the
+      // registry consults it for labels and windows; it is no longer what the
+      // gate asks, which is the whole point of that issue.
+      const INVENTED_ROW = Object.freeze({
+        id: 'model-with-zzz',
+        label: 'Invented',
+        fullId: 'model-with-zzz',
+        contextWindow: null,
+        reasoningLevels: ['low', 'zzz', 'xhigh'],
+        defaultReasoningLevel: 'zzz',
+      })
       class InventedLevelProviderSession {
         static claudeFamily = false
         static get capabilities() { return { thinkingLevel: true } }
+        static getFallbackModels() { return [INVENTED_ROW] }
         static getModelMetadata(modelId) {
           if (modelId !== 'model-with-zzz') return null
-          return {
-            id: modelId,
-            label: 'Invented',
-            fullId: modelId,
-            contextWindow: null,
-            reasoningLevels: ['low', 'zzz', 'xhigh'],
-            defaultReasoningLevel: 'zzz',
-          }
+          return { ...INVENTED_ROW }
         }
         sendMessage() {}
         interrupt() {}
@@ -2826,9 +2835,17 @@ describe('settings-handlers', () => {
         }
       })
 
-      it('REJECTS on a NON-Claude provider whose getModelMetadata THROWS (a cannot-check is not a pass)', async () => {
+      it('REJECTS on a NON-Claude provider whose ROSTER LOOKUP THROWS (a cannot-check is not a pass)', async () => {
+        // #7784 moved the row source from `getModelMetadata` to the roster the
+        // client was SENT, so the throwing seam moved with it: building a
+        // non-Claude provider's registry runs `getFallbackModels()`, and a
+        // throwing one turns the row lookup into a cannot-check. Named after
+        // what actually throws — the previous spelling of this test would now
+        // never reach a throw at all, and a green test whose scenario is
+        // unconstructible is the failure mode docs/false-safety-guards.md is a
+        // catalogue of.
         class ThrowingNonClaudeSession extends NoRosterNonClaudeSession {
-          static getModelMetadata() { throw new Error('catalog unavailable') }
+          static getFallbackModels() { throw new Error('catalog unavailable') }
         }
         registerProvider('test-throwing-non-claude', ThrowingNonClaudeSession)
         const session = createMockSession()
@@ -2908,39 +2925,47 @@ describe('settings-handlers', () => {
         assert.equal(session.setThinkingLevel.lastCall[0], 'high')
       })
 
-      it('a THROWING getModelMetadata leaves the RESOLVED CLASS authoritative', async () => {
+      it('a THROWING ROSTER LOOKUP leaves the RESOLVED CLASS authoritative', async () => {
         // Two lookups, two failure meanings: `getProvider` resolving is what
-        // says "Claude family"; `getModelMetadata` says only what the model ROW
-        // is. Re-merging them into one try/catch — the shape that nulled
-        // `ProviderClass` whenever either threw — reds this test: the live
-        // session's constructor here is deliberately a class that declares
-        // `claudeFamily = false`, and isClaudeProvider treats a passed class as
-        // authoritative, so the downgraded classification answers false, the
-        // legacy narrowing fires, and `high` is rejected on a provider whose
-        // registry class says Claude. The name map cannot rescue it either — it
-        // is never consulted once a class with a boolean flag is passed.
-        class ThrowingRowClaudeSession extends LegacyRosterProviderSession {
-          static getModelMetadata() { throw new Error('row lookup exploded') }
+        // says which FAMILY this is; the roster lookup says only what the model
+        // ROW is. Re-merging them into one try/catch — the shape that nulled
+        // `ProviderClass` whenever either threw — reds this test, and the
+        // direction is deliberate: the REGISTRY class here declares
+        // `claudeFamily = false` while the live session's constructor declares
+        // true, so a downgrade to the constructor would turn a provider with no
+        // fallback roster into one that has the Claude triple and ACCEPT `high`
+        // on a model that advertised nothing.
+        //
+        // #7784 moved which call is the later one — the row now comes from the
+        // roster the client was sent, and building a non-Claude provider's
+        // registry runs `getFallbackModels()`. The Claude direction is no longer
+        // constructible at all (a Claude-family provider shares the default
+        // registry, which `getRegistryForProvider` returns without running any
+        // provider code, so nothing there can throw), which is why this asserts
+        // the non-Claude direction instead of a scenario that cannot happen.
+        class ThrowingRosterNonClaudeSession extends NoRosterNonClaudeSession {
+          static claudeFamily = false
+          static getFallbackModels() { throw new Error('roster lookup exploded') }
         }
-        class NotClaudeWrapperSession { static claudeFamily = false }
-        registerProvider('test-throwing-claude-class', ThrowingRowClaudeSession)
+        class ClaudeWrapperSession { static claudeFamily = true }
+        registerProvider('test-throwing-roster-class', ThrowingRosterNonClaudeSession)
         const session = createMockSession()
         // Own property, so the mock's prototype chain is untouched while
-        // `session.constructor` reports the non-Claude wrapper.
-        Object.defineProperty(session, 'constructor', { value: NotClaudeWrapperSession, configurable: true })
-        session.model = 'claude-sonnet-4-6'
+        // `session.constructor` reports the Claude wrapper.
+        Object.defineProperty(session, 'constructor', { value: ClaudeWrapperSession, configurable: true })
+        session.model = 'gpt-5-codex'
         session.setThinkingLevel = createSpy(async () => {})
         const sessions = new Map()
-        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-claude-class' })
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-roster-class' })
         const ctx = makeCtx(sessions)
         const ws = makeWs()
         const client = makeClient({ activeSessionId: 's1' })
 
         await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-claude-throw-class' }, ctx)
 
-        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
+        assert.equal(session.setThinkingLevel.callCount, 0,
           'a class that really RESOLVED must stay authoritative when a LATER call throws')
-        assert.equal(session.setThinkingLevel.lastCall[0], 'high')
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
       })
 
       it('classifies from the SESSION CLASS when the entry carries no provider name', async () => {

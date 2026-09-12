@@ -491,9 +491,9 @@ export declare const CreateSessionSchema: z.ZodObject<{
         "danger-full-access": "danger-full-access";
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
+        none: "none";
         worktree: "worktree";
         sandbox: "sandbox";
-        none: "none";
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
@@ -1337,9 +1337,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         "danger-full-access": "danger-full-access";
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
+        none: "none";
         worktree: "worktree";
         sandbox: "sandbox";
-        none: "none";
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;

@@ -24,7 +24,7 @@ import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { CodexAppServerSession } from './codex-app-server-session.js'
 import { UserShellSession } from './user-shell-session.js'
-import { registerProviderRegistry } from './models.js'
+import { registerProviderRegistry, thinkingLevelLegacyFallbackApplies } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import {
@@ -258,6 +258,18 @@ export function getProviderDataDirs() {
  * supports session-scoped rules iff its prototype has `setPermissionRules`.
  * Clients use this to gate the "Allow for Session" UI affordance (#3072).
  *
+ * `thinkingLevelLegacyFallback` (#7784) is derived the same way — from the
+ * class, not from a name list — and answers one question for the CLIENT: when
+ * this provider's active model row advertises no reasoning levels, does the
+ * legacy triple stand in for it? Only the Claude family says yes, and the
+ * server's `set_thinking_level` gate asks the SAME derivation
+ * (`thinkingLevelLegacyFallbackApplies`), so the picker cannot offer a roster
+ * the gate refuses. Before this the dashboard always took the fallback and had
+ * no way to know better: a pre-catalog codex session was offered three levels
+ * of which the gate accepted none, and giving the dashboard a list of provider
+ * names to check instead would be the hardcoded-roster defect #7730 removed.
+ *
+
  * `auth` (#3404 audit F1+F5) summarises whether the provider can actually run
  * sessions right now and which billing identity is on the hook. Lets the
  * dashboard grey-out unusable providers and surface a billing-confidence
@@ -282,6 +294,7 @@ export function listProviders() {
       capabilities: {
         ...(ProviderClass.capabilities || {}),
         sessionRules: typeof ProviderClass.prototype.setPermissionRules === 'function',
+        thinkingLevelLegacyFallback: thinkingLevelLegacyFallbackApplies(name, ProviderClass),
       },
       auth: getProviderAuthInfo(name, ProviderClass),
     })
