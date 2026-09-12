@@ -189,6 +189,16 @@ export class CodexAppServerSession extends BaseSession {
     this._threadId = null
     this._activeTurn = null // { messageId, turnId, didStreamStart }
     this._lastUsage = null
+    // #7724 — initialised HERE, not left undefined until the handshake resolves.
+    // A consumer reading `this._capabilities?.supportsX` before start() finishes
+    // (a request racing the handshake, or a retry after an initialize rejection)
+    // would get `undefined` → falsy → feature disabled, which is the
+    // fail-UNSAFE direction this module exists to avoid. `deriveCapabilities()`
+    // with no signals is a pure call returning all-true, the same answer an
+    // unparseable version gets, so the pre-handshake state and the
+    // cannot-determine state agree.
+    this._capabilities = deriveCapabilities()
+    this._handshake = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
     this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
@@ -207,6 +217,15 @@ export class CodexAppServerSession extends BaseSession {
     // through this; the #6629 silence watchdog keeps using the globals directly.
     this._setTimer = typeof opts.setTimer === 'function' ? opts.setTimer : setTimeout
     this._clearTimer = typeof opts.clearTimer === 'function' ? opts.clearTimer : clearTimeout
+    // #7724 — injectable client factory, same seam idiom as `setTimer` above and
+    // `watchFactory` in models.js. start() otherwise constructs the client inline,
+    // which makes the handshake wiring reachable only by spawning a real `codex
+    // app-server` — so the capture-the-handshake change (the actual defect this
+    // fixes) could be reverted with the whole suite green. Production never
+    // passes this.
+    this._createClient = typeof opts.createClient === 'function'
+      ? opts.createClient
+      : (clientOpts) => new CodexAppServerClient(clientOpts)
     // #6638: per-session sandbox override (create_session `codexSandbox`) — wins
     // over CHROXY_CODEX_SANDBOX / the default. Applied at thread start.
     this._codexSandbox = opts.codexSandbox || null
@@ -268,7 +287,7 @@ export class CodexAppServerSession extends BaseSession {
     // _onClientExit — rather than a fresh re-resolve.
     const attemptedBinary = CodexAppServerSession.resolvedBinary
     this._spawnedBinary = attemptedBinary
-    this._client = new CodexAppServerClient({
+    this._client = this._createClient({
       bin: attemptedBinary,
       cwd: this.cwd,
       env: this._buildChildEnv(),

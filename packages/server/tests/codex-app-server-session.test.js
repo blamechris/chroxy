@@ -6,6 +6,7 @@ import { join } from 'path'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
 import { setLogListener } from '../src/logger.js'
+import { CAPABILITY_FLOORS } from '../src/codex-protocol-capabilities.js'
 
 // #6605 Phase 1 — the codex app-server DRIVING layer. These pin the JSON-RPC
 // transport routing and the app-server-notification → Chroxy-event mapping
@@ -1571,6 +1572,95 @@ describe('#7724 codex version gate + deprecation notices', () => {
     return lines
   }
 
+  /**
+   * A fake app-server client: records what was requested and replies from a
+   * script. Enough to drive start() to completion without spawning anything.
+   */
+  function fakeClient({ userAgent, thread }) {
+    const calls = []
+    const handlers = {}
+    return {
+      calls,
+      on(ev, fn) { handlers[ev] = fn },
+      async initialize(clientInfo) { calls.push(['initialize', clientInfo]); return userAgent === undefined ? {} : { userAgent } },
+      async request(method, params) {
+        calls.push([method, params])
+        if (method === 'thread/start') return { thread }
+        return {}
+      },
+      notify() {},
+      close() {},
+    }
+  }
+  const startWithFake = async (opts) => {
+    const { s, cleanup } = mkSession({ createClient: () => fakeClient(opts) })
+    await s.start()
+    return { s, cleanup }
+  }
+
+  it('CAPTURES the handshake userAgent — the defect this fixes, pinned at the call site', async () => {
+    // The pure parser is covered in codex-protocol-capabilities.test.js. What
+    // this pins is the WIRING: reverting start() to `await initialize(...)` with
+    // no assignment left 110/110 green before this case existed, so the headline
+    // change was revertible without a single test noticing.
+    const { s, cleanup } = await startWithFake({
+      userAgent: 'chroxy/0.128.0 (Mac OS 26.6.2; arm64) unknown (chroxy; 1)',
+      thread: { id: 't1' }, // no cliVersion — the userAgent must be what answers
+    })
+    try {
+      assert.equal(s._handshake?.userAgent, 'chroxy/0.128.0 (Mac OS 26.6.2; arm64) unknown (chroxy; 1)')
+      assert.equal(s._capabilities.version, '0.128.0', 'derived from the handshake, not left at the pre-start default')
+      assert.equal(s._capabilities.supportsMidTurnSettings, false, 'and the derived value actually gates')
+      assert.equal(s._threadId, 't1', 'the session still started')
+    } finally { cleanup() }
+  })
+
+  it('prefers thread.cliVersion over the userAgent, at the call site', async () => {
+    // Deliberately DISAGREEING signals, so the winner is observable — an
+    // agreeing pair could not tell which was read.
+    const { s, cleanup } = await startWithFake({
+      userAgent: 'chroxy/0.100.0 (Linux 6.1; x86_64)',
+      thread: { id: 't2', cliVersion: '0.154.0' },
+    })
+    try {
+      assert.equal(s._capabilities.version, '0.154.0', 'cliVersion won')
+      assert.equal(s._capabilities.supportsMidTurnSettings, true)
+      assert.equal(s._capabilities.belowFloor, false, 'and the below-floor verdict followed the winning signal')
+    } finally { cleanup() }
+  })
+
+  it('a BELOW-FLOOR binary still starts the session and can send a turn (AC: gate features, never the connection)', async () => {
+    const { s, cleanup } = await startWithFake({
+      userAgent: 'chroxy/0.100.0 (Linux 6.1; x86_64)',
+      thread: { id: 't3' },
+    })
+    try {
+      assert.equal(s._capabilities.belowFloor, true, 'precondition: this IS below the floor')
+      // Asserted positively, not as the absence of an abort: the session reached
+      // ready, and a turn actually reaches the wire.
+      assert.equal(s._threadId, 't3')
+      assert.equal(s._processReady, true, 'the session is ready despite the old binary')
+      await s.sendMessage('hello', [], {})
+      assert.ok(
+        s._client.calls.some(([m]) => m === 'turn/start'),
+        `a turn was sent; saw ${JSON.stringify(s._client.calls.map(([m]) => m))}`,
+      )
+    } finally { cleanup() }
+  })
+
+  it('an UNPARSEABLE userAgent and a MISSING one both leave every gate supported', async () => {
+    for (const userAgent of ['codex app-server, version unknown', undefined]) {
+      const { s, cleanup } = await startWithFake({ userAgent, thread: { id: 't4' } })
+      try {
+        assert.equal(s._capabilities.version, null, `version unknown for ${JSON.stringify(userAgent)}`)
+        for (const cap of Object.keys(CAPABILITY_FLOORS)) {
+          assert.equal(s._capabilities[cap], true, `${cap} stays supported for ${JSON.stringify(userAgent)}`)
+        }
+        assert.equal(s._threadId, 't4', 'and the session still started')
+      } finally { cleanup() }
+    }
+  })
+
   it('logs a deprecationNotice BETWEEN turns, where the active-turn gate would swallow it', () => {
     const { s, cleanup } = mkSession()
     try {
@@ -1612,10 +1702,22 @@ describe('#7724 codex version gate + deprecation notices', () => {
   it('capabilities default to SUPPORTED before any handshake has happened', () => {
     // A session that has not connected yet must not report features as absent —
     // the same fail-safe direction the parser uses for an unknown version.
+    //
+    // This assertion was originally written as
+    //   `s._capabilities === undefined || s._capabilities?.supportsModelList !== false`
+    // which could not fail: nothing assigned `_capabilities` before start(), so
+    // the first disjunct was unconditionally true on a fresh session and the
+    // right-hand side never evaluated. The hedge that made it safe to write is
+    // exactly what made it vacuous. It is unconditional now, and the
+    // constructor assigns the value it asserts.
     const { s, cleanup } = mkSession()
     try {
-      assert.ok(s._capabilities === undefined || s._capabilities?.supportsModelList !== false,
-        'an un-handshaken session never reports a feature as unsupported')
+      assert.equal(s._capabilities.version, null, 'no version is known before a handshake')
+      assert.equal(s._capabilities.belowFloor, false, '"below the floor" is a verdict we do not have yet')
+      for (const cap of Object.keys(CAPABILITY_FLOORS)) {
+        assert.equal(s._capabilities[cap], true, `${cap} must default to supported, never undefined`)
+      }
+      assert.equal(s._handshake, null)
     } finally { cleanup() }
   })
 })

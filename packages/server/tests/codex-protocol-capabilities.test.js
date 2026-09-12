@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   parseCodexVersion,
+  parseBareVersion,
   deriveCapabilities,
   isUnknownMethodError,
   probeMethodSupported,
@@ -39,6 +40,11 @@ describe('#7724 parseCodexVersion', () => {
     ['UNPARSEABLE — not a string', undefined, null],
     ['UNPARSEABLE — null', null, null],
     ['a two-component version is not a semver core', 'chroxy/0.154 (Linux 6.1)', null],
+    // A FOUR-component vendor build must REFUSE to parse, not truncate. A
+    // truncated '0.128.0' would compare equal to the floor instead of above it —
+    // a confident wrong answer, where null is the fail-safe one.
+    ['a four-component build refuses rather than truncating', 'chroxy/0.128.0.99 (Linux 6.1)', null],
+    ['and the same with no parenthetical', 'chroxy/1.2.3.4', null],
   ]
   for (const [label, input, expected] of CASES) {
     it(label, () => { assert.equal(parseCodexVersion(input), expected) })
@@ -104,6 +110,15 @@ describe('#7724 deriveCapabilities', () => {
     const caps = deriveCapabilities({ cliVersion: '0.128.0', userAgent: 'chroxy/0.154.0 (Mac OS 26.6.2; arm64)' })
     assert.equal(caps.version, '0.128.0')
     assert.equal(caps.supportsMidTurnSettings, false, 'the cliVersion answer is the one that took effect')
+  })
+
+  it('accepts a v-prefixed or space-padded cliVersion instead of silently demoting it', () => {
+    // The old synthetic-`x/`-prefix parse rejected these, so the userAgent
+    // quietly became the answer — a surprising reason for a fallback to fire.
+    assert.equal(parseBareVersion('v0.154.0'), '0.154.0')
+    assert.equal(parseBareVersion('  0.154.0  '), '0.154.0')
+    assert.equal(parseBareVersion('0.128.0.99'), null, 'and a 4-component build still refuses')
+    assert.equal(deriveCapabilities({ cliVersion: 'v0.154.0', userAgent: 'chroxy/0.100.0 (Linux 6.1)' }).version, '0.154.0')
   })
 
   it('falls back to the userAgent when cliVersion is absent or junk', () => {

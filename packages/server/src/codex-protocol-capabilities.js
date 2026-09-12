@@ -73,7 +73,28 @@ export function parseCodexVersion(userAgent) {
   if (typeof userAgent !== 'string') return null
   // Anchored at the start: <originator>/<version>. The originator may not
   // contain a slash or whitespace, so the first `/` is unambiguous.
-  const m = /^[^/\s]+\/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)/.exec(userAgent.trim())
+  //
+  // The trailing `(?![\d.])` is a right-hand boundary, and it matters: without
+  // it a four-component vendor build like `0.128.0.99` captures as `0.128.0` and
+  // silently compares EQUAL to the floor rather than above it. Refusing to parse
+  // is the fail-safe answer (an unknown version enables every gate); a truncated
+  // one is a confident wrong answer.
+  const m = /^[^/\s]+\/(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?![\d.])/.exec(userAgent.trim())
+  return m ? m[1] : null
+}
+
+/**
+ * Parse a bare semver, as `thread.cliVersion` reports it.
+ *
+ * Separate from `parseCodexVersion` rather than reusing it behind a synthetic
+ * `x/` prefix: the prefix trick worked, but it silently demoted any value the
+ * userAgent grammar rejects (a `v` prefix, surrounding spaces) from "the
+ * preferred signal" to "no signal", which is a surprising reason for the
+ * fallback to fire.
+ */
+export function parseBareVersion(version) {
+  if (typeof version !== 'string') return null
+  const m = /^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?![\d.])/.exec(version.trim())
   return m ? m[1] : null
 }
 
@@ -109,7 +130,7 @@ export function deriveCapabilities(rawSignals = {}) {
   // try-block, so a throw here is relabelled a handshake failure and REFUSES the
   // session, which is precisely the outcome the gate must never cause.
   const signals = rawSignals ?? {}
-  const version = (typeof signals.cliVersion === 'string' && parseCodexVersion(`x/${signals.cliVersion}`))
+  const version = parseBareVersion(signals.cliVersion)
     || parseCodexVersion(signals.userAgent)
     || null
 
