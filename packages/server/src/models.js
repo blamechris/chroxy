@@ -1088,6 +1088,30 @@ export function createModelsRegistry(hooks = {}) {
 const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
 
 /**
+ * #7722 — a stable signature for ONE provider's overlay slice, used to decide
+ * whether a reload actually moved that provider's registry. Three
+ * normalisations, each for one way an edit-free save can look like an edit:
+ *
+ *   - the `.sort()` on entries: a Map iterates in insertion order, which is the
+ *     file's ROW order, so moving two lines in models.json would otherwise read
+ *     as a change;
+ *   - `canonicalStringify` rather than `JSON.stringify`: every row is rebuilt as
+ *     a fixed-shape object by `loadModelsOverlayResult`, EXCEPT `pricing`, which
+ *     is copied through verbatim from `JSON.parse` and so carries the file's key
+ *     order;
+ *   - the empty/absent short-circuit: a provider mentioned by neither overlay
+ *     must compare equal to itself, not read as changed.
+ *
+ * @param {Map<string, object>|undefined} slice
+ * @returns {string}
+ */
+function overlaySliceSignature(slice) {
+  if (!slice || slice.size === 0) return '[]'
+  const rows = [...slice.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  return canonicalStringify(rows)
+}
+
+/**
  * #5932 — hot-reload the user model overlay (`~/.chroxy/models.json`) into the
  * DEFAULT (Claude) registry + the module-level pricing path, without a daemon
  * restart. Re-reads the file, re-folds it into the registry (re-merging with
@@ -1100,9 +1124,10 @@ const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
  * action). Never throws.
  *
  * #7722: the result also carries `providers` — one `{ provider, models,
- * defaultModelId }` snapshot per NON-Claude registry this reload touched — so
- * the caller can emit a provider-tagged `available_models` broadcast for each
- * instead of labelling every roster `claude-sdk`.
+ * defaultModelId }` snapshot per NON-Claude registry whose overlay slice this
+ * reload actually CHANGED — so the caller can emit a provider-tagged
+ * `available_models` broadcast for each instead of labelling every roster
+ * `claude-sdk`. A registry the save did not move is absent, not empty.
  *
  * @param {string} [path]
  * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null, providers?: {provider: string, models: object[], defaultModelId: string|null}[] }}
@@ -1115,40 +1140,65 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   }
   defaultOverlay = result.overlay
   defaultRegistry.applyOverlay(result.overlay)
-  // #7722: the provider registries this reload TOUCHED — the union of the names
-  // the NEW overlay carries, the names the PREVIOUS overlay carried (a provider
-  // that lost all its rows changed too, and its overlay-only models drop), and
-  // every already-built registry re-folded below. Collected BEFORE
-  // `providerOverlays` is reassigned so the previous names are still readable.
-  const touched = new Set([
-    ...providerOverlays.keys(),
-    ...result.byProvider.keys(),
-    ...providerRegistryCache.keys(),
-  ])
+  // #7722: the provider registries whose roster this reload actually CHANGED.
+  // A reload can only move a provider registry through its overlay SLICE — the
+  // fallback list and the on-disk cache are untouched here — so the changed set
+  // is exactly the names whose slice differs between the PREVIOUS
+  // `providerOverlays` and the NEW `result.byProvider`: a name added, a name
+  // that lost all its rows, or a row edited in place. Read BEFORE
+  // `providerOverlays` is reassigned below, so the previous slices are still
+  // readable.
+  //
+  // An already-built registry whose slice did NOT move is deliberately absent:
+  // re-broadcasting a byte-identical roster is pure wire cost, and a
+  // config-driven / anthropic-compatible registry seeds its fallback list from
+  // catalogMeta (hundreds of rows) over a tunnel that may be on a cellular link.
+  const changed = []
+  for (const name of new Set([...providerOverlays.keys(), ...result.byProvider.keys()])) {
+    const before = overlaySliceSignature(providerOverlays.get(name))
+    const after = overlaySliceSignature(result.byProvider.get(name))
+    if (before === after) continue
+    changed.push(name)
+  }
   // #6377: re-fold the per-provider slices into every ALREADY-BUILT non-Claude
-  // registry. A provider whose registry hasn't been built yet picks up its slice
-  // lazily on first getRegistryForProvider() (which reads providerOverlays), so
-  // only the cached ones need an explicit re-fold here. A provider that lost all
-  // its overlay entries gets an empty Map → its overlay-only rows drop.
+  // registry. A provider whose registry hasn't been built yet needs no re-fold
+  // here — `getRegistryForProvider` seeds a fresh registry from
+  // `providerOverlays` on first build. #7722 made that first build happen
+  // EAGERLY for a CHANGED provider: the snapshot loop below calls
+  // `getRegistryForProvider(name)` so the reload can report that provider's
+  // roster, which for an overlay-tagged provider moves the build — the
+  // `registry.loadCache()` disk read included — off the first session and onto
+  // the reload. Providers the overlay never mentions stay lazy. A provider that
+  // lost all its overlay entries gets an empty Map → its overlay-only rows drop.
   providerOverlays = result.byProvider
   for (const [name, registry] of providerRegistryCache) {
     registry.applyOverlay(providerOverlays.get(name) ?? new Map())
   }
-  // #7722: snapshot each touched provider's roster. getRegistryForProvider()
-  // folds the new slice into a registry that had not been built yet, and returns
-  // the DEFAULT registry for a Claude-family / unknown / unregistered name —
-  // those are skipped, so a mistyped `provider` field can never broadcast the
-  // Claude roster under that tag, and a Claude-tagged row (a documented no-op)
-  // can't produce a duplicate of the default broadcast the caller already sends.
+  // #7722: snapshot each changed provider's roster. A Claude-family / unknown /
+  // unregistered name resolves to the DEFAULT registry and is skipped, so a
+  // mistyped `provider` field can never broadcast the Claude roster under that
+  // tag, and a Claude-tagged row (a documented no-op) can't produce a duplicate
+  // of the default broadcast the caller already sends.
+  //
+  // Wrapped because the docstring above promises this function NEVER THROWS and
+  // `watchModelsOverlay`'s `fire()` only try/catches `onReload`, not the reload
+  // itself — it runs from a setTimeout, where a throw is an unhandled exception.
+  // `getRegistryForProvider` executes provider-class code (`getFallbackModels()`,
+  // `getModelMetadata`) that a reload never used to reach; every shipping
+  // implementation is pure, so this only ever costs a warn line.
   const providers = []
-  for (const name of touched) {
-    const registry = getRegistryForProvider(name)
-    if (registry === defaultRegistry) continue
-    providers.push({
-      provider: name,
-      models: registry.getModels(),
-      defaultModelId: registry.getDefaultModelId(),
-    })
+  for (const name of changed) {
+    try {
+      if (usesDefaultModelsRegistry(name)) continue
+      const registry = getRegistryForProvider(name)
+      providers.push({
+        provider: name,
+        models: registry.getModels(),
+        defaultModelId: registry.getDefaultModelId(),
+      })
+    } catch (err) {
+      log.warn(`reloadModelsOverlay: roster snapshot for provider "${name}" failed: ${err?.message || err}`)
+    }
   }
   return {
     reloaded: true,
@@ -1408,6 +1458,23 @@ export function getRegistryForProvider(providerName) {
   }
   providerRegistryCache.set(providerName, registry)
   return registry
+}
+
+/**
+ * #7722 — true when `providerName`'s models come from the DEFAULT (Claude)
+ * registry: a Claude-family provider, an unknown/unregistered name, a provider
+ * class with no `getFallbackModels()`, and `null`/`undefined` (no active
+ * session) all land there. The SINGLE derivation of that question — the overlay
+ * reload uses it to decide which rosters are worth reporting separately, and
+ * `server-cli.js` uses it to decide which clients an overlay-reload broadcast
+ * reaches. Two copies of this predicate would be free to disagree about exactly
+ * the edge cases (unregistered names, docker-* subclasses) it exists for.
+ *
+ * @param {string|null|undefined} providerName
+ * @returns {boolean}
+ */
+export function usesDefaultModelsRegistry(providerName) {
+  return getRegistryForProvider(providerName) === defaultRegistry
 }
 
 // Accept both short ids and full model IDs in set_model.

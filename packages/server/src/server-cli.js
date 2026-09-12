@@ -45,7 +45,7 @@ import { registerOpenAiCompatibleProviders } from './openai-compatible-session.j
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay, usesDefaultModelsRegistry } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -253,6 +253,15 @@ export function buildServerBanner({ version, provider }) {
  * The wire shape is unchanged — each entry is the same provider-tagged
  * `available_models` message every other sender emits.
  *
+ * This builds the SET; it does not decide recipients. Every client keeps ONE
+ * `availableModels` slot and one `availableModelsProvider` tag
+ * (`dispatchAvailableModels`, store-core/src/dispatch-table.ts), replaced
+ * unconditionally on every message with no provider filter — so sending the
+ * whole set to everyone would be last-write-wins, and a Claude client on a
+ * daemon that also has a codex row would end up tagged `codex` and lose the
+ * very picker this issue is about. `overlayBroadcastReachesProvider` below is
+ * the recipient rule, and `createOverlayReloadBroadcaster` is what applies it.
+ *
  * Exported so tests can assert the broadcast set without executing
  * `startCliServer()` end-to-end.
  *
@@ -276,6 +285,93 @@ export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers
     })
   }
   return out
+}
+
+/**
+ * #7722 — the recipient rule for ONE overlay-reload broadcast: does a client
+ * whose ACTIVE session runs `activeProvider` receive this message?
+ *
+ * Necessary because every client keeps a SINGLE `availableModels` slot plus one
+ * `availableModelsProvider` tag, and `dispatchAvailableModels` replaces both
+ * unconditionally on every message — no provider filter, on either client. A
+ * multi-message burst delivered to everyone is therefore last-write-wins: the
+ * client ends on whichever roster arrived last, `modelsMatchProvider` goes false
+ * for every client whose provider isn't that one, and the picker vanishes. The
+ * mobile app has no tag at all (it omits `extendModelsPatch`), so there it would
+ * silently render another provider's model ids as selectable chips.
+ *
+ * The rule:
+ *   - the DEFAULT (Claude) roster reaches every client whose active provider
+ *     shares the default registry — Claude-family, an unknown/unregistered
+ *     name, and no active session at all. That set is exactly the pre-#7722
+ *     recipients of the single hardcoded `claude-sdk` broadcast, so no client
+ *     that used to get a usable roster stops getting one.
+ *   - every other tag names a PER-PROVIDER registry, and those are keyed by
+ *     name (`providerRegistryCache`), so only that exact provider matches.
+ *
+ * `usesDefaultModelsRegistry` is imported rather than re-derived: it is the same
+ * predicate `reloadModelsOverlay` uses to decide which rosters are worth
+ * reporting, and a second copy here would be free to disagree about the
+ * unknown-name and docker-* edges that motivate it.
+ *
+ * @param {{ provider?: string|null }} message  one entry from buildOverlayReloadBroadcasts
+ * @param {string|null|undefined} activeProvider  the client's active session provider
+ * @returns {boolean}
+ */
+export function overlayBroadcastReachesProvider(message, activeProvider) {
+  const tag = message?.provider ?? null
+  if (usesDefaultModelsRegistry(tag)) return usesDefaultModelsRegistry(activeProvider)
+  return activeProvider === tag
+}
+
+/**
+ * #7722 — the provider a client is currently looking at, or null when it has no
+ * active session. Null is NOT an error signal: it is the "no session yet" case,
+ * which `overlayBroadcastReachesProvider` routes to the default roster exactly
+ * as the pre-#7722 broadcast did.
+ *
+ * Deliberately fail-OPEN toward that default: a session lookup that throws (or a
+ * SessionManager torn down mid-reload) yields null, so the client still receives
+ * the Claude roster it would have received before this change rather than
+ * silently receiving nothing.
+ *
+ * @param {{ activeSessionId?: string|null }} client
+ * @param {{ getSession?: (id: string) => ({ provider?: string|null }|undefined) }} sessionManager
+ * @returns {string|null}
+ */
+export function clientActiveProvider(client, sessionManager) {
+  try {
+    const sessionId = client?.activeSessionId
+    if (!sessionId) return null
+    return sessionManager?.getSession?.(sessionId)?.provider || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * #7722 — build the `watchModelsOverlay({ onReload })` callback: turn one reload
+ * into its broadcast set and send each entry ONLY to the clients that registry
+ * is the roster for (`overlayBroadcastReachesProvider`).
+ *
+ * A factory rather than an inline closure so the wiring is a single named
+ * reference at the call site AND the behaviour is directly executable in a test
+ * — the previous inline closure lived inside `startCliServer()`, which no test
+ * can run, so the only available check was a source grep over its body.
+ *
+ * @param {{ wsServer: { _broadcast: Function }, sessionManager: object, logger?: object }} deps
+ * @returns {(reload: object) => void}
+ */
+export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logger = log }) {
+  return (reload) => {
+    for (const message of buildOverlayReloadBroadcasts(reload)) {
+      logger.info(`Models overlay reloaded (${message.provider}): ${message.models.map((m) => m.id).join(', ')}`)
+      wsServer._broadcast(message, (client) => overlayBroadcastReachesProvider(
+        message,
+        clientActiveProvider(client, sessionManager),
+      ))
+    }
+  }
 }
 
 /**
@@ -1297,17 +1393,12 @@ export async function startCliServer(config) {
   // #5932: hot-reload the ~/.chroxy/models.json overlay on edit — surfacing a
   // new model id (or a label/contextWindow/pricing override) is "a config entry,
   // not a code change", so it must not require a daemon restart. On a successful
-  // reload, re-broadcast `available_models` for EVERY registry the overlay
-  // touched — the default (Claude) one plus each provider-tagged slice (#7722)
-  // — so connected pickers refresh live. A malformed save is ignored
-  // (last-good kept).
+  // reload, re-broadcast `available_models` for every registry the overlay
+  // CHANGED — the default (Claude) one plus each provider-tagged slice (#7722)
+  // — routed so each client only ever receives the roster for the provider its
+  // active session runs on. A malformed save is ignored (last-good kept).
   const modelsOverlayWatcher = watchModelsOverlay({
-    onReload: (reload) => {
-      for (const msg of buildOverlayReloadBroadcasts(reload)) {
-        log.info(`Models overlay reloaded (${msg.provider}): ${msg.models.map((m) => m.id).join(', ')}`)
-        wsServer.broadcast(msg)
-      }
-    },
+    onReload: createOverlayReloadBroadcaster({ wsServer, sessionManager }),
   })
 
   // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
