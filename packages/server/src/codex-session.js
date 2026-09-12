@@ -604,21 +604,40 @@ export class CodexSession extends JsonlSubprocessSession {
     // that came back empty are different facts, and neither of them may be
     // reported as a roster.
     //
-    // WHAT REACHES THE WIRE IS NOT THIS, and saying otherwise here would be
-    // the #7290/#7291 comment-claims-more-than-the-code class. The codex
-    // registry snapshots this function's result ONCE, at construction
+    // AND IT NOW ALSO HOLDS AT THE WIRE (#7761). It did not until that issue:
+    // the codex registry snapshots this function's result ONCE, at construction
     // (`getRegistryForProvider` → `fallbackModels: getFallbackModels()`,
-    // models.js:1526) — which always happens while the catalog is still UNSET,
-    // so the captured roster is always the six statics. `updateModels` then
-    // merges back every captured fallback the refresh omitted (the #3075
-    // under-reporting union, models.js:851-866). Net `available_models`:
-    // `discovered ∪ {gpt-5-codex, gpt-5, gpt-4.1, gpt-4o, o1, o3}`, in every
-    // process, PERMANENTLY — not "until a restart", because no path builds the
-    // registry after the catalog exists and a restart reproduces it exactly.
-    // Making the registry's captured roster replaceable is #7761; the
-    // registry-level test in codex-model-catalog.test.js pins today's union in
-    // BOTH directions so whichever way #7761 resolves it must change that test
-    // deliberately.
+    // models.js) — which always happens while the catalog is still UNSET, so
+    // the captured roster is always the six statics, and `updateModels` used to
+    // merge back every one the refresh omitted (the #3075 under-reporting
+    // union). Net `available_models` was `discovered ∪ {gpt-5-codex, gpt-5,
+    // gpt-4.1, gpt-4o, o1, o3}` in every process, PERMANENTLY — no path builds
+    // the registry after the catalog exists, so a restart reproduced it rather
+    // than clearing it, and `gpt-4.1`'s 1M window then minted a `gpt-4.1[1m]`
+    // chip that exists in no catalog (#7747). #7761 scoped BOTH rules to the
+    // Claude registry (identity check on the fallback roster), so a discovered
+    // codex roster now REPLACES at the wire as well. The registry-level test in
+    // codex-model-catalog.test.js pins that in BOTH directions — the discovered
+    // ids are present AND every static the refresh did not discover is absent —
+    // so a re-widening cannot land quietly. The captured roster is still stale
+    // by construction; it is simply no longer consulted once a refresh lands.
+    //
+    // The precise scope, because "REPLACES at the wire" on its own overstates
+    // it: the statics ARE still what `available_models` carries BEFORE any
+    // roster is learned — cold boot with no cache, probe unresolved, probe
+    // failed — which is the seed doing its job, not the union. What #7761/#7776
+    // removed is the seed riding back in ON TOP of a roster the binary reported,
+    // and that now holds at all three merge sites in models.js (`updateModels`,
+    // `loadCache`, `applyOverlay`'s cache-warmed branch). Stated at the
+    // observable rather than at the rule, because the two differ: the UNION no
+    // longer re-adds them, and rows a pre-fix build already PERSISTED are still
+    // served until the migration runs — `saveCache()` wrote `activeModels`, and
+    // the file is what boots. `loadCache`'s one-time schema-marker migration
+    // (models.js, `migrateLegacyStaticSeed`) is what takes them out of the file;
+    // absent that, they would be served indefinitely on an install whose probe
+    // never succeeds. Validation (`getAllowedModels`) is a separate roster and is
+    // untouched: #7727 is where the catalogue becomes authoritative there, so
+    // until it lands an id this function stopped OFFERING can still be ACCEPTED.
     if (hasCodexCatalog()) {
       return Object.freeze(getCodexCatalogRows().map((row) => Object.freeze(catalogEntry(row))))
     }

@@ -17,8 +17,14 @@
  *     `getAllowedModels()` returns null (session-manager treats a
  *     non-array as "no restriction"). `getFallbackModels()` seeds the
  *     dashboard picker with Ollama's recommended coder models; dynamic
- *     discovery via GET /api/tags (#5421, ollama-tags.js) replaces the
- *     seed with the actually-installed list when the daemon is reachable.
+ *     discovery via GET /api/tags (#5421, ollama-tags.js) ADDS the
+ *     actually-installed list when the daemon is reachable. It does not
+ *     replace the seed — this line said "replaces" until #7761 and the code
+ *     never did, which is the comment-claims-more-than-the-code class
+ *     (#7290/#7291): the recommendations stay in the picker so a machine
+ *     that has pulled two models is still offered the other three. That
+ *     union is now declared, not incidental — see
+ *     `staticModelsAreRecommendations` below.
  *     Discovery is ADVISORY only — it feeds the picker, never validation.
  *   - Zero pricing. Local inference is free; `_getPricing` returns a
  *     zero-rate entry (not null) so byok-session's "no pricing entry"
@@ -131,6 +137,24 @@ export class OllamaSession extends ClaudeByokSession {
 
   static getFallbackModels() {
     return OLLAMA_FALLBACK_MODELS
+  }
+
+  /**
+   * #7761 — this provider's static seed is a RECOMMENDATION list, not a roster
+   * claim: `OLLAMA_FALLBACK_MODELS` names coder models worth pulling, and
+   * `/api/tags` reports the ones this machine has actually pulled. The two are
+   * different facts, so a discovery refresh must UNION rather than replace, or
+   * the picker stops suggesting anything the user has not already installed
+   * (pinned in ollama-tags.test.js: "merged fallbacks").
+   *
+   * Every other non-Claude provider leaves this false — for them the refresh IS
+   * the provider's own roster, and unioning a hand-maintained table back in is
+   * exactly how a retired model reached the wire forever (#7761).
+   *
+   * @returns {boolean}
+   */
+  static get staticModelsAreRecommendations() {
+    return true
   }
 
   static getAllowedModels() {
