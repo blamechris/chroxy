@@ -438,7 +438,15 @@ Rules that matter when you are reading a picker and wondering what you are seein
   reload and it does not come back after a restart. The withholding is keyed on
   where the row came from, not on its id — a model the binary still reports is
   persisted as it always was, with whatever context window a live turn taught
-  it, whether or not an entry also names it. (One narrow residue,
+  it, whether or not an entry also names it. The cost of that, stated plainly:
+  a **declared-only** row does not keep its learned context window across a
+  restart either — it is rebuilt at boot from the entry plus
+  `resolveContextWindow()`, so pin `contextWindow` in the entry if you need it
+  stable. It is most visible on a provider with **no discovery seam** (gemini,
+  deepseek), where nothing ever publishes a roster and such a row can never
+  acquire provider provenance;
+  [#7810](https://github.com/blamechris/chroxy/issues/7810) tracks caching those
+  windows under their own key. (One narrow residue,
   [#7808](https://github.com/blamechris/chroxy/issues/7808): while the roster is
   the one `loadCache` read and no refresh has landed yet, a hot overlay reload
   can override such a row's live label and window with the operator's.)

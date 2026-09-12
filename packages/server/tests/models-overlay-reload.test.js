@@ -491,6 +491,118 @@ describe('overlay override of a static id survives a refresh (#7777)', () => {
     }
   })
 
+  it('the provenance record is taken on the CACHE-WARMED path too, with no refresh this boot (#7799 round 3)', () => {
+    // The four tests above all drive provenance through `updateModels`, so the
+    // `loadCache` half of the same record was unproven: deleting
+    // `providerReportedFullIds = new Set(seenFullIds)` from the loadCache union
+    // left every one of them green. It is not an inert line — a cache file is
+    // what a provider once reported, and for a non-Claude registry `loadCache`
+    // runs at construction (`getRegistryForProvider`) while `updateModels` may
+    // never run at all (unreachable binary, CLI-only window). Without the
+    // record, every row read off disk looks declaration-only the moment an
+    // overlay entry names its id, so the next `saveCache` writes the roster
+    // WITHOUT it — #7759's harm, on a path no test walked. This is the repo's
+    // filed "guard wired to only some of its callers" class (#7262), which is
+    // what this fix is FOR, so it gets a caller-specific proof.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-loadcache-provenance-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      // What a PREVIOUS boot's refresh reported, with a window a live turn had
+      // already ratcheted past the seed's.
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [
+          { id: 'base-1', fullId: 'base-1', label: 'Base 1', contextWindow: 272000 },
+          { id: 'gpt-9', fullId: 'gpt-9', label: 'GPT 9', contextWindow: 4242 },
+        ],
+        defaultModelId: 'base-1',
+        savedAt: Date.now(),
+      }, null, 2))
+
+      const declaration = overlayMap({ 'base-1': { pricing: { input: 1, output: 2 } } })
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(declaration)
+      // The whole point: the roster this boot comes from DISK, and nothing
+      // calls updateModels() — the provenance record has exactly one chance to
+      // be taken.
+      assert.equal(reg.loadCache(cachePath), true)
+      assert.equal(reg.updateContextWindow('base-1', 300000), true, 'a live turn ratchets it further')
+      assert.equal(reg.saveCache(cachePath), true)
+
+      const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+      const saved = payload.models.find((m) => m.fullId === 'base-1')
+      assert.ok(saved, 'a row read off disk carries provider provenance and must be persisted again')
+      assert.equal(saved.contextWindow, 300000, 'with the newly learned window')
+
+      // And the sharper half: the operator deletes the entry, the binary is
+      // unreachable, and the model it serves must still be in the picker.
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(new Map())
+      assert.equal(restarted.loadCache(cachePath), true)
+      assert.deepEqual(restarted.getModels().map((m) => m.fullId).sort(), ['base-1', 'gpt-9'],
+        'the cache-warmed row survives the declaration going away')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a row that BECOMES provider-reported is written, even though activeModels did not move (#7799 round 3)', () => {
+    // The write-skip key must describe the payload. The payload is
+    // `activeModels` MINUS the declaration-only rows, and that filter reads a
+    // second input — `providerReportedFullIds` — which moves on its own. Warm
+    // the cache from a file that lacks the declared id, let the union re-add it
+    // (rendering from the provider metadata table), then let the binary come
+    // back and REPORT it with the same rendering in the same position: the
+    // roster and the default are byte-identical, so a key hashed over
+    // `activeModels` matched and `saveCacheImpl` returned true WITHOUT WRITING.
+    //
+    // Assert the DISK, never the return value: `true` here is the success
+    // report for work not done, this repo's dominant defect class.
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-dedupe-key-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'gpt-9', fullId: 'gpt-9', label: 'GPT 9', contextWindow: 4242 }],
+        defaultModelId: 'gpt-9',
+        savedAt: Date.now(),
+      }, null, 2))
+
+      const declaration = overlayMap({ 'base-1': { pricing: { input: 1, output: 2 } } })
+      const reg = makeMetaRegistry()
+      reg.applyOverlay(declaration)
+      assert.equal(reg.loadCache(cachePath), true)
+      // The union re-added base-1 from the metadata table: `vendor-short` /
+      // `Vendor Label` / 128000, appended after the cached gpt-9.
+      assert.deepEqual(reg.getModels().map((m) => `${m.fullId}:${m.label}:${m.contextWindow}`),
+        ['gpt-9:GPT 9:4242', 'base-1:Vendor Label:128000'])
+
+      // The binary comes back and reports it — same rendering, same order.
+      reg.updateModels([
+        { value: 'gpt-9', displayName: 'GPT 9' },
+        { value: 'base-1', displayName: 'Vendor Label' },
+      ])
+      assert.deepEqual(reg.getModels().map((m) => `${m.fullId}:${m.label}:${m.contextWindow}`),
+        ['gpt-9:GPT 9:4242', 'base-1:Vendor Label:128000'],
+        'the roster is byte-identical — only the PROVENANCE changed')
+
+      reg.saveCache(cachePath)
+      const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+      assert.deepEqual(payload.models.map((m) => m.fullId), ['gpt-9', 'base-1'],
+        'the now-reported row must reach disk — the skip key has to see the provenance change')
+
+      // Why it matters: the operator deletes the entry ("it was only a
+      // re-price") and restarts with the binary unreachable.
+      const restarted = makeMetaRegistry()
+      restarted.applyOverlay(new Map())
+      assert.equal(restarted.loadCache(cachePath), true)
+      assert.ok(restarted.getModels().some((m) => m.fullId === 'base-1'),
+        'a model the binary serves is still offered after the declaration goes away')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('still drops an UNDECLARED static — #7761 is not reopened', () => {
     // The other direction, on the same registry in the same state: declaring
     // one id must not restore the seed wholesale. Two statics, one declared.

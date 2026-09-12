@@ -874,14 +874,38 @@ export function createModelsRegistry(hooks = {}) {
     rebuildLookups(filtered)
   }
 
-  function snapshotString() {
-    return canonicalStringify({ models: activeModels, defaultModelId })
+  /**
+   * The rows `saveCacheImpl` actually writes — `activeModels` minus the ones
+   * that are in the roster ONLY because the operator declared them
+   * (`isUnpersistableDeclaredRow`).
+   *
+   * #7799 round 3 — this exists so the write-skip key and the payload are the
+   * SAME list. Round 2 filtered the payload but kept hashing `activeModels`,
+   * and the filter reads a second input (`providerReportedFullIds`) that moves
+   * WITHOUT `activeModels` moving: warm the cache from a disk file that lacks a
+   * declared id, let the union re-add it, then let the binary come back and
+   * REPORT it with the same rendering in the same array position. The roster is
+   * byte-identical, so `saveCacheImpl` returned `true` without writing — a
+   * success report for work not done — and the now-provider-reported row stayed
+   * off disk. Delete the entry ("it was only a re-price") and restart with the
+   * binary unreachable and the model it serves is gone from the picker, which is
+   * the very harm the withholding guard was written to prevent, reached from the
+   * other side.
+   */
+  function persistableModels() {
+    return activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId))
+  }
+
+  // Takes the list so `saveCacheImpl` can hash the exact array it writes.
+  function snapshotString(models = persistableModels()) {
+    return canonicalStringify({ models, defaultModelId })
   }
 
   // Hoisted out of the returned method so loadCache() can heal the disk
   // file in the same pass when stale entries are pruned (#3162).
   function saveCacheImpl(path) {
-    const snapshot = snapshotString()
+    const persistable = persistableModels()
+    const snapshot = snapshotString(persistable)
     if (snapshot === lastSavedSnapshot) return true
 
     try {
@@ -907,7 +931,10 @@ export function createModelsRegistry(hooks = {}) {
         // it is how the row outlives the declaration. A row the PROVIDER
         // reported is persisted as it always was, learned context window
         // included, whether or not an overlay entry also names its id.
-        models: activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId)),
+        //
+        // This is the same array the write-skip key above hashed (#7799 round
+        // 3) — computed once, so the key cannot describe a different payload.
+        models: persistable,
         defaultModelId,
         savedAt: Date.now(),
       }, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
@@ -1497,6 +1524,10 @@ export function createModelsRegistry(hooks = {}) {
         lastCacheModels = models
         // Treat the loaded state as the last-saved baseline so subsequent
         // saveCache() calls only hit disk when the registry actually drifts.
+        // Since #7799 round 3 the baseline is taken over the PERSISTABLE rows —
+        // the same list `saveCacheImpl` writes — so "the snapshot matches" means
+        // "the payload would be identical", which it did not while the key was
+        // hashed over `activeModels` and the payload was filtered.
         lastSavedSnapshot = snapshotString()
 
         // Heal the disk file when we pruned anything. Without this the
