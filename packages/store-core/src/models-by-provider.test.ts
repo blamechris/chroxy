@@ -125,30 +125,61 @@ describe('selectModelsForProvider (#7728)', () => {
     expect(selectModelsForProvider(mixed, 'gemini').defaultModelId).toBeNull()
   })
 
-  it('falls back to an UNTAGGED roster for a provider with none of its own', () => {
-    // An older daemon tags nothing and has one registry — its roster is global,
-    // exactly as it was before #7728. "Nobody said which provider" is not the
-    // same as "this provider has nothing".
-    const withUntagged: ModelsByProvider = { [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus') }
-    expect(selectModelsForProvider(withUntagged, 'codex').models).toEqual([opus])
+  it('serves an UNTAGGED roster only to an UNKNOWN provider, never to a named one', () => {
+    // A pre-provider daemon tags neither its rosters NOR its session entries,
+    // so the lookup provider is null and the single-roster rule serves it —
+    // exactly as it was served before #7728. A daemon that names the session's
+    // provider is a different claim, and an untagged roster is no evidence
+    // about it: "nobody said which provider" must not read as "said codex".
+    const onlyUntagged: ModelsByProvider = { [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus') }
+    expect(selectModelsForProvider(onlyUntagged, null).models).toEqual([opus])
+    expect(selectModelsForProvider(onlyUntagged, undefined).models).toEqual([opus])
+    expect(selectModelsForProvider(onlyUntagged, 'codex')).toBe(EMPTY_MODEL_ROSTER)
+    expect(selectModelsForProvider(onlyUntagged, 'codex').models).toEqual([])
   })
 
-  it('stops serving the untagged roster once a SECOND roster is in play', () => {
+  it('never serves the untagged roster to a known provider, with or without a second roster', () => {
     // The #7728 headline case, reachable on a MODERN daemon: ws-history.js
     // sends `provider: activeProvider`, null on a post-auth connect with no
     // active session, and getRegistryForProvider(null) answers with the CLAUDE
-    // default registry — so the Claude roster lands untagged. An unconditional
-    // untagged fallback then served those Claude ids to a codex session that
-    // had not yet heard its own roster. Server-side tagging is #7759.
+    // default registry — so the Claude roster lands untagged. Server-side
+    // tagging is #7759.
     const claudeUntaggedPlusCodex: ModelsByProvider = {
       [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus'),
       codex: roster([gpt], 'gpt-5.5'),
     }
     expect(selectModelsForProvider(claudeUntaggedPlusCodex, 'gemini')).toBe(EMPTY_MODEL_ROSTER)
     expect(selectModelsForProvider(claudeUntaggedPlusCodex, 'gemini').models).toEqual([])
-    // ...and the untagged roster is still global while it is the only one.
+    // ...and the SOLE-untagged shape is the same answer, not a fallback. An
+    // earlier revision gated the untagged fallback on "only one roster in play",
+    // which this map satisfies — see the scenario cell below.
     const onlyUntagged: ModelsByProvider = { [UNTAGGED_MODELS_PROVIDER]: roster([opus], 'opus') }
-    expect(selectModelsForProvider(onlyUntagged, 'gemini').models).toEqual([opus])
+    expect(selectModelsForProvider(onlyUntagged, 'gemini')).toBe(EMPTY_MODEL_ROSTER)
+    expect(selectModelsForProvider(onlyUntagged, 'gemini').models).toEqual([])
+  })
+
+  it('SCENARIO: post-auth connect with no session, then a switch to codex, offers ZERO chips', () => {
+    // The reachable leak, end to end, in the order the client actually sees it
+    // (PR #7758 re-review). A client connects post-auth with no active session:
+    // ws-history.js sends `provider: activeProvider` — null — and
+    // getRegistryForProvider(null) answers with the CLAUDE default registry, so
+    // the client's map is exactly one UNTAGGED Claude roster. The user then
+    // opens a codex session; switchSession sets activeSessionId optimistically
+    // and only THEN asks the server, so for one tunnel round trip the selector
+    // is asked for 'codex' against that single untagged Claude roster.
+    const afterPostAuthConnect = mergeModelsByProvider(undefined, null, roster([opus], 'opus'))
+    expect(Object.keys(afterPostAuthConnect)).toEqual([UNTAGGED_MODELS_PROVIDER])
+
+    const shown = selectModelsForProvider(afterPostAuthConnect, 'codex')
+    expect(shown).toBe(EMPTY_MODEL_ROSTER)
+    // No chip is rendered, so no Claude id can be tapped into `set_model` on a
+    // codex session — the whole point of #7728.
+    expect(shown.models.map(m => m.id)).toEqual([])
+    expect(shown.defaultModelId).toBeNull()
+
+    // ...and one round trip later the codex roster arrives and the picker fills.
+    const afterCodexRoster = mergeModelsByProvider(afterPostAuthConnect, 'codex', roster([gpt], 'gpt-5.5'))
+    expect(selectModelsForProvider(afterCodexRoster, 'codex').models).toEqual([gpt])
   })
 
   it('prefers the provider-tagged roster over the untagged one', () => {

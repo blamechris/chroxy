@@ -250,13 +250,40 @@ describe('#7728 — the mobile store keys model rosters by provider', () => {
     expect(sent).toEqual(['gpt-5.5']);
   });
 
-  it('still serves an UNTAGGED broadcast to every session (older daemons)', () => {
-    // A daemon that tags nothing has one registry, and its roster stays global —
-    // "nobody said which provider" must not read as "this provider has none".
+  it('still serves an UNTAGGED broadcast to a session with NO provider (older daemons)', () => {
+    // A pre-provider daemon tags neither its rosters NOR its session entries, so
+    // the selector is asked for a null provider and the one registry it has is
+    // global — exactly as it was before #7728.
     handleMessage({ ...CODEX_ROSTER, provider: undefined }, mockCtx as never);
+    store.setState({
+      sessions: [{ sessionId: CODEX_SESSION, name: 'Legacy' } as never],
+    });
 
     expect(Object.keys(store.getState().modelsByProvider)).toEqual([UNTAGGED_MODELS_PROVIDER]);
     const { roster } = renderBarFor(store.getState());
     expect(roster.models.map((m) => m.id)).toEqual(['gpt-5.5']);
+  });
+
+  it('renders ZERO chips on a codex session whose only roster in play is untagged', () => {
+    // PR #7758 re-review, the reachable leak end to end: a client connects
+    // post-auth with no active session, so ws-history.js sends
+    // `provider: activeProvider` — null — and getRegistryForProvider(null)
+    // answers with the CLAUDE default registry. The map is one untagged CLAUDE
+    // roster. switchSession then sets the active session optimistically, so the
+    // bar is composed for the codex session a whole tunnel round trip before
+    // the codex roster lands. Serving the untagged roster there put Claude chips
+    // in front of the user with `set_model` live on tap.
+    handleMessage({ ...CLAUDE_ROSTER, provider: undefined }, mockCtx as never);
+    expect(Object.keys(store.getState().modelsByProvider)).toEqual([UNTAGGED_MODELS_PROVIDER]);
+
+    const sent: string[] = [];
+    const { tree, roster } = renderBarFor(store.getState(), (id) => sent.push(id));
+    expect(roster.models).toEqual([]);
+    expect(collectVisibleText(tree.root)).not.toContain('Opus');
+    expect(sent).toEqual([]);
+
+    // ...and one round trip later the codex roster arrives and the chips fill.
+    handleMessage(CODEX_ROSTER, mockCtx as never);
+    expect(renderBarFor(store.getState()).roster.models.map((m) => m.id)).toEqual(['gpt-5.5']);
   });
 });

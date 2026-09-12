@@ -921,16 +921,38 @@ describe('App', () => {
       expect(screen.queryByTestId('model-picker-item-gpt-5.5')).not.toBeInTheDocument()
     })
 
-    it('serves an UNTAGGED roster to the codex session (older daemons stay working)', () => {
-      // A daemon that tags nothing has one registry; its roster is global, and
-      // "nobody said which provider" must not read as "this provider has none".
+    it('serves an UNTAGGED roster to a session with NO provider (older daemons stay working)', () => {
+      // A pre-provider daemon tags neither its rosters nor its session entries,
+      // so the header asks for a null provider and the one registry it has is
+      // global — exactly as it was before #7728.
+      const { provider: _drop, ...untaggedSession } = codexSession
+      void _drop
       stateOverrides = {
         ...codexState,
+        sessions: [untaggedSession],
         modelsByProvider: { [UNTAGGED_MODELS_PROVIDER]: CODEX_ROSTER },
       }
       render(<App />)
       fireEvent.click(screen.getByTestId('chat-settings-trigger'))
       expect(screen.getByTestId('model-picker-item-gpt-5.5')).toBeInTheDocument()
+    })
+
+    it('offers NOTHING to a NAMED provider whose only roster in play is untagged', () => {
+      // PR #7758 re-review. The reachable leak: a client that connects post-auth
+      // with no active session gets ONE roster — the untagged Claude one
+      // `ws-history.js` sends for `provider: null` — and switchSession sets the
+      // active session optimistically, so the header asks for 'codex' against
+      // that map for a whole tunnel round trip. Serving it rendered Claude chips
+      // into a codex session with `set_model` live on tap.
+      stateOverrides = {
+        ...codexState,
+        modelsByProvider: { [UNTAGGED_MODELS_PROVIDER]: CLAUDE_ROSTER },
+      }
+      render(<App />)
+      const trigger = screen.queryByTestId('chat-settings-trigger')
+      if (trigger) fireEvent.click(trigger)
+      expect(screen.queryByTestId('model-picker-item-opus')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('model-picker-item-gpt-5.5')).not.toBeInTheDocument()
     })
   })
 
