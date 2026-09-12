@@ -253,14 +253,17 @@ export function buildServerBanner({ version, provider }) {
  * The wire shape is unchanged — each entry is the same provider-tagged
  * `available_models` message every other sender emits.
  *
- * This builds the SET; it does not decide recipients. Every client keeps ONE
- * `availableModels` slot and one `availableModelsProvider` tag
- * (`dispatchAvailableModels`, store-core/src/dispatch-table.ts), replaced
- * unconditionally on every message with no provider filter — so sending the
- * whole set to everyone would be last-write-wins, and a Claude client on a
- * daemon that also has a codex row would end up tagged `codex` and lose the
- * very picker this issue is about. `overlayBroadcastReachesProvider` below is
- * the recipient rule, and `createOverlayReloadBroadcaster` is what applies it.
+ * This builds the SET; it does not decide recipients.
+ * `overlayBroadcastReachesProvider` below is the recipient rule, and
+ * `createOverlayReloadBroadcaster` is what applies it. Until #7728 that routing
+ * was load-bearing for CORRECTNESS: every client kept ONE `availableModels`
+ * slot, replaced unconditionally on every message, so sending the whole set to
+ * everyone was last-write-wins and a Claude client on a daemon that also has a
+ * codex row ended up tagged `codex` and lost the very picker this issue is
+ * about. Clients now key each roster by the provider that sent it
+ * (`mergeModelsByProvider`, store-core/src/models-by-provider.ts), so the
+ * routing is defence in depth and bandwidth rather than the only thing standing
+ * between a codex session and a Claude roster.
  *
  * Exported so tests can assert the broadcast set without executing
  * `startCliServer()` end-to-end.
@@ -291,14 +294,18 @@ export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers
  * #7722 — the recipient rule for ONE overlay-reload broadcast: does a client
  * whose ACTIVE session runs `activeProvider` receive this message?
  *
- * Necessary because every client keeps a SINGLE `availableModels` slot plus one
- * `availableModelsProvider` tag, and `dispatchAvailableModels` replaces both
- * unconditionally on every message — no provider filter, on either client. A
- * multi-message burst delivered to everyone is therefore last-write-wins: the
- * client ends on whichever roster arrived last, `modelsMatchProvider` goes false
- * for every client whose provider isn't that one, and the picker vanishes. The
- * mobile app has no tag at all (it omits `extendModelsPatch`), so there it would
- * silently render another provider's model ids as selectable chips.
+ * Originally necessary because every client kept a SINGLE `availableModels`
+ * slot, replaced unconditionally on every message — no provider filter, on
+ * either client. A multi-message burst delivered to everyone was therefore
+ * last-write-wins: the client ended on whichever roster arrived last,
+ * `modelsMatchProvider` went false for every client whose provider wasn't that
+ * one, and the picker vanished; the mobile app had no tag at all (it omitted
+ * `extendModelsPatch`), so there it silently rendered another provider's model
+ * ids as selectable chips. #7728 fixed that on the CLIENT — each roster is now
+ * stored under the provider that sent it — so this rule no longer carries the
+ * correctness of a mixed-provider machine on its own. It stays because a client
+ * has no use for a roster its session cannot run, and the two compose: routing
+ * decides who is told, the provider-keyed slot decides what each session reads.
  *
  * The rule:
  *   - the DEFAULT (Claude) roster reaches every client whose active provider

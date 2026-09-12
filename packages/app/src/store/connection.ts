@@ -185,10 +185,12 @@ import {
   // #7603: the one place the container-lost fields are cleared, shared with the
   // dashboard so a dismiss means the same thing on both clients.
   clearContainerLostPatch,
+  // #7728: read ONE provider's roster out of the provider-keyed map.
+  selectModelsForProvider,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
-import type { InputSettings, QueuedSessionMessage } from '@chroxy/store-core';
+import type { InputSettings, QueuedSessionMessage, ProviderModelRoster } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -364,6 +366,25 @@ export const selectLastResultDuration = (s: ConnectionState): number | null =>
   activeSession(s)?.lastResultDuration ?? null;
 export const selectIsIdle = (s: ConnectionState): boolean =>
   activeSession(s)?.isIdle ?? true;
+/**
+ * #7728 — the model roster the ACTIVE session's provider offers.
+ *
+ * `available_models` is a machine-wide broadcast tagged with the registry that
+ * emitted it, and the app used to keep one flat list: with a Claude and a codex
+ * session open, whichever roster arrived last became the codex session's chips,
+ * and a tap sent `set_model` with a Claude id. The provider is read from the
+ * SESSION LIST rather than passed in, so a screen cannot forget to ask for its
+ * own session's provider.
+ *
+ * Referentially stable: `selectModelsForProvider` returns the stored roster
+ * object itself, or the shared frozen `EMPTY_MODEL_ROSTER` — never a fresh
+ * object — so this is safe as a zustand selector.
+ */
+export const selectActiveProviderModels = (s: ConnectionState): ProviderModelRoster => {
+  const id = s.activeSessionId;
+  const provider = id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
+  return selectModelsForProvider(s.modelsByProvider, provider);
+};
 // #5938 — the active session's outgoing queue (messages sent mid-turn, awaiting
 // flush). Stable empty fallback so an idle/empty session keeps a referentially
 // constant value and never churns the selector.
@@ -529,8 +550,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #6543 (feature B): server capability map from auth_ok; gates the pre-write diff.
   serverCapabilities: {},
   activity: createEmptyActivityState(),
-  availableModels: [],
-  defaultModelId: null,
+  // #7728 — one roster per provider (see ModelsAndPermissionsData).
+  modelsByProvider: {},
   availablePermissionModes: [],
   availableProviders: [],
   myClientId: null,
@@ -1575,8 +1596,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Preserve sessions, activeSessionId, sessionStates (messages live there now)
     set({
       socket: null,
-      availableModels: [],
-      defaultModelId: null,
+      // #7728 — the model rosters are per daemon/provider.
+      modelsByProvider: {},
       availablePermissionModes: [],
       availableProviders: [],
       myClientId: null,

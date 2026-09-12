@@ -10,13 +10,14 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
-import { buildProviderLimitationNote } from '@chroxy/store-core'
+import { buildProviderLimitationNote, selectOwnModelsForProvider } from '@chroxy/store-core'
+import type { ModelsByProvider } from '@chroxy/store-core'
 import {
   CODEX_PROVIDER,
   CODEX_SANDBOX_MODE_META,
   type CodexSandboxMode,
 } from '@chroxy/protocol'
-import type { DirectoryListing, DirectoryEntry, ModelInfo } from '../store/types'
+import type { DirectoryListing, DirectoryEntry } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 
 export interface CreateSessionData {
@@ -81,7 +82,7 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 }
 
 const EMPTY_STRINGS: string[] = []
-const EMPTY_MODELS: ModelInfo[] = []
+const EMPTY_MODELS_BY_PROVIDER: ModelsByProvider = {}
 
 // #7333: the client-side mirror of the server's era boundary is GONE.
 //
@@ -177,15 +178,19 @@ export function renderHintWithCode(hint: string): Array<string | { code: string 
 export function resolveCreateSessionModel(
   provider: string,
   defaultModel: string | null | undefined,
-  availableModels: ModelInfo[],
-  availableModelsProvider: string | null,
+  modelsByProvider: ModelsByProvider,
 ): string | undefined {
   const model = typeof defaultModel === 'string' ? defaultModel.trim() : ''
   if (!model) return undefined
-  // The dashboard default model is not yet provider-scoped. Only apply it when
-  // the current provider-scoped catalog proves the selected provider accepts it.
-  if (availableModelsProvider !== provider) return undefined
-  return availableModels.some(m => m.id === model || m.fullId === model)
+  // The dashboard default model is not provider-scoped. Only apply it when THAT
+  // PROVIDER'S OWN catalog proves it accepts the model (#7728) — deliberately
+  // `selectOwnModelsForProvider`, not the display-side selector: an untagged
+  // roster from an older daemon cannot prove which provider it describes, and a
+  // cannot-check must not read as a yes. Same refusal as before, now without
+  // depending on which provider broadcast last.
+  const own = selectOwnModelsForProvider(modelsByProvider, provider)
+  if (!own) return undefined
+  return own.models.some(m => m.id === model || m.fullId === model)
     ? model
     : undefined
 }
@@ -193,8 +198,7 @@ export function resolveCreateSessionModel(
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
-  const availableModels = useConnectionStore(s => s.availableModels) || EMPTY_MODELS
-  const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
+  const modelsByProvider = useConnectionStore(s => s.modelsByProvider) || EMPTY_MODELS_BY_PROVIDER
   const availableProviders = useConnectionStore(s => s.availableProviders)
   // #4019: read the server's PERMISSION_MODES list (including the
   // `description` field) so the picker + hint stay in lockstep with the
@@ -370,7 +374,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // visually disabled, but the click path checks here for defence in
     // depth (e.g. keyboard activation racing a store update).
     if (selectedProviderUnready) return
-    const model = resolveCreateSessionModel(provider, defaultModel, availableModels, availableModelsProvider)
+    const model = resolveCreateSessionModel(provider, defaultModel, modelsByProvider)
     // #4208/#4244: gate on the TUI provider at submit time as well as in the
     // UI. The radio group is hidden for non-TUI providers, but a user who
     // flips provider AFTER changing state would otherwise carry the stale
@@ -390,7 +394,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready])
+  }, [onCreate, provider, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)

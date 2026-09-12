@@ -193,7 +193,7 @@ function baseState(): Partial<ConnectionState> {
       [LIVE]: createEmptySessionState(),
     },
     messages: [],
-    availableModels: [],
+    modelsByProvider: {},
     // #5163 activity tree — the removedIds block calls `clearSessionActivity`
     // on it, so an undefined value throws there and the PR/CI assertions below
     // would never run (a crash is not a red assertion).
@@ -1243,8 +1243,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       '`pair_resolved` or by TTL (#5510).',
     availableProviders:
       'ProviderInfo[] — keyed by `name`. The server\'s provider registry, connection-wide.',
-    availableModels:
-      'ModelInfo[] — keyed by `id` / `fullId`. The server\'s model list, connection-wide.',
+    modelsByProvider:
+      'Record<provider, {models, defaultModelId}> — keyed by PROVIDER (#7728). The server\'s model ' +
+      'rosters, connection-wide; one per provider that broadcast one.',
     availablePermissionModes:
       'PermissionMode[] — keyed by `id`. The server\'s PERMISSION_MODES table, connection-wide ' +
       '(#4019).',
@@ -2075,9 +2076,12 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     // handles; this one asks the complementary question the enumeration cannot:
     // is there a member that mentions an array and reached NO pattern at all?
     //
-    // Baseline is exactly zero over 31 array-mentioning members — 24 extracted
+    // Baseline is exactly zero over 30 array-mentioning members — 23 extracted
     // as arrays, 7 function-typed — so it is a live check on the real interface
-    // and not a floor that a broken derivation would satisfy.
+    // and not a floor that a broken derivation would satisfy. (Was 31 until
+    // #7728 replaced the `availableModels: ModelInfo[]` member with the
+    // provider-keyed `Record<string, ProviderModelRoster>`, which the Record
+    // half extracts instead.)
     expect(
       arrayResidual(typesSrc),
       'member(s) whose type mentions an array but which no shape pattern extracted and which are ' +
@@ -2086,11 +2090,11 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       'in`), do not classify around it. #7527/#7551',
     ).toEqual([])
     // Non-vacuous in the other direction: the derivation really is looking at
-    // the 31 members it claims to, not at an empty set.
+    // the 30 members it claims to, not at an empty set.
     const mentioning = [...interfaceBody.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)]
       .filter((m) => /\[|Array</.test(m[2]!.replace(/\/\/.*$/, '')))
     expect(mentioning.length, 'no member mentions an array — the residual is vacuously empty')
-      .toBeGreaterThanOrEqual(31)
+      .toBeGreaterThanOrEqual(30)
   })
 
   it.each([
@@ -2540,7 +2544,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       '#3272 review — disconnect() clears it so a reconnect against a different (or older) server ' +
       'cannot have its UI gates left enabled by stale state (empty = fail-closed)',
     availableProviders: 'disconnect() — the provider registry is per daemon',
-    availableModels: 'disconnect() — the model list is per daemon/provider',
+    modelsByProvider: 'disconnect() — the model rosters are per daemon/provider',
     availablePermissionModes: 'disconnect() — the mode enum is advertised per daemon',
     connectedClients: 'disconnect() — the presence roster belongs to the dropped socket',
     webTasks: 'disconnect() — web-task list is per daemon',

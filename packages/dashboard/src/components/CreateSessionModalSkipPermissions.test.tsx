@@ -46,8 +46,7 @@ function mockStore(defaultProvider: string, providers = [TUI_PROVIDER, SDK_PROVI
       selector({
         defaultProvider,
         defaultModel: null,
-        availableModels: [],
-        availableModelsProvider: null,
+        modelsByProvider: {},
         availableProviders: providers,
         availablePermissionModes: [],
         environments: [],

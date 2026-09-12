@@ -27,6 +27,9 @@ import {
   // inline `Record<VoiceInputMode, true>` literal previously rebuilt
   // on every change-handler call.
   isVoiceInputMode,
+  // #7728 — one roster per provider; the default-model picker reads the
+  // default PROVIDER's.
+  selectModelsForProvider,
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import { isMacPlatform } from '../utils/platform'
@@ -749,7 +752,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
-  const availableModels = useConnectionStore(s => s.availableModels ?? [])
+  // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
+  // just above it, so it reads that provider's roster instead of whichever
+  // provider broadcast last. Empty (field hidden) until that roster arrives —
+  // offering another provider's ids as a default is what this replaces.
+  const modelsByProvider = useConnectionStore(s => s.modelsByProvider)
+  const availableModels = useMemo(
+    () => selectModelsForProvider(modelsByProvider, defaultProvider).models,
+    [modelsByProvider, defaultProvider],
+  )
   const availableProviders = useConnectionStore(s => s.availableProviders ?? [])
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const updateInputSettings = useConnectionStore(s => s.updateInputSettings)

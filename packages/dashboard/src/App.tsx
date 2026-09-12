@@ -20,6 +20,9 @@ import {
   getToolPresentation,
   deriveChatActivity,
   approvePlanWithAcceptEdits,
+  // #7728 — the model roster is keyed by PROVIDER; this reads the one the
+  // active session's provider offers (never "whichever roster arrived last").
+  selectModelsForProvider,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -219,11 +222,22 @@ export function App() {
   // surface only for claude-tui (the only provider with a real PTY).
   const subscribeTerminalMirror = useConnectionStore(s => s.subscribeTerminalMirror)
   const unsubscribeTerminalMirror = useConnectionStore(s => s.unsubscribeTerminalMirror)
-  const availableModels = useConnectionStore(s => s.availableModels)
-  const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
+  // #7728 — every provider's roster; the active session's is derived below.
+  const modelsByProvider = useConnectionStore(s => s.modelsByProvider)
+  // #7728 — the roster the ACTIVE session's provider offers. `available_models`
+  // is a machine-wide broadcast tagged with the registry that emitted it, so a
+  // single global slot meant the last broadcast decided what every session saw:
+  // the picker showed Claude models to a codex session, or vanished from it.
+  // Empty while that provider's roster has not arrived — the picker then renders
+  // nothing rather than another provider's ids.
+  const activeProviderModels = useMemo(
+    () => selectModelsForProvider(modelsByProvider, activeSessionProvider),
+    [modelsByProvider, activeSessionProvider],
+  )
+  const availableModels = activeProviderModels.models
+  const defaultModelId = activeProviderModels.defaultModelId
   // #5184: header cost-badge display mode (Settings-driven, persisted).
   const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
-  const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const availableProviders = useConnectionStore(s => s.availableProviders)
   const serverErrors = useConnectionStore(s => s.serverErrors)
@@ -451,25 +465,20 @@ export function App() {
     const activeProvider = activeSessionProvider
     const providerInfo = availableProviders.find(p => p.name === activeProvider)
     const caps = providerInfo?.capabilities
-    // The store carries one `availableModels` slot tagged with the provider
-    // that pushed it. If the active session is a different provider (server
-    // hasn't pushed the matching list yet), suppress the picker instead of
-    // showing the wrong models.
-    const modelsMatchProvider =
-      availableModelsProvider == null ||
-      activeProvider == null ||
-      availableModelsProvider === activeProvider
+    // #7728 — visibility no longer depends on a GLOBAL provider match. The
+    // roster is read per provider (`activeProviderModels` above), so a session
+    // whose provider has no roster yet is handed an EMPTY list and the dropdown
+    // drops the picker on its own — without a Claude broadcast being able to
+    // hide the picker on a codex session that has a perfectly good roster.
     return {
-      showModelPicker: caps?.modelSwitch !== false && modelsMatchProvider,
+      showModelPicker: caps?.modelSwitch !== false,
       // #4464: render a non-interactive badge in the picker's slot when the
       // active provider permanently lacks mid-session model switching (TUI).
-      // null on transient "models not matching provider" (provider just
-      // switched) so we don't flash a stale-label badge during reconnect.
       readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
     }
-  }, [activeSessionProvider, availableProviders, availableModelsProvider, activeModel])
+  }, [activeSessionProvider, availableProviders, activeModel])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>

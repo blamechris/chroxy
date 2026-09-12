@@ -78,6 +78,8 @@ import type {
   McpServer,
   MessageAttachment,
   ModelInfo,
+  // #7728: one provider's model roster (the provider-keyed map's value type).
+  ProviderModelRoster,
   PendingPermissionConfirm,
   SavedConnection,
   // #4213: typed permission-mode shape used by the
@@ -302,10 +304,14 @@ export interface MultiClientSessionData {
  * server plus the pending auto-mode confirmation prompt.
  */
 export interface ModelsAndPermissionsData {
-  // Available models from server (CLI mode)
-  availableModels: ModelInfo[];
-  // Server-reported default model short id (from SDK)
-  defaultModelId: string | null;
+  // #7728 — available models from the server, keyed by the PROVIDER whose
+  // registry broadcast them (each roster carries that provider's default model
+  // id). `models_updated` is machine-wide, so one flat list meant a codex
+  // session rendered whichever roster arrived last — and tapping a chip sent
+  // `set_model` with a Claude id to codex. Read it with
+  // `selectModelsForProvider(modelsByProvider, <active session's provider>)`,
+  // never by picking a key directly.
+  modelsByProvider: Record<string, ProviderModelRoster>;
   // Available permission modes from server (CLI mode).
   // #4213: typed PermissionMode from store-core; the optional `description`
   // field flows through to the SettingsBar hint so the mobile picker shares

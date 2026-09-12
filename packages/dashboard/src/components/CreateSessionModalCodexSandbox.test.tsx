@@ -37,8 +37,7 @@ function mockStore(defaultProvider: string, providers = [CODEX_PROVIDER, SDK_PRO
       selector({
         defaultProvider,
         defaultModel: null,
-        availableModels: [],
-        availableModelsProvider: null,
+        modelsByProvider: {},
         availableProviders: providers,
         availablePermissionModes: [],
         environments: [],

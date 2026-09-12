@@ -214,8 +214,8 @@ export function createEmptyConnectionScope() {
     serverCapabilities: {},
     // The provider registry is per daemon.
     availableProviders: [],
-    // The model list is per daemon/provider.
-    availableModels: [],
+    // The model rosters are per daemon/provider (#7728: one per provider).
+    modelsByProvider: {},
     // The mode enum is advertised per daemon, and `auth_ok` re-sets it only
     // when the server sends it — see the docstring above.
     availablePermissionModes: [],

@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextOccupancy, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectActiveProviderModels, selectPermissionMode, selectContextOccupancy, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
 import type { SessionIntervention } from '@chroxy/store-core';
 // #4875: shared typed predicate for the AskUserQuestion freeform shape.
@@ -156,8 +156,17 @@ export function SessionScreen() {
   const streamingMessageId = useConnectionStore(selectStreamingMessageId);
   const connectionPhase = useConnectionLifecycleStore((s) => s.connectionPhase);
   const activeModel = useConnectionStore(selectActiveModel);
-  const availableModels = useConnectionStore((s) => s.availableModels);
-  const defaultModelId = useConnectionStore((s) => s.defaultModelId);
+  // #7728 — the roster the ACTIVE session's provider offers. `available_models`
+  // is a machine-wide broadcast tagged with the registry that emitted it, and
+  // the app used to land every one of them in a single list: a codex session
+  // rendered Claude chips, and tapping one sent `set_model` with a Claude id.
+  // The selector resolves the provider from the session list itself, so this
+  // screen cannot ask for the wrong one; it is empty while this provider's
+  // roster has not arrived, and the SettingsBar then renders no chips at all
+  // rather than another provider's.
+  const activeProviderModels = useConnectionStore(selectActiveProviderModels);
+  const availableModels = activeProviderModels.models;
+  const defaultModelId = activeProviderModels.defaultModelId;
   const permissionMode = useConnectionStore(selectPermissionMode);
   const availablePermissionModes = useConnectionStore((s) => s.availablePermissionModes);
   // #6769: occupancy snapshot drives the SettingsBar meter (the billing

@@ -30,6 +30,20 @@ export {
   CONTEXT_AUTO_COMPACT_RESERVE,
 } from './context-window'
 
+// #7728: provider-keyed model rosters. `available_models` is a GLOBAL broadcast
+// tagged with the emitting provider, so one flat slot let a Claude roster hide
+// the codex picker (dashboard) and send Claude ids to a codex session (mobile).
+// Both clients now store every roster and read the ACTIVE session's provider
+// through `selectModelsForProvider`.
+export {
+  UNTAGGED_MODELS_PROVIDER,
+  EMPTY_MODEL_ROSTER,
+  mergeModelsByProvider,
+  selectModelsForProvider,
+  selectOwnModelsForProvider,
+} from './models-by-provider'
+export type { ModelsByProvider, ProviderModelRoster } from './models-by-provider'
+
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
 // exhaustive `Record<VoiceInputMode, true>` so widening the union is a
 // TS error in the guard, not a silent drop at the call site.

@@ -50,8 +50,7 @@ function buildState(defaultProvider: string, providers: ProviderInfo[]) {
   return {
     defaultProvider,
     defaultModel: '',
-    availableModels: [],
-    availableModelsProvider: null,
+    modelsByProvider: {},
     availableProviders: providers,
     availablePermissionModes: [],
     environments: [],

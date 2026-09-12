@@ -283,15 +283,14 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // (#4878); the app OMITS `addInfoNotification` (#4879). Record it on the
     // dashboard side so a unit/contract assertion can observe the divergence;
     // the app's empty array IS the contract for that case.
-    // #5618 Batch 5a — only the DASHBOARD contributes availableModelsProvider to
-    // the available_models patch (the app omits the hook). Locked by a divergent
-    // fixture (dashboard flat carries the extra field; app's does not).
+    // #7728 — available_models used to diverge here: only the DASHBOARD wired
+    // `extendModelsPatch` to record which provider the roster came from, and the
+    // app's missing copy is what let a Claude roster render as codex chips. The
+    // provider tag now lives in the SHARED `modelsByProvider` map, so the hook
+    // is gone and that fixture is no longer divergent.
     ...(kind === 'dashboard'
       ? {
           addInfoNotification: (message: string) => infoNotifications.push(message),
-          extendModelsPatch: (msg: Record<string, unknown>) => ({
-            availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
-          }),
         }
       : {}),
   }

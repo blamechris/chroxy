@@ -1459,8 +1459,11 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   setPrimaryClientId: (clientId) => useMultiClientStore.getState().setPrimaryClientId(clientId),
   // #5618 Batch 5a — cost_update's app-only mirror: flat totalCost/costBudget +
   // the useCostStore dual-write. (The shared per-session sessionCost patch is
-  // applied by the dispatch handler.) The app omits extendModelsPatch — it does
-  // not track availableModelsProvider (dashboard-only).
+  // applied by the dispatch handler.)
+  // #7728 — available_models needs no hook on either client any more: the
+  // provider tag is part of the shared `modelsByProvider` write. The comment
+  // that used to sit here ("the app omits extendModelsPatch") was the bug
+  // report — the app rendered whichever provider's roster arrived last.
   setCostUpdate: (totalCost, budget) => {
     getStore().setState({ totalCost, costBudget: budget } as Partial<ConnectionState>);
     useCostStore.getState().setCostUpdate(totalCost, budget);
@@ -3148,8 +3151,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
     // available_models — migrated to the shared dispatch table (#5618 Batch 5a;
     // handled by runDispatch before this switch). Non-array payloads are a no-op
-    // that preserves the existing list. The app omits the dashboard-only
-    // availableModelsProvider extension.
+    // that preserves the existing rosters. #7728: the roster lands under the
+    // broadcasting provider's key in `modelsByProvider`, the same write the
+    // dashboard gets.
 
 
     // permission_mode_changed — migrated to the shared dispatch table (#5618;

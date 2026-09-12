@@ -171,6 +171,8 @@ import {
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
 } from './replay-reconcile'
+// #7728 — available_models lands in a provider-keyed map, not one global slot.
+import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -530,19 +532,6 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * regardless).
    */
   setPrimaryClientId?(clientId: string | null): void
-  /**
-   * Contribute extra flat fields to the `available_models` patch (#5618 Batch 5a).
-   * The dashboard tracks which provider the model list is for
-   * (`availableModelsProvider`, parsed from `msg.provider`) and writes it in the
-   * SAME `set` as the models; the app store has no such field. The dispatcher
-   * spreads the returned object into the single `setState` patch, preserving the
-   * single-write behaviour.
-   *
-   * OPTIONAL: when omitted (the app), no extra fields are added. Returns the
-   * patch fragment (e.g. `{ availableModelsProvider }`); receives the raw wire
-   * message so the client parses only the fields it needs.
-   */
-  extendModelsPatch?(msg: Record<string, unknown>): Record<string, unknown>
   /**
    * Mirror a cost update into the client's flat state + cost store (#5618 Batch 5a).
    * `cost_update`'s shared effect is the per-session `sessionCost` patch; the app
@@ -1026,10 +1015,12 @@ export type DispatchTable<S extends DispatchSessionBase> = {
 // (permission_mode_changed, agent_idle — carry a dashboard
 // flat-state fallback the app lacks; budget_warning/exceeded — platform alert
 // APIs; primary_changed, client_joined/left/focus_changed — the app's
-// dedicated multi-client store; available_models — dashboard-only
-// `availableModelsProvider`; permission_expired — divergent notification
+// dedicated multi-client store; permission_expired — divergent notification
 // lifecycle + the dashboard's #2833 already-resolved branch) are deliberately
-// NOT here — they stay platform-local and visible as such.
+// NOT here — they stay platform-local and visible as such. available_models
+// LEFT that list in #7728: its divergence was the dashboard-only
+// `availableModelsProvider` tag, and keying the roster by provider in shared
+// state removed the difference rather than papering over it.
 // ---------------------------------------------------------------------------
 
 /** `available_permission_modes` — replace the flat list when the payload parses. */
@@ -1795,26 +1786,37 @@ function dispatchClientFocusChanged<S extends DispatchSessionBase>(
 // ---------------------------------------------------------------------------
 // Models / cost cases (#5618 Batch 5a)
 //
-// available_models replaces the flat model list (+ the dashboard's extra
-// `availableModelsProvider` via `extendModelsPatch`). cost_update applies the
-// shared per-session `sessionCost` patch (+ the app's flat/cost-store mirror via
-// `setCostUpdate`). Both ALWAYS own the message — the optional hooks only carry
-// the platform-specific extra, never gate ownership.
+// available_models replaces the roster of the provider that BROADCAST it inside
+// the shared `modelsByProvider` map (#7728 — it used to replace one global list,
+// so the last broadcast on a mixed-provider machine hid or mis-populated every
+// other session's picker). cost_update applies the shared per-session `sessionCost`
+// patch (+ the app's flat/cost-store mirror via `setCostUpdate`). Both ALWAYS
+// own the message — the optional hook only carries the platform-specific extra,
+// never gates ownership.
 // ---------------------------------------------------------------------------
 
-/** `available_models` — replace the flat model list (skip entirely if not an array). */
+/** `available_models` — replace that provider's roster (skip entirely if not an array). */
 function dispatchAvailableModels<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['available_models'],
   adapter: ClientStoreAdapter<S>,
 ): void {
   // Both clients guard on Array.isArray BEFORE writing — a non-array payload is a
-  // no-op that PRESERVES the existing list (NOT a clobber to []).
+  // no-op that PRESERVES the existing rosters (NOT a clobber to []).
   if (!Array.isArray(msg.models)) return
   const { models, defaultModelId } = handleAvailableModels(msg as Record<string, unknown>)
-  const extra = adapter.extendModelsPatch ? adapter.extendModelsPatch(msg as Record<string, unknown>) : {}
-  // Spread `extra` FIRST so the shared fields always win — the hook is for EXTRA
-  // flat fields only and must never override availableModels/defaultModelId.
-  adapter.setState({ ...extra, availableModels: models, defaultModelId } as Record<string, unknown>)
+  // #7728 — read-modify-write: every OTHER provider's roster survives. The
+  // provider tag is parsed inside `mergeModelsByProvider` (untagged broadcasts
+  // land in their own bucket, which is not the same as an empty roster), so
+  // neither client needs a per-client hook for it any more.
+  adapter.updateState((flat) => {
+    const previous = (flat as { modelsByProvider?: ModelsByProvider }).modelsByProvider
+    return {
+      modelsByProvider: mergeModelsByProvider(previous, (msg as Record<string, unknown>).provider, {
+        models,
+        defaultModelId,
+      }),
+    } as unknown as typeof flat
+  })
 }
 
 /** `cost_update` — per-session sessionCost patch (+ app flat/cost-store mirror). */

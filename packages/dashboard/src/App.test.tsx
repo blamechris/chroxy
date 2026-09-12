@@ -167,6 +167,7 @@ vi.mock('./components/StdinDisabledBanner', () => ({
   },
 }))
 
+import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { App } from './App'
 import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { createShortcutRegistry } from './shortcuts/registry'
@@ -186,7 +187,8 @@ vi.mock('./store/connection', () => {
     messages: [] as unknown[],
     viewMode: 'chat',
     availableProviders: [],
-    availableModels: [],
+    // #7728 — rosters are keyed by the provider that broadcast them.
+    modelsByProvider: {},
     availablePermissionModes: [],
     serverErrors: [],
     connectionRetryCount: 0,
@@ -821,12 +823,19 @@ describe('App', () => {
   describe('Model selector onChange', () => {
     const modelsState = {
       connectionPhase: 'connected' as const,
-      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null }],
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider: 'claude-sdk' }],
       activeSessionId: 's1',
-      availableModels: [
-        { id: 'claude-sonnet', label: 'Sonnet' },
-        { id: 'claude-opus', label: 'Opus' },
-      ],
+      // #7728 — the roster is keyed by the provider that broadcast it, and the
+      // default model id travels inside that provider's roster.
+      modelsByProvider: {
+        'claude-sdk': {
+          models: [
+            { id: 'claude-sonnet', label: 'Sonnet' },
+            { id: 'claude-opus', label: 'Opus' },
+          ],
+          defaultModelId: null,
+        },
+      },
     }
 
     // #6220 — the model picker is now a button that opens a modal; selecting a
@@ -845,7 +854,9 @@ describe('App', () => {
       stateOverrides = {
         ...modelsState,
         setModel: setModelFn,
-        defaultModelId: 'claude-sonnet',
+        modelsByProvider: {
+          'claude-sdk': { ...modelsState.modelsByProvider['claude-sdk'], defaultModelId: 'claude-sonnet' },
+        },
         getActiveSessionState: () => ({
           messages: [],
           streamingMessageId: null,
@@ -867,39 +878,59 @@ describe('App', () => {
     })
   })
 
-  // #7722 — a models-overlay hot-reload broadcast that is tagged with the WRONG
-  // provider doesn't just deliver the wrong list: `modelsMatchProvider` goes
-  // false and the picker DISAPPEARS from a live session until reconnect. The
-  // server now tags each overlay-reload roster with the registry it came from;
-  // these two assert the visible consequence from the dashboard's side, so a
-  // regression to a single `claude-sdk`-tagged broadcast is not silent.
-  describe('model picker visibility vs the available_models provider tag (#7722)', () => {
+  // #7722 / #7728 — `available_models` is a machine-wide broadcast tagged with
+  // the registry that emitted it. It used to land in ONE slot, so a Claude
+  // roster arriving while a codex session was open made the codex picker
+  // DISAPPEAR (`modelsMatchProvider` went false) until reconnect. The store now
+  // keeps one roster per provider and the header reads the ACTIVE session's, so
+  // picker visibility no longer depends on a global provider match at all.
+  describe('model picker visibility vs the provider-keyed roster (#7722 / #7728)', () => {
+    const codexSession = { sessionId: 's1', name: 'Codex', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider: 'codex' }
+    const CODEX_ROSTER = { models: [{ id: 'gpt-5.5', label: 'GPT-5.5' }], defaultModelId: null }
+    const CLAUDE_ROSTER = { models: [{ id: 'opus', label: 'Opus' }], defaultModelId: null }
     const codexState = {
       connectionPhase: 'connected' as const,
-      sessions: [{ sessionId: 's1', name: 'Codex', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider: 'codex' }],
+      sessions: [codexSession],
       activeSessionId: 's1',
       availableProviders: [{ name: 'codex', capabilities: { modelSwitch: true } }],
-      availableModels: [{ id: 'gpt-5.5', label: 'GPT-5.5' }],
     }
 
-    it('keeps the picker VISIBLE on a codex session when the roster is tagged codex', () => {
-      stateOverrides = { ...codexState, availableModelsProvider: 'codex' }
+    it('keeps the picker POPULATED on a codex session after a LATER claude-sdk broadcast', () => {
+      // The acceptance case: both rosters are in the store, claude's arrived
+      // last, and the codex session still offers its own models.
+      stateOverrides = {
+        ...codexState,
+        modelsByProvider: { codex: CODEX_ROSTER, 'claude-sdk': CLAUDE_ROSTER },
+      }
       render(<App />)
       fireEvent.click(screen.getByTestId('chat-settings-trigger'))
       expect(screen.getByTestId('model-picker-item-gpt-5.5')).toBeInTheDocument()
+      // And never the other provider's ids, which is the other half of the bug.
+      expect(screen.queryByTestId('model-picker-item-opus')).not.toBeInTheDocument()
     })
 
-    it('HIDES the picker on a codex session when the same roster is tagged claude-sdk', () => {
-      // The pre-#7722 behaviour, kept as the control: without it the test above
-      // would pass just as well with the provider tag ignored entirely.
-      stateOverrides = { ...codexState, availableModelsProvider: 'claude-sdk' }
+    it('offers NOTHING when only another provider has broadcast a roster', () => {
+      // The control: the picker must not fall back to a roster that is not this
+      // provider's. The dropdown drops the picker on an empty list, so the
+      // trigger may not survive — click it only if it did.
+      stateOverrides = { ...codexState, modelsByProvider: { 'claude-sdk': CLAUDE_ROSTER } }
       render(<App />)
-      // The header passes an EMPTY model list down when the tag mismatches, so
-      // the settings dropdown has nothing to render and drops out entirely —
-      // click it only if it survived.
       const trigger = screen.queryByTestId('chat-settings-trigger')
       if (trigger) fireEvent.click(trigger)
+      expect(screen.queryByTestId('model-picker-item-opus')).not.toBeInTheDocument()
       expect(screen.queryByTestId('model-picker-item-gpt-5.5')).not.toBeInTheDocument()
+    })
+
+    it('serves an UNTAGGED roster to the codex session (older daemons stay working)', () => {
+      // A daemon that tags nothing has one registry; its roster is global, and
+      // "nobody said which provider" must not read as "this provider has none".
+      stateOverrides = {
+        ...codexState,
+        modelsByProvider: { [UNTAGGED_MODELS_PROVIDER]: CODEX_ROSTER },
+      }
+      render(<App />)
+      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+      expect(screen.getByTestId('model-picker-item-gpt-5.5')).toBeInTheDocument()
     })
   })
 
@@ -2489,10 +2520,10 @@ describe('App', () => {
       connectionPhase: 'connected' as const,
       sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: 'sonnet', permissionMode: 'approve', isBusy: false, createdAt: Date.now(), conversationId: null }],
       activeSessionId: 's1',
-      availableModels: [
-        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
-        { id: 'opus', label: 'Opus 4.7', fullId: 'claude-opus-4-7', contextWindow: 200000 },
-      ],
+      modelsByProvider: { 'claude-sdk': { models: [
+          { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
+          { id: 'opus', label: 'Opus 4.7', fullId: 'claude-opus-4-7', contextWindow: 200000 },
+          ], defaultModelId: null } },
       availablePermissionModes: [
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto Approve' },
@@ -2841,11 +2872,11 @@ describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () =>
       connectionPhase: 'connected',
       sessions: [session('ollama')],
       activeSessionId: 's1',
-      availableModels: [
-        // Ollama models ship contextWindow: null on the wire; store-core
-        // drops it, so the entry simply has no contextWindow here.
-        { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b' },
-      ],
+      modelsByProvider: { 'ollama': { models: [
+          // Ollama models ship contextWindow: null on the wire; store-core
+          // drops it, so the entry simply has no contextWindow here.
+          { id: 'llama3:8b', label: 'llama3:8b', fullId: 'llama3:8b' },
+          ], defaultModelId: null } },
       getActiveSessionState: () =>
         sessionState('llama3:8b', { contextOccupancy: byokSnapshot(12_500) }),
     }
@@ -2863,11 +2894,11 @@ describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () =>
       connectionPhase: 'connected',
       sessions: [session('claude-byok')],
       activeSessionId: 's1',
-      availableModels: [
-        // Legacy servers can omit contextWindow on claude models — the
-        // 200k default is genuine there.
-        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6' },
-      ],
+      modelsByProvider: { 'claude-byok': { models: [
+          // Legacy servers can omit contextWindow on claude models — the
+          // 200k default is genuine there.
+          { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6' },
+          ], defaultModelId: null } },
       getActiveSessionState: () =>
         sessionState('sonnet', { contextOccupancy: byokSnapshot(12_500) }),
     }
@@ -2884,9 +2915,9 @@ describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () =>
       connectionPhase: 'connected',
       sessions: [session('claude-sdk')],
       activeSessionId: 's1',
-      availableModels: [
-        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
-      ],
+      modelsByProvider: { 'claude-sdk': { models: [
+          { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+          ], defaultModelId: null } },
       getActiveSessionState: () =>
         sessionState('sonnet', {
           // The billing aggregate of an 8-round turn — ≈816k of cache_read.
@@ -2930,9 +2961,9 @@ describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () =>
       connectionPhase: 'connected',
       sessions: [session('claude-cli')],
       activeSessionId: 's1',
-      availableModels: [
-        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
-      ],
+      modelsByProvider: { 'claude-cli': { models: [
+          { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+          ], defaultModelId: null } },
       getActiveSessionState: () =>
         sessionState('sonnet', {
           contextUsage: {
@@ -2957,10 +2988,10 @@ describe('context meter — occupancy snapshot semantics (#5424 / #6769)', () =>
       connectionPhase: 'connected',
       sessions: [session('claude-sdk')],
       activeSessionId: 's1',
-      availableModels: [
-        // Registry thinks 200k; the SDK snapshot says the window is 1M.
-        { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
-      ],
+      modelsByProvider: { 'claude-sdk': { models: [
+          // Registry thinks 200k; the SDK snapshot says the window is 1M.
+          { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
+          ], defaultModelId: null } },
       getActiveSessionState: () =>
         sessionState('sonnet', {
           contextOccupancy: {

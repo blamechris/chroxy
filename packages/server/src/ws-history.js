@@ -1110,12 +1110,13 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     send(ws, { type: 'claude_ready', sessionId })
   }
   // #4302: push the new session's provider-scoped model list on every
-  // switch. Without this, the dashboard's `availableModelsProvider` stays
-  // tagged with whichever provider the client saw last (set on auth via
-  // `sendPostAuthInfo`), and `modelsMatchProvider` in App.tsx suppresses
-  // the model picker for any session whose provider differs from the
-  // initial one — most visibly, a claude-cli session created after a
-  // TUI/SDK session loses its picker entirely.
+  // switch. Without this a client never learns the roster of a provider it
+  // did not see at auth time (`sendPostAuthInfo`) — pre-#7728 that showed up
+  // as the dashboard's single `availableModelsProvider` tag staying pinned to
+  // the provider seen last, suppressing the picker for every other session;
+  // since #7728 each roster is keyed by provider, so what a missing push
+  // leaves behind is an EMPTY roster for that provider (no picker, and no
+  // other provider's ids either) until this message arrives.
   if (!opts.skipModels) {
     const activeProvider = entry.provider || null
     const activeRegistry = getRegistryForProvider(activeProvider)
