@@ -496,9 +496,14 @@ export class CodexSession extends JsonlSubprocessSession {
     // failed — which is the seed doing its job, not the union. What #7761/#7776
     // removed is the seed riding back in ON TOP of a roster the binary reported,
     // and that now holds at all three merge sites in models.js (`updateModels`,
-    // `loadCache`, `applyOverlay`'s cache-warmed branch), so a cache file
-    // written by a pre-fix build no longer re-seeds them at the next boot
-    // either. Validation (`getAllowedModels`) is a separate roster and is
+    // `loadCache`, `applyOverlay`'s cache-warmed branch). Stated at the
+    // observable rather than at the rule, because the two differ: the UNION no
+    // longer re-adds them, and rows a pre-fix build already PERSISTED are still
+    // served until the migration runs — `saveCache()` wrote `activeModels`, and
+    // the file is what boots. `loadCache`'s one-time schema-marker migration
+    // (models.js, `migrateLegacyStaticSeed`) is what takes them out of the file;
+    // absent that, they would be served indefinitely on an install whose probe
+    // never succeeds. Validation (`getAllowedModels`) is a separate roster and is
     // untouched: #7727 is where the catalogue becomes authoritative there, so
     // until it lands an id this function stopped OFFERING can still be ACCEPTED.
     if (hasCodexCatalog()) {
