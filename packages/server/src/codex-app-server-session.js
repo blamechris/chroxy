@@ -421,18 +421,23 @@ export class CodexAppServerSession extends BaseSession {
   /**
    * #7729 — record the model codex resolved, from the `thread/start` response.
    *
-   * The TOP-LEVEL `model` is the observed field, and it is the only one. The
-   * live codex-cli 0.154.0 capture on #7721 is exactly
-   * `{model, reasoningEffort, modelProvider, sandbox, approvalPolicy}` — it
-   * carries NO `thread` object at all.
+   * BOTH reads are observed live. The UNTRIMMED codex-cli 0.154.0 capture
+   * (https://github.com/blamechris/chroxy/issues/7721#issuecomment-5646200933)
+   * carries the resolved model at the TOP LEVEL **and** on a nested `thread`
+   * object — `thread.model` / `thread.reasoningEffort` mirror the top-level
+   * `model` / `reasoningEffort` — and `thread` is in the generated
+   * `ThreadStartResponse.required` alongside `model`. An earlier revision of
+   * this docblock read the TRIMMED echo quoted in the #7721 body (only
+   * `{model, reasoningEffort, modelProvider, sandbox, approvalPolicy}`) and
+   * wrongly declared the nested object unobserved: cite the untrimmed capture,
+   * never the trimmed excerpt.
    *
-   * `thread.model` is therefore a DEFENSIVE fallback whose warrant is the
-   * generated schema's nested thread object and the pre-existing
-   * `started?.thread?.id` read in `start()` (itself of unrecorded provenance) —
-   * NOT an observed payload. Do not re-cite it as "verified live": the claim
-   * gets inherited by the next reader, and docs are leads, not ground truth.
-   * Top level wins; the nested read costs one `??` and is kept for a build
-   * that carries only the nested copy.
+   * The ordering below is deliberate and unchanged — the TOP LEVEL wins, and
+   * the nested read is the one `??` that still answers for a build carrying
+   * only the mirrored copy. That same nested object is also the SOLE source of
+   * `this._threadId` (`started?.thread?.id`, in `start()` above), which every
+   * `turn/start` and `interrupt` depends on: observed live AND schema-required,
+   * so it is neither speculative nor deletable defensive cruft.
    *
    * A response carrying NEITHER leaves `bootedModel` **null**, never
    * `undefined` — the badge, the usage split and the context-window lookup all

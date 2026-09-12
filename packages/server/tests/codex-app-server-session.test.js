@@ -1654,14 +1654,18 @@ function stubClient(responses = {}) {
   return { client: c, calls }
 }
 
-// The live `thread/start` result PLUS a nested `thread` object.
+// The live `thread/start` result, trimmed to the fields this session reads.
 //
-// The live codex-cli 0.154.0 capture (#7721) is only
-// `{model, reasoningEffort, modelProvider, sandbox, approvalPolicy}` — it has
-// NO `thread` key. The nested object here is SYNTHETIC: it exercises
-// `start()`'s pre-existing `started?.thread?.id` read and gives
-// `_captureBootedModel`'s defensive `thread.model` fallback something to hit.
-// Calling this "the live result, trimmed" would be a false provenance claim.
+// Provenance is the UNTRIMMED codex-cli 0.154.0 capture,
+// https://github.com/blamechris/chroxy/issues/7721#issuecomment-5646200933 —
+// which carries the nested `thread` object (`id`, `model`, `reasoningEffort`,
+// `cliVersion`, …) alongside the top-level fields, with `thread.model` /
+// `thread.reasoningEffort` MIRRORING the top-level `model` /
+// `reasoningEffort`. `thread` is in `ThreadStartResponse.required`. Nothing
+// here is synthetic: the nested object is what exercises `start()`'s
+// `started?.thread?.id` read (the sole source of `_threadId`) and
+// `_captureBootedModel`'s `thread.model` branch, so do not trim it away on the
+// belief that it was invented.
 const THREAD_START_ECHO = Object.freeze({
   model: 'gpt-5.5',
   reasoningEffort: 'xhigh',
