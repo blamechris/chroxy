@@ -654,6 +654,23 @@ function nonClaudeRegistry(cachePath) {
   })
 }
 
+// The same registry WITH a getModelMetadata hook — the shape
+// getRegistryForProvider() actually builds for a real non-Claude provider,
+// whose session class publishes a discovered catalogue through applyCatalog()
+// before updateModels() runs. Without a hook every `providerMeta` in
+// withModelMetadata() is null, so the precedence between the caller's entry
+// and the provider's metadata is unasserted whichever way it is written
+// (#7749). `meta` is a plain object keyed by fullId.
+function nonClaudeRegistryWithMetadata(meta, cachePath) {
+  return createModelsRegistry({
+    fallbackModels: [],
+    deriveId: (id) => id,
+    resolveContextWindow: () => DEFAULT_CONTEXT_WINDOW,
+    getModelMetadata: (fullId) => meta[fullId] ?? null,
+    ...(cachePath ? { cachePath: () => cachePath } : {}),
+  })
+}
+
 describe('updateModels carries the caller-supplied metadata (#7723)', () => {
   it("a discovery result's contextWindow reaches getModels() with that exact number", () => {
     // Before #7723 the `contextWindow` key refreshDiscoveredModels() passes was
@@ -685,8 +702,14 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
       { value: 'b', displayName: 'B', contextWindow: '272000' },
       { value: 'c', displayName: 'C', contextWindow: null },
       { value: 'd', displayName: 'D' },
+      // Infinity is the ONLY row here that reaches the Number.isFinite()
+      // clause: it is a number and it is > 0, so every other guard in
+      // usableContextWindow() passes it through. Without this row that
+      // clause is untested code (deleting it leaves the suite green).
+      { value: 'e', displayName: 'E', contextWindow: Infinity },
+      { value: 'f', displayName: 'F', contextWindow: NaN },
     ])
-    for (const id of ['a', 'b', 'c', 'd']) {
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) {
       const entry = registry.getModels().find((m) => m.fullId === id)
       assert.equal(entry.contextWindow, DEFAULT_CONTEXT_WINDOW, `${id} should fall back to the heuristic`)
     }
@@ -706,6 +729,59 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     assert.equal(entry.provenance, 'discovered')
     assert.deepEqual(entry.reasoningLevels, ['low', 'medium', 'high', 'xhigh'])
     assert.equal(entry.defaultReasoningLevel, 'medium')
+  })
+
+  it("the caller's metadata beats the provider's static table, field by field (#7749)", () => {
+    // withModelMetadata(entry, m, providerMeta) — the CALLER first. With no
+    // getModelMetadata hook providerMeta is null at every site and this
+    // ordering is unasserted; swapping the two arguments stays green.
+    const registry = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low'],
+        defaultReasoningLevel: 'low',
+      },
+    })
+    registry.updateModels([{
+      value: 'gpt-5.5',
+      displayName: 'GPT-5.5',
+      contextWindow: 272_000,
+      provenance: 'discovered',
+      reasoningLevels: ['low', 'high'],
+      defaultReasoningLevel: 'high',
+    }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 272_000, 'the live discovery window must beat the static table')
+    assert.equal(entry.provenance, 'discovered', "the caller's provenance must beat the table's")
+    assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
+    assert.equal(entry.defaultReasoningLevel, 'high')
+  })
+
+  it("the provider's table fills a field the caller omits (#7749)", () => {
+    // The other half of the same precedence: first source that CARRIES a
+    // usable value wins, so an absent caller key falls through rather than
+    // blanking the field.
+    const registry = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low', 'medium'],
+      },
+    })
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5' }])
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 128_000, "the table's window fills in when the caller sends none")
+    assert.equal(entry.provenance, 'catalogued')
+    assert.deepEqual(entry.reasoningLevels, ['low', 'medium'])
+    assert.equal(entry.defaultReasoningLevel, undefined,
+      'a key NEITHER source carries must stay absent')
   })
 
   it('an entry whose source carries none of the new fields gains no new keys', () => {
@@ -783,6 +859,41 @@ describe('loadCache stale prune is scoped to the Claude registry (#7723)', () =>
     assert.equal(entry.provenance, 'discovered')
     assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
     assert.equal(entry.defaultReasoningLevel, 'high')
+  })
+
+  it("the cached entry's metadata beats the provider's static table on reload (#7749)", () => {
+    // loadCache's withModelMetadata(entry, m, providerMeta) — the CACHED row
+    // first: the cache is what the provider REPORTED, the table is what the
+    // repo happens to know. Needs a getModelMetadata hook to be assertable at
+    // all; without one providerMeta is null and either ordering passes.
+    writeFileSync(cachePath, JSON.stringify({
+      models: [{
+        id: 'gpt-5.5',
+        fullId: 'gpt-5.5',
+        label: 'GPT-5.5',
+        contextWindow: 272_000,
+        provenance: 'discovered',
+        reasoningLevels: ['low', 'high'],
+      }],
+    }))
+    const r = nonClaudeRegistryWithMetadata({
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        label: 'Table GPT',
+        fullId: 'gpt-5.5',
+        contextWindow: 128_000,
+        provenance: 'catalogued',
+        reasoningLevels: ['low'],
+        defaultReasoningLevel: 'low',
+      },
+    }, cachePath)
+    assert.equal(r.loadCache(cachePath), true)
+    const entry = r.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 272_000, 'the cached window must beat the static table')
+    assert.equal(entry.provenance, 'discovered', "the cached row's provenance must beat the table's")
+    assert.deepEqual(entry.reasoningLevels, ['low', 'high'])
+    assert.equal(entry.defaultReasoningLevel, 'low',
+      'a key only the table carries still fills in')
   })
 
   it('the Claude registry STILL drops a retired claude family', () => {
