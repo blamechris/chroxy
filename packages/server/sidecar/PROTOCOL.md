@@ -510,6 +510,14 @@ new one.  If all sessions are active, the globally oldest session is evicted:
 the agent sends `{ type: 'session_lost', sessionId, reason: 'evicted_by_cap' }`
 to the live consumer before closing the WS with code `1001`.
 
+Two sessions can share a `lastActiveAt` — it comes from a clock, and Windows'
+timer granularity is around 15.6ms — so the order is `(lastActiveAt,
+createdSeq)`, where `createdSeq` is a counter the agent increments per session.
+**An equal-timestamp tie is therefore broken by creation order, oldest first.**
+Before #7690 the tie was settled by `Map` iteration order, which gives the same
+answer but as a side effect of the container rather than as a stated rule — so
+nothing documented it and no test could fail on it.
+
 `K8sBackend` maps `session_lost` to `exit(-2)` regardless of reason, so the
 caller can distinguish a cap eviction (session-loss semantics) from a
 pre-session connection failure (which maps to `exit(-1)`).

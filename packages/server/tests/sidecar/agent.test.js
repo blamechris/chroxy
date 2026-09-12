@@ -13,6 +13,47 @@ const WRONG_TOKEN = 'wrong-token'
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Deterministic fake clock — timers AND the wall clock.
+ *
+ * ONE copy, at module scope. There were two, in sibling describe blocks, and the
+ * first carried a comment saying it had been "hoisted here so we don't need
+ * forward references across describe scopes" — while the second existed anyway.
+ * They had already drifted apart in their comments (#7690).
+ *
+ * `now()` is the half #7690 needed. `PodAgent.lastActiveAt` decides which
+ * session the size cap evicts and is REWRITTEN on every emitted frame, so a
+ * test that pins those timestamps can have its pin overwritten by a frame that
+ * lands a moment later — `Date.now()` being some 1.7e12, any late bump makes
+ * that session the NEWEST and inverts the eviction. Handing the agent this
+ * clock makes the ordering a property of the test rather than of the machine.
+ */
+function makeFakeClock() {
+  let now = 0
+  const pending = []
+  function fakeSetTimeout(fn, delay) {
+    const handle = { _fn: fn, _at: now + delay, _cancelled: false, unref() {} }
+    pending.push(handle)
+    return handle
+  }
+  function fakeClearTimeout(handle) {
+    if (handle) handle._cancelled = true
+  }
+  // Fire all callbacks that have become due (sorted earliest-first for
+  // deterministic ordering when multiple timers share the same deadline).
+  function advance(ms) {
+    now += ms
+    const due = pending
+      .filter((h) => !h._cancelled && h._at <= now)
+      .sort((a, b) => a._at - b._at)
+    for (const h of due) {
+      h._cancelled = true
+      h._fn()
+    }
+  }
+  return { fakeSetTimeout, fakeClearTimeout, advance, now: () => now }
+}
+
 /** Start an agent on a random port and resolve the chosen port. */
 async function startAgent(opts = {}) {
   const agent = new PodAgent({ token: TOKEN, ...opts })
@@ -2118,34 +2159,6 @@ describe('PodAgent', () => {
   // ---------------------------------------------------------------------------
 
   describe('stdin drain stall detection', () => {
-    /**
-     * Reusable deterministic fake clock — same shape as the one used by the
-     * idle-resume TTL describe block below. Hoisted here so we don't need
-     * forward references across describe scopes.
-     */
-    function makeFakeClock() {
-      let now = 0
-      const pending = []
-      function fakeSetTimeout(fn, delay) {
-        const handle = { _fn: fn, _at: now + delay, _cancelled: false, unref() {} }
-        pending.push(handle)
-        return handle
-      }
-      function fakeClearTimeout(handle) {
-        if (handle) handle._cancelled = true
-      }
-      function advance(ms) {
-        now += ms
-        const due = pending
-          .filter((h) => !h._cancelled && h._at <= now)
-          .sort((a, b) => a._at - b._at)
-        for (const h of due) {
-          h._cancelled = true
-          h._fn()
-        }
-      }
-      return { fakeSetTimeout, fakeClearTimeout, advance }
-    }
 
     function makeFakeChild() {
       const child = new EventEmitter()
@@ -2859,40 +2872,6 @@ describe('PodAgent', () => {
   // ---------------------------------------------------------------------------
 
   describe('idle-resume TTL eviction', () => {
-    /**
-     * Deterministic fake timer: exposes `advance(ms)` to fire pending callbacks
-     * without actually waiting.  Returned handles have a no-op `.unref()` so the
-     * idempotent guard in _startIdleTimer works normally.
-     */
-    function makeFakeClock() {
-      let now = 0
-      const pending = []
-
-      function fakeSetTimeout(fn, delay) {
-        const handle = { _fn: fn, _at: now + delay, _cancelled: false, unref() {} }
-        pending.push(handle)
-        return handle
-      }
-
-      function fakeClearTimeout(handle) {
-        if (handle) handle._cancelled = true
-      }
-
-      function advance(ms) {
-        now += ms
-        // Fire all callbacks that have become due (sorted earliest-first for
-        // deterministic ordering when multiple timers share the same deadline).
-        const due = pending
-          .filter((h) => !h._cancelled && h._at <= now)
-          .sort((a, b) => a._at - b._at)
-        for (const h of due) {
-          h._cancelled = true
-          h._fn()
-        }
-      }
-
-      return { fakeSetTimeout, fakeClearTimeout, advance }
-    }
 
     it('idle timer fires after TTL and kills the child + drops session', async () => {
       const clock = makeFakeClock()
@@ -3405,6 +3384,147 @@ describe('PodAgent', () => {
       }
     })
 
+    // ------------------------------------------------------------------
+    // #7690 — the flake itself, at unit level.
+    //
+    // `Server Windows Tests` is a REQUIRED check and this suite failed there
+    // intermittently, a different eviction/TTL subtest each time, reading as
+    // `mergeStateStatus=BLOCKED` on healthy PRs. The filed hypothesis was
+    // Windows timer granularity breaking a tie. Measured, it is not: ties were
+    // already decided (by Map insertion order, which IS creation order). The
+    // real mechanism is that `lastActiveAt` is MUTABLE — `_emitSessionFrame`
+    // rewrites it on every frame — so a frame arriving after a test pins the
+    // timestamps sets that session to the wall clock and makes it the NEWEST.
+    //
+    // These two rows pin the mechanism directly, because the end-to-end test
+    // below can only reproduce it by losing a race.
+    // ------------------------------------------------------------------
+    it('a frame arriving after the pin does not invert the eviction (#7690)', () => {
+      // The exact failure: one frame on A after the pin. Against a wall clock
+      // this set A to ~1.7e12 and evicted B; against the injected clock the
+      // worst case is a TIE at `clock.now()`, which `createdSeq` resolves to A.
+      const clock = makeFakeClock()
+      const agent = new PodAgent({ token: TOKEN, maxSessions: 2, nowFn: clock.now })
+      const evicted = []
+      agent._evictSession = (sess) => { evicted.push(sess.sessionId); agent._sessions.delete(sess.sessionId) }
+
+      const mk = (id, at, seq) => ({
+        sessionId: id, activeWs: { send() {}, readyState: 1 }, lastActiveAt: at,
+        createdSeq: seq, idleTimer: null, seq: 0, buffer: [],
+      })
+      clock.advance(1000)
+      agent._sessions.set('A', mk('A', clock.now(), 1))
+      clock.advance(1000)
+      agent._sessions.set('B', mk('B', clock.now(), 2))
+
+      // The late frame — what a mock child's stdout causes on a loaded runner.
+      agent._emitSessionFrame(agent._sessions.get('A'), { type: 'output', data: 'x' }, () => {})
+      assert.equal(
+        agent._sessions.get('A').lastActiveAt, clock.now(),
+        'the bump must land on the injected clock, not the wall clock',
+      )
+
+      agent._enforceSessionCap()
+      assert.deepEqual(evicted, ['A'], 'the oldest-CREATED session must still be the one evicted')
+    })
+
+    it('an eviction tie is broken by creation order, not by Map insertion order (#7690)', () => {
+      // Equal timestamps happen whenever the clock does not advance between two
+      // sessions — Windows' granularity is ~15.6ms. Before `createdSeq` the
+      // winner was whichever the Map yielded first, which is insertion order:
+      // the right answer, by accident, and unfalsifiable. Inserting B FIRST is
+      // what separates the two rules — measured on main, this evicts B.
+      for (const order of [['A', 'B'], ['B', 'A']]) {
+        const agent = new PodAgent({ token: TOKEN, maxSessions: 2 })
+        const evicted = []
+        agent._evictSession = (sess) => { evicted.push(sess.sessionId); agent._sessions.delete(sess.sessionId) }
+        const createdSeq = { A: 1, B: 2 }   // A created first, whatever the Map order
+        for (const id of order) {
+          agent._sessions.set(id, {
+            sessionId: id, activeWs: { send() {}, readyState: 1 },
+            lastActiveAt: 1000, createdSeq: createdSeq[id], idleTimer: null,
+          })
+        }
+        agent._enforceSessionCap()
+        assert.deepEqual(evicted, ['A'], `insertion order ${order.join(',')} must not change the verdict`)
+      }
+    })
+
+    it('the AGENT assigns createdSeq, in creation order, across real spawns (#7690)', async () => {
+      // This row replaced a TAUTOLOGY. The first version hand-incremented
+      // `agent._sessionSeq` and asserted that `+= 1` three times yields
+      // [1,2,3] — a statement about the `+=` operator, not about the agent.
+      // Proven in review: deleting `createdSeq: ++this._sessionSeq` from
+      // agent.js outright left that test GREEN, while the PR claimed it was
+      // exactly what stops a constant `createdSeq`.
+      //
+      // Nothing here is hand-set: three sessions are spawned through the real
+      // WS protocol and the field is read back off the agent.
+      const spawnFn = () => createMockSpawn().child
+      const { agent, port } = await startAgent({ spawnFn, maxSessions: 10 })
+      try {
+        assert.equal(agent._sessionSeq, 0, 'a fresh agent starts its counter at zero')
+        const ids = []
+        for (let i = 0; i < 3; i++) {
+          const ws = connect(port, TOKEN)
+          await waitOpen(ws)
+          const started = waitForSessionStarted(ws)
+          ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+          ids.push(await started)
+          ws.close()
+          await waitFor(() => agent._sessions.get(ids[i])?.activeWs === null, { label: 'ws detach' })
+        }
+        const seqs = ids.map((id) => agent._sessions.get(id).createdSeq)
+        assert.deepEqual(seqs, [1, 2, 3], `agent-assigned createdSeq, got ${JSON.stringify(seqs)}`)
+        assert.equal(agent._sessionSeq, 3, 'the counter tracks the number of sessions created')
+      } finally {
+        await agent.close()
+      }
+    })
+
+    it('a RESUME stamps lastActiveAt from the injected clock too (#7690)', async () => {
+      // The gap this closes: `nowFn` is threaded at THREE sites, and only the
+      // `_emitSessionFrame` one had a test. Reverting the RESUME site survived
+      // the whole suite in review — and it is load-bearing, because the resume
+      // path bumps `lastActiveAt` exactly like a frame does, so a wall-clock
+      // stamp there re-creates the inversion this change exists to remove, one
+      // code path over.
+      const clock = makeFakeClock()
+      const spawnFn = () => createMockSpawn().child
+      const { agent, port } = await startAgent({
+        spawnFn, maxSessions: 10, resumeTimeoutMs: 999_999, nowFn: clock.now,
+      })
+      try {
+        const ws1 = connect(port, TOKEN)
+        await waitOpen(ws1)
+        const started = waitForSessionStarted(ws1)
+        ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
+        const sessionId = await started
+        // Creation stamped from the injected clock, not the wall clock.
+        assert.equal(
+          agent._sessions.get(sessionId).lastActiveAt, clock.now(),
+          'creation must stamp from nowFn',
+        )
+
+        ws1.close()
+        await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, { label: 'ws detach' })
+
+        clock.advance(5000)
+        const ws2 = connect(port, TOKEN)
+        await waitOpen(ws2)
+        ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
+        await waitFor(() => agent._sessions.get(sessionId)?.activeWs !== null, { label: 'resume attach' })
+
+        assert.equal(
+          agent._sessions.get(sessionId).lastActiveAt, clock.now(),
+          'resume must stamp from nowFn — a wall-clock stamp here re-creates the inversion',
+        )
+        ws2.close()
+      } finally {
+        await agent.close()
+      }
+    })
+
     it('falls back to evicting oldest active session when all sessions are active', async () => {
       // Cap=2. Spawn A and B sequentially (each over its own WS connection so
       // the single-connection policy is satisfied), then simulate both sessions
@@ -3419,10 +3539,24 @@ describe('PodAgent', () => {
         return mock.child
       }
 
+      // The clock is INJECTED (#7690). `lastActiveAt` is rewritten on every
+      // emitted frame, so pinning it below is not enough on its own: a frame
+      // landing after the pin sets it to the wall clock, ~1.7e12, which makes
+      // session A the NEWEST and inverts the eviction. Demonstrated directly —
+      // one `_emitSessionFrame` on A after the pin flips the evicted session
+      // from A to B, which is exactly the observed Windows failure.
+      //
+      // With the clock injected and held, a late bump can only set A to the
+      // CURRENT fake time, i.e. a TIE with B — and the `createdSeq` tie-break
+      // added in the same change resolves a tie by creation order, which is A.
+      // The two halves compose: the clock bounds the damage to a tie, the
+      // tie-break decides the tie.
+      const clock = makeFakeClock()
       const { agent: capAgent, port: capPort } = await startAgent({
         spawnFn,
         maxSessions: 2,
         resumeTimeoutMs: 999_999,  // long TTL so idle timers don't race
+        nowFn: clock.now,
       })
 
       try {
@@ -3462,10 +3596,14 @@ describe('PodAgent', () => {
         sessionA.activeWs = fakeWsA
         sessionB.activeWs = fakeWsB
 
-        // Pin timestamps: A is definitively older than B. Without this the two
-        // spawns may happen within the same millisecond on fast machines.
-        sessionA.lastActiveAt = 1000
-        sessionB.lastActiveAt = 2000
+        // Pin timestamps against the INJECTED clock, so a later frame cannot
+        // jump a session past the others — the most it can do is set it to
+        // `clock.now()`, which is the tie the `createdSeq` break resolves.
+        clock.advance(1000)
+        sessionA.lastActiveAt = clock.now()
+        clock.advance(1000)
+        sessionB.lastActiveAt = clock.now()
+        assert.ok(sessionA.createdSeq < sessionB.createdSeq, 'A must have been created before B')
 
         // --- Session C: cap enforced, must evict session A (oldest active) ---
         const ws3 = connect(capPort, TOKEN)
