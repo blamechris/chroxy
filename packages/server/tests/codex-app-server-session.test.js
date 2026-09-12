@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { setLogListener } from '../src/logger.js'
 
 // #6605 Phase 1 — the codex app-server DRIVING layer. These pin the JSON-RPC
 // transport routing and the app-server-notification → Chroxy-event mapping
@@ -1555,5 +1556,66 @@ describe('CodexAppServerSession — permission rule accessors (#6829)', () => {
       s.destroy()
       cleanup()
     }
+  })
+})
+
+// #7724 (CDX-1) — the handshake result used to be discarded and
+// `deprecationNotice` used to be swallowed. Both are session-level wiring, so
+// they are pinned here rather than in the pure-capability suite.
+describe('#7724 codex version gate + deprecation notices', () => {
+  /** Collect log lines emitted while fn() runs. */
+  function withLog(fn) {
+    const lines = []
+    setLogListener((entry) => { lines.push(entry) })
+    try { fn() } finally { setLogListener(null) }
+    return lines
+  }
+
+  it('logs a deprecationNotice BETWEEN turns, where the active-turn gate would swallow it', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      assert.equal(s._activeTurn, null, 'precondition: no active turn — the early-return path')
+      const lines = withLog(() => {
+        s._onNotification({ method: 'deprecationNotice', params: { summary: 'thread/foo is going away', details: 'use thread/bar' } })
+      })
+      const hit = lines.find((l) => String(l?.message ?? l).includes('thread/foo is going away'))
+      assert.ok(hit, `the notice was logged; got ${JSON.stringify(lines.map((l) => String(l?.message ?? l)))}`)
+      assert.ok(String(hit?.message ?? hit).includes('use thread/bar'), 'and carries the details')
+    } finally { cleanup() }
+  })
+
+  it('logs a deprecationNotice with NULL details (the wire type allows it) without printing "null"', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      const lines = withLog(() => {
+        s._onNotification({ method: 'deprecationNotice', params: { summary: 'x is deprecated', details: null } })
+      })
+      const hit = lines.find((l) => String(l?.message ?? l).includes('x is deprecated'))
+      assert.ok(hit, 'logged')
+      assert.ok(!String(hit?.message ?? hit).includes('null'), 'a null details must not be concatenated as the string "null"')
+    } finally { cleanup() }
+  })
+
+  it('a deprecationNotice does not disturb an active turn', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      // Handled ahead of the turn machinery, so it must not be mistaken for
+      // forward progress on the turn nor reach the notification switch.
+      s._activeTurn = { messageId: 'm1', turnId: null }
+      const out = capture(s, ['stream_delta', 'stream_start'])
+      withLog(() => s._onNotification({ method: 'deprecationNotice', params: { summary: 's' } }))
+      assert.deepEqual(out, [], 'no turn events emitted')
+      assert.equal(s._activeTurn.turnId, null, 'turn state untouched')
+    } finally { cleanup() }
+  })
+
+  it('capabilities default to SUPPORTED before any handshake has happened', () => {
+    // A session that has not connected yet must not report features as absent —
+    // the same fail-safe direction the parser uses for an unknown version.
+    const { s, cleanup } = mkSession()
+    try {
+      assert.ok(s._capabilities === undefined || s._capabilities?.supportsModelList !== false,
+        'an un-handshaken session never reports a feature as unsupported')
+    } finally { cleanup() }
   })
 })

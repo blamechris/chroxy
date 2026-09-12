@@ -6,6 +6,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
+import { deriveCapabilities } from './codex-protocol-capabilities.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
@@ -279,13 +280,28 @@ export class CodexAppServerSession extends BaseSession {
 
     let started
     try {
-      await this._client.initialize({ name: 'chroxy', version: '1' })
+      // #7724 — the handshake result was previously discarded. It carries the
+      // ONLY in-band version signal (`userAgent`), which describes the binary
+      // serving THIS session rather than whatever `codex` is on PATH.
+      const handshake = await this._client.initialize({ name: 'chroxy', version: '1' })
+      this._handshake = handshake ?? null
+      this._capabilities = deriveCapabilities({ userAgent: handshake?.userAgent })
+      log.debug(`codex app-server handshake: version=${this._capabilities.version ?? 'unknown'} userAgent=${JSON.stringify(handshake?.userAgent ?? null)}`)
       started = await this._client.request('thread/start', {
         approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
         cwd: this.cwd,
         sandbox,
         ...(this.model ? { model: this.model } : {}),
       })
+      // `thread.cliVersion` is a bare semver and needs no string surgery, so it
+      // supersedes the userAgent parse once the thread exists. Re-derived rather
+      // than patched so one function owns the whole mapping.
+      if (started?.thread?.cliVersion) {
+        this._capabilities = deriveCapabilities({
+          cliVersion: started.thread.cliVersion,
+          userAgent: this._handshake?.userAgent,
+        })
+      }
     } catch (err) {
       // #6708 — the app-server child is spawned inside initialize(); a missing/
       // quarantined codex binary surfaces here as an initialize rejection (the
@@ -430,6 +446,15 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   _onNotification({ method, params }) {
+    // #7724 — codex announces protocol deprecations out of band, at any time,
+    // including BETWEEN turns. Handled ahead of the active-turn gate below,
+    // which returns early and would otherwise swallow it entirely.
+    if (method === 'deprecationNotice') {
+      const summary = params?.summary || '(no summary)'
+      const details = params?.details
+      log.warn(`codex app-server deprecation notice: ${summary}${details ? ` — ${details}` : ''}`)
+      return
+    }
     if (!this._activeTurn) {
       // Between turns: only usage/errors matter; ignore stray item churn.
       if (method === 'thread/tokenUsage/updated') this._lastUsage = this._mapUsage(params)

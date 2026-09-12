@@ -17,6 +17,30 @@ const log = createLogger('codex-app-server')
  * Protocol validated against codex-cli 0.128.0. This is pure transport — it maps
  * nothing onto Chroxy's session contract; CodexAppServerSession does that.
  */
+/**
+ * #7724 — turn a JSON-RPC `error` object into an Error that still carries its
+ * CODE.
+ *
+ * Until now the single reject site built `new Error(m.error.message)` and
+ * dropped `code` on the floor, so no caller could branch on it — and a caller
+ * that needed to (a capability gate asking "is this method supported?") had only
+ * the message text to work with. Matching upstream prose is the #7503/#7540
+ * defect: the wording changes and the check silently stops matching, which reads
+ * as "nothing wrong" rather than as a failure.
+ *
+ * `code` and `data` are attached as own properties rather than subclassing, so
+ * every existing `catch`/`err.message` path is untouched.
+ */
+export function toRpcError(error) {
+  const err = new Error(error?.message || JSON.stringify(error))
+  // A JSON-RPC code is an integer; anything else (absent, null, a string from a
+  // non-conforming peer) becomes null so a caller's `=== -32600` is a clean
+  // false rather than a coercion surprise.
+  err.code = Number.isInteger(error?.code) ? error.code : null
+  if (error?.data !== undefined) err.data = error.data
+  return err
+}
+
 export class CodexAppServerClient extends EventEmitter {
   constructor({ bin, cwd, env, logger } = {}) {
     super()
@@ -109,7 +133,7 @@ export class CodexAppServerClient extends EventEmitter {
       const pend = this._pending.get(m.id)
       if (!pend) return
       this._pending.delete(m.id)
-      if (m.error) pend.reject(new Error(m.error.message || JSON.stringify(m.error)))
+      if (m.error) pend.reject(toRpcError(m.error))
       else pend.resolve(m.result)
       return
     }
