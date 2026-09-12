@@ -50,6 +50,8 @@ export interface AppHeaderProps {
   codexSandbox: ComponentProps<typeof ChatSettingsDropdown>['codexSandbox']
   showThinkingLevel: boolean
   thinkingLevel: ComponentProps<typeof ChatSettingsDropdown>['thinkingLevel']
+  // #7730: forwarded straight through — the levels the ACTIVE MODEL offers.
+  thinkingLevels: ComponentProps<typeof ChatSettingsDropdown>['thinkingLevels']
   onThinkingLevelChange: (level: string) => void
   // NotificationsWidget
   sessionNotifications: ComponentProps<typeof NotificationsWidget>['notifications']
@@ -198,7 +200,13 @@ export function AppHeader(props: AppHeaderProps) {
           codexSandbox={props.codexSandbox}
           showThinkingLevel={props.showThinkingLevel}
           thinkingLevel={props.thinkingLevel}
-          onThinkingLevelChange={level => props.onThinkingLevelChange(level as 'default' | 'high' | 'max')}
+          thinkingLevels={props.thinkingLevels}
+          // #7730: the cast this line used to carry — `level as` the
+          // three-level Claude union — was one of the six frozen copies of the
+          // vocabulary, and the one that was purely a lie to the compiler: the
+          // <select> can emit any offered level, and asserting otherwise
+          // type-checked while being false for every codex session.
+          onThinkingLevelChange={level => props.onThinkingLevelChange(level)}
         />
       </div>
       <div className="header-right">

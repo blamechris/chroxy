@@ -1893,6 +1893,205 @@ describe('CodexAppServerSession — param builders (#7729)', () => {
   })
 })
 
+describe('CodexAppServerSession — reasoning effort (#7730)', () => {
+  it('advertises thinkingLevel and NOT thinkingKeywords', () => {
+    const caps = CodexAppServerSession.capabilities
+    assert.equal(caps.thinkingLevel, true, 'codex has a real reasoning control and this driver can reach it')
+    assert.equal(caps.thinkingKeywords, false,
+      'the Claude magic keywords are not scanned on any codex path — #7735 split these so this flip cannot drag the highlight along')
+  })
+
+  it('thinkingLevel is null (never undefined) before anything is known', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      assert.equal(s.thinkingLevel, null,
+        'undefined is BaseSession\'s "this provider has no thinking level" — which suppresses the ws-history replay entirely')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('the thread/start echo becomes the session thinkingLevel when nobody chose one', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      assert.equal(s.thinkingLevel, 'xhigh',
+        "the control must show codex's real effort (from ~/.codex/config.toml), not a default this repo invented")
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('falls back to thread.reasoningEffort when the top-level echo is absent', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-e', reasoningEffort: 'medium' } } })
+    try {
+      await s.start()
+      assert.equal(s.thinkingLevel, 'medium')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('an echo carrying NO effort leaves thinkingLevel null rather than guessing', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-n' } } })
+    try {
+      await s.start()
+      assert.equal(s.thinkingLevel, null)
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('the operator override WINS over the echo', async () => {
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      s.setThinkingLevel('low')
+      assert.equal(s.thinkingLevel, 'low')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('setThinkingLevel VALIDATES NOTHING — the per-model gate lives in the handler', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      // `zzz` is in no list anywhere in this repo. A roster here would be a
+      // second one to drift, and this layer cannot see the active model's row.
+      s.setThinkingLevel('zzz')
+      assert.equal(s.thinkingLevel, 'zzz')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a null / empty level clears the override rather than storing a falsy string', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s.setThinkingLevel('xhigh')
+      s.setThinkingLevel(null)
+      assert.equal(s.thinkingLevel, null)
+      assert.equal('effort' in s._buildTurnParams([]), false, 'a cleared effort sends no key')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
+describe('CodexAppServerSession — the effort reaches the wire (#7730)', () => {
+  it('thread/start seeds the effort through `config.model_reasoning_effort`, NOT a top-level field', async () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    delete process.env.CHROXY_CODEX_SANDBOX
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      s.setThinkingLevel('xhigh')
+      await s.start()
+      const params = calls.find(([m]) => m === 'thread/start')[1]
+      // The asymmetry is the whole trap: thread/start has NO top-level effort
+      // field (verified live on codex-cli 0.154.0), so a symmetrical
+      // `effort: 'xhigh'` here is accepted and silently ignored.
+      assert.equal('effort' in params, false, 'thread/start takes no top-level effort field')
+      assert.deepEqual(params.config, { model_reasoning_effort: 'xhigh' })
+    } finally {
+      s.destroy()
+      cleanup()
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('thread/start carries NO config key when the operator chose nothing', async () => {
+    const prev = process.env.CHROXY_CODEX_SANDBOX
+    delete process.env.CHROXY_CODEX_SANDBOX
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    try {
+      await s.start()
+      const params = calls.find(([m]) => m === 'thread/start')[1]
+      assert.equal('config' in params, false,
+        'codex must be left to resolve its own effort from ~/.codex/config.toml')
+    } finally {
+      s.destroy()
+      cleanup()
+      if (prev === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+      else process.env.CHROXY_CODEX_SANDBOX = prev
+    }
+  })
+
+  it('a set_thinking_level lands in the NEXT turn/start params as a first-class `effort`', async () => {
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO, 'turn/start': { turn: { id: 'tu-1' } } })
+    try {
+      await s.start()
+      s.setThinkingLevel('zzz')
+      await s.sendMessage('hello')
+      const params = calls.find(([m]) => m === 'turn/start')[1]
+      assert.equal(params.effort, 'zzz',
+        'turn/start takes `effort` as a first-class per-turn field — an invented level rides it unchanged')
+      assert.equal('config' in params, false, 'the config map is the thread/start half only')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('the effort rides EVERY subsequent turn, not just the one after the change', async () => {
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO, 'turn/start': { turn: { id: 'tu-1' } } })
+    try {
+      await s.start()
+      s.setThinkingLevel('low')
+      await s.sendMessage('one')
+      // End the turn the way a real `result` would, so the second send is not
+      // queued behind the busy flag.
+      s._isBusy = false
+      s._activeTurn = null
+      await s.sendMessage('two')
+      const turns = calls.filter(([m]) => m === 'turn/start')
+      assert.equal(turns.length, 2, 'two turns were sent')
+      assert.deepEqual(turns.map(([, p]) => p.effort), ['low', 'low'],
+        'a thread must not silently drift back to the binary default on a later turn')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('turn/start carries NO effort key when nobody chose one — the echo is display-only', async () => {
+    const { s, cleanup, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO, 'turn/start': { turn: { id: 'tu-1' } } })
+    try {
+      await s.start()
+      assert.equal(s.thinkingLevel, 'xhigh', 'the echo IS known')
+      await s.sendMessage('hello')
+      const params = calls.find(([m]) => m === 'turn/start')[1]
+      assert.equal('effort' in params, false,
+        "echoing codex's own resolved effort back at it would pin a value the binary is free to re-resolve")
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('_buildThreadParams / _buildTurnParams keep their existing shape when no effort is set', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s._threadId = 'th-9'
+      assert.deepEqual(Object.keys(s._buildThreadParams('read-only')), ['approvalPolicy', 'cwd', 'sandbox'])
+      assert.deepEqual(Object.keys(s._buildTurnParams([])), ['threadId', 'approvalPolicy', 'input'])
+      s.setThinkingLevel('xhigh')
+      assert.deepEqual(Object.keys(s._buildThreadParams('read-only')), ['approvalPolicy', 'cwd', 'sandbox', 'config'])
+      assert.deepEqual(Object.keys(s._buildTurnParams([])), ['threadId', 'approvalPolicy', 'input', 'effort'])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
 describe('CodexAppServerSession — model/rerouted (#7729)', () => {
   it('a mid-turn reroute moves bootedModel and the per-model usage split', () => {
     const { s, cleanup } = mkSession()

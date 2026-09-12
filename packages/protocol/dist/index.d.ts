@@ -68,6 +68,7 @@ export declare const CLAUDE_TUI_PTY_SIZE: Readonly<{
     rows: 30;
 }>;
 export * from './codex.ts';
+export * from './thinking-levels.ts';
 export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
 export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, ServerBudgetResumeAckMessage, } from './schemas/server.ts';

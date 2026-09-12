@@ -174,10 +174,19 @@ export class CodexAppServerSession extends BaseSession {
       planMode: false,
       resume: false, // matches exec CodexSession; app-server resume is a follow-up
       terminal: false,
-      thinkingLevel: false,
+      // #7730 — codex has a REAL reasoning control, and this is the driver that
+      // can reach it: `model/list` advertises `supportedReasoningEfforts` per
+      // model, `thread/start` seeds one through its `config` map, and
+      // `turn/start` takes `effort` as a first-class per-turn field. The
+      // offered levels come from the ACTIVE MODEL's catalog row, never from a
+      // repo-wide list — see `setThinkingLevel` below and the per-model gate in
+      // `handlers/settings-handlers.js`.
+      thinkingLevel: true,
       // #7725: same as the exec driver — the Claude magic keywords are not
       // scanned for on any codex path. Explicit so #7730's `thinkingLevel`
-      // flip cannot drag the keyword highlight along with it.
+      // flip cannot drag the keyword highlight along with it: the composer's
+      // keyword highlight reads THIS flag, so flipping the one above lights the
+      // dropdown and nothing else.
       thinkingKeywords: false,
       streaming: true,
       // #6888: despite inProcessPermissions:true (this session's
@@ -201,6 +210,19 @@ export class CodexAppServerSession extends BaseSession {
     }))
     this._client = null
     this._threadId = null
+    // #7730 — the reasoning effort, split in two on PURPOSE.
+    //
+    // `_reasoningEffortOverride` is the operator's explicit choice (a
+    // `set_thinking_level`, null until one arrives) and is the ONLY value the
+    // param builders send: seeding `thread/start` with codex's own echoed
+    // effort, or replaying it on every `turn/start`, would pin the thread to a
+    // value codex chose for itself — the same trap `_buildTurnParams` documents
+    // for `model`. `_bootedReasoningEffort` is what codex reported at
+    // `thread/start` (from the operator's `~/.codex/config.toml`), and exists
+    // so the control can SHOW the session's real effort before anyone touches
+    // it. `get thinkingLevel` composes the two in that precedence.
+    this._reasoningEffortOverride = null
+    this._bootedReasoningEffort = null
     // #7729 — injectable JSON-RPC client factory (subclass-local opt, read off
     // `opts` directly; NOT a BaseSession opt). Production leaves it null and
     // start() builds a real CodexAppServerClient; a test supplies a stub so
@@ -334,6 +356,10 @@ export class CodexAppServerSession extends BaseSession {
     // render — names a real model instead of the null this session is
     // constructed with by design.
     this._captureBootedModel(started)
+    // #7730 — and the effort it resolved, from the same response. Also BEFORE
+    // `ready`, so the very first `thinking_level_changed` replay names the
+    // operator's real `~/.codex/config.toml` setting rather than nothing.
+    this._captureBootedReasoningEffort(started)
     // #6608 — do NOT set this.resumeSessionId in Phase 1: capabilities.resume is
     // false, and SessionManager persists resumeSessionId as the conversationId to
     // resume on restart. Leaving it null keeps the two consistent. The live thread
@@ -382,6 +408,20 @@ export class CodexAppServerSession extends BaseSession {
       cwd: this.cwd,
       sandbox,
       ...(this.model ? { model: this.model } : {}),
+      // #7730 — effort is seeded ASYMMETRICALLY, and this half is the one that
+      // is easy to get wrong. `thread/start` has NO top-level effort field:
+      // the value goes through the generic `config` map as
+      // `model_reasoning_effort`, exactly as `~/.codex/config.toml` spells it
+      // (verified live on codex-cli 0.154.0 — passing
+      // `{config: {model_reasoning_effort: 'xhigh'}}` made the response echo
+      // `reasoningEffort: 'xhigh'`). A top-level `effort` key here is silently
+      // IGNORED, which is why the omission has to be deliberate rather than
+      // symmetrical with `_buildTurnParams` below.
+      //
+      // Omitted entirely when the operator has chosen nothing, so codex
+      // resolves its own default from the config file and the echo tells us
+      // what it picked.
+      ...(this._reasoningEffortOverride ? { config: { model_reasoning_effort: this._reasoningEffortOverride } } : {}),
     }
   }
 
@@ -404,6 +444,17 @@ export class CodexAppServerSession extends BaseSession {
       approvalPolicy: this._approvalPolicy(), // #6605 P2 — per-turn, tracks mode changes
       input,
       ...(this.model ? { model: this.model } : {}),
+      // #7730 — the OTHER half of the asymmetry: on `turn/start`, `effort` IS a
+      // first-class param ("this turn and subsequent turns"). It rides EVERY
+      // turn, not just the one after a `set_thinking_level`, for the same
+      // reason `model` does (#6608): a mid-session change must take effect, and
+      // a thread that was seeded at start must not silently drift back to the
+      // binary's default on some later turn. `turn/settings/update` (change the
+      // effort on a RUNNING turn) exists only at codex >= 0.154.0 and is
+      // deliberately not used — "the next turn carries the new effort" needs no
+      // version gate, and a capability probe here would buy a one-turn latency
+      // difference at the price of a gate that can be wrong.
+      ...(this._reasoningEffortOverride ? { effort: this._reasoningEffortOverride } : {}),
     }
   }
 
@@ -462,6 +513,74 @@ export class CodexAppServerSession extends BaseSession {
    */
   _readModelId(value) {
     return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  /**
+   * #7730 — the reasoning effort this session is running at: the operator's
+   * explicit choice, else the effort codex reported at `thread/start`, else
+   * null.
+   *
+   * Overriding this getter is not cosmetic. `BaseSession.thinkingLevel` returns
+   * `undefined`, and `ws-history.js` skips the `thinking_level_changed` replay
+   * on exactly that value — so without this override the control would reset to
+   * whatever the client last had in memory on every reconnect and tab switch,
+   * which for a codex session means a level the session never entered.
+   *
+   * Null (never `undefined`) when codex named none and nobody chose one:
+   * "unknown" has to stay readable as itself rather than collapsing into the
+   * "this provider has no thinking level" case the base class expresses.
+   */
+  get thinkingLevel() {
+    return this._reasoningEffortOverride || this._bootedReasoningEffort || null
+  }
+
+  /**
+   * #7730 — record the operator's chosen reasoning effort.
+   *
+   * Deliberately does NOT validate the level against a roster. The
+   * authoritative membership check is `handlers/settings-handlers.js`, which is
+   * the only layer that can see the ACTIVE MODEL's catalog row (`reasoningLevels`
+   * from `model/list`); duplicating it here would be a second roster to drift,
+   * and a per-model question answered in a place that does not know the model
+   * can only be answered with a repo-wide literal — which is the whole defect
+   * #7730 removes.
+   *
+   * The effort is not pushed to codex here: it rides the NEXT `turn/start`
+   * (see `_buildTurnParams`). There is no separate "set the effort" RPC that
+   * works on an idle thread, and `turn/settings/update` only applies to a turn
+   * already running.
+   */
+  setThinkingLevel(level) {
+    const next = typeof level === 'string' && level.length > 0 ? level : null
+    this._reasoningEffortOverride = next
+    ;(this._log || log).info(`codex reasoning effort set to ${next ?? 'unset'} (rides the next turn/start)`)
+    return true
+  }
+
+  /**
+   * #7730 — record the effort codex resolved at `thread/start`.
+   *
+   * Same two reads as `_captureBootedModel`, for the same reason: the untrimmed
+   * codex-cli 0.154.0 capture
+   * (https://github.com/blamechris/chroxy/issues/7721#issuecomment-5646200933)
+   * carries `reasoningEffort` at the TOP LEVEL and mirrored on the nested
+   * `thread` object, and `ReasoningEffort` is typed there as a free non-empty
+   * STRING — so no value is validated against a list on the way in.
+   *
+   * This feeds the DISPLAY only (`get thinkingLevel`), never the param
+   * builders: it is codex's own answer, and echoing it back at codex on the
+   * next turn would pin a value the binary is free to resolve for itself. An
+   * absent echo leaves it null — the control then shows nothing rather than
+   * claiming the session is at a level nobody established.
+   */
+  _captureBootedReasoningEffort(started) {
+    const nonEmpty = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+    const echoed = nonEmpty(started?.reasoningEffort) ?? nonEmpty(started?.thread?.reasoningEffort)
+    this._bootedReasoningEffort = echoed ?? null
+    if (this._bootedReasoningEffort) {
+      ;(this._log || log).info(`codex resolved reasoning effort=${this._bootedReasoningEffort} (thread/start echo)`)
+    }
+    return this._bootedReasoningEffort
   }
 
   /**

@@ -98,7 +98,7 @@ import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
-import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, thinkingLevelOptions } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistTurnCompleteNotification, loadPersistedTurnCompleteNotification, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
@@ -457,6 +457,32 @@ export function App() {
     }
     return false
   }, [storeMessages, resolvedPermissions])
+
+  // #7730: the thinking levels the ACTIVE MODEL offers, from its own roster row
+  // (`reasoningLevels` / `defaultReasoningLevel`, put on the wire by
+  // #7723/#7726). A row that advertises none — every Claude provider today —
+  // resolves to the legacy `Auto / High / Max` triple, so nothing about the
+  // Claude header changes.
+  //
+  // `activeModel` arrives as either a short id or a full id (the #5628 trap the
+  // model <select> hit), so the row is matched on both. No match yet (a roster
+  // still in flight, a model the roster does not carry) resolves to the same
+  // legacy triple rather than to an empty list: an empty list would blank the
+  // control on a provider whose levels simply have not arrived.
+  //
+  // #7784 — this and the SERVER's gate read the model row from two different
+  // sources: the picker matches `availableModels` (the modelsByProvider wire
+  // rows), while `resolveSessionThinkingLevels` calls the provider class's
+  // `getModelMetadata` directly. codex-model-catalog.js documents a
+  // populated -> empty divergence in which they disagree by construction, and
+  // since the server now REFUSES the legacy fallback on a non-Claude provider,
+  // that state shows a picker offering Auto/High/Max whose every selection
+  // bounces. Reconciling the two sources is #7784; recorded here rather than
+  // left for the next reader to rediscover.
+  const activeModelThinkingLevels = useMemo(() => {
+    const row = availableModels.find(m => m.fullId === activeModel || m.id === activeModel) ?? null
+    return thinkingLevelOptions(row)
+  }, [availableModels, activeModel])
 
   // #3839: dropdown-gating flags derived from the active session's provider
   // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
@@ -2513,7 +2539,11 @@ export function App() {
         codexSandbox={activeSessionCodexSandbox}
         showThinkingLevel={dropdownFlags.showThinkingLevel}
         thinkingLevel={thinkingLevel}
-        onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}
+        thinkingLevels={activeModelThinkingLevels}
+        // #7730: no cast. `setThinkingLevel` takes the open string the
+        // model's own roster offers; the `as`-to-a-three-level-union that
+        // stood here compiled and was false for every codex session.
+        onThinkingLevelChange={(level) => setThinkingLevel(level)}
         sessionNotifications={sessionNotifications}
         onSwitchSession={handleSwitchSession}
         isNotificationSessionListed={sessionIsListed}

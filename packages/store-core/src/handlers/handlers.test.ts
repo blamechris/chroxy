@@ -527,16 +527,32 @@ describe('handleSessionActivity', () => {
 // handleThinkingLevelChanged
 // ---------------------------------------------------------------------------
 describe('handleThinkingLevelChanged', () => {
-  it('extracts valid thinking level', () => {
+  it('extracts the legacy Claude levels', () => {
     expect(handleThinkingLevelChanged({ level: 'high' })).toEqual({ level: 'high' })
     expect(handleThinkingLevelChanged({ level: 'max' })).toEqual({ level: 'max' })
     expect(handleThinkingLevelChanged({ level: 'default' })).toEqual({ level: 'default' })
   })
 
-  it('defaults to "default" for invalid level', () => {
-    expect(handleThinkingLevelChanged({ level: 'turbo' })).toEqual({ level: 'default' })
+  // #7730 — this used to assert the OPPOSITE: `turbo` became `default`, and so
+  // did every codex effort. The server has just CONFIRMED the level the session
+  // entered, so coercing it here made the control report a state the session
+  // was not in, silently. The roster is per-model and the server owns it; the
+  // store keeps what it is told.
+  it('KEEPS a level this client has never heard of (the store holds no roster)', () => {
+    expect(handleThinkingLevelChanged({ level: 'turbo' })).toEqual({ level: 'turbo' })
+    expect(handleThinkingLevelChanged({ level: 'xhigh' })).toEqual({ level: 'xhigh' })
+    expect(handleThinkingLevelChanged({ level: 'zzz' })).toEqual({ level: 'zzz' })
+  })
+
+  // The other half of the pair (#7273): an open roster is not "anything at
+  // all". The syntactic guard shared with the wire schema still bounds what can
+  // reach a React `value` prop and the persisted store.
+  it('falls back to the legacy default when the field is missing or unusable', () => {
     expect(handleThinkingLevelChanged({})).toEqual({ level: 'default' })
     expect(handleThinkingLevelChanged({ level: 42 })).toEqual({ level: 'default' })
+    expect(handleThinkingLevelChanged({ level: '' })).toEqual({ level: 'default' })
+    expect(handleThinkingLevelChanged({ level: '../../etc' })).toEqual({ level: 'default' })
+    expect(handleThinkingLevelChanged({ level: 'a'.repeat(200) })).toEqual({ level: 'default' })
   })
 })
 

@@ -2584,7 +2584,7 @@ describe('settings-handlers', () => {
 
     it('calls session.setThinkingLevel and broadcasts thinking_level_changed on success', async () => {
       const sessions = new Map()
-      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
@@ -2598,7 +2598,7 @@ describe('settings-handlers', () => {
 
     it('rejects an invalid level with THINKING_LEVEL_NOT_APPLIED echoing the requestId', async () => {
       const sessions = new Map()
-      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
       const ctx = makeCtx(sessions)
       const ws = makeWs()
       const client = makeClient({ activeSessionId: 's1' })
@@ -2625,11 +2625,375 @@ describe('settings-handlers', () => {
       assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
     })
 
+    // -----------------------------------------------------------------------
+    // #7730 — THE anti-roster proof. The vocabulary is not a repo-wide list any
+    // more: it is whatever the SESSION'S ACTIVE MODEL advertises. These tests
+    // are the red-proof for that claim, so the invented level is deliberately a
+    // string that appears in no source file outside this block.
+    // -----------------------------------------------------------------------
+    describe('per-model levels (#7730)', () => {
+      // A provider whose catalog row advertises an INVENTED effort. `zzz` is in
+      // no enum, no Set, no union and no option list anywhere in this repo —
+      // which is the point: if any of the six removed literals came back, this
+      // provider's own answer about its own model would stop being honoured.
+      class InventedLevelProviderSession {
+        static claudeFamily = false
+        static get capabilities() { return { thinkingLevel: true } }
+        static getModelMetadata(modelId) {
+          if (modelId !== 'model-with-zzz') return null
+          return {
+            id: modelId,
+            label: 'Invented',
+            fullId: modelId,
+            contextWindow: null,
+            reasoningLevels: ['low', 'zzz', 'xhigh'],
+            defaultReasoningLevel: 'zzz',
+          }
+        }
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+
+      function inventedLevelSession(modelId = 'model-with-zzz') {
+        registerProvider('test-invented-levels', InventedLevelProviderSession)
+        const session = createMockSession()
+        session.model = modelId
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-invented-levels' })
+        return { session, sessions }
+      }
+
+      it('ACCEPTS a level that exists only on the model row — no list in this repo contains it', async () => {
+        const { session, sessions } = inventedLevelSession()
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'zzz', requestId: 'r-zzz' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
+          'a level the MODEL advertises must be accepted — restoring any hardcoded roster reds this')
+        assert.equal(session.setThinkingLevel.callCount, 1)
+        assert.equal(session.setThinkingLevel.lastCall[0], 'zzz')
+        assert.equal(ctx._sessionBroadcasts.length, 1)
+        assert.equal(ctx._sessionBroadcasts[0].msg.level, 'zzz')
+      })
+
+      it('REJECTS a level absent from THAT model row — including one the Claude triple contains', async () => {
+        const { session, sessions } = inventedLevelSession()
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        // `max` is a perfectly good Claude level and is NOT on this model's
+        // row. The gate is per-model, so it must be refused here — a gate that
+        // accepted every level it had ever heard of would pass the case above
+        // for the wrong reason.
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'max', requestId: 'r-max' }, ctx)
+
+        assert.equal(session.setThinkingLevel.callCount, 0, 'nothing is applied on a rejection')
+        assert.equal(ctx._sessionBroadcasts.length, 0)
+        assert.equal(ws._messages[0].type, 'error')
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        assert.equal(ws._messages[0].requestId, 'r-max')
+        assert.ok(ws._messages[0].message.includes('low, zzz, xhigh'),
+          'the error names the levels this model DOES offer')
+      })
+
+      it('REJECTS a malformed level before any session lookup (path traversal, 200 chars)', async () => {
+        const { session, sessions } = inventedLevelSession()
+        for (const [level, tag] of [['../../etc', 'r-trav'], ['a'.repeat(200), 'r-long'], ['', 'r-empty']]) {
+          const ctx = makeCtx(sessions)
+          const ws = makeWs()
+          const client = makeClient({ activeSessionId: 's1' })
+          await settingsHandlers.set_thinking_level(ws, client, { level, requestId: tag }, ctx)
+          assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED', `${tag} must be refused`)
+          assert.equal(ws._messages[0].requestId, tag)
+        }
+        assert.equal(session.setThinkingLevel.callCount, 0)
+      })
+
+      // A provider whose rows carry NO reasoningLevels — the Claude family
+      // today. The regression guard: nothing about the Claude path changes.
+      class LegacyRosterProviderSession {
+        static claudeFamily = true
+        static get capabilities() { return { thinkingLevel: true } }
+        static getModelMetadata(modelId) {
+          return { id: modelId, label: 'Legacy', fullId: modelId, contextWindow: 200000 }
+        }
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+
+      function legacyRosterSession() {
+        registerProvider('test-legacy-roster', LegacyRosterProviderSession)
+        const session = createMockSession()
+        session.model = 'claude-sonnet-4-6'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-legacy-roster' })
+        return { session, sessions }
+      }
+
+      it('a row WITHOUT reasoningLevels still validates the Claude triple', async () => {
+        for (const level of ['default', 'high', 'max']) {
+          const { session, sessions } = legacyRosterSession()
+          const ctx = makeCtx(sessions)
+          const ws = makeWs()
+          const client = makeClient({ activeSessionId: 's1' })
+          await settingsHandlers.set_thinking_level(ws, client, { level, requestId: `r-${level}` }, ctx)
+          assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0, `${level} must still be accepted`)
+          assert.equal(session.setThinkingLevel.lastCall[0], level)
+        }
+      })
+
+      it('a row WITHOUT reasoningLevels still REJECTS a codex effort', async () => {
+        const { session, sessions } = legacyRosterSession()
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'xhigh', requestId: 'r-x' }, ctx)
+
+        assert.equal(session.setThinkingLevel.callCount, 0)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      })
+
+      // ---------------------------------------------------------------
+      // The legacy triple is the CLAUDE roster, and it is offered to nobody
+      // else. Before this narrowing the gate fell OPEN to `default | high |
+      // max` for ANY provider whose row carried no reasoningLevels — and for
+      // codex that state is ordinary, not exotic: CodexSession.getModelMetadata
+      // falls back to the CODEX_MODEL_METADATA seed, whose rows carry none, and
+      // _refreshModelCatalog() is skipped permanently when the binary reports
+      // supportsModelList === false. `default` is offered by NO codex model and
+      // is the picker's FIRST option, so it was the most natural click in
+      // exactly that state, and it would have ridden out on turn/start.effort.
+      // ---------------------------------------------------------------
+      class NoRosterNonClaudeSession {
+        static claudeFamily = false
+        static get capabilities() { return { thinkingLevel: true } }
+        // The codex seed shape: a real row, honest label and window, and no
+        // reasoningLevels at all.
+        static getModelMetadata(modelId) {
+          return { id: modelId, label: 'Seeded', fullId: modelId, contextWindow: 400000, provenance: 'catalogued' }
+        }
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+
+      function noRosterNonClaudeSession(providerName = 'test-no-roster-non-claude') {
+        registerProvider(providerName, NoRosterNonClaudeSession)
+        const session = createMockSession()
+        session.model = 'gpt-5-codex'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: providerName })
+        return { session, sessions }
+      }
+
+      it('REJECTS every legacy level on a NON-Claude provider whose row advertises none', async () => {
+        // `default` first on purpose: it is the picker's first option, renders
+        // as 'Auto', and is offered by no codex model in the live catalog.
+        for (const level of ['default', 'high', 'max']) {
+          const { session, sessions } = noRosterNonClaudeSession()
+          const ctx = makeCtx(sessions)
+          const ws = makeWs()
+          const client = makeClient({ activeSessionId: 's1' })
+
+          await settingsHandlers.set_thinking_level(ws, client, { level, requestId: `r-nc-${level}` }, ctx)
+
+          assert.equal(session.setThinkingLevel.callCount, 0,
+            `${level} must NOT reach the session — the Claude triple is not this provider's roster`)
+          assert.equal(ctx._sessionBroadcasts.length, 0, `${level} must not broadcast`)
+          assert.equal(ws._messages[0].type, 'error')
+          assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+          assert.equal(ws._messages[0].requestId, `r-nc-${level}`)
+          assert.match(ws._messages[0].message, /has not advertised its reasoning levels yet/)
+        }
+      })
+
+      it('REJECTS on a NON-Claude provider whose getModelMetadata THROWS (a cannot-check is not a pass)', async () => {
+        class ThrowingNonClaudeSession extends NoRosterNonClaudeSession {
+          static getModelMetadata() { throw new Error('catalog unavailable') }
+        }
+        registerProvider('test-throwing-non-claude', ThrowingNonClaudeSession)
+        const session = createMockSession()
+        session.model = 'gpt-5-codex'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-non-claude' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-throwmeta' }, ctx)
+
+        assert.equal(session.setThinkingLevel.callCount, 0)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+        assert.match(ws._messages[0].message, /has not advertised its reasoning levels yet/)
+      })
+
+      it('REJECTS when the provider name resolves to nothing at all (unknown provider)', async () => {
+        const session = createMockSession()
+        session.model = 'gpt-5-codex'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-provider-that-does-not-exist' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-unknownprov' }, ctx)
+
+        assert.equal(session.setThinkingLevel.callCount, 0)
+        assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      })
+
+      it('a NON-Claude provider that DOES advertise levels is untouched by the narrowing', async () => {
+        // The control that stops the new branch from being a deny-everything
+        // check (#7273): source is 'model' here, so the narrowing never fires.
+        const { session, sessions } = inventedLevelSession()
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'zzz', requestId: 'r-nc-model' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0)
+        assert.equal(session.setThinkingLevel.lastCall[0], 'zzz')
+      })
+
+      it('a CLAUDE provider whose getModelMetadata THROWS still gets the legacy triple', async () => {
+        // The other half of the narrowing: the fallback is retained where it is
+        // the provider's REAL roster. The guard is
+        // `source === 'legacy' && !claudeFamily`, so each clause reds a
+        // DISJOINT set (the #7273 pairing), and this is which is which:
+        // deleting `!offered.claudeFamily` leaves `source === 'legacy'`, which
+        // now rejects a Claude legacy row — it reds THIS test and the Claude
+        // triple beside it. Deleting `offered.source === 'legacy'` leaves
+        // `!claudeFamily`, which now rejects a non-Claude row that DID
+        // advertise levels — it reds the invented-level ACCEPTs above, not
+        // this one (claudeFamily is true here, so this test stays green).
+        class ThrowingClaudeSession extends LegacyRosterProviderSession {
+          static getModelMetadata() { throw new Error('lookup exploded') }
+        }
+        registerProvider('test-throwing-claude', ThrowingClaudeSession)
+        const session = createMockSession()
+        session.model = 'claude-sonnet-4-6'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-claude' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-claude-throw' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
+          "the Claude path keeps its fallback — it is that family's real roster")
+        assert.equal(session.setThinkingLevel.lastCall[0], 'high')
+      })
+
+      it('a THROWING getModelMetadata leaves the RESOLVED CLASS authoritative', async () => {
+        // Two lookups, two failure meanings: `getProvider` resolving is what
+        // says "Claude family"; `getModelMetadata` says only what the model ROW
+        // is. Re-merging them into one try/catch — the shape that nulled
+        // `ProviderClass` whenever either threw — reds this test: the live
+        // session's constructor here is deliberately a class that declares
+        // `claudeFamily = false`, and isClaudeProvider treats a passed class as
+        // authoritative, so the downgraded classification answers false, the
+        // legacy narrowing fires, and `high` is rejected on a provider whose
+        // registry class says Claude. The name map cannot rescue it either — it
+        // is never consulted once a class with a boolean flag is passed.
+        class ThrowingRowClaudeSession extends LegacyRosterProviderSession {
+          static getModelMetadata() { throw new Error('row lookup exploded') }
+        }
+        class NotClaudeWrapperSession { static claudeFamily = false }
+        registerProvider('test-throwing-claude-class', ThrowingRowClaudeSession)
+        const session = createMockSession()
+        // Own property, so the mock's prototype chain is untouched while
+        // `session.constructor` reports the non-Claude wrapper.
+        Object.defineProperty(session, 'constructor', { value: NotClaudeWrapperSession, configurable: true })
+        session.model = 'claude-sonnet-4-6'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-throwing-claude-class' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-claude-throw-class' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0,
+          'a class that really RESOLVED must stay authoritative when a LATER call throws')
+        assert.equal(session.setThinkingLevel.lastCall[0], 'high')
+      })
+
+      it('classifies from the SESSION CLASS when the entry carries no provider name', async () => {
+        // isClaudeProvider treats a passed class as authoritative, so a Claude
+        // session whose entry lost its provider string is still a Claude
+        // session. Without the constructor fallback this rejects `high` on an
+        // ordinary claude-sdk session that merely lost its registry name.
+        class ClaudeFamilySession { static claudeFamily = true }
+        const session = createMockSession()
+        // Own property, so the EventEmitter prototype chain the mock needs is
+        // left intact while `session.constructor` reports the Claude class.
+        Object.defineProperty(session, 'constructor', { value: ClaudeFamilySession, configurable: true })
+        session.model = 'claude-sonnet-4-6'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-noprov' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0)
+        assert.equal(session.setThinkingLevel.lastCall[0], 'high')
+      })
+
+      it('validates against bootedModel when the operator set no explicit model', async () => {
+        registerProvider('test-invented-levels', InventedLevelProviderSession)
+        const session = createMockSession()
+        session.model = null
+        session.bootedModel = 'model-with-zzz'
+        session.setThinkingLevel = createSpy(async () => {})
+        const sessions = new Map()
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'test-invented-levels' })
+        const ctx = makeCtx(sessions)
+        const ws = makeWs()
+        const client = makeClient({ activeSessionId: 's1' })
+
+        // The codex shape: constructed with model:null on purpose, the real
+        // model arrives in the thread/start echo. Reading only `session.model`
+        // here would silently fall back to the Claude triple and refuse `zzz`.
+        await settingsHandlers.set_thinking_level(ws, client, { level: 'zzz', requestId: 'r-booted' }, ctx)
+
+        assert.equal(ws._messages.filter((m) => m.type === 'error').length, 0)
+        assert.equal(session.setThinkingLevel.lastCall[0], 'zzz')
+      })
+    })
+
     it('surfaces a setThinkingLevel throw as THINKING_LEVEL_NOT_APPLIED + requestId', async () => {
       const sessions = new Map()
       const session = createMockSession()
       session.setThinkingLevel = createSpy(async () => { throw new Error('pty gone') })
-      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
       const ctx = makeCtx(sessions)
       const ws = makeWs()
       const client = makeClient({ activeSessionId: 's1' })

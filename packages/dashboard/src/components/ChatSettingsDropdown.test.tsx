@@ -139,6 +139,76 @@ describe('ChatSettingsDropdown', () => {
     expect(onThinkingLevelChange).toHaveBeenCalledWith('high')
   })
 
+  // #7730 — the three literal <option>s that used to live in this component were
+  // a copy of the Claude vocabulary, so a codex session could only ever be
+  // offered levels codex does not have. The options now come from the ACTIVE
+  // MODEL's row.
+  describe('per-model thinking levels (#7730)', () => {
+    function thinkingSelect() {
+      return screen.getAllByRole('combobox')[1] as HTMLSelectElement
+    }
+    function optionValues() {
+      return Array.from(thinkingSelect().options).map(o => o.value)
+    }
+
+    it('offers whatever the model advertises — including a level no list in this repo contains', () => {
+      renderDropdown({
+        showThinkingLevel: true,
+        thinkingLevel: 'zzz',
+        thinkingLevels: [
+          { id: 'low', label: 'Low' },
+          { id: 'zzz', label: 'Zzz' },
+          { id: 'xhigh', label: 'Xhigh' },
+        ],
+      })
+      expect(optionValues()).toEqual(['low', 'zzz', 'xhigh'])
+      expect(thinkingSelect().value).toBe('zzz')
+    })
+
+    it('emits the invented level verbatim on change', () => {
+      const onThinkingLevelChange = vi.fn()
+      renderDropdown({
+        showThinkingLevel: true,
+        thinkingLevel: 'low',
+        thinkingLevels: [{ id: 'low', label: 'Low' }, { id: 'zzz', label: 'Zzz' }],
+        onThinkingLevelChange,
+      })
+      fireEvent.change(thinkingSelect(), { target: { value: 'zzz' } })
+      expect(onThinkingLevelChange).toHaveBeenCalledWith('zzz')
+    })
+
+    // The other half of the pair: a row with no reasoning levels — every Claude
+    // provider today — renders exactly what it always did.
+    it('falls back to the Claude triple when the model advertises no levels', () => {
+      renderDropdown({ showThinkingLevel: true, thinkingLevel: 'default' })
+      expect(optionValues()).toEqual(['default', 'high', 'max'])
+      expect(Array.from(thinkingSelect().options).map(o => o.textContent)).toEqual(['Auto', 'High', 'Max'])
+    })
+
+    it('an empty levels array falls back too (an empty picker is never the answer)', () => {
+      renderDropdown({ showThinkingLevel: true, thinkingLevel: 'high', thinkingLevels: [] })
+      expect(optionValues()).toEqual(['default', 'high', 'max'])
+    })
+
+    // #5628's trap, re-applied: a <select> whose value matches no <option>
+    // silently renders the FIRST one, so the control would claim the session is
+    // at a level it is not.
+    it('APPENDS a current level the model does not offer rather than mis-selecting the first option', () => {
+      renderDropdown({
+        showThinkingLevel: true,
+        thinkingLevel: 'default',
+        thinkingLevels: [{ id: 'low', label: 'Low' }, { id: 'xhigh', label: 'Xhigh' }],
+      })
+      expect(optionValues()).toEqual(['low', 'xhigh', 'default'])
+      expect(thinkingSelect().value).toBe('default')
+      // The LABEL matters as much as the value, and pinning only values is what
+      // let the appended option render its raw id: `default` is 'Auto'
+      // everywhere else in this control, and this is the path a fresh codex
+      // session takes (ws-history replays `thinkingLevel || 'default'`).
+      expect(Array.from(thinkingSelect().options).map(o => o.textContent)).toEqual(['Low', 'Xhigh', 'Auto'])
+    })
+  })
+
   it('does not render any prompt-evaluator checkbox in the header', () => {
     renderDropdown()
     expect(screen.queryByTestId('prompt-evaluator-toggle')).toBeNull()
