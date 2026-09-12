@@ -494,14 +494,20 @@ export class CodexAppServerSession extends BaseSession {
    * `turn/start` and `interrupt` depends on: observed live AND schema-required,
    * so it is neither speculative nor deletable defensive cruft.
    *
-   * A response carrying NEITHER leaves `bootedModel` **null**, never
-   * `undefined` — the badge, the usage split and the context-window lookup all
-   * distinguish "codex did not say" from a model id, and an `undefined` here
-   * would serialize away entirely rather than reading as a cannot-check.
+   * A response carrying NEITHER is a cannot-read, not a "codex cleared the
+   * model": it leaves `bootedModel` at whatever it already was — `null` for a
+   * brand-new session, or a value `SessionManager.createSession()` pre-seeded
+   * from the persisted restore snapshot before calling `start()` — and never
+   * blanks a known id (#7770; mirrors `_onModelRerouted`'s identical rule for
+   * the same field, twelve lines below). A session with no prior value stays
+   * `null`, never `undefined` — the badge, the usage split and the
+   * context-window lookup all distinguish "codex did not say" from a model
+   * id, and an `undefined` here would serialize away entirely rather than
+   * reading as a cannot-check.
    */
   _captureBootedModel(started) {
     const echoed = this._readModelId(started?.model) ?? this._readModelId(started?.thread?.model)
-    this.bootedModel = echoed ?? null
+    this.bootedModel = echoed ?? this.bootedModel ?? null
     if (this.bootedModel) {
       ;(this._log || log).info(`codex resolved model=${this.bootedModel} (thread/start echo)`)
     } else {
@@ -616,6 +622,17 @@ export class CodexAppServerSession extends BaseSession {
    * read as a no. Any error from the call itself degrades identically
    * (`probeMethod`), whatever JSON-RPC code it carries.
    *
+   * #7762 — this live refresh claims the shared `'codex'` discovery slot
+   * (model-discovery.js), so `scheduleProviderModelsRefresh`'s later scheduled
+   * call sees an unchanged change key / hits the TTL and pushes nothing —
+   * this call is the ONLY place a change made here can reach a connected
+   * client. On a non-empty resolved roster, emit `models_updated` exactly the
+   * `ollama-session.js` / `anthropic-compatible-session.js` shape:
+   * session-manager forwards it as a provider-tagged `available_models`
+   * broadcast. A `null`/empty resolution (no change, TTL-cached, or a failed
+   * probe) emits nothing — pushing an empty roster would blank a picker that
+   * already has one.
+   *
    * @returns {Promise<Array<Object>|null>} always resolves; never throws.
    */
   _refreshModelCatalog() {
@@ -626,6 +643,10 @@ export class CodexAppServerSession extends BaseSession {
     }
     return Promise.resolve()
       .then(() => CodexAppServerSession.refreshModels({ client: this._client }))
+      .then((models) => {
+        if (Array.isArray(models) && models.length > 0) this.emit('models_updated', { models })
+        return models
+      })
       .catch((err) => {
         ;(this._log || log).debug(`codex model catalog refresh failed: ${err?.message || err}`)
         return null

@@ -1772,6 +1772,24 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
     }
   })
 
+  it('#7770 — a pre-seeded bootedModel (restored from the session snapshot) survives an absent thread/start echo', async () => {
+    // SessionManager.createSession() pre-seeds session.bootedModel from the
+    // persisted restore snapshot BEFORE calling session.start() — mirroring
+    // that ordering here. A thread/start response with no model field is a
+    // cannot-read, not a "codex cleared the model", so the restored value must
+    // survive it exactly the way `_onModelRerouted` already preserves it on an
+    // unusable `toModel`.
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-restored' } } })
+    s.bootedModel = 'gpt-5-restored'
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5-restored', 'an absent echo must not blank a value restored before start()')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
   it('the operator override WINS over the echo for the effective model', async () => {
     const { s, cleanup } = mkStartedSession({ model: 'gpt-5-codex' }, { 'thread/start': THREAD_START_ECHO })
     try {
@@ -2386,5 +2404,102 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
       assert.equal(broadcasts.filter((m) => m.type === 'available_models').length, 1,
         'control: this wiring broadcasts available_models when models_updated fires')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7762 — the live catalog refresh must push a changed roster, not just cache
+// it. `_refreshModelCatalog` claims the shared 'codex' discovery slot
+// (model-discovery.js), so the LATER scheduled `scheduleProviderModelsRefresh`
+// call sees an unchanged change key / hits the TTL and pushes nothing — this
+// call is the only place a change discovered here can ever reach a connected
+// client. Same `models_updated` shape as ollama-session.js / anthropic-
+// compatible-session.js: a non-empty resolved roster emits it, everything
+// else (null, empty array, a rejected probe) emits nothing.
+// ---------------------------------------------------------------------------
+describe('CodexAppServerSession — _refreshModelCatalog pushes models_updated (#7762)', () => {
+  async function withMockedRefresh(resolution, fn) {
+    const restore = mock.method(CodexAppServerSession, 'refreshModels', () => {
+      if (resolution instanceof Error) return Promise.reject(resolution)
+      return Promise.resolve(resolution)
+    })
+    try {
+      // _refreshModelCatalog's call to the mocked static method happens on a
+      // later microtask (Promise.resolve().then(...)), not synchronously — the
+      // mock must still be installed when that tick runs, so this AWAITS fn()
+      // before restoring rather than restoring in the same synchronous pass.
+      return await fn()
+    } finally {
+      restore.mock.restore()
+    }
+  }
+
+  it('a non-empty resolved roster emits models_updated with the discovered rows', async () => {
+    const rows = [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }]
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {} // _refreshModelCatalog bails out early with no client
+      await withMockedRefresh(rows, () => s._refreshModelCatalog())
+      assert.deepEqual(events, [['models_updated', { models: rows }]],
+        'the refreshed roster must reach listeners — this is the ONLY path that can push it once the live client has claimed the discovery slot')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a null resolution (TTL-cached / no change) emits nothing', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      await withMockedRefresh(null, () => s._refreshModelCatalog())
+      assert.deepEqual(events, [], 'no change / TTL-cached must not push anything')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('an empty array resolution emits nothing — a failed probe must not blank an existing picker', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      await withMockedRefresh([], () => s._refreshModelCatalog())
+      assert.deepEqual(events, [], 'an empty roster must not overwrite a picker a client already has')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a rejected probe emits nothing and resolves null, same as before #7762', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      const result = await withMockedRefresh(new Error('probe failed'), () => s._refreshModelCatalog())
+      assert.equal(result, null)
+      assert.deepEqual(events, [])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('no client at all short-circuits before the refresh call and emits nothing', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = null
+      const result = await withMockedRefresh([{ id: 'unreachable' }], () => s._refreshModelCatalog())
+      assert.equal(result, null)
+      assert.deepEqual(events, [], 'no client means no probe means no emit')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
   })
 })
