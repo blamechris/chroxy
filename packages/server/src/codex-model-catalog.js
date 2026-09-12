@@ -69,7 +69,9 @@ export const UNSET = Symbol('chroxy.codex-model-catalog.UNSET')
 export const CODEX_CATALOG_METHOD = 'model/list'
 
 /**
- * Bound on the whole no-session probe (spawn + handshake + `model/list`).
+ * Bound on the whole no-session probe (spawn + handshake + `model/list`) —
+ * ONE deadline computed once in `probeCodexCatalog` and split across the two
+ * requests, not this value applied to each of them (#7757 review).
  * A wedged binary must not hold the create-session path open: on timeout the
  * probe returns null and the PREVIOUS catalog stands.
  */
@@ -379,18 +381,39 @@ function defaultCreateClient(opts) {
  * the literal `['app-server']`, and no parameter this module passes may become
  * a CLI flag.
  *
+ * `bin` and `env` accept a FUNCTION as well as a value (#7757 review). Codex's
+ * `bin` is `CodexSession.resolvedBinary`, a getter that re-runs a SYNCHRONOUS
+ * `execFileSync('which', …)` on every read by design (#6708), and `refreshModels`
+ * is called on the post-auth `available_models` path for the default provider —
+ * so resolving it eagerly spawned a blocking child on every push, including the
+ * calls that carry a live client (no spawn at all) and the ones the TTL gate
+ * drops immediately. A thunk is only called on the branch that actually spawns.
+ *
  * @returns {Promise<Array<Object>|null>}
  */
-export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultCreateClient, timeoutMs = CODEX_CATALOG_PROBE_TIMEOUT_MS, includeHidden = false } = {}) {
-  if (typeof bin !== 'string' || bin.length === 0) {
+export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultCreateClient, timeoutMs = CODEX_CATALOG_PROBE_TIMEOUT_MS, includeHidden = false, now = Date.now } = {}) {
+  const resolvedBin = typeof bin === 'function' ? bin() : bin
+  if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) {
     log.debug('codex catalog probe skipped: no codex binary resolved')
     return null
   }
   let client = null
   try {
-    client = createClient({ bin, cwd, env, logger: log })
+    const resolvedEnv = typeof env === 'function' ? env() : env
+    client = createClient({ bin: resolvedBin, cwd, env: resolvedEnv, logger: log })
+    // ONE deadline across both requests. `timeoutMs` bounds the whole probe,
+    // as CODEX_CATALOG_PROBE_TIMEOUT_MS's comment says it does; applying it
+    // per-request (which is what this did) let a slow handshake plus a wedged
+    // `model/list` hold a spawned child for ~2x the stated budget — the
+    // comment-claims-more-than-the-code class (#7290/#7291) this PR is careful
+    // about elsewhere.
+    const bounded = typeof timeoutMs === 'number' && timeoutMs > 0
+    const deadline = bounded ? now() + timeoutMs : null
     await withTimeout(client.initialize({ name: 'chroxy', version: '1' }), timeoutMs, 'initialize')
-    return await fetchCodexCatalogFromClient(client, { timeoutMs, includeHidden })
+    // Never 0 or negative: withTimeout treats those as "no bound at all", which
+    // would turn an ALREADY-EXHAUSTED budget into an unbounded second request.
+    const remainingMs = bounded ? Math.max(1, deadline - now()) : timeoutMs
+    return await fetchCodexCatalogFromClient(client, { timeoutMs: remainingMs, includeHidden })
   } catch (err) {
     log.debug(`codex catalog probe failed: ${err?.message || err}`)
     return null
@@ -431,13 +454,24 @@ export async function fetchCodexCatalog(opts = {}) {
  * Resolves to the refreshed model list when the picker CHANGED, else null —
  * the `refreshOllamaModels` / `refreshDiscoveredModels` contract that
  * `scheduleProviderModelsRefresh` (ws-history.js) expects.
+ *
+ * `deps` supplies SEAMS ONLY (client / createClient / registry / now / ttlMs /
+ * timeoutMs / windows / bin / cwd / env). The structural keys below are set
+ * AFTER the spread on purpose (#7757 review): `id`, `applyCatalog` and
+ * `fetchCatalog` are the discovery slot's identity, its SINK and its SOURCE —
+ * the source spawns a child process — so no caller may redirect them by
+ * passing a key of the same name.
  */
 export function refreshCodexModels(deps = {}) {
   return refreshDiscoveredModels({
+    ...deps,
     id: CODEX_CATALOG_DISCOVERY_ID,
-    ttlMs: CODEX_CATALOG_TTL_MS,
+    ttlMs: typeof deps.ttlMs === 'number' ? deps.ttlMs : CODEX_CATALOG_TTL_MS,
     applyCatalog: applyCodexCatalog,
     fetchCatalog: fetchCodexCatalog,
-    ...deps,
+    // #7757 review (Copilot): codex's catalog sink tells UNSET from empty, so
+    // it wants the zero-row answer recorded rather than collapsed into the
+    // failed-fetch no-op. Nothing is broadcast either way.
+    publishEmptyCatalog: true,
   })
 }

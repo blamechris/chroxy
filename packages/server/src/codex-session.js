@@ -458,13 +458,30 @@ export class CodexSession extends JsonlSubprocessSession {
    * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
    */
   static getFallbackModels() {
-    // #7726 — REPLACE, not union. Once the binary has answered `model/list`,
-    // its roster IS the picker; the six static rows do not ride along, because
-    // a union means a model OpenAI retired never disappears. Pre-catalog (cold
-    // boot, probe not resolved, probe failed) the catalogued seed keeps the
-    // picker useful. `hasCatalog` is the sentinel-aware check: a catalog that
-    // was never fetched and one that came back empty are different facts, and
-    // neither of them may be reported as a roster.
+    // #7726 — REPLACE, not union, AT THIS FUNCTION. Once the binary has
+    // answered `model/list`, its roster is what this RETURNS; the six static
+    // rows do not ride along here, because a union means a model OpenAI
+    // retired never disappears. Pre-catalog (cold boot, probe not resolved,
+    // probe failed) the catalogued seed keeps the picker useful. `hasCatalog`
+    // is the sentinel-aware check: a catalog that was never fetched and one
+    // that came back empty are different facts, and neither of them may be
+    // reported as a roster.
+    //
+    // WHAT REACHES THE WIRE IS NOT THIS, and saying otherwise here would be
+    // the #7290/#7291 comment-claims-more-than-the-code class. The codex
+    // registry snapshots this function's result ONCE, at construction
+    // (`getRegistryForProvider` → `fallbackModels: getFallbackModels()`,
+    // models.js:1526) — which always happens while the catalog is still UNSET,
+    // so the captured roster is always the six statics. `updateModels` then
+    // merges back every captured fallback the refresh omitted (the #3075
+    // under-reporting union, models.js:851-866). Net `available_models`:
+    // `discovered ∪ {gpt-5-codex, gpt-5, gpt-4.1, gpt-4o, o1, o3}`, in every
+    // process, PERMANENTLY — not "until a restart", because no path builds the
+    // registry after the catalog exists and a restart reproduces it exactly.
+    // Making the registry's captured roster replaceable is #7761; the
+    // registry-level test in codex-model-catalog.test.js pins today's union in
+    // BOTH directions so whichever way #7761 resolves it must change that test
+    // deliberately.
     if (hasCodexCatalog()) {
       return Object.freeze(getCodexCatalogRows().map((row) => Object.freeze(catalogEntry(row))))
     }
@@ -520,15 +537,24 @@ export class CodexSession extends JsonlSubprocessSession {
    *
    * `deps` is the test seam (client / createClient / registry / now / ttlMs /
    * timeoutMs / windows).
+   *
+   * `bin` and `env` are passed as THUNKS, not values (#7757 review).
+   * `resolvedBinary` re-runs a synchronous `execFileSync('which', …)` on every
+   * read by design (#6708) and `buildSpawnEnv` walks the environment; this
+   * method runs on the post-auth `available_models` path for the DEFAULT
+   * provider, so building them eagerly meant a blocking child process on every
+   * push — including the calls that carry a live client (never spawns) and the
+   * ones the TTL gate drops without probing. `probeCodexCatalog` calls the
+   * thunk on the one branch that actually spawns.
    */
   static refreshModels(deps = {}) {
     try {
       return refreshCodexModels({
         ...deps,
         registry: deps.registry || getRegistryForProvider('codex'),
-        bin: 'bin' in deps ? deps.bin : this.resolvedBinary,
+        bin: 'bin' in deps ? deps.bin : () => this.resolvedBinary,
         cwd: 'cwd' in deps ? deps.cwd : undefined,
-        env: 'env' in deps ? deps.env : buildSpawnEnv('codex'),
+        env: 'env' in deps ? deps.env : () => buildSpawnEnv('codex'),
       })
     } catch {
       // A refresh is advisory. A throw here (a registry build that blew up, a

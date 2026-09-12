@@ -233,6 +233,16 @@ export function _resetModelDiscoveryStateForTests() {
  * @param {(opts: Object) => Promise<{models:Array,pricing:Object}|null>} [opts.fetchCatalog]
  *   Catalog SOURCE override (#7726). Defaults to the HTTP `fetchModelCatalog`;
  *   codex supplies a JSON-RPC probe instead and reuses everything else here.
+ * @param {boolean} [opts.publishEmptyCatalog] - opt in to publishing a
+ *   successfully-fetched but ZERO-ROW catalog to `applyCatalog` (#7757 review).
+ *   Default false, which is this function's historical behaviour: an empty
+ *   roster returns early and the sink never sees it, so a provider that blips
+ *   to zero models cannot empty a picker. A sink that DISTINGUISHES "asked,
+ *   zero models" from "never asked" — codex's UNSET sentinel — sets this true,
+ *   otherwise its documented `empty` state is unreachable from the only caller
+ *   that exists and the tests asserting it assert a state production cannot
+ *   produce. Either way nothing is broadcast for an empty roster: the return
+ *   is still null.
  * @returns {Promise<Array<Object>|null>}
  */
 export async function refreshDiscoveredModels(opts = {}) {
@@ -255,7 +265,16 @@ export async function refreshDiscoveredModels(opts = {}) {
     try {
       const catalog = await fetchCatalog(opts)
       slot.lastProbeAt = now()
-      if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) return null
+      if (!catalog || !Array.isArray(catalog.models)) return null
+      // #7757 review (Copilot, and the review panel independently): a
+      // successfully-fetched but EMPTY catalog used to return here, BEFORE the
+      // applyCatalog publish below — which collapsed "the provider answered
+      // with zero models" into the same no-op as "the fetch failed" at every
+      // sink. For codex that silently made `getCodexCatalogState() === 'empty'`
+      // unreachable in production while four tests asserted it. Sinks that tell
+      // the two apart opt in; every other caller keeps the old early return.
+      const isEmpty = catalog.models.length === 0
+      if (isEmpty && opts.publishEmptyCatalog !== true) return null
       // Publish the catalog to the session class FIRST (cheap, idempotent) so
       // its getModelMetadata/getAllowedModels/_getPricing reflect the discovered
       // ids + context windows + per-model pricing before updateModels() (which
@@ -269,6 +288,10 @@ export async function refreshDiscoveredModels(opts = {}) {
           log.debug(`discovery: applyCatalog for ${id} threw: ${err?.message || err}`)
         }
       }
+      // An empty roster is now RECORDED (above) but still never broadcast:
+      // there are no rows to put in the picker, and updateModels([]) would
+      // "keep existing models" anyway. Same return as before, one line later.
+      if (isEmpty) return null
       // Change-detection key: order-insensitive (a reorder of the same set
       // isn't a change) and metadata-aware (a label / context-window update on
       // an existing id IS a change the registry must pick up — updateModels()

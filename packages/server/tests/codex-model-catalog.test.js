@@ -27,6 +27,8 @@ import { _resetModelDiscoveryStateForTests } from '../src/model-discovery.js'
 import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { UNKNOWN } from '../src/codex-protocol-capabilities.js'
+import { spawn as realSpawn } from 'child_process'
 import { getProvider } from '../src/providers.js'
 import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
 
@@ -365,6 +367,85 @@ describe('codex model catalog — the no-session spawn probe', () => {
     assert.equal(await probeCodexCatalog({ bin: null }), null)
     assert.equal(await probeCodexCatalog({}), null)
   })
+
+  // #7757 review — `bin`/`env` may be thunks so the caller's expensive
+  // resolvers (execFileSync('which'), buildSpawnEnv) run ONLY on the branch
+  // that spawns. A thunk that returns nothing is still "no binary resolved".
+  it('accepts a THUNK for bin/env and calls it exactly once, on the spawn branch', async () => {
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+    let binCalls = 0
+    let envCalls = 0
+    const created = []
+    const rows = await probeCodexCatalog({
+      bin: () => { binCalls++; return '/fake/codex' },
+      env: () => { envCalls++; return { CODEX_HOME: '/fake/home' } },
+      createClient: (o) => { created.push(o); return client },
+    })
+    assert.deepEqual(rows.map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'])
+    assert.equal(binCalls, 1)
+    assert.equal(envCalls, 1)
+    assert.equal(created[0].bin, '/fake/codex')
+    assert.deepEqual(created[0].env, { CODEX_HOME: '/fake/home' })
+  })
+
+  it('a bin thunk that resolves nothing is the same skip as a missing bin', async () => {
+    let envCalls = 0
+    assert.equal(await probeCodexCatalog({ bin: () => null, env: () => { envCalls++; return {} } }), null)
+    assert.equal(envCalls, 0, 'nothing downstream of the bin check may be evaluated')
+  })
+
+  // #7757 review — CODEX_CATALOG_PROBE_TIMEOUT_MS's comment says it bounds the
+  // WHOLE probe. It used to be applied to initialize() and again to
+  // model/list, so a slow handshake plus a wedged model/list held a spawned
+  // child for ~2x the stated budget. The deadline is computed once and split.
+  it('bounds the WHOLE probe with ONE deadline, not each request separately', async () => {
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) }) // never settles
+    let clock = 1000
+    client.initialize = () => { clock += 4800; return Promise.resolve({ userAgent: 'chroxy/0.154.0 (Mac OS 26.6.2; arm64)' }) }
+    const startedAt = Date.now()
+    const rows = await probeCodexCatalog({
+      bin: '/fake/codex',
+      createClient: () => client,
+      timeoutMs: 5000,
+      now: () => clock,
+    })
+    const elapsed = Date.now() - startedAt
+    assert.equal(rows, null, 'the wedged model/list must time out, not hang')
+    // 4800ms of the 5000ms budget was spent in the handshake, so the real
+    // setTimeout left for model/list is ~200ms — NOT another full 5000ms.
+    assert.ok(elapsed < 2000, `model/list must inherit the REMAINING budget, waited ${elapsed}ms`)
+    assert.equal(client.killed, true)
+  })
+
+  it('an already-exhausted budget still bounds the second request (never unbounded)', async () => {
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) })
+    let clock = 1000
+    client.initialize = () => { clock += 60_000; return Promise.resolve({ userAgent: 'chroxy/0.154.0 (…)' }) }
+    const rows = await probeCodexCatalog({
+      bin: '/fake/codex',
+      createClient: () => client,
+      timeoutMs: 5000,
+      now: () => clock,
+    })
+    // withTimeout treats <=0 as "no bound at all", so a negative remainder
+    // would make this test hang forever rather than fail.
+    assert.equal(rows, null)
+  })
+
+  // #7757 review — the PR converted a hard-coded `new CodexAppServerClient(...)`
+  // into a defaulted injection. Nothing covered the DEFAULT, so a broken one
+  // would only show up as "no codex model ever discovered".
+  it('defaults createClient to a real CodexAppServerClient (the seam, exercised)', async () => {
+    // A binary that cannot exist: the real client spawns it, the child emits
+    // ENOENT, initialize() rejects, and the probe degrades to null — which is
+    // only reachable if defaultCreateClient built a real client at all.
+    const rows = await probeCodexCatalog({
+      bin: '/nonexistent/chroxy-test-codex-does-not-exist',
+      cwd: '/tmp',
+      timeoutMs: 4000,
+    })
+    assert.equal(rows, null)
+  })
 })
 
 describe('codex app-server client — the argv invariant', () => {
@@ -415,6 +496,16 @@ describe('codex app-server client — the argv invariant', () => {
     assert.equal(spawns.length, 1)
     client.kill()
   })
+
+  // #7757 review — `spawnFn` is a NEW defaulted injection. Every existing site
+  // that constructs a client without it only exercises _onData/_dispatch, so
+  // nothing asserted that the default is the production spawn: a broken
+  // default means no codex session starts at all, and no test would say so.
+  it('defaults spawnFn to child_process.spawn when the caller passes none', () => {
+    assert.equal(new CodexAppServerClient({ bin: '/fake/codex' })._spawn, realSpawn)
+    // …and a non-function is not silently accepted as one.
+    assert.equal(new CodexAppServerClient({ bin: '/fake/codex', spawnFn: 'nope' })._spawn, realSpawn)
+  })
 })
 
 describe('codex model catalog — refresh through the discovery slot', () => {
@@ -444,6 +535,55 @@ describe('codex model catalog — refresh through the discovery slot', () => {
       { value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272000 },
     ])
     assert.deepEqual(out.map((m) => m.id), ['gpt-6-astra', 'gpt-5.5'])
+  })
+
+  // #7757 review (Copilot's suppressed comment, and the panel independently):
+  // `refreshDiscoveredModels` used to return on `models.length === 0` BEFORE
+  // the applyCatalog publish, which made "the binary answered with zero
+  // models" indistinguishable from "the fetch failed" at the sink — so
+  // `getCodexCatalogState() === 'empty'` was a documented state no production
+  // caller could produce, while four tests asserted it. Codex opts in.
+  it('a zero-row ANSWER is recorded as empty (not collapsed into the failed-fetch no-op)', async () => {
+    applyCodexCatalog([{ id: 'gpt-5.5', label: 'GPT-5.5' }])
+    const registry = stubRegistry()
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: { data: [] } })
+    const out = await refreshCodexModels({ client, registry, windows: new Map() })
+    assert.equal(out, null, 'an empty roster has nothing to broadcast')
+    assert.deepEqual(registry.applied, [], 'and nothing to feed the picker')
+    assert.equal(getCodexCatalogState(), 'empty',
+      'the answer reached the sink — asked-and-got-zero is not the same fact as never-asked')
+    assert.equal(hasCodexCatalog(), false)
+    // …and the seed is what the picker falls back to, exactly as pre-catalog.
+    assert.deepEqual(CodexSession.getFallbackModels().map((m) => m.id),
+      ['gpt-5-codex', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o1', 'o3'])
+  })
+
+  it('a CANNOT-PARSE body still leaves the catalog untouched (the empty opt-in did not widen it)', async () => {
+    applyCodexCatalog([{ id: 'gpt-5.5', label: 'GPT-5.5' }])
+    const registry = stubRegistry()
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: { items: LIVE_MODEL_LIST.data } })
+    assert.equal(await refreshCodexModels({ client, registry, windows: new Map() }), null)
+    assert.deepEqual(getCodexCatalogRows().map((r) => r.id), ['gpt-5.5'])
+    assert.equal(getCodexCatalogState(), 'populated')
+  })
+
+  // #7757 review — `id`, `applyCatalog` and `fetchCatalog` are the slot's
+  // identity, SINK and SOURCE (the source spawns a child), so they are set
+  // after the `...deps` spread and a caller cannot redirect them.
+  it('the discovery id, sink and SOURCE are not overridable by a caller', async () => {
+    const registry = stubRegistry()
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+    let hijacked = 0
+    await refreshCodexModels({
+      client,
+      registry,
+      windows: new Map(),
+      id: 'not-codex',
+      applyCatalog: () => { hijacked++ },
+      fetchCatalog: () => { hijacked++; return Promise.resolve({ models: [{ id: 'evil' }], pricing: {} }) },
+    })
+    assert.equal(hijacked, 0, 'a caller-supplied sink/source must not displace the module’s own')
+    assert.deepEqual(getCodexCatalogRows().map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'])
   })
 
   it('a failed probe returns null, touches no registry, and keeps the previous catalog', async () => {
@@ -552,6 +692,95 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
     assert.deepEqual([...byId.get('gpt-6-astra').reasoningLevels], ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'])
     assert.equal(byId.get('gpt-6-astra').defaultReasoningLevel, 'medium')
     assert.equal(byId.get('gpt-5.5').contextWindow, 272000)
+    // #7757 review — the null window is asserted at the unit level
+    // (stampContextWindows / getModelMetadata), but the #5418/#5444 regression
+    // appears HERE, on the entry that goes on the wire: `??` skips an explicit
+    // null twice on its way through models.js:820-823, and only the
+    // `if (meta && 'contextWindow' in meta)` branch at models.js:1538-1544
+    // stops it becoming a fabricated 200k.
+    assert.equal(byId.get('gpt-6-astra').contextWindow, null,
+      'an unknown window must stay null on the REGISTRY entry, not just in the catalog row')
+  })
+
+  // #7757 review (the critical) — the one-direction roster check is this
+  // repo's four-times-filed defect (#7199/#7216/#7544/#7639): the test above
+  // asserts the discovered ids are PRESENT and never asks what else is. Pin
+  // both directions, including the deviation, so #7761 cannot be "fixed"
+  // without a deliberate edit here.
+  it('the registry entry list is discovered UNION the constructor-captured statics — today\'s DEVIATION, pinned', async () => {
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+    await getProvider('codex').refreshModels({ client, windows: new Map([['gpt-5.5', 272000]]) })
+    const ids = getRegistryForProvider('codex').getModels().map((m) => m.id).sort()
+    // REPLACE holds at CodexSession.getFallbackModels()…
+    assert.deepEqual(CodexSession.getFallbackModels().map((m) => m.id), ['gpt-6-astra', 'gpt-5.5'])
+    // …and does NOT hold at the wire. `getRegistryForProvider` captured the
+    // six statics at construction (models.js:1526, always while the catalog is
+    // UNSET) and `updateModels` merges every one the refresh omitted back in
+    // (models.js:851-866). `gpt-4.1[1m]` is the 1M synthesis (models.js:869-905)
+    // firing on the re-added gpt-4.1 row — a Claude id convention on an OpenAI
+    // registry, tracked as #7747.
+    assert.deepEqual(ids, [
+      'gpt-4.1',
+      'gpt-4.1[1m]',
+      'gpt-4o',
+      'gpt-5',
+      'gpt-5-codex',
+      'gpt-5.5',
+      'gpt-6-astra',
+      'o1',
+      'o3',
+    ], 'this list is the DEVIATION #7761 fixes — when it becomes the two discovered ids, update it here on purpose')
+    // Stated as a direction, not only as a literal, so the intent survives a
+    // future roster edit: every static the refresh did not discover is present.
+    for (const stale of ['gpt-5-codex', 'gpt-4.1', 'gpt-4o', 'o1', 'o3']) {
+      assert.equal(ids.includes(stale), true,
+        `${stale} is NOT in the discovered roster and still reaches the wire — that is #7761`)
+    }
+  })
+
+  // #7757 review — `CodexSession.resolvedBinary` re-runs execFileSync('which')
+  // on EVERY read by design (#6708), and this method is called on the
+  // post-auth available_models path for the default provider. Building its
+  // opts eagerly therefore spawned a blocking child on every push, including
+  // the calls that carry a live client and never spawn anything.
+  it('does not resolve the codex binary when a live client is supplied', async () => {
+    const original = Object.getOwnPropertyDescriptor(CodexSession, 'resolvedBinary')
+    let resolves = 0
+    Object.defineProperty(CodexSession, 'resolvedBinary', {
+      configurable: true,
+      get() { resolves++; return '/fake/codex' },
+    })
+    try {
+      const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+      await getProvider('codex').refreshModels({ client, windows: new Map() })
+      assert.equal(resolves, 0, 'a refresh over a live client must never shell out to resolve a binary')
+      // …and the TTL gate drops the next call before any probe, so it must not
+      // resolve one either.
+      await getProvider('codex').refreshModels({ client, windows: new Map() })
+      assert.equal(resolves, 0, 'a TTL-gated no-op must not shell out either')
+    } finally {
+      Object.defineProperty(CodexSession, 'resolvedBinary', original)
+    }
+  })
+
+  it('DOES resolve the binary on the no-session spawn branch', async () => {
+    const original = Object.getOwnPropertyDescriptor(CodexSession, 'resolvedBinary')
+    let resolves = 0
+    Object.defineProperty(CodexSession, 'resolvedBinary', {
+      configurable: true,
+      get() { resolves++; return '/fake/codex' },
+    })
+    try {
+      const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+      await getProvider('codex').refreshModels({
+        createClient: () => client,
+        windows: new Map(),
+      })
+      assert.equal(resolves, 1, 'the thunk is DEFERRED, not dropped — the spawn branch still needs a binary')
+      assert.deepEqual(getCodexCatalogRows().map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'])
+    } finally {
+      Object.defineProperty(CodexSession, 'resolvedBinary', original)
+    }
   })
 
   it('the codex registry cache file lands under CHROXY_CONFIG_DIR, not the real home', async () => {
@@ -581,22 +810,43 @@ describe('CodexAppServerSession — the live-session catalog refresh', () => {
     assert.equal(hasCodexCatalog(), true)
   })
 
-  it('skips the probe when the handshake said this binary is BELOW the model/list floor', async () => {
+  // #7757 review — driven through the real PRODUCER (`_captureHandshake` →
+  // `capabilitiesForVersion`), not by assigning the capability object the code
+  // consumes. Handing the gate its own input asserts the flag NAME against
+  // itself: a rename in #7724's CAPABILITY_MIN_VERSIONS would leave the
+  // consumer reading `undefined` (always probe) with the test still green.
+  // These derive the flag from the version floor, so the wiring is proven.
+  it('skips the probe when the HANDSHAKE said this binary is BELOW the model/list floor', async () => {
     const s = mkSession()
     const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
     s._client = client
-    s.codexCapabilities = { supportsModelList: false }
+    // 0.127.0 < CODEX_PROTOCOL_FLOOR (0.128.0) → supportsModelList === false.
+    s._captureHandshake({ userAgent: 'codex/0.127.0 (Mac OS 26.6.2; arm64) unknown (codex; 0)' })
+    assert.equal(s.codexCapabilities.supportsModelList, false,
+      'the fixture must actually land below the floor, or this test proves nothing')
     assert.equal(await s._refreshModelCatalog(), null)
     assert.deepEqual(client.calls, [])
   })
 
-  it('still probes when the capability is UNKNOWN — a cannot-check is not a no', async () => {
+  it('still probes when the HANDSHAKE carried no parseable version — a cannot-check is not a no', async () => {
     const s = mkSession()
     const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
     s._client = client
-    s.codexCapabilities = { supportsModelList: 'unknown' }
+    s._captureHandshake({ userAgent: 'something-unparseable' })
+    assert.equal(s.codexCapabilities.supportsModelList, UNKNOWN)
     await s._refreshModelCatalog()
     assert.deepEqual(client.calls.map((c) => c.method), ['model/list'])
+  })
+
+  it('probes when the handshake is ABOVE the floor', async () => {
+    const s = mkSession()
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+    s._client = client
+    s._captureHandshake({ userAgent: 'codex/0.154.0 (Mac OS 26.6.2; arm64) unknown (codex; 0)' })
+    assert.equal(s.codexCapabilities.supportsModelList, true)
+    await s._refreshModelCatalog()
+    assert.deepEqual(client.calls.map((c) => c.method), ['model/list'])
+    assert.equal(hasCodexCatalog(), true)
   })
 
   it('never throws with no client', async () => {
