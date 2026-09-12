@@ -239,7 +239,19 @@ export class CodexAppServerSession extends BaseSession {
     this.codexVersion = null
     this.codexCapabilities = capabilitiesForVersion(null)
     this._activeTurn = null // { messageId, turnId, didStreamStart }
+    // #7769 — per-TURN, and reset in sendMessage(). It used to live for the
+    // lifetime of the session, so a turn that carried no
+    // `thread/tokenUsage/updated` re-reported the PREVIOUS turn's numbers and
+    // session-manager's `_trackUsage` accumulated them a second time.
     this._lastUsage = null
+    // #7794 — per-turn occupancy snapshot built from the same notification.
+    this._lastOccupancy = null
+    // #7773 — codex's `tokenUsage.total` is CUMULATIVE over the thread (proven
+    // live: see _turnUsageBreakdown). These two make the per-turn figure a
+    // DELTA of it: `_threadTotals` tracks the newest cumulative breakdown seen,
+    // `_turnBaselineTotals` freezes it at turn start.
+    this._threadTotals = null
+    this._turnBaselineTotals = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
     this._turnAbort = null // per-turn AbortController — cancels pending approvals
     this._reconnectWatchdog = null // #6629 — bounded backstop for a wedged reconnect
@@ -666,6 +678,18 @@ export class CodexAppServerSession extends BaseSession {
     const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId
     this._activeTurn = { messageId, turnId: null, didStreamStart: false }
+    // #7769 — clear the PREVIOUS turn's usage here, not at turn end. A
+    // `turn/completed` that arrives with no intervening
+    // `thread/tokenUsage/updated` must report `usage: null` ("codex told us
+    // nothing"), never the last turn's numbers: `session-manager._trackUsage`
+    // ADDS `result.usage` into `cumulativeUsage` once per turn, so re-reporting
+    // is a silent double count of user-visible tokens and cost.
+    // #7773 — and freeze the cumulative baseline this turn's delta is measured
+    // from, in the same place, so the two can never disagree about where a turn
+    // starts.
+    this._lastUsage = null
+    this._lastOccupancy = null
+    this._turnBaselineTotals = this._threadTotals
     // Fresh abort scope for this turn's approvals — interrupt()/destroy() abort it
     // so a pending permission_request resolves (deny) instead of hanging the turn.
     this._turnAbort = new AbortController()
@@ -1016,17 +1040,77 @@ export class CodexAppServerSession extends BaseSession {
   }
 
   /**
-   * #7729 — the one consumer of `thread/tokenUsage/updated`. It carries TWO
+   * #7729 — the one consumer of `thread/tokenUsage/updated`. It carries THREE
    * independent facts and they are handled separately:
    *
-   *   - the token breakdown, mapped onto chroxy's accounting keys (unchanged);
+   *   - the token breakdown, mapped onto chroxy's accounting keys — a DELTA of
+   *     the cumulative `total` since turn start (#7773);
+   *   - the context-window OCCUPANCY snapshot the meter reads (#7794);
    *   - `tokenUsage.modelContextWindow`, which is the model's REAL window as
    *     reported by the binary running it — authoritative, and the only source
    *     that exists: `model/list` does not carry a window at all.
+   *
+   * #7773 — `_threadTotals` is advanced LAST, and deliberately after
+   * `_mapUsage` has read it: the delta is always measured from the baseline
+   * frozen at turn start, never from the previous notification, so N
+   * notifications in one turn each report that turn's running sum rather than
+   * one response's slice.
    */
   _onTokenUsage(params) {
     this._lastUsage = this._mapUsage(params)
+    this._lastOccupancy = this._buildOccupancy(params)
     this._applyContextWindow(params)
+    const total = params?.tokenUsage?.total
+    if (total && typeof total === 'object') this._threadTotals = total
+  }
+
+  /**
+   * #7794 — the context-window OCCUPANCY snapshot (wire field
+   * `contextOccupancy`, NOT the billing `usage` aggregate beside it) built from
+   * codex's own numbers, so a codex session's context meter renders instead of
+   * staying dashed forever.
+   *
+   * **The series is `tokenUsage.last`, NOT `tokenUsage.total`** — #7794's body
+   * specifies `total.total_tokens` and that is WRONG, falsified by a live
+   * two-turn probe against codex-cli 0.154.0 (gpt-5.5, thread
+   * 01a09778-0c52-7c41-8d24-e4f4ff68b708):
+   *
+   *   turn 1: total.totalTokens=14962  last.totalTokens=14962
+   *   turn 2: total.totalTokens=31920  last.totalTokens=16958   (14962+16958)
+   *
+   * `total` is the thread-CUMULATIVE sum of every response's usage. Metered as
+   * occupancy it grows without bound, reads 100% of a 258400 window after ~15
+   * turns of a real session, and can never step down after a compaction — the
+   * exact failure #7794's own second acceptance criterion forbids. `last` is
+   * the most recent response: `inputTokens` is the conversation as codex last
+   * sent it and `totalTokens` is that prompt plus the reply
+   * (14935+27=14962, 16937+21=16958), i.e. the size the NEXT turn starts from.
+   * That follows a compaction down, which is the #6769 semantics.
+   *
+   * No `source` field: the protocol enum has values for the SDK control API and
+   * byok's final-round estimate, and this is neither. Absent parses to
+   * `source: null` client-side, which renders the value un-flagged rather than
+   * labelled an estimate — correct, since these are the binary's own figures.
+   *
+   * Returns null (field omitted, clients keep their previous snapshot / dash)
+   * for the flat legacy shape, a missing/malformed `last`, or a zero total —
+   * never a fabricated number (#5444).
+   */
+  _buildOccupancy(params) {
+    const last = params?.tokenUsage?.last
+    if (!last || typeof last !== 'object') return null
+    const totalTokens = nonNegInt(last.totalTokens)
+    if (totalTokens <= 0) return null
+    const win = params?.tokenUsage?.modelContextWindow
+    return {
+      totalTokens,
+      // Omitted rather than null when codex reported no window: the client's
+      // ceiling resolution then falls back to the registry window, which the
+      // ratchet may still have. `maxTokens: null` would mean the same thing to
+      // `contextMeterCeiling`, but omitting keeps "codex said nothing" and
+      // "codex said null" from being spelled differently on the wire.
+      ...(Number.isFinite(win) && win > 0 ? { maxTokens: win } : {}),
+    }
   }
 
   /**
@@ -1096,24 +1180,80 @@ export class CodexAppServerSession extends BaseSession {
   }
 
   /**
-   * #7729 — the per-turn token breakdown inside a `thread/tokenUsage/updated`
-   * payload, for every shape this session has to read.
+   * #7729 — the LAST RESPONSE's token breakdown inside a
+   * `thread/tokenUsage/updated` payload, for every shape this session has to
+   * read.
    *
    * The LIVE shape is `{threadId, turnId, tokenUsage: {total, last,
    * modelContextWindow}}` (verified against codex-cli 0.154.0), so the
    * pre-existing `params.usage` read found nothing there and every token count
-   * mapped to zero. `last` — THIS turn's breakdown — is what is read: `total`
-   * is the thread-cumulative figure, and session-manager ACCUMULATES every
-   * `result.usage` into `cumulativeUsage`, so feeding it a running total would
-   * compound the count on every turn. `params.usage` keeps its precedence for
-   * any caller/build still using the flat shape.
+   * mapped to zero. `params.usage` keeps its precedence for any caller/build
+   * still using the flat shape.
+   *
+   * #7773 — the docstring here USED to call this "the per-turn token
+   * breakdown", which is more than `last` delivers: `last` is one model
+   * RESPONSE, and a coding turn with N tool round-trips emits N notifications.
+   * The per-turn figure is `_turnUsageBreakdown` below. This one keeps
+   * one-response semantics on purpose, because the context-window RATCHET in
+   * `_applyContextWindow` wants a single response's prompt size — summing a
+   * turn's responses there would ratchet the learned window far above the real
+   * one.
    */
   _usageBreakdown(params) {
     return params?.usage || params?.tokenUsage?.last || params || {}
   }
 
+  /**
+   * #7773 — THIS TURN's token breakdown: `tokenUsage.total` minus the
+   * cumulative baseline frozen at turn start.
+   *
+   * `total` is CUMULATIVE over the thread. Proven live on codex-cli 0.154.0
+   * (two turns, one thread — full capture in `_buildOccupancy`): turn 2
+   * reported `total.totalTokens = 31920` for `last.totalTokens = 16958`,
+   * exactly turn 1's 14962 plus turn 2's 16958. So neither raw field is the
+   * turn:
+   *
+   *   - `total` compounds — session-manager's `_trackUsage` ADDS `result.usage`
+   *     into `cumulativeUsage` once per turn, so reporting a running total
+   *     re-counts the whole thread every turn (the #7767 rationale, correct);
+   *   - `last` DROPS — every response but the final one of the turn is thrown
+   *     away, a systematic undercount concentrated on exactly the tool-heavy
+   *     turns that dominate a coding session (#7773).
+   *
+   * The delta does neither, and it is what every other chroxy provider reports
+   * (an Anthropic turn sums all of its requests).
+   *
+   * Measured from the TURN BASELINE rather than the previous notification, so
+   * the value is the turn's running sum on each of N notifications and the
+   * final one — the only one `_finishTurn` reports — is the whole turn.
+   *
+   * Every field is clamped at 0 by `nonNegInt`, so a `total` that moved
+   * BACKWARDS (a resumed thread, or a future build that resets its counters
+   * after compacting) undercounts rather than emitting a negative into an
+   * accumulator.
+   *
+   * Falls through to `_usageBreakdown` when there is no `total` to difference:
+   * the flat `params.usage` shape, and any build that stops sending `total`.
+   */
+  _turnUsageBreakdown(params) {
+    if (params?.usage) return params.usage
+    const total = params?.tokenUsage?.total
+    if (!total || typeof total !== 'object') return this._usageBreakdown(params)
+    const base = this._turnBaselineTotals
+    if (!base || typeof base !== 'object') return total
+    const delta = (key) => nonNegInt(nonNegInt(total[key]) - nonNegInt(base[key]))
+    return {
+      totalTokens: delta('totalTokens'),
+      inputTokens: delta('inputTokens'),
+      cachedInputTokens: delta('cachedInputTokens'),
+      cacheWriteInputTokens: delta('cacheWriteInputTokens'),
+      outputTokens: delta('outputTokens'),
+      reasoningOutputTokens: delta('reasoningOutputTokens'),
+    }
+  }
+
   _mapUsage(params) {
-    const u = this._usageBreakdown(params)
+    const u = this._turnUsageBreakdown(params)
     const rawInput = nonNegInt(u.inputTokens ?? u.input_tokens)
     const cached = nonNegInt(u.cachedInputTokens ?? u.cached_input_tokens)
     return {
@@ -1133,6 +1273,26 @@ export class CodexAppServerSession extends BaseSession {
       // Deprecated duplicate of cache_read_input_tokens — kept one release
       // for any external reader of the raw result payload (#6692).
       cached_input_tokens: cached,
+      // #7773 — `TokenUsageBreakdown` has six fields and this maps three;
+      // the other two are UNREAD ON PURPOSE, and a test pins each.
+      //
+      //   - `reasoningOutputTokens` is a SUBSET of `outputTokens`, proven by
+      //     the live capture's own arithmetic: totalTokens 14962 =
+      //     inputTokens 14935 + outputTokens 27, while reasoningOutputTokens
+      //     was 20. Were it additive, totalTokens would have been 14982. So
+      //     `output_tokens` above already contains it and adding it anywhere
+      //     would double count. Surfacing it SEPARATELY for display is
+      //     #7730/#6942, not an accounting key.
+      //   - `cacheWriteInputTokens` maps to NOTHING, so
+      //     `cache_creation_input_tokens` stays absent (and `_trackUsage`
+      //     accumulates 0) for every codex session. Read 0 in every capture so
+      //     far, which means its relationship to `inputTokens` is UNPROVEN —
+      //     and under the OpenAI convention the rest of this function is built
+      //     on it is plausibly another subset, where an additive map would
+      //     double count real tokens. Absent is the fail-safe reading: it
+      //     under-reports a cost line rather than inflating one. Map it the day
+      //     a capture shows it non-zero AND shows whether totalTokens counts it
+      //     twice.
     }
   }
 
@@ -1154,6 +1314,12 @@ export class CodexAppServerSession extends BaseSession {
         // default codex session's per-model usage split was silently dropped.
         modelUsage: synthesizeModelUsage(this._effectiveModelId(), this._lastUsage),
         sessionId: this._threadId,
+        // #7794 — occupancy snapshot, or the field omitted entirely when codex
+        // sent no usable one (clients then keep their previous snapshot / the
+        // honest dash). Wire name is contextOccupancy, NOT contextUsage: the
+        // `usage` field above is the billing aggregate and must never be
+        // metered against the window (#6769).
+        ...(this._lastOccupancy ? { contextOccupancy: this._lastOccupancy } : {}),
       },
       'turn_ended_with_orphan_tool_start',
     )
