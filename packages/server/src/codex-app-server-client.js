@@ -5,6 +5,24 @@ import { createLogger } from './logger.js'
 const log = createLogger('codex-app-server')
 
 /**
+ * Build the rejection for a JSON-RPC error response, CARRYING the numeric code
+ * (#7724). The message alone cannot be switched on: the live binary answers an
+ * unknown method with -32600 "Invalid request: unknown variant `x`..." rather
+ * than -32601, so a caller that wants to distinguish a protocol-level refusal
+ * from a transport failure needs the code, not the wording. `jsonRpcCode` is
+ * for LOGGING and diagnostics — `probeMethod` still degrades on ANY error.
+ */
+function jsonRpcError(error) {
+  const err = new Error(error.message || JSON.stringify(error))
+  if (typeof error.code === 'number') {
+    err.code = error.code
+    err.jsonRpcCode = error.code
+  }
+  if (error.data !== undefined) err.data = error.data
+  return err
+}
+
+/**
  * JSON-RPC 2.0 transport for `codex app-server` (newline-delimited over stdio).
  *
  * Spawns the app-server child, performs the `initialize` / `initialized`
@@ -109,7 +127,7 @@ export class CodexAppServerClient extends EventEmitter {
       const pend = this._pending.get(m.id)
       if (!pend) return
       this._pending.delete(m.id)
-      if (m.error) pend.reject(new Error(m.error.message || JSON.stringify(m.error)))
+      if (m.error) pend.reject(jsonRpcError(m.error))
       else pend.resolve(m.result)
       return
     }

@@ -6,6 +6,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
 import { CodexAppServerClient } from './codex-app-server-client.js'
+import { parseCodexUserAgent, capabilitiesForVersion } from './codex-protocol-capabilities.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
@@ -186,6 +187,12 @@ export class CodexAppServerSession extends BaseSession {
     }))
     this._client = null
     this._threadId = null
+    // #7724 — filled from the `initialize` handshake in start(). Null / all-UNKNOWN
+    // before the handshake AND after an unparseable userAgent: a cannot-check must
+    // not read as a no, so callers probe (probeMethod) instead of disabling.
+    this.codexUserAgent = null
+    this.codexVersion = null
+    this.codexCapabilities = capabilitiesForVersion(null)
     this._activeTurn = null // { messageId, turnId, didStreamStart }
     this._lastUsage = null
     this._skillsPrepended = false // #6606 — inject the skills prefix once, on turn 1
@@ -279,7 +286,12 @@ export class CodexAppServerSession extends BaseSession {
 
     let started
     try {
-      await this._client.initialize({ name: 'chroxy', version: '1' })
+      // #7724 — the handshake result is the ONLY in-band version signal, and it
+      // reports the binary serving THIS session (not whatever is on PATH). It
+      // gates FEATURES only: nothing below refuses to start, and an unparseable
+      // userAgent leaves every gate UNKNOWN so callers probe rather than assume.
+      const init = await this._client.initialize({ name: 'chroxy', version: '1' })
+      this._captureHandshake(init)
       started = await this._client.request('thread/start', {
         approvalPolicy: this._approvalPolicy(), // #6605 P2 — derived from permission mode
         cwd: this.cwd,
@@ -311,6 +323,26 @@ export class CodexAppServerSession extends BaseSession {
     this._processReady = true
     ;(this._log || log).info(`codex app-server ready (thread=${this._threadId} sandbox=${sandbox})`)
     this.emit('ready', { model: this.model })
+  }
+
+  /**
+   * #7724 — record what the `initialize` handshake said about the binary serving
+   * this session. Feature-gating ONLY: this never throws and never refuses a
+   * session, so a binary below the protocol floor (or one whose userAgent we
+   * cannot parse) still starts a thread and still sends turns.
+   */
+  _captureHandshake(init) {
+    const { version, raw } = parseCodexUserAgent(init?.userAgent)
+    this.codexUserAgent = raw
+    this.codexVersion = version
+    this.codexCapabilities = capabilitiesForVersion(version)
+    if (version) {
+      ;(this._log || log).info(`codex app-server handshake (version=${version} userAgent=${String(raw).slice(0, 200)})`)
+    } else {
+      // Not a warning about the binary — a note that the CHEAP gate is
+      // unavailable and load-bearing features must be probed at runtime.
+      ;(this._log || log).warn(`codex app-server handshake carried no parseable version (userAgent=${raw === null ? 'absent' : String(raw).slice(0, 200)}); capabilities fall through to runtime probes`)
+    }
   }
 
   async sendMessage(prompt, attachments, sendOptions = {}) {
@@ -430,6 +462,16 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   _onNotification({ method, params }) {
+    // #7724 — `deprecationNotice` is handled HERE, ahead of the between-turns
+    // early return, NOT as a case in the switch below. It is a lifecycle notice
+    // the binary can emit at any point — most plausibly right after the
+    // handshake, when there is no active turn — and the switch is unreachable in
+    // exactly that window. A case down there would be a handler that cannot fire
+    // for its own main case.
+    if (method === 'deprecationNotice') {
+      this._onDeprecationNotice(params)
+      return
+    }
     if (!this._activeTurn) {
       // Between turns: only usage/errors matter; ignore stray item churn.
       if (method === 'thread/tokenUsage/updated') this._lastUsage = this._mapUsage(params)
@@ -503,6 +545,18 @@ export class CodexAppServerSession extends BaseSession {
       default:
         break // reasoning/plan/other items are ignored in Phase 1
     }
+  }
+
+  /**
+   * #7724 — surface the app-server's own deprecation notice. Logged, not
+   * emitted: it is operator-facing information about the codex binary, not a
+   * turn event, and the switch's default arm used to swallow it entirely.
+   */
+  _onDeprecationNotice(params) {
+    const detail = typeof params?.message === 'string' && params.message
+      ? params.message
+      : JSON.stringify(params ?? null)
+    ;(this._log || log).warn(`codex app-server deprecation notice: ${String(detail).slice(0, 500)}`)
   }
 
   _onItemStarted(item) {
