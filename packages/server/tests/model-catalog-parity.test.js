@@ -28,7 +28,7 @@
  *      producer payload (the live codex 0.154.0 `model/list`, epic #7721
  *      comment 5644101381) on the other side. A coverage test whose
  *      expectation derives from its own subject cannot go red; that is cause
- *      #29 (`#7424`), and `reverseViolations` carries its own positive
+ *      #21 (`#7424`), and `reverseViolations` carries its own positive
  *      controls so a rewrite into that shape is caught here.
  *   2. A catalog fetch FAILURE never satisfies the guard vacuously. The
  *      producer roster is what the stub PUBLISHED, never what the registry
@@ -41,8 +41,27 @@
  *      never hand-written, and a test flips those seams at runtime to prove
  *      the derivation is live.
  *   4. Every roster this file does hold by hand — the stub map, the
- *      not-selectable exclusions — is checked in BOTH directions against its
- *      derived counterpart, so failing to grow is what goes red.
+ *      not-selectable exclusions, the three FORWARD skip sets — is checked in
+ *      BOTH directions against its derived counterpart, so failing to grow is
+ *      what goes red.
+ *
+ * THE ONE HAND-MAINTAINED LIST THIS FILE ACCEPTS, stated rather than left for a
+ * reader to discover: `CODEX_PRODUCER_MODEL_LIST` is a FROZEN TRANSCRIPTION of
+ * codex-cli 0.154.0's `model/list`, and nothing here can notice when it goes
+ * stale — a newer binary serving a different roster changes no assertion in
+ * this file. That is deliberate (a fixture that chased the live binary would be
+ * a network test, and the reverse direction needs a roster that genuinely
+ * disagrees with the seed), and it carries an explicit RE-RECORD TRIGGER: when
+ * the codex-cli this repo has evidence for is bumped, re-record the payload
+ * from the new binary and re-derive `CODEX_DEPRECATED_SEED_IDS` from it. The
+ * fixture is a claim about a specific binary version, not about today's.
+ *
+ * AND HOW THIN THE REVERSE HALF STILL IS: the Claude-family registries have NO
+ * reverse coverage at all — they declare no `refreshModels`, so `reverseEligible`
+ * excludes every one of them. The reverse direction therefore covers exactly one
+ * real provider (`codex`) plus one synthetic (`parity-compat`, built here through
+ * the production config-driven factory) until CAT-1 gives the Claude registries a
+ * catalog source. The FORWARD direction covers all ten.
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -50,13 +69,34 @@ import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-// The config dir has to move BEFORE any provider registry is constructed —
-// `getRegistryForProvider` calls `loadCache()` at construction, and the
-// developer's real `~/.chroxy/models-cache.codex.json` would otherwise seed
-// rows this guard would then attribute to the repo.
+// Everything the developer's machine could otherwise feed into this guard is
+// pinned BEFORE any provider registry is constructed. `tests/_setup.mjs`
+// sandboxes WRITES only, so a read of the real home is not caught by it.
 const TMP_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'parity-cfg-'))
-const ORIG_CONFIG_DIR = process.env.CHROXY_CONFIG_DIR
-process.env.CHROXY_CONFIG_DIR = TMP_CONFIG_DIR
+const TMP_CODEX_HOME = mkdtempSync(join(tmpdir(), 'parity-codex-'))
+const ENV_PINS = Object.freeze({
+  // `getRegistryForProvider` calls `loadCache()` at construction, and the
+  // developer's real `~/.chroxy/models-cache.codex.json` would otherwise seed
+  // rows this guard would then attribute to the repo.
+  CHROXY_CONFIG_DIR: TMP_CONFIG_DIR,
+  // `fetchCodexCatalog` (codex-model-catalog.js) falls back to
+  // `readCodexModelsCacheWindows({ env: opts.cacheEnv })` whenever a caller
+  // omits `windows`. Both call sites in this file DO pass it, which is a
+  // property of today's call sites and not of the seam — an unpinned
+  // `$CODEX_HOME` would let the developer's real `models_cache.json` stamp
+  // context windows onto fixture rows with nothing going red.
+  CODEX_HOME: TMP_CODEX_HOME,
+  // #6616 — `getProvider('codex')` resolves the app-server class only while
+  // this is not opted out, and it reads `process.env` at CALL time. Inheriting
+  // `CHROXY_CODEX_APPSERVER=0` from a shell would silently switch the whole
+  // census to the legacy exec class, leave the app-server class covered by
+  // nothing (it is excluded by name), and falsify the recorded exclusion reason
+  // for `codex-appserver` — all three classes delegate every static this guard
+  // reads, which is exactly what makes the switch invisible.
+  CHROXY_CODEX_APPSERVER: '1',
+})
+const ORIG_ENV = Object.freeze(Object.keys(ENV_PINS).map((k) => [k, process.env[k]]))
+for (const [k, v] of Object.entries(ENV_PINS)) process.env[k] = v
 
 const {
   getRegisteredProviderNames,
@@ -70,6 +110,7 @@ const {
   computePromptCostUsd,
   isClaudeProvider,
   _resetProviderRegistryCacheForTests,
+  _unregisterProviderRegistryForTests,
 } = await import('../src/models.js')
 const { settingsHandlers } = await import('../src/handlers/settings-handlers.js')
 const {
@@ -83,9 +124,18 @@ const { _resetModelDiscoveryStateForTests } = await import('../src/model-discove
 const { createSpy, createMockSession, nsCtx } = await import('./test-helpers.js')
 
 after(() => {
-  if (ORIG_CONFIG_DIR === undefined) delete process.env.CHROXY_CONFIG_DIR
-  else process.env.CHROXY_CONFIG_DIR = ORIG_CONFIG_DIR
+  for (const [k, v] of ORIG_ENV) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
   rmSync(TMP_CONFIG_DIR, { recursive: true, force: true })
+  rmSync(TMP_CODEX_HOME, { recursive: true, force: true })
+  // models.js:1705 exports this for exactly this case, and its JSDoc says
+  // `_resetProviderRegistryCacheForTests()` is NOT sufficient: the name stays
+  // resolvable via `nameToProviderClass` and keeps rebuilding the same
+  // registry. Harmless today under `node --test` process isolation — but that
+  // is an assumption about the runner, not a property of this file.
+  _unregisterProviderRegistryForTests(COMPAT_PROVIDER)
 })
 
 // --- the stubbed producers ---------------------------------------------------
@@ -267,10 +317,15 @@ const STATIC_SEEDS = new Map(
 /**
  * The reverse rule: data in, violations out.
  *
- * BOTH directions of the roster are read, which is the point. A seed id the
- * producer dropped and nobody declared is a violation, AND a declaration for an
- * id no longer in the seed is a violation — `#7639`/`#7544`/`#7216`/`#7199`
- * are four filings of the same one-direction gap.
+ * ALL THREE directions of the roster are read, which is the point. A seed id the
+ * producer dropped and nobody declared is a violation; a declaration for an id
+ * no longer in the seed is a violation — `#7639`/`#7544`/`#7216`/`#7199` are
+ * four filings of that one-direction gap — and so is a declaration for an id the
+ * producer STILL offers. The third is the deprecation roster's own instance of
+ * the same shape: it is this PR's hand-maintained list beside a moving set, and
+ * without that loop an id claimed retired while the producer keeps serving it
+ * hits `if (catalogIds.has(id)) continue` in the first loop and is never
+ * examined again — a false "retired" claim passing silently.
  *
  * An empty `catalogIds` is not an input this function may see: callers reject a
  * cannot-check first (see `producerCatalogIds`).
@@ -284,6 +339,7 @@ function reverseViolations({ seedIds, catalogIds, deprecatedIds }) {
   }
   for (const id of deprecatedIds) {
     if (!seedIds.has(id)) violations.push(`deprecation roster names '${id}', which is not in the static seed`)
+    else if (catalogIds.has(id)) violations.push(`deprecation roster names '${id}', which the producer still offers`)
   }
   return violations
 }
@@ -356,15 +412,46 @@ function resolvePricingFor(c, modelId) {
   return null
 }
 
+/** Two ids no provider can have a row for. */
+const FLAT_PROBE_IDS = Object.freeze(['__parity-flat-probe-a__', '__parity-flat-probe-b__'])
+
+/** Rate-table equality, by value over the four billed buckets. */
+function sameRates(a, b) {
+  if (a === b) return true
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false
+  return RATE_KEYS.every((k) => a[k] === b[k])
+}
+
 /**
  * True when the provider's pricing seam ignores the model id entirely — a
  * DECLARED flat rate (ollama's free local inference) rather than a per-model
  * table that happened to answer zero. This is what lets a $0 outcome be an
  * honest answer for one provider and a silent-zero defect for another, without
  * a provider-name list deciding which.
+ *
+ * DERIVED BEHAVIOURALLY, by calling the seam. The obvious proxy —
+ * `_getPricing.length === 0` — answers "how many parameters have no default and
+ * are not rest", which is not the same question: `_getPricing(model = null)` and
+ * `_getPricing(...args)` both have length 0 and can be fully per-model, so the
+ * proxy would admit them as declared flat rates and re-open the silent-zero
+ * hole. It is also wrong in the other direction for a real class —
+ * `anthropic-compatible-session.js`'s `_getPricing(model)` is length 1 and falls
+ * back to a single `flatPricing` block for every id it has no row for.
+ *
+ * The rule, in three clauses: the seam must answer SOMETHING for an id it cannot
+ * know (a `null` there is a per-model table admitting an unknown, not a flat
+ * declaration); its answer must not MOVE with the id; and the rate THIS id
+ * resolved to must be that same declared rate — otherwise the id has its own
+ * row and a zero for it is not the declaration's doing.
  */
-function pricingIsFlatDeclaration(c) {
-  return c.pricingSource === 'provider-table' && c.ProviderClass.prototype._getPricing.length === 0
+function pricingIsFlatDeclaration(c, modelId) {
+  if (c.pricingSource !== 'provider-table') return false
+  const probe = (id) => c.ProviderClass.prototype._getPricing.call({ _provider: c.name }, id) ?? null
+  const a = probe(FLAT_PROBE_IDS[0])
+  const b = probe(FLAT_PROBE_IDS[1])
+  if (a === null || b === null) return false
+  if (!sameRates(a, b)) return false
+  return sameRates(a, resolvePricingFor(c, modelId))
 }
 
 // --- publishing the stubbed producers into the real registries ---------------
@@ -446,6 +533,13 @@ describe('#7731 the reverse-direction skip list is DERIVED, not written down', (
       assert.ok(NOT_SELECTABLE_REASONS[name].length > 0, `'${name}' is excluded with an empty reason`)
     }
     assert.ok(selectable.size > 0, 'no selectable provider — the whole guard would be vacuous')
+    // The RECORDED REASON for excluding `codex-appserver`, turned into a checked
+    // claim rather than left as prose. The exclusion is only safe while the
+    // app-server class is what `getProvider('codex')` hands back — the moment
+    // that resolution changes (CHROXY_CODEX_APPSERVER opting out, #6616 being
+    // reverted) the class is covered by nothing and the reason above is false.
+    assert.equal(getProvider('codex'), getProvider('codex-appserver'),
+      'codex-appserver is excluded BECAUSE getProvider("codex") resolves to it; it no longer does, so that class is now covered by nothing')
   })
 
   it('every selectable provider is classified exactly once, with a reason when it is skipped', () => {
@@ -469,7 +563,8 @@ describe('#7731 the reverse-direction skip list is DERIVED, not written down', (
     // Recorded, not asserted as a permanent truth: codex, and the configured
     // compat endpoint. gemini/deepseek/claude-* declare no `refreshModels`;
     // ollama's seed is declared a recommendation list.
-    assert.deepEqual(eligible, ['codex', COMPAT_PROVIDER].sort())
+    assert.deepEqual(eligible, ['codex', COMPAT_PROVIDER].sort(),
+      'a registry gained or lost a catalog source — add a stubbed producer to PUBLISHED_CATALOGS and a deprecatedSeedModelIds roster to its provider class, or record here why it is exempt')
   })
 
   it('granting a skipped provider a catalog source MOVES it out of the skip list', () => {
@@ -514,11 +609,38 @@ describe('#7731 the reverse-direction skip list is DERIVED, not written down', (
 // B. FORWARD — every id every registry can emit
 // =============================================================================
 
+/**
+ * The FORWARD half skips a provider whenever the seam it is about to drive is
+ * absent, and each of those three `continue`s is a place where a provider can
+ * leave a check with nothing going red — entry 28's shape applied to this
+ * file's own forward direction, and the reason the REVERSE skip list is pinned
+ * at line ~470 rather than merely reasoned about.
+ *
+ * So each forward skip set is DERIVED from the same predicate its loop uses and
+ * pinned here. These are recordings of today, not permanent truths: a provider
+ * legitimately joining or leaving one of them is a one-line diff, and the point
+ * is that it has to be a diff.
+ */
+const FORWARD_SKIPS = Object.freeze({
+  // Nobody. Every selectable provider declares a static `getModelMetadata`.
+  noMetadataSeam: Object.freeze([]),
+  // The two PTY/channel drivers: the model is whatever the attached Claude
+  // session is already running, so there is no switch to validate.
+  noModelSwitch: Object.freeze(['claude-channel', 'claude-tui']),
+  // Only codex advertises per-model `reasoningLevels` today (#7730/#7736).
+  noAdvertisedLevels: Object.freeze([
+    'claude-byok', 'claude-channel', 'claude-cli', 'claude-sdk', 'claude-tui',
+    'deepseek', 'gemini', 'ollama', COMPAT_PROVIDER,
+  ]),
+})
+
 describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a working set_model', () => {
   it('every registry emits at least one row, and every row round-trips through the registry', () => {
     let rowsChecked = 0
+    const rowsPerProvider = new Map()
     for (const c of census()) {
       const rows = c.registry.getModels()
+      rowsPerProvider.set(c.name, rows.length)
       // The minimum NON-ZERO row count. A registry the guard claims to check
       // and then finds empty is a cannot-check, never a clean pass.
       assert.ok(rows.length > 0, `${c.name}: registry emitted ZERO rows — the forward direction would be vacuous`)
@@ -536,14 +658,24 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
         assert.ok(allowed.has(row.id) && allowed.has(row.fullId), `${c.name}/${row.id}: emitted but not in the registry allowlist`)
       }
     }
-    assert.ok(rowsChecked >= selectableProviderNames().length,
-      `only ${rowsChecked} rows checked across ${selectableProviderNames().length} providers`)
+    // NOT `rowsChecked >= providerCount` — the per-registry `rows.length > 0`
+    // above already guarantees that, so it would be an assertion implied by its
+    // own loop sitting in a non-vacuity clause. What is NOT implied is that the
+    // stubbed producers actually REPLACED each registry's seed: codex's in-repo
+    // seed is six ids and the producer's roster is six DIFFERENT ids, and the
+    // compat endpoint's operator seed is two ids of which the producer keeps one.
+    assert.ok(rowsChecked > 0, 'no row was checked at all')
+    assert.equal(rowsPerProvider.get('codex'), CODEX_PRODUCER_MODEL_LIST.data.length,
+      'the codex registry no longer serves exactly the stubbed producer roster — the seed was unioned back in, or the catalog was not ingested')
+    assert.equal(rowsPerProvider.get(COMPAT_PROVIDER), COMPAT_PRODUCER_BODY.data.length,
+      'the compat registry no longer serves exactly the discovered catalog')
   })
 
   it('every emitted id resolves to provider metadata where the provider declares a lookup', () => {
     let checked = 0
+    const skipped = []
     for (const c of census()) {
-      if (typeof c.ProviderClass.getModelMetadata !== 'function') continue
+      if (typeof c.ProviderClass.getModelMetadata !== 'function') { skipped.push(c.name); continue }
       for (const row of c.registry.getModels()) {
         const meta = c.ProviderClass.getModelMetadata(row.fullId)
         assert.ok(meta && typeof meta === 'object',
@@ -551,6 +683,8 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
         checked++
       }
     }
+    assert.deepEqual(skipped.sort(), [...FORWARD_SKIPS.noMetadataSeam],
+      'a provider joined or left the set this check SKIPS for want of a getModelMetadata seam — pin it in FORWARD_SKIPS or restore the seam')
     assert.ok(checked > 0, 'no provider declared a metadata lookup — nothing was checked')
   })
 
@@ -564,7 +698,20 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
           // The provider reports no pricing at all. The ONE acceptable outcome
           // is an explicit unknown that the cost path renders as null — a 0
           // here would be a fabricated free turn.
-          assert.equal(rates, null, `${where}: provider declares no pricing seam yet resolved rates ${JSON.stringify(rates)}`)
+          //
+          // Asserted against the PRODUCTION seams, not against `rates`.
+          // `resolvePricingFor` returns the literal `null` by construction for
+          // this branch, so `assert.equal(rates, null)` would assert a constant
+          // the test itself produced while its message described a check the
+          // code does not perform — cause #13 (`#7290`/`#7291`), inside the
+          // file documenting that class. `getModelPricing` is the real
+          // module-level path (operator overlay, then the Claude table), and
+          // the absent prototype seam is what `censusFor` classified on.
+          assert.equal(typeof c.ProviderClass.prototype?._getPricing, 'undefined',
+            `${where}: classified as having no pricing seam, but the prototype declares _getPricing`)
+          const fromProduction = getModelPricing(row.fullId) ?? null
+          assert.equal(fromProduction, null,
+            `${where}: provider declares no pricing seam yet the production pricing path resolved ${JSON.stringify(fromProduction)}`)
           assert.equal(computePromptCostUsd(PROBE_USAGE, rates), null, `${where}: unknown pricing must cost null, never 0`)
           seen.unknown++
           continue
@@ -584,7 +731,7 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
           // declared flat rate (free local inference). A per-model table that
           // answers zero for a catalogued id is the silent 0 this guard exists
           // to catch.
-          assert.ok(pricingIsFlatDeclaration(c),
+          assert.ok(pricingIsFlatDeclaration(c, row.fullId),
             `${where}: cost is exactly 0 from a PER-MODEL pricing lookup — a silent zero, not a declared free rate`)
           seen.declaredFree++
         } else {
@@ -600,10 +747,50 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
     assert.ok(seen.declaredFree > 0, 'nothing resolved to a declared free rate — that branch never ran')
   })
 
+  it('the declared-flat-rate rule is BEHAVIOURAL, not Function.length (the silent-zero control)', () => {
+    const FLAT = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
+    const PER_MODEL = Object.freeze({ input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 })
+    const rowOf = (ProviderClass) => ({ name: 'parity-pricing-probe', ProviderClass, pricingSource: 'provider-table' })
+
+    // Both of these seams are fully PER-MODEL and both have `Function.length`
+    // 0 — the shape the old `_getPricing.length === 0` rule admitted as a
+    // declared flat rate, which is how a silent zero would get through.
+    class DefaultedParam {}
+    DefaultedParam.prototype._getPricing = function (model = null) { return model === 'known-id' ? PER_MODEL : null }
+    class RestParam {}
+    RestParam.prototype._getPricing = function (...args) { return args[0] === 'known-id' ? PER_MODEL : null }
+    // …and this one genuinely ignores its argument while having length 1 — the
+    // shape the old rule rejected (`anthropic-compatible-session.js`'s seam).
+    class IgnoresItsArgument {}
+    // eslint-disable-next-line no-unused-vars
+    IgnoresItsArgument.prototype._getPricing = function (model) { return FLAT }
+
+    assert.equal(DefaultedParam.prototype._getPricing.length, 0, 'control is only meaningful while this seam has Function.length 0')
+    assert.equal(RestParam.prototype._getPricing.length, 0, 'control is only meaningful while this seam has Function.length 0')
+    assert.equal(IgnoresItsArgument.prototype._getPricing.length, 1, 'control is only meaningful while this seam has Function.length 1')
+
+    assert.equal(pricingIsFlatDeclaration(rowOf(DefaultedParam), 'known-id'), false,
+      'a per-model seam written as `(model = null)` must NOT be admitted as a declared flat rate')
+    assert.equal(pricingIsFlatDeclaration(rowOf(RestParam), 'known-id'), false,
+      'a per-model seam written as `(...args)` must NOT be admitted as a declared flat rate')
+    assert.equal(pricingIsFlatDeclaration(rowOf(IgnoresItsArgument), 'known-id'), true,
+      'a seam that returns the same rate for every id IS a declared flat rate, whatever its arity')
+
+    // And the real one the forward loop depends on still classifies correctly.
+    const ollama = censusFor('ollama')
+    const ollamaRow = ollama.registry.getModels()[0]
+    assert.ok(ollamaRow, 'ollama emitted no row — the live half of this control has no subject')
+    assert.equal(pricingIsFlatDeclaration(ollama, ollamaRow.fullId), true, 'ollama declares a flat free rate')
+    const byok = censusFor('claude-byok')
+    const byokRow = byok.registry.getModels()[0]
+    assert.equal(pricingIsFlatDeclaration(byok, byokRow.fullId), false, 'claude-byok resolves per-model rates, not a flat declaration')
+  })
+
   it('every emitted id is accepted by the production set_model handler', () => {
     let checked = 0
+    const skipped = []
     for (const c of census()) {
-      if (!c.canSwitchModel) continue
+      if (!c.canSwitchModel) { skipped.push(c.name); continue }
       for (const row of c.registry.getModels()) {
         const out = trySetModel(c.name, row.fullId)
         assert.equal(out.code, null, `${c.name}/${row.fullId}: set_model rejected an id the registry offers (${out.code})`)
@@ -611,6 +798,8 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
         checked++
       }
     }
+    assert.deepEqual(skipped.sort(), [...FORWARD_SKIPS.noModelSwitch],
+      'a provider joined or left the set this check SKIPS for capabilities.modelSwitch === false — pin it in FORWARD_SKIPS or restore the capability')
     assert.ok(checked > 0, 'no provider supports model switching — nothing was checked')
   })
 
@@ -625,8 +814,11 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
   it('every advertised reasoning level is accepted by the production set_thinking_level handler', async () => {
     let rowsWithLevels = 0
     let levelsChecked = 0
+    const skipped = []
     for (const c of census()) {
-      for (const row of c.registry.getModels()) {
+      const rowsHere = c.registry.getModels()
+      if (!rowsHere.some((r) => Array.isArray(r.reasoningLevels) && r.reasoningLevels.length > 0)) skipped.push(c.name)
+      for (const row of rowsHere) {
         const levels = Array.isArray(row.reasoningLevels) ? row.reasoningLevels : null
         if (!levels || levels.length === 0) continue
         rowsWithLevels++
@@ -643,8 +835,18 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
         }
       }
     }
-    assert.ok(rowsWithLevels > 0, 'no row advertised reasoningLevels — the level check ran over nothing')
-    assert.ok(levelsChecked >= rowsWithLevels, 'fewer levels checked than rows carrying them')
+    assert.deepEqual(skipped.sort(), [...FORWARD_SKIPS.noAdvertisedLevels].sort(),
+      'a provider started or stopped advertising reasoningLevels on any row — pin it in FORWARD_SKIPS, or restore the wire field (#7736)')
+    // NOT `levelsChecked >= rowsWithLevels` — the `if (!levels || levels.length
+    // === 0) continue` above guarantees that, so it could never fire. Pinned
+    // against the stubbed producer's OWN payload instead: the six rows that
+    // advertised efforts and the 31 efforts across them. A catalog that drops a
+    // level on its way to the wire goes red HERE rather than quietly narrowing
+    // what this loop validates.
+    assert.equal(rowsWithLevels, Object.keys(CODEX_PRODUCER_EFFORTS).length,
+      'the rows carrying reasoningLevels are no longer exactly the stubbed codex producer rows')
+    assert.equal(levelsChecked, Object.values(CODEX_PRODUCER_EFFORTS).reduce((n, l) => n + l.length, 0),
+      'the levels reaching the wire are no longer exactly the efforts the stubbed producer advertised')
   })
 
   it('a level NO model advertises is still refused (the accept-everything control)', async () => {
@@ -675,10 +877,18 @@ describe('#7731 REVERSE: no seed id outlives the producer that stopped offering 
     const stale = reverseViolations({ seedIds: new Set(['a']), catalogIds, deprecatedIds: new Set(['q']) })
     assert.equal(stale.length, 1, 'a deprecation entry for an id no longer in the seed must be a violation')
     assert.match(stale[0], /not in the static seed/)
+    // The THIRD direction: a retirement claim the producer contradicts. Without
+    // its loop this input hits `if (catalogIds.has(id)) continue` in the first
+    // pass and is never examined — the deprecation roster is this PR's own
+    // hand-maintained list beside a moving set, and it must be checked against
+    // the catalog in both directions, not just against the seed.
+    const stillOffered = reverseViolations({ seedIds: new Set(['a']), catalogIds, deprecatedIds: new Set(['a']) })
+    assert.equal(stillOffered.length, 1, 'a retirement claim for an id the producer STILL offers must be a violation')
+    assert.match(stillOffered[0], /still offers/)
     // The shape that would make every assertion above unfalsifiable: an
     // expectation taken from the subject. Pinned so the reason the real
     // catalog is a RECORDED PRODUCER PAYLOAD is written down next to the
-    // proof that the alternative passes trivially (cause #29, `#7424`).
+    // proof that the alternative passes trivially (cause #21, `#7424`).
     assert.deepEqual(
       reverseViolations({ seedIds: new Set(['a', 'z']), catalogIds: new Set(['a', 'z']), deprecatedIds: new Set() }),
       [], 'a catalog copied from the seed passes trivially — which is why the real one never is')

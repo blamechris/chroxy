@@ -2321,7 +2321,7 @@ harness written `#!/bin/bash` — five tracked scripts here already are — left
 roster silently. Nothing noticed, because the summary floor's expectation is
 `FIXED_CASES + subjects.length`: it SELF-ADJUSTED from 22 to 20 when two
 harnesses were dropped, and printed `20 passed, 0 failed`. A coverage check whose
-expectation comes from its own subject is entry 29's `#7424` — reproduced inside
+expectation comes from its own subject is entry 21's `#7424` — reproduced inside
 the guard whose PR adds that very cause to `CLAUDE.md`. Widening the regex fixes
 today's instance; what fixes the class is asserting the roster's COMPLEMENT
 against a written list, so a file leaving has to be justified in a diff. An
@@ -2377,7 +2377,7 @@ published into the void cannot stand in for a producer that answered.
 the first publish. A config-driven endpoint's `getFallbackModels()` switches to
 the discovered catalog the moment discovery lands and never reports the
 operator's seed again, so that "seed" was the catalog wearing the seed's name —
-entry 29's `#7424` reached by accident rather than by design. Static seeds are
+entry 21's `#7424` reached by accident rather than by design. Static seeds are
 now captured once at module load, before any producer answers.
 
 **The `#7424` shape was then pinned deliberately.** Rewriting the producer
@@ -2399,7 +2399,50 @@ and the reverse-direction skip list is not one: it is derived from
 flips those seams at runtime (grant `gemini` a `refreshModels` and it must LEAVE
 the skip list) rather than reading the list back.
 
+**Three more of the same class, all found by REVIEW rather than by a mutation.**
+(a) The `pricingSource === 'none'` branch opened with
+`assert.equal(rates, null, '…provider declares no pricing seam yet resolved
+rates…')` — and the helper it read returns the literal `null` by construction for
+that branch. It asserted a constant the test had just produced while its message
+described a check the code did not perform: entry 13's shape (`#7290`/`#7291`)
+inside the file documenting it. Under a one-line mutation making the production
+pricing path fabricate an all-zero rate — the exact silent zero the headline
+claim is about — the old assertion stayed GREEN and the replacement
+(`getModelPricing(id) ?? null`, the production module-level seam) went red.
+(b) "Does this pricing seam ignore the model id?" was answered with
+`_getPricing.length === 0`, which answers a different question: a per-model seam
+written `(model = null)` or `(...args)` has length 0 and would have been admitted
+as a declared flat rate. The rule is now three behavioural clauses — the seam must
+answer something for an id it cannot know, its answer must not move with the id,
+and the rate THIS id resolved to must be that same declared rate.
+(c) The deprecation roster the PR introduces was checked against the seed in both
+directions and against the catalog in only ONE: an id declared retired that the
+producer still offers hit `if (catalogIds.has(id)) continue` in the first loop and
+was never examined again. That is entry 28's shape, committed in the PR whose
+argument is entry 28. The guard's thesis has to apply to the rosters the guard
+itself introduces.
+
+**The three FORWARD skips got what the reverse skip already had.** Each
+`continue` for an absent seam — no `getModelMetadata`, `modelSwitch: false`, no
+row carrying `reasoningLevels` — is a place a provider can leave a check with
+nothing going red, so each skip set is now derived from its loop's own predicate
+and pinned. Flipping `claude-channel`'s `modelSwitch` to `true` in the source
+reds the pin; before, it silently moved a provider into a checked bucket nobody
+counted. Two non-vacuity assertions were also inert — implied by their own loops —
+and are now pinned against the stubbed producer's payload instead, which caught a
+mutation dropping a reasoning level on its way to the wire.
+
+**What the guard ACCEPTS, stated because the entry above is otherwise a list of
+shapes it avoids.** `CODEX_PRODUCER_MODEL_LIST` is a frozen hand-transcription of
+codex-cli 0.154.0's `model/list` and nothing can notice when it goes stale; the
+re-record trigger is a codex-cli bump, written at the top of the test file. And
+the reverse half is thin: the Claude-family registries declare no `refreshModels`,
+so it covers exactly one real provider plus one synthetic until CAT-1. A guard
+that documents only its strengths is a guard whose limits get rediscovered.
+
 **Guard against it:** when a guard compares two rosters, ask where each one would
 come from if the thing being guarded were broken. If the answer is "the same
-place", the guard has no failing input. And read a mutation's output, not just
-its exit code — `!= 0` hides which assertion actually fired.
+place", the guard has no failing input. When an assertion's subject is a value
+the test itself computed, ask what production seam would have to be wrong for it
+to fire — if there isn't one, it is decoration. And read a mutation's output, not
+just its exit code — `!= 0` hides which assertion actually fired.
