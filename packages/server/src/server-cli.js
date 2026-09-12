@@ -246,9 +246,13 @@ export function buildServerBanner({ version, provider }) {
  * registry the overlay touches (#6377), so it produces ONE roster per affected
  * registry — not one. Broadcasting only the Claude roster (and labelling it
  * `claude-sdk`, as this did before) had two failures on a live codex session: a
- * `provider: "codex"` overlay row never reached the codex client at all, and the
- * claude-sdk tag flipped the dashboard's `modelsMatchProvider` false, which HIDES
- * the model picker until the client reconnects.
+ * `provider: "codex"` overlay row never reached the codex client at all, and —
+ * on the pre-#7728 clients this was written against — the claude-sdk tag flipped
+ * the dashboard's `modelsMatchProvider` false, which HID the model picker until
+ * the client reconnected. That second failure is gone: `modelsMatchProvider` was
+ * deleted with the single `availableModels` slot, and a client now keys each
+ * roster by its sender. The FIRST one is still live and is what this function
+ * exists for — a roster that is never sent cannot be read from any slot.
  *
  * The wire shape is unchanged — each entry is the same provider-tagged
  * `available_models` message every other sender emits.

@@ -1559,10 +1559,15 @@ describe('sendSessionInfo', () => {
   })
 
   // #4302 — sendSessionInfo runs on every switch_session. Pre-fix it did
-  // not push available_models, so the dashboard's availableModelsProvider
-  // stayed tagged with whichever provider sendPostAuthInfo set at auth.
-  // A claude-cli session created after a TUI/SDK session lost its model
-  // picker via the modelsMatchProvider guard in App.tsx.
+  // not push available_models at all, so a client never learned the roster of
+  // a provider it had not seen at auth time. On the pre-#7728 clients that
+  // showed up as the single `availableModelsProvider` tag staying pinned to
+  // the provider seen last, and a claude-cli session created after a TUI/SDK
+  // one lost its picker via `modelsMatchProvider` in App.tsx. That guard is
+  // gone (#7728 keys each roster by its sender), but the push is not
+  // redundant: without it the switched-to provider's bucket stays EMPTY, so
+  // the picker has nothing to render. The symptom moved; the requirement
+  // this test pins did not.
   describe('available_models on session switch (#4302)', () => {
     it('sends available_models tagged with the switched-to session provider', () => {
       const { manager, sessionsMap } = createMockSessionManager([
@@ -1582,11 +1587,15 @@ describe('sendSessionInfo', () => {
     })
 
     it('uses a null provider when the session entry has none', () => {
-      // No mock provider — getRegistryForProvider falls back to the
-      // Claude default registry, and the payload's provider is null so
-      // the dashboard handler resets availableModelsProvider to null,
-      // which unblocks the picker via the `availableModelsProvider == null`
-      // branch in App.tsx:326.
+      // No mock provider — getRegistryForProvider falls back to the CLAUDE
+      // default registry, and the payload's provider is null. Pre-#7728 the
+      // dashboard read that null as "no tag" and unblocked the picker via the
+      // `availableModelsProvider == null` branch in App.tsx. Since #7728 the
+      // roster lands in the UNTAGGED bucket, which is served to a session of
+      // any provider only while it is the only roster the client knows — so a
+      // Claude roster sent under a null tag can no longer reach a codex
+      // session that has one of its own. Tagging these sends server-side
+      // (this is the last null-provider push left) is #7759.
       const { manager } = createMockSessionManager([
         { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },
       ])
@@ -1603,10 +1612,13 @@ describe('sendSessionInfo', () => {
     // #4315 — follow-up to #4310/#4302. The two tests above verify the
     // end-state for a single sendSessionInfo call, but the original bug
     // scenario is a *transition* between providers across two consecutive
-    // switches. Without re-tagging on every switch, the dashboard's
-    // `availableModelsProvider` would stay pinned to whichever provider
-    // the client saw first and `modelsMatchProvider` (App.tsx) would
-    // suppress the model picker for the second session. A future refactor
+    // switches. Without re-tagging on every switch, the pre-#7728 dashboard's
+    // `availableModelsProvider` stayed pinned to whichever provider the client
+    // saw first and `modelsMatchProvider` (App.tsx) suppressed the picker for
+    // the second session. Since #7728 the client keys rosters by sender, so an
+    // untagged or wrongly-tagged re-push instead files the roster under the
+    // wrong bucket and leaves the second session's own bucket EMPTY — either
+    // way the second session loses its picker. A future refactor
     // that suppresses the push when the provider hasn't changed must
     // still fire one when it has — this test pins that behaviour.
     it('re-tags available_models when switching between different-provider sessions', () => {

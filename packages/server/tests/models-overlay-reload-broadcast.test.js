@@ -29,9 +29,12 @@ import { WsBroadcaster } from '../src/ws-broadcaster.js'
  * #7722 — a models-overlay hot-reload used to emit exactly ONE
  * `available_models` broadcast, built from the Claude registry and hardcoded
  * `provider: 'claude-sdk'`. On a live codex session that broke twice over: the
- * `provider: "codex"` overlay row never reached the codex client, AND the
- * claude-sdk tag flipped the dashboard's `modelsMatchProvider` false, hiding the
- * model picker until reconnect.
+ * `provider: "codex"` overlay row never reached the codex client, AND — on the
+ * pre-#7728 clients this was written against — the claude-sdk tag flipped the
+ * dashboard's `modelsMatchProvider` false, hiding the model picker until
+ * reconnect. That second failure went away with the single `availableModels`
+ * slot (#7728); the FIRST is what these tests still guard, because a roster
+ * that is never sent cannot be read out of a per-provider bucket either.
  *
  * The reload now reports every registry it touched (`result.providers`) and the
  * caller emits one provider-tagged broadcast per roster.
@@ -314,19 +317,26 @@ describe('#7722 overlay hot-reload broadcasts one provider-tagged roster per reg
 /**
  * #7722 (review) — the broadcast SET is not the delivery set.
  *
- * Both clients keep ONE `availableModels` slot plus one
+ * WHEN THIS WAS WRITTEN, both clients kept ONE `availableModels` slot plus one
  * `availableModelsProvider` tag, and `dispatchAvailableModels`
- * (store-core/src/dispatch-table.ts) replaces both unconditionally on every
- * message with no provider filter. Sending the whole set to every client is
- * therefore last-write-wins: on a daemon that has built a second non-Claude
- * registry, a codex overlay edit would leave the codex client tagged with
- * whichever provider happened to be broadcast LAST, `modelsMatchProvider` would
- * be false, and the picker would stay hidden — the headline symptom this issue
- * exists to fix, reproduced by the fix. A Claude client that was CORRECT before
- * the change would lose its picker the same way, and the mobile app (no tag at
- * all) would render another provider's ids as selectable chips.
+ * (store-core/src/dispatch-table.ts) replaced both unconditionally on every
+ * message with no provider filter. Sending the whole set to every client was
+ * therefore last-write-wins: on a daemon that had built a second non-Claude
+ * registry, a codex overlay edit left the codex client tagged with whichever
+ * provider happened to be broadcast LAST, `modelsMatchProvider` was false, and
+ * the picker stayed hidden — the headline symptom this issue exists to fix,
+ * reproduced by the fix. A Claude client that was CORRECT before the change
+ * lost its picker the same way, and the mobile app (no tag at all) rendered
+ * another provider's ids as selectable chips.
  *
- * So each message is routed. These tests execute the routing.
+ * #7728 removed that slot: each roster is now keyed by the provider that sent
+ * it (`mergeModelsByProvider`), so an unrouted burst no longer clobbers anyone.
+ * The routing these tests execute is therefore DEFENCE IN DEPTH and bandwidth,
+ * not the only thing standing between a codex session and a Claude roster — and
+ * it is still the reason a provider's own roster ARRIVES at all. Dropping it
+ * would not restore the old bug; it would waste a message per client per
+ * reload, and any future client that reintroduces a global slot would be
+ * unprotected. These tests stay.
  */
 describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients', () => {
   const CLAUDE_MSG = { type: 'available_models', models: [], defaultModel: null, provider: 'claude-sdk' }
