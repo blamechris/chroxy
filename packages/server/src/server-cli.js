@@ -303,9 +303,12 @@ export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers
  * The rule:
  *   - the DEFAULT (Claude) roster reaches every client whose active provider
  *     shares the default registry — Claude-family, an unknown/unregistered
- *     name, and no active session at all. That set is exactly the pre-#7722
- *     recipients of the single hardcoded `claude-sdk` broadcast, so no client
- *     that used to get a usable roster stops getting one.
+ *     name, and no active session at all. That set is every pre-#7722 recipient
+ *     of the single hardcoded `claude-sdk` broadcast that could USE the Claude
+ *     roster — a strict SUBSET of the old delivery, not parity with it: the
+ *     non-Claude clients that broadcast used to clobber are exactly the ones now
+ *     dropped, which is the fix. No client that used to get a roster it could
+ *     use stops getting one.
  *   - every other tag names a PER-PROVIDER registry, and those are keyed by
  *     name (`providerRegistryCache`), so only that exact provider matches.
  *
@@ -314,21 +317,40 @@ export function buildOverlayReloadBroadcasts({ models, defaultModelId, providers
  * reporting, and a second copy here would be free to disagree about the
  * unknown-name and docker-* edges that motivate it.
  *
- * It runs once per client per message, and resolves to a `providerRegistryCache`
- * hit every time in production: `getRegistryForProvider` short-circuits on every
- * Claude-family and unregistered name without building anything, and any OTHER
- * name reaching here belongs to a live session — whose registry `ws-history.js`
- * already built during that client's post-auth handshake. So no filter call can
- * trigger the lazy build's `loadCache()` disk read on a connected daemon.
+ * The TAG half is hoisted by `createOverlayReloadBroadcaster` and passed in as
+ * `tagIsDefault` (once per message, not once per client); the ACTIVE-PROVIDER
+ * half necessarily runs per client, and is wrapped because it is the same
+ * `ProviderClass.getFallbackModels()` call `reloadModelsOverlay` already guards.
+ * A throw there must not propagate into `WsBroadcaster._broadcast`'s filter,
+ * which SKIPS a client whose filter threw — that would deliver *nothing* to a
+ * client that received the `claude-sdk` roster before #7722, contradicting
+ * `clientActiveProvider`'s fail-OPEN promise. So a throw resolves to the default
+ * roster: the pre-#7722 delivery.
+ *
+ * It resolves to a `providerRegistryCache` hit every time in production:
+ * `getRegistryForProvider` short-circuits on every Claude-family and
+ * unregistered name without building anything, and any OTHER name reaching here
+ * belongs to a live session — whose registry `ws-history.js` already built
+ * during that client's post-auth handshake. So no filter call can trigger the
+ * lazy build's `loadCache()` disk read on a connected daemon.
  *
  * @param {{ provider?: string|null }} message  one entry from buildOverlayReloadBroadcasts
  * @param {string|null|undefined} activeProvider  the client's active session provider
+ * @param {boolean} [tagIsDefault]  precomputed `usesDefaultModelsRegistry(message.provider)`.
+ *   Omit it and the same value is derived here — callers that route many clients
+ *   through one message pass it so the tag is resolved once.
  * @returns {boolean}
  */
-export function overlayBroadcastReachesProvider(message, activeProvider) {
+export function overlayBroadcastReachesProvider(message, activeProvider, tagIsDefault) {
   const tag = message?.provider ?? null
-  if (usesDefaultModelsRegistry(tag)) return usesDefaultModelsRegistry(activeProvider)
-  return activeProvider === tag
+  const isDefaultTag = tagIsDefault === undefined ? usesDefaultModelsRegistry(tag) : tagIsDefault
+  if (!isDefaultTag) return activeProvider === tag
+  try {
+    return usesDefaultModelsRegistry(activeProvider)
+  } catch {
+    // Fail OPEN toward the default roster — see the paragraph above.
+    return true
+  }
 }
 
 /**
@@ -373,9 +395,16 @@ export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logge
   return (reload) => {
     for (const message of buildOverlayReloadBroadcasts(reload)) {
       logger.info(`Models overlay reloaded (${message.provider}): ${message.models.map((m) => m.id).join(', ')}`)
+      // Hoisted out of the filter: the tag is a property of the MESSAGE, so
+      // resolving it per client was N redundant resolutions. It cannot throw
+      // here — `claude-sdk` short-circuits on the Claude-family flag, and every
+      // other tag is in the message only because `reloadModelsOverlay` just
+      // built (and therefore cached) that provider's registry.
+      const tagIsDefault = usesDefaultModelsRegistry(message.provider ?? null)
       wsServer._broadcast(message, (client) => overlayBroadcastReachesProvider(
         message,
         clientActiveProvider(client, sessionManager),
+        tagIsDefault,
       ))
     }
   }

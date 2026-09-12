@@ -12,8 +12,10 @@ import {
   reloadModelsOverlay,
   getRegistryForProvider,
   registerProviderRegistry,
+  usesDefaultModelsRegistry,
   _resetModelsOverlayForTests,
   _resetProviderRegistryCacheForTests,
+  _unregisterProviderRegistryForTests,
 } from '../src/models.js'
 import {
   buildOverlayReloadBroadcasts,
@@ -21,6 +23,7 @@ import {
   clientActiveProvider,
   createOverlayReloadBroadcaster,
 } from '../src/server-cli.js'
+import { WsBroadcaster } from '../src/ws-broadcaster.js'
 
 /**
  * #7722 — a models-overlay hot-reload used to emit exactly ONE
@@ -36,6 +39,20 @@ import {
 
 const CODEX_ROW = 'gpt-5.5'
 const CLAUDE_ROW = 'claude-untagged-7722'
+// Provider names this file REGISTERS. `registerProviderRegistry` writes to
+// models.js's module-level `nameToProviderClass`, which
+// `_resetProviderRegistryCacheForTests()` does not clear — so each one is undone
+// in afterEach via `_unregisterProviderRegistryForTests` (#7722 re-review).
+const THROWING_PROVIDER = 'throwing-provider-7722'
+const FILTER_THROWS_PROVIDER = 'filter-throws-7722'
+const UNREGISTER_ME = 'unregister-me-7722'
+const REGISTERED_BY_THIS_FILE = [THROWING_PROVIDER, FILTER_THROWS_PROVIDER, UNREGISTER_ME]
+
+/** A provider class whose roster build blows up — the #7722 hostile input. */
+class ThrowingProvider {
+  static claudeFamily = false
+  static getFallbackModels() { throw new Error('provider blew up building its roster') }
+}
 
 let dir
 function overlayPath() {
@@ -60,6 +77,7 @@ beforeEach(() => {
   _resetModelsOverlayForTests()
 })
 afterEach(() => {
+  for (const name of REGISTERED_BY_THIS_FILE) _unregisterProviderRegistryForTests(name)
   _resetProviderRegistryCacheForTests()
   _resetModelsOverlayForTests()
   if (prevConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
@@ -256,14 +274,10 @@ describe('#7722 overlay hot-reload broadcasts one provider-tagged roster per reg
   // reload never reached before. This exercises that path with a provider class
   // that throws, so the try/catch is a tested branch rather than dead defence.
   it('a provider class that THROWS while building its registry does not break the reload', () => {
-    class ThrowingProvider {
-      static claudeFamily = false
-      static getFallbackModels() { throw new Error('provider blew up building its roster') }
-    }
-    registerProviderRegistry('throwing-provider-7722', ThrowingProvider)
+    registerProviderRegistry(THROWING_PROVIDER, ThrowingProvider)
 
     const path = writeOverlay({
-      'boom-7722': { provider: 'throwing-provider-7722', label: 'Boom' },
+      'boom-7722': { provider: THROWING_PROVIDER, label: 'Boom' },
       [CODEX_ROW]: { provider: 'codex', label: 'GPT-5.5' },
     })
     const result = reloadModelsOverlay(path)
@@ -413,7 +427,7 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
       assert.equal(wsServer.sent[1].defaultModel, CODEX_ROW)
     })
 
-    it('SENDS nothing when the reload produced no rosters at all', () => {
+    it('the SENT set is driven by the builder, not a hardcoded message', () => {
       // `buildOverlayReloadBroadcasts` always emits the default entry, so the
       // only way to zero sends is an empty builder result — this pins that the
       // loop is driven by the builder and not by a hardcoded message.
@@ -478,6 +492,97 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
       assert.equal(lines.length, 2)
       assert.ok(lines.some((l) => l.includes('(codex)') && l.includes(CODEX_ROW)), lines.join(' | '))
       assert.ok(lines.some((l) => l.includes('(claude-sdk)')), lines.join(' | '))
+    })
+
+    // #7722 (re-review) — `fakeWsServer` above re-implements the MATCHED branch
+    // of `WsBroadcaster._broadcast`, so on its own nothing here binds the
+    // routing to the real contract: change the filter's arity, or move the
+    // filter call ahead of the authenticated/readyState guard, and every test
+    // above stays green while production mis-routes. This one drives the SAME
+    // broadcaster through the real `WsBroadcaster`, which explicitly supports a
+    // bare `clients` Map + `sendFn` fixture (ws-broadcaster.js:26-30).
+    //
+    // `_broadcast` iterates `[ws, client]` pairs, skips `!client.authenticated`
+    // or `ws.readyState !== 1`, and hands the CLIENT to the filter — the object
+    // `clientActiveProvider` reads `activeSessionId` off.
+    function realWsBroadcaster(clientFixtures) {
+      const delivered = new Map(clientFixtures.map((c) => [c.id, []]))
+      const map = new Map()
+      const byWs = new Map()
+      for (const fixture of clientFixtures) {
+        const ws = { readyState: 1, bufferedAmount: 0 }
+        const client = { ...fixture, authenticated: true, _ws: ws }
+        map.set(ws, client)
+        byWs.set(ws, client)
+      }
+      const broadcaster = new WsBroadcaster({
+        clients: map,
+        sendFn: (ws, message) => { delivered.get(byWs.get(ws).id).push(message) },
+      })
+      return { broadcaster, delivered }
+    }
+
+    it('routes identically through a REAL WsBroadcaster (not the fake)', () => {
+      const { broadcaster, delivered } = realWsBroadcaster(clients)
+      createOverlayReloadBroadcaster({ wsServer: broadcaster, sessionManager, logger: silentLogger })({
+        models: [{ id: 'sonnet', fullId: 'claude-sonnet' }],
+        defaultModelId: 'claude-sonnet',
+        providers: [
+          { provider: 'codex', models: [{ id: CODEX_ROW, fullId: CODEX_ROW }], defaultModelId: CODEX_ROW },
+          { provider: 'gemini', models: [{ id: 'gemini-x', fullId: 'gemini-x' }], defaultModelId: 'gemini-x' },
+        ],
+      })
+      assert.deepEqual(delivered.get('codex-client').map((m) => m.provider), ['codex'])
+      assert.deepEqual(delivered.get('gemini-client').map((m) => m.provider), ['gemini'])
+      assert.deepEqual(delivered.get('claude-client').map((m) => m.provider), ['claude-sdk'])
+      assert.deepEqual(delivered.get('idle-client').map((m) => m.provider), ['claude-sdk'])
+      assert.deepEqual(delivered.get('codex-client')[0].models.map((m) => m.fullId), [CODEX_ROW])
+    })
+
+    // #7722 (re-review) — the recipient rule resolves the CLIENT's provider
+    // through `usesDefaultModelsRegistry`, i.e. through
+    // `ProviderClass.getFallbackModels()`. An unguarded throw there does not
+    // fail open: `_broadcast` catches a throwing filter and SKIPS that client,
+    // so it would receive no roster at all where pre-#7722 it received the
+    // claude-sdk one. Run through the real broadcaster, because "skipped" is
+    // precisely the real broadcaster's behaviour.
+    it('a client whose provider class THROWS still receives the default roster (fail-OPEN)', () => {
+      registerProviderRegistry(FILTER_THROWS_PROVIDER, ThrowingProvider)
+      const sm = {
+        getSession: (id) => (id === 'boom-session' ? { provider: FILTER_THROWS_PROVIDER } : undefined),
+      }
+      const { broadcaster, delivered } = realWsBroadcaster([
+        { id: 'boom-client', activeSessionId: 'boom-session' },
+      ])
+      createOverlayReloadBroadcaster({ wsServer: broadcaster, sessionManager: sm, logger: silentLogger })({
+        models: [{ id: 'sonnet', fullId: 'claude-sonnet' }],
+        defaultModelId: 'claude-sonnet',
+        providers: [],
+      })
+      assert.deepEqual(
+        delivered.get('boom-client').map((m) => m.provider),
+        ['claude-sdk'],
+        'a throwing registry resolution must not turn into silence',
+      )
+      assert.deepEqual(delivered.get('boom-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
+    })
+
+    // #7722 (re-review) — the afterEach cleanup this file relies on. Registering
+    // a provider writes to models.js's `nameToProviderClass`, which
+    // `_resetProviderRegistryCacheForTests()` does NOT clear.
+    it('_unregisterProviderRegistryForTests undoes a registration (afterEach leaves no module state)', () => {
+      registerProviderRegistry(UNREGISTER_ME, class {
+        static claudeFamily = false
+        static getFallbackModels() { return [{ id: 'x', fullId: 'x' }] }
+      })
+      assert.equal(usesDefaultModelsRegistry(UNREGISTER_ME), false, 'a registered name gets its OWN registry')
+      assert.equal(_unregisterProviderRegistryForTests(UNREGISTER_ME), true, 'reports the removal')
+      assert.equal(
+        usesDefaultModelsRegistry(UNREGISTER_ME),
+        true,
+        'after unregistering, the name resolves to the default registry again',
+      )
+      assert.equal(_unregisterProviderRegistryForTests(UNREGISTER_ME), false, 'second call removes nothing')
     })
   })
 })

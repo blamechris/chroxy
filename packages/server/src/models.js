@@ -1389,6 +1389,25 @@ export function _resetProviderRegistryCacheForTests(providerName) {
 }
 
 /**
+ * Test helper (#7722 review). Undoes `registerProviderRegistry(name, Class)`:
+ * drops the name→class mapping AND any registry already built from it, so a
+ * test that registers a throwaway provider class (e.g. one that throws on
+ * purpose) leaves no module state behind for the next test.
+ *
+ * `_resetProviderRegistryCacheForTests()` is NOT enough on its own — it clears
+ * `providerRegistryCache` only, so the name stays resolvable via
+ * `nameToProviderClass` and keeps rebuilding the same registry.
+ *
+ * @param {string} providerName
+ * @returns {boolean} true when a registration was actually removed
+ */
+export function _unregisterProviderRegistryForTests(providerName) {
+  if (typeof providerName !== 'string' || providerName.length === 0) return false
+  providerRegistryCache.delete(providerName)
+  return nameToProviderClass.delete(providerName)
+}
+
+/**
  * Lazily create and cache a provider-scoped registry.
  *
  * Claude providers (including docker-based variants) share the module-level
