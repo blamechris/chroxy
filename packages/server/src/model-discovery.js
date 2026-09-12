@@ -230,6 +230,9 @@ export function _resetModelDiscoveryStateForTests() {
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.ttlMs]
  * @param {() => number} [opts.now] - injectable clock for tests
+ * @param {(opts: Object) => Promise<{models:Array,pricing:Object}|null>} [opts.fetchCatalog]
+ *   Catalog SOURCE override (#7726). Defaults to the HTTP `fetchModelCatalog`;
+ *   codex supplies a JSON-RPC probe instead and reuses everything else here.
  * @returns {Promise<Array<Object>|null>}
  */
 export async function refreshDiscoveredModels(opts = {}) {
@@ -240,9 +243,17 @@ export async function refreshDiscoveredModels(opts = {}) {
   const slot = slotFor(id)
   if (slot.inflight) return slot.inflight
   if (now() - slot.lastProbeAt < ttlMs) return null
+  // #7726 — the catalog SOURCE is injectable. Everything below this line (the
+  // per-entry TTL slot, the single in-flight probe, the order-insensitive
+  // change key, the applyCatalog-then-updateModels ordering) is transport
+  // agnostic, and codex's catalog arrives over JSON-RPC on a spawned child
+  // rather than over HTTP. Re-implementing the slot machinery for it would be
+  // a second copy of the part that is easy to get wrong; the HTTP fetch is the
+  // part that differs, so that is the part that is swapped.
+  const fetchCatalog = typeof opts.fetchCatalog === 'function' ? opts.fetchCatalog : fetchModelCatalog
   slot.inflight = (async () => {
     try {
-      const catalog = await fetchModelCatalog(opts)
+      const catalog = await fetchCatalog(opts)
       slot.lastProbeAt = now()
       if (!catalog || !Array.isArray(catalog.models) || catalog.models.length === 0) return null
       // Publish the catalog to the session class FIRST (cheap, idempotent) so
@@ -278,7 +289,7 @@ export async function refreshDiscoveredModels(opts = {}) {
       )
       if (!Array.isArray(converted) || converted.length === 0) return null
       slot.lastAppliedKey = key
-      log.info(`discovered ${catalog.models.length} models for '${id}' via ${opts.format} catalog`)
+      log.info(`discovered ${catalog.models.length} models for '${id}' via ${opts.format || 'provider'} catalog`)
       return typeof registry.getModels === 'function' ? registry.getModels() : converted
     } finally {
       slot.inflight = null

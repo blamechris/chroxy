@@ -12,6 +12,13 @@ import {
 import { nonNegInt } from './usage-normalize.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { hasCodexOAuthCreds } from './auth-probes.js'
+import { getRegistryForProvider } from './models.js'
+import {
+  getCodexCatalogRow,
+  getCodexCatalogRows,
+  hasCodexCatalog,
+  refreshCodexModels,
+} from './codex-model-catalog.js'
 import {
   CODEX_SANDBOX_MODES as PROTOCOL_CODEX_SANDBOX_MODES,
   CODEX_DEFAULT_SANDBOX as PROTOCOL_CODEX_DEFAULT_SANDBOX,
@@ -235,10 +242,18 @@ export function buildCodexArgs(text, model, threadId = null, sandboxOverride = u
 }
 
 // Per-provider model metadata — #2956.
-// Source of truth for `set_model` validation, fallback model list, and
-// per-model context window/label surfaced in the dashboard dropdown. Keep
-// this list small and explicit until Codex CLI grows a native
-// `supportedModels()` equivalent.
+//
+// #7726 DEMOTED this from "the roster" to a CATALOGUED label/window SEED. The
+// binary answers `model/list` with its own roster (codex-model-catalog.js), and
+// once that catalog is in hand it REPLACES this list in getFallbackModels() —
+// a union would mean a retired model never dies. These six remain as the
+// cold-boot seed (before any probe has resolved) and as the label/window
+// lookup for an id the catalog does not carry; every row they produce is
+// stamped `provenance: 'catalogued'` so a hand-maintained row is LABELLED as
+// hand-maintained instead of masquerading as provider truth (the #7348 class).
+//
+// It is still the source of truth for `set_model` validation
+// (getAllowedModels) — making the catalog authoritative there is #7727.
 //
 // Context-window values come from the OpenAI model docs; `contextWindow` is
 // used both in the token-usage HUD and as the Codex-side override for the
@@ -272,8 +287,42 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
     label: meta.label,
     fullId: id,
     contextWindow: meta.contextWindow,
+    // #7726 — hand-maintained, and says so on the wire.
+    provenance: 'catalogued',
   })
 }))
+
+/**
+ * #7726 — one catalog row to the `{id,label,fullId,contextWindow,...}` entry
+ * shape both `getFallbackModels()` and `getModelMetadata()` hand the registry.
+ *
+ * `contextWindow` is the row's value or explicit `null` — never a fabricated
+ * number and never borrowed from a same-named static row. models.js preserves
+ * an explicit null instead of substituting DEFAULT_CONTEXT_WINDOW, so the
+ * dashboard omits the chip rather than showing an invented 200k (#5418/#5444).
+ *
+ * `reasoningLevels` / `defaultReasoningLevel` are OMITTED when the row has
+ * none, rather than emitted empty: `withModelMetadata` (models.js) skips
+ * undefined/null, so an absent key means "not recorded" on the wire, which is
+ * the contract #7723 established for these fields.
+ */
+function catalogEntry(row) {
+  const entry = {
+    id: row.id,
+    label: typeof row.label === 'string' && row.label.length > 0 ? row.label : row.id,
+    fullId: row.id,
+    contextWindow: Number.isInteger(row.contextWindow) && row.contextWindow > 0 ? row.contextWindow : null,
+    description: typeof row.description === 'string' ? row.description : '',
+    provenance: typeof row.provenance === 'string' && row.provenance.length > 0 ? row.provenance : 'discovered',
+  }
+  if (Array.isArray(row.reasoningLevels) && row.reasoningLevels.length > 0) {
+    entry.reasoningLevels = row.reasoningLevels
+  }
+  if (typeof row.defaultReasoningLevel === 'string' && row.defaultReasoningLevel.length > 0) {
+    entry.defaultReasoningLevel = row.defaultReasoningLevel
+  }
+  return entry
+}
 
 /**
  * Headroom multiplier for the learn-loop. Re-exported from the shared
@@ -409,6 +458,16 @@ export class CodexSession extends JsonlSubprocessSession {
    * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
    */
   static getFallbackModels() {
+    // #7726 — REPLACE, not union. Once the binary has answered `model/list`,
+    // its roster IS the picker; the six static rows do not ride along, because
+    // a union means a model OpenAI retired never disappears. Pre-catalog (cold
+    // boot, probe not resolved, probe failed) the catalogued seed keeps the
+    // picker useful. `hasCatalog` is the sentinel-aware check: a catalog that
+    // was never fetched and one that came back empty are different facts, and
+    // neither of them may be reported as a roster.
+    if (hasCodexCatalog()) {
+      return Object.freeze(getCodexCatalogRows().map((row) => Object.freeze(catalogEntry(row))))
+    }
     return CODEX_FALLBACK_MODELS
   }
 
@@ -421,6 +480,17 @@ export class CodexSession extends JsonlSubprocessSession {
    * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
    */
   static getModelMetadata(modelId) {
+    if (typeof modelId !== 'string' || modelId.length === 0) return null
+    // #7726 — the discovered row wins: it carries the binary's own label, its
+    // reasoning levels, and a context window that came from the Codex CLI's
+    // cache or is honestly null.
+    const row = getCodexCatalogRow(modelId)
+    if (row) return catalogEntry(row)
+    // Not in the catalog (or no catalog yet): fall back to the catalogued seed
+    // for a LOOKUP only. This is not a membership decision — getFallbackModels
+    // above is the roster — so an id the seed still knows keeps its real label
+    // and window instead of falling through to the registry's generic 200k
+    // heuristic. An unknown id stays null, exactly as before.
     const meta = CODEX_MODEL_METADATA[modelId]
     if (!meta) return null
     return {
@@ -429,6 +499,42 @@ export class CodexSession extends JsonlSubprocessSession {
       fullId: modelId,
       contextWindow: meta.contextWindow,
       description: meta.description || '',
+      provenance: 'catalogued',
+    }
+  }
+
+  /**
+   * #7726 — refresh the codex model catalog from the app-server's own
+   * `model/list` and feed it into the codex models registry.
+   *
+   * This is the hook `scheduleProviderModelsRefresh` (ws-history.js) calls,
+   * fire-and-forget, whenever it sends `available_models` for this provider.
+   * Resolves to the refreshed list when the picker CHANGED, else null. Never
+   * throws and never blocks: every failure path resolves null and leaves the
+   * previous catalog untouched.
+   *
+   * With no `client` in `deps` this spawns a SHORT-LIVED app-server for the
+   * probe — the no-session/create-session path, which is exactly where the
+   * frozen roster used to reject the operator's configured model. A live
+   * session passes its own client instead (CodexAppServerSession.start).
+   *
+   * `deps` is the test seam (client / createClient / registry / now / ttlMs /
+   * timeoutMs / windows).
+   */
+  static refreshModels(deps = {}) {
+    try {
+      return refreshCodexModels({
+        ...deps,
+        registry: deps.registry || getRegistryForProvider('codex'),
+        bin: 'bin' in deps ? deps.bin : this.resolvedBinary,
+        cwd: 'cwd' in deps ? deps.cwd : undefined,
+        env: 'env' in deps ? deps.env : buildSpawnEnv('codex'),
+      })
+    } catch {
+      // A refresh is advisory. A throw here (a registry build that blew up, a
+      // binary resolver that threw) must not become an unhandled rejection in
+      // the post-auth path.
+      return Promise.resolve(null)
     }
   }
 
