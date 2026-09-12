@@ -2343,3 +2343,63 @@ reject it, and the deletion sweep runs 6/6.
 the part that decays is whether it is still reached, so prove it by removing the
 cases, not by reading the code. And when a bug report hands you a list of
 affected files, the list is a lead — enumerate the class yourself.
+
+### 33. The roster guard whose "catalog" was the seed it was checking — `#7731`
+
+Epic `#7721` replaces hand-maintained model rosters with what each provider's
+own producer reports. `#7731` is the guard that keeps them replaced: for every
+selectable provider registry, FORWARD (every id the registry can emit resolves
+to metadata, to a pricing outcome that is a number or an explicit UNKNOWN, to an
+id `set_model` accepts, and to reasoning levels `set_thinking_level` accepts) and
+REVERSE (every id in the static seed is in the producer's catalog or is declared
+retired). The reverse half is the direction the same gap was filed four times
+for — `#7199`, `#7216`, `#7544`, `#7639`, entry 28.
+
+**The first draft was cause 1 with two extra steps, and only a mutation found
+it.** It read the producer's roster from `registry.getModels()`, which looks like
+the obvious source and is not: `createModelsRegistry` falls back to the STATIC
+SEED whenever a probe answers with nothing. So on the exact input the guard
+exists for — a fetch that failed, a binary that answered zero rows — the "producer
+catalog" it compared the seed against WAS the seed, every id matched, and the
+reverse direction passed. Cause 2 and the `#7503` empty-filter shape at once:
+could-not-fetch was not distinguishable from everything-is-fine, and the
+comparison it reported as clean was `seed ⊆ seed`.
+
+The mutation that exposed it is the one the issue mandated for a different
+reason — make the stubbed producer return zero rows — and it went red on three
+OTHER assertions while the two it was aimed at stayed green. **A mutation that
+reds the wrong tests is a finding, not a pass.** The producer roster is now what
+the stub PUBLISHED, recorded as it is sent, and it must additionally be shown to
+have been INGESTED (every published id is served by the registry), so a stub that
+published into the void cannot stand in for a producer that answered.
+
+**A second defect in the same draft, same class.** One seed was captured after
+the first publish. A config-driven endpoint's `getFallbackModels()` switches to
+the discovered catalog the moment discovery lands and never reports the
+operator's seed again, so that "seed" was the catalog wearing the seed's name —
+entry 29's `#7424` reached by accident rather than by design. Static seeds are
+now captured once at module load, before any producer answers.
+
+**The `#7424` shape was then pinned deliberately.** Rewriting the producer
+roster to `STATIC_SEEDS.get(name)` — the expectation taken from the subject —
+makes the reverse assertion unfalsifiable: a fake id added to the seed stops
+going red. It does not make the FILE green, because three controls fire on it
+(the unset-catalog probe, the zero-row probe, and the REPLACE check). That is the
+point of writing controls for the guard's own failure modes rather than only for
+its subject's: the bad shape is not merely discouraged, it cannot be adopted
+without a red.
+
+**What the two-direction rule bought elsewhere.** Every roster the guard holds
+by hand is checked against its derived counterpart in both directions: the
+stubbed-producer map against the derived eligible set, and the not-selectable
+exclusions against `listProviders()`. An exclusion set is the one place a
+hardcoded list is the right shape — failing to grow is exactly what must go red —
+and the reverse-direction skip list is not one: it is derived from
+`refreshModels` / `staticModelsAreRecommendations` / `compatEntry`, and a test
+flips those seams at runtime (grant `gemini` a `refreshModels` and it must LEAVE
+the skip list) rather than reading the list back.
+
+**Guard against it:** when a guard compares two rosters, ask where each one would
+come from if the thing being guarded were broken. If the answer is "the same
+place", the guard has no failing input. And read a mutation's output, not just
+its exit code — `!= 0` hides which assertion actually fired.
