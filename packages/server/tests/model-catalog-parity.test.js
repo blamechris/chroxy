@@ -93,10 +93,22 @@ const ENV_PINS = Object.freeze({
   // nothing (it is excluded by name), and falsify the recorded exclusion reason
   // for `codex-appserver` — all three classes delegate every static this guard
   // reads, which is exactly what makes the switch invisible.
-  CHROXY_CODEX_APPSERVER: '1',
+  //
+  // DELETED, not set to '1'. Setting it defeats the inherited `=0` but also
+  // forces `providers.js`'s opt-in branch, so the census would stop exercising
+  // production's DEFAULT resolution: if the default ever flipped to exec, this
+  // guard would keep covering the app-server class while production ran the
+  // other one, and the `getProvider('codex') === getProvider('codex-appserver')`
+  // claim below would stay green while its premise was false. An `undefined`
+  // sentinel is strictly stronger — it defeats the inherited value AND leaves
+  // the resolution to whatever production's default resolves to today.
+  CHROXY_CODEX_APPSERVER: undefined,
 })
 const ORIG_ENV = Object.freeze(Object.keys(ENV_PINS).map((k) => [k, process.env[k]]))
-for (const [k, v] of Object.entries(ENV_PINS)) process.env[k] = v
+for (const [k, v] of Object.entries(ENV_PINS)) {
+  if (v === undefined) delete process.env[k]
+  else process.env[k] = v
+}
 
 const {
   getRegisteredProviderNames,
@@ -438,11 +450,25 @@ function sameRates(a, b) {
  * `anthropic-compatible-session.js`'s `_getPricing(model)` is length 1 and falls
  * back to a single `flatPricing` block for every id it has no row for.
  *
- * The rule, in three clauses: the seam must answer SOMETHING for an id it cannot
+ * The rule, in FOUR clauses: the seam must answer SOMETHING for an id it cannot
  * know (a `null` there is a per-model table admitting an unknown, not a flat
- * declaration); its answer must not MOVE with the id; and the rate THIS id
- * resolved to must be that same declared rate — otherwise the id has its own
- * row and a zero for it is not the declaration's doing.
+ * declaration); its answer must not MOVE with the id; the rate THIS id resolved
+ * to must be that same declared rate — otherwise the id has its own row and a
+ * zero for it is not the declaration's doing; and the declaration must be
+ * PROVIDER-WIDE, i.e. every row the registry can emit must resolve to that same
+ * rate.
+ *
+ * THE FOURTH CLAUSE IS LOAD-BEARING and was added in re-review. Without it the
+ * first three are satisfied by exactly the shape this guard exists to catch:
+ * `anthropic-compatible-session.js:514-520` answers `flatPricing`
+ * (= `ZERO_PRICING` when the entry declares no `pricing` block) for every id its
+ * discovered catalog misses, and `parseOpenRouter` (`model-discovery.js:91-99`)
+ * only tables an id that carries a `pricing` object. So a per-model catalog with
+ * ONE row whose pricing block is absent bills $0 for that row while its siblings
+ * price correctly — and the three-clause rule classified it "declared flat" for
+ * exactly the ids it silently zero-prices. A flat rate is a statement about the
+ * PROVIDER, not about the ids it happens to miss: ollama (every row zero) stays
+ * `true`; a mixed catalog goes `false` and its $0 row reds.
  */
 function pricingIsFlatDeclaration(c, modelId) {
   if (c.pricingSource !== 'provider-table') return false
@@ -451,7 +477,9 @@ function pricingIsFlatDeclaration(c, modelId) {
   const b = probe(FLAT_PROBE_IDS[1])
   if (a === null || b === null) return false
   if (!sameRates(a, b)) return false
-  return sameRates(a, resolvePricingFor(c, modelId))
+  if (!sameRates(a, resolvePricingFor(c, modelId))) return false
+  const rows = typeof c.registry?.getModels === 'function' ? c.registry.getModels() : []
+  return rows.every((r) => sameRates(a, resolvePricingFor(c, r.fullId)))
 }
 
 // --- publishing the stubbed producers into the real registries ---------------
@@ -637,10 +665,10 @@ const FORWARD_SKIPS = Object.freeze({
 describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a working set_model', () => {
   it('every registry emits at least one row, and every row round-trips through the registry', () => {
     let rowsChecked = 0
-    const rowsPerProvider = new Map()
+    const servedIdsPerProvider = new Map()
     for (const c of census()) {
       const rows = c.registry.getModels()
-      rowsPerProvider.set(c.name, rows.length)
+      servedIdsPerProvider.set(c.name, [...new Set(rows.map((r) => r.fullId))].sort())
       // The minimum NON-ZERO row count. A registry the guard claims to check
       // and then finds empty is a cannot-check, never a clean pass.
       assert.ok(rows.length > 0, `${c.name}: registry emitted ZERO rows — the forward direction would be vacuous`)
@@ -661,14 +689,28 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
     // NOT `rowsChecked >= providerCount` — the per-registry `rows.length > 0`
     // above already guarantees that, so it would be an assertion implied by its
     // own loop sitting in a non-vacuity clause. What is NOT implied is that the
-    // stubbed producers actually REPLACED each registry's seed: codex's in-repo
-    // seed is six ids and the producer's roster is six DIFFERENT ids, and the
-    // compat endpoint's operator seed is two ids of which the producer keeps one.
+    // stubbed producers actually REPLACED each registry's seed.
+    //
+    // AND NOT A COUNT EITHER (#7788 re-review). Row COUNTS cannot see the
+    // failure the message below names: codex's in-repo seed is six ids and the
+    // producer's roster is six ids, and the compat entry's operator seed is two
+    // ids against a two-row producer body — a registry that fell back to its
+    // seed has exactly the right cardinality and the wrong roster. That is
+    // cause #13 (a message describing a stronger check than the code performs)
+    // inside the fix for a cause-#13 finding. The id SETS are pinned instead,
+    // against what each stub PUBLISHED — the payload, never the subject.
     assert.ok(rowsChecked > 0, 'no row was checked at all')
-    assert.equal(rowsPerProvider.get('codex'), CODEX_PRODUCER_MODEL_LIST.data.length,
-      'the codex registry no longer serves exactly the stubbed producer roster — the seed was unioned back in, or the catalog was not ingested')
-    assert.equal(rowsPerProvider.get(COMPAT_PROVIDER), COMPAT_PRODUCER_BODY.data.length,
-      'the compat registry no longer serves exactly the discovered catalog')
+    let rostersPinned = 0
+    for (const c of census()) {
+      if (!reverseEligible(c)) continue
+      const published = PUBLISHED_CATALOGS.get(c.name)
+      assert.ok(published instanceof Set,
+        `${c.name}: reverse-eligible but no stubbed producer published for it`)
+      assert.deepEqual(servedIdsPerProvider.get(c.name), [...published].sort(),
+        `${c.name}: the registry no longer serves exactly the stubbed producer roster — the seed was unioned back in, or the catalog was not ingested and the registry fell back to it`)
+      rostersPinned++
+    }
+    assert.ok(rostersPinned > 0, 'no registry had its served roster pinned against a published producer payload')
   })
 
   it('every emitted id resolves to provider metadata where the provider declares a lookup', () => {
@@ -750,7 +792,16 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
   it('the declared-flat-rate rule is BEHAVIOURAL, not Function.length (the silent-zero control)', () => {
     const FLAT = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
     const PER_MODEL = Object.freeze({ input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 })
-    const rowOf = (ProviderClass) => ({ name: 'parity-pricing-probe', ProviderClass, pricingSource: 'provider-table' })
+    // The probe row carries a REGISTRY, because the fourth clause quantifies
+    // over every row the registry can emit. Without one that clause would run
+    // `[].every(...)` — vacuously true — and the control would stop exercising
+    // the direction the rule changed.
+    const rowOf = (ProviderClass, ids = ['known-id']) => ({
+      name: 'parity-pricing-probe',
+      ProviderClass,
+      pricingSource: 'provider-table',
+      registry: { getModels: () => ids.map((id) => ({ id, fullId: id })) },
+    })
 
     // Both of these seams are fully PER-MODEL and both have `Function.length`
     // 0 — the shape the old `_getPricing.length === 0` rule admitted as a
@@ -776,6 +827,24 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
     assert.equal(pricingIsFlatDeclaration(rowOf(IgnoresItsArgument), 'known-id'), true,
       'a seam that returns the same rate for every id IS a declared flat rate, whatever its arity')
 
+    // THE FOURTH CLAUSE'S OWN CONTROL (#7788 re-review). A catalog hit for one
+    // id and the flat fallback for every id it misses — the shape
+    // `anthropic-compatible-session.js`'s `_getPricing` has once discovery has
+    // landed a per-model table with a gap in it. All three of the earlier
+    // clauses are satisfied for 'unpriced-id' (the seam answers the same FLAT
+    // for both unknowable probe ids, and that is what 'unpriced-id' resolves
+    // to), so this is the input that separates the rules.
+    class CatalogHitElseZero {}
+    CatalogHitElseZero.prototype._getPricing = function (model) { return model === 'priced-id' ? PER_MODEL : FLAT }
+    assert.equal(pricingIsFlatDeclaration(rowOf(CatalogHitElseZero, ['priced-id', 'unpriced-id']), 'unpriced-id'), false,
+      'a per-model catalog whose MISSES fall back to a flat zero must NOT be a declared flat rate — that zero is silent')
+    // …and the same seam over a roster where NO row has a table entry IS flat:
+    // the clause is about the provider's whole roster, not about one id. This
+    // is the LM Studio / vLLM case (`parseOpenAi` tables no pricing at all),
+    // the false positive the behavioural rule was introduced to stop.
+    assert.equal(pricingIsFlatDeclaration(rowOf(CatalogHitElseZero, ['unpriced-id', 'other-unpriced-id']), 'unpriced-id'), true,
+      'a seam whose EVERY emitted row resolves to the same rate IS a declared flat rate')
+
     // And the real one the forward loop depends on still classifies correctly.
     const ollama = censusFor('ollama')
     const ollamaRow = ollama.registry.getModels()[0]
@@ -784,6 +853,74 @@ describe('#7731 FORWARD: every emitted id resolves to metadata, pricing and a wo
     const byok = censusFor('claude-byok')
     const byokRow = byok.registry.getModels()[0]
     assert.equal(pricingIsFlatDeclaration(byok, byokRow.fullId), false, 'claude-byok resolves per-model rates, not a flat declaration')
+  })
+
+  it('a REAL discovered catalog with one unpriced row is a silent zero, not a declared flat rate', async () => {
+    // The live half of the fourth clause, driven through the PRODUCTION seams
+    // the re-review named: `createAnthropicCompatibleSessionClass` +
+    // `parseOpenRouter`. The payload has two rows and only one carries a
+    // `pricing` object, so `parseOpenRouter` (`model-discovery.js:91-99`) tables
+    // one of them, and `_getPricing` (`anthropic-compatible-session.js:514-520`)
+    // answers the entry-level `flatPricing` — `ZERO_PRICING`, since this entry
+    // declares no `pricing` block — for the other. That row bills $0 while its
+    // sibling prices correctly: a real silent zero, inside the guard whose
+    // headline claim is "never a silent 0".
+    //
+    // Deliberately NOT registered as a provider: the census population is
+    // pinned in both directions in describe A, and this class exists only as a
+    // subject for the rule.
+    const MIXED_ID = 'parity-mixed-pricing'
+    const MixedSession = createAnthropicCompatibleSessionClass({
+      id: MIXED_ID,
+      label: 'Parity Mixed Pricing',
+      baseUrl: 'https://mixed.invalid/api',
+      defaultModel: 'vendor/priced',
+      models: ['vendor/priced'],
+      contextWindow: 128_000,
+      modelDiscovery: { url: 'https://mixed.invalid/api/v1/models', format: 'openrouter' },
+    })
+    const MIXED_BODY = Object.freeze({
+      data: [
+        { id: 'vendor/priced', name: 'Priced', context_length: 128000, pricing: { prompt: '0.000003', completion: '0.000015', input_cache_read: '0.0000003', input_cache_write: '0.00000375' } },
+        // No `pricing` key at all — the one-row difference the whole case is for.
+        { id: 'vendor/unpriced', name: 'Unpriced', context_length: 128000 },
+      ],
+    })
+    const served = []
+    const registry = {
+      updateModels(models) {
+        served.length = 0
+        for (const m of models) served.push({ id: m.value, fullId: m.value, label: m.displayName, contextWindow: m.contextWindow })
+        return [...served]
+      },
+      getModels: () => [...served],
+    }
+    await MixedSession.refreshModels({
+      fetchFn: () => Promise.resolve({ ok: true, status: 200, json: async () => MIXED_BODY }),
+      registry,
+    })
+    assert.deepEqual(registry.getModels().map((r) => r.fullId).sort(), ['vendor/priced', 'vendor/unpriced'],
+      'the mixed catalog was not ingested — this control has no subject')
+
+    const c = { name: MIXED_ID, ProviderClass: MixedSession, pricingSource: 'provider-table', registry }
+    const priced = resolvePricingFor(c, 'vendor/priced')
+    const unpriced = resolvePricingFor(c, 'vendor/unpriced')
+    assert.ok(RATE_KEYS.some((k) => priced[k] > 0),
+      'the catalogued row must carry real rates, or the catalog is not mixed and the case is not reproduced')
+    assert.deepEqual(RATE_KEYS.map((k) => unpriced[k]), [0, 0, 0, 0],
+      'the row whose `pricing` block was absent must fall back to the entry-level flat ZERO')
+    assert.equal(computePromptCostUsd(PROBE_USAGE, unpriced), 0, '…and bill exactly $0 on a turn with tokens in every bucket')
+
+    // THE CLAIM. This is the outcome the forward loop asserts on: a $0 row is
+    // tolerated only while `pricingIsFlatDeclaration` is true for it, so `false`
+    // here is the guard going red on the silent zero. The three-clause rule
+    // returned TRUE for this exact input and let it pass.
+    assert.equal(pricingIsFlatDeclaration(c, 'vendor/unpriced'), false,
+      'a discovered catalog with one unpriced row is a per-model table with a gap, never a provider-wide flat declaration')
+    // Not a blanket rejection of the class: the priced sibling is rejected for
+    // the ordinary third-clause reason (its own row, not the declaration).
+    assert.equal(pricingIsFlatDeclaration(c, 'vendor/priced'), false,
+      'a row with its own catalog rates is not a flat declaration either')
   })
 
   it('every emitted id is accepted by the production set_model handler', () => {
