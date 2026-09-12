@@ -53,7 +53,12 @@
 # in the files it reaches. And a file it could not OPEN is reported and refused
 # rather than counted — counting it would let unreadable files satisfy the very
 # floor that exists to catch a scan which reached nothing, which is "could not
-# check" reading as "nothing to check" (#7195/#7210).
+# check" reading as "nothing to check" (#7195/#7210). That refusal covers the
+# ALLOWLISTED file too, and deliberately: the allowlist skip runs AFTER the
+# open, so an unreadable packages/protocol/src/thinking-levels.ts is reported
+# like any other unreadable file rather than being waved through — the one file
+# the roster is supposed to live in is the last one whose contents this lint
+# should be willing to guess at.
 #
 # Pure bash + perl — no deps, no node. CI runs it under bash in the bash-lint job.
 #
@@ -71,8 +76,10 @@ command -v perl >/dev/null 2>&1 || {
 }
 
 # Floor on the number of files the scan must actually open. Well below today's
-# count (~1,100 non-test source files) so ordinary churn never trips it, and far
-# above zero so a broken path filter fails LOUDLY instead of passing vacuously.
+# count (the run reports 824 non-test source files) so ordinary churn never
+# trips it, and far above zero so a broken path filter fails LOUDLY instead of
+# passing vacuously. The number is illustrative, not asserted — it is printed by
+# every run, so a reader can check it rather than trusting this line.
 MIN_FILES="${LINT_THINKING_MIN_FILES:-300}"
 
 # The one file allowed to carry the literal roster: the module every other layer

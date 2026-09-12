@@ -26,8 +26,8 @@
 #   8. the min-files floor FAILS a scan that walked too few files — the guard
 #      must not report "clean" because it found nothing to look at
 #   9. the production invocation over the real repo stays green
-#  10. a file the scan could NOT OPEN fails, and does NOT count toward the
-#      floor. Counting an unreadable file would let the floor — the check whose
+#  10. a file the scan could NOT OPEN fails BY NAME, and does NOT count toward
+#      the floor. Counting an unreadable file would let the floor — the check whose
 #      only job is to catch a scan that reached nothing — be satisfied by files
 #      nothing was read from (#7195/#7210, #7783). This case can only be built
 #      as a non-root user, so it SKIPS loudly rather than passing when it
@@ -122,12 +122,24 @@ check "a scan below the min-files floor fails" 1 "$(run_lint "$SCAN" 50)"
 bash "$LINT" >/dev/null 2>&1
 check "default invocation (real repo) green" 0 "$?"
 
-# Case 10 — a file that could not be OPENED must fail the lint, and must not be
-# counted toward the min-files floor. The floor is set to 3 here while the tree
-# holds exactly two readable files plus the unreadable one: a build that counts
-# the unreadable file reaches 3 and reports a clean repo, one that does not
-# reaches 2. Either way this case demands exit 1, so it reds on BOTH the
-# swallowed-open bug and a regression that stops reporting it.
+# Case 10 — a file that could not be OPENED must fail the lint, by NAME, and
+# must not be counted toward the min-files floor.
+#
+# The floor is 2 here, not 3, and the difference is the whole case. The tree
+# holds exactly two readable files plus the unreadable one, so at floor 2 the
+# readable files already satisfy the floor and the ONLY remaining source of
+# exit 1 is the unreadable REPORT. At floor 3 the floor itself supplied the
+# exit 1: measured against a scratch copy of the lint, the pre-fix code
+# (`$scanned++` before the open, no report) exited 1 at floor 3 and the case
+# stayed green, so the reporting block — the load-bearing half — had no red-able
+# coverage at all. At floor 2 that same regression exits 0 (`OK — scanned 2`)
+# and the case goes red, and so does a lint that counts correctly but drops the
+# report.
+#
+# The naming half rides on the same `check` rather than adding an eleventh call,
+# so the EXPECTED_CASES arithmetic keeps meaning what it says: a lint that exits
+# 1 without ever saying WHICH file it could not read fails an operator at the
+# only moment this guard fires, so it fails the case too.
 UNREADABLE="$SCAN/src/unreadable.ts"
 printf "export const z = 3\n" > "$UNREADABLE"
 chmod 000 "$UNREADABLE" 2>/dev/null || true
@@ -137,7 +149,15 @@ if [ -r "$UNREADABLE" ] || cat "$UNREADABLE" >/dev/null 2>&1; then
   SKIP=$((SKIP + 1))
   echo "SKIP - an unreadable file fails the scan (cannot make a file unreadable as uid $(id -u))"
 else
-  check "an unreadable file fails the scan and does not count toward the floor" 1 "$(run_lint "$SCAN" 3)"
+  # Not run_lint: this case asserts on the lint's OUTPUT as well as its exit
+  # code, and run_lint discards it.
+  unreadable_out="$(LINT_THINKING_SCAN_DIR="$SCAN" LINT_THINKING_MIN_FILES=2 bash "$LINT" 2>&1)"
+  unreadable_rc=$?
+  case "$unreadable_out" in
+    *"$UNREADABLE"*) unreadable_actual="$unreadable_rc" ;;
+    *) unreadable_actual="$unreadable_rc (output never NAMED $UNREADABLE)" ;;
+  esac
+  check "an unreadable file fails the scan BY NAME and does not count toward the floor" 1 "$unreadable_actual"
 fi
 chmod 644 "$UNREADABLE" 2>/dev/null || true
 rm -f "$UNREADABLE"
