@@ -828,6 +828,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Resume (`resumeSessionId`) | Yes | Yes | Yes | — | — | — | — | — | — |
 | **(capability)** Terminal (raw PTY) | — | — | — | — | — | — | — | — | — |
 | **(capability)** Thinking level control | Yes | — | — | — | — | — | — | — | — |
+| **(capability)** Thinking keyword escalation (`thinkingKeywords`) | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
 | **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | — | — | — | — | — |
@@ -853,7 +854,7 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 > session). See [`claude-channel`](#claude-channel-research-preview) and the
 > [spike's capability matrix](architecture/claude-channels-provider-spike.md#capability-matrix-proposed-from-sub-2).
 
-> **Config-driven ACP agents** (#7319 — [see above](#acp-agents-config-driven)) don't share a column with any existing provider: `permissions` and `inProcessPermissions` are both `false` (deny-all, no bridge yet — #7320), `modelSwitch` / `permissionModeSwitch` / `planMode` / `resume` / `terminal` / `thinkingLevel` are all `false` (the agent picks its own model; Chroxy has no visibility into or control over the rest), and `streaming` is `true`. Behaviourally: attachments are refused (not yet implemented), conversation continuity holds for the lifetime of the persistent connection (one child process, many turns — not per-message like `codex`/`gemini`), and cost reporting is unimplemented (no pricing concept for an arbitrary agent).
+> **Config-driven ACP agents** (#7319 — [see above](#acp-agents-config-driven)) don't share a column with any existing provider: `permissions` and `inProcessPermissions` are both `false` (deny-all, no bridge yet — #7320), `modelSwitch` / `permissionModeSwitch` / `planMode` / `resume` / `terminal` / `thinkingLevel` / `thinkingKeywords` are all `false` (the agent picks its own model; Chroxy has no visibility into or control over the rest), and `streaming` is `true`. Behaviourally: attachments are refused (not yet implemented), conversation continuity holds for the lifetime of the persistent connection (one child process, many turns — not per-message like `codex`/`gemini`), and cost reporting is unimplemented (no pricing concept for an arbitrary agent).
 
 ## Known limits
 
