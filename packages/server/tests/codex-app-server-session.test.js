@@ -2156,13 +2156,20 @@ describe('CodexAppServerSession — model/rerouted (#7729)', () => {
 // The live notification shape, verified against codex-cli 0.154.0 (epic record
 // github.com/blamechris/chroxy/issues/7721#issuecomment-5644101381):
 //   { threadId, turnId, tokenUsage: { total, last, modelContextWindow } }
+// #7773 — `total` DEFAULTS TO `last` when a caller names only `last`, because
+// that is the live turn-1 invariant: `total` is the thread-cumulative sum of
+// every response, so on the first response of a fresh thread the two are
+// identical (probed: turn 1 reported total.totalTokens == last.totalTokens ==
+// 14962). Defaulting it to all-zeros instead would make every one of these
+// fixtures describe a payload codex cannot emit, and the per-turn delta
+// (#7773) would read 0 for a turn the fixture says spent 500k.
 function tokenUsageParams({ last, total, modelContextWindow } = {}) {
   const breakdown = (o) => ({
     totalTokens: 0, inputTokens: 0, cachedInputTokens: 0,
     outputTokens: 0, reasoningOutputTokens: 0, cacheWriteInputTokens: 0,
     ...o,
   })
-  const tokenUsage = { total: breakdown(total), last: breakdown(last) }
+  const tokenUsage = { total: breakdown(total ?? last), last: breakdown(last) }
   if (modelContextWindow !== undefined) tokenUsage.modelContextWindow = modelContextWindow
   return { threadId: 'th-1', turnId: 'tu-1', tokenUsage }
 }
@@ -2201,15 +2208,23 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
     })
   })
 
-  it('the token breakdown is read from `last`, never the thread-cumulative `total`', () => {
+  // #7773 — this test used to assert the breakdown was read straight off
+  // `last`, on the theory that `last` IS the turn. It is not: `last` is one
+  // model RESPONSE. The turn is the DELTA of the cumulative `total` since turn
+  // start, which is what the suite below pins. The anti-compounding rationale
+  // the old assertion carried is preserved here: the reported figure must not
+  // be the running total either.
+  it('the token breakdown is neither the raw cumulative `total` nor one response (#7773)', () => {
     withCodexSession((s) => {
       s.bootedModel = 'gpt-5-codex'
       s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+      // Turn 1 of the thread: nothing accumulated yet, so the baseline is
+      // zero and the turn's delta IS `total`.
       s._onNotification({
         method: 'thread/tokenUsage/updated',
         params: tokenUsageParams({
           last: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
-          total: { inputTokens: 900_000, cachedInputTokens: 0, outputTokens: 9_999 },
+          total: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
           modelContextWindow: 272_000,
         }),
       })
@@ -2386,5 +2401,257 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
       assert.equal(broadcasts.filter((m) => m.type === 'available_models').length, 1,
         'control: this wiring broadcasts available_models when models_updated fires')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7773 / #7769 / #7794 — usage accounting on `thread/tokenUsage/updated`.
+//
+// THE LIVE FACT this suite rests on, probed against codex-cli 0.154.0 on
+// 2026-09-12 (gpt-5.5, thread 01a09778-0c52-7c41-8d24-e4f4ff68b708, two
+// one-word turns, every `thread/tokenUsage/updated` logged verbatim):
+//
+//   turn 1  total.totalTokens=14962  last.totalTokens=14962
+//   turn 2  total.totalTokens=31920  last.totalTokens=16958   (= 14962+16958)
+//
+// So `total` is the thread-CUMULATIVE sum of every response's usage and `last`
+// is the most recent response. Three consequences, one per issue:
+//
+//   #7773  NEITHER field is the turn. `total` compounds (session-manager ADDS
+//          result.usage into cumulativeUsage once per turn), `last` drops every
+//          response but the final one of a tool-heavy turn. The turn is
+//          total_now - total_at_turn_start.
+//   #7769  `_lastUsage` must be cleared per TURN, or a `turn/completed` with no
+//          intervening notification re-reports — and re-accumulates — the
+//          previous turn's numbers.
+//   #7794  occupancy is `last.totalTokens`, NOT the `total.total_tokens` the
+//          issue body specifies: metered as occupancy, `total` grows without
+//          bound and can never step down after a compaction, which is the
+//          failure that issue's own second acceptance criterion forbids.
+// ---------------------------------------------------------------------------
+describe('CodexAppServerSession — usage accounting (#7773 / #7769 / #7794)', () => {
+  // Breakdown factory: every one of TokenUsageBreakdown's six fields, zero by
+  // default, so a test only names the ones it is reasoning about.
+  const bd = (o = {}) => ({
+    totalTokens: 0, inputTokens: 0, cachedInputTokens: 0,
+    cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0,
+    ...o,
+  })
+  const notif = ({ total, last, modelContextWindow }) => {
+    const tokenUsage = { total: bd(total), last: bd(last) }
+    if (modelContextWindow !== undefined) tokenUsage.modelContextWindow = modelContextWindow
+    return { threadId: 'th-1', turnId: 'tu-1', tokenUsage }
+  }
+
+  // A session that runs turns through the REAL sendMessage path, so the
+  // per-turn reset (#7769) and the baseline freeze (#7773) are exercised where
+  // they live instead of being poked directly.
+  function mkTurnRunner(opts = {}) {
+    const { s, cleanup } = mkSession({ model: 'gpt-5-codex', ...opts })
+    s._processReady = true
+    s._threadId = 'th-1'
+    s._client = { request: async () => ({ turn: { id: 'tu-1' } }) }
+    const results = capture(s, ['result'])
+    return {
+      s,
+      results,
+      send: (text = 'hi') => s.sendMessage(text),
+      tokenUsage: (p) => s._onNotification({ method: 'thread/tokenUsage/updated', params: notif(p) }),
+      // _finishTurn's _clearMessageState clears _isBusy, so the next send is
+      // not queued — no manual flag poking.
+      finish: () => s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 7 } } }),
+      cleanup: () => { s.destroy(); cleanup() },
+    }
+  }
+
+  it('sums a turn\'s responses instead of dropping all but the last (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('do a tool-heavy thing')
+    // Two model responses inside ONE turn, as any tool round-trip produces.
+    // `total` climbs cumulatively; `last` is only ever the newest response.
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 10 }, last: { inputTokens: 1000, outputTokens: 10 } })
+    tokenUsage({ total: { inputTokens: 3000, outputTokens: 30 }, last: { inputTokens: 2000, outputTokens: 20 } })
+    finish()
+    assert.equal(results.length, 1)
+    assert.equal(results[0][1].usage.input_tokens, 3000,
+      'both responses of the turn are counted — reading `last` would report 2000 and silently drop the first request')
+    assert.equal(results[0][1].usage.output_tokens, 30,
+      'output is summed across the turn too — `last` alone would report 20')
+    cleanup()
+  })
+
+  it('measures turn 2 from turn 1\'s cumulative baseline, so the total never compounds (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    // The live capture's own numbers.
+    await send('one')
+    tokenUsage({ total: { totalTokens: 14962, inputTokens: 14935, cachedInputTokens: 5504, outputTokens: 27, reasoningOutputTokens: 20 },
+      last: { totalTokens: 14962, inputTokens: 14935, cachedInputTokens: 5504, outputTokens: 27, reasoningOutputTokens: 20 } })
+    finish()
+    await send('two')
+    tokenUsage({ total: { totalTokens: 31920, inputTokens: 31872, cachedInputTokens: 20224, outputTokens: 48, reasoningOutputTokens: 34 },
+      last: { totalTokens: 16958, inputTokens: 16937, cachedInputTokens: 14720, outputTokens: 21, reasoningOutputTokens: 14 } })
+    finish()
+    assert.equal(results.length, 2)
+    // turn 2's delta: input 31872-14935=16937, cached 20224-5504=14720,
+    // output 48-27=21 — which is exactly `last`, because turn 2 was a
+    // single-response turn. That equality is the arithmetic PROOF that `total`
+    // is the cumulative sum, and it is why a single-turn capture cannot tell
+    // the two readings apart.
+    assert.deepEqual(results[1][1].usage, {
+      input_tokens: 16937 - 14720,
+      output_tokens: 21,
+      cache_read_input_tokens: 14720,
+      cached_input_tokens: 14720,
+    }, 'turn 2 reports only turn 2 — reporting the raw cumulative total would re-count turn 1')
+    assert.notEqual(results[1][1].usage.cache_read_input_tokens, 20224,
+      'control: the raw cumulative cached figure is a DIFFERENT number, so the assertion above is armed')
+    cleanup()
+  })
+
+  it('clamps a cumulative total that moved BACKWARDS rather than emitting a negative (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { inputTokens: 5000, outputTokens: 50 }, last: { inputTokens: 5000, outputTokens: 50 } })
+    finish()
+    await send('two')
+    // A resumed thread, or a future build that resets its counters after
+    // compacting, can report a SMALLER total. An accumulator must never be fed
+    // a negative.
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 5 }, last: { inputTokens: 1000, outputTokens: 5 } })
+    finish()
+    assert.equal(results[1][1].usage.input_tokens, 0)
+    assert.equal(results[1][1].usage.output_tokens, 0)
+    cleanup()
+  })
+
+  it('a turn with NO tokenUsage notification reports null, not the previous turn\'s numbers (#7769)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 10 }, last: { inputTokens: 1000, outputTokens: 10 } })
+    finish()
+    assert.equal(results[0][1].usage.input_tokens, 1000, 'precondition: turn 1 really did report usage')
+    // Turn 2 completes without codex ever sending a usage update.
+    await send('two')
+    finish()
+    assert.equal(results.length, 2)
+    assert.equal(results[1][1].usage, null,
+      'session-manager ADDS result.usage per turn — re-reporting turn 1 here double counts real tokens and cost')
+    assert.equal(results[1][1].modelUsage, null,
+      'and the per-model split must not be fabricated from stale numbers either')
+    cleanup()
+  })
+
+  it('does not carry the previous turn\'s occupancy snapshot into a turn that had none (#7769/#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 500 }, last: { totalTokens: 500 }, modelContextWindow: 258_400 })
+    finish()
+    assert.ok(results[0][1].contextOccupancy, 'precondition: turn 1 emitted a snapshot')
+    await send('two')
+    finish()
+    assert.equal('contextOccupancy' in results[1][1], false,
+      'the field is OMITTED so clients keep their own last snapshot, rather than being re-told a stale one as fresh')
+    cleanup()
+  })
+
+  it('emits a contextOccupancy snapshot from codex\'s own numbers (#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 14962 }, last: { totalTokens: 14962 }, modelContextWindow: 258_400 })
+    finish()
+    await send('two')
+    tokenUsage({ total: { totalTokens: 31920 }, last: { totalTokens: 16958 }, modelContextWindow: 258_400 })
+    finish()
+    assert.deepEqual(results[1][1].contextOccupancy, { totalTokens: 16958, maxTokens: 258_400 },
+      'occupancy is the last response (prompt + reply = the size the next turn starts from), never the cumulative total')
+    assert.notEqual(results[1][1].contextOccupancy.totalTokens, 31920,
+      'control: asserting the cumulative figure here would pin the unbounded-growth bug as correct')
+    // The window must come from the live snapshot, not the roster: the same
+    // probe read modelContextWindow=258400 for gpt-5.5 while
+    // ~/.codex/models_cache.json said 272000.
+    assert.equal(results[1][1].contextOccupancy.maxTokens, 258_400)
+    cleanup()
+  })
+
+  it('the occupancy snapshot steps DOWN after a compaction (#7794 AC2)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 200_000 }, last: { totalTokens: 200_000 }, modelContextWindow: 258_400 })
+    finish()
+    await send('two')
+    // codex compacted: the cumulative total keeps climbing, the next response's
+    // prompt is much smaller. Nothing here may pin the meter as monotonic.
+    tokenUsage({ total: { totalTokens: 230_000 }, last: { totalTokens: 30_000 }, modelContextWindow: 258_400 })
+    finish()
+    assert.equal(results[0][1].contextOccupancy.totalTokens, 200_000)
+    assert.equal(results[1][1].contextOccupancy.totalTokens, 30_000,
+      'a post-compaction snapshot is SMALLER; sourcing it from the cumulative total would have reported 230000')
+    cleanup()
+  })
+
+  it('emits no snapshot for the flat legacy shape or a zero total (#7794)', async () => {
+    const { s, results, send, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    // The pre-#7767 flat shape carries no totalTokens at all.
+    s._onNotification({ method: 'thread/tokenUsage/updated', params: { usage: { inputTokens: 10, outputTokens: 2 } } })
+    finish()
+    assert.equal('contextOccupancy' in results[0][1], false, 'no fabricated meter from a shape that carries no occupancy')
+    await send('two')
+    s._onNotification({ method: 'thread/tokenUsage/updated', params: notif({ total: {}, last: {}, modelContextWindow: 258_400 }) })
+    finish()
+    assert.equal('contextOccupancy' in results[1][1], false, 'a zero-token snapshot is a cannot-check, not a 0% meter')
+    cleanup()
+  })
+
+  it('omits maxTokens when codex reported no window, rather than sending null (#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 900 }, last: { totalTokens: 900 } })
+    finish()
+    assert.deepEqual(results[0][1].contextOccupancy, { totalTokens: 900 })
+    cleanup()
+  })
+
+  it('leaves cache_creation_input_tokens unmapped ON PURPOSE (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    // cacheWriteInputTokens is non-zero AND reasoningOutputTokens is a subset
+    // of outputTokens (the live capture's arithmetic: totalTokens 14962 =
+    // inputTokens 14935 + outputTokens 27, with reasoningOutputTokens 20).
+    tokenUsage({
+      total: { totalTokens: 1100, inputTokens: 1000, outputTokens: 100, cacheWriteInputTokens: 700, reasoningOutputTokens: 60 },
+      last: { totalTokens: 1100, inputTokens: 1000, outputTokens: 100, cacheWriteInputTokens: 700, reasoningOutputTokens: 60 },
+    })
+    finish()
+    const r = results[0][1]
+    assert.equal('cache_creation_input_tokens' in r.usage, false,
+      'codex cacheWriteInputTokens is plausibly another SUBSET of inputTokens; mapping it additively would double count')
+    assert.equal(r.modelUsage['gpt-5-codex'].cache_creation_input_tokens, 0,
+      'so it stays 0 downstream — deliberately, and this test is why it is not just an omission nobody noticed')
+    assert.equal(r.usage.output_tokens, 100,
+      'reasoningOutputTokens is inside outputTokens already — adding it would double count reasoning')
+    cleanup()
+  })
+
+  it('forwards the codex snapshot onto the wire as contextOccupancy (#7794)', async () => {
+    const { s, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+    const ctx = {
+      sessionId: 'sess-1',
+      mode: 'multi',
+      getSessionEntry: () => ({ session: { model: 'gpt-5-codex', permissionMode: 'approve' }, name: 'Codex', cwd: '/tmp' }),
+    }
+    const frames = []
+    // The same hop session-manager uses to forward a session result.
+    s.on('result', (data) => frames.push(...normalizer.normalize('result', data, ctx).messages))
+    await send('one')
+    tokenUsage({ total: { totalTokens: 16958 }, last: { totalTokens: 16958 }, modelContextWindow: 258_400 })
+    finish()
+    const resultMsg = frames.find((m) => m.msg.type === 'result')
+    assert.ok(resultMsg, 'precondition: the result reached the normalizer')
+    assert.deepEqual(resultMsg.msg.contextOccupancy, { totalTokens: 16958, maxTokens: 258_400 },
+      'the snapshot has to survive the normalizer hop, or the meter still never renders')
+    normalizer.destroy?.()
+    cleanup()
   })
 })
