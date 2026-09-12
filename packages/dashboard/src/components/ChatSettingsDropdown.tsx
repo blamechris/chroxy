@@ -14,7 +14,12 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #6901: single-source the sandbox label/description from protocol's
 // CODEX_SANDBOX_MODE_META so the read-only badge below never re-declares the
 // copy (same list the create-time selector uses).
-import { CODEX_SANDBOX_MODE_META, type CodexSandboxMode } from '@chroxy/protocol'
+import {
+  CODEX_SANDBOX_MODE_META,
+  type CodexSandboxMode,
+  thinkingLevelOptions,
+  type ThinkingLevelOption,
+} from '@chroxy/protocol'
 import { ModelPickerModal } from './ModelPickerModal'
 
 /**
@@ -79,6 +84,15 @@ export interface ChatSettingsDropdownProps {
   codexSandbox?: CodexSandboxMode | null
   showThinkingLevel: boolean
   thinkingLevel: string | null
+  // #7730: the levels THIS session's model offers, in the provider's own order
+  // — from the active model's catalog row (`reasoningLevels` /
+  // `defaultReasoningLevel`), which for codex is the binary's own
+  // `supportedReasoningEfforts`. The three literal <option>s that used to live
+  // below were a copy of the Claude vocabulary, so a codex session could only
+  // be offered levels codex does not have. Omitted → the Claude triple, which
+  // is what `thinkingLevelOptions(null)` resolves to, so a row with no
+  // reasoning levels (every Claude provider today) renders exactly as before.
+  thinkingLevels?: ThinkingLevelOption[]
   onThinkingLevelChange: (level: string) => void
   // promptEvaluator was originally rendered here as a per-session
   // checkbox alongside the model + permission selects. Moved to the
@@ -99,6 +113,7 @@ export function ChatSettingsDropdown({
   codexSandbox = null,
   showThinkingLevel,
   thinkingLevel,
+  thinkingLevels,
   onThinkingLevelChange,
   readOnlyModel = null,
   providerLabel = null,
@@ -115,6 +130,23 @@ export function ChatSettingsDropdown({
   useEffect(() => {
     if (availableModels.length === 0) setPickerOpen(false)
   }, [availableModels.length])
+
+  // #7730: the thinking-level <option> list, and which one is selected.
+  //
+  // Two things this has to get right, both learned from the model <select> two
+  // blocks down (#5628): a native <select> whose `value` matches no <option>
+  // silently renders the FIRST one, so a session running codex's `xhigh` would
+  // have shown "Low" — a control lying about the state it is in. If the current
+  // level is not in the offered list (a stale value mid-model-switch, or a
+  // Claude `default` on a codex row), it is APPENDED rather than dropped, so
+  // the control keeps naming what the session is actually at.
+  const thinkingLevelChoices = useMemo(() => {
+    const options = thinkingLevels && thinkingLevels.length > 0 ? thinkingLevels : thinkingLevelOptions(null)
+    const current = thinkingLevel && thinkingLevel.length > 0 ? thinkingLevel : options[0]!.id
+    return options.some(o => o.id === current)
+      ? { options, selected: current }
+      : { options: [...options, { id: current, label: current }], selected: current }
+  }, [thinkingLevels, thinkingLevel])
 
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
@@ -248,12 +280,12 @@ export function ChatSettingsDropdown({
         <select
           data-kind="thinking"
           aria-label="Thinking level"
-          value={thinkingLevel || 'default'}
+          value={thinkingLevelChoices.selected}
           onChange={e => onThinkingLevelChange(e.target.value)}
         >
-          <option value="default">Auto</option>
-          <option value="high">High</option>
-          <option value="max">Max</option>
+          {thinkingLevelChoices.options.map(({ id, label }) => (
+            <option key={id} value={id}>{label}</option>
+          ))}
         </select>
       )}
     </>

@@ -26,6 +26,10 @@ import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../
 // registerProvider is used by the scheduleProviderModelsRefresh suite to
 // inject fake provider classes (#5450).
 import { registerProvider } from '../src/providers.js'
+// #7730 — the codex thinking-level replay is exercised against the REAL session
+// class, because the thing under test IS the `get thinkingLevel` override: the
+// base class returns undefined and the replay below skips exactly that value.
+import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -1721,6 +1725,62 @@ describe('sendSessionInfo', () => {
     const thinkMsg = ctx._sends.find(m => m.type === 'thinking_level_changed')
     assert.ok(thinkMsg)
     assert.equal(thinkMsg.level, 'default')
+  })
+
+  // #7730 — the reconnect half of the codex reasoning control. `capabilities
+  // .thinkingLevel: true` lights the dropdown; this is what keeps the dropdown
+  // CORRECT after a reconnect or a tab switch. The two cases are a matched
+  // pair on purpose: the second is the control that proves the first is not
+  // passing because the replay fires unconditionally.
+  it('replays a codex session\'s reasoning effort (the get thinkingLevel override is live)', () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha', provider: 'codex' },
+    ])
+    const sk = mkdtempSync(join(tmpdir(), 'chroxy-wsh-codex-'))
+    const codex = new CodexAppServerSession({ cwd: '/alpha', skillsDir: sk, repoSkillsDir: null })
+    try {
+      codex.setThinkingLevel('xhigh')
+      sessionsMap.get('sess-1').session = codex
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-1')
+
+      const thinkMsg = ctx._sends.find(m => m.type === 'thinking_level_changed')
+      assert.ok(thinkMsg, 'a codex session must replay its reasoning effort — without the override it is undefined and skipped')
+      assert.equal(thinkMsg.level, 'xhigh')
+      assert.equal(thinkMsg.sessionId, 'sess-1')
+    } finally {
+      codex.destroy()
+    }
+  })
+
+  it('a FRESH codex session with no effort known replays the legacy default, not a fabricated level', () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha', provider: 'codex' },
+    ])
+    const sk = mkdtempSync(join(tmpdir(), 'chroxy-wsh-codex-'))
+    const codex = new CodexAppServerSession({ cwd: '/alpha', skillsDir: sk, repoSkillsDir: null })
+    try {
+      sessionsMap.get('sess-1').session = codex
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      sendSessionInfo(ctx, ws, 'sess-1')
+
+      // thinkingLevel is null (not undefined), so the replay DOES fire — with
+      // the legacy default, which is what `level || default` has always sent
+      // for a falsy-but-defined level. Pinned so the behaviour is a decision
+      // rather than an accident: a codex model that does not offer that level
+      // renders it as an extra option rather than silently selecting the first.
+      const thinkMsg = ctx._sends.find(m => m.type === 'thinking_level_changed')
+      assert.ok(thinkMsg)
+      assert.equal(thinkMsg.level, 'default')
+    } finally {
+      codex.destroy()
+    }
   })
 
   it('does NOT send thinking_level_changed when thinkingLevel is undefined', () => {

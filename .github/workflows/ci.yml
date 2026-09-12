@@ -862,6 +862,17 @@ jobs:
       - name: No fallback-less var(--…) to an undefined CSS custom property
         run: bash scripts/lint-undefined-css-vars.sh
 
+      - name: Exactly one literal roster of thinking/reasoning levels
+        # #7730 — the level vocabulary was frozen into six independent sites,
+        # every one of them written when Claude was the only provider with a
+        # reasoning control. Codex advertises supportedReasoningEfforts PER
+        # MODEL, so no repo-wide list can be right. This fails on a SECOND
+        # literal list anywhere in non-test source; the one legal copy is
+        # LEGACY_THINKING_LEVELS in packages/protocol/src/thinking-levels.ts.
+        # The scan is fail-closed on its own file count (a filter that matches
+        # nothing would otherwise report a clean repo — #7503).
+        run: bash scripts/lint-thinking-level-roster.sh
+
       - name: No literal NUL bytes in tracked source files
         # #7103 — a raw NUL makes a text file invisible to every search layer
         # that passes grep's -I, silently: an empty result is indistinguishable
@@ -1436,6 +1447,14 @@ jobs:
 
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
+
+      - name: Run lint-thinking-level-roster golden test
+        # #7730 — positive controls for the guard above: a restored Set, a TS
+        # union, a z.enum and a codex-flavoured list must each go red, a lone
+        # `|| 'default'` fallback must stay green (a check that denies
+        # everything passes a naive negative test too, #7273), and a scan below
+        # the min-files floor must fail rather than report clean.
+        run: bash scripts/__tests__/lint-thinking-level-roster.test.sh
 
       - name: Run lint-write-only-ctx-fields tests
         run: node scripts/__tests__/lint-write-only-ctx-fields.test.mjs

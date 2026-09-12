@@ -326,7 +326,7 @@ function _isSecureRequest(req) {
  *   { type: 'terminal_unsubscribe', sessionId }         — #5835 opt OUT of a session's live PTY mirror
  *   { type: 'terminal_resize', sessionId, cols, rows }  — #5835 Phase 2 request to resize the live claude-tui PTY; applied only for the session's primary owner (or an unclaimed session), then broadcast back as terminal_size
  *   { type: 'terminal_input', sessionId, data }         — #5835 Phase 3 raw keystrokes → live claude-tui PTY (true remote control); authority mirrors `input` (bound-session check + single-driver primary gate; an observer's keystroke is rejected with input_conflict)
- *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
+ *   { type: 'set_thinking_level', level }               — set the reasoning level; the accepted values are whatever the session's ACTIVE MODEL advertises (`reasoningLevels`), falling back to the Claude triple for a model row that carries none (#7730)
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_mcp_server_enabled', server, enabled, sessionId?, requestId? } — #6824 runtime park/unpark of an ALREADY-CONFIGURED MCP server (BYOK lane; own-session gate)
  *   { type: 'submit_mcp_auth_code', server, code, sessionId?, requestId? } — #6822 submit a pasted OAuth authorization code for a remote MCP server (BYOK lane)

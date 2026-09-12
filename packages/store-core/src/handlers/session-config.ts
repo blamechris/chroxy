@@ -9,6 +9,7 @@
  * for the stateless-handler contract.
  */
 
+import { isWellFormedThinkingLevel, LEGACY_DEFAULT_THINKING_LEVEL } from '@chroxy/protocol'
 import type { ActiveTool, TranscriptBackgroundTask } from '../types'
 import { parseStringField, resolveSessionId, type SessionPatch } from './_shared'
 
@@ -160,13 +161,32 @@ export function handleSessionActivity(
 // thinking_level_changed
 // ---------------------------------------------------------------------------
 
-export type ThinkingLevel = 'default' | 'high' | 'max'
+/**
+ * #7730 — an OPEN string, not a union of three.
+ *
+ * This used to be a union of the three Claude levels, with a `Set` that
+ * silently COERCED anything else to the first of them. That coercion is the
+ * defect: the server has just CONFIRMED a level the session actually entered
+ * (codex reports `xhigh` from the operator's own `~/.codex/config.toml`), and
+ * the store threw it away and rendered "Auto" — a control reporting a state
+ * the session is not in, with no error anywhere. The roster is per-model and lives on the model's
+ * catalog row; the store keeps whatever the server confirmed.
+ */
+export type ThinkingLevel = string
 
-const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(['default', 'high', 'max'])
-
-/** Extract and validate the thinking level from a `thinking_level_changed` message. */
+/**
+ * Extract the thinking level from a `thinking_level_changed` message.
+ *
+ * The only check left is the SYNTACTIC one shared with the wire schema and the
+ * server gate (`isWellFormedThinkingLevel`: 1-32 chars of `[A-Za-z0-9_-]`) —
+ * it bounds what a compromised or buggy server can push into a React `value`
+ * prop and a persisted store, without pretending to know which levels exist.
+ * A missing, malformed or oversized value falls back to the legacy default
+ * rather than being carried: that is "the server said nothing usable", which is
+ * a different thing from "the server named a level this client has not heard
+ * of" — the latter is now kept verbatim.
+ */
 export function handleThinkingLevelChanged(msg: Record<string, unknown>): { level: ThinkingLevel } {
-  const raw = parseStringField(msg, 'level') || 'default'
-  const level = VALID_THINKING_LEVELS.has(raw as ThinkingLevel) ? (raw as ThinkingLevel) : 'default'
-  return { level }
+  const raw = parseStringField(msg, 'level')
+  return { level: isWellFormedThinkingLevel(raw) ? raw : LEGACY_DEFAULT_THINKING_LEVEL }
 }

@@ -4,6 +4,7 @@
  * Handles: set_model, set_permission_mode, permission_response,
  *          query_permission_audit, list_providers, set_permission_rules
  */
+import { isWellFormedThinkingLevel, resolveThinkingLevels } from '@chroxy/protocol'
 import { ALLOWED_MODEL_IDS, toShortModelId, isClaudeProvider } from '../models.js'
 import {
   ALLOWED_PERMISSION_MODE_IDS,
@@ -612,7 +613,61 @@ function handleListProviders(ws, client, msg, ctx) {
   ctx.transport.send(ws, { type: 'provider_list', providers: listProviders() })
 }
 
-const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
+/**
+ * #7730 — the AUTHORITATIVE per-model thinking-level gate.
+ *
+ * This replaces `VALID_THINKING_LEVELS`, a Set of the three Claude levels and
+ * one of six frozen copies of a vocabulary that was only ever true of the
+ * Claude family. Codex advertises `supportedReasoningEfforts` PER MODEL (the
+ * values differ per model and move with releases), so the question "is this a
+ * real level?" has no repo-wide answer — only "is this level offered by the
+ * model THIS session is running?", and this handler is the layer that can see
+ * both the session and its provider.
+ *
+ * The roster comes from the provider class's own `getModelMetadata(id)`, which
+ * for codex returns the discovered `model/list` row (#7726) and for the Claude
+ * providers returns a row with no `reasoningLevels` at all —
+ * `resolveThinkingLevels` then falls back to `LEGACY_THINKING_LEVELS`, so
+ * claude-sdk keeps accepting exactly `default | high | max` and mapping them to
+ * `maxThinkingTokens`. Nothing about the Claude path changes.
+ *
+ * Fails OPEN to that same legacy triple when the provider or the model cannot
+ * be resolved (unknown provider name, a `getModelMetadata` that throws, a
+ * session whose model codex has not echoed yet). That is a deliberate choice
+ * and the cost is stated plainly: a codex session whose row is momentarily
+ * unreadable would accept `high` — a level codex does offer — rather than
+ * rejecting everything and leaving the operator with a dead dropdown. It is a
+ * cannot-check falling back to the one roster that is true of most sessions,
+ * never a cannot-check silently reading as "everything is fine".
+ *
+ * @returns {{levels: string[], defaultLevel: string, source: 'model'|'legacy', modelId: string|null}}
+ */
+function resolveSessionThinkingLevels(entry) {
+  const session = entry?.session
+  // Same precedence as ws-history's `model_changed` replay and session-manager's
+  // session_info render: the operator's explicit override first, then the model
+  // the provider actually booted. Keeping the three in step is what stops the
+  // gate from validating against a model the session is not running.
+  const modelId = (typeof session?.model === 'string' && session.model.length > 0)
+    ? session.model
+    : ((typeof session?.bootedModel === 'string' && session.bootedModel.length > 0) ? session.bootedModel : null)
+
+  let row = null
+  if (modelId && typeof entry?.provider === 'string' && entry.provider.length > 0) {
+    try {
+      const ProviderClass = getProvider(entry.provider)
+      if (ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
+        row = ProviderClass.getModelMetadata(modelId)
+      }
+    } catch {
+      // Unknown provider, or a provider whose metadata lookup threw. Falls
+      // through to the legacy roster below — see the docblock.
+      row = null
+    }
+  }
+
+  return { ...resolveThinkingLevels(row), modelId }
+}
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // #5731 T9: every rejection path echoes the client's requestId with a single
@@ -626,7 +681,15 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // (older clients omit it); sendError tolerates null.
   const requestId = msg?.requestId
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
-  if (!VALID_THINKING_LEVELS.has(level)) {
+  // #7730 — two questions, asked separately and in this order.
+  //
+  // FORM first, because it needs no session: the level is about to become a
+  // JSON-RPC param on a subprocess, so charset and length are checked with the
+  // same predicate the wire schema uses (1-32 chars of [A-Za-z0-9_-] — this is
+  // what refuses `../../etc` and a 200-char string). This says nothing about
+  // which levels exist; a syntactic guard that also carried the roster is what
+  // the six-site problem was made of.
+  if (!isWellFormedThinkingLevel(level)) {
     sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Invalid thinking level: ${level}`, undefined, ctx)
     return
   }
@@ -640,6 +703,23 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
 
   if (!entry.session || typeof entry.session.setThinkingLevel !== 'function') {
     sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'This provider does not support thinking level control', undefined, ctx)
+    return
+  }
+
+  // MEMBERSHIP second, and only here — this is the first point that knows both
+  // the session and the model it is running, which is the only scope in which
+  // the question has an answer (see resolveSessionThinkingLevels above).
+  const offered = resolveSessionThinkingLevels(entry)
+  if (!offered.levels.includes(level)) {
+    ;sessionLogger(sessionId).warn(`Rejected thinking level '${level}' on ${entry.provider || 'unknown-provider'} session ${sessionId} from ${client.id}: model ${offered.modelId || 'unknown'} offers ${offered.levels.join(', ')} (${offered.source})`)
+    sendError(
+      ws,
+      requestId,
+      'THINKING_LEVEL_NOT_APPLIED',
+      `Thinking level '${level}' is not offered by model '${offered.modelId || 'unknown'}'. Supported levels: ${offered.levels.join(', ')}`,
+      undefined,
+      ctx,
+    )
     return
   }
 

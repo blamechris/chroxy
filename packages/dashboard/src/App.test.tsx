@@ -1025,6 +1025,74 @@ describe('App', () => {
     })
   })
 
+  // #7730 — the levels the header offers come from the ACTIVE MODEL's roster
+  // row, not from a list in this repo. These pin the wiring end to end: the row
+  // arrives on `modelsByProvider`, the header resolves it against the session's
+  // active model, and the <select> renders whatever it says.
+  describe('thinking levels come from the active model row (#7730)', () => {
+    const codexSession = {
+      sessionId: 's1', name: 'Codex', cwd: '/tmp', type: 'cli' as const, hasTerminal: true,
+      model: null, permissionMode: null, isBusy: false, createdAt: Date.now(),
+      conversationId: null, provider: 'codex',
+    }
+
+    function codexStateWith(models: unknown[], activeModel: string | null) {
+      return {
+        connectionPhase: 'connected' as const,
+        sessions: [codexSession],
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'codex', capabilities: { thinkingLevel: true, thinkingKeywords: false } }],
+        modelsByProvider: { codex: { models, defaultModelId: null } },
+        getActiveSessionState: () => ({
+          messages: [],
+          streamingMessageId: null,
+          activeModel,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+          thinkingLevel: null,
+        }),
+      }
+    }
+
+    function levelOptions() {
+      const select = screen.getByLabelText('Thinking level') as HTMLSelectElement
+      return Array.from(select.options).map(o => o.value)
+    }
+
+    it("offers the MODEL's own efforts — including one no list in this repo contains", () => {
+      stateOverrides = codexStateWith(
+        [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5', reasoningLevels: ['low', 'zzz', 'xhigh'], defaultReasoningLevel: 'zzz' }],
+        'gpt-5.5',
+      )
+      render(<App />)
+      expect(levelOptions()).toEqual(['low', 'zzz', 'xhigh'])
+    })
+
+    it('falls back to the Claude triple for a model row that advertises none', () => {
+      // The control. Without it, "the picker offers the model's levels" would
+      // also pass for a picker that offers everything it has ever seen.
+      stateOverrides = codexStateWith(
+        [{ id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5' }],
+        'gpt-5.5',
+      )
+      render(<App />)
+      expect(levelOptions()).toEqual(['default', 'high', 'max'])
+    })
+
+    it('matches the roster row on the FULL id as well as the short id', () => {
+      stateOverrides = codexStateWith(
+        [{ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', reasoningLevels: ['low', 'zzz'] }],
+        'claude-sonnet-4-6',
+      )
+      render(<App />)
+      expect(levelOptions()).toEqual(['low', 'zzz'])
+    })
+  })
+
   // #6861 / PR #6878 (Copilot review thread) — the `#`-prefix quick-append must
   // be SKIPPED for PTY-backed sessions (claude-tui / user-shell): the composer
   // routes to the terminal there, where a leading `#` is a shell comment, not a

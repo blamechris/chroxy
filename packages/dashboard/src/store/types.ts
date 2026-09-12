@@ -364,7 +364,19 @@ export interface DiffResult {
   error: string | null;
 }
 
-export type ThinkingLevel = 'default' | 'high' | 'max';
+/**
+ * #7730 — an OPEN string, not a union of three.
+ *
+ * The offered levels are a property of the MODEL (codex's `model/list`
+ * advertises `supportedReasoningEfforts` per row, and the set differs per model
+ * and moves with releases), so a union here could only ever describe the Claude
+ * family. It read as a type-safety win and was the opposite: it made the two
+ * call sites reach for `as`-to-this-union casts, which compiled while being
+ * false. The roster now travels with the model row
+ * (`ModelInfo.reasoningLevels`) and is resolved by `resolveThinkingLevels` in
+ * `@chroxy/protocol`.
+ */
+export type ThinkingLevel = string;
 
 /**
  * Session-scoped auto-approval rule. Mirrors the app-side shape so the

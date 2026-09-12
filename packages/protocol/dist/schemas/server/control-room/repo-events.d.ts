@@ -43,9 +43,9 @@ import { z } from 'zod';
  */
 export declare const RepoEventSchema: z.ZodObject<{
     kind: z.ZodEnum<{
+        push: "push";
         ping: "ping";
         issues: "issues";
-        push: "push";
         pull_request: "pull_request";
     }>;
     repo: z.ZodNullable<z.ZodString>;
@@ -74,9 +74,9 @@ export declare const ServerRepoEventsSnapshotSchema: z.ZodObject<{
     generatedAt: z.ZodString;
     events: z.ZodArray<z.ZodObject<{
         kind: z.ZodEnum<{
+            push: "push";
             ping: "ping";
             issues: "issues";
-            push: "push";
             pull_request: "pull_request";
         }>;
         repo: z.ZodNullable<z.ZodString>;
@@ -110,9 +110,9 @@ export declare const ServerRepoEventsDeltaSchema: z.ZodObject<{
     generatedAt: z.ZodString;
     event: z.ZodObject<{
         kind: z.ZodEnum<{
+            push: "push";
             ping: "ping";
             issues: "issues";
-            push: "push";
             pull_request: "pull_request";
         }>;
         repo: z.ZodNullable<z.ZodString>;

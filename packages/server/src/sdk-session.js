@@ -1781,7 +1781,11 @@ export class SdkSession extends BaseSession {
 
   /**
    * Set thinking level by adjusting max thinking tokens.
-   * @param {string} level - 'default' | 'high' | 'max'
+   * A key of `SdkSession.THINKING_BUDGETS` — the Claude budget table. An
+   * unknown key resolves to a null budget (adaptive), so this method never
+   * rejects: the per-model membership decision belongs to the
+   * `set_thinking_level` handler, which knows the session's model (#7730).
+   * @param {string} level
    */
   async setThinkingLevel(level) {
     const budget = SdkSession.THINKING_BUDGETS[level] ?? null

@@ -77,6 +77,14 @@ export const CLAUDE_TUI_PTY_SIZE = Object.freeze({ cols: 120, rows: 30 })
 // `z.enum(CODEX_SANDBOX_MODES)` without a circular import through this entry.
 export * from './codex.ts'
 
+// #7730: the thinking / reasoning-effort vocabulary — the bounded syntactic
+// guard, the per-model roster resolver, and the legacy Claude triple that is
+// the ONLY literal level list in non-test source. Kept in a dedicated module
+// for the same reason as `./codex.ts`: `./schemas/client.ts` composes the
+// predicate for `set_thinking_level` without a circular import through this
+// entry, and store-core / the clients import it without pulling in Zod.
+export * from './thinking-levels.ts'
+
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from './schemas/index.ts'
 

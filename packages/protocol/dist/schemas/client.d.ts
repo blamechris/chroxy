@@ -141,13 +141,29 @@ export declare const SetPermissionModeSchema: z.ZodObject<{
     }>;
     confirmed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>;
+/**
+ * #7730 — a BOUNDED string, not an enum.
+ *
+ * The level a client asks for is per-MODEL (codex advertises
+ * `supportedReasoningEfforts` per row; the values differ per model and move
+ * with releases), so the wire schema cannot hold the roster — an enum here
+ * would reject a level the operator's own binary offers, and would have to be
+ * edited every time OpenAI ships one. Membership is decided server-side
+ * against the ACTIVE MODEL's row (`settings-handlers.js`), which is the only
+ * place that knows which model the session is running.
+ *
+ * What stays here is the part that is NOT about the roster: the value lands in
+ * a JSON-RPC param on a subprocess, so charset and length still matter.
+ * `isWellFormedThinkingLevel` is the single implementation of that check —
+ * shared with the server gate and both clients — and it refuses an empty
+ * string, anything over 32 chars, and every character outside `[A-Za-z0-9_-]`
+ * (so `../../etc` and a 200-char string are rejected right here, before any
+ * handler sees them).
+ */
+export declare const ThinkingLevelValueSchema: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
 export declare const SetThinkingLevelSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_thinking_level">;
-    level: z.ZodEnum<{
-        default: "default";
-        high: "high";
-        max: "max";
-    }>;
+    level: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const PermissionRuleSchema: z.ZodObject<{
@@ -1131,11 +1147,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     confirmed: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_thinking_level">;
-    level: z.ZodEnum<{
-        default: "default";
-        high: "high";
-        max: "max";
-    }>;
+    level: z.ZodString & z.ZodType<string, string, z.core.$ZodTypeInternals<string, string>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_permission_rules">;

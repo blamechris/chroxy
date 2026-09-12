@@ -15,6 +15,7 @@
  */
 import { z } from 'zod';
 import { CODEX_SANDBOX_MODES } from "../codex.js";
+import { isWellFormedThinkingLevel, THINKING_LEVEL_MAX_LENGTH } from "../thinking-levels.js";
 // -- Attachment schema (reusable) --
 const BinaryAttachmentSchema = z.object({
     type: z.enum(['image', 'document']),
@@ -170,9 +171,31 @@ export const SetPermissionModeSchema = z.object({
     mode: z.enum(['approve', 'auto', 'plan', 'acceptEdits']),
     confirmed: z.boolean().optional(),
 }).passthrough();
+/**
+ * #7730 — a BOUNDED string, not an enum.
+ *
+ * The level a client asks for is per-MODEL (codex advertises
+ * `supportedReasoningEfforts` per row; the values differ per model and move
+ * with releases), so the wire schema cannot hold the roster — an enum here
+ * would reject a level the operator's own binary offers, and would have to be
+ * edited every time OpenAI ships one. Membership is decided server-side
+ * against the ACTIVE MODEL's row (`settings-handlers.js`), which is the only
+ * place that knows which model the session is running.
+ *
+ * What stays here is the part that is NOT about the roster: the value lands in
+ * a JSON-RPC param on a subprocess, so charset and length still matter.
+ * `isWellFormedThinkingLevel` is the single implementation of that check —
+ * shared with the server gate and both clients — and it refuses an empty
+ * string, anything over 32 chars, and every character outside `[A-Za-z0-9_-]`
+ * (so `../../etc` and a 200-char string are rejected right here, before any
+ * handler sees them).
+ */
+export const ThinkingLevelValueSchema = z.string().refine(isWellFormedThinkingLevel, {
+    message: `thinking level must be 1-${THINKING_LEVEL_MAX_LENGTH} characters of [A-Za-z0-9_-]`,
+});
 export const SetThinkingLevelSchema = z.object({
     type: z.literal('set_thinking_level'),
-    level: z.enum(['default', 'high', 'max']),
+    level: ThinkingLevelValueSchema,
     sessionId: z.string().max(256).optional(),
 }).passthrough();
 export const PermissionRuleSchema = z.object({
