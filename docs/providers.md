@@ -259,7 +259,7 @@ OPENAI_API_KEY=sk-... chroxy start --provider codex
 ### Common pitfalls
 
 - **Empty streams on stderr warnings**: Codex writes occasional `WARN`/`ERROR` lines to stderr that Chroxy logs but doesn't propagate as session errors unless the process exits non-zero.
-- **The picker is empty or short until the binary answers**: the model roster comes from the installed `codex` binary, not from a Chroxy release — see [Where the model list comes from](#where-the-model-list-comes-from-modellist). Until an answer lands you see the hand-maintained seed rows.
+- **The picker is short, or not the list you expected, until the binary answers**: the model roster comes from the installed `codex` binary, not from a Chroxy release — see [Where the model list comes from](#where-the-model-list-comes-from-modellist). Until an answer lands you see the hand-maintained seed rows; it does not go empty, because a probe that failed and a binary that answered with zero rows both leave the previous roster standing.
 - **The context meter is dashed on a brand-new session**: `model/list` carries no context window at all, so unless the Codex CLI's own cache happens to name one, nothing knows the window until the first turn reports it. See [The context window and the meter](#the-context-window-and-the-meter).
 - **How the model id is passed depends on the driver**: the default app-server driver sends `model` as a JSON-RPC param on `thread/start` and on **every** `turn/start`, so a mid-session switch takes effect on the next message. The legacy exec driver passes `-c 'model="<id>"'` on the next `codex exec` instead. Either way there is no process to restart.
 
@@ -394,7 +394,7 @@ prompt.
 
 The codex picker is **not** a list Chroxy ships. Since #7726/#7727 the roster is
 whatever the installed `codex` binary says it can run, asked over the app-server's
-own `model/list` method. Five sources:
+own `model/list` method. The sources, and what each one is good for:
 
 | # | Source | When it is used | What it contributes |
 |---|---|---|---|
@@ -408,8 +408,11 @@ Rules that matter when you are reading a picker and wondering what you are seein
 
 - **A learned roster REPLACES, it does not union.** Once the binary has answered,
   the seed rows are gone from `available_models` — a model OpenAI retired must be
-  able to disappear (#7761/#7765 scoped the old fallback union, and the `[1m]`
-  variant synthesis, to the Claude registry, which is where they belong).
+  able to disappear (#7761/#7765 scoped the old fallback union away from any
+  provider that reports its own roster, and the `[1m]` variant synthesis — a
+  Claude-CLI id convention — to the Claude registry outright. A provider with no
+  discovery seam at all, and ollama, whose seed is a list of models to pull
+  rather than a roster claim, still union).
 - **"Could not ask" and "there is nothing there" are different states.** A failed
   or unparseable answer leaves the previous roster exactly as it was; only a
   well-formed answer with zero rows records an empty one.
@@ -964,7 +967,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | Yes (persistent thread) | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
 
-> **The `codex` column is the DEFAULT app-server driver** (`CodexAppServerSession`), the class `getProvider('codex')` returns unless `CHROXY_CODEX_APPSERVER=0` opts out (#6616). Cells marked *(app-server)* are exactly the ones the legacy `codex exec` driver (`CodexSession`) reports as `false`: permissions, in-process permissions, permission-mode switch, thinking-level control, and attachments. Everything else in the column is identical on both drivers — including **conversation continuity**, which the exec driver keeps by resuming its own thread on every turn (`codex exec resume <id>`, #3865) rather than by holding a process open.
+> **The `codex` column is the DEFAULT app-server driver** (`CodexAppServerSession`), the class `getProvider('codex')` returns unless `CHROXY_CODEX_APPSERVER=0` opts out (#6616). Cells marked *(app-server)* are exactly the ones the legacy `codex exec` driver (`CodexSession`) does not have: `permissions`, `inProcessPermissions`, `permissionModeSwitch` and `thinkingLevel` are all `false` in its capability object, and attachments — a **(behavioural)** row, not a capability key on either class — are rejected with a session-level error on that path. Everything else in the column is identical on both drivers — including **conversation continuity**, which the exec driver keeps by resuming its own thread on every turn (`codex exec resume <id>`, #3865) rather than by holding a process open.
 
 > The `claude-byok`, `deepseek`, and `ollama` columns share one session class — `deepseek-session.js` and `ollama-session.js` subclass `ClaudeByokSession` (`byok-session.js`), overriding only credentials, endpoint, model registry, and pricing — so their **(capability)** rows are identical by construction. Behaviourally they differ in cost reporting: `claude-byok` and `deepseek` compute real per-token API cost from their pricing tables, while `ollama` reports an honest $0 (local inference). Attachments are dropped with a session-level error ("does not yet materialise attachments") on all three; in-memory history means continuity within the server process but no cross-restart resume (`resume: false`, tracked in #4047).
 >

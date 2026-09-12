@@ -124,9 +124,10 @@ Consequences:
 can edit files). Applied **once at thread start** — the sandbox is **not** a
 per-turn parameter, so a mid-session sandbox change would need a new thread.
 
-Three things *are* per-turn, and the list has grown since this section was
-written — `_buildTurnParams` in `codex-app-server-session.js` is the one place
-that spells it out:
+Other things *are* per-turn, and that list has grown since this section was
+written — so it is not restated here as a count. `_buildTurnParams` in
+`codex-app-server-session.js` is the one place that spells it out, and this
+table tracks it:
 
 | `turn/start` param | Why it rides every turn |
 |---|---|
