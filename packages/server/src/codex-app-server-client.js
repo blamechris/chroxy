@@ -5,6 +5,31 @@ import { createLogger } from './logger.js'
 const log = createLogger('codex-app-server')
 
 /**
+ * Build the rejection for a JSON-RPC error response, CARRYING the numeric code
+ * (#7724). The message alone cannot be switched on: the live binary answers an
+ * unknown method with -32600 "Invalid request: unknown variant `x`..." rather
+ * than -32601, so a caller that wants to distinguish a protocol-level refusal
+ * from a transport failure needs the code, not the wording. `jsonRpcCode` is
+ * for LOGGING and diagnostics — `probeMethod` still degrades on ANY error.
+ *
+ * The numeric code goes on `jsonRpcCode` ONLY — never on `err.code`. That slot
+ * belongs to the session-start error contract: session-manager.js:1766 and
+ * :1804 stamp `if (err && !err.code) err.code = 'START_FAILED'` on a rejection
+ * from `start()`, and any truthy NUMBER parked there short-circuits the stamp.
+ * `session_create_failed.errorCode` would then carry -32600, ws-forwarding.js
+ * puts it on the wire as `session_error.code`, and both clients DROP it —
+ * `ServerSessionErrorSchema.code` is `z.string().optional()`, and store-core's
+ * `parseRawStringField` returns null for a non-string. A codex session that
+ * failed to start would lose its error code entirely.
+ */
+function jsonRpcError(error) {
+  const err = new Error(error.message || JSON.stringify(error))
+  if (typeof error.code === 'number') err.jsonRpcCode = error.code
+  if (error.data !== undefined) err.data = error.data
+  return err
+}
+
+/**
  * JSON-RPC 2.0 transport for `codex app-server` (newline-delimited over stdio).
  *
  * Spawns the app-server child, performs the `initialize` / `initialized`
@@ -109,7 +134,7 @@ export class CodexAppServerClient extends EventEmitter {
       const pend = this._pending.get(m.id)
       if (!pend) return
       this._pending.delete(m.id)
-      if (m.error) pend.reject(new Error(m.error.message || JSON.stringify(m.error)))
+      if (m.error) pend.reject(jsonRpcError(m.error))
       else pend.resolve(m.result)
       return
     }
