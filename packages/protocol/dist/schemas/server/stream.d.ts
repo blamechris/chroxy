@@ -236,7 +236,42 @@ export declare const ServerAvailableModelsEntrySchema: z.ZodObject<{
     label: z.ZodString;
     fullId: z.ZodString;
     contextWindow: z.ZodOptional<z.ZodUnknown>;
+    provenance: z.ZodOptional<z.ZodUnknown>;
+    reasoningLevels: z.ZodOptional<z.ZodUnknown>;
+    defaultReasoningLevel: z.ZodOptional<z.ZodUnknown>;
 }, z.core.$strip>;
+/**
+ * How a model row got into the registry (#7723, epic #7721).
+ *
+ * - `discovered` — reported by the provider at runtime (a live model list).
+ * - `catalogued` — read from a static in-repo catalogue for that provider.
+ * - `manual` — supplied by the operator (the `~/.chroxy/models.json` overlay).
+ *
+ * Carried so a hand-maintained row can stay in the picker while being
+ * LABELLED as hand-maintained, instead of masquerading as provider truth
+ * (the #7348 class). Producers only ever STAMP a value they know; nothing
+ * infers one, so an entry with no `provenance` means "not recorded", never
+ * "manual".
+ *
+ * The wire schema deliberately does NOT `z.enum()` this: a value outside the
+ * union must drop the FIELD, not the model, so an older client keeps working
+ * against a newer server. `handleAvailableModels` in `@chroxy/store-core` is
+ * the one place that narrows against this list.
+ */
+export declare const MODEL_PROVENANCE_VALUES: readonly ["discovered", "catalogued", "manual"];
+export type ModelProvenance = (typeof MODEL_PROVENANCE_VALUES)[number];
+/**
+ * The optional metadata keys an `available_models` entry may carry ON TOP of
+ * the `{id,label,fullId}` identity and `contextWindow` (#7723).
+ *
+ * One roster, consumed by every layer that has to move these fields as a
+ * GROUP rather than individually: the server registry copies them through
+ * `updateModels`/`loadCache` with it, and the protocol test asserts it stays
+ * equal to the schema's own optional-metadata keys — so adding a field to
+ * `ServerAvailableModelsEntrySchema` without adding it here goes red instead
+ * of being silently dropped on the way to the wire.
+ */
+export declare const MODEL_ENTRY_METADATA_KEYS: readonly ["provenance", "reasoningLevels", "defaultReasoningLevel"];
 export declare const ServerAvailableModelsSchema: z.ZodObject<{
     type: z.ZodLiteral<"available_models">;
     models: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;

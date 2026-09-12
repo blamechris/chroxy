@@ -1,5 +1,6 @@
 import { readFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { basename, dirname } from 'path'
+import { MODEL_ENTRY_METADATA_KEYS } from '@chroxy/protocol'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { configPath } from './config-dir.js'
@@ -430,6 +431,45 @@ function humanizeModelId(id) {
 }
 
 /**
+ * Copy the optional `available_models` metadata (#7723) onto a registry entry,
+ * taking each key from the FIRST source that carries a usable value.
+ *
+ * The key roster is `MODEL_ENTRY_METADATA_KEYS` from `@chroxy/protocol` — the
+ * same list the wire schema declares — so a field added to the entry schema is
+ * carried by every construction site here without a second list to keep in
+ * sync. Nothing is synthesized: a source that never supplies a key leaves the
+ * key ABSENT, so an entry with none of these fields stays byte-identical to
+ * what it was before this change (and to what older clients already parse).
+ *
+ * @param {Object} entry - mutated in place and returned
+ * @param {...(Object|null|undefined)} sources - highest precedence first
+ */
+function withModelMetadata(entry, ...sources) {
+  for (const key of MODEL_ENTRY_METADATA_KEYS) {
+    for (const source of sources) {
+      const value = source?.[key]
+      if (value === undefined || value === null) continue
+      entry[key] = value
+      break
+    }
+  }
+  return entry
+}
+
+/**
+ * The caller-supplied context window from an `updateModels()` / cache entry,
+ * or `undefined` when it is absent or unusable (#7723).
+ *
+ * `undefined` (not `null`) so the caller can keep chaining with `??` — a
+ * provider that means "window unknown, never fabricate" says so through its
+ * own `getModelMetadata()`, which is consulted further down the chain.
+ */
+function usableContextWindow(source) {
+  const cw = source?.contextWindow
+  return typeof cw === 'number' && Number.isFinite(cw) && cw > 0 ? cw : undefined
+}
+
+/**
  * Factory function that creates an isolated models registry.
  * Each instance has its own mutable state, preventing test pollution.
  *
@@ -472,6 +512,17 @@ export function createModelsRegistry(hooks = {}) {
   const cachePathFn = typeof hooks.cachePath === 'function' ? hooks.cachePath : getDefaultCachePath
   const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
   const overlay = hooks.overlay instanceof Map ? hooks.overlay : new Map()
+  // #7723 — `loadCache()`'s stale-entry prune reads a CLAUDE grammar:
+  // `modelFamilyAndMinor` matches `claude-<family>-<major>[-<minor>]` and the
+  // filter keeps only families present in the fallback roster. Against a
+  // NON-Claude roster that grammar degenerates to "keep only ids literally in
+  // the static seed", so a discovered `gpt-5.5` is written by `saveCache()` and
+  // deleted on the next boot — taking its learned context window with it. The
+  // prune therefore applies exactly where its grammar came from: a registry
+  // seeded with Claude's own `FALLBACK_MODELS`. Identity, not a name check —
+  // the roster IS the thing the regex was written against, and a provider that
+  // passes its own list is by construction not it.
+  const prunesStaleClaudeFamilies = baseFallbackModels === FALLBACK_MODELS
   // #6381: the CURRENT overlay (swapped by applyOverlay on hot-reload), retained
   // so getOverlayPricing() reflects live edits. The fallback rows don't carry
   // pricing, so pricing is read from this map directly.
@@ -741,10 +792,19 @@ export function createModelsRegistry(hooks = {}) {
           // Prefer an authoritative value observed from SDK modelUsage
           // over the static heuristic, so a learned contextWindow isn't
           // lost when _fetchSupportedModels() fires on every init.
+          //
+          // #7723 — the CALLER's `contextWindow` sits directly below the
+          // learned override and ABOVE the provider's static table: it is
+          // what the provider reported for this id on THIS refresh (live
+          // discovery), so it beats a hand-maintained table row and the
+          // heuristic. Until this line existed, the `contextWindow` key
+          // `refreshDiscoveredModels()` passes was read by nothing and every
+          // discovered window was silently replaced by the 200k default.
           const contextWindow = contextWindowOverrides.get(fullId)
+            ?? usableContextWindow(m)
             ?? providerMeta?.contextWindow
             ?? resolveContextWindowFn(fullId)
-          return { id: derivedId, label, fullId, contextWindow }
+          return withModelMetadata({ id: derivedId, label, fullId, contextWindow }, m, providerMeta)
         })
 
       if (droppedCount > 0) {
@@ -784,7 +844,7 @@ export function createModelsRegistry(hooks = {}) {
             ?? providerMeta?.contextWindow
             ?? fb.contextWindow
             ?? resolveContextWindowFn(fb.fullId)
-          converted.push({ id, label, fullId: fb.fullId, contextWindow })
+          converted.push(withModelMetadata({ id, label, fullId: fb.fullId, contextWindow }, providerMeta, fb))
           seenFullIds.add(fb.fullId)
         }
       }
@@ -816,12 +876,15 @@ export function createModelsRegistry(hooks = {}) {
         // Currently unreachable for codex/gemini (no 1M models today) but
         // keeps the synthesis path consistent with the five other call sites.
         const providerMeta = getModelMetadataFn ? getModelMetadataFn(variantFullId) : null
-        variants.push({
+        // #7723: the synthesized variant is the SAME model at a longer window,
+        // so it inherits the base entry's metadata when the provider has none
+        // of its own for the variant id.
+        variants.push(withModelMetadata({
           id: variantId,
           label: providerMeta?.label || humanizeModelId(variantId),
           fullId: variantFullId,
           contextWindow: 1_000_000,
-        })
+        }, providerMeta, m))
         seenFullIds.add(variantFullId)
         // Drift detection (#4106 + #4116). Two failure modes both lose
         // the premium tier in different ways:
@@ -972,6 +1035,11 @@ export function createModelsRegistry(hooks = {}) {
         )
         const models = valid
           .filter(m => {
+            // #7723: non-Claude registries keep every well-formed cached entry
+            // — their ids carry no family/minor grammar for this filter to
+            // read, so applying it would delete exactly the discovered models
+            // the cache exists to remember.
+            if (!prunesStaleClaudeFamilies) return true
             const { family, minor } = modelFamilyAndMinor(m.fullId)
             if (!fallbackByFamily.has(family)) return false
             if (minor === null) return true
@@ -987,7 +1055,10 @@ export function createModelsRegistry(hooks = {}) {
             // Mirrors the post-filter merge step below which already
             // consults `getModelMetadataFn` for the same reason.
             const providerMeta = getModelMetadataFn ? getModelMetadataFn(m.fullId) : null
-            return {
+            // #7723: the cached entry's own metadata wins over the provider's
+            // static table — the cache is what the provider REPORTED, the
+            // table is what the repo happens to know.
+            return withModelMetadata({
               id: m.id,
               fullId: m.fullId,
               label: typeof m.label === 'string' && m.label.length > 0
@@ -996,7 +1067,7 @@ export function createModelsRegistry(hooks = {}) {
               contextWindow: typeof m.contextWindow === 'number' && m.contextWindow > 0
                 ? m.contextWindow
                 : resolveContextWindowFn(m.fullId),
-            }
+            }, m, providerMeta)
           })
 
         const droppedStaleCount = valid.length - models.length
@@ -1025,7 +1096,7 @@ export function createModelsRegistry(hooks = {}) {
             const id = providerMeta?.id ?? deriveIdFn(fb.fullId)
             const label = providerMeta?.label || humanizeModelId(id)
             const contextWindow = providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
-            models.push({ id, fullId: fb.fullId, label, contextWindow })
+            models.push(withModelMetadata({ id, fullId: fb.fullId, label, contextWindow }, providerMeta, fb))
             seenFullIds.add(fb.fullId)
           }
         }

@@ -11,9 +11,9 @@
  * for the stateless-handler contract.
  */
 
-import type { ModelInfo } from '../types'
+import type { ModelInfo, ModelProvenance } from '../types'
 // Established Zod-handler pattern (#3138).
-import { ServerAvailableModelsEntrySchema } from '@chroxy/protocol'
+import { MODEL_PROVENANCE_VALUES, ServerAvailableModelsEntrySchema } from '@chroxy/protocol'
 import { parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
 import type { SessionPatch } from './_shared'
 
@@ -166,6 +166,10 @@ export interface AvailableModelsPayload {
  *   rejection is applied to `id`, `label`, and `fullId`. Fields are NOT
  *   trimmed in the output (preserves verbatim values).
  * - `contextWindow` is included only when `typeof === 'number' && > 0`.
+ * - `provenance` (#7723) is included only when it is one of
+ *   `MODEL_PROVENANCE_VALUES`; `reasoningLevels` only when it is an array of
+ *   non-empty strings; `defaultReasoningLevel` only when it is a non-empty
+ *   string. Each drops on its own — a bad one never rejects the entry.
  * - String entries are trimmed; the trimmed value is used as `id` and `fullId`,
  *   and `label` is the trimmed value with its first character uppercased.
  * - `defaultModel` is normalised via `parseStringField` — trimmed; empty or
@@ -190,6 +194,32 @@ export function handleAvailableModels(
             const info: ModelInfo = { id, label, fullId }
             if (typeof contextWindow === 'number' && contextWindow > 0) {
               info.contextWindow = contextWindow
+            }
+            // #7723 — the additive metadata fields get the SAME fail-soft
+            // treatment as contextWindow: each is narrowed on its own and a
+            // value that does not fit drops only that FIELD, never the model.
+            // `provenance` is checked against the protocol's own value list so
+            // an unknown string from a newer server is dropped rather than
+            // widening the client's union.
+            const { provenance, reasoningLevels, defaultReasoningLevel } = parsed.data
+            if (
+              typeof provenance === 'string' &&
+              (MODEL_PROVENANCE_VALUES as readonly string[]).includes(provenance)
+            ) {
+              info.provenance = provenance as ModelProvenance
+            }
+            // Provider-defined strings, so the only check is the SHAPE: an
+            // array whose every element is a non-empty string. A single bad
+            // element drops the whole list rather than silently serving a
+            // partial one the picker would present as complete.
+            if (
+              Array.isArray(reasoningLevels) &&
+              reasoningLevels.every((l) => typeof l === 'string' && l.trim() !== '')
+            ) {
+              info.reasoningLevels = reasoningLevels as string[]
+            }
+            if (typeof defaultReasoningLevel === 'string' && defaultReasoningLevel.trim() !== '') {
+              info.defaultReasoningLevel = defaultReasoningLevel
             }
             return info
           }
