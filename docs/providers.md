@@ -424,12 +424,17 @@ Rules that matter when you are reading a picker and wondering what you are seein
 - **The overlay's reach is "ids the roster does not carry".** An overlay row is
   merged into the picker when the learned roster has no row with that `fullId`;
   where the binary already reports the model, its own label and window are what
-  you see and the overlay row is skipped with the row it was decorating. That is
+  you see. For the ids it *does* reach — a model the binary has retired, or one
+  on a host whose binary cannot be asked — the overlay wins outright: the row
+  stays in the picker and carries the operator's own `label` / `contextWindow` /
+  `shortId` rather than falling back to this repo's in-repo seed table. That is
   [#7777](https://github.com/blamechris/chroxy/issues/7777), stated here rather
-  than implied: the overlay is how you **add** a model (or decorate one before any
-  roster is learned), not how you relabel one codex already serves. A context
-  window learned from a live turn also sits **above** an overlay `contextWindow`,
-  since it is the binary's own authoritative answer.
+  than implied: the overlay is how you **add or keep** a model, not how you
+  relabel one codex already serves. A context window learned from a live turn
+  still sits **above** an overlay `contextWindow`, since it is the binary's own
+  authoritative answer. The declaration is live operator state and is never
+  written to `models-cache.codex.json`, so deleting the entry drops the row on
+  the next reload and it does not come back after a restart.
 - **Validation follows the same tri-state.** With a catalog in hand, its ids are
   the allowlist; with none, codex is **unrestricted** and any id passes through to
   the binary. `providers.allowAnyModel: ["codex"]` is therefore no longer needed

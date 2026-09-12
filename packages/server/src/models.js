@@ -601,7 +601,16 @@ export function createModelsRegistry(hooks = {}) {
   // Recomputed by `computeFallbackModels` (construction + every
   // `applyOverlay`), so removing the row from `models.json` removes the union
   // pass with it.
-  let overlayDeclaredFullIds = new Set()
+  //
+  // A MAP, not a Set (`.has()` reads the same either way), keyed fullId → the
+  // operator's own overlay entry. The union pass needs the entry itself: for an
+  // id the provider is NOT reporting, `providerMeta` is this repo's static
+  // table rather than a live value, and #5932's stated precedence — SDK live >
+  // overlay > static heuristic — puts the operator ahead of it. Reading the
+  // ENTRY (not the merged fallback row) keeps that precise: only fields the
+  // operator actually supplied win, so a bare `{provider: "codex"}`
+  // declaration still renders from the provider's metadata exactly as before.
+  let overlayDeclaredFullIds = new Map()
   // …and one non-Claude provider OPTS BACK IN, because for it the seed is not
   // a vendor roster at all: ollama's is a list of RECOMMENDED models to pull,
   // so a machine with two models installed should still be offered the other
@@ -655,12 +664,12 @@ export function createModelsRegistry(hooks = {}) {
     // are the operator asserting "this model exists, offer it", which is what
     // the union gate keys on. Rebuilt from scratch here rather than mutated, so
     // a reload that DROPS an entry drops its union pass.
-    const declaredFullIds = new Set()
+    const declaredFullIds = new Map()
     for (const entry of overlayMap.values()) {
       // #6219 — an overlay must not reintroduce a disallowed model (e.g. fable).
       // A skipped row declares nothing, so it is recorded after this guard.
       if (isDisallowedModelId(entry.shortId) || isDisallowedModelId(entry.fullId)) continue
-      declaredFullIds.add(entry.fullId)
+      declaredFullIds.set(entry.fullId, entry)
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
         // Override the base row's label/window from the overlay when supplied.
@@ -717,6 +726,33 @@ export function createModelsRegistry(hooks = {}) {
   function unionableSeedRows() {
     if (unionsStaticFallbacks) return fallbackModels
     return fallbackModels.filter((m) => !staticFallbackFullIds.has(m.fullId) || overlayDeclaredFullIds.has(m.fullId))
+  }
+
+  /**
+   * True for a static-seed id that `unionableSeedRows()` admits ONLY because
+   * the operator's overlay declares it.
+   *
+   * #7799 review — such a row must never be PERSISTED. `saveCache()` writes
+   * `activeModels` under the CURRENT schema marker, and `loadCache`'s one-time
+   * `migrateLegacyStaticSeed` pass can only clear a payload written by an older
+   * build — so a declared static that reaches disk outlives the declaration
+   * that justified it: delete the entry from `models.json`, restart, and the
+   * row is served forever from a cache no code path can clean, with no
+   * declaration anywhere. That is #7761's exact failure mode ("a retired model
+   * reached available_models forever, in every process, with no path that could
+   * ever clear it") reached through the cache file instead of the seed.
+   *
+   * Nothing is lost by leaving it out: the row is fully reconstructible at
+   * boot, because `loadCache` runs the SAME union over `unionableSeedRows()`
+   * and re-adds it whenever the declaration is still there. The inverse fix —
+   * dropping cached static ids on load — is wrong: it would also delete static
+   * ids the provider genuinely still reports, which the undeclared-static
+   * filter would then refuse to re-add.
+   */
+  function isOverlayExemptedSeedId(fullId) {
+    return !unionsStaticFallbacks
+      && staticFallbackFullIds.has(fullId)
+      && overlayDeclaredFullIds.has(fullId)
   }
 
   let activeModels = fallbackModels
@@ -830,7 +866,12 @@ export function createModelsRegistry(hooks = {}) {
         // carries the unioned static seed. Written on every registry (the
         // Claude loader ignores it) so there is exactly one save path.
         v: MODELS_CACHE_SCHEMA_VERSION,
-        models: activeModels,
+        // …and the overlay-declared statics are held OUT of that payload for the
+        // same reason the marker exists (#7799 review — see
+        // `isOverlayExemptedSeedId`): a declaration is live operator state, and
+        // persisting a row that only exists because of it is how the row
+        // outlives the declaration.
+        models: activeModels.filter((m) => !isOverlayExemptedSeedId(m.fullId)),
         defaultModelId,
         savedAt: Date.now(),
       }, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
@@ -1017,16 +1058,34 @@ export function createModelsRegistry(hooks = {}) {
       // which `computeFallbackModels` merges in place under the base row's own
       // fullId. That shape used to be dropped with the static it decorated
       // (#7777); `unionableSeedRows()` now reads `overlayDeclaredFullIds`, so
-      // the escape hatch works for exactly the ids this gate removes.
+      // the row survives the gate — and (#7799 review) so do the operator's own
+      // `label` / `contextWindow` / `shortId`, which is the whole of what
+      // `docs/guides/model-overlay.md` promises. Membership alone would have
+      // been a half fix: on every shipping non-Claude provider
+      // (`getModelMetadata` is defined by codex, gemini, deepseek, ollama,
+      // anthropic-compatible and acp) `providerMeta` used to win all three
+      // back, so the row came back renamed and re-windowed from this repo's own
+      // static table.
       const seenFullIds = new Set(converted.map(m => m.fullId))
       for (const fb of unionableSeedRows()) {
         if (!seenFullIds.has(fb.fullId)) {
           // Re-derive the short id with the registry's hook so non-Claude
           // providers don't accidentally inherit Claude's `claude-` strip.
+          //
+          // The OPERATOR's entry outranks `providerMeta` here and only here:
+          // this branch runs precisely when the provider did NOT report the id,
+          // so `providerMeta` is the static table rather than a live answer, and
+          // #5932's precedence (SDK live > overlay > static heuristic) has the
+          // overlay ahead of it. A live window still wins — `contextWindowOverrides`
+          // is read first, as before. Fields the operator did not supply are
+          // `undefined` and fall straight through, so a bare declaration renders
+          // exactly as it did.
+          const declared = overlayDeclaredFullIds.get(fb.fullId)
           const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
-          const id = providerMeta?.id ?? deriveIdFn(fb.fullId)
-          const label = providerMeta?.label || humanizeModelId(id)
+          const id = declared?.shortId ?? providerMeta?.id ?? deriveIdFn(fb.fullId)
+          const label = declared?.label || providerMeta?.label || humanizeModelId(id)
           const contextWindow = contextWindowOverrides.get(fb.fullId)
+            ?? declared?.contextWindow
             ?? providerMeta?.contextWindow
             ?? fb.contextWindow
             ?? resolveContextWindowFn(fb.fullId)
@@ -1359,10 +1418,16 @@ export function createModelsRegistry(hooks = {}) {
         const seenFullIds = new Set(models.map(m => m.fullId))
         for (const fb of unionableSeedRows()) {
           if (!seenFullIds.has(fb.fullId)) {
+            // Same operator-outranks-static-table precedence as the
+            // `updateModels` copy of this union (#7799 review) — the two must
+            // agree or a row changes label/window depending on whether the
+            // roster came from a refresh or from disk.
+            const declared = overlayDeclaredFullIds.get(fb.fullId)
             const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
-            const id = providerMeta?.id ?? deriveIdFn(fb.fullId)
-            const label = providerMeta?.label || humanizeModelId(id)
-            const contextWindow = providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
+            const id = declared?.shortId ?? providerMeta?.id ?? deriveIdFn(fb.fullId)
+            const label = declared?.label || providerMeta?.label || humanizeModelId(id)
+            const contextWindow = declared?.contextWindow
+              ?? providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
             models.push(withModelMetadata({ id, fullId: fb.fullId, label, contextWindow }, providerMeta, fb))
             seenFullIds.add(fb.fullId)
           }
