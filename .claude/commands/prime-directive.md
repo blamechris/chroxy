@@ -64,6 +64,12 @@ This matches CLAUDE.md's Unattended Merge Authority section as written — full 
   consuming essentially the repo's entire closing capacity on its own same-generation output.
   Unlike any restriction on filing, this cannot suppress a finding — it adds work rather than
   removing it, which is why it is the rule that carries the burden here.
+  **When fewer than 2 eligible issues remain, the quota is satisfied by taking all of them** —
+  it is a floor on effort, never a blocker. Record in the wave's log entry how many eligible
+  issues existed and how many were taken; a wave that takes 0 because 0 were eligible is the
+  quota succeeding at its purpose, and must be distinguished in the log from a wave that took 0
+  because nobody looked. The quota is **not** a convergence condition: missing it never stops a
+  marathon, and never overrides the Mission's no-stop rule or the cost circuit breaker.
 - **Converge:** if a wave produces zero new completions on the remaining set, stop and summarize. (For the full wave/retry/convergence machinery, this composes `/tackle-issues` — call it; do not re-implement it here.)
 
 ## Session boundaries (context + cost discipline)

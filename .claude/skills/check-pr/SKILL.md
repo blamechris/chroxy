@@ -95,7 +95,7 @@ Only process comments in `PENDING_COMMENTS`. If all comments already have replie
 For each pending review comment (Copilot or human), you MUST do ALL of these steps **before moving to the next comment**:
 
 1. Read the comment carefully
-2. Classify it into exactly ONE of the three valid outcomes below
+2. Classify it into exactly ONE of the four valid outcomes below
 3. Take the required action AND post a reply
 
 **CRITICAL: The inline reply (`gh api ... /comments/${COMMENT_ID}/replies`) is the PRIMARY output of this skill.** The summary comment is secondary. If you only post a summary without inline replies, the skill has FAILED — conversation threads will remain unresolved and block merging.
@@ -270,7 +270,9 @@ Created ${ISSUE_URL} to track this.
 - "Follow-up." or "Deferred." without a `**FOLLOW-UP ISSUE**` label and issue URL
 - "Intentional design decision" without evidence — use FALSE POSITIVE with evidence instead
 - "Noted" / "Acknowledged" without a FIX or ISSUE URL
-- Any reply that doesn't start with `**FIX**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`
+- Any reply that doesn't start with `**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`
+- `**FOLD**` with no commit SHA, or with a SHA that is not a commit on THIS PR — that is the
+  banned "acknowledge and move on" wearing a new label, and step 6c rejects it
 - Empty Reference cells in the summary table
 
 ### 4. Push All Fixes
@@ -312,6 +314,33 @@ echo "Root comments: ${ROOT_COUNT}, Replied: ${REPLIED_COUNT}"
 ```
 
 If `REPLIED_COUNT < ROOT_COUNT`, you have UNREPLIED comments. Go back to step 3 and post the missing inline replies BEFORE proceeding. **Do NOT post the summary comment until every thread has a reply.**
+
+### 6c. Verify every FOLD names a real commit on this PR
+
+**A FOLD whose SHA is not a commit on this PR is indistinguishable from the "acknowledge and
+move on" this file bans.** The claim "a FOLD reply without a commit SHA is invalid" is only worth
+something if something checks it, so check it — this is the one outcome whose evidence is
+mechanically verifiable, and leaving it on the honour system would repeat the pattern this repo
+records as *every honour-system limit has failed and every mechanically-bound one has held*.
+
+```bash
+# Every SHA claimed by a FOLD reply must appear in this PR's commit list.
+gh pr view "$PR" --json commits -q '.commits[].oid' > /tmp/pr-shas.txt
+gh api "repos/$REPO/pulls/$PR/comments" --paginate -q '.[] | select(.body | startswith("**FOLD**")) | .body' \
+  | grep -oE '\b[0-9a-f]{7,40}\b' | sort -u > /tmp/fold-shas.txt
+
+# A FOLD SHA not on this PR is a FAILURE, not a warning.
+while read -r sha; do
+  grep -q "^$sha" /tmp/pr-shas.txt || { echo "::error::FOLD cites $sha, which is not a commit on PR #$PR"; exit 1; }
+done < /tmp/fold-shas.txt
+```
+
+Then, for each FOLD, confirm the cited commit actually **touches the file the finding was about**
+— `git show --stat <sha>` — because a SHA copy-pasted from elsewhere in the PR passes the check
+above and changes nothing relevant.
+
+If there are no FOLD replies, `/tmp/fold-shas.txt` is empty and the loop runs zero times. **That
+is a pass over zero rows, not a pass** — say so explicitly rather than reporting the step green.
 
 ### 6b. Resolve Conversation Threads
 
@@ -444,8 +473,11 @@ Then below the table, list:
 
 1. **EVERY pending comment gets a reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
 2. **Reply IMMEDIATELY after each comment** — Process one comment at a time: read → fix/defer → post inline reply → next. Do NOT batch all fixes and try to reply later.
-3. **Exactly 3 valid outcomes** — FIX, FALSE POSITIVE, or FOLLOW-UP ISSUE. Nothing else.
+3. **Exactly 4 valid outcomes** — FIX, FOLD, FALSE POSITIVE, or FOLLOW-UP ISSUE. Nothing else.
 4. **FIX requires commit hash + code diff** — Both mandatory in reply
+4b. **FOLD requires a commit SHA that is on THIS PR** — verified mechanically in step 6c.
+   FOLD is for a valid finding whose fix is ≤15 min but outside this PR's stated scope:
+   make the change here, name it, and say in the reply that scope was deliberately widened.
 5. **FALSE POSITIVE requires evidence** — No bare dismissals
 6. **FOLLOW-UP requires issue URL** — Never say "good idea" without creating an issue
 7. **Summary table has no empty cells** — Every row has a reference

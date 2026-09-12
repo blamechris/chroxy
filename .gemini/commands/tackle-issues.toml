@@ -270,6 +270,29 @@ After each wave, check for convergence BEFORE entering the next wave:
 
 **Progress metric:** Count issues that moved to `Done` in the latest wave. If this count is 0 and there are retry candidates, the session has converged on failure — further waves won't help.
 
+**Old-debt quota (enforced here, declared in `/prime-directive`).** A wave's completions are not
+interchangeable. Two rules apply when building the next wave queue (2e) and when reporting a
+wave's result:
+
+- **At least 2 issues per wave must predate that wave by 30+ days.** Select them explicitly in
+  2e rather than hoping the replenishment scan surfaces them — it sorts by tractability, not age,
+  which is why old debt never gets picked. Derive age from `createdAt`, not `updatedAt`:
+  measured on this repo, 72.4% of open issues have `updatedAt == createdAt`, so `updatedAt` is
+  not an engagement signal.
+- **A `from-review` issue created during the current session is ineligible** to count toward a
+  wave's completions. It still gets worked and still gets closed — it just does not satisfy the
+  quota, because a pipeline closing its own same-generation output is the failure this exists to
+  prevent. Measured over the 30 days to 2026-09-12: 208 of 209 closes were issues created inside
+  that same window, exactly one touched anything older, and 122 of the 123 issues open at the
+  start were still open at the end.
+
+**When fewer than 2 eligible issues remain, take all of them.** The quota is a floor on effort,
+never a blocker, and **never a convergence condition** — missing it does not stop a session.
+Report both numbers in the wave table below (`eligible` and `taken`) so a wave that took 0
+because none were eligible is distinguishable from one that took 0 because nobody looked. Those
+two states are identical in every metric that counts only completions, which is exactly how this
+went unnoticed for 30 days.
+
 ```markdown
 ## Convergence Check — Wave {W} Complete
 

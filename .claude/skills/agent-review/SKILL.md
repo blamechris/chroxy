@@ -136,11 +136,17 @@ So apply **both** halves:
 
 - **≤15 minutes → FIX IT IN THIS PR**, even when it sits outside the abstraction this PR owns.
   Name it in the Deferred Items table with its commit SHA instead of an issue link.
-- **Scope-provenance is NOT a reason to file.** "It belongs to a different rule / path / layer"
-  is the rationale in **all 22** explicit fold-vs-file arguments sampled from those 208 issues,
-  and **none** of them mentions effort. Because a fix-PR's scope is by construction one
-  previously-filed issue, almost everything adjacent fails a provenance test — which is what
-  made the fold branch unreachable in practice.
+- **This AMENDS the follow-on protocol's first clause; it does not merely restore it.** The
+  written test is *in-scope **and** ≤15 min*, a conjunction. Scope-provenance is the rationale in
+  **all 22** explicit fold-vs-file arguments sampled from those 208 issues, and **none** mentions
+  effort — and because a fix-PR's scope is by construction one previously-filed issue, almost
+  everything adjacent fails a provenance test. A conjunction whose first term is nearly always
+  false is a branch that cannot be taken. So effort, not provenance, decides fold-vs-file here.
+- **Widening scope is therefore permitted, but never silently.** The protocol's clause 4 —
+  *"Never expand scope silently, never fake-merge, never drop a follow-on unrecorded"* — is
+  unchanged and binding. A folded item MUST be named in the review comment with its commit SHA
+  **and** flagged in the PR description as a deliberate scope widening, so the PR author and any
+  later reviewer see it without reading resolved threads.
 - **File an issue** only when the fix exceeds ~15 minutes, needs a decision, or is
   **critical or security** severity. Those are exempt from this test entirely.
 - If something is worth mentioning but is neither worth 15 minutes nor worth an issue,
