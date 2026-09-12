@@ -4,8 +4,16 @@
 import type React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { Sidebar, type SidebarProps, type RepoNode } from './Sidebar'
+import { Sidebar, overlayLiveUsage, type SidebarProps, type RepoNode } from './Sidebar'
 import type { ConnectedClient } from '../store/types'
+import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
+
+// #7793 — mutable so tests can arm live `sessionStates[id].cumulativeUsage`
+// values (the session_usage-patched slice) independently of the `sessions`
+// prop (the session_list snapshot). Empty by default so every existing test
+// in this file (which never sets it) sees the pre-#7793 behavior of no live
+// overlay.
+let mockSessionStates: Record<string, unknown> = {}
 
 // Mock the connection store (used by ServerPicker inside Sidebar)
 vi.mock('../store/connection', () => ({
@@ -17,12 +25,16 @@ vi.mock('../store/connection', () => ({
       addServer: vi.fn(),
       removeServer: vi.fn(),
       switchServer: vi.fn(),
+      sessionStates: mockSessionStates,
     }
     return selector(store)
   },
 }))
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  mockSessionStates = {}
+})
 
 const noop = vi.fn()
 
@@ -620,5 +632,94 @@ describe('Sidebar', () => {
       expect(screen.queryByTestId('sidebar-stdin-disabled-s1')).not.toBeInTheDocument()
       expect(screen.queryByTestId('sidebar-stdin-disabled-s2')).not.toBeInTheDocument()
     })
+  })
+})
+
+// #7793 — the Tokens panel must read the live `sessionStates[id].cumulativeUsage`
+// (patched by every `session_usage` event), not just the `session_list`
+// snapshot carried in the `sessions` prop. On codex the busy→idle
+// `session_list` broadcast races ahead of usage accounting, so the snapshot
+// still shows zero for the turn that just completed.
+function makeSessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
+  return {
+    sessionId: 's1',
+    name: 's1',
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 0,
+    conversationId: null,
+    provider: 'codex',
+    cumulativeUsage: undefined,
+    ...overrides,
+  }
+}
+
+const ZERO_USAGE: CumulativeUsage = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheCreationTokens: 0,
+  costUsd: 0,
+  turnsBilled: 0,
+}
+
+const LIVE_USAGE: CumulativeUsage = {
+  inputTokens: 15153,
+  outputTokens: 17,
+  cacheReadTokens: 1408,
+  cacheCreationTokens: 0,
+  costUsd: 0,
+  turnsBilled: 1,
+}
+
+describe('overlayLiveUsage (pure) (#7793)', () => {
+  it('prefers the live value over the snapshot value when a live entry exists', () => {
+    const sessions = [makeSessionInfo({ sessionId: 's1', cumulativeUsage: ZERO_USAGE })]
+    const out = overlayLiveUsage(sessions, { s1: LIVE_USAGE })
+    expect(out[0]!.cumulativeUsage).toEqual(LIVE_USAGE)
+  })
+
+  it('falls back to the snapshot value when there is no live entry for that session', () => {
+    const sessions = [makeSessionInfo({ sessionId: 's1', cumulativeUsage: ZERO_USAGE })]
+    const out = overlayLiveUsage(sessions, {})
+    expect(out[0]!.cumulativeUsage).toEqual(ZERO_USAGE)
+  })
+
+  it('falls back to the snapshot value when the live entry is null/undefined', () => {
+    const sessions = [makeSessionInfo({ sessionId: 's1', cumulativeUsage: ZERO_USAGE })]
+    const out = overlayLiveUsage(sessions, { s1: null, s2: undefined })
+    expect(out[0]!.cumulativeUsage).toEqual(ZERO_USAGE)
+  })
+
+  it('leaves sessions with no live counterpart untouched by identity', () => {
+    const sessions = [makeSessionInfo({ sessionId: 's1', cumulativeUsage: ZERO_USAGE })]
+    const out = overlayLiveUsage(sessions, { other: LIVE_USAGE })
+    expect(out[0]).toBe(sessions[0])
+  })
+})
+
+describe('Sidebar — Tokens panel reads live session_usage, not just the snapshot (#7793)', () => {
+  it('shows the live sessionStates total, not the stale zero session_list snapshot', () => {
+    // Simulates the wire order from #7793: the `session_list` snapshot for
+    // this turn still carries zero (broadcast on the busy→idle edge before
+    // `_trackUsage` ran), but `session_usage` has already patched
+    // `sessionStates.s1.cumulativeUsage` with the real totals.
+    mockSessionStates = {
+      s1: { cumulativeUsage: LIVE_USAGE, mcpServers: [] },
+    }
+    const sessions = [makeSessionInfo({ sessionId: 's1', provider: 'codex', cumulativeUsage: ZERO_USAGE })]
+    renderSidebar({ sessions, activeSessionId: 's1' })
+    expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('15.2K tokens')
+  })
+
+  it('falls back to the session_list snapshot when no live sessionStates entry exists yet', () => {
+    mockSessionStates = {}
+    const sessions = [makeSessionInfo({ sessionId: 's1', provider: 'codex', cumulativeUsage: LIVE_USAGE })]
+    renderSidebar({ sessions, activeSessionId: 's1' })
+    expect(screen.getByTestId('sidebar-token-view-today-total')).toHaveTextContent('15.2K tokens')
   })
 })
