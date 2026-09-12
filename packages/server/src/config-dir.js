@@ -74,7 +74,6 @@ export function configDir() {
   if (!isAbsolute(raw)) {
     if (!warnedRelative) {
       warnedRelative = true
-       
       console.warn(
         `[config-dir] ignoring CHROXY_CONFIG_DIR=${JSON.stringify(raw)}: not an absolute path. `
         + `Using ${defaultConfigDir()} instead.`,

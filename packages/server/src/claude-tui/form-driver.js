@@ -102,7 +102,6 @@ export function multiSelectReinjectEnabled() {
 // Pure + never throws: non-string input coerces to '' (drop it).
 function sanitizeReinjectLabel(s) {
   if (typeof s !== 'string') return ''
-   
   return s.replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').replace(/\s+/g, ' ').trim()
 }
 

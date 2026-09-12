@@ -614,7 +614,6 @@ describe('canonicalStringify', () => {
         omitUndefined: undefined,
         omitFunction: () => 'ignored',
       },
-       
       list: [1, undefined, () => 'ignored', , 5],
     }
 

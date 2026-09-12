@@ -1963,7 +1963,6 @@ describe('ClaudeByokSession', () => {
       session._client = {
         messages: {
           stream: () => ({
-             
             async *[Symbol.asyncIterator]() {
               // Yield a tool_use start so the map gets populated,
               // then throw — finalMessage() never runs, so the

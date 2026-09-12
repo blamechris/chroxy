@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import {  EventEmitter } from 'node:events'
+import { EventEmitter } from 'node:events'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'

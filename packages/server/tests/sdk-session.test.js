@@ -2591,7 +2591,6 @@ describe('SdkSession', () => {
 
       // Kick off iteration so the query is "mid-stream" when interrupt fires.
       const iterationPromise = (async () => {
-         
         for await (const _ of session._query) { /* drain */ }
       })()
 

@@ -100,7 +100,6 @@ function createShimStream(client, params, opts) {
       if (finalMessage === null) {
         // Drain remaining events so the generator runs finish() and assembles
         // the message (the events themselves are discarded on this path).
-         
         for await (const _event of iterable) { /* drain */ }
       }
       return finalMessage

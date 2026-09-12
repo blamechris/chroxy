@@ -1,6 +1,6 @@
 import { describe, it, before, beforeEach, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import {  EventEmitter } from 'node:events'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'

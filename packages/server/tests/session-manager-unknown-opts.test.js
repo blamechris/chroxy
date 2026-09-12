@@ -148,7 +148,6 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
     process.env.CHROXY_DEBUG_CTOR_OPTS = '1'
     try {
       const warnings = captureWarnings(() => {
-         
         new SessionManager({
           skipPreflight: true,
           persistenceDebounceMs: 0, // WRONG key — the ctor opt is `persistDebounceMs`
@@ -171,7 +170,6 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
     process.env.CHROXY_DEBUG_CTOR_OPTS = '1'
     try {
       const warnings = captureWarnings(() => {
-         
         new SessionManager({
           skipPreflight: true,
           maxSessions: 5,
@@ -210,7 +208,6 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
     delete process.env.CHROXY_DEBUG_CTOR_OPTS
     try {
       const warnings = captureWarnings(() => {
-         
         new SessionManager({
           skipPreflight: true,
           legacyDebounceIntervalTypo: 0, // a genuinely unknown ctor option
@@ -239,7 +236,6 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
     delete process.env.CHROXY_DEBUG_CTOR_OPTS
     try {
       const firstWarnings = captureWarnings(() => {
-         
         new SessionManager({
           skipPreflight: true,
           totallyUniqueDedupTestKey: 0,
@@ -247,7 +243,6 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
         })
       })
       const secondWarnings = captureWarnings(() => {
-         
         new SessionManager({
           skipPreflight: true,
           totallyUniqueDedupTestKey: 0,
