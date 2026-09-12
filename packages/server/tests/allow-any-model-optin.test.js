@@ -13,9 +13,12 @@ import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
 
 /**
  * #6378 — `config.providers.allowAnyModel` opt-in. A static-allowlist provider
- * (gemini/codex/deepseek) listed here serves an unlisted-but-API-valid model id
- * verbatim (like ollama, #5418) instead of hard-rejecting it — so a new model
- * the upstream API already exposes needs no chroxy release. Covers the config
+ * (currently gemini and deepseek — codex left that bucket in #7727) listed here
+ * serves an unlisted-but-API-valid model id verbatim (like ollama, #5418)
+ * instead of hard-rejecting it — so a new model the upstream API already
+ * exposes needs no chroxy release. codex is still ACCEPTED here and still
+ * short-circuits both gates ahead of its catalog; it is just no longer the way
+ * to serve a new OpenAI model. Covers the config
  * helpers, the providers-block validation, and BOTH validation seams
  * (create-time preflight + set_model).
  */
@@ -188,13 +191,25 @@ describe('#6378 set_model seam', () => {
     assert.equal(ctx.transport.broadcastToSession.callCount, 1)
   })
 
-  it('the opt-in is per-provider: opting in gemini does not loosen codex', () => {
+  // #7727 — this case used to assert against `codex`, which was a frozen
+  // six-row allowlist. Codex is TRI-STATE now (its own `model/list` catalog
+  // when it has one, unrestricted when it does not), so with no catalog in
+  // this process it accepts any id and could no longer prove "gemini's opt-in
+  // did not loosen a DIFFERENT provider". `deepseek` is the surviving static
+  // allowlist and proves exactly the same property.
+  //
+  // That substitution is load-bearing, not cosmetic: after #7727, a test that
+  // still needs `allowAnyModel: ["codex"]` — or that still expects codex to
+  // reject on a static list — is evidence the catalog did not reach the
+  // validator. Codex's own tri-state coverage is in
+  // tests/codex-model-validation.test.js.
+  it('the opt-in is per-provider: opting in gemini does not loosen deepseek', () => {
     const sessions = new Map()
     const session = createMockSession()
-    sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+    sessions.set('s1', { session, name: 'Ds', cwd: '/tmp', provider: 'deepseek' })
     const ctx = setModelCtx(sessions, { providers: { allowAnyModel: ['gemini'] } })
     const ws = makeWs()
-    settingsHandlers.set_model(ws, { id: 'c1', activeSessionId: 's1' }, { model: 'gpt-9.9-codex', requestId: 'r2' }, ctx)
+    settingsHandlers.set_model(ws, { id: 'c1', activeSessionId: 's1' }, { model: 'deepseek-9.9-ultra', requestId: 'r2' }, ctx)
     assert.equal(session.setModel.callCount, 0)
     assert.equal(ws._messages[0].code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
   })

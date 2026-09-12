@@ -5,6 +5,33 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { CodexSession } from '../src/codex-session.js'
+import {
+  applyCodexCatalog,
+  parseModelListResult,
+  stampContextWindows,
+  _resetCodexCatalogForTests,
+} from '../src/codex-model-catalog.js'
+
+// #7766 — a trimmed `model/list` answer, enough to put the catalog module in
+// its POPULATED state. Not one id is in the hand-maintained seed, so an
+// allowlist that came from anywhere but the catalog is visibly wrong.
+const DELEGATION_MODEL_LIST = Object.freeze({
+  data: [{ id: 'gpt-6-astra', model: 'gpt-6-astra', displayName: 'GPT-6-Astra', isDefault: true }],
+  nextCursor: null,
+})
+
+{
+  // Control for the comment above (#7766), mirroring the sibling in
+  // codex-model-validation.test.js. Without it, adding `gpt-6-astra` to the
+  // hand-maintained seed would make "came from the catalog" and "came from the
+  // seed" indistinguishable here while the comment still claimed otherwise.
+  const seedIds = CodexSession.getFallbackModels().map((m) => m.id)
+  assert.ok(seedIds.length > 0, 'the seed must be non-empty, or the disjointness control asserts nothing')
+  const fixtureIds = DELEGATION_MODEL_LIST.data.map((m) => m.id)
+  assert.deepEqual(seedIds.filter((id) => fixtureIds.includes(id)), [],
+    'the fixture must share no id with the seed, or "came from the catalog" is untestable')
+}
 
 // #6605 Phase 1 — the codex app-server DRIVING layer. These pin the JSON-RPC
 // transport routing and the app-server-notification → Chroxy-event mapping
@@ -304,7 +331,32 @@ describe('CodexAppServerSession — lifecycle guards', () => {
     assert.equal(CodexAppServerSession.providerName, 'codex')
     assert.equal(CodexAppServerSession.apiKeyEnv, 'OPENAI_API_KEY')
     assert.ok(CodexAppServerSession.resolvedBinary, 'resolvedBinary delegates')
-    assert.ok(Array.isArray(CodexAppServerSession.getAllowedModels()))
+    // #7727 — getAllowedModels is TRI-STATE (catalog ids, else null =
+    // unrestricted), so `Array.isArray` is no longer the invariant; the
+    // DELEGATION is.
+    //
+    // #7766 — and the delegation has to be asserted in a state where the two
+    // sides are DISTINGUISHABLE. This file applies no catalog, so both answers
+    // were `null` and `deepEqual(null, null)` stayed green even with the
+    // delegation replaced by `return null` — strictly WEAKER than the
+    // `Array.isArray` check it replaced, under a comment claiming it caught
+    // that failure "in BOTH catalog states" (docs/false-safety-guards.md: a
+    // check satisfied for the wrong reason). Both states are now actually
+    // driven, populated first.
+    try {
+      const applied = applyCodexCatalog(
+        stampContextWindows(parseModelListResult(DELEGATION_MODEL_LIST), new Map()))
+      assert.equal(applied, true, 'the fixture must land, or the populated case proves nothing')
+      const ids = CodexSession.getAllowedModels()
+      assert.ok(Array.isArray(ids) && ids.length > 0,
+        'control: with a catalog in hand the answer must be a non-empty array, not null')
+      assert.deepEqual(CodexAppServerSession.getAllowedModels(), ids)
+    } finally {
+      _resetCodexCatalogForTests()
+    }
+    // ...and the unrestricted state, where both sides are null by contract.
+    assert.equal(CodexSession.getAllowedModels(), null, 'control: the catalog reset must have taken')
+    assert.deepEqual(CodexAppServerSession.getAllowedModels(), CodexSession.getAllowedModels())
   })
 })
 

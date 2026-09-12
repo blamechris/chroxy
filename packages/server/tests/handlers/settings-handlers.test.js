@@ -167,10 +167,15 @@ describe('settings-handlers', () => {
         assert.equal(ctx.transport.broadcastToSession.callCount, 1)
       })
 
-      it('rejects a Gemini model on a Codex session', () => {
+      it('rejects a Gemini model on a DeepSeek session', () => {
+        // #7727 — this case used to use `codex`, whose allowlist was a frozen
+        // six-row literal. Codex is tri-state now (see below), so the
+        // cross-provider strictness it was proving has to be proved on a
+        // provider that still publishes a static list. DeepSeek is that
+        // provider; the assertion is otherwise unchanged.
         const sessions = new Map()
         const session = createMockSession()
-        sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+        sessions.set('s1', { session, name: 'Ds', cwd: '/tmp', provider: 'deepseek' })
         const ctx = makeCtx(sessions)
         const client = makeClient({ activeSessionId: 's1' })
         const ws = makeWs()
@@ -181,7 +186,7 @@ describe('settings-handlers', () => {
         assert.equal(ws._messages.length, 1)
         const err = ws._messages[0]
         assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
-        assert.match(err.message, /codex/i)
+        assert.match(err.message, /deepseek/i)
       })
 
       it('accepts a Codex model on a Codex session', () => {
@@ -196,6 +201,29 @@ describe('settings-handlers', () => {
 
         assert.equal(session.setModel.callCount, 1)
         assert.equal(session.setModel.lastCall[0], 'gpt-5-codex')
+      })
+
+      // #7727 — codex's allowlist is now its OWN `model/list` catalog, and
+      // UNRESTRICTED while it has none (which is this process: nothing here
+      // probes a binary). The deliberate trade recorded on #7727: an obviously
+      // wrong id on a codex session is no longer caught here pre-catalog and
+      // surfaces as codex's own error instead — the ollama rule (#5418), and
+      // the price of `gpt-5.5` being selectable at all. Once a catalog IS in
+      // hand the strict rejection comes back, which is asserted against the
+      // real catalog module in tests/codex-model-validation.test.js.
+      it('passes an off-roster id through on a Codex session with no catalog (tri-state, #7727)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Cx', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'gpt-5.5', requestId: 'r2b' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1, 'a model the frozen six-row seed never carried must reach setModel')
+        assert.equal(session.setModel.lastCall[0], 'gpt-5.5')
+        assert.equal(ws._messages.length, 0)
       })
 
       it('still accepts Claude models on a claude-sdk session', () => {

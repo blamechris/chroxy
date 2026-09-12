@@ -1,12 +1,13 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP, _maybeRatchetContextWindow } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs, toTomlBasicString, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP, _maybeRatchetContextWindow } from '../src/codex-session.js'
+import { prepareSpawn } from '../src/utils/win-spawn.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
 import { getRegistryForProvider } from '../src/models.js'
 import { waitFor } from './test-helpers.js'
@@ -928,6 +929,147 @@ describe('CodexSession', () => {
       const idx = args.indexOf('-c')
       assert.ok(idx >= 0, '-c flag should be present when model is set')
       assert.equal(args[idx + 1], 'model="o3"')
+    })
+
+    it('an off-roster model id stays ONE argv element — no split, no second -c (#7727)', () => {
+      // #7727 made getAllowedModels() tri-state, so this function's doc no
+      // longer gets to say its `model` argument is one of six compiled-in ids:
+      // on the unrestricted branch it is whatever the operator asked for. This
+      // executes the argv-shape half of the SECURITY INVARIANT instead of
+      // asserting it in prose (#7646: a guard that only asserts a comment's
+      // spelling proves nothing). The TOML-escaping half is the next block.
+      const hostile = 'x" trust_level="trusted'
+      const args = buildCodexArgs('hi', hostile)
+      const cIdxs = args.reduce((acc, a, i) => (a === '-c' ? [...acc, i] : acc), [])
+      assert.equal(cIdxs.length, 1, `exactly one -c override: ${JSON.stringify(args)}`)
+      // The whole thing is a single argv element: nothing was split on the
+      // quote or the space, so no second config key was introduced at the ARGV
+      // layer.
+      assert.equal(args[cIdxs[0] + 1], `model=${JSON.stringify(hostile)}`)
+      assert.equal(args.filter((a) => typeof a === 'string' && a.includes('trust_level')).length, 1)
+    })
+
+    // --- #7766: the escaping half -------------------------------------------
+    //
+    // Copilot's review of #7766 made the point the old prose had papered over:
+    // ONE ARGV ELEMENT IS NOT ONE TOML VALUE. The element is handed to codex,
+    // which parses it as `key=<toml>`, and a `"` plus a newline closes the
+    // string and opens a second key without ever splitting the argv element.
+    // "Codex rejects the invalid TOML" was an unverified claim about a
+    // third-party parser's error handling standing in for escaping we were not
+    // doing — the false-safety class where a comment describes a stronger
+    // check than its code performs (#7290/#7291). These tests pin the escaping
+    // itself, so reverting toTomlBasicString to the old `model="${model}"`
+    // template takes them red.
+    describe('toTomlBasicString — the value cannot escape the TOML string (#7766)', () => {
+      it('an ordinary id is byte-identical to the pre-#7766 interpolation', () => {
+        // The escaping must be a no-op on every id anyone actually selects, or
+        // it is a behaviour change wearing a hardening's clothes.
+        for (const id of ['gpt-5-codex', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o1', 'o3', 'gpt-5.5']) {
+          assert.equal(toTomlBasicString(id), `"${id}"`)
+          assert.equal(buildCodexArgs('hi', id).at(-1), `model="${id}"`)
+        }
+      })
+
+      it('a quote is escaped, not merely quoted around', () => {
+        assert.equal(toTomlBasicString('x" trust_level="trusted'), '"x\\" trust_level=\\"trusted"')
+      })
+
+      it('a quote+newline cannot open a second TOML key', () => {
+        // The attack the argv-shape test cannot see: still ONE argv element,
+        // but pre-#7766 it was two TOML assignments once codex parsed it.
+        const hostile = 'gpt-5"\n[projects."/"]\ntrust_level = "trusted'
+        const value = toTomlBasicString(hostile)
+        assert.equal(value.includes('\n'), false, 'a raw newline would terminate the first TOML key')
+        assert.equal(/[^\\]"/.test(value.slice(1, -1)), false, 'no unescaped quote may survive inside the string')
+        // The whole payload is still PRESENT — escaped, not stripped. A value
+        // silently mangled would be a different bug (a model id that no longer
+        // round-trips), so this pins "escaped" rather than "sanitised".
+        assert.equal(JSON.parse(value), hostile)
+      })
+
+      it('DEL (U+007F) is escaped — TOML forbids it raw where JSON allows it', () => {
+        // The one place JSON's escape set is NARROWER than TOML's, and so the
+        // one case a bare JSON.stringify would get wrong.
+        assert.equal(toTomlBasicString('a\u007Fb'), '"a\\u007Fb"')
+      })
+
+      it('a lone surrogate is escaped, not sanitised — a CLOSED failure, pinned (#7766)', () => {
+        // The SECOND place JSON's escape set and TOML's disagree, and the one
+        // this helper does NOT fix. ES2019 well-formed JSON.stringify emits
+        // `\udXXX` for an unpaired surrogate; TOML's \uXXXX must name a
+        // Unicode scalar value, which a surrogate is not — so codex's parser
+        // rejects the override and the turn fails CLOSED. Nothing escapes: it
+        // is still one argv element, no shell, no second -c.
+        //
+        // Pinned rather than fixed on purpose. Stripping or replacing the
+        // surrogate would silently mangle an operator-supplied id; the
+        // contract here is escaped-not-sanitised (see the hostile-payload test
+        // above), so this records the observed bytes and the docblock on
+        // toTomlBasicString records why.
+        assert.equal(toTomlBasicString('a\uD800b'), '"a\\ud800b"')
+        // Still one element, still one -c — the invariant that makes the
+        // failure closed rather than an injection.
+        const args = buildCodexArgs('hi', 'a\uD800b')
+        assert.equal(args.filter((a) => a === '-c').length, 1)
+        assert.deepEqual(args.filter((a) => typeof a === 'string' && a.startsWith('model=')),
+          ['model="a\\ud800b"'])
+      })
+
+      it('the escaped value still reaches argv as exactly one element', () => {
+        const args = buildCodexArgs('hi', 'gpt-5"\n[a]\nb = "c')
+        assert.equal(args.filter((a) => a === '-c').length, 1)
+        assert.equal(args.filter((a) => typeof a === 'string' && a.startsWith('model=')).length, 1)
+      })
+    })
+
+    it('nothing on the codex spawn path passes a shell option (#7766)', () => {
+      // The other half of the SECURITY INVARIANT is "spawn() without a shell".
+      // Every argv test above proves the argv SHAPE and cannot see this half
+      // at all: jsonl-subprocess-session.js spreads `...spawnSpec.options`
+      // LAST, so a `shell: true` arriving from either side would leave all of
+      // them green while re-opening shell metacharacters. Both sides checked.
+
+      // (1) prepareSpawn, on both platforms — the win32 branch is the one that
+      //     rewrites the command line, so it is the plausible place for a
+      //     shell option to appear.
+      //
+      //     The positive control comes FIRST. Three of the four (platform,
+      //     command) combos below take prepareSpawn's passthrough branch and
+      //     return `{}`, so if the opts bag were renamed or the signature
+      //     changed, every combo would passthrough on a POSIX host and the
+      //     absence-assertion would pass over nothing — an absence proved
+      //     against a function that is no longer being reached
+      //     (docs/false-safety-guards.md). This pins that the one rewriting
+      //     branch is genuinely entered.
+      assert.equal(
+        prepareSpawn('C:\\npm\\codex.cmd', [], { platform: 'win32' }).options.windowsVerbatimArguments,
+        true,
+        'control: the win32 .cmd rewrite branch must actually be reached')
+      for (const platform of ['darwin', 'win32']) {
+        for (const command of ['/usr/local/bin/codex', 'C:\\npm\\codex.cmd']) {
+          const { options } = prepareSpawn(command, buildCodexArgs('hi', 'o3'), { platform })
+          assert.equal(Object.hasOwn(options, 'shell'), false,
+            `prepareSpawn(${platform}, ${command}) must not set shell`)
+        }
+      }
+
+      // (2) the base options object literal at the spawn call itself. Read from
+      //     source because mocking child_process for this module leaks into the
+      //     other suites node --test runs in parallel. The two positive
+      //     controls are what stop this being an absence-assertion over the
+      //     wrong bytes: if the slice stops matching the real call, they go red
+      //     rather than the absence quietly passing over nothing
+      //     (docs/false-safety-guards.md).
+      const src = readFileSync(
+        new URL('../src/jsonl-subprocess-session.js', import.meta.url), 'utf8')
+      const call = /proc = spawn\(spawnSpec\.command, spawnSpec\.args, \{([\s\S]{0,900}?)\n {6}\}\)/.exec(src)
+      assert.ok(call, 'the spawn call in jsonl-subprocess-session.js was not found')
+      const optionsLiteral = call[1]
+      assert.ok(/stdio:/.test(optionsLiteral), 'control: the slice must be the real options object')
+      assert.ok(/\.\.\.spawnSpec\.options/.test(optionsLiteral), 'control: the slice must reach the spread')
+      assert.equal(/\bshell\b/.test(optionsLiteral), false,
+        'the codex spawn must not pass a shell option — the SECURITY INVARIANT rests on it')
     })
 
     it('always passes --skip-git-repo-check (#3834)', () => {

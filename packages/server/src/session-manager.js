@@ -1177,10 +1177,23 @@ export class SessionManager extends EventEmitter {
           log.warn(`Requested model '${resolvedModel}' is not in the current registry for provider '${resolvedProviderType}'; falling back to provider default. Supported: ${providerAllowedModels.slice(0, 8).join(', ')}${providerAllowedModels.length > 8 ? ', …' : ''}`)
           resolvedModel = null
         } else {
-          // Non-Claude providers (Codex, Gemini, custom) have small static
-          // allowlists — strict rejection still applies because falling
-          // back would otherwise mask a real misconfiguration (e.g. a
+          // Non-Claude providers reaching HERE published an authoritative,
+          // non-empty allowlist — strict rejection still applies because
+          // falling back would otherwise mask a real misconfiguration (e.g. a
           // Claude model id sent to a Gemini session).
+          //
+          // "Authoritative" is not the same as "static" any more. Gemini and
+          // DeepSeek publish a compiled-in list; codex (#7727) publishes the
+          // ids its own binary answered `model/list` with, and publishes a
+          // NON-ARRAY while it has no catalog — which this gate reads as
+          // unrestricted a few lines above and never reaches this branch for.
+          //
+          // The `length > 0` guard above is why an empty array never gets
+          // here: it is skipped, i.e. unvalidated. `handleSetModel`'s copy of
+          // this gate does the opposite and treats `[]` as a deny-all. The
+          // two disagree, so a provider must never return `[]` to mean
+          // "nothing to say" — #7727 documents that on getAllowedModels and
+          // tests/codex-model-validation.test.js pins the asymmetry.
           throw new ProviderModelNotSupportedError({
             provider: resolvedProviderType,
             model: resolvedModel,
