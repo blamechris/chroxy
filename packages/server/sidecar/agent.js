@@ -232,6 +232,12 @@ export class PodAgent {
    * @param {number}   [opts.stdinDrainTimeoutMs]  Override wedged-child drain timeout in ms (tests).
    * @param {Function} [opts.setTimeoutFn]         Override setTimeout for deterministic timer tests.
    * @param {Function} [opts.clearTimeoutFn]       Override clearTimeout for deterministic timer tests.
+   * @param {Function} [opts.nowFn]                Override Date.now for deterministic ACTIVITY tests (#7690).
+   *                                               `lastActiveAt` decides which session the size cap evicts,
+   *                                               and it is REWRITTEN on every emitted frame — so a test that
+   *                                               pins it can have the pin overwritten by a frame that lands
+   *                                               a moment later. Injecting the clock is what makes that
+   *                                               ordering a property of the test rather than of the machine.
    */
   constructor({ spawnFn = nodeSpawn, token = AGENT_TOKEN, killGraceMs = KILL_GRACE_MS,
     stdinCloseGraceMs = DEFAULT_STDIN_CLOSE_GRACE_MS,
@@ -241,7 +247,8 @@ export class PodAgent {
     maxSessions = DEFAULT_MAX_SESSIONS,
     stdinDrainTimeoutMs = DEFAULT_STDIN_DRAIN_TIMEOUT_MS,
     setTimeoutFn = setTimeout,
-    clearTimeoutFn = clearTimeout } = {}) {
+    clearTimeoutFn = clearTimeout,
+    nowFn = Date.now } = {}) {
     this._spawnFn = spawnFn
     this._token = token
     this._killGraceMs = killGraceMs
@@ -268,6 +275,12 @@ export class PodAgent {
       : FALLBACK_STDIN_DRAIN_TIMEOUT_MS
     this._setTimeoutFn = setTimeoutFn
     this._clearTimeoutFn = clearTimeoutFn
+    this._nowFn = nowFn
+    // Monotonic creation counter, used ONLY to break `lastActiveAt` ties in
+    // `_enforceSessionCap`. Insertion order already decided them, but only as a
+    // side effect of Map iteration — an implicit rule nothing stated and no test
+    // could fail on (#7690).
+    this._sessionSeq = 0
 
     // Fail-secure warning. Emitted from the constructor (not module-load) so
     // tests and embedders that pass an explicit `token` don't see a misleading
@@ -630,11 +643,21 @@ export class PodAgent {
   _enforceSessionCap() {
     if (this._sessions.size < this._maxSessions) return
 
+    // Strictly older, or the same age and created FIRST. The tie-break is
+    // explicit since #7690: `lastActiveAt` comes from a clock, two sessions can
+    // share a millisecond (Windows' timer granularity is ~15.6ms), and with a
+    // bare `<` the winner was then decided by Map iteration order. That gave the
+    // right answer — insertion order IS creation order — but as a side effect
+    // nothing stated and no test could fail on. `createdSeq` makes the ordering
+    // total, so it is a property of the data rather than of the container.
+    const isOlder = (a, b) => a.lastActiveAt < b.lastActiveAt ||
+      (a.lastActiveAt === b.lastActiveAt && a.createdSeq < b.createdSeq)
+
     // Prefer evicting idle sessions (no activeWs) over live ones.
     let evictTarget = null
     for (const session of this._sessions.values()) {
       if (session.activeWs !== null) continue
-      if (evictTarget === null || session.lastActiveAt < evictTarget.lastActiveAt) {
+      if (evictTarget === null || isOlder(session, evictTarget)) {
         evictTarget = session
       }
     }
@@ -642,7 +665,7 @@ export class PodAgent {
     // Fall back to evicting the globally oldest session if all are active.
     if (evictTarget === null) {
       for (const session of this._sessions.values()) {
-        if (evictTarget === null || session.lastActiveAt < evictTarget.lastActiveAt) {
+        if (evictTarget === null || isOlder(session, evictTarget)) {
           evictTarget = session
         }
       }
@@ -839,7 +862,8 @@ export class PodAgent {
       activeWs: ws,
       seq: 0,
       buffer: [],
-      lastActiveAt: Date.now(),
+      lastActiveAt: this._nowFn(),
+      createdSeq: ++this._sessionSeq,
       idleTimer: null,
       // Cooperative backpressure flag for child.stdin.write() (#3396).
       // True while a 'drain' listener is armed and the WS is paused.
@@ -1166,7 +1190,7 @@ export class PodAgent {
 
     // Attach this WS to the session and refresh activity timestamp.
     session.activeWs = ws
-    session.lastActiveAt = Date.now()
+    session.lastActiveAt = this._nowFn()
     ws._sessionId = sessionId
 
     // Replay any buffered frames the client hasn't seen yet (seq > lastSeq).
@@ -1204,7 +1228,7 @@ export class PodAgent {
    */
   _emitSessionFrame(session, frame, cb) {
     session.seq += 1
-    session.lastActiveAt = Date.now()
+    session.lastActiveAt = this._nowFn()
     const seqFrame = { ...frame, seq: session.seq }
 
     // Ring buffer: drop oldest entry when at capacity.
