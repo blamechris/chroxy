@@ -1537,7 +1537,18 @@ function isConstantInitializer(init) {
  * NOT SEEN, deliberately stated rather than implied:
  *   - `declare`/ambient declarations are treated like any other;
  *   - a declarator shape `declaratorNames` cannot read contributes no name —
- *     it is REPORTED through `unparsed` rather than dropped (see there);
+ *     it is REPORTED through `unparsed` rather than dropped (see there), and
+ *     since #7689 it is FATAL rather than a warning. The count is what decided
+ *     it — the count ON THE SHIPPED TARGETS, which is the one that governs:
+ *     both contain ZERO unreadable declarators. (Three remain elsewhere under
+ *     `packages/`, all generated `.d.ts` in `packages/protocol/dist/`, outside
+ *     either target's declDirs.) So #7533's
+ *     argument for warning — that the previous extractor did not read these
+ *     either, so failing would red the build over a shape it did not introduce
+ *     — has nothing left to grandfather. What it closes is PARTIAL EROSION: a
+ *     roster of exactly zero already raises CannotCheckError, but that is one
+ *     direction only, and misses a refactor that pushes most of the roster into
+ *     this bucket and leaves the run green over what remains;
  *   - a declaration whose GENERIC wraps across lines. `genericEnd` bails on a
  *     newline, exactly as the regex it replaced did. The outcome is safe but
  *     not obvious, so it is pinned: the declaration-end scan stops at that same
@@ -1943,6 +1954,46 @@ export function extractModuleBindings(strippedText) {
       continue
     }
     if (depth === 0 && /[A-Za-z_$]/.test(c) && !/[\w$.]/.test(s[i - 1] ?? '\n')) {
+      // `as const` is a TYPE ASSERTION, not a declaration, and the `const` in it
+      // matched here because the character before it is a space (#7689). The
+      // scan then treated whatever followed as a declarator list and swallowed
+      // the NEXT statement, emitting it as an unreadable declarator:
+      //
+      //   export const A = [1] as const
+      //   export const B = mk()          ->  A, UNPARSED('export const B = mk()'), B
+      //
+      // `B` survives, because `i = listStart` re-walks — so this was noise
+      // rather than lost coverage, and invisible while the unreadable channel
+      // was only a warning. It stops being invisible in this same change, and
+      // `as const` is idiomatic: 30 declarations repo-wide hit it, and
+      // `packages/dashboard/src/store/connection.ts` already uses it five times
+      // at brace depth > 0, one dedent from the roster's own directory.
+      //
+      // Scanned back to the preceding non-whitespace character, NOT read out of a
+      // fixed-width slice. The first version used `s.slice(i - 12, i)` and had
+      // two bad edges, both found in review and both measured:
+      //
+      //   gap of exactly 10  the `a` lands at slice index 0, so the character
+      //                      that would REJECT it (a `.` or a word char) falls
+      //                      outside the window, the lookbehind succeeds
+      //                      vacuously, and the next declaration is skipped with
+      //                      NO `unreadable` entry — a silently lost binding,
+      //                      and a regression against main
+      //   gap of 11 or more  the guard never fires and the mis-parse returns,
+      //                      which this same change makes exit 2
+      //
+      // `stripComments` blanks a comment to same-length spaces, so
+      // `as /*abcdef*/ const` reaches the second edge and `as /*abcde*/ const`
+      // the first. A CRLF line ending shifts the arithmetic by one as well
+      // (`\r` is whitespace), which is a third reason the width should not have
+      // been a constant.
+      //
+      // `wordEndingAt` is reused rather than reimplemented: it already refuses a
+      // property access, for the same reason it grew that lookback in #7560 F5
+      // — `o.else` is not the keyword, and `o.as` is not either.
+      let w = i - 1
+      while (w >= 0 && /\s/.test(s[w])) w--
+      if (wordEndingAt(s, w) === 'as') { i++; continue }
       decl.lastIndex = i
       const m = decl.exec(s)
       if (m) {
@@ -2095,7 +2146,7 @@ export function extractModuleBindings(strippedText) {
  * `perName` maps a roster KEY to `{reads, writes}`; `subject(key)` renders that
  * key for a human.
  */
-function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedTail, fileCount }) {
+function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedTail, fileCount, unreadable = [] }) {
   // Allowlist hygiene FIRST: a bad entry means the lint's own configuration no
   // longer describes the code, which is a cannot-check rather than a finding.
   for (const [key, why] of Object.entries(allow)) {
@@ -2143,6 +2194,10 @@ function judge({ keys, perName, allow, noun, rosterLabel, subject, unreferencedT
     perName,
     failures,
     warnings,
+    // Declarators the extractor could not read. Reported by the CLI as errors
+    // and forced to exit 2, but kept SEPARATE from `failures` so a write-only
+    // finding is never renamed into a cannot-check, and vice versa (#7689).
+    unreadable,
     stats: {
       noun,
       fields: keys.length,
@@ -2253,11 +2308,12 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
       if (b.name === null) {
         // A declarator the extractor could not read. REPORTED, never dropped:
         // its bindings go unjudged either way, and the difference between a
-        // silent gap and a named one is the whole point of #7533. Not fatal —
-        // main's extractor did not read these declarations either (it emitted
-        // entries literally named `const` for them), so failing here would red
-        // the build over a shape this change did not introduce. Tracked for
-        // tightening; see the declaration-slice note in #7533's follow-up.
+        // silent gap and a named one is the whole point of #7533. It WAS not
+        // fatal, on the reasoning that main's extractor did not read these
+        // declarations either (it emitted entries literally named `const` for
+        // them), so failing would red the build over a shape #7533 did not
+        // introduce. #7689 is the tightening that note anticipated: the count
+        // reached a measured zero, so there was nothing left to grandfather.
         unreadable.push(`${decl.path}: ${b.unparsed.replace(/\s+/g, ' ').slice(0, 80)}`)
         continue
       }
@@ -2295,30 +2351,55 @@ function analyzeModuleBindings({ declSources, sources, inPlaceMutationIsWrite = 
     }
   }
 
+  // NOT A THROW, and that is the whole design (#7689). An unreadable declarator
+  // must RED the run — its bindings are unjudged while everything else reports
+  // clean, which is "cannot check" read as "nothing to check" — but throwing
+  // here pre-empts `judge()` and MASKS real findings. Measured: an unreadable
+  // declarator in one file suppressed a genuine
+  // `store/b.ts::deadState is WRITE-ONLY` in another. One problem hiding
+  // another is not an improvement on one problem being silent.
+  //
+  // So it is DATA on the result, and the CLI decides the exit code: failures
+  // print as themselves, unreadable declarators print as themselves, and the
+  // run exits 2 because "I could not check part of this" outranks "I checked it
+  // and it is wrong". It also lets the OTHER target finish, which a throw did
+  // not.
+  //
+  // FATAL rather than the `::warning::` it was, because the count decided it:
+  // both shipped targets contain ZERO unreadable declarators today, so #7533's
+  // argument — that the previous extractor did not read these either, and
+  // failing would red the build over a shape it did not introduce — has nothing
+  // left to grandfather. What it closes is PARTIAL EROSION: a roster of exactly
+  // zero already raises CannotCheckError, but that is one direction only, and
+  // misses a refactor that pushes most of the roster into this bucket and
+  // leaves the run green over what remains.
+
+  // This THROWS, so it pre-empts the `unreadable` list that `judge()` would
+  // otherwise carry to the CLI — and the case where both conditions hold is
+  // exactly the one where that list is the useful half: a refactor that makes
+  // every declaration unreadable empties the roster, and "ZERO bindings" says
+  // so without saying WHY.
+  //
+  // An earlier draft of this change claimed the ordering solved that. It did
+  // not: moving the naming into `runCli` put it BEHIND this throw rather than
+  // in front of it, and the comment asserting otherwise was a stronger claim
+  // than the code performed — the shape this file catalogues (#7689 review).
+  // The declarators are named HERE instead, so nothing is lost whichever
+  // condition fires first.
   if (keys.length === 0) {
     throw new CannotCheckError(
       `${declSources.length} declaring file(s) yielded ZERO module-level bindings. Either they ` +
       'hold no state any more or the extractor no longer understands their shape — both are ' +
-      '"cannot check", not "clean".',
+      '"cannot check", not "clean".' +
+      (unreadable.length > 0
+        ? `\n      ${unreadable.length} declarator(s) could not be read, which is probably why:\n` +
+          unreadable.map((u) => `      unread declarator: ${u}`).join('\n')
+        : ''),
     )
-  }
-
-  if (unreadable.length > 0) {
-    // Printed, not swallowed. These declarations contribute no roster entries,
-    // so their bindings are unjudged — the same gap #7533 closed for
-    // destructuring and multi-declarator forms, in the shapes still unread.
-    // Naming them is the difference between a known gap and a silent one.
-    // As a `::warning::`, like every other diagnostic here. It was a bare
-    // `console.log` until #7687's review: the one line in this file that CI
-    // renders nowhere, announcing the one thing the run did not check.
-    console.warn(
-      `::warning::[write-only-ctx] ${unreadable.length} declarator(s) could not be read and ` +
-      'are therefore unjudged — their bindings are outside the roster.',
-    )
-    for (const u of unreadable) console.warn(`::warning::[write-only-ctx] unread declarator: ${u}`)
   }
 
   return judge({
+    unreadable,
     keys,
     perName,
     allow,
@@ -2364,6 +2445,11 @@ export function runCli(argv = process.argv.slice(2)) {
   const log = (...a) => { if (!quiet) console.log(...a) }
 
   let failed = 0
+  // Counted separately from `failed`, because they are different verdicts and
+  // the exit code has to say which: 2 ("I could not check part of this")
+  // outranks 1 ("I checked it and it is wrong"). Accumulated across targets so
+  // one target's gap cannot stop the other from being reported (#7689).
+  let uncheckable = 0
   for (const target of TARGETS) {
     const kind = target.kind ?? 'interface'
     const readSource = (rel) => ({ path: rel, text: readFileSync(join(root, rel), 'utf8') })
@@ -2428,6 +2514,18 @@ export function runCli(argv = process.argv.slice(2)) {
       failed++
       console.error(`::error::[write-only-ctx] ${target.id}: ${f}`)
     }
+    // AFTER the failures, not instead of them. These are declarators the
+    // extractor could not read: their bindings are unjudged while everything
+    // above reports clean, so the run must red — but it must not swallow the
+    // findings it DID make, which is what throwing from the analysis did.
+    for (const u of result.unreadable ?? []) {
+      uncheckable++
+      console.error(
+        `::error::[write-only-ctx] ${target.id}: CANNOT CHECK — unread declarator: ${u}\n` +
+        '      Its bindings are outside the roster and go unjudged. Flatten the pattern, or ' +
+        'extend declaratorNames to read it.',
+      )
+    }
   }
 
   if (failed > 0) {
@@ -2435,8 +2533,19 @@ export function runCli(argv = process.argv.slice(2)) {
       `\n[write-only-ctx] FAIL — ${failed} field(s)/binding(s) written but never read. See the ` +
       'header of scripts/lint-write-only-ctx-fields.mjs for the heuristic and its limits.',
     )
-    return 1
   }
+  // Checked AFTER the failure report so both are visible, and returned FIRST so
+  // the exit code names the stronger verdict: a run that could not check part
+  // of its subject is not merely a run with findings (#7689).
+  if (uncheckable > 0) {
+    console.error(
+      `\n[write-only-ctx] CANNOT CHECK — ${uncheckable} declarator(s) could not be read, so ` +
+      'their bindings were never judged. A guard that reports clean over state it did not ' +
+      'look at is the failure mode this lint exists to catch.',
+    )
+    return 2
+  }
+  if (failed > 0) return 1
   log('[write-only-ctx] OK — no guarded state is written without a reader.')
   return 0
 }
