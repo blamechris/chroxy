@@ -239,7 +239,15 @@ export class FormDriver {
    *   then writes `freeformText` + Enter. Dropped when the chosen option
    *   doesn't exist or sits beyond the single-digit hotkey range.
    *
-   * @returns {Promise<void>|undefined} — #7812 DRAIN HANDLE. The keystroke
+   * @returns {Promise<boolean|undefined>|undefined} — #7812 DRAIN HANDLE.
+   *   **Await it for SETTLE TIME, never branch on the resolved value.** Both
+   *   writers are `Promise<boolean>` (`pty-driver.js` — true if completed, false
+   *   if aborted mid-write), but each call site wraps them in a `.catch` that
+   *   logs and resolves `undefined`, and the Other-path IIFE resolves
+   *   `undefined` on every branch including success. So the value is
+   *   `boolean | undefined` with no consistent meaning across paths, and a
+   *   caller reading it as success would be wrong on two of the three.
+   *   Settle-time is the contract this handle exists to provide. The keystroke
    *   drive is asynchronous (`_writePtyTextThrottled` paces one character per
    *   PROMPT_CHAR_DELAY_MS to defeat claude TUI's paste detector — #4269) while
    *   this method is synchronous by contract, so the drive has always been
