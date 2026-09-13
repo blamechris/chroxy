@@ -622,8 +622,11 @@ describe('runDoctorChecks — provider awareness (issue #2951)', () => {
 
   it('codex provider reports credential status via OPENAI_API_KEY', async () => {
     const originalKey = process.env.OPENAI_API_KEY
+    const originalAuthHome = process.env.CHROXY_CODEX_HOME
+    const authHome = mkdtempSync(join(tmpdir(), 'doctor-no-native-auth-'))
     try {
       delete process.env.OPENAI_API_KEY
+      process.env.CHROXY_CODEX_HOME = authHome
       const { checks } = await runDoctorChecks({ providers: ['codex'] })
       const credCheck = checks.find(c => c.provider === 'codex' && c.name.toLowerCase().includes('credentials'))
       assert.ok(credCheck)
@@ -632,6 +635,9 @@ describe('runDoctorChecks — provider awareness (issue #2951)', () => {
     } finally {
       if (originalKey === undefined) delete process.env.OPENAI_API_KEY
       else process.env.OPENAI_API_KEY = originalKey
+      if (originalAuthHome === undefined) delete process.env.CHROXY_CODEX_HOME
+      else process.env.CHROXY_CODEX_HOME = originalAuthHome
+      rmSync(authHome, { recursive: true, force: true })
     }
   })
 

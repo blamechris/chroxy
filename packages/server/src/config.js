@@ -29,6 +29,7 @@ import { validateAcpProviders } from './acp-config.js'
 // lightweight.
 import { DEFAULT_SEMANTIC_TITLE_MODEL, DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS } from './session-title.js'
 import { configPath } from './config-dir.js'
+import { validateAgentConnections } from './agent-connections.js'
 
 const log = createLogger('config')
 
@@ -88,6 +89,10 @@ const CONFIG_SCHEMA = {
   //     name an env var (`apiKeyEnv`) or a ~/.chroxy/credentials.json
   //     field (`credentialsKey`).
   providers: 'array|object',
+  // Explicit host-scoped agent access routes. Entries contain only stable
+  // identifiers and credential references; raw credentials are rejected by
+  // the connection validator and remain in env/native/vendor stores.
+  agentConnections: 'array',
   // #5547: optional override for the one-shot session summarizer (the sidebar
   // "Summarize & start new session" action). `{ provider?: string, model?:
   // string }` — when set, the summarizer uses this (typically cheaper) model
@@ -1335,6 +1340,10 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  if (config.agentConnections !== undefined) {
+    validateAgentConnections(config.agentConnections, warnings)
+  }
+
   // #4482: per-MCP-call timeout. 1s-10min. Unlike streamStallTimeoutMs,
   // 0 isn't meaningful here — a 0-ms callTool timeout fires immediately
   // and makes every MCP tool look broken — so any non-finite / non-
@@ -2291,4 +2300,3 @@ export function writeControlRoomRootToConfig(root, configPath = defaultConfigPat
   mkdirSync(dir, { recursive: true })
   writeFileRestricted(configPath, JSON.stringify(existing, null, 2))
 }
-

@@ -318,13 +318,31 @@ describe('store actions', () => {
       expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
     });
 
-    it('connect() clears userDisconnected flag', () => {
+    it('connect() clears userDisconnected and ignores a completed probe after disconnect', async () => {
+      const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      } as Response);
       useConnectionLifecycleStore.setState({ userDisconnected: true, connectionPhase: 'disconnected' });
-      // connect() will fail (no server) but should clear the flag immediately
-      useConnectionStore.getState().connect('ws://localhost:9999', 'test-token');
-      expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(false);
-      // Clean up — disconnect to cancel any pending retries
-      useConnectionStore.getState().disconnect();
+      try {
+        // connect() starts its health probe without returning that promise. Use
+        // a local response fixture, then disconnect before the probe continuation
+        // runs so this test covers the real stale-attempt cleanup path without a
+        // live localhost request escaping past Jest teardown.
+        useConnectionStore.getState().connect('ws://localhost:9999', 'test-token');
+        expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(false);
+        useConnectionStore.getState().disconnect();
+
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(fetchSpy).toHaveBeenCalledWith(
+          'http://localhost:9999',
+          expect.objectContaining({ method: 'GET', signal: expect.anything() }),
+        );
+        expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 
@@ -1441,7 +1459,7 @@ describe('createSession store action', () => {
     expect(JSON.parse(sent[0])).toEqual({ type: 'create_session', name: 'NewSession' });
   });
 
-  it('sends cwd, worktree, provider when provided', () => {
+  it('sends cwd, worktree, provider, and explicit connection when provided', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
     useConnectionStore.getState().createSession({
@@ -1449,6 +1467,7 @@ describe('createSession store action', () => {
       cwd: '/work',
       worktree: true,
       provider: 'sdk',
+      connectionId: 'claude-native',
     });
 
     expect(JSON.parse(sent[0])).toEqual({
@@ -1457,6 +1476,7 @@ describe('createSession store action', () => {
       cwd: '/work',
       worktree: true,
       provider: 'sdk',
+      connectionId: 'claude-native',
     });
   });
 

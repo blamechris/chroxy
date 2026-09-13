@@ -441,7 +441,7 @@ export function resetAllHandlerState(): void {
 function mapProviderList(rawProviders: unknown[]): ProviderInfo[] {
   return rawProviders
     .filter(
-      (p): p is { name: string; capabilities?: unknown; auth?: unknown } =>
+      (p): p is { name: string; capabilities?: unknown; auth?: unknown; connections?: unknown } =>
         !!p &&
         typeof p === 'object' &&
         typeof (p as { name?: unknown }).name === 'string',
@@ -453,6 +453,9 @@ function mapProviderList(rawProviders: unknown[]): ProviderInfo[] {
       }
       if (p.auth && typeof p.auth === 'object' && !Array.isArray(p.auth)) {
         entry.auth = p.auth as ProviderInfo['auth'];
+      }
+      if (Array.isArray(p.connections)) {
+        entry.connections = p.connections as ProviderInfo['connections'];
       }
       return entry;
     });

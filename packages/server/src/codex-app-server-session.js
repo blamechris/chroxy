@@ -109,6 +109,14 @@ function resolveReconnectDeadlineMs(optValue, logger = log) {
 }
 
 const log = createLogger('codex-app-server')
+const CODEX_FIRST_PARTY_API_BASE_URL = 'https://api.openai.com/v1'
+const CODEX_FIRST_PARTY_CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api/'
+const CODEX_FIRST_PARTY_CONNECTION_ARGS = Object.freeze([
+  'app-server',
+  '-c', 'model_provider="openai"',
+  '-c', `openai_base_url="${CODEX_FIRST_PARTY_API_BASE_URL}"`,
+  '-c', `chatgpt_base_url="${CODEX_FIRST_PARTY_CHATGPT_BASE_URL}"`,
+])
 
 /**
  * Codex session driven through the `codex app-server` JSON-RPC protocol
@@ -167,6 +175,10 @@ export class CodexAppServerSession extends BaseSession {
   // invoked, and the symptom is a picker that looks like flaky discovery
   // rather than a wiring bug.
   static refreshModels(deps) { return CodexSession.refreshModels(deps) }
+  // Explicit connection routes are supported only on app-server because its
+  // account/read RPC can prove the active auth method before thread/start.
+  static get agentConnectionRoutes() { return ['native', 'api'] }
+  static get agentConnectionCredentialKey() { return 'OPENAI_API_KEY' }
 
   static get capabilities() {
     return {
@@ -221,6 +233,10 @@ export class CodexAppServerSession extends BaseSession {
       provider: opts.provider || 'codex',
       model: opts.model || null,
     }))
+    this._connectionAuthRoute = opts.connectionAuthRoute || null
+    this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
+      ? { ...opts.connectionChildEnv }
+      : null
     this._client = null
     this._threadId = null
     // #7730 — the reasoning effort, split in two on PURPOSE.
@@ -241,6 +257,9 @@ export class CodexAppServerSession extends BaseSession {
     // start() builds a real CodexAppServerClient; a test supplies a stub so
     // start() can be executed rather than reproduced.
     this._clientFactory = typeof opts.clientFactory === 'function' ? opts.clientFactory : null
+    this._binaryFailureLabeler = typeof opts.binaryFailureLabeler === 'function'
+      ? opts.binaryFailureLabeler
+      : labelBinarySpawnFailure
     // #7724 — filled from the `initialize` handshake in start(). Null / all-UNKNOWN
     // before the handshake AND after an unparseable userAgent: a cannot-check must
     // not read as a no, so callers probe (probeMethod) instead of disabling.
@@ -323,7 +342,70 @@ export class CodexAppServerSession extends BaseSession {
     return this._resolvedCodexSandbox || resolveCodexSandbox(this._codexSandbox)
   }
 
-  _buildChildEnv() { return buildSpawnEnv('codex') }
+  _buildChildEnv() {
+    return this._connectionChildEnv ? { ...this._connectionChildEnv } : buildSpawnEnv('codex')
+  }
+
+  _buildClientArgs() {
+    return this._connectionAuthRoute
+      ? [...CODEX_FIRST_PARTY_CONNECTION_ARGS]
+      : ['app-server']
+  }
+
+  async _verifyConnectionAuthRoute() {
+    if (!this._connectionAuthRoute) return
+    const configResult = await this._client.request('config/read', { cwd: this.cwd, includeLayers: false })
+    if (configResult?.config?.model_provider !== 'openai') {
+      const err = new Error('Codex could not verify the built-in OpenAI provider for this explicit connection.')
+      err.code = 'CODEX_PROVIDER_ROUTE_UNAVAILABLE'
+      throw err
+    }
+    const result = await this._client.request('account/read', { refreshToken: false })
+    const actual = result?.account?.type === 'chatgpt'
+      ? 'native'
+      : result?.account?.type === 'apiKey'
+        ? 'api'
+        : 'none'
+    if (actual !== this._connectionAuthRoute) {
+      const err = new Error(
+        this._connectionAuthRoute === 'native'
+          ? 'Codex native login is unavailable for this connection. Run `codex login`; API credentials are not used as a fallback.'
+          : 'Codex API authentication is unavailable for this connection. Configure OPENAI_API_KEY; native login is not used as a fallback.'
+      )
+      err.code = this._connectionAuthRoute === 'native'
+        ? 'NATIVE_LOGIN_REQUIRED'
+        : 'API_AUTH_ROUTE_UNAVAILABLE'
+      throw err
+    }
+    return actual
+  }
+
+  _verifyStartedConnectionRoute(started, actualAuthRoute) {
+    if (!this._connectionAuthRoute) return
+    if (started?.modelProvider !== 'openai') {
+      const err = new Error('Codex started this thread with a model provider outside the explicit OpenAI connection route.')
+      err.code = 'CODEX_PROVIDER_ROUTE_MISMATCH'
+      throw err
+    }
+    if (!this.agentConnection) return
+    this.agentConnection.authentication = {
+      ...this.agentConnection.authentication,
+      observed: actualAuthRoute === 'native' ? 'native' : 'api-key',
+    }
+    this.agentConnection.entitlement = actualAuthRoute === 'api'
+      ? { route: 'api', status: 'available' }
+      : { route: 'subscription', status: 'unknown' }
+    this.agentConnection.readiness = {
+      state: 'ready',
+      reasonCode: null,
+      message: 'The selected authentication and first-party provider route was verified by Codex.',
+      recoveryAction: null,
+    }
+    this.agentConnection.provenance = {
+      ...this.agentConnection.provenance,
+      observedAt: new Date().toISOString(),
+    }
+  }
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -342,6 +424,7 @@ export class CodexAppServerSession extends BaseSession {
     this._spawnedBinary = attemptedBinary
     this._client = this._createClient({
       bin: attemptedBinary,
+      args: this._buildClientArgs(),
       cwd: this.cwd,
       env: this._buildChildEnv(),
       logger: log,
@@ -350,15 +433,13 @@ export class CodexAppServerSession extends BaseSession {
     this._client.on('serverRequest', (r) => this._onServerRequest(r))
     this._client.on('exit', (e) => this._onClientExit(e))
 
-    let started
+    let init
     try {
       // #7724 — the handshake result is the ONLY in-band version signal, and it
       // reports the binary serving THIS session (not whatever is on PATH). It
       // gates FEATURES only: nothing below refuses to start, and an unparseable
       // userAgent leaves every gate UNKNOWN so callers probe rather than assume.
-      const init = await this._client.initialize({ name: 'chroxy', version: '1' })
-      this._captureHandshake(init)
-      started = await this._client.request('thread/start', this._buildThreadParams(sandbox))
+      init = await this._client.initialize({ name: 'chroxy', version: '1' })
     } catch (err) {
       // #6708 — the app-server child is spawned inside initialize(); a missing/
       // quarantined codex binary surfaces here as an initialize rejection (the
@@ -366,7 +447,7 @@ export class CodexAppServerSession extends BaseSession {
       // session_create_failed names the quarantine + fix rather than an opaque
       // "codex app-server exited". Only relabels when the binary is actually
       // unhealthy; otherwise the original protocol error rethrows unchanged.
-      const labeled = labelBinarySpawnFailure({
+      const labeled = this._binaryFailureLabeler({
         attemptedPath: err?.path || this._spawnedBinary,
         binary: 'codex',
         prefix: 'Failed to start codex app-server',
@@ -374,6 +455,10 @@ export class CodexAppServerSession extends BaseSession {
       if (labeled) throw new Error(labeled)
       throw err
     }
+    this._captureHandshake(init)
+    const actualAuthRoute = await this._verifyConnectionAuthRoute()
+    const started = await this._client.request('thread/start', this._buildThreadParams(sandbox))
+    this._verifyStartedConnectionRoute(started, actualAuthRoute)
     this._threadId = started?.thread?.id || null
     // #7729 — the `thread/start` RESPONSE echoes the model codex actually
     // resolved (from ~/.codex/config.toml when chroxy sent none). Capture it
@@ -541,6 +626,9 @@ export class CodexAppServerSession extends BaseSession {
     const echoed = this._readModelId(started?.model) ?? this._readModelId(started?.thread?.model)
     const carried = echoed ? null : this.bootedModel || null
     this.bootedModel = echoed ?? this.bootedModel ?? null
+    if (echoed && this.agentConnection) {
+      this.agentConnection.model = { ...this.agentConnection.model, resolved: echoed }
+    }
     if (echoed) {
       ;(this._log || log).info(`codex resolved model=${echoed} (thread/start echo)`)
     } else if (carried) {
@@ -558,6 +646,17 @@ export class CodexAppServerSession extends BaseSession {
    */
   _readModelId(value) {
     return typeof value === 'string' && value.length > 0 ? value : null
+  }
+
+  _onModelChanged(model) {
+    if (this.agentConnection) {
+      this.agentConnection.model = {
+        ...this.agentConnection.model,
+        requested: model,
+        resolved: null,
+      }
+    }
+    ;(this._log || log).info(`codex requested model set to ${model ?? 'default'}; resolved model is unknown until the runtime reports it`)
   }
 
   /**
@@ -644,6 +743,9 @@ export class CodexAppServerSession extends BaseSession {
     }
     const from = this._readModelId(params?.fromModel) || this.bootedModel || 'unknown'
     this.bootedModel = to
+    if (this.agentConnection) {
+      this.agentConnection.model = { ...this.agentConnection.model, resolved: to }
+    }
     ;(this._log || log).info(`codex re-routed this thread ${from} → ${to}${params?.reason ? ` (${params.reason})` : ''}`)
     return true
   }

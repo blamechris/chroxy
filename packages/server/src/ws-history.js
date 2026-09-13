@@ -386,6 +386,9 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     billingCanary,
     // #5536: long-lived identity keypair for signing the eager exchange key.
     serverIdentity,
+    // #7821: configured explicit agent routes. Kept on the history context so
+    // auth_ok feature derivation and auth_bootstrap use the same live config.
+    agentConnections,
   } = ctx
   const client = clients.get(ws)
 
@@ -547,7 +550,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     client.eagerKeyExchange = null
   }
 
-  const providers = listProviders()
+  const providers = listProviders({ agentConnections })
   const features = {
     environments: providers.some(p => p.capabilities?.containerized),
   }
@@ -579,6 +582,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // (older server) fall back to requesting the three lists as before. The
     // request handlers stay live either way for post-connect refreshes.
     authBootstrap: true,
+    // #7821 — provider_list/auth_bootstrap include versioned, non-secret agent
+    // connection descriptors and create_session accepts an explicit connectionId.
+    // New clients require this flag before presenting strong route selection;
+    // older clients keep provider-only creation and receive a legacy descriptor.
+    agentConnections: true,
     // #6481 (epic #6469): the opt-in IDE feature surface (file navigator, symbol
     // navigation, go-to-definition, find-references, edit-in-place) is enabled on
     // THIS server (config.features.ide / CHROXY_ENABLE_IDE). Clients gate ALL IDE
@@ -796,6 +804,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
           sessionId: failed.sessionId,
           name: failed.name,
           provider: failed.provider,
+          agentConnection: failed.agentConnection,
           cwd: failed.cwd,
           model: failed.model,
           permissionMode: failed.permissionMode,
@@ -1004,7 +1013,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
  * @param {{ cwd: string|null, provider: string|null, sessionId: string|null }} info
  */
 function sendAuthBootstrap(ctx, ws, info = {}) {
-  const { send, services } = ctx
+  const { send, services, agentConnections } = ctx
   const fileOps = ctx.fileOps || services?.fileOps || null
   const cwd = info.cwd || null
   const provider = info.provider || null
@@ -1016,7 +1025,7 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
   // the list_providers handler.
   let providers = []
   try {
-    providers = listProviders()
+    providers = listProviders({ agentConnections })
   } catch (err) {
     log.warn(`auth_bootstrap: listProviders failed: ${err.message}`)
     providers = []

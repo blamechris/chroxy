@@ -43,11 +43,12 @@ function jsonRpcError(error) {
  * nothing onto Chroxy's session contract; CodexAppServerSession does that.
  */
 export class CodexAppServerClient extends EventEmitter {
-  constructor({ bin, cwd, env, logger, spawnFn } = {}) {
+  constructor({ bin, args, cwd, env, logger, spawnFn } = {}) {
     super()
     this._bin = bin
     this._cwd = cwd
     this._env = env
+    this._args = Array.isArray(args) && args.length > 0 ? [...args] : ['app-server']
     this._log = logger || log
     // #7726 — injectable spawn, so a test can assert the REAL argv literal
     // below instead of a copy of it. Defaults to child_process.spawn; nothing
@@ -68,11 +69,10 @@ export class CodexAppServerClient extends EventEmitter {
    * dies or the handshake errors.
    */
   async initialize(clientInfo = { name: 'chroxy', version: '1' }) {
-    // ARGV INVARIANT: exactly `['app-server']`, forever. Every knob the
-    // protocol exposes — model lists, reasoning effort, sandbox, approval
-    // policy — is a JSON-RPC param over stdin, so no capability may ever add a
-    // CLI flag here (#7726). A test pins this literal via `spawnFn`.
-    this._child = this._spawn(this._bin, ['app-server'], { cwd: this._cwd, env: this._env })
+    // Default sessions use exactly `['app-server']`. Explicit agent
+    // connections may add audited `-c` route constraints supplied by the
+    // session adapter; ordinary capabilities remain JSON-RPC params.
+    this._child = this._spawn(this._bin, [...this._args], { cwd: this._cwd, env: this._env })
     this._child.stdout.on('data', (d) => this._onData(d))
     this._child.stderr.on('data', (d) => this._onStderr(d))
     this._child.on('exit', (code, signal) => this._onExit(code, signal))

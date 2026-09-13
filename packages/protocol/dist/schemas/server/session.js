@@ -11,6 +11,7 @@ import { ServerPendingBackgroundShellSchema } from "./stream.js";
 // stays in lockstep with the create-time `create_session` control (client.ts)
 // and the server's `resolveCodexSandbox` — same list, one place.
 import { CODEX_SANDBOX_MODES } from "../../codex.js";
+import { AgentConnectionSchema } from "../../agent-connection.js";
 export const ServerClientFocusChangedSchema = z.object({
     type: z.literal('client_focus_changed'),
     clientId: z.string(),
@@ -227,6 +228,7 @@ export const ServerSessionListEntrySchema = z.object({
     // (see docs/design/codex-permission-model.md §5) — clients should render it
     // read-only. Older servers omit the field; treat `undefined` as "unknown".
     codexSandbox: z.enum(CODEX_SANDBOX_MODES).optional(),
+    agentConnection: AgentConnectionSchema.optional(),
 }).passthrough();
 export const ServerSessionListSchema = z.object({
     type: z.literal('session_list'),
@@ -246,6 +248,7 @@ export const ServerSessionRestoreFailedSchema = z.object({
     sessionId: z.string(),
     name: z.string(),
     provider: z.string(),
+    agentConnection: AgentConnectionSchema.optional(),
     cwd: z.string().optional(),
     model: z.string().nullable().optional(),
     permissionMode: z.string().nullable().optional(),
@@ -293,6 +296,7 @@ export const ServerFailedRestoresListSchema = z.object({
         sessionId: z.string(),
         name: z.string(),
         provider: z.string(),
+        agentConnection: AgentConnectionSchema.optional(),
         cwd: z.string().optional(),
         model: z.string().nullable().optional(),
         permissionMode: z.string().nullable().optional(),
@@ -395,6 +399,7 @@ export const ServerProviderListSchema = z.object({
         name: z.string(),
         capabilities: z.record(z.string(), z.boolean()).optional(),
         auth: ProviderAuthSchema.optional(),
+        connections: z.array(AgentConnectionSchema).optional(),
     })),
 });
 // #5555 (auth_bootstrap) — single connect-time burst frame that carries the
@@ -411,6 +416,7 @@ export const ServerAuthBootstrapSchema = z.object({
         name: z.string(),
         capabilities: z.record(z.string(), z.boolean()).optional(),
         auth: ProviderAuthSchema.optional(),
+        connections: z.array(AgentConnectionSchema).optional(),
     })).default([]),
     slashCommands: z.array(z.object({
         name: z.string(),

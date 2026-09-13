@@ -1,6 +1,7 @@
 import React from 'react';
 import { act } from 'react';
 import renderer from 'react-test-renderer';
+import { StyleSheet } from 'react-native';
 import { CreateSessionModal } from '../CreateSessionModal';
 import { useConnectionStore } from '../../store/connection';
 
@@ -273,6 +274,61 @@ describe('CreateSessionModal provider loading state', () => {
 
     defaultChip = component!.root.findByProps({ accessibilityLabel: 'Provider: Default' });
     expect(defaultChip).toBeTruthy();
+  });
+});
+
+describe('CreateSessionModal agent connections', () => {
+  const providers = [
+    {
+      name: 'claude-tui',
+      auth: { ready: true },
+      connections: [{
+        version: 1,
+        id: 'claude-native',
+        label: 'C',
+        provider: 'claude',
+        runtime: { id: 'claude-tui', version: null },
+        accountRef: null,
+        authentication: { requested: 'native', observed: 'unknown' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        model: { requested: null, resolved: null },
+        execution: { host: 'daemon', inference: 'remote' },
+        readiness: { state: 'unknown', reasonCode: 'NATIVE_AUTH_UNVERIFIED', message: 'Checked on start', recoveryAction: null },
+        provenance: { source: 'configured', observedAt: '2026-09-13T00:00:00.000Z', expiresAt: null },
+      }],
+    },
+    { name: 'codex', auth: { ready: true } },
+  ];
+
+  it('Default submits neither provider nor connection when the daemon default is unknown', () => {
+    setupStore(providers);
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    expect(component!.root.findAllByProps({ testID: 'agent-connection-field' })).toHaveLength(0);
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Create session' }).props.onPress();
+    });
+
+    expect(mockCreateSession).toHaveBeenCalledTimes(1);
+    expect(mockCreateSession.mock.calls[0][0].provider).toBeUndefined();
+    expect(mockCreateSession.mock.calls[0][0].connectionId).toBeUndefined();
+  });
+
+  it('gives a one-character connection chip a 48dp minimum width', () => {
+    setupStore(providers);
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+    act(() => {
+      component!.root.findByProps({ accessibilityLabel: 'Provider: Claude Code (TUI)' }).props.onPress();
+    });
+
+    const chip = component!.root.findByProps({ testID: 'agent-connection-chip-claude-native' });
+    expect(StyleSheet.flatten(chip.props.style).minWidth).toBeGreaterThanOrEqual(48);
   });
 });
 

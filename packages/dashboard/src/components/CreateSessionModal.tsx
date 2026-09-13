@@ -24,6 +24,7 @@ export interface CreateSessionData {
   name: string
   cwd: string
   provider?: string
+  connectionId?: string
   permissionMode?: string
   model?: string
   worktree?: boolean
@@ -209,6 +210,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
   const [provider, setProvider] = useState(defaultProvider)
+  const [connectionId, setConnectionId] = useState('')
   const [nameError, setNameError] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
@@ -309,6 +311,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setProvider(defaultProvider)
     }
     setShowAdvanced(false)
+    const initialProvider = availableProviders.find(p => p.name === (availableProviders.some(p => p.name === defaultProvider) ? defaultProvider : availableProviders[0]?.name))
+    setConnectionId(initialProvider?.connections?.[0]?.id || '')
     setPermissionMode('')
     setWorktree(false)
     setCodexSandbox('')
@@ -338,6 +342,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, availableProviders, provider])
 
+  useEffect(() => {
+    const connections = availableProviders.find(p => p.name === provider)?.connections || []
+    if (!connections.some(connection => connection.id === connectionId)) {
+      setConnectionId(connections[0]?.id || '')
+    }
+  }, [availableProviders, provider, connectionId])
+
   // #4245: reset skipPermissions whenever the provider changes. The
   // checkbox is hidden for non-TUI providers, but the underlying state
   // survives a provider switch — so a user who ticks the box for
@@ -361,7 +372,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // resolve `selectedProviderUnready` once and reuse it for the panel +
   // submit gate + button disabled state.
   const selectedProviderInfo = availableProviders.find(p => p.name === provider)
-  const selectedProviderUnready = selectedProviderInfo?.auth?.ready === false
+  const selectedConnection = selectedProviderInfo?.connections?.find(connection => connection.id === connectionId)
+  const selectedConnectionUnready = selectedConnection?.readiness.state === 'blocked' || selectedConnection?.readiness.state === 'unsupported'
+  const selectedProviderUnready = selectedConnection
+    ? selectedConnectionUnready
+    : selectedProviderInfo?.auth?.ready === false
   const selectedProviderAutoUnsupported = selectedProviderInfo?.capabilities?.autoPermissionMode === false
 
   // A mode selected for the previous provider must not survive a provider
@@ -401,8 +416,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // instead of being silently overridden. Other providers never forward it.
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
+  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -739,6 +754,32 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 </>
             }
           </select>
+
+          {selectedProviderInfo?.connections?.length ? (
+            <div className="form-group" data-testid="agent-connection-field">
+              <label htmlFor="connection-select">Connection</label>
+              <select
+                id="connection-select"
+                value={connectionId}
+                onChange={e => setConnectionId(e.target.value)}
+              >
+                {selectedProviderInfo.connections.map(connection => (
+                  <option
+                    key={connection.id}
+                    value={connection.id}
+                    disabled={connection.readiness.state === 'blocked' || connection.readiness.state === 'unsupported'}
+                  >
+                    {connection.label} · {connection.authentication.requested} · {connection.entitlement.route}
+                  </option>
+                ))}
+              </select>
+              {selectedConnection ? (
+                <p className="field-hint" data-testid="agent-connection-route">
+                  {selectedConnection.runtime.id} · {selectedConnection.execution.inference} inference · {selectedConnection.readiness.message}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {/* Live auth detail from the server (#3404 audit F5) wins over the
               static date-gated fallback so the user sees the actual billing
               identity, not a generic "uses API credits" hint. The fallback

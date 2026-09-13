@@ -6,6 +6,7 @@
  */
 
 import { z } from 'zod'
+import { AgentConnectionSchema } from '../../agent-connection.ts'
 
 import { BillingCanarySnapshotSchema, MAX_SANE_DURATION_MS } from './connection.ts'
 import { CumulativeUsageSchema } from './session.ts'
@@ -206,6 +207,7 @@ export const ServerSessionUsageSchema = z.object({
   // so consumers can construct the message without it pre-broadcast.
   sessionId: z.string().optional(),
   cumulativeUsage: CumulativeUsageSchema,
+  agentConnection: AgentConnectionSchema.optional(),
 })
 
 // #4075: soft per-session cost-threshold crossing. Fires ONCE per

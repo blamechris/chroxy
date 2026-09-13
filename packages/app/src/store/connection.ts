@@ -2490,12 +2490,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // future fields a one-place change. Server's `create_session` handler
   // accepts these fields plus others (e.g. `sandbox`) — see
   // packages/server/src/handlers/session-handlers.js for the full set.
-  createSession: ({ name, cwd, worktree, provider, model, permissionMode, environmentId, codexSandbox }) => {
+  createSession: ({ name, cwd, worktree, provider, connectionId, model, permissionMode, environmentId, codexSandbox }) => {
     const msg: Record<string, unknown> = { type: 'create_session' };
     if (name) msg.name = name;
     if (cwd) msg.cwd = cwd;
     if (worktree) msg.worktree = true;
     if (provider) msg.provider = provider;
+    if (connectionId) msg.connectionId = connectionId;
     if (model) msg.model = model;
     if (permissionMode) msg.permissionMode = permissionMode;
     if (environmentId) msg.environmentId = environmentId;
