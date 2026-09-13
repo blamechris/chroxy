@@ -187,6 +187,9 @@ import {
   clearContainerLostPatch,
   // #7728: read ONE provider's roster out of the provider-keyed map.
   selectModelsForProvider,
+  buildInputMessage,
+  beginInputDelivery,
+  cancelInputDelivery,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -1828,23 +1831,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInput: (input, wireAttachments, options) => {
-    const { socket, activeSessionId } = get();
-    const payload: Record<string, unknown> = { type: 'input', data: input };
-    if (activeSessionId) payload.sessionId = activeSessionId;
-    if (wireAttachments?.length) {
-      payload.attachments = wireAttachments;
-    }
-    if (options?.isVoice) {
-      payload.isVoice = true;
-    }
+    const { socket, activeSessionId, serverCapabilities } = get();
     // When the caller pre-generated a client-side messageId for the
     // optimistic UI (via addUserMessage), include it in the wire so the
     // server adopts the same id in its history record. Enables id-based
     // dedup on reconnect replay (issue #2902).
-    if (options?.clientMessageId) {
-      payload.clientMessageId = options.clientMessageId;
+    const clientMessageId = options?.clientMessageId || (options?.context ? nextMessageId('user') : undefined);
+    if (options?.context && serverCapabilities.inputContextV1 !== true) return false;
+    const payload = buildInputMessage({
+      input,
+      sessionId: activeSessionId,
+      attachments: wireAttachments,
+      isVoice: options?.isVoice,
+      clientMessageId,
+      context: options?.context,
+    });
+    if (options?.context && clientMessageId && activeSessionId) {
+      updateSession(activeSessionId, (session) => ({
+        inputDeliveries: beginInputDelivery(
+          session.inputDeliveries,
+          clientMessageId,
+          options.context!,
+          Date.now(),
+          activeSessionId,
+        ),
+      }));
     }
-    let result: 'sent' | 'queued' | false;
+    let result: 'sent' | 'queued' | 'uncertain' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticLight();
       // #6283: socket.readyState can flip OPEN → CLOSING before this synchronous
@@ -1852,7 +1865,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // through to the offline queue so the frame retries on reconnect instead
       // of leaving a permanently 'sent'-looking bubble that never reached the
       // server.
-      result = wsSend(socket, payload) ? 'sent' : enqueueMessage('input', payload);
+      result = wsSend(socket, payload) ? 'sent' : (options?.context ? 'uncertain' : enqueueMessage('input', payload));
     } else {
       result = enqueueMessage('input', payload);
     }
@@ -1898,6 +1911,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         updateSession(activeSessionId, (ss) => ({
           queuedMessages: [],
           messages: ss.messages.filter((m) => !queuedIds.has(m.id)),
+          inputDeliveries: [...queuedIds].reduce(
+            (records, id) => cancelInputDelivery(records, id),
+            ss.inputDeliveries,
+          ),
         }));
       }
     }
@@ -1940,6 +1957,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // a cancelled message was never sent, so it must not linger as a phantom
         // "sent" bubble once the queued badge clears.
         messages: ss.messages.filter((m) => m.id !== clientMessageId),
+        inputDeliveries: cancelInputDelivery(ss.inputDeliveries, clientMessageId),
       }));
     }
     return 'sent';

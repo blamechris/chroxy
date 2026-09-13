@@ -593,6 +593,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // hide exactly the banner that tells an operator their saved tasks will never
     // fire. Clients read the real gate state off the snapshot's `scheduler` block.
     scheduledTasks: true,
+    // #7822 — this server validates a versioned selected-context envelope,
+    // correlates acceptance with clientMessageId, and rejects unsupported
+    // kinds/lifetimes instead of letting an older passthrough schema drop them.
+    // New clients must gate context sends on this flag; old clients omit the
+    // envelope and continue through the legacy input path.
+    inputContextV1: true,
     // #5986 (epic #5982) — the embedded user-shell terminal is available to THIS
     // client: the server has it enabled (userShell.enabled) AND this connection
     // holds the primary token. Both conditions of the create gate are reflected

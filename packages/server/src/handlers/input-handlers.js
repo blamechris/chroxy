@@ -5,11 +5,13 @@
  *          user_question_response, notification_prefs_get,
  *          notification_prefs_set (#4541)
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { InputContextEnvelopeSchema } from '@chroxy/protocol/schemas'
 import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, sessionLogger } from '../logger.js'
+import { INPUT_CONTEXT_CAPABILITIES, InputContextError, prepareInputContext } from '../input-context.js'
 
 const log = createLogger('ws')
 
@@ -64,12 +66,13 @@ function _getEvaluatorAwaits(ctx) {
 // without normalization the recorded text reads `'foo \n[1 file(s) attached]'`
 // (double whitespace before the marker). Empty/whitespace-only text drops
 // to a marker-only entry.
-export function buildHistoryText(text, attCount) {
-  if (!attCount) return text
+export function buildHistoryText(text, attCount, contextCount = 0) {
+  if (!attCount && !contextCount) return text
   const stripped = typeof text === 'string' ? text.replace(/\s+$/, '') : ''
-  return stripped
-    ? `${stripped} [${attCount} file(s) attached]`
-    : `[${attCount} file(s) attached]`
+  const markers = []
+  if (attCount) markers.push(`[${attCount} file(s) attached]`)
+  if (contextCount) markers.push(`[${contextCount} context item(s) selected]`)
+  return stripped ? `${stripped} ${markers.join(' ')}` : markers.join(' ')
 }
 
 // #3639 — build the minimal config object passed into shouldSkipEvaluator.
@@ -99,6 +102,9 @@ function _resolveSkipConfig(entry, ctx) {
 // but collisions inside one session's ring buffer are the client's problem.
 const USER_INPUT_ID_RE = /^[A-Za-z0-9_-]+$/
 const MAX_CLIENT_MESSAGE_ID_LEN = 128
+export const INPUT_DEDUP_TTL_MS = 10 * 60 * 1000
+export const INPUT_DEDUP_TOMBSTONE_TTL_MS = 60 * 60 * 1000
+export const INPUT_DEDUP_MAX_PER_SESSION = 4096
 // IDs the clients treat specially in their stores (e.g. the "thinking"
 // placeholder shown while waiting for the first stream_delta). Never let a
 // client-supplied id collide with these — it would clobber the placeholder
@@ -115,6 +121,124 @@ function resolveUserInputId(candidate) {
   if (!USER_INPUT_ID_RE.test(candidate)) return generateUserInputId()
   if (RESERVED_USER_INPUT_IDS.has(candidate)) return generateUserInputId()
   return candidate
+}
+
+function isWellFormedClientMessageId(candidate) {
+  return typeof candidate === 'string' &&
+    candidate.length > 0 &&
+    candidate.length <= MAX_CLIENT_MESSAGE_ID_LEN &&
+    USER_INPUT_ID_RE.test(candidate) &&
+    !RESERVED_USER_INPUT_IDS.has(candidate)
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function inputPayloadHash(msg) {
+  return createHash('sha256').update(canonicalJson({
+    data: msg.data,
+    attachments: msg.attachments,
+    context: msg.context,
+    isVoice: !!msg.isVoice,
+  })).digest('hex')
+}
+
+function getInputDedupRecords(ctx) {
+  if (!ctx.runtime.inputDedupRecords) ctx.runtime.inputDedupRecords = new Map()
+  return ctx.runtime.inputDedupRecords
+}
+
+function sendInputAck(ws, ctx, record, overrides = {}) {
+  if (!record) return
+  const status = overrides.status ?? record.status
+  const context = record.contextItemIds?.length && (status === 'accepted' || status === 'queued' || status === 'duplicate')
+    ? {
+        version: 1,
+        acceptedItemIds: [...record.contextItemIds],
+        supportedKinds: [...INPUT_CONTEXT_CAPABILITIES.kinds],
+        supportedLifetimes: [...INPUT_CONTEXT_CAPABILITIES.lifetimes],
+      }
+    : undefined
+  ctx.transport.send(ws, {
+    type: 'input_ack',
+    sessionId: record.sessionId,
+    clientMessageId: record.clientMessageId,
+    status,
+    delivery: record.delivery,
+    retrySafe: false,
+    acceptedAt: record.acceptedAt,
+    retentionExpiresAt: record.expiresAt,
+    dedupScope: 'process',
+    ...(context ? { context } : {}),
+    ...overrides,
+  })
+}
+
+function sendInputRejectionAck(ws, ctx, sessionId, msg, reason, message) {
+  if (!isWellFormedClientMessageId(msg.clientMessageId)) return
+  const parsedContext = msg.context ? InputContextEnvelopeSchema.safeParse(msg.context) : null
+  sendInputAck(ws, ctx, {
+    sessionId,
+    clientMessageId: msg.clientMessageId,
+    contextItemIds: parsedContext?.success ? parsedContext.data.items.map((item) => item.id) : null,
+    status: 'rejected',
+    delivery: 'not_dispatched',
+  }, { reason, message })
+}
+
+function reserveInputRequest(ctx, sessionId, msg) {
+  if (!isWellFormedClientMessageId(msg.clientMessageId)) return { record: null, duplicate: false }
+  const now = typeof ctx.now === 'function' ? ctx.now() : Date.now()
+  const ttlMs = Number.isFinite(ctx.inputDedupTtlMs) ? ctx.inputDedupTtlMs : INPUT_DEDUP_TTL_MS
+  const tombstoneTtlMs = Number.isFinite(ctx.inputDedupTombstoneTtlMs)
+    ? ctx.inputDedupTombstoneTtlMs
+    : INPUT_DEDUP_TOMBSTONE_TTL_MS
+  const bySession = getInputDedupRecords(ctx)
+  let records = bySession.get(sessionId)
+  if (!records) {
+    records = new Map()
+    bySession.set(sessionId, records)
+  }
+  for (const [id, record] of records) {
+    if (now > record.tombstoneExpiresAt) records.delete(id)
+  }
+
+  const hash = inputPayloadHash(msg)
+  const existing = records.get(msg.clientMessageId)
+  if (existing) {
+    if (existing.hash !== hash) return { record: existing, mismatch: true }
+    if (now > existing.expiresAt) return { record: existing, expired: true }
+    return { record: existing, duplicate: true }
+  }
+  if (records.size >= INPUT_DEDUP_MAX_PER_SESSION) return { record: null, capacity: true }
+
+  const record = {
+    sessionId,
+    clientMessageId: msg.clientMessageId,
+    hash,
+    // Retain only bounded identifiers, never image/text payload bytes. The
+    // payload hash is sufficient for duplicate/mismatch decisions.
+    contextItemIds: msg.context?.items?.map((item) => item.id) ?? null,
+    status: 'accepted',
+    delivery: 'unknown',
+    acceptedAt: now,
+    expiresAt: now + ttlMs,
+    tombstoneExpiresAt: now + ttlMs + tombstoneTtlMs,
+  }
+  records.set(msg.clientMessageId, record)
+  return { record, duplicate: false }
+}
+
+function releaseInputRequest(ctx, record) {
+  if (!record) return
+  const records = getInputDedupRecords(ctx).get(record.sessionId)
+  if (records?.get(record.clientMessageId) === record) records.delete(record.clientMessageId)
+  if (records?.size === 0) getInputDedupRecords(ctx).delete(record.sessionId)
 }
 
 // #5281 ①.3 — an input_conflict rejection: the session can't accept this send
@@ -209,10 +333,19 @@ async function handleInput(ws, client, msg, ctx) {
     return
   }
 
+  // Only negotiated clients receive the new acknowledgement/dedup behavior.
+  // An explicit context envelope also opts in by construction. This keeps the
+  // observable plain-input behavior unchanged for deployed older clients.
+  const supportsInputAck = !!msg.context
+    || client.clientCapabilities?.has?.('input_context_v1') === true
+
   if (attachments?.length) {
     const err = validateAttachments(attachments)
     if (err) {
       sendSessionError(ws, ctx, `Invalid attachment: ${err}`)
+      if (supportsInputAck) {
+        sendInputRejectionAck(ws, ctx, targetSessionId, msg, 'invalid_attachment', `Invalid attachment: ${err}`)
+      }
       return
     }
   }
@@ -222,9 +355,59 @@ async function handleInput(ws, client, msg, ctx) {
     attachments = resolveFileRefAttachments(attachments, entry.cwd)
   }
 
-  if ((!text || !text.trim()) && !attachments?.length) return
+  let preparedContext
+  const attachmentsWithoutContext = attachments
+  if (msg.context) {
+    const parsedContext = InputContextEnvelopeSchema.safeParse(msg.context)
+    if (!parsedContext.success) {
+      const record = isWellFormedClientMessageId(msg.clientMessageId)
+        ? {
+            sessionId: targetSessionId,
+            clientMessageId: msg.clientMessageId,
+            contextItemIds: null,
+            status: 'rejected',
+            delivery: 'not_dispatched',
+          }
+        : null
+      sendInputAck(ws, ctx, record, { reason: 'invalid_context', message: 'The selected context envelope is invalid.' })
+      return
+    }
+    try {
+      preparedContext = prepareInputContext(text?.trim() || '', attachments, parsedContext.data)
+      attachments = preparedContext.attachments
+    } catch (err) {
+      if (!(err instanceof InputContextError)) throw err
+      if (isWellFormedClientMessageId(msg.clientMessageId)) {
+        sendInputAck(ws, ctx, {
+          sessionId: targetSessionId,
+          clientMessageId: msg.clientMessageId,
+          contextItemIds: null,
+          status: 'rejected',
+          delivery: 'not_dispatched',
+        }, { reason: err.reason, message: err.message })
+      }
+      return
+    }
+    const attachmentError = validateAttachments(attachments)
+    if (attachmentError) {
+      if (isWellFormedClientMessageId(msg.clientMessageId)) {
+        sendInputAck(ws, ctx, {
+          sessionId: targetSessionId,
+          clientMessageId: msg.clientMessageId,
+          contextItemIds: null,
+          status: 'rejected',
+          delivery: 'not_dispatched',
+        }, { reason: 'invalid_context_attachment', message: `Invalid context attachment: ${attachmentError}` })
+      }
+      return
+    }
+  }
+
+  if ((!text || !text.trim()) && !attachments?.length && !msg.context?.items?.length) return
   const trimmed = text?.trim() || ''
   const attCount = attachments?.length || 0
+  const directAttachmentCount = attachmentsWithoutContext?.length || 0
+  const contextCount = preparedContext?.context.items.length || 0
   log.debug(`Message from ${client.id} to session ${targetSessionId}: "${trimmed.slice(0, 80)}"${attCount ? ` (+${attCount} attachment(s))` : ''}`)
 
   // #4733 — wire-arrival fingerprint. Logs the byte/codepoint/whitespace
@@ -285,6 +468,9 @@ async function handleInput(ws, client, msg, ctx) {
 
   if (ctx.sessions.sessionManager.isBudgetPaused(targetSessionId)) {
     sendSessionError(ws, ctx, 'Session is paused — cost budget exceeded. Use "Resume Budget" to continue.')
+    if (supportsInputAck) {
+      sendInputRejectionAck(ws, ctx, targetSessionId, msg, 'budget_paused', 'The input was not dispatched because the session budget is paused.')
+    }
     return
   }
 
@@ -293,9 +479,56 @@ async function handleInput(ws, client, msg, ctx) {
     const primaryClientId = ctx.transport.getPrimary(targetSessionId)
     if (primaryClientId && primaryClientId !== client.id) {
       ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
+      if (supportsInputAck) {
+        sendInputRejectionAck(ws, ctx, targetSessionId, msg, 'input_conflict', INPUT_CONFLICT_CROSS_DEVICE_MESSAGE)
+      }
       return
     }
   }
+
+  const reservation = supportsInputAck
+    ? reserveInputRequest(ctx, targetSessionId, msg)
+    : { record: null, duplicate: false }
+  if (reservation.mismatch) {
+    sendInputAck(ws, ctx, {
+      ...reservation.record,
+      status: 'rejected',
+      delivery: 'not_dispatched',
+    }, {
+      reason: 'payload_mismatch',
+      message: 'This clientMessageId was already used for a different input payload. Generate a new id.',
+    })
+    return
+  }
+  if (reservation.expired) {
+    sendInputAck(ws, ctx, {
+      ...reservation.record,
+      status: 'expired',
+      delivery: 'not_dispatched',
+    }, {
+      reason: 'dedup_expired',
+      message: 'The server retention window expired for this input id; delivery is uncertain and it was not submitted again.',
+    })
+    return
+  }
+  if (reservation.duplicate) {
+    sendInputAck(ws, ctx, { ...reservation.record, status: 'duplicate' })
+    return
+  }
+  if (reservation.capacity) {
+    sendInputAck(ws, ctx, {
+      sessionId: targetSessionId,
+      clientMessageId: msg.clientMessageId,
+      contextItemIds: null,
+      status: 'rejected',
+      delivery: 'not_dispatched',
+    }, {
+      reason: 'dedup_capacity',
+      message: 'The input deduplication window is full; wait for retained entries to expire before submitting.',
+    })
+    return
+  }
+  const inputRecord = reservation.record
 
   // #3666 — hoist the per-session evaluator-await lock check above the
   // routing logic so trivial-skip-path messages also reject during an
@@ -313,6 +546,15 @@ async function handleInput(ws, client, msg, ctx) {
       msg.clientMessageId,
       'Session is already evaluating a previous draft. Wait for it to finish or interrupt first.',
     ))
+    if (inputRecord) {
+      sendInputAck(ws, ctx, inputRecord, {
+        status: 'rejected',
+        delivery: 'not_dispatched',
+        reason: 'input_conflict',
+        message: 'Session is already evaluating a previous draft. The input was not dispatched.',
+      })
+    }
+    releaseInputRequest(ctx, inputRecord)
     return
   }
 
@@ -360,7 +602,11 @@ async function handleInput(ws, client, msg, ctx) {
   function recordHistoryEntry(text) {
     if (_historyRecorded) return
     _historyRecorded = true
-    ctx.sessions.sessionManager.recordUserInput(targetSessionId, buildHistoryText(text, attCount), messageId)
+    ctx.sessions.sessionManager.recordUserInput(
+      targetSessionId,
+      buildHistoryText(text, directAttachmentCount, contextCount),
+      messageId,
+    )
     ctx.sessions.sessionManager.touchActivity(targetSessionId)
   }
 
@@ -434,6 +680,15 @@ async function handleInput(ws, client, msg, ctx) {
         const primaryClientId = ctx.transport.getPrimary(targetSessionId)
         if (primaryClientId && primaryClientId !== client.id) {
           ctx.transport.send(ws, buildInputConflictError(targetSessionId, msg.clientMessageId))
+          if (inputRecord) {
+            sendInputAck(ws, ctx, inputRecord, {
+              status: 'rejected',
+              delivery: 'not_dispatched',
+              reason: 'input_conflict',
+              message: 'Another client took control while the draft was being evaluated. The input was not dispatched.',
+            })
+          }
+          releaseInputRequest(ctx, inputRecord)
           return
         }
       }
@@ -484,6 +739,11 @@ async function handleInput(ws, client, msg, ctx) {
           { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
           (c) => c.id !== client.id,
         )
+        if (inputRecord) {
+          inputRecord.status = 'accepted'
+          inputRecord.delivery = 'evaluation_held'
+          sendInputAck(ws, ctx, inputRecord)
+        }
         return
       } else {
         // forward verdict (or unrecognised result) — drop the iteration
@@ -515,12 +775,40 @@ async function handleInput(ws, client, msg, ctx) {
   // `message_queued` mirror carries the id the sender's optimistic copy uses —
   // letting that client reconcile its queued bubble. Providers that send
   // immediately ignore the extra option.
-  const sendResult = entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice, clientMessageId: messageId })
+  const wasRunningAtDispatch = entry.session.isRunning
+  const dispatchText = preparedContext
+    ? prepareInputContext(textToSend, attachmentsWithoutContext, preparedContext.context).text
+    : textToSend
+  let sendResult
+  try {
+    sendResult = entry.session.sendMessage(dispatchText, attachments, {
+      isVoice: !!msg.isVoice,
+      clientMessageId: messageId,
+      ...(preparedContext?.context ? { context: preparedContext.context } : {}),
+    })
+  } catch (err) {
+    if (inputRecord) {
+      inputRecord.status = 'uncertain'
+      inputRecord.delivery = 'unknown'
+      sendInputAck(ws, ctx, inputRecord, {
+        reason: 'dispatch_threw',
+        message: 'Provider dispatch failed synchronously; acceptance is uncertain and the server will not retry automatically.',
+      })
+    }
+    throw err
+  }
   if (sendResult && typeof sendResult.catch === 'function') {
     sendResult.catch((err) => {
       const message = err?.message || String(err)
       log.error(`sendMessage rejected for session ${targetSessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
     })
+  }
+
+  if (inputRecord) {
+    const queued = sendResult?.status === 'queued' || wasRunningAtDispatch
+    inputRecord.status = queued ? 'queued' : 'accepted'
+    inputRecord.delivery = queued ? 'queued' : 'dispatch_started'
+    sendInputAck(ws, ctx, inputRecord)
   }
 
   ctx.transport.updatePrimary(targetSessionId, client.id)

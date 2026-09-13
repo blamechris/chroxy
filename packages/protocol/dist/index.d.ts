@@ -21,8 +21,8 @@ export declare const PROTOCOL_VERSION = 2;
  * Single source of truth so app and dashboard stay in sync with the server.
  */
 export declare const CLIENT_CAPABILITIES: {
-    readonly desktop: readonly ["console", "environment_panel", "agent_monitor", "diff_viewer", "voice_input"];
-    readonly mobile: readonly ["push_notifications", "biometric_lock", "voice_input", "live_activity"];
+    readonly desktop: readonly ["console", "environment_panel", "agent_monitor", "diff_viewer", "voice_input", "input_context_v1"];
+    readonly mobile: readonly ["push_notifications", "biometric_lock", "voice_input", "live_activity", "input_context_v1"];
 };
 /**
  * Minimum protocol version the server will accept from clients.
@@ -69,6 +69,8 @@ export declare const CLAUDE_TUI_PTY_SIZE: Readonly<{
 }>;
 export * from './codex.ts';
 export * from './thinking-levels.ts';
+export { buildInputMessage } from './input.ts';
+export type { BuildInputMessageOptions } from './input.ts';
 export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
 export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, ServerBudgetResumeAckMessage, } from './schemas/server.ts';

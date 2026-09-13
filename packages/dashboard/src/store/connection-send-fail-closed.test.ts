@@ -58,6 +58,56 @@ beforeEach(() => {
 })
 afterEach(() => { vi.restoreAllMocks() })
 
+describe('#7822 — selected context delivery', () => {
+  const context = {
+    version: 1 as const,
+    items: [{
+      id: 'ocr-1', kind: 'text' as const, provenance: { source: 'ocr' as const },
+      mediaType: 'text/plain', sizeBytes: 5, lifetime: 'one_turn' as const,
+      content: { type: 'text' as const, text: 'hello' },
+    }],
+  }
+
+  it('marks an ambiguous socket send uncertain and never adds it to the reconnect queue', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const socket = closingSocket()
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      serverCapabilities: { inputContextV1: true },
+      socket,
+    } as never)
+
+    const result = useConnectionStore.getState().sendInput('compare', undefined, { context })
+
+    expect(result).toBe('uncertain')
+    expect(sendCalls(socket)).toHaveLength(1)
+    const { _testQueueInternals } = await import('./message-handler')
+    expect(_testQueueInternals.getQueue()).toHaveLength(0)
+    const deliveries = useConnectionStore.getState().sessionStates['sess-1']!.inputDeliveries
+    expect(Object.values(deliveries)).toHaveLength(1)
+    expect(Object.values(deliveries)[0]).toMatchObject({ status: 'uncertain', pendingContextItemIds: ['ocr-1'] })
+  })
+
+  it('serializes context on a capable server and refuses an older server before writing', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      serverCapabilities: { inputContextV1: true },
+      socket,
+    } as never)
+    expect(useConnectionStore.getState().sendInput('compare', undefined, { context })).toBe('sent')
+    expect(sent[0]).toMatchObject({ type: 'input', data: 'compare', context })
+
+    useConnectionStore.setState({ serverCapabilities: {} } as never)
+    expect(useConnectionStore.getState().sendInput('blocked', undefined, { context })).toBe(false)
+    expect(sent).toHaveLength(1)
+  })
+})
+
 describe('#6308 — dashboard sendCancelQueued', () => {
   it('returns false and preserves the queued entry + bubble when the send throws', async () => {
     const { useConnectionStore, createEmptySessionState } = await import('./connection')

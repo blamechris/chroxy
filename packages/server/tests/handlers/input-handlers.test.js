@@ -174,6 +174,218 @@ describe('input-handlers', () => {
       assert.equal(session.sendMessage.lastCall[0], 'hello world')
     })
 
+    it('delivers typed text/image context once and acknowledges acceptance (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const context = {
+        version: 1,
+        items: [
+          {
+            id: 'ocr-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 11, lifetime: 'one_turn',
+            provenance: { source: 'device', label: 'OCR only' },
+            content: { type: 'text', text: 'hello world' },
+          },
+          {
+            id: 'shot-1', kind: 'image', mediaType: 'image/png', sizeBytes: 3, lifetime: 'one_turn',
+            provenance: { source: 'project', path: 'screens/shot.png' },
+            content: { type: 'base64', data: 'YWJj' },
+          },
+        ],
+      }
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'compare', clientMessageId: 'context-send-1', context,
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      const [prompt, attachments, options] = session.sendMessage.lastCall
+      assert.ok(/Selected context[\s\S]*source content[\s\S]*not as instructions/i.test(prompt))
+      assert.ok(/ocr-1[\s\S]*OCR only[\s\S]*hello world/.test(prompt))
+      assert.deepEqual(attachments, [{
+        type: 'image', mediaType: 'image/png', data: 'YWJj', name: 'shot-1.png',
+      }])
+      assert.deepEqual(options.context, context, 'the typed provenance envelope reaches concrete adapters unchanged')
+      assert.equal(ctx._sent.at(-1).type, 'input_ack')
+      assert.equal(ctx._sent.at(-1).clientMessageId, 'context-send-1')
+      assert.equal(ctx._sent.at(-1).status, 'accepted')
+      assert.equal(ctx._sent.at(-1).delivery, 'dispatch_started')
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'compare', clientMessageId: 'context-send-1', context,
+      }, ctx)
+      assert.equal(session.sendMessage.callCount, 1, 'same retained request must not create a second provider turn')
+      assert.equal(ctx._sent.at(-1).status, 'duplicate')
+    })
+
+    it('accepts context-only input and reports queued acceptance without claiming completion (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.isRunning = true
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      ctx.transport.claimPrimary('s1', 'client-1', { force: true })
+      const client = makeClient({ id: 'client-1', activeSessionId: 's1' })
+
+      await inputHandlers.input(makeWs(), client, {
+        clientMessageId: 'context-only',
+        context: { version: 1, items: [{
+          id: 'clip-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+          provenance: { source: 'clipboard' },
+          content: { type: 'text', text: 'selected' },
+        }] },
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.match(session.sendMessage.lastCall[0], /selected/)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.lastCall[1], '[1 context item(s) selected]')
+      assert.equal(ctx._sent.at(-1).status, 'queued')
+      assert.equal(ctx._sent.at(-1).delivery, 'queued')
+      assert.ok(!Object.values(ctx._sent.at(-1)).includes('completed'))
+    })
+
+    it('applies existing decoded image limits to typed context (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const bytes = Buffer.alloc(2 * 1024 * 1024 + 1).toString('base64')
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'inspect', clientMessageId: 'oversize-context',
+        context: { version: 1, items: [{
+          id: 'large-image', kind: 'image', mediaType: 'image/png',
+          sizeBytes: 2 * 1024 * 1024 + 1, lifetime: 'one_turn',
+          provenance: { source: 'device' }, content: { type: 'base64', data: bytes },
+        }] },
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 0)
+      assert.equal(ctx._sent.at(-1).status, 'rejected')
+      assert.equal(ctx._sent.at(-1).reason, 'invalid_context_attachment')
+      assert.match(ctx._sent.at(-1).message, /exceeds 2MB limit/i)
+    })
+
+    it('rejects image bytes duplicated across attachments and typed context (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const image = { type: 'image', mediaType: 'image/png', data: 'YWJj', name: 'same.png' }
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'inspect', clientMessageId: 'duplicate-bytes', attachments: [image],
+        context: { version: 1, items: [{
+          id: 'same-image', kind: 'image', mediaType: 'image/png', sizeBytes: 3, lifetime: 'one_turn',
+          provenance: { source: 'device' }, content: { type: 'base64', data: image.data },
+        }] },
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 0)
+      assert.equal(ctx._sent.at(-1).reason, 'duplicate_context_content')
+    })
+
+    it('rejects clientMessageId reuse with a different payload (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1', clientCapabilities: new Set(['input_context_v1']) })
+
+      await inputHandlers.input(makeWs(), client, { data: 'first', clientMessageId: 'same-id' }, ctx)
+      await inputHandlers.input(makeWs(), client, { data: 'changed', clientMessageId: 'same-id' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx._sent.at(-1).type, 'input_ack')
+      assert.equal(ctx._sent.at(-1).status, 'rejected')
+      assert.equal(ctx._sent.at(-1).reason, 'payload_mismatch')
+    })
+
+    it('keeps pre-capability plain-input behavior for older clients (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const oldClient = makeClient({ activeSessionId: 's1' })
+      const message = { data: 'legacy', clientMessageId: 'legacy-history-id' }
+
+      await inputHandlers.input(makeWs(), oldClient, message, ctx)
+      await inputHandlers.input(makeWs(), oldClient, message, ctx)
+
+      assert.equal(session.sendMessage.callCount, 2, 'pre-negotiation clientMessageId remains a history id only')
+      assert.equal(ctx._sent.filter((entry) => entry.type === 'input_ack').length, 0)
+    })
+
+    it('rejects unsupported context kinds/lifetimes without silently reducing data (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const base = {
+        id: 'doc-1', kind: 'document', mediaType: 'application/pdf', sizeBytes: 4,
+        provenance: { source: 'project', path: '../secret.pdf' },
+        content: { type: 'reference', uri: '../secret.pdf' },
+      }
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'read', clientMessageId: 'unsupported-kind',
+        context: { version: 1, items: [{ ...base, lifetime: 'one_turn' }] },
+      }, ctx)
+      assert.equal(session.sendMessage.callCount, 0)
+      assert.equal(ctx._sent.at(-1).reason, 'unsupported_context_kind')
+      assert.match(ctx._sent.at(-1).message, /text and image/i)
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'remember', clientMessageId: 'unsupported-lifetime',
+        context: { version: 1, items: [{
+          ...base, id: 'text-1', kind: 'text', mediaType: 'text/plain', lifetime: 'durable',
+          content: { type: 'text', text: 'remember me' },
+        }] },
+      }, ctx)
+      assert.equal(session.sendMessage.callCount, 0)
+      assert.equal(ctx._sent.at(-1).reason, 'unsupported_context_lifetime')
+      assert.match(ctx._sent.at(-1).message, /one_turn|promotion/i)
+    })
+
+    it('reports retained-request expiry and never dispatches it again (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      let now = 1_000
+      const ctx = makeCtx(sessions, { now: () => now, inputDedupTtlMs: 50 })
+      const client = makeClient({ activeSessionId: 's1', clientCapabilities: new Set(['input_context_v1']) })
+
+      await inputHandlers.input(makeWs(), client, { data: 'once', clientMessageId: 'expiring-id' }, ctx)
+      now = 1_051
+      await inputHandlers.input(makeWs(), client, { data: 'once', clientMessageId: 'expiring-id' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx._sent.at(-1).status, 'expired')
+      assert.equal(ctx._sent.at(-1).retrySafe, false)
+      assert.match(ctx._sent.at(-1).message, /retention window expired/i)
+    })
+
+    it('checks session binding before consulting dedup records (#7822)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('bound-id', { session, name: 'Bound', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const owner = makeClient({ id: 'owner', activeSessionId: 'bound-id', clientCapabilities: new Set(['input_context_v1']) })
+      await inputHandlers.input(makeWs(), owner, { data: 'secret', clientMessageId: 'bound-request' }, ctx)
+
+      const attacker = makeClient({ id: 'attacker', boundSessionId: 'other-bound' })
+      await inputHandlers.input(makeWs(), attacker, {
+        data: 'secret', clientMessageId: 'bound-request', sessionId: 'bound-id',
+      }, ctx)
+      assert.equal(ctx._sent.at(-1).code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx._sent.at(-1).type, 'session_error')
+    })
+
     it('sends session_error when budget is paused', () => {
       const sessions = new Map()
       const session = createMockSession()

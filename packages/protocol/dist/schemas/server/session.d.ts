@@ -467,6 +467,41 @@ export declare const ServerSessionErrorSchema: z.ZodObject<{
     boundSessionName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     primaryClientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$loose>;
+export declare const ServerInputAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"input_ack">;
+    sessionId: z.ZodString;
+    clientMessageId: z.ZodString;
+    status: z.ZodEnum<{
+        queued: "queued";
+        rejected: "rejected";
+        accepted: "accepted";
+        duplicate: "duplicate";
+        expired: "expired";
+        uncertain: "uncertain";
+    }>;
+    delivery: z.ZodEnum<{
+        unknown: "unknown";
+        queued: "queued";
+        dispatch_started: "dispatch_started";
+        evaluation_held: "evaluation_held";
+        not_dispatched: "not_dispatched";
+    }>;
+    retrySafe: z.ZodBoolean;
+    acceptedAt: z.ZodOptional<z.ZodNumber>;
+    retentionExpiresAt: z.ZodOptional<z.ZodNumber>;
+    dedupScope: z.ZodLiteral<"process">;
+    reason: z.ZodOptional<z.ZodString>;
+    message: z.ZodOptional<z.ZodString>;
+    context: z.ZodOptional<z.ZodObject<{
+        version: z.ZodLiteral<1>;
+        acceptedItemIds: z.ZodArray<z.ZodString>;
+        supportedKinds: z.ZodArray<z.ZodEnum<{
+            image: "image";
+            text: "text";
+        }>>;
+        supportedLifetimes: z.ZodArray<z.ZodLiteral<"one_turn">>;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
 export declare const ServerSessionUpdatedSchema: z.ZodObject<{
     type: z.ZodLiteral<"session_updated">;
     sessionId: z.ZodString;

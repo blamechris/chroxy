@@ -173,6 +173,7 @@ import {
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
+import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -224,6 +225,7 @@ export interface DispatchSessionBase {
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
   // Both clients' real `SessionState` carry this array (BaseSessionState).
   queuedMessages?: QueuedSessionMessage[]
+  inputDeliveries?: InputDeliveryMap
   // --- reconciled divergent case (#5618) ---
   // `activeModel` — written by model_changed. Both clients' real `SessionState`
   // carry it (the dashboard also mirrors the active session's value to flat
@@ -922,6 +924,20 @@ export interface DispatchMessageMap {
     // #5943 adds 'cancelled' (per-item cancel via cancel_queued) alongside the
     // slice-① 'flush'/'interrupted'. Mirrors ServerMessageDequeuedSchema.reason.
     reason: 'flush' | 'interrupted' | 'cancelled'
+  }
+  input_ack: {
+    type: 'input_ack'
+    sessionId: string
+    clientMessageId: string
+    status: 'accepted' | 'queued' | 'duplicate' | 'rejected' | 'expired' | 'uncertain'
+    delivery: 'dispatch_started' | 'queued' | 'evaluation_held' | 'not_dispatched' | 'unknown'
+    retrySafe: boolean
+    acceptedAt?: number
+    retentionExpiresAt?: number
+    dedupScope: 'process'
+    reason?: string
+    message?: string
+    context?: unknown
   }
   // --- user_question (#5618) — the question payload the shared parser reads ---
   user_question: {
@@ -2319,6 +2335,12 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
     message_queued: dispatchQueuedMessages<S>(handleMessageQueued),
     message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
+    input_ack: (msg, adapter) => {
+      if (!adapter.hasSession(msg.sessionId)) return
+      adapter.updateSession(msg.sessionId, (session) => ({
+        inputDeliveries: applyInputAcknowledgement(session.inputDeliveries ?? {}, msg),
+      }) as Partial<S>)
+    },
     // --- user_question (#5618) — byte-identical append + notify ---
     user_question: dispatchUserQuestion,
     // --- multi_question_intervention (#5618) — byte-identical builder + append ---
@@ -2407,6 +2429,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   'message_queued',
   'message_dequeued',
+  'input_ack',
   // --- reconciled divergent case (#5618) ---
   'model_changed',
   // --- user_question (#5618) — byte-identical append + notify ---

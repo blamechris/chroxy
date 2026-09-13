@@ -35,6 +35,91 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject data over 100k chars')
   })
 
+  it('validates the versioned input-context envelope and correlated request id (#7822)', async () => {
+    const { InputSchema } = await import('../src/schemas/client.ts')
+    const result = InputSchema.safeParse({
+      type: 'input',
+      data: 'compare these',
+      clientMessageId: 'context-request-1',
+      context: {
+        version: 1,
+        items: [
+          {
+            id: 'ocr-1',
+            kind: 'text',
+            provenance: { source: 'device', label: 'OCR from screenshot' },
+            mediaType: 'text/plain',
+            sizeBytes: 11,
+            lifetime: 'one_turn',
+            content: { type: 'text', text: 'hello world' },
+          },
+          {
+            id: 'image-1',
+            kind: 'image',
+            provenance: { source: 'project', path: 'docs/diagram.png' },
+            mediaType: 'image/png',
+            sizeBytes: 3,
+            lifetime: 'one_turn',
+            content: { type: 'base64', data: 'YWJj' },
+          },
+        ],
+      },
+    })
+    assert.ok(result.success, result.error?.message)
+    assert.equal(result.data.context.version, 1)
+
+    assert.ok(!InputSchema.safeParse({
+      type: 'input',
+      context: result.data.context,
+    }).success, 'context delivery requires the existing clientMessageId correlation key')
+
+    assert.ok(InputSchema.safeParse({
+      type: 'input', data: 'legacy', clientMessageId: 42,
+    }).success, 'legacy plain inputs retain the prior passthrough id behavior')
+    assert.ok(!InputSchema.safeParse({
+      type: 'input', clientMessageId: 42, context: result.data.context,
+    }).success, 'selected context requires a usable string correlation id')
+    assert.ok(!InputSchema.safeParse({
+      type: 'input', clientMessageId: 'thinking', context: result.data.context,
+    }).success, 'selected context cannot use a client-reserved placeholder id')
+  })
+
+  it('represents future context kinds/lifetimes but rejects inconsistent content (#7822)', async () => {
+    const { InputSchema } = await import('../src/schemas/client.ts')
+    const base = {
+      id: 'doc-1',
+      provenance: { source: 'project', path: 'docs/spec.pdf' },
+      mediaType: 'application/pdf',
+      sizeBytes: 10,
+      lifetime: 'task',
+    }
+    assert.ok(InputSchema.safeParse({
+      type: 'input', clientMessageId: 'future-1',
+      context: { version: 1, items: [{ ...base, kind: 'document', content: { type: 'reference', uri: 'project:docs/spec.pdf' } }] },
+    }).success, 'documents/references must be representable for capability rejection')
+    assert.ok(!InputSchema.safeParse({
+      type: 'input', clientMessageId: 'bad-pair',
+      context: { version: 1, items: [{ ...base, kind: 'text', content: { type: 'base64', data: 'YWJj' } }] },
+    }).success, 'kind and content discriminator cannot disagree')
+  })
+
+  it('validates correlated input acceptance without implying provider completion (#7822)', async () => {
+    const { ServerInputAckSchema } = await import('../src/schemas/server.ts')
+    const result = ServerInputAckSchema.safeParse({
+      type: 'input_ack', sessionId: 's1', clientMessageId: 'request-1',
+      status: 'accepted', delivery: 'dispatch_started', retrySafe: false,
+      acceptedAt: 10, retentionExpiresAt: 20, dedupScope: 'process',
+      context: {
+        version: 1, acceptedItemIds: ['ocr-1'],
+        supportedKinds: ['text', 'image'], supportedLifetimes: ['one_turn'],
+      },
+    })
+    assert.ok(result.success, result.error?.message)
+    assert.ok(!ServerInputAckSchema.safeParse({
+      ...result.data, status: 'completed',
+    }).success, 'acceptance vocabulary must not claim provider completion')
+  })
+
   // #6543 / #6773 — permission_response carries an optional editedInput (per-hunk /
   // command edit) and an optional free-text deny reason.
   it('validates permission_response with editedInput and reason (#6773)', async () => {

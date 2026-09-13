@@ -627,6 +627,29 @@ export const ServerSessionErrorSchema = z.object({
     boundSessionName: z.string().nullable().optional(),
     primaryClientId: z.string().nullable().optional(),
 }).passthrough();
+// #7822 — server acceptance acknowledgement for a correlated input submission.
+// This confirms validation/dedup/queue admission only; it never claims that the
+// provider completed the turn. Retention is process-local and bounded, exposed
+// explicitly so reconnecting clients do not infer exactly-once delivery forever.
+export const ServerInputAckSchema = z.object({
+    type: z.literal('input_ack'),
+    sessionId: z.string(),
+    clientMessageId: z.string().min(1).max(128),
+    status: z.enum(['accepted', 'queued', 'duplicate', 'rejected', 'expired', 'uncertain']),
+    delivery: z.enum(['dispatch_started', 'queued', 'evaluation_held', 'not_dispatched', 'unknown']),
+    retrySafe: z.boolean(),
+    acceptedAt: z.number().int().nonnegative().finite().optional(),
+    retentionExpiresAt: z.number().int().nonnegative().finite().optional(),
+    dedupScope: z.literal('process'),
+    reason: z.string().max(128).optional(),
+    message: z.string().max(1024).optional(),
+    context: z.object({
+        version: z.literal(1),
+        acceptedItemIds: z.array(z.string().min(1).max(128)).max(5),
+        supportedKinds: z.array(z.enum(['text', 'image'])),
+        supportedLifetimes: z.array(z.literal('one_turn')),
+    }).optional(),
+}).passthrough();
 // A session's metadata changed (today: its display name — auto-label or rename).
 export const ServerSessionUpdatedSchema = z.object({
     type: z.literal('session_updated'),

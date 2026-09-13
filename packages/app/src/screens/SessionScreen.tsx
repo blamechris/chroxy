@@ -1028,7 +1028,7 @@ export function SessionScreen() {
     // would have silently misrouted a future third object shape; the
     // shared guard keeps both call sites in lockstep.
     const freeform = isFreeformAnswer(value);
-    let sent: 'sent' | 'queued' | false = false;
+    let sent: 'sent' | 'queued' | 'uncertain' | false = false;
     if (toolUseId) {
       sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
