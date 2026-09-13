@@ -1955,6 +1955,28 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  _beginNativeRouteVerification() {
+    if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
+    this.agentConnection.readiness = {
+      state: 'unknown',
+      reasonCode: 'NATIVE_ROUTE_REVERIFYING',
+      message: 'Claude Code native authentication and endpoint are being reverified for this spawn.',
+      recoveryAction: null,
+    }
+  }
+
+  _blockNativeRouteVerification(err) {
+    if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
+    this.agentConnection.readiness = {
+      state: 'blocked',
+      reasonCode: typeof err?.code === 'string' ? err.code : 'NATIVE_ROUTE_UNVERIFIED',
+      message: typeof err?.message === 'string' && err.message
+        ? err.message
+        : 'Claude Code native authentication or endpoint could not be verified for this spawn.',
+      recoveryAction: null,
+    }
+  }
+
   _verifyNativeRouteMarker(nonce) {
     if (this._connectionAuthRoute !== 'native') return
     const markerPath = join(this._sinkDir, 'native-route.json')
@@ -1999,20 +2021,30 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {boolean} permissionsEnabled
    */
   async _spawnPty(permissionsEnabled) {
-    if (this._connectionAuthRoute === 'native') this._nativeRouteVerifiedForSpawn = false
+    if (this._connectionAuthRoute === 'native') {
+      this._nativeRouteVerifiedForSpawn = false
+      this._beginNativeRouteVerification()
+    }
     const cwdReal = realpathSync(this.cwd)
     const env = this._buildPtyEnv(permissionsEnabled)
-    const attemptedBinary = this._connectionAuthRoute === 'native'
-      ? this._connectionRuntimePreflight?.()
-      : this._connectionVerifiedBinary || resolveClaudeBinary()
-    if (this._connectionAuthRoute === 'native' && attemptedBinary !== this._connectionVerifiedBinary) {
-      throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'Claude Code native authentication requires the configured binary provenance check before every spawn.')
+    let attemptedBinary
+    let nativeRouteNonce = null
+    try {
+      attemptedBinary = this._connectionAuthRoute === 'native'
+        ? this._connectionRuntimePreflight?.()
+        : this._connectionVerifiedBinary || resolveClaudeBinary()
+      if (this._connectionAuthRoute === 'native' && attemptedBinary !== this._connectionVerifiedBinary) {
+        throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'Claude Code native authentication requires the configured binary provenance check before every spawn.')
+      }
+      nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
+      if (nativeRouteNonce) {
+        this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
+      }
+      await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
+    } catch (err) {
+      this._blockNativeRouteVerification(err)
+      throw err
     }
-    const nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
-    if (nativeRouteNonce) {
-      this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
-    }
-    await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
 
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
@@ -2086,9 +2118,14 @@ export class ClaudeTuiSession extends BaseSession {
       args.push('--append-system-prompt', skillsPrefix)
     }
     if (this._connectionAuthRoute === 'native') {
-      const spawnBinary = this._connectionRuntimePreflight?.()
-      if (spawnBinary !== attemptedBinary) {
-        throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'The verified Claude Code binary changed between native authentication verification and PTY startup.')
+      try {
+        const spawnBinary = this._connectionRuntimePreflight?.()
+        if (spawnBinary !== attemptedBinary) {
+          throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'The verified Claude Code binary changed between native authentication verification and PTY startup.')
+        }
+      } catch (err) {
+        this._blockNativeRouteVerification(err)
+        throw err
       }
     }
     log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
@@ -2213,6 +2250,7 @@ export class ClaudeTuiSession extends BaseSession {
       try {
         this._verifyNativeRouteMarker(nativeRouteNonce)
       } catch (err) {
+        this._blockNativeRouteVerification(err)
         this._ptyExited = true
         try { this._term?.kill?.('SIGTERM') } catch {}
         this._term = null

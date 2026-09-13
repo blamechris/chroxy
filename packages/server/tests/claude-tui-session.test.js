@@ -303,10 +303,19 @@ describe('ClaudeTuiSession', () => {
           candidate._sessionId = 'blocked-native-route'
           candidate._sinkDir = fakeHome
           candidate._settingsPath = join(fakeHome, 'settings.json')
+          candidate.agentConnection = {
+            authentication: { requested: 'native', observed: 'native' },
+            entitlement: { route: 'subscription', status: 'unknown' },
+            readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+            provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+          }
           candidate.on('error', () => {})
           candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('unexpected PTY spawn') } }
           await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === code)
           assert.equal(ptySpawned, false)
+          assert.equal(candidate.agentConnection.readiness.state, 'blocked')
+          assert.equal(candidate.agentConnection.readiness.reasonCode, code)
+          assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
           await candidate.destroy()
         })
       }
@@ -345,8 +354,8 @@ describe('ClaudeTuiSession', () => {
       candidate.agentConnection = {
         authentication: { requested: 'native', observed: 'unknown' },
         entitlement: { route: 'subscription', status: 'unknown' },
-        readiness: { state: 'unknown' },
-        provenance: { observedAt: null },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
       }
       candidate._sessionId = 'native-marker-success'
       candidate._sinkDir = fakeHome
@@ -357,6 +366,11 @@ describe('ClaudeTuiSession', () => {
           'a new spawn resets the prior process route verdict before warmup')
         assert.equal(candidate.writeTerminalInput('before-marker'), false,
           'raw input is blocked while the real spawn awaits its marker')
+        assert.equal(candidate.agentConnection.readiness.state, 'unknown',
+          'the prior spawn readiness is retired while this spawn is being verified')
+        assert.equal(candidate.agentConnection.readiness.reasonCode, 'NATIVE_ROUTE_REVERIFYING')
+        assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z',
+          'the prior successful observation remains available as historical provenance')
         assert.deepEqual(rawWrites, [])
         return true
       }
@@ -396,6 +410,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
       for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')
       assert.equal(candidate.agentConnection.readiness.state, 'ready')
+      assert.notEqual(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
       assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
       assert.equal(candidate.writeTerminalInput('after-marker'), true)
       assert.deepEqual(rawWrites, ['after-marker'], 'input opens only after this spawn passes the marker')
@@ -434,6 +449,12 @@ describe('ClaudeTuiSession', () => {
           let killed = false
           candidate._sessionId = 'native-marker-failure'
           candidate._sinkDir = sink
+          candidate.agentConnection = {
+            authentication: { requested: 'native', observed: 'native' },
+            entitlement: { route: 'subscription', status: 'unknown' },
+            readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+            provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+          }
           candidate._nativeRouteVerifiedForSpawn = true
           candidate._waitForPrompt = async () => true
           candidate._ptyModOverride = {
@@ -452,10 +473,104 @@ describe('ClaudeTuiSession', () => {
           assert.equal(killed, true, 'unverified PTY is stopped before it can become ready')
           assert.equal(candidate._term, null)
           assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+          assert.equal(candidate.agentConnection.readiness.state, 'blocked')
+          assert.equal(
+            candidate.agentConnection.readiness.reasonCode,
+            stale ? 'NATIVE_ENDPOINT_ROUTE_MISMATCH' : 'NATIVE_ENDPOINT_UNVERIFIED',
+          )
+          assert.match(candidate.agentConnection.readiness.message, stale ? /custom endpoint/ : /did not expose/)
+          assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
           await candidate.destroy()
           rmSync(sink, { recursive: true, force: true })
         })
       }
+    })
+
+    it('retires ready metadata on a failed native respawn and restores it only after a verified retry', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const sink = mkdtempSync(join(fakeHome, 'respawn-route-'))
+      const priorObservedAt = '2026-09-12T00:00:00.000Z'
+      let failProvenance = true
+      let scheduled = 0
+      const candidate = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/claude',
+        connectionRuntimePreflight: () => {
+          if (failProvenance) {
+            const err = new Error('Configured Claude binary failed its provenance ledger check.')
+            err.code = 'PROVIDER_BINARY_PROVENANCE'
+            throw err
+          }
+          return '/fixture/claude'
+        },
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      })
+      candidate.agentConnection = {
+        authentication: { requested: 'native', observed: 'native' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: priorObservedAt },
+      }
+      candidate._sessionId = 'native-respawn-readiness'
+      candidate._sinkDir = sink
+      candidate._settingsPath = join(sink, 'settings.json')
+      candidate._processReady = true
+      candidate._scheduleRespawn = () => { scheduled += 1 }
+      candidate._waitForPrompt = async () => true
+      candidate.on('error', () => {})
+      candidate._ptyModOverride = {
+        spawn: () => {
+          const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+          const nonce = settings.hooks.SessionStart[0].hooks[0].args[2]
+          writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+            version: 1,
+            nonce,
+            safe: true,
+            firstPartyEndpoint: true,
+            blockedKeys: [],
+          }))
+          return {
+            pid: 123,
+            write: () => {},
+            kill: () => {},
+            onData: () => {},
+            onExit: () => {},
+            on: () => {},
+          }
+        },
+      }
+
+      await candidate._respawnPty()
+      assert.equal(candidate._processReady, false)
+      assert.deepEqual(candidate.agentConnection.readiness, {
+        state: 'blocked',
+        reasonCode: 'PROVIDER_BINARY_PROVENANCE',
+        message: 'Configured Claude binary failed its provenance ledger check.',
+        recoveryAction: null,
+      })
+      assert.equal(candidate.agentConnection.provenance.observedAt, priorObservedAt,
+        'a failed respawn retains the last successful observation only as history')
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+      assert.equal(scheduled, 1)
+
+      failProvenance = false
+      await candidate._respawnPty()
+      assert.equal(candidate._processReady, true)
+      assert.equal(candidate.agentConnection.readiness.state, 'ready')
+      assert.equal(candidate.agentConnection.readiness.reasonCode, null)
+      assert.notEqual(candidate.agentConnection.provenance.observedAt, priorObservedAt)
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+      assert.equal(scheduled, 1, 'the verified retry does not schedule another respawn')
+
+      await candidate.destroy()
+      rmSync(sink, { recursive: true, force: true })
     })
 
     it('the marker classifier rejects a custom endpoint and every alternate route selector', () => {
