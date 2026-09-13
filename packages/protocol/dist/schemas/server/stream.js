@@ -261,10 +261,18 @@ export const ServerToolInputDeltaSchema = z.object({
  *     (docker-byok, deepseek, ollama, anthropic-compatible) WHENEVER their
  *     endpoint reports per-round usage — an endpoint that reports none
  *     omits the field.
+ *   - (no `source`)          — codex's app-server driver (#7794): the
+ *     binary's own `tokenUsage.last.totalTokens` (the size the NEXT turn
+ *     starts from — NOT the thread-cumulative `total`, which never steps
+ *     down after a compaction) plus `modelContextWindow` as `maxTokens`. No
+ *     enum value fits — `source` is omitted, which parses as `null`
+ *     client-side and renders un-flagged rather than labelled an estimate,
+ *     since these are the binary's own figures.
  *
- * Providers with no occupancy signal at all (claude-cli, claude-tui, codex,
- * gemini, …) omit the field entirely; clients render their unknown/dash
- * state rather than a fabricated number.
+ * Providers with no occupancy signal at all (claude-cli, claude-tui, gemini,
+ * the legacy codex `exec` driver [`CHROXY_CODEX_APPSERVER=0`], …) omit the
+ * field entirely; clients render their unknown/dash state rather than a
+ * fabricated number.
  */
 export const ServerContextOccupancySnapshotSchema = z.object({
     totalTokens: z.number().nonnegative(),
@@ -478,6 +486,34 @@ export const ServerAvailableModelsSchema = z.object({
 export const ServerPermissionModeChangedSchema = z.object({
     type: z.literal('permission_mode_changed'),
     mode: z.string(),
+});
+// #7792: the session's thinking / reasoning-effort level changed, or is being
+// synced to a (re)connecting client. Emitted from THREE server sites, all of
+// which put the same shape on the wire:
+//   - `event-normalizer.js`'s `ready` burst (the booted effort a fresh codex
+//     app-server session resolved at `thread/start`, which the creating
+//     client's replay runs too early to see),
+//   - `ws-history.js`'s `sendSessionInfo` replay (reconnect / tab switch),
+//   - `handlers/settings-handlers.js` after an accepted `set_thinking_level`.
+//
+// `level` is an OPEN string, deliberately — NOT `ThinkingLevelValueSchema`.
+// #7730 replaced the frozen `default | high | max` roster with a per-model
+// catalog (codex advertises `supportedReasoningEfforts` per model and the set
+// moves with releases), and the value pushed by the `ready` burst is whatever
+// codex echoed at `thread/start` — captured verbatim by
+// `_captureBootedReasoningEffort` with no roster or charset check. A refined
+// schema here would declare a contract no producer enforces and would go red
+// on a level the operator's own binary actually offers. The charset/length
+// guard belongs on the INBOUND `set_thinking_level` (client.ts), where the
+// value is about to become a JSON-RPC param, and it is applied there.
+//
+// `sessionId` is optional for the same reason as ServerPermissionRequestSchema:
+// the multi-session broadcaster stamps it (`_broadcastToSession`), and
+// single-session mode has none.
+export const ServerThinkingLevelChangedSchema = z.object({
+    type: z.literal('thinking_level_changed'),
+    level: z.string(),
+    sessionId: z.string().optional(),
 });
 export const ServerPermissionRequestSchema = z.object({
     type: z.literal('permission_request'),

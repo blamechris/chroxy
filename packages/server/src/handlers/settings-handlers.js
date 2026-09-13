@@ -5,7 +5,13 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { isWellFormedThinkingLevel, resolveThinkingLevels } from '@chroxy/protocol'
-import { ALLOWED_MODEL_IDS, toShortModelId, isClaudeProvider } from '../models.js'
+import {
+  ALLOWED_MODEL_IDS,
+  toShortModelId,
+  isClaudeProvider,
+  getRosterModelRow,
+  thinkingLevelLegacyFallbackApplies,
+} from '../models.js'
 import {
   ALLOWED_PERMISSION_MODE_IDS,
   resolveSession,
@@ -624,28 +630,35 @@ function handleListProviders(ws, client, msg, ctx) {
  * model THIS session is running?", and this handler is the layer that can see
  * both the session and its provider.
  *
- * The roster comes from the provider class's own `getModelMetadata(id)`, which
- * for codex returns the discovered `model/list` row (#7726) and for the Claude
- * providers returns a row with no `reasoningLevels` at all —
- * `resolveThinkingLevels` then falls back to `LEGACY_THINKING_LEVELS`, so
- * claude-sdk keeps accepting exactly `default | high | max` and mapping them to
- * `maxThinkingTokens`. Nothing about the Claude path changes.
+ * #7784 — THE ROSTER AND THE PICKER NOW READ THE SAME ROW.
  *
- * When the row cannot be read at all (unknown provider name, a
- * `getModelMetadata` that throws, a session whose model codex has not echoed
- * yet) `resolveThinkingLevels` returns the legacy triple with
- * `source: 'legacy'`. That is the CLAUDE roster, and it is only an answer for a
- * Claude session — so `claudeFamily` is resolved here alongside it and the
- * caller refuses the legacy fallback on any other provider. A codex row that is
- * momentarily unreadable is a cannot-check, and handing a cannot-check the
- * Claude three would let `default` (offered by NO codex model) and `max` (not
- * offered by gpt-5.5 or gpt-5.3-codex-spark) through to `turn/start.effort` as
- * if a model had advertised them — "could not check" reading as "nothing to
- * check", cause #2 in docs/false-safety-guards.md. The reachability is not
- * hypothetical: `CodexSession.getModelMetadata` falls back to the
- * `CODEX_MODEL_METADATA` seed, whose six rows carry no `reasoningLevels` at
- * all, and `_refreshModelCatalog()` is skipped permanently when the binary
- * reports `supportsModelList === false`.
+ * The row comes from `getRosterModelRow(provider, modelId)`, which is the
+ * roster `available_models` carried to this client — `getRegistryForProvider`'s
+ * rows, matched on `fullId || id` exactly as the dashboard's picker matches
+ * them. It used to come from `ProviderClass.getModelMetadata(id)`, a SECOND
+ * source with its own refresh timing, and the two provably disagreed: after a
+ * codex `model/list` that answers with zero rows the catalog records the empty
+ * answer while nothing is broadcast for it, so the registry keeps serving the
+ * previously discovered rows — levels and all — while `getModelMetadata` for
+ * those same ids returns null. The picker offered the stale row's efforts and
+ * this gate refused every one of them.
+ *
+ * A row with no `reasoningLevels` at all — every Claude provider today — falls
+ * back to `LEGACY_THINKING_LEVELS`, so claude-sdk keeps accepting the Claude
+ * triple and mapping it to `maxThinkingTokens`. That fallback is the CLAUDE
+ * family's roster and nobody else's, so whether it applies is asked through
+ * `thinkingLevelLegacyFallbackApplies` — the same derivation `listProviders()`
+ * ships to clients as the `thinkingLevelLegacyFallback` capability, so the
+ * picker narrows with this gate instead of against it. On a provider where it
+ * does not apply the answer is an EMPTY roster (`source: 'none'`) and the caller
+ * refuses every level: handing a cannot-check the Claude three would let
+ * `default` (offered by NO codex model, and the picker's first option) ride out
+ * on `turn/start.effort` as if a model had advertised it — "could not check"
+ * reading as "nothing to check", cause #2 in docs/false-safety-guards.md. The
+ * reachability is not hypothetical: `CodexSession.getFallbackModels` seeds the
+ * registry from `CODEX_MODEL_METADATA`, whose six rows carry no
+ * `reasoningLevels` at all, and `_refreshModelCatalog()` is skipped permanently
+ * when the binary reports `supportsModelList === false`.
  *
  * `claudeFamily` prefers the registry class and falls back to the live
  * session's own constructor, so a session whose `entry.provider` is missing or
@@ -653,9 +666,13 @@ function handleListProviders(ws, client, msg, ctx) {
  * (`isClaudeProvider` treats a passed class's `static claudeFamily` as
  * authoritative).
  *
- * @returns {{levels: string[], defaultLevel: string, source: 'model'|'legacy', modelId: string|null, claudeFamily: boolean}}
+ * EXPORTED for the parity guard (`tests/thinking-level-roster-parity.test.js`),
+ * which drives one roster row through this function and through the picker's
+ * own `thinkingLevelOptions` and compares the two sets in both directions.
+ *
+ * @returns {{levels: string[], defaultLevel: string, source: 'model'|'legacy'|'none', modelId: string|null, claudeFamily: boolean}}
  */
-function resolveSessionThinkingLevels(entry) {
+export function resolveSessionThinkingLevels(entry) {
   const session = entry?.session
   // Same precedence as ws-history's `model_changed` replay and session-manager's
   // session_info render: the operator's explicit override first, then the model
@@ -665,41 +682,57 @@ function resolveSessionThinkingLevels(entry) {
     ? session.model
     : ((typeof session?.bootedModel === 'string' && session.bootedModel.length > 0) ? session.bootedModel : null)
 
-  let row = null
+  const providerName = (typeof entry?.provider === 'string' && entry.provider.length > 0) ? entry.provider : null
+
   let ProviderClass = null
-  if (typeof entry?.provider === 'string' && entry.provider.length > 0) {
+  if (providerName) {
     // TWO lookups, TWO try blocks, because they fail for different reasons and
     // only one of them says anything about which FAMILY the session belongs to.
     try {
-      ProviderClass = getProvider(entry.provider) || null
+      ProviderClass = getProvider(providerName) || null
     } catch (err) {
       // The provider NAME did not resolve to a class. A cannot-check, and it is
       // LOGGED rather than swallowed: without this line a deployment whose
       // registry lookup is permanently broken is indistinguishable in every log
       // from one that is working (docs/false-safety-guards.md #2).
-      log.warn(`Thinking-level provider lookup failed for provider '${entry.provider}': ${err?.message || err}`)
+      log.warn(`Thinking-level provider lookup failed for provider '${providerName}': ${err?.message || err}`)
       ProviderClass = null
-    }
-    if (modelId && ProviderClass && typeof ProviderClass.getModelMetadata === 'function') {
-      try {
-        row = ProviderClass.getModelMetadata(modelId)
-      } catch (err) {
-        // The MODEL ROW is unavailable — and that is all. `ProviderClass` stays
-        // set on purpose: it really resolved, and isClaudeProvider treats a
-        // passed class as authoritative, so nulling it here would downgrade a
-        // Claude session to its live constructor and then to the name map
-        // because of a failure one call LATER. The roster falls back (row null
-        // -> source 'legacy'); the FAMILY does not have to.
-        log.warn(`Thinking-level roster lookup failed for provider '${entry.provider}' model '${modelId}': ${err?.message || err}`)
-        row = null
-      }
     }
   }
 
+  // Preferred for BOTH questions below: the class the registry resolved, else
+  // the class actually running. `isClaudeProvider` treats a passed class as
+  // authoritative, so a session whose entry lost its provider string is still
+  // classified by what it is.
+  const resolvedClass = ProviderClass || entry?.session?.constructor || null
+
+  let row = null
+  try {
+    row = getRosterModelRow(providerName, modelId)
+  } catch (err) {
+    // The ROSTER is unavailable — and that is all. `ProviderClass` stays set on
+    // purpose: it really resolved, and isClaudeProvider treats a passed class as
+    // authoritative, so nulling it here would downgrade a Claude session to its
+    // live constructor and then to the name map because of a failure one call
+    // LATER. The roster falls back (row null); the FAMILY does not have to.
+    // Reachable because building a provider registry runs provider-class code
+    // (`getFallbackModels()`), which a throwing implementation turns into a
+    // cannot-check here.
+    log.warn(`Thinking-level roster lookup failed for provider '${providerName || 'none'}' model '${modelId}': ${err?.message || err}`)
+    row = null
+  }
+
+  // ONE question, asked once, through the derivation `listProviders()` also
+  // ships: "does the legacy triple stand in for a row that advertised nothing
+  // on this provider?" It is the Claude-family test, which is why the returned
+  // `claudeFamily` is the same value rather than a second call — two spellings
+  // of one fact are free to disagree, and this one is load-bearing on both
+  // sides of the wire.
+  const legacyFallback = thinkingLevelLegacyFallbackApplies(providerName, resolvedClass)
   return {
-    ...resolveThinkingLevels(row),
+    ...resolveThinkingLevels(row, { legacyFallback }),
     modelId,
-    claudeFamily: isClaudeProvider(entry?.provider, ProviderClass || entry?.session?.constructor || null),
+    claudeFamily: legacyFallback,
   }
 }
 
@@ -744,16 +777,20 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
   // the session and the model it is running, which is the only scope in which
   // the question has an answer (see resolveSessionThinkingLevels above).
   const offered = resolveSessionThinkingLevels(entry)
-  // The legacy triple is the CLAUDE roster, not a neutral default. Offering it
-  // to a provider that simply has not advertised its own levels yet would let
-  // `default` — which NO codex model offers, and which the picker renders first
-  // as 'Auto' — ride out on `turn/start.effort`, with a cannot-check
-  // masquerading as a model's own answer. Reject instead, with the same typed
-  // code every other path uses so the #5731 optimistic rollback still fires.
-  // The Claude path is untouched: claudeFamily is true there, and a codex row
-  // that DID advertise levels has source 'model' and never reaches this branch.
-  if (offered.source === 'legacy' && !offered.claudeFamily) {
-    ;sessionLogger(sessionId).warn(`Rejected thinking level '${level}' on ${entry.provider || 'unknown-provider'} session ${sessionId} from ${client.id}: model ${offered.modelId || 'unknown'} has advertised no reasoning levels, and the legacy roster is Claude-only`)
+  // NO ROSTER AT ALL is its own rejection, before membership, and it carries a
+  // different message: "this model has advertised nothing" is not "you picked
+  // the wrong level", and an empty `Supported levels:` list reads as a bug.
+  //
+  // `source: 'none'` is reached only when the row advertised nothing AND this
+  // provider has no legacy fallback (#7784) — the pre-catalog codex state. The
+  // Claude path never reaches it (the fallback applies, so source is 'legacy'
+  // with the triple), and a codex row that DID advertise levels has source
+  // 'model'. Since #7784 the picker resolves from the SAME fact, so it offers
+  // nothing here rather than offering three levels this branch refuses; the
+  // branch stays because a client can send any level it likes, and an older
+  // client still offers the triple.
+  if (offered.levels.length === 0) {
+    ;sessionLogger(sessionId).warn(`Rejected thinking level '${level}' on ${entry.provider || 'unknown-provider'} session ${sessionId} from ${client.id}: model ${offered.modelId || 'unknown'} has advertised no reasoning levels, and the legacy roster is Claude-only (source=${offered.source})`)
     sendError(
       ws,
       requestId,

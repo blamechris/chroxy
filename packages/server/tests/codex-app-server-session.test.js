@@ -1772,6 +1772,95 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
     }
   })
 
+  it('#7770 — a pre-seeded bootedModel (restored from the session snapshot) survives an absent thread/start echo', async () => {
+    // SessionManager.createSession() pre-seeds session.bootedModel from the
+    // persisted restore snapshot BEFORE calling session.start() — mirroring
+    // that ordering here. A thread/start response with no model field is a
+    // cannot-read, not a "codex cleared the model", so the restored value must
+    // survive it exactly the way `_onModelRerouted` already preserves it on an
+    // unusable `toModel`.
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-restored' } } })
+    s.bootedModel = 'gpt-5-restored'
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5-restored', 'an absent echo must not blank a value restored before start()')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('#7770 — a PRESENT echo is authoritative and REPLACES a pre-seeded bootedModel', async () => {
+    // The OTHER direction of the same coalescing rule, and the reason the
+    // preservation test above is not self-arming without it. `echoed ??
+    // this.bootedModel ?? null` makes two claims; reordering it to
+    // `this.bootedModel ?? echoed ?? null` — the exact shape a later "prefer
+    // the id we already know" edit would take — leaves every other test in
+    // this file green, because they all start from `bootedModel === null`.
+    // Production would then report the model the session is NOT running
+    // (operator edits ~/.codex/config.toml between daemon runs; the restored
+    // snapshot wins forever, since no `model/rerouted` arrives to correct it)
+    // on the badge, in `_effectiveModelId()`, in `ready`, in the per-model
+    // usage split and as the `_applyContextWindow` key.
+    //
+    // This also arms the sibling: deleting `_captureBootedModel(started)` from
+    // start() leaves an untouched pre-seed, which the preservation test cannot
+    // distinguish from a correctly-preserved one — but this one goes red.
+    const { s, cleanup } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    s.bootedModel = 'gpt-5-restored'
+    try {
+      await s.start()
+      assert.equal(s.bootedModel, 'gpt-5.5',
+        'a real echo names the model codex actually booted — it must WIN over a restored value, not defer to it')
+      assert.equal(s._effectiveModelId(), 'gpt-5.5')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  // Only `_captureBootedModel`'s three branches — not the sibling reasoning-effort
+  // line, which carries the same `(thread/start echo)` suffix on the same response.
+  const MODEL_BOOT_LOG = /resolved model=|no model echo/
+
+  it('the boot log names PROVENANCE: a carried-over value is not reported as an echo', async () => {
+    // Post-#7770 `this.bootedModel` is truthy in both branches, so a log that
+    // switches on truthiness claims "(thread/start echo)" over a value codex
+    // never sent — pointing an operator at codex's config resolution instead
+    // of at chroxy's restore snapshot — and silently retires the cannot-read
+    // warn in exactly the case #7770 added.
+    const carried = mkStartedSession({}, { 'thread/start': { thread: { id: 'th-log' } } })
+    const lines = []
+    carried.s._log = { info: (m) => lines.push(['info', m]), warn: (m) => lines.push(['warn', m]), debug: () => {}, error: () => {} }
+    carried.s.bootedModel = 'gpt-5-restored'
+    try {
+      await carried.s.start()
+      // Narrowed to the MODEL capture — `_captureBootedReasoningEffort` logs its
+      // own `(thread/start echo)` line on the same response and is not this
+      // test's subject.
+      assert.deepEqual(lines.filter(([, m]) => MODEL_BOOT_LOG.test(m)), [
+        ['warn', 'codex thread/start carried no model echo; keeping gpt-5-restored (restored before start)'],
+      ], 'a cannot-read over a carried value still warns, and names what it kept')
+    } finally {
+      carried.s.destroy()
+      carried.cleanup()
+    }
+
+    const echoed = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    const echoLines = []
+    echoed.s._log = { info: (m) => echoLines.push(['info', m]), warn: (m) => echoLines.push(['warn', m]), debug: () => {}, error: () => {} }
+    echoed.s.bootedModel = 'gpt-5-restored'
+    try {
+      await echoed.s.start()
+      assert.deepEqual(echoLines.filter(([, m]) => MODEL_BOOT_LOG.test(m)), [
+        ['info', 'codex resolved model=gpt-5.5 (thread/start echo)'],
+      ], 'a real echo is the only thing that may be logged as one')
+    } finally {
+      echoed.s.destroy()
+      echoed.cleanup()
+    }
+  })
+
   it('the operator override WINS over the echo for the effective model', async () => {
     const { s, cleanup } = mkStartedSession({ model: 'gpt-5-codex' }, { 'thread/start': THREAD_START_ECHO })
     try {
@@ -2156,13 +2245,20 @@ describe('CodexAppServerSession — model/rerouted (#7729)', () => {
 // The live notification shape, verified against codex-cli 0.154.0 (epic record
 // github.com/blamechris/chroxy/issues/7721#issuecomment-5644101381):
 //   { threadId, turnId, tokenUsage: { total, last, modelContextWindow } }
+// #7773 — `total` DEFAULTS TO `last` when a caller names only `last`, because
+// that is the live turn-1 invariant: `total` is the thread-cumulative sum of
+// every response, so on the first response of a fresh thread the two are
+// identical (probed: turn 1 reported total.totalTokens == last.totalTokens ==
+// 14962). Defaulting it to all-zeros instead would make every one of these
+// fixtures describe a payload codex cannot emit, and the per-turn delta
+// (#7773) would read 0 for a turn the fixture says spent 500k.
 function tokenUsageParams({ last, total, modelContextWindow } = {}) {
   const breakdown = (o) => ({
     totalTokens: 0, inputTokens: 0, cachedInputTokens: 0,
     outputTokens: 0, reasoningOutputTokens: 0, cacheWriteInputTokens: 0,
     ...o,
   })
-  const tokenUsage = { total: breakdown(total), last: breakdown(last) }
+  const tokenUsage = { total: breakdown(total ?? last), last: breakdown(last) }
   if (modelContextWindow !== undefined) tokenUsage.modelContextWindow = modelContextWindow
   return { threadId: 'th-1', turnId: 'tu-1', tokenUsage }
 }
@@ -2201,25 +2297,64 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
     })
   })
 
-  it('the token breakdown is read from `last`, never the thread-cumulative `total`', () => {
-    withCodexSession((s) => {
-      s.bootedModel = 'gpt-5-codex'
-      s._activeTurn = { messageId: 'm1', turnId: 'tu-1', didStreamStart: false }
+  // #7773 — this test used to assert the breakdown was read straight off
+  // `last`, on the theory that `last` IS the turn. It is not: `last` is one
+  // model RESPONSE. The turn is the DELTA of the cumulative `total` since turn
+  // start, which is what the suite below pins.
+  //
+  // This MUST be a two-turn test, driven through the real `sendMessage()`
+  // path so `_turnBaselineTotals` actually freezes at a non-zero value
+  // (review finding #2 on #7798): a single-turn fixture pokes `_activeTurn`
+  // directly, leaves the baseline null, and falls through to raw `total` —
+  // so it passed under `last`, under raw `total`, AND under the delta, and
+  // discriminated none of the three readings its own name claims to.
+  it('the token breakdown is neither the raw cumulative `total` nor one response (#7773)', async () => {
+    const { s, cleanup } = mkSession({ model: 'gpt-5-codex' })
+    s._processReady = true
+    s._threadId = 'th-1'
+    s._client = { request: async () => ({ turn: { id: 'tu-1' } }) }
+    try {
+      // Turn 1: nothing accumulated yet, so the baseline freezes at zero.
+      await s.sendMessage('one')
       s._onNotification({
         method: 'thread/tokenUsage/updated',
         params: tokenUsageParams({
           last: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
-          total: { inputTokens: 900_000, cachedInputTokens: 0, outputTokens: 9_999 },
-          modelContextWindow: 272_000,
+          total: { inputTokens: 1000, cachedInputTokens: 600, outputTokens: 42 },
+        }),
+      })
+      s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 1 } } })
+
+      // Turn 2: a tool round-trip inside the turn, so `last` (this turn's
+      // final response alone) and `total` (the whole THREAD's cumulative sum,
+      // including turn 1) are both wrong, and both a different number from
+      // the correct turn-2-only delta.
+      await s.sendMessage('two')
+      s._onNotification({
+        method: 'thread/tokenUsage/updated',
+        params: tokenUsageParams({
+          last: { inputTokens: 300, cachedInputTokens: 50, outputTokens: 10 },
+          total: { inputTokens: 1500, cachedInputTokens: 900, outputTokens: 90 },
         }),
       })
       assert.deepEqual(s._lastUsage, {
-        input_tokens: 400,
-        output_tokens: 42,
-        cache_read_input_tokens: 600,
-        cached_input_tokens: 600,
-      }, 'session-manager ACCUMULATES result.usage — a running total here would compound every turn')
-    })
+        input_tokens: 200, // (1500-900) - (1000-600)
+        output_tokens: 48, // 90 - 42
+        cache_read_input_tokens: 300, // 900 - 600
+        cached_input_tokens: 300,
+      }, 'turn 2 reports only turn 2 — a running total here would compound every turn')
+      assert.notEqual(s._lastUsage.input_tokens, 250,
+        'control: raw `last` alone (this turn\'s final response) maps to a DIFFERENT input_tokens, so reverting to `last` would be caught')
+      assert.notEqual(s._lastUsage.output_tokens, 10,
+        'control: raw `last` alone maps to a DIFFERENT output_tokens too')
+      assert.notEqual(s._lastUsage.input_tokens, 600,
+        'control: the raw cumulative `total` (ignoring the baseline) maps to a DIFFERENT input_tokens, so reverting to `total` would be caught')
+      assert.notEqual(s._lastUsage.cache_read_input_tokens, 900,
+        'control: the raw cumulative `total`\'s cache figure is different too')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
   })
 
   it('a payload WITHOUT modelContextWindow leaves the entry unchanged and falls through to the ratchet', () => {
@@ -2386,5 +2521,388 @@ describe('CodexAppServerSession — authoritative context window (#7729)', () =>
       assert.equal(broadcasts.filter((m) => m.type === 'available_models').length, 1,
         'control: this wiring broadcasts available_models when models_updated fires')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7762 — the live catalog refresh must push a changed roster, not just cache
+// it. `_refreshModelCatalog` claims the shared 'codex' discovery slot
+// (model-discovery.js), so the LATER scheduled `scheduleProviderModelsRefresh`
+// call sees an unchanged change key / hits the TTL and pushes nothing — this
+// call is the only place a change discovered here can ever reach a connected
+// client. Same `models_updated` shape as ollama-session.js / anthropic-
+// compatible-session.js: a non-empty resolved roster emits it, everything
+// else (null, empty array, a rejected probe) emits nothing.
+// ---------------------------------------------------------------------------
+describe('CodexAppServerSession — _refreshModelCatalog pushes models_updated (#7762)', () => {
+  async function withMockedRefresh(resolution, fn) {
+    const restore = mock.method(CodexAppServerSession, 'refreshModels', () => {
+      if (resolution instanceof Error) return Promise.reject(resolution)
+      return Promise.resolve(resolution)
+    })
+    try {
+      // _refreshModelCatalog's call to the mocked static method happens on a
+      // later microtask (Promise.resolve().then(...)), not synchronously — the
+      // mock must still be installed when that tick runs, so this AWAITS fn()
+      // before restoring rather than restoring in the same synchronous pass.
+      return await fn()
+    } finally {
+      restore.mock.restore()
+    }
+  }
+
+  it('a non-empty resolved roster emits models_updated with the discovered rows', async () => {
+    const rows = [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }]
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      // A truthy _client is what lets the refresh path RUN: _refreshModelCatalog
+      // bails out early when there is no client, which would make this test vacuous.
+      s._client = {}
+      await withMockedRefresh(rows, () => s._refreshModelCatalog())
+      assert.deepEqual(events, [['models_updated', { models: rows }]],
+        'the refreshed roster must reach listeners — this is the ONLY path that can push it once the live client has claimed the discovery slot')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a null resolution (TTL-cached / no change) emits nothing', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      await withMockedRefresh(null, () => s._refreshModelCatalog())
+      assert.deepEqual(events, [], 'no change / TTL-cached must not push anything')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('an empty array resolution emits nothing — a failed probe must not blank an existing picker', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      await withMockedRefresh([], () => s._refreshModelCatalog())
+      assert.deepEqual(events, [], 'an empty roster must not overwrite a picker a client already has')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a rejected probe emits nothing and resolves null, same as before #7762', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = {}
+      const result = await withMockedRefresh(new Error('probe failed'), () => s._refreshModelCatalog())
+      assert.equal(result, null)
+      assert.deepEqual(events, [])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a THROWING models_updated listener is not misreported as a probe failure, and does not flip the resolution to null', async () => {
+    // EventEmitter.emit rethrows a synchronous listener throw. With the emit
+    // inside the chain the probe's `.catch()` guards, that throw is logged as
+    // `codex model catalog refresh failed: <listener error>` — blaming the
+    // codex probe for a downstream forwarding bug — and returns null even
+    // though the probe and the registry write both succeeded.
+    const rows = [{ id: 'gpt-6-astra', label: 'GPT-6-Astra' }]
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const debugLines = []
+    s._log = { info: () => {}, warn: () => {}, error: () => {}, debug: (m) => debugLines.push(m) }
+    const seen = []
+    s.on('models_updated', (p) => seen.push(p))
+    s.on('models_updated', () => { throw new Error('listener boom') })
+    try {
+      s._client = {}
+      const result = await withMockedRefresh(rows, () => s._refreshModelCatalog())
+      assert.deepEqual(result, rows, 'the probe succeeded — a listener throw must not rewrite its result as null')
+      assert.deepEqual(seen, [{ models: rows }], 'the listeners registered before the thrower still ran')
+      assert.deepEqual(debugLines.filter((m) => m.includes('catalog refresh failed')), [],
+        'a listener throw must never be attributed to the codex probe')
+      assert.ok(debugLines.some((m) => m.includes('models_updated listener threw')),
+        'it is reported as what it is')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('no client at all short-circuits before the refresh call and emits nothing', async () => {
+    const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
+    const events = capture(s, ['models_updated'])
+    try {
+      s._client = null
+      const result = await withMockedRefresh([{ id: 'unreachable' }], () => s._refreshModelCatalog())
+      assert.equal(result, null)
+      assert.deepEqual(events, [], 'no client means no probe means no emit')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
+// #7773 / #7769 / #7794 — usage accounting on `thread/tokenUsage/updated`.
+//
+// THE LIVE FACT this suite rests on, probed against codex-cli 0.154.0 on
+// 2026-09-12 (gpt-5.5, thread 01a09778-0c52-7c41-8d24-e4f4ff68b708, two
+// one-word turns, every `thread/tokenUsage/updated` logged verbatim):
+//
+//   turn 1  total.totalTokens=14962  last.totalTokens=14962
+//   turn 2  total.totalTokens=31920  last.totalTokens=16958   (= 14962+16958)
+//
+// So `total` is the thread-CUMULATIVE sum of every response's usage and `last`
+// is the most recent response. Three consequences, one per issue:
+//
+//   #7773  NEITHER field is the turn. `total` compounds (session-manager ADDS
+//          result.usage into cumulativeUsage once per turn), `last` drops every
+//          response but the final one of a tool-heavy turn. The turn is
+//          total_now - total_at_turn_start.
+//   #7769  `_lastUsage` must be cleared per TURN, or a `turn/completed` with no
+//          intervening notification re-reports — and re-accumulates — the
+//          previous turn's numbers.
+//   #7794  occupancy is `last.totalTokens`, NOT the `total.total_tokens` the
+//          issue body specifies: metered as occupancy, `total` grows without
+//          bound and can never step down after a compaction, which is the
+//          failure that issue's own second acceptance criterion forbids.
+// ---------------------------------------------------------------------------
+describe('CodexAppServerSession — usage accounting (#7773 / #7769 / #7794)', () => {
+  // Breakdown factory: every one of TokenUsageBreakdown's six fields, zero by
+  // default, so a test only names the ones it is reasoning about.
+  const bd = (o = {}) => ({
+    totalTokens: 0, inputTokens: 0, cachedInputTokens: 0,
+    cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0,
+    ...o,
+  })
+  const notif = ({ total, last, modelContextWindow }) => {
+    const tokenUsage = { total: bd(total), last: bd(last) }
+    if (modelContextWindow !== undefined) tokenUsage.modelContextWindow = modelContextWindow
+    return { threadId: 'th-1', turnId: 'tu-1', tokenUsage }
+  }
+
+  // A session that runs turns through the REAL sendMessage path, so the
+  // per-turn reset (#7769) and the baseline freeze (#7773) are exercised where
+  // they live instead of being poked directly.
+  function mkTurnRunner(opts = {}) {
+    const { s, cleanup } = mkSession({ model: 'gpt-5-codex', ...opts })
+    s._processReady = true
+    s._threadId = 'th-1'
+    s._client = { request: async () => ({ turn: { id: 'tu-1' } }) }
+    const results = capture(s, ['result'])
+    return {
+      s,
+      results,
+      send: (text = 'hi') => s.sendMessage(text),
+      tokenUsage: (p) => s._onNotification({ method: 'thread/tokenUsage/updated', params: notif(p) }),
+      // _finishTurn's _clearMessageState clears _isBusy, so the next send is
+      // not queued — no manual flag poking.
+      finish: () => s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 7 } } }),
+      // The codex models registry is a process-global (several tests below
+      // feed a `modelContextWindow`, which writes into it) — put it back the
+      // same way `withCodexSession` above does, or a test appended after this
+      // suite inherits whatever window the last test here left behind
+      // (review finding #4 on #7798).
+      cleanup: () => { s.destroy(); cleanup(); getRegistryForProvider('codex').resetModels() },
+    }
+  }
+
+  it('sums a turn\'s responses instead of dropping all but the last (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('do a tool-heavy thing')
+    // Two model responses inside ONE turn, as any tool round-trip produces.
+    // `total` climbs cumulatively; `last` is only ever the newest response.
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 10 }, last: { inputTokens: 1000, outputTokens: 10 } })
+    tokenUsage({ total: { inputTokens: 3000, outputTokens: 30 }, last: { inputTokens: 2000, outputTokens: 20 } })
+    finish()
+    assert.equal(results.length, 1)
+    assert.equal(results[0][1].usage.input_tokens, 3000,
+      'both responses of the turn are counted — reading `last` would report 2000 and silently drop the first request')
+    assert.equal(results[0][1].usage.output_tokens, 30,
+      'output is summed across the turn too — `last` alone would report 20')
+    cleanup()
+  })
+
+  it('measures turn 2 from turn 1\'s cumulative baseline, so the total never compounds (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    // The live capture's own numbers.
+    await send('one')
+    tokenUsage({ total: { totalTokens: 14962, inputTokens: 14935, cachedInputTokens: 5504, outputTokens: 27, reasoningOutputTokens: 20 },
+      last: { totalTokens: 14962, inputTokens: 14935, cachedInputTokens: 5504, outputTokens: 27, reasoningOutputTokens: 20 } })
+    finish()
+    await send('two')
+    tokenUsage({ total: { totalTokens: 31920, inputTokens: 31872, cachedInputTokens: 20224, outputTokens: 48, reasoningOutputTokens: 34 },
+      last: { totalTokens: 16958, inputTokens: 16937, cachedInputTokens: 14720, outputTokens: 21, reasoningOutputTokens: 14 } })
+    finish()
+    assert.equal(results.length, 2)
+    // turn 2's delta: input 31872-14935=16937, cached 20224-5504=14720,
+    // output 48-27=21 — which is exactly `last`, because turn 2 was a
+    // single-response turn. That equality is the arithmetic PROOF that `total`
+    // is the cumulative sum, and it is why a single-turn capture cannot tell
+    // the two readings apart.
+    assert.deepEqual(results[1][1].usage, {
+      input_tokens: 16937 - 14720,
+      output_tokens: 21,
+      cache_read_input_tokens: 14720,
+      cached_input_tokens: 14720,
+    }, 'turn 2 reports only turn 2 — reporting the raw cumulative total would re-count turn 1')
+    assert.notEqual(results[1][1].usage.cache_read_input_tokens, 20224,
+      'control: the raw cumulative cached figure is a DIFFERENT number, so the assertion above is armed')
+    cleanup()
+  })
+
+  it('clamps a cumulative total that moved BACKWARDS rather than emitting a negative (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { inputTokens: 5000, outputTokens: 50 }, last: { inputTokens: 5000, outputTokens: 50 } })
+    finish()
+    await send('two')
+    // A resumed thread, or a future build that resets its counters after
+    // compacting, can report a SMALLER total. An accumulator must never be fed
+    // a negative.
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 5 }, last: { inputTokens: 1000, outputTokens: 5 } })
+    finish()
+    assert.equal(results[1][1].usage.input_tokens, 0)
+    assert.equal(results[1][1].usage.output_tokens, 0)
+    cleanup()
+  })
+
+  it('a turn with NO tokenUsage notification reports null, not the previous turn\'s numbers (#7769)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { inputTokens: 1000, outputTokens: 10 }, last: { inputTokens: 1000, outputTokens: 10 } })
+    finish()
+    assert.equal(results[0][1].usage.input_tokens, 1000, 'precondition: turn 1 really did report usage')
+    // Turn 2 completes without codex ever sending a usage update.
+    await send('two')
+    finish()
+    assert.equal(results.length, 2)
+    assert.equal(results[1][1].usage, null,
+      'session-manager ADDS result.usage per turn — re-reporting turn 1 here double counts real tokens and cost')
+    assert.equal(results[1][1].modelUsage, null,
+      'and the per-model split must not be fabricated from stale numbers either')
+    cleanup()
+  })
+
+  it('does not carry the previous turn\'s occupancy snapshot into a turn that had none (#7769/#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 500 }, last: { totalTokens: 500 }, modelContextWindow: 258_400 })
+    finish()
+    assert.ok(results[0][1].contextOccupancy, 'precondition: turn 1 emitted a snapshot')
+    await send('two')
+    finish()
+    assert.equal('contextOccupancy' in results[1][1], false,
+      'the field is OMITTED so clients keep their own last snapshot, rather than being re-told a stale one as fresh')
+    cleanup()
+  })
+
+  it('emits a contextOccupancy snapshot from codex\'s own numbers (#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 14962 }, last: { totalTokens: 14962 }, modelContextWindow: 258_400 })
+    finish()
+    await send('two')
+    tokenUsage({ total: { totalTokens: 31920 }, last: { totalTokens: 16958 }, modelContextWindow: 258_400 })
+    finish()
+    assert.deepEqual(results[1][1].contextOccupancy, { totalTokens: 16958, maxTokens: 258_400 },
+      'occupancy is the last response (prompt + reply = the size the next turn starts from), never the cumulative total')
+    assert.notEqual(results[1][1].contextOccupancy.totalTokens, 31920,
+      'control: asserting the cumulative figure here would pin the unbounded-growth bug as correct')
+    // The window must come from the live snapshot, not the roster: the same
+    // probe read modelContextWindow=258400 for gpt-5.5 while
+    // ~/.codex/models_cache.json said 272000.
+    assert.equal(results[1][1].contextOccupancy.maxTokens, 258_400)
+    cleanup()
+  })
+
+  it('the occupancy snapshot steps DOWN after a compaction (#7794 AC2)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 200_000 }, last: { totalTokens: 200_000 }, modelContextWindow: 258_400 })
+    finish()
+    await send('two')
+    // codex compacted: the cumulative total keeps climbing, the next response's
+    // prompt is much smaller. Nothing here may pin the meter as monotonic.
+    tokenUsage({ total: { totalTokens: 230_000 }, last: { totalTokens: 30_000 }, modelContextWindow: 258_400 })
+    finish()
+    assert.equal(results[0][1].contextOccupancy.totalTokens, 200_000)
+    assert.equal(results[1][1].contextOccupancy.totalTokens, 30_000,
+      'a post-compaction snapshot is SMALLER; sourcing it from the cumulative total would have reported 230000')
+    cleanup()
+  })
+
+  it('emits no snapshot for the flat legacy shape or a zero total (#7794)', async () => {
+    const { s, results, send, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    // The pre-#7767 flat shape carries no totalTokens at all.
+    s._onNotification({ method: 'thread/tokenUsage/updated', params: { usage: { inputTokens: 10, outputTokens: 2 } } })
+    finish()
+    assert.equal('contextOccupancy' in results[0][1], false, 'no fabricated meter from a shape that carries no occupancy')
+    await send('two')
+    s._onNotification({ method: 'thread/tokenUsage/updated', params: notif({ total: {}, last: {}, modelContextWindow: 258_400 }) })
+    finish()
+    assert.equal('contextOccupancy' in results[1][1], false, 'a zero-token snapshot is a cannot-check, not a 0% meter')
+    cleanup()
+  })
+
+  it('omits maxTokens when codex reported no window, rather than sending null (#7794)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    tokenUsage({ total: { totalTokens: 900 }, last: { totalTokens: 900 } })
+    finish()
+    assert.deepEqual(results[0][1].contextOccupancy, { totalTokens: 900 })
+    cleanup()
+  })
+
+  it('leaves cache_creation_input_tokens unmapped ON PURPOSE (#7773)', async () => {
+    const { results, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    await send('one')
+    // cacheWriteInputTokens is non-zero AND reasoningOutputTokens is a subset
+    // of outputTokens (the live capture's arithmetic: totalTokens 14962 =
+    // inputTokens 14935 + outputTokens 27, with reasoningOutputTokens 20).
+    tokenUsage({
+      total: { totalTokens: 1100, inputTokens: 1000, outputTokens: 100, cacheWriteInputTokens: 700, reasoningOutputTokens: 60 },
+      last: { totalTokens: 1100, inputTokens: 1000, outputTokens: 100, cacheWriteInputTokens: 700, reasoningOutputTokens: 60 },
+    })
+    finish()
+    const r = results[0][1]
+    assert.equal('cache_creation_input_tokens' in r.usage, false,
+      'codex cacheWriteInputTokens is plausibly another SUBSET of inputTokens; mapping it additively would double count')
+    assert.equal(r.modelUsage['gpt-5-codex'].cache_creation_input_tokens, 0,
+      'so it stays 0 downstream — deliberately, and this test is why it is not just an omission nobody noticed')
+    assert.equal(r.usage.output_tokens, 100,
+      'reasoningOutputTokens is inside outputTokens already — adding it would double count reasoning')
+    cleanup()
+  })
+
+  it('forwards the codex snapshot onto the wire as contextOccupancy (#7794)', async () => {
+    const { s, send, tokenUsage, finish, cleanup } = mkTurnRunner()
+    const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+    const ctx = {
+      sessionId: 'sess-1',
+      mode: 'multi',
+      getSessionEntry: () => ({ session: { model: 'gpt-5-codex', permissionMode: 'approve' }, name: 'Codex', cwd: '/tmp' }),
+    }
+    const frames = []
+    // The same hop session-manager uses to forward a session result.
+    s.on('result', (data) => frames.push(...normalizer.normalize('result', data, ctx).messages))
+    await send('one')
+    tokenUsage({ total: { totalTokens: 16958 }, last: { totalTokens: 16958 }, modelContextWindow: 258_400 })
+    finish()
+    const resultMsg = frames.find((m) => m.msg.type === 'result')
+    assert.ok(resultMsg, 'precondition: the result reached the normalizer')
+    assert.deepEqual(resultMsg.msg.contextOccupancy, { totalTokens: 16958, maxTokens: 258_400 },
+      'the snapshot has to survive the normalizer hop, or the meter still never renders')
+    normalizer.destroy?.()
+    cleanup()
   })
 })

@@ -204,6 +204,17 @@ export interface ProviderCapabilities {
   // reasoning-effort dropdown (codex) without honouring the keywords, so a
   // client must not derive a keyword affordance from the dropdown's flag.
   thinkingKeywords?: boolean;
+  // #7784: does the legacy thinking-level triple stand in for an active-model
+  // row that advertises no `reasoningLevels`? True only for the Claude family,
+  // whose real roster it is; derived server-side from the provider class (the
+  // same derivation the `set_thinking_level` gate asks), so a picker and the
+  // gate resolve the offered roster from ONE fact. This app renders no
+  // reasoning-effort control yet — the field is mirrored here so the one that
+  // lands reads the server's answer instead of always taking the fallback,
+  // which is what made a pre-catalog codex dropdown on the dashboard offer
+  // three levels the gate refused. Absent (an older daemon) means the fallback
+  // applies, i.e. the pre-#7784 behaviour.
+  thinkingLevelLegacyFallback?: boolean;
   // #5026: true when the provider runs sessions inside an isolated Docker
   // container (docker-cli, docker-sdk, docker-byok). Surfaced as a badge +
   // container settings knobs in the New Session flow.

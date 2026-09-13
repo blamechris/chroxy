@@ -175,6 +175,16 @@ export interface ProviderCapabilities {
   // composer's keyword highlight must never promise an escalation that isn't
   // happening. Gates `highlightThinkingKeywords` on InputBar.
   thinkingKeywords?: boolean;
+  // #7784: does the legacy thinking-level triple stand in for an active-model
+  // row that advertises no `reasoningLevels`? True only for the Claude family,
+  // whose real roster it is; derived server-side from the provider class (the
+  // same `thinkingLevelLegacyFallbackApplies` derivation the `set_thinking_level`
+  // gate asks), so the picker and the gate resolve the offered roster from ONE
+  // fact. Absent (an older daemon) keeps the pre-#7784 behaviour — the picker
+  // takes the fallback — because a client cannot answer this itself: hardcoding
+  // which providers have a fallback would be the provider-name list #7730
+  // removed.
+  thinkingLevelLegacyFallback?: boolean;
   // True if the provider supports session-scoped permission rules
   // (i.e. the "Allow for Session" affordance). Derived server-side from
   // method existence — only providers whose session class implements

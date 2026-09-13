@@ -157,10 +157,18 @@ export declare const ServerToolInputDeltaSchema: z.ZodObject<{
  *     (docker-byok, deepseek, ollama, anthropic-compatible) WHENEVER their
  *     endpoint reports per-round usage — an endpoint that reports none
  *     omits the field.
+ *   - (no `source`)          — codex's app-server driver (#7794): the
+ *     binary's own `tokenUsage.last.totalTokens` (the size the NEXT turn
+ *     starts from — NOT the thread-cumulative `total`, which never steps
+ *     down after a compaction) plus `modelContextWindow` as `maxTokens`. No
+ *     enum value fits — `source` is omitted, which parses as `null`
+ *     client-side and renders un-flagged rather than labelled an estimate,
+ *     since these are the binary's own figures.
  *
- * Providers with no occupancy signal at all (claude-cli, claude-tui, codex,
- * gemini, …) omit the field entirely; clients render their unknown/dash
- * state rather than a fabricated number.
+ * Providers with no occupancy signal at all (claude-cli, claude-tui, gemini,
+ * the legacy codex `exec` driver [`CHROXY_CODEX_APPSERVER=0`], …) omit the
+ * field entirely; clients render their unknown/dash state rather than a
+ * fabricated number.
  */
 export declare const ServerContextOccupancySnapshotSchema: z.ZodObject<{
     totalTokens: z.ZodNumber;
@@ -281,6 +289,11 @@ export declare const ServerAvailableModelsSchema: z.ZodObject<{
 export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_mode_changed">;
     mode: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerThinkingLevelChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"thinking_level_changed">;
+    level: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ServerPermissionRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_request">;
