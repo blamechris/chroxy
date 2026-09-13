@@ -1616,6 +1616,16 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       // client runs (#7809), so the exact value is assertable here — and a
       // handler that stops writing the field goes red instead of quietly
       // dropping out of both sides of the parity compare.
+      //
+      // SCOPE: this literal is only valid under `contract.test.ts`, the one
+      // harness that pins the clock. DISPATCH_FIXTURES is exported from the
+      // package index as data "consumed by BOTH clients' test suites", so a
+      // future app-jest / dashboard-vitest harness driving these rows through a
+      // real `handleMessage` — the shape `contract-switch.test.ts` already has
+      // for SWITCH_FIXTURES — must pin `Date.now()` to CONTRACT_FIXED_NOW too,
+      // or teach its field matcher the #7618 `isTimestamp` branch. It fails
+      // loudly with a value mismatch rather than silently, so this is a trip
+      // hazard to read, not a hole.
       flat: { shutdownReason: 'restart', restartEtaMs: 30000, restartingSince: CONTRACT_FIXED_NOW },
     },
   },
