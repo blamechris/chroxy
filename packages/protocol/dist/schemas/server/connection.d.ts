@@ -105,10 +105,10 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         description: z.ZodOptional<z.ZodString>;
         supported: z.ZodOptional<z.ZodBoolean>;
         enforcement: z.ZodOptional<z.ZodEnum<{
-            "native-sandbox": "native-sandbox";
             unknown: "unknown";
-            chroxy: "chroxy";
             unsupported: "unsupported";
+            "native-sandbox": "native-sandbox";
+            chroxy: "chroxy";
         }>>;
     }, z.core.$strip>>>;
 }, z.core.$loose>;
