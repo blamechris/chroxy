@@ -561,12 +561,16 @@ export function SettingsBar({
                 <View style={styles.chipRow}>
                   {availablePermissionModes.map((m) => {
                     const isActive = permissionMode === m.id;
+                    const unsupported = m.supported === false;
                     return (
                       <TouchableOpacity
                         key={m.id}
-                        style={[styles.chip, isActive && styles.chipActive]}
+                        testID={`permission-mode-${m.id}`}
+                        style={[styles.chip, isActive && styles.chipActive, unsupported && styles.chipDisabled]}
                         onPress={() => setPermissionMode(m.id)}
                         activeOpacity={0.7}
+                        disabled={unsupported}
+                        accessibilityState={{ selected: isActive, disabled: unsupported }}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
                           {m.label}
@@ -587,7 +591,7 @@ export function SettingsBar({
                 let hint = selected?.description;
                 if (!hint) {
                   if (permissionMode === 'auto') {
-                    hint = 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.';
+                    hint = 'Ordinary tool calls auto-approve without prompting. Protected paths and secret reads still require a Chroxy prompt.';
                   } else if (permissionMode === 'acceptEdits') {
                     hint = 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.';
                   } else if (permissionMode === 'plan') {
@@ -1080,6 +1084,9 @@ const styles = StyleSheet.create({
   chipActive: {
     backgroundColor: COLORS.accentBlueSubtle,
     borderColor: COLORS.accentBlueBorderStrong,
+  },
+  chipDisabled: {
+    opacity: 0.45,
   },
   chipText: {
     color: COLORS.textDim,

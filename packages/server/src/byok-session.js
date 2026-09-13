@@ -173,6 +173,8 @@ export class ClaudeByokSession extends BaseSession {
       // PermissionManager (same machinery as claude-sdk).
       permissions: true,
       inProcessPermissions: true,
+      permissionFloor: true,
+      autoPermissionMode: true,
       modelSwitch: true,
       permissionModeSwitch: true,
       planMode: false,

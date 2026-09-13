@@ -263,7 +263,13 @@ export interface PermissionMode {
    * older servers that pre-date the description plumbing still parse cleanly.
    */
   description?: string
+  /** Whether the active provider can safely enter this mode. Missing on older servers. */
+  supported?: boolean
+  /** Which layer enforces the mode's stated safety properties. */
+  enforcement?: 'chroxy' | 'native-sandbox' | 'unsupported' | 'unknown'
 }
+
+const PERMISSION_MODE_ENFORCEMENTS = new Set(['chroxy', 'native-sandbox', 'unsupported', 'unknown'])
 
 /** Validate and extract permission modes from an `available_permission_modes` message. */
 export function handleAvailablePermissionModes(
@@ -272,7 +278,7 @@ export function handleAvailablePermissionModes(
   if (!Array.isArray(msg.modes)) return null
   return (msg.modes as unknown[])
     .filter(
-      (m): m is { id: string; label: string; description?: unknown } =>
+      (m): m is { id: string; label: string; description?: unknown; supported?: unknown; enforcement?: unknown } =>
         typeof m === 'object' &&
         m !== null &&
         typeof (m as { id: unknown }).id === 'string' &&
@@ -284,6 +290,10 @@ export function handleAvailablePermissionModes(
       // strings (number, object, etc.) get dropped at the type boundary
       // rather than poisoning the typed shape downstream consumers see.
       if (typeof m.description === 'string') out.description = m.description
+      if (typeof m.supported === 'boolean') out.supported = m.supported
+      if (typeof m.enforcement === 'string' && PERMISSION_MODE_ENFORCEMENTS.has(m.enforcement)) {
+        out.enforcement = m.enforcement as PermissionMode['enforcement']
+      }
       return out
     })
 }

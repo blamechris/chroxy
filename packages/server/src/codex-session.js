@@ -547,6 +547,9 @@ export class CodexSession extends JsonlSubprocessSession {
     return {
       permissions: false,
       inProcessPermissions: false,
+      permissionFloor: false,
+      autoPermissionMode: false,
+      nativeSandbox: true,
       modelSwitch: true,
       permissionModeSwitch: false,
       planMode: false,

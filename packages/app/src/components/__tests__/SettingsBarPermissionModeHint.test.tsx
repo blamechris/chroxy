@@ -56,6 +56,27 @@ function makeProps(overrides: Partial<{
 }
 
 describe('SettingsBar permission-mode hint (#4213)', () => {
+  it('disables a permission-mode chip reported as unsupported', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps({
+            permissionMode: 'approve',
+            availablePermissionModes: [
+              { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+              { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+            ],
+          })}
+        />,
+      );
+    });
+    const unsupported = tree!.root.findByProps({ testID: 'permission-mode-auto' });
+    expect(unsupported.props.disabled).toBe(true);
+    expect(unsupported.props.accessibilityState).toEqual({ selected: false, disabled: true });
+    expect(collectVisibleText(unsupported)).toContain('Auto (unavailable)');
+  });
+
   it('renders the server-supplied description for the selected mode', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {

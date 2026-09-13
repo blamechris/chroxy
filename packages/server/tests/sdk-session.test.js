@@ -834,6 +834,22 @@ describe('SdkSession', () => {
       const result = await promise
       assert.equal(result.behavior, 'allow')
     })
+
+    it('switching to auto keeps a protected-path prompt pending for the user', async () => {
+      const requests = []
+      session.on('permission_request', request => requests.push(request))
+      const pmgr = session._permissions
+      session._isBusy = true
+      const promise = pmgr.handlePermission('Write', { file_path: '.env', content: 'TOKEN=x' }, null, 'approve')
+
+      session.setPermissionMode('auto')
+
+      assert.equal(session.permissionMode, 'auto')
+      assert.equal(pmgr._pendingPermissions.size, 1, 'protected prompt must survive the mode switch')
+      assert.equal(session.respondToPermission(requests[0].requestId, 'deny'), true)
+      const result = await promise
+      assert.equal(result.behavior, 'deny')
+    })
   })
 
   // -- _sdkPermissionMode --
@@ -857,6 +873,97 @@ describe('SdkSession', () => {
     it('maps acceptEdits to default (uses canUseTool callback)', () => {
       session.permissionMode = 'acceptEdits'
       assert.equal(session._sdkPermissionMode(), 'default')
+    })
+  })
+
+  describe('Auto protected-path hook bridge (#7825)', () => {
+    async function captureAutoHook() {
+      const s = createSession({ permissionMode: 'auto' })
+      s._processReady = true
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'auto-floor', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+      await s.sendMessage('exercise the Auto floor')
+      assert.equal(captured[0]?.options?.permissionMode, 'bypassPermissions')
+      assert.equal(captured[0]?.options?.canUseTool, undefined, 'bypass mode must use PreToolUse rather than canUseTool')
+      const matcher = captured[0]?.options?.hooks?.PreToolUse?.[0]
+      assert.ok(matcher, 'Auto must install an SDK PreToolUse hook before the turn starts')
+      assert.equal(typeof matcher.hooks?.[0], 'function')
+      return { s, hook: matcher.hooks[0] }
+    }
+
+    it('keeps benign in-workspace reads and writes prompt-free', async () => {
+      const { s, hook } = await captureAutoHook()
+      const requests = []
+      s.on('permission_request', (request) => requests.push(request))
+
+      for (const [tool_name, tool_input] of [
+        ['Read', { file_path: 'src/index.js' }],
+        ['Write', { file_path: 'src/generated.js', content: 'ok' }],
+      ]) {
+        const out = await hook({ hook_event_name: 'PreToolUse', tool_name, tool_input }, 'tool-1', { signal: new AbortController().signal })
+        assert.equal(out.hookSpecificOutput.permissionDecision, 'allow')
+      }
+
+      assert.equal(requests.length, 0, 'benign Auto operations must remain prompt-free')
+      s.destroy()
+    })
+
+    for (const [label, tool_name, tool_input] of [
+      ['secret read', 'Read', { file_path: '.env' }],
+      ['protected write', 'Write', { file_path: '.git/config', content: '[core]' }],
+    ]) {
+      it(`${label} reaches a real allow decision`, async () => {
+        const { s, hook } = await captureAutoHook()
+        const requests = []
+        s.on('permission_request', (request) => requests.push(request))
+
+        const pending = hook({ hook_event_name: 'PreToolUse', tool_name, tool_input }, 'tool-protected', { signal: new AbortController().signal })
+        assert.equal(requests.length, 1, 'protected Auto target must reach PermissionManager before execution')
+        assert.equal(s.respondToPermission(requests[0].requestId, 'allow'), true)
+
+        const out = await pending
+        assert.equal(out.hookSpecificOutput.permissionDecision, 'allow', 'the floor prompts; it does not hard-deny')
+        s.destroy()
+      })
+    }
+
+    it('a user deny blocks the protected operation', async () => {
+      const { s, hook } = await captureAutoHook()
+      const requests = []
+      s.on('permission_request', (request) => requests.push(request))
+
+      const pending = hook(
+        { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: '.env.local' } },
+        'tool-denied',
+        { signal: new AbortController().signal },
+      )
+      assert.equal(s.respondToPermission(requests[0].requestId, 'deny', undefined, 'Keep secrets private'), true)
+
+      const out = await pending
+      assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+      assert.match(out.hookSpecificOutput.permissionDecisionReason, /Keep secrets private/)
+      s.destroy()
+    })
+
+    it('non-Auto turns keep using canUseTool without installing the Auto hook', async () => {
+      const s = createSession({ permissionMode: 'approve' })
+      s._processReady = true
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'approve-floor', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+      await s.sendMessage('normal permissions')
+      assert.equal(typeof captured[0].options.canUseTool, 'function')
+      assert.equal(captured[0].options.hooks, undefined)
+      s.destroy()
     })
   })
 

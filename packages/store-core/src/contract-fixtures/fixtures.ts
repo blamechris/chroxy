@@ -280,14 +280,14 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       type: 'available_permission_modes',
       modes: [
         { id: 'default', label: 'Default' },
-        { id: 'plan', label: 'Plan', description: 'Plan mode' },
+        { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
       ],
     },
     expect: {
       flat: {
         availablePermissionModes: [
           { id: 'default', label: 'Default' },
-          { id: 'plan', label: 'Plan', description: 'Plan mode' },
+          { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
         ],
       },
     },

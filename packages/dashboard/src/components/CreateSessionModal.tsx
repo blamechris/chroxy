@@ -362,6 +362,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // submit gate + button disabled state.
   const selectedProviderInfo = availableProviders.find(p => p.name === provider)
   const selectedProviderUnready = selectedProviderInfo?.auth?.ready === false
+  const selectedProviderAutoUnsupported = selectedProviderInfo?.capabilities?.autoPermissionMode === false
+
+  // A mode selected for the previous provider must not survive a provider
+  // switch when the new adapter cannot enforce it.
+  useEffect(() => {
+    if (permissionMode === 'auto' && selectedProviderAutoUnsupported) setPermissionMode('approve')
+  }, [permissionMode, selectedProviderAutoUnsupported])
 
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
@@ -374,6 +381,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // visually disabled, but the click path checks here for defence in
     // depth (e.g. keyboard activation racing a store update).
     if (selectedProviderUnready) return
+    if (permissionMode === 'auto' && selectedProviderAutoUnsupported) return
     const model = resolveCreateSessionModel(provider, defaultModel, modelsByProvider)
     // #4208/#4244: gate on the TUI provider at submit time as well as in the
     // UI. The radio group is hidden for non-TUI providers, but a user who
@@ -394,7 +402,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready])
+  }, [onCreate, provider, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -885,11 +893,22 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               {(availablePermissionModes.length > 0 ? availablePermissionModes : [
                 { id: 'approve', label: 'Approve' },
                 { id: 'acceptEdits', label: 'Accept Edits' },
-                { id: 'auto', label: 'Auto (skip all prompts)' },
+                { id: 'auto', label: 'Auto' },
                 { id: 'plan', label: 'Plan' },
-              ]).map((m) => (
-                <option key={m.id} value={m.id}>{m.label}</option>
-              ))}
+              ]).map((m) => {
+                // The auth roster describes the session active at handshake,
+                // which can differ from the provider selected in this form.
+                // Creation therefore keys support off the selected provider's
+                // own capability instead of inheriting stale mode metadata.
+                const unsupported = m.id === 'auto' && selectedProviderAutoUnsupported
+                return (
+                  <option key={m.id} value={m.id} disabled={unsupported}>
+                    {unsupported
+                      ? (m.label.includes('unavailable') ? m.label : `${m.label} (unavailable)`)
+                      : (m.id === 'auto' ? 'Auto' : m.label)}
+                  </option>
+                )
+              })}
             </select>
             <span id="permission-mode-hint" className="form-hint">
               {/* #4019: hint sourced from availablePermissionModes[].description
@@ -899,9 +918,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   selection). */}
               {(() => {
                 const selected = availablePermissionModes.find((m) => m.id === permissionMode)
-                if (selected?.description) return selected.description
+                const staleUnsupportedAuto = permissionMode === 'auto' && selected?.supported === false && !selectedProviderAutoUnsupported
+                if (selected?.description && !staleUnsupportedAuto) return selected.description
                 if (permissionMode === 'auto') {
-                  return 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.'
+                  return 'Ordinary tool calls auto-approve without prompting. Protected paths and secret reads still require a Chroxy prompt.'
                 }
                 if (permissionMode === 'acceptEdits') {
                   return 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'

@@ -183,6 +183,29 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(result.success, 'Should validate auth_ok message')
   })
 
+  it('validates permission-mode support and enforcement metadata in auth_ok (#7825)', async () => {
+    const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
+    const base = {
+      type: 'auth_ok', clientId: 'client-1', serverMode: 'cli', serverVersion: '0.11.0',
+      latestVersion: null, serverCommit: 'abc123', cwd: '/home/user', connectedClients: [],
+      encryption: 'disabled', protocolVersion: 1, minProtocolVersion: 1, maxProtocolVersion: 1,
+    }
+    const result = ServerAuthOkSchema.safeParse({
+      ...base,
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+        { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+      ],
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.availablePermissionModes[1].supported, false)
+    assert.equal(result.data.availablePermissionModes[1].enforcement, 'unsupported')
+    assert.equal(ServerAuthOkSchema.safeParse({
+      ...base,
+      availablePermissionModes: [{ id: 'auto', label: 'Auto', enforcement: 'invented' }],
+    }).success, false)
+  })
+
   // #3760/#3765: resultTimeoutMs is the server's effective inactivity timeout,
   // surfaced so clients can render the ActivityIndicator warning at the right
   // moment. Optional for back-compat with servers from before #3763.

@@ -15,24 +15,25 @@ describe('buildAutoModeConfirmMessage (#5609)', () => {
     expect(msg).toMatch(/INTERRUPT/)
     expect(msg).toMatch(/restart the session/)
     // still explains the bypass consequence
-    expect(msg).toMatch(/without asking for permission/)
+    expect(msg).toMatch(/without asking/)
+    expect(msg).toMatch(/Protected paths and secret reads still require a Chroxy prompt/)
   })
 
   it('uses the plain copy when the provider interrupts but there is no work at risk', () => {
     const msg = buildAutoModeConfirmMessage({ interruptsTurn: true, isBusy: false })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('uses the plain copy for non-interrupting providers (SDK/TUI) even when busy', () => {
     const msg = buildAutoModeConfirmMessage({ interruptsTurn: false, isBusy: true })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('treats an undefined capability flag as non-interrupting', () => {
     const msg = buildAutoModeConfirmMessage({ interruptsTurn: undefined, isBusy: true })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
   })
 })

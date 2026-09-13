@@ -44,16 +44,19 @@ export const CODEX_SANDBOX_MODE_META = [
     {
         id: 'read-only',
         label: 'Read-only',
-        description: 'Codex can read the workspace but every write is blocked.',
+        description: 'Codex native sandbox: reads are allowed and writes are blocked. This is separate from Chroxy permission prompts.',
+        enforcement: 'native-sandbox',
     },
     {
         id: 'workspace-write',
         label: 'Workspace write',
-        description: 'Default. Codex can read and write within the workspace.',
+        description: 'Codex native sandbox: reads and workspace writes are allowed. This is separate from Chroxy permission prompts.',
+        enforcement: 'native-sandbox',
     },
     {
         id: 'danger-full-access',
         label: 'Full access (danger)',
-        description: 'No sandbox — Codex can touch anything the daemon can. Use only in trusted, isolated contexts.',
+        description: 'Codex native sandbox is disabled. This is separate from Chroxy permission prompts; use only in trusted, isolated contexts.',
+        enforcement: 'native-sandbox',
     },
 ];

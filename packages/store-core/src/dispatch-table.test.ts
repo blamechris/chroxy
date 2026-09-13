@@ -278,13 +278,24 @@ describe('shared dispatch table', () => {
         type: 'available_permission_modes',
         modes: [
           { id: 'default', label: 'Default' },
-          { id: 'plan', label: 'Plan', description: 'Plan mode' },
+          { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
+          { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
         ],
       })
       expect(env.flat.availablePermissionModes).toEqual([
         { id: 'default', label: 'Default' },
-        { id: 'plan', label: 'Plan', description: 'Plan mode' },
+        { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
+        { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
       ])
+    })
+
+    it('drops malformed support metadata without dropping the mode', () => {
+      const env = makeAdapter()
+      dispatch(env, {
+        type: 'available_permission_modes',
+        modes: [{ id: 'future', label: 'Future', supported: 'yes', enforcement: 'invented' }],
+      })
+      expect(env.flat.availablePermissionModes).toEqual([{ id: 'future', label: 'Future' }])
     })
 
     it('leaves state untouched when modes is not an array', () => {

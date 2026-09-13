@@ -102,6 +102,41 @@ function selectPermissionMode(container: HTMLElement, modeId: string) {
 }
 
 describe('CreateSessionModal permission-mode hint (#4214)', () => {
+  it('disables Auto when the selected provider adapter cannot enforce the floor', () => {
+    mockStoreState.defaultProvider = 'codex'
+    mockStoreState.availableProviders = [{
+      name: 'codex',
+      label: 'Codex',
+      capabilities: { autoPermissionMode: false },
+    }]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+      { id: 'auto', label: 'Auto', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(true)
+    expect(auto?.textContent).toMatch(/unavailable/i)
+  })
+
+  it('keeps SDK Auto available when the active-session roster came from unsupported Codex Auto', () => {
+    mockStoreState.defaultProvider = 'claude-sdk'
+    mockStoreState.availableProviders = [{
+      name: 'claude-sdk',
+      label: 'Claude SDK',
+      capabilities: { autoPermissionMode: true },
+    }]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+      { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+    ]
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(false)
+  })
+
   it('renders the server-provided description when the selected mode has one', () => {
     // Custom description that does NOT overlap with any hardcoded
     // fallback substring — proves the description path produced the
@@ -132,7 +167,7 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     const { container } = renderModal()
 
     selectPermissionMode(container, 'auto')
-    expect(getHint(container)).toMatch(/dangerously-skip-permissions/)
+    expect(getHint(container)).toMatch(/Protected paths and secret reads still require a Chroxy prompt/)
 
     selectPermissionMode(container, 'acceptEdits')
     expect(getHint(container)).toMatch(/Read\/Write\/Edit\/Grep\/Glob\/NotebookEdit/)

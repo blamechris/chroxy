@@ -103,6 +103,13 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         id: z.ZodString;
         label: z.ZodString;
         description: z.ZodOptional<z.ZodString>;
+        supported: z.ZodOptional<z.ZodBoolean>;
+        enforcement: z.ZodOptional<z.ZodEnum<{
+            "native-sandbox": "native-sandbox";
+            unknown: "unknown";
+            chroxy: "chroxy";
+            unsupported: "unsupported";
+        }>>;
     }, z.core.$strip>>>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{

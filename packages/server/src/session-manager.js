@@ -38,6 +38,7 @@ import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
 import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { assertProviderPermissionModeSupported, UnsupportedPermissionModeError } from './permission-mode-support.js'
 import { toWireCount } from './utils/wire-counters.js'
 import { configPath } from './config-dir.js'
 import {
@@ -196,6 +197,7 @@ export { formatIdleDuration }
 // PROVIDER_BINARY_PROVENANCE / PROVIDER_CREDENTIAL_MISSING without taking a
 // separate dependency on utils/preflight.js.
 export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError }
+export { UnsupportedPermissionModeError }
 
 /**
  * @typedef {Object} SessionManagerConfig
@@ -1127,6 +1129,10 @@ export class SessionManager extends EventEmitter {
     // doesn't leave an orphan worktree behind. (#2962)
     const resolvedProviderType = provider || this._providerType
     const PreflightProviderClass = getProvider(resolvedProviderType)
+    // #7825 — reject an adapter/mode combination before preflight, worktree
+    // creation, provider construction, or turn start. This chokepoint is shared
+    // by explicit create requests, configured defaults, boot restore, and retry.
+    assertProviderPermissionModeSupported(PreflightProviderClass, resolvedPermissionMode, PreflightProviderClass.displayLabel || resolvedProviderType)
     // #5985 (epic #5982): fail-closed gate for the embedded user-shell terminal.
     // Enforced here (before any spawn) so it covers EVERY create path — WS
     // create_session, restoreState, and internal callers — not just the WS

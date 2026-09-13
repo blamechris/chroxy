@@ -58,7 +58,7 @@ The floor is checked **before** any short-circuit, on **both** pipelines:
 
 | Lenient path | Without the floor | With the floor |
 |---|---|---|
-| `auto` (SDK `bypassPermissions`) | allow everything | protected/secret target → prompt |
+| `auto` (SDK `bypassPermissions` + `PreToolUse`) | allow everything | protected/secret target → prompt |
 | `acceptEdits` | auto-approve file ops | protected/secret target → prompt |
 | a broad `allow` rule (session or persisted project rule) | auto-approve the tool | protected/secret target → prompt |
 | a `deny` rule | deny | deny (unchanged — the floor never widens access) |
@@ -68,9 +68,10 @@ The floor is checked **before** any short-circuit, on **both** pipelines:
 Chroxy has two permission pipelines, and the floor must be identical on both.
 
 ```
-IN-PROCESS (SDK / BYOK / codex app-server)
-  canUseTool → permission-manager.js handlePermission
-                 └─ isFlooredTarget(tool, input, cwd) ──┐
+IN-PROCESS (SDK / BYOK / supported provider adapters)
+  canUseTool ───────────────────────────────────────────┐
+  SDK Auto PreToolUse ──→ PermissionManager             │
+                         └─ isFlooredTarget(...) ───────┤
                                                         │
 HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   Claude Code PreToolUse → hooks/permission-hook.sh      │  permission-floor.js
@@ -92,6 +93,24 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   `.git`/`.claude` with no prompt. The hook now asks the daemon instead of
   re-deriving path rules in bash (a shell copy would be a second source of truth and
   would drift — the #6986/#7001 lesson).
+- **SDK Auto uses the SDK's native `PreToolUse` callback.** `bypassPermissions`
+  suppresses `canUseTool`, but the callback still runs before every tool. It sends
+  the tool name and input through the same `PermissionManager`: benign operations
+  return immediately without a prompt, while a protected target waits for the real
+  user decision. The callback contains no path predicate of its own.
+- **Codex app-server Auto is unavailable.** Its Auto mapping is
+  `approvalPolicy: 'never'`, and that protocol exposes Chroxy's approval callbacks
+  only through approval requests which `never` does not emit. Chroxy therefore
+  rejects this provider/mode pair before session construction, including configured
+  defaults and restored sessions, and refuses an in-session switch. Approve,
+  Accept Edits, and Plan remain available. Codex `read-only`, `workspace-write`,
+  and `danger-full-access` are native sandbox settings reported separately; they do
+  not prove that Chroxy's prompt floor ran.
+
+Permission-mode metadata reports both `supported` and `enforcement`. Current
+adapters use `chroxy`, `unsupported`, or `unknown`; Codex sandbox copy identifies
+native sandbox enforcement separately. Missing provider declarations are reported
+as `unknown` and remain usable for backward-compatible third-party providers.
 
 ### `POST /permission-floor`
 

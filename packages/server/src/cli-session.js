@@ -248,6 +248,8 @@ export class CliSession extends BaseSession {
     return {
       permissions: true,
       inProcessPermissions: false,
+      permissionFloor: true,
+      autoPermissionMode: true,
       modelSwitch: true,
       permissionModeSwitch: true,
       // #5609: switching to 'auto' mid-turn is the #3729 panic-button —

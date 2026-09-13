@@ -11,6 +11,7 @@ import { resolve, relative, sep, posix as posixPath, win32 as win32Path } from '
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
+import { getProviderPermissionModeSupport } from './permission-mode-support.js'
 
 const log = createLogger('handler-utils')
 
@@ -18,9 +19,9 @@ const log = createLogger('handler-utils')
 // `description` is a short, plain-English sentence the dashboard
 // surfaces as a tooltip / inline hint (#4013). Keep terse — the picker
 // space is limited and screen readers re-narrate the whole string.
-// The default (Claude) auto-mode description deliberately names
-// `--dangerously-skip-permissions` so users searching for that Claude CLI flag
-// find the chroxy equivalent.
+// Auto copy names the Chroxy prompt floor explicitly: the provider may run in
+// its native bypass mode underneath, but protected paths and secret reads are
+// still intercepted before execution.
 //
 // #6638: the mode IDs are provider-independent, but the descriptions are NOT —
 // the default copy is Claude-oriented (Read/Write/Edit tool names, the
@@ -28,12 +29,12 @@ const log = createLogger('handler-utils')
 // tools (apply_patch / shell / connectors) and no plan enforcement, so
 // `getPermissionModes('codex')` returns codex-tuned copy. Callers pass the active
 // session's provider; a switch re-sends `available_permission_modes` (session-handlers).
-const MODE_LABELS = { approve: 'Approve', acceptEdits: 'Accept Edits', auto: 'Auto (skip all prompts)', plan: 'Plan' }
+const MODE_LABELS = { approve: 'Approve', acceptEdits: 'Accept Edits', auto: 'Auto', plan: 'Plan' }
 const MODE_DESCRIPTIONS = {
   default: {
     approve: 'Default. Every tool call gates on your approval in the dashboard or mobile app.',
     acceptEdits: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.',
-    auto: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.',
+    auto: 'Auto-approve ordinary tool calls without prompting. Protected paths and secret reads still require a Chroxy prompt.',
     plan: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.',
   },
   codex: {
@@ -47,7 +48,10 @@ const MODE_IDS = ['approve', 'acceptEdits', 'auto', 'plan']
 const buildModes = (desc) => MODE_IDS.map((id) => ({ id, label: MODE_LABELS[id], description: desc[id] }))
 
 // The default (Claude) mode list. Kept as a named export for back-compat.
-export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default)
+export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode) => ({
+  ...mode,
+  ...getProviderPermissionModeSupport(undefined, mode.id),
+}))
 
 /**
  * The permission-mode list with descriptions tuned to the given provider (#6638).
@@ -56,8 +60,25 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default)
  * provider-independent.
  * @param {string|null|undefined} provider
  */
-export function getPermissionModes(provider) {
-  return provider === 'codex' ? buildModes(MODE_DESCRIPTIONS.codex) : PERMISSION_MODES
+export function getPermissionModes(provider, ProviderClass) {
+  const modes = provider === 'codex' ? buildModes(MODE_DESCRIPTIONS.codex) : buildModes(MODE_DESCRIPTIONS.default)
+  return modes.map((mode) => {
+    const support = getProviderPermissionModeSupport(ProviderClass, mode.id)
+    if (!support.supported) {
+      return {
+        ...mode,
+        label: `${mode.label} (unavailable)`,
+        description: 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.',
+        ...support,
+      }
+    }
+    const enforcementNote = !ProviderClass
+      ? ''
+      : support.enforcement === 'chroxy'
+        ? ' Protected paths and secret reads always require a Chroxy prompt.'
+        : ' Protected-path enforcement is not reported by this provider.'
+    return { ...mode, description: `${mode.description}${enforcementNote}`, ...support }
+  })
 }
 
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))

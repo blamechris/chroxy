@@ -22,13 +22,16 @@ describe('@chroxy/protocol codex constants (#6689)', () => {
     assert.equal(CODEX_PROVIDER, 'codex')
   })
 
-  it('has UI metadata (label + description) for every mode', async () => {
+  it('has native-sandbox UI metadata for every mode', async () => {
     const { CODEX_SANDBOX_MODES, CODEX_SANDBOX_MODE_META } = await import('../src/codex.ts')
     const metaIds = CODEX_SANDBOX_MODE_META.map((m) => m.id)
     assert.deepEqual(metaIds, [...CODEX_SANDBOX_MODES], 'meta covers exactly the modes, in order')
     for (const m of CODEX_SANDBOX_MODE_META) {
       assert.ok(typeof m.label === 'string' && m.label.length > 0, `${m.id} has a non-empty label`)
       assert.ok(typeof m.description === 'string' && m.description.length > 0, `${m.id} has a non-empty description`)
+      assert.match(m.description, /Codex native sandbox/i)
+      assert.match(m.description, /separate from Chroxy permission prompts/i)
+      assert.equal(m.enforcement, 'native-sandbox', `${m.id} identifies the enforcing layer`)
     }
   })
 

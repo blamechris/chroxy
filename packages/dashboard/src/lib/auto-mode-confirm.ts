@@ -6,7 +6,7 @@
  * where it respawns the `claude -p` subprocess and drops the in-flight turn
  * (the #3729 "panic-button"). SDK and TUI apply the same switch in-place and
  * leave the running turn alone. Before this helper the dashboard showed one
- * generic confirm ("Tools will run without asking for permission.") that never
+ * generic confirm about skipped prompts that never
  * mentioned the kill — a silent footgun where flipping to Auto to stop being
  * prompted would instead destroy the agent's running response, and only on
  * CLI. This centralizes the wording so the copy reflects the ACTUAL
@@ -39,14 +39,16 @@ export interface AutoModeConfirmInput {
   isBusy: boolean
 }
 
-const BASE_COPY = 'Switch to Auto mode? Tools will run without asking for permission.'
+const FLOOR_COPY = 'Ordinary tools will run without asking. Protected paths and secret reads still require a Chroxy prompt.'
+
+const BASE_COPY = `Switch to Auto mode? ${FLOOR_COPY}`
 
 const DESTRUCTIVE_COPY =
   'Switch to Auto mode?\n\n' +
   'This session is mid-response. On this provider, switching to Auto will ' +
   'INTERRUPT the running turn and restart the session — the in-flight ' +
   'response will be dropped.\n\n' +
-  'Tools will then run without asking for permission. Continue?'
+  `${FLOOR_COPY} Continue?`
 
 /**
  * Returns the confirm-dialog message for the Auto switch. When the active
