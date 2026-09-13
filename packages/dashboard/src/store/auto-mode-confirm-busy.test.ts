@@ -128,7 +128,7 @@ describe('#7335 — Auto-mode confirm copy vs the session busy predicate', () =>
       interruptsTurnOnAutoSwitch: true,
     })
     expect(copy).not.toMatch(/INTERRUPT/)
-    expect(copy).toMatch(/Tools will run without asking for permission/)
+    expect(copy).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('POSITIVE CONTROL: a CLOCK-expired prompt is not work at risk — plain copy', async () => {
@@ -158,7 +158,7 @@ describe('#7335 — Auto-mode confirm copy vs the session busy predicate', () =>
       interruptsTurnOnAutoSwitch: true,
     })
     expect(copy).not.toMatch(/INTERRUPT/)
-    expect(copy).toMatch(/Tools will run without asking for permission/)
+    expect(copy).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('POSITIVE CONTROL: an ANSWERED prompt is not work at risk — plain copy', async () => {
@@ -182,6 +182,6 @@ describe('#7335 — Auto-mode confirm copy vs the session busy predicate', () =>
       interruptsTurnOnAutoSwitch: false,
     })
     expect(copy).not.toMatch(/INTERRUPT/)
-    expect(copy).toMatch(/Tools will run without asking for permission/)
+    expect(copy).toMatch(/Ordinary tools will run without asking/)
   })
 })
