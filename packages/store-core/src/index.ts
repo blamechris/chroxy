@@ -59,6 +59,19 @@ export { isFreeformAnswer } from './freeform-answer'
 export { buildProviderLimitationNote } from './provider-capabilities'
 export type { DegradableCapabilities } from './provider-capabilities'
 export type { OtherFreeformAnswer } from './freeform-answer'
+export {
+  beginInputDelivery,
+  applyInputAcknowledgement,
+  cancelInputDelivery,
+  MAX_INPUT_DELIVERY_RECORDS,
+} from './input-delivery'
+export type {
+  InputDeliveryMap,
+  InputDeliveryRecord,
+  InputDeliveryStatus,
+} from './input-delivery'
+export { buildInputMessage } from '@chroxy/protocol'
+export type { BuildInputMessageOptions } from '@chroxy/protocol'
 
 // #6774 — combined "approve plan + auto-accept edits" action. Shared so both
 // clients dispatch the mode switch and the approval in the same (mode-first)

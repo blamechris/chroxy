@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
@@ -605,6 +605,18 @@ export class CliSession extends BaseSession {
 
     this._child = child
 
+    // A returned ChildProcess is not ready proof: missing or non-executable
+    // binaries report ENOENT/EACCES asynchronously. Only expose readiness and
+    // drain startup input after Node confirms the child `spawn` event. Ignore
+    // a late event from a child that was replaced during a restart.
+    child.once('spawn', () => {
+      if (this._destroying || this._child !== child) return
+      this._processReady = true
+      log.info('Process started, ready for messages')
+      this.emit('ready', { sessionId: null, model: this.model, tools: [] })
+      this._drainPendingQueue()
+    })
+
     // Do NOT close stdin — we write messages to it
 
     // Read stdout line by line — each line is a JSON object
@@ -650,6 +662,7 @@ export class CliSession extends BaseSession {
     })
 
     child.on('error', (err) => {
+      if (this._child !== child) return
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
@@ -662,15 +675,10 @@ export class CliSession extends BaseSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => this._handleChildClose(code))
-
-    // stdin is writable immediately — process is ready for NDJSON messages.
-    // system.init arrives with the first response, not at startup.
-    this._processReady = true
-    log.info('Process started, ready for messages')
-    this.emit('ready', { sessionId: null, model: this.model, tools: [] })
-
-    this._drainPendingQueue()
+    child.on('close', (code) => {
+      if (this._child !== child) return
+      this._handleChildClose(code)
+    })
   }
 
   /**
@@ -750,19 +758,30 @@ export class CliSession extends BaseSession {
       // processing a message" — flushed FIFO on the turn-complete `result` (via
       // _clearMessageState's drain below). Matches the SDK's behaviour. The
       // overflow cap + the message_queued mirror live in enqueueOutgoingMessage.
-      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions: options })
+      const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions: options })
+      reportInputAdmission(options, queued
+        ? { status: 'queued', delivery: 'queued' }
+        : {
+            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+            reason: 'queue_full', message: 'The provider input queue is full; retry after queued work advances.',
+          })
       return
     }
 
     if (!this._processReady) {
       if (this._pendingQueue.length >= 3) {
         this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
+        reportInputAdmission(options, {
+          status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+          reason: 'queue_full', message: 'The provider startup queue is full; retry after the session becomes ready.',
+        })
         return
       }
       // #4828: session-scoped when init has fired (queuing typically happens
       // pre-init or during respawn — both can race with the binding).
       ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
+      reportInputAdmission(options, { status: 'queued', delivery: 'queued' })
       // #7438: a user Stop leaves no child and no respawn, so without this the
       // message just queued would sit there forever. Restart lazily, now that
       // the user has asked for more work; the warmup drain delivers it.
@@ -837,8 +856,14 @@ export class CliSession extends BaseSession {
       ;(this._log || log).error(`stdin.write failed (sendMessage): ${err.message}`)
       this._clearMessageState()
       this.emit('error', { message: `Failed to send message: ${err.message}` })
+      reportInputAdmission(options, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'write_failed', message: 'The provider input channel rejected the write.',
+      })
       return
     }
+
+    reportInputAdmission(options, { status: 'accepted', delivery: 'dispatch_started' })
 
     // Skills text is committed to the wire — safe to flip the flag now (#3225).
     // If the write threw above we returned early, leaving the flag false so

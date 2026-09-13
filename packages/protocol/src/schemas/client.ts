@@ -33,6 +33,53 @@ const FileRefAttachmentSchema = z.object({
 
 const AttachmentSchema = z.union([BinaryAttachmentSchema, FileRefAttachmentSchema])
 
+// #7822 — deliberately selected context, carried as source data rather than a
+// client-specific prompt encoding. Version 1 can describe future document and
+// reference delivery without implying the active provider supports them; the
+// server capability gate currently accepts text/image + one_turn only.
+const ContextProvenanceSchema = z.object({
+  source: z.enum(['device', 'project', 'clipboard', 'file', 'ocr', 'other']),
+  label: z.string().max(256).optional(),
+  path: z.string().max(4096).optional(),
+  capturedAt: z.number().int().nonnegative().finite().optional(),
+}).passthrough()
+
+const ContextItemBaseSchema = z.object({
+  id: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  provenance: ContextProvenanceSchema,
+  mediaType: z.string().min(1).max(256),
+  sizeBytes: z.number().int().nonnegative().max(5 * 1024 * 1024),
+  lifetime: z.enum(['one_turn', 'task', 'durable']),
+})
+
+export const ContextItemSchema = z.discriminatedUnion('kind', [
+  ContextItemBaseSchema.extend({
+    kind: z.literal('text'),
+    content: z.object({ type: z.literal('text'), text: z.string().max(100_000) }),
+  }),
+  ContextItemBaseSchema.extend({
+    kind: z.literal('image'),
+    content: z.object({ type: z.literal('base64'), data: z.string().max(10_000_000) }),
+  }),
+  ContextItemBaseSchema.extend({
+    kind: z.enum(['document', 'reference']),
+    content: z.object({ type: z.literal('reference'), uri: z.string().min(1).max(4096) }),
+  }),
+])
+
+export const InputContextEnvelopeSchema = z.object({
+  version: z.literal(1),
+  items: z.array(ContextItemSchema).min(1).max(5),
+}).superRefine((value, ctx) => {
+  const ids = new Set<string>()
+  for (const item of value.items) {
+    if (ids.has(item.id)) {
+      ctx.addIssue({ code: 'custom', path: ['items'], message: `duplicate context item id: ${item.id}` })
+    }
+    ids.add(item.id)
+  }
+})
+
 // #6453 — canonical WIRE attachment types, single-sourced from the schemas above
 // (was a loose `WireAttachment` in the dashboard + an inline type in the app).
 // Client-local picker types (device uri / id / size) stay client-side; this is
@@ -40,6 +87,8 @@ const AttachmentSchema = z.union([BinaryAttachmentSchema, FileRefAttachmentSchem
 export type BinaryAttachment = z.infer<typeof BinaryAttachmentSchema>
 export type FileRefAttachment = z.infer<typeof FileRefAttachmentSchema>
 export type Attachment = z.infer<typeof AttachmentSchema>
+export type ContextItem = z.infer<typeof ContextItemSchema>
+export type InputContextEnvelope = z.infer<typeof InputContextEnvelopeSchema>
 
 // -- Device info (optional in auth) --
 const DeviceInfoSchema = z.object({
@@ -144,7 +193,24 @@ export const InputSchema = z.object({
   data: z.string().max(100_000).optional(),
   attachments: z.array(AttachmentSchema).optional(),
   isVoice: z.boolean().optional(),
-}).passthrough()
+  // Legacy plain-input senders were historically allowed to omit or provide
+  // an unusable id (the server generated its history id). Keep that wire
+  // compatibility; selected context requires the strict correlated id below.
+  clientMessageId: z.unknown().optional(),
+  context: InputContextEnvelopeSchema.optional(),
+}).passthrough().superRefine((value, ctx) => {
+  if (value.context && (
+    typeof value.clientMessageId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,128}$/.test(value.clientMessageId)
+    || ['thinking', 'pending', 'queued'].includes(value.clientMessageId)
+  )) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['clientMessageId'],
+      message: 'a well-formed clientMessageId is required when context is present',
+    })
+  }
+})
 
 export const InterruptSchema = z.object({
   type: z.literal('interrupt'),

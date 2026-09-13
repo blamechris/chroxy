@@ -9,7 +9,7 @@ import { homedir, tmpdir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 // #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
@@ -2753,7 +2753,7 @@ export class ClaudeTuiSession extends BaseSession {
     return stderrIndicatesUnknownResume(candidates)
   }
 
-  async sendMessage(prompt, attachments, _options = {}) {
+  async sendMessage(prompt, attachments, sendOptions = {}) {
     // #5800: these two guards signal failure to callers via a typed result
     // ({ ok: false, reason }) IN ADDITION to the legacy emit('error', ...).
     // The emit is unchanged (existing error surfacing relies on it); the
@@ -2766,10 +2766,18 @@ export class ClaudeTuiSession extends BaseSession {
     // resolved typed object never trips.
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'busy', message: 'The provider is already processing a message.',
+      })
       return { ok: false, reason: 'busy' }
     }
     if (!this._processReady || !this._term || this._ptyExited) {
       this.emit('error', { message: 'Session not started or PTY no longer alive' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'not_runnable', message: 'The provider session is not ready to accept input.',
+      })
       return { ok: false, reason: 'not_runnable' }
     }
 
@@ -2868,6 +2876,10 @@ export class ClaudeTuiSession extends BaseSession {
       const code = this._ptyExitInfo?.exitCode
       const signal = this._ptyExitInfo?.signal
       this._finishTurnError(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`, messageId)
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'pty_exited', message: 'The provider terminal exited before the prompt was written.',
+      })
       // #5813: return the typed failure (like the up-front busy/not_runnable
       // guards) so callers that key off `result.ok === false` — e.g. the reinject
       // stop-and-wait watch-close in form-driver.js — don't have to rely on
@@ -2882,6 +2894,10 @@ export class ClaudeTuiSession extends BaseSession {
     // still process the bytes once it returns to prompt). Bail cleanly.
     if (this._activeTurn?.aborted) {
       this._finishTurnError('Turn aborted before prompt write', messageId)
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'aborted', message: 'The turn was aborted before the prompt was written.',
+      })
       return { ok: false, reason: 'aborted' } // #5813: typed failure
     }
 
@@ -2909,11 +2925,26 @@ export class ClaudeTuiSession extends BaseSession {
       // #5813: typed failure. _writePtyTextThrottled returns false for BOTH an
       // aborted turn AND a mid-write PTY exit, so report the actual cause (#5848
       // review) rather than always labelling it 'aborted'.
-      if (!completed) return { ok: false, reason: this._ptyExited ? 'pty_exited' : 'aborted' }
+      if (!completed) {
+        const reason = this._ptyExited ? 'pty_exited' : 'aborted'
+        reportInputAdmission(sendOptions, {
+          status: 'rejected', delivery: 'not_dispatched', retrySafe: true, reason,
+          message: reason === 'pty_exited'
+            ? 'The provider terminal exited before the prompt write completed.'
+            : 'The turn was aborted before the prompt write completed.',
+        })
+        return { ok: false, reason }
+      }
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'write_failed', message: 'The provider terminal rejected the prompt write.',
+      })
       return { ok: false, reason: 'write_failed' } // #5813: typed failure
     }
+
+    reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
 
     // Arm soft + hard inactivity timers (#3920). Each new hook file the
     // poll loop drains re-arms both, so a long turn that's making

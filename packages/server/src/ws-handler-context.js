@@ -92,6 +92,7 @@
  * @property {string[]} projectsDirs - Per-provider projects dirs (computed fresh each access).
  * @property {string[]} userAgentsDirs - Per-provider agents dirs (computed fresh each access).
  * @property {Map} evaluatorIterations - sessionId → stable auto-evaluator iteration counter (#3186/#3637).
+ * @property {Map} inputDedupRecords - sessionId → bounded clientMessageId acceptance records (#7822).
  *
  * @typedef {Object} WsHandlerContext
  * @property {WsHandlerTransport} transport
@@ -204,6 +205,7 @@ export const CTX_NAMESPACES = {
     'projectsDirs',
     'userAgentsDirs',
     'evaluatorIterations',
+    'inputDedupRecords',
   ],
 }
 

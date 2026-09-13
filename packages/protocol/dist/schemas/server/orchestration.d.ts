@@ -87,8 +87,8 @@ export declare const RunGateSchema: z.ZodObject<{
         approved: "approved";
         rejected: "rejected";
         skipped: "skipped";
-        revise_requested: "revise_requested";
         expired: "expired";
+        revise_requested: "revise_requested";
     }>;
     summary: z.ZodString;
     detail: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -109,11 +109,11 @@ export declare const RunNodeSchema: z.ZodObject<{
     provider: z.ZodNullable<z.ZodString>;
     model: z.ZodNullable<z.ZodString>;
     status: z.ZodEnum<{
+        pending: "pending";
         done: "done";
         failed: "failed";
         interrupted: "interrupted";
         cancelled: "cancelled";
-        pending: "pending";
         skipped: "skipped";
         escalated: "escalated";
         executing: "executing";
@@ -280,11 +280,11 @@ export declare const RunDetailSchema: z.ZodObject<{
         provider: z.ZodNullable<z.ZodString>;
         model: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
+            pending: "pending";
             done: "done";
             failed: "failed";
             interrupted: "interrupted";
             cancelled: "cancelled";
-            pending: "pending";
             skipped: "skipped";
             escalated: "escalated";
             executing: "executing";
@@ -331,8 +331,8 @@ export declare const RunDetailSchema: z.ZodObject<{
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";
-            revise_requested: "revise_requested";
             expired: "expired";
+            revise_requested: "revise_requested";
         }>;
         summary: z.ZodString;
         detail: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -530,11 +530,11 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
             provider: z.ZodNullable<z.ZodString>;
             model: z.ZodNullable<z.ZodString>;
             status: z.ZodEnum<{
+                pending: "pending";
                 done: "done";
                 failed: "failed";
                 interrupted: "interrupted";
                 cancelled: "cancelled";
-                pending: "pending";
                 skipped: "skipped";
                 escalated: "escalated";
                 executing: "executing";
@@ -581,8 +581,8 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
                 approved: "approved";
                 rejected: "rejected";
                 skipped: "skipped";
-                revise_requested: "revise_requested";
                 expired: "expired";
+                revise_requested: "revise_requested";
             }>;
             summary: z.ZodString;
             detail: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -722,11 +722,11 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
         provider: z.ZodNullable<z.ZodString>;
         model: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
+            pending: "pending";
             done: "done";
             failed: "failed";
             interrupted: "interrupted";
             cancelled: "cancelled";
-            pending: "pending";
             skipped: "skipped";
             escalated: "escalated";
             executing: "executing";
@@ -773,8 +773,8 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
             approved: "approved";
             rejected: "rejected";
             skipped: "skipped";
-            revise_requested: "revise_requested";
             expired: "expired";
+            revise_requested: "revise_requested";
         }>;
         summary: z.ZodString;
         detail: z.ZodOptional<z.ZodNullable<z.ZodString>>;

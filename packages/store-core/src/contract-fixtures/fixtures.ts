@@ -1479,6 +1479,84 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #7822: acceptance is correlated by both session and clientMessageId. The
+    // acknowledged request consumes its one-turn context, while a similarly
+    // pending request in another session remains untouched. This fixture also
+    // pins the server timestamps carried into the retained delivery record.
+    name: 'input_ack accepts only the correlated request and consumes its one-turn context',
+    type: 'input_ack',
+    init: {
+      sessions: {
+        s1: {
+          inputDeliveries: {
+            'input-1': {
+              clientMessageId: 'input-1',
+              sessionId: 's1',
+              status: 'uncertain',
+              delivery: 'unknown',
+              pendingContextItemIds: ['context-1'],
+              updatedAt: 10,
+            },
+          },
+        },
+        s2: {
+          inputDeliveries: {
+            'input-2': {
+              clientMessageId: 'input-2',
+              sessionId: 's2',
+              status: 'uncertain',
+              delivery: 'unknown',
+              pendingContextItemIds: ['context-2'],
+              updatedAt: 11,
+            },
+          },
+        },
+      },
+    },
+    message: {
+      type: 'input_ack',
+      sessionId: 's1',
+      clientMessageId: 'input-1',
+      status: 'accepted',
+      delivery: 'dispatch_started',
+      retrySafe: false,
+      acceptedAt: 20,
+      retentionExpiresAt: 620_000,
+      dedupScope: 'process',
+      context: {
+        version: 1,
+        acceptedItemIds: ['context-1'],
+        supportedKinds: ['text', 'image'],
+        supportedLifetimes: ['one_turn'],
+      },
+    },
+    expect: {
+      sessions: {
+        s1: {
+          inputDeliveries: {
+            'input-1': {
+              clientMessageId: 'input-1',
+              sessionId: 's1',
+              status: 'accepted',
+              delivery: 'dispatch_started',
+              pendingContextItemIds: [],
+              acceptedAt: 20,
+              retentionExpiresAt: 620_000,
+            },
+          },
+        },
+        s2: {
+          inputDeliveries: {
+            'input-2': {
+              status: 'uncertain',
+              pendingContextItemIds: ['context-2'],
+            },
+          },
+        },
+      },
+    },
+  },
 
   // 14. checkpoint_created / checkpoint_list (#5618 Batch 6) — flat checkpoint
   // list write, broadcast-guarded on the active session. The app's extra mirror

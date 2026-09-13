@@ -360,6 +360,7 @@ function _isSecureRequest(req) {
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
  *   { type: 'message',      ... }                     — parsed chat message
+ *   { type: 'input_ack', sessionId, clientMessageId, status, delivery, retrySafe, retentionExpiresAt?, dedupScope } — #7822 correlated input validation/queue acceptance; never provider completion
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
@@ -737,6 +738,11 @@ export class WsServer {
     // would never fire in production. Cleaned up by `_sessionDestroyedHandler`
     // so a long-running server doesn't leak entries for destroyed sessions.
     this._evaluatorIterations = new Map() // sessionId -> iteration count
+    // #7822: bounded process-local input acceptance records. The handler scopes
+    // these by session and clientMessageId; session destruction drops the whole
+    // bucket. They are intentionally not persisted, so acks describe process
+    // retention rather than promising exactly-once across daemon restarts.
+    this._inputDedupRecords = new Map() // sessionId -> Map<clientMessageId, record>
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     // #5704: refcount of permission-INDUCED session subscriptions, per client.
     // clientId -> Map<sessionId, refcount>. _registerPermissionRoute increments
@@ -965,6 +971,7 @@ export class WsServer {
         // #3637: stable per-session auto-evaluator iteration counter (#3186).
         // See WsServer constructor for the lifecycle rationale.
         evaluatorIterations: this._evaluatorIterations,
+        inputDedupRecords: this._inputDedupRecords,
       },
     }
     // Fail loudly if the production ctx ever drifts from the declared shape.
@@ -1258,6 +1265,7 @@ export class WsServer {
         // but a long-running server with many session destroys would
         // accumulate dead entries.
         this._evaluatorIterations.delete(sessionId)
+        this._inputDedupRecords.delete(sessionId)
       }
       // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
       // The WS inline response path in settings-handlers.js audits user

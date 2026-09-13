@@ -4,7 +4,7 @@ import { homedir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { normalizeSdkModelUsage } from './usage-normalize.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -628,6 +628,10 @@ export class SdkSession extends BaseSession {
         message: 'Cannot send message — stdin forwarding is disabled; restart this session',
         recoverable: false,
       })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'stdin_disabled', message: 'The provider input channel is disabled; restart the session before retrying.',
+      })
       return
     }
 
@@ -636,7 +640,13 @@ export class SdkSession extends BaseSession {
       // outgoing queue (BaseSession) — flushed FIFO on the next `result`. The
       // overflow cap + the `message_queued` mirror event live in
       // enqueueOutgoingMessage; nothing to do here but enqueue and return.
-      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+      const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+      reportInputAdmission(sendOptions, queued
+        ? { status: 'queued', delivery: 'queued' }
+        : {
+            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+            reason: 'queue_full', message: 'The provider input queue is full; retry after queued work advances.',
+          })
       return
     }
 
@@ -854,6 +864,7 @@ export class SdkSession extends BaseSession {
         queryArgs.prompt = buildContentBlocks(promptWithSkills, attachments)
       }
       this._query = this._callQuery(queryArgs)
+      reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       // #5269: a fresh turn — drop any task_id mappings left over from a prior
       // turn (every subagent should clear via task_notification, but a turn
       // aborted before its notifications would otherwise strand entries).

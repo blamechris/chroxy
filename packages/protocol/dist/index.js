@@ -21,8 +21,8 @@ export const PROTOCOL_VERSION = 2;
  * Single source of truth so app and dashboard stay in sync with the server.
  */
 export const CLIENT_CAPABILITIES = {
-    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input'],
-    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity'],
+    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1'],
+    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1'],
 };
 /**
  * Minimum protocol version the server will accept from clients.
@@ -77,6 +77,9 @@ export * from "./codex.js";
 // predicate for `set_thinking_level` without a circular import through this
 // entry, and store-core / the clients import it without pulling in Zod.
 export * from "./thinking-levels.js";
+// #7822: one canonical serializer keeps the dashboard and mobile wire shape
+// identical as optional selected-context fields are negotiated.
+export { buildInputMessage } from "./input.js";
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";
 // Re-export client-side error-category detection (#3151)
