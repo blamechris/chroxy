@@ -25,9 +25,12 @@ if (typeof mock.module !== 'function') {
   })
   const { CliSession } = await import('../src/cli-session.js')
   const sessions = []
+  const childCloseObservations = new Map()
 
   afterEach(async () => {
-    for (const session of sessions.splice(0)) await session.destroy()
+    for (const session of sessions.splice(0)) {
+      await destroyAndWaitForChildClose(session)
+    }
   })
 
   function createSession() {
@@ -35,6 +38,29 @@ if (typeof mock.module !== 'function') {
     session._scheduleRespawn = () => {}
     sessions.push(session)
     return session
+  }
+
+  function observeChildClose(session) {
+    const child = session._child
+    const observation = { child, closed: child == null }
+    child?.once('close', () => {
+      observation.closed = true
+    })
+    childCloseObservations.set(session, observation)
+  }
+
+  async function destroyAndWaitForChildClose(session) {
+    const observation = childCloseObservations.get(session)
+    session.destroy()
+    if (observation?.child) {
+      await waitFor(() => observation.closed, {
+        timeoutMs: 5000,
+        label: 'CLI fixture child close',
+      })
+    }
+    const childClosed = observation?.closed ?? true
+    childCloseObservations.delete(session)
+    return childClosed
   }
 
   describe('CLI child spawn admission (#7822)', () => {
@@ -51,13 +77,18 @@ if (typeof mock.module !== 'function') {
       })
 
       session._spawnPersistentProcess([])
+      observeChildClose(session)
       assert.equal(session._processReady, false, 'spawn() return is not readiness proof')
       await waitFor(() => errors.length === 1, { label: 'missing CLI child error' })
 
       assert.equal(session._processReady, false)
       assert.equal(session._pendingQueue.length, 1, 'failed child must not drain startup input')
       assert.deepEqual(admissions, [], 'failed child must not claim input admission')
-      await session.destroy()
+      assert.equal(
+        await destroyAndWaitForChildClose(session),
+        true,
+        'failed-spawn child closes before temp cwd teardown',
+      )
     })
 
     it('marks ready and drains startup input after an actual child spawn', async () => {
@@ -72,6 +103,7 @@ if (typeof mock.module !== 'function') {
       })
 
       session._spawnPersistentProcess([])
+      observeChildClose(session)
       assert.equal(session._processReady, false, 'readiness waits for the child spawn event')
       await waitFor(() => session._processReady && admissions.length === 1, {
         label: 'spawned CLI child admission',
@@ -79,7 +111,11 @@ if (typeof mock.module !== 'function') {
 
       assert.equal(session._pendingQueue.length, 0)
       assert.deepEqual(admissions, [{ status: 'accepted', delivery: 'dispatch_started' }])
-      await session.destroy()
+      assert.equal(
+        await destroyAndWaitForChildClose(session),
+        true,
+        'spawned child closes before temp cwd teardown',
+      )
     })
   })
 }
