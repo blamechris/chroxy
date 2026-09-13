@@ -32,14 +32,14 @@ const log = createLogger('handler-utils')
 const MODE_LABELS = { approve: 'Approve', acceptEdits: 'Accept Edits', auto: 'Auto', plan: 'Plan' }
 const MODE_DESCRIPTIONS = {
   default: {
-    approve: 'Default. Every tool call gates on your approval in the dashboard or mobile app.',
-    acceptEdits: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.',
-    auto: 'Auto-approve ordinary tool calls without prompting. Protected paths and secret reads still require a Chroxy prompt.',
-    plan: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.',
+    approve: 'Default. Tool approval requests sent by the provider are shown in the dashboard or mobile app.',
+    acceptEdits: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep approval requests. Other approval requests still prompt.',
+    auto: 'Auto-approve ordinary tool calls without prompting.',
+    plan: 'Plan mode — the provider is asked to plan before acting; tool approval requests still prompt.',
   },
   codex: {
-    approve: 'Default. Every codex command, file edit, and connector action gates on your approval.',
-    acceptEdits: 'Auto-approve codex file edits (apply_patch). Shell commands, connector actions, and permission escalations still gate on approval.',
+    approve: 'Default. Approval requests sent by codex are shown in Chroxy; sandbox-authorized actions may run without a request.',
+    acceptEdits: 'Auto-approve codex file-edit approval requests (apply_patch). Other native approval requests still prompt; sandbox-authorized actions may run without a request.',
     auto: 'Auto-approve every codex action without prompting (codex runs with approvalPolicy `never`).',
     plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
   },

@@ -5,6 +5,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { CodexSession } from '../src/codex-session.js'
+import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { getPermissionModes } from '../src/handler-utils.js'
 
@@ -23,6 +25,22 @@ function manager(providerType, defaultPermissionMode = 'approve') {
 }
 
 describe('permission-mode adapter support (#7825)', () => {
+  it('keeps legacy default construction usable while rejecting explicitly requested Auto', () => {
+    const session = new CodexSession({ cwd: tempDir })
+    assert.equal(session.permissionMode, 'approve')
+    session.destroy()
+    assert.throws(
+      () => new CodexSession({ cwd: tempDir, permissionMode: 'auto' }),
+      (error) => error.code === 'PERMISSION_MODE_UNSUPPORTED',
+    )
+  })
+
+  it('does not evaluate an abstract provider label for a supported mode', () => {
+    const session = new JsonlSubprocessSession({ cwd: tempDir, permissionMode: 'approve' })
+    assert.equal(session.permissionMode, 'approve')
+    session.destroy()
+  })
+
   describe('codex app-server', () => {
     const ProviderClass = CodexAppServerSession
 
@@ -90,7 +108,7 @@ describe('permission-mode adapter support (#7825)', () => {
       session.destroy()
     })
 
-    it('advertises Auto as unsupported and the remaining modes as Chroxy-enforced', () => {
+    it('advertises Auto as unsupported and leaves other modes unverified by Chroxy', () => {
       const modes = getPermissionModes('codex', ProviderClass)
       const auto = modes.find((mode) => mode.id === 'auto')
       assert.deepEqual(
@@ -103,8 +121,9 @@ describe('permission-mode adapter support (#7825)', () => {
         const mode = modes.find((candidate) => candidate.id === id)
         assert.deepEqual(
           { supported: mode?.supported, enforcement: mode?.enforcement },
-          { supported: true, enforcement: 'chroxy' },
+          { supported: true, enforcement: 'unknown' },
         )
+        assert.equal(mode.description.includes('always require a Chroxy prompt'), false)
       }
     })
   })

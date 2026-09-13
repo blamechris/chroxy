@@ -962,7 +962,7 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     const c = CodexAppServerSession.capabilities
     assert.equal(c.permissions, true)
     assert.equal(c.inProcessPermissions, true)
-    assert.equal(c.permissionFloor, true)
+    assert.equal(c.permissionFloor, false, 'native approval RPCs do not intercept every tool')
     assert.equal(c.autoPermissionMode, false)
     assert.equal(c.nativeSandbox, true)
     assert.equal(c.permissionModeSwitch, true)

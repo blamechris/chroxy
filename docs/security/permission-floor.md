@@ -105,7 +105,9 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   defaults and restored sessions, and refuses an in-session switch. Approve,
   Accept Edits, and Plan remain available. Codex `read-only`, `workspace-write`,
   and `danger-full-access` are native sandbox settings reported separately; they do
-  not prove that Chroxy's prompt floor ran.
+  not prove that Chroxy's prompt floor ran. The supported modes use `on-request`,
+  which can execute sandbox-authorized actions without an approval RPC. Their
+  Chroxy floor enforcement is therefore `unknown`, not `chroxy`.
 
 Permission-mode metadata reports both `supported` and `enforcement`. Current
 adapters use `chroxy`, `unsupported`, or `unknown`; Codex sandbox copy identifies

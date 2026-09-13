@@ -370,7 +370,7 @@ export class BaseSession extends EventEmitter {
     // Set by subclasses in their init handlers (#3687).
     this.bootedModel = null
     this.permissionMode = permissionMode || 'approve'
-    assertProviderPermissionModeSupported(this.constructor, this.permissionMode, this.constructor.displayLabel)
+    assertProviderPermissionModeSupported(this.constructor, this.permissionMode)
     // #3185: per-session toggle for the auto-evaluator chain (parent epic
     // #3068). Default `false` — the existing manual `evaluate_draft` flow
     // (PR #3089) is unaffected by this flag. Coerced to a strict boolean

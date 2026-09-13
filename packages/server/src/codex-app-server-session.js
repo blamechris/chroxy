@@ -176,7 +176,10 @@ export class CodexAppServerSession extends BaseSession {
       // #7825: `approvalPolicy:'never'` emits no requestApproval RPC, so this
       // adapter has no pre-execution seam through which Chroxy can preserve the
       // protected-path floor in Auto. Keep native sandbox truth separate.
-      permissionFloor: true,
+      // Supported modes only surface approvals requested by the native
+      // runtime. Sandbox-authorized tools can execute without an RPC, so
+      // those modes cannot claim complete Chroxy floor interception either.
+      permissionFloor: false,
       autoPermissionMode: false,
       nativeSandbox: true,
       modelSwitch: true,

@@ -868,6 +868,9 @@ export class CodexSession extends JsonlSubprocessSession {
     super(buildBaseSessionOpts(opts, {
       provider: opts.provider || 'codex',
       model: opts.model || DEFAULT_MODEL,
+      // This adapter cannot intercept Auto. Do not inherit the subprocess
+      // layer's Auto default when the caller omitted a permission mode.
+      permissionMode: opts.permissionMode || 'approve',
       resumeSessionId: opts.resumeSessionId,
     }))
     // #6638: per-session sandbox override — honored on the exec path too, so a

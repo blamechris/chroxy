@@ -29,5 +29,7 @@ export function getProviderPermissionModeSupport(ProviderClass, mode) {
 
 export function assertProviderPermissionModeSupported(ProviderClass, mode, providerLabel) {
   const support = getProviderPermissionModeSupport(ProviderClass, mode)
-  if (!support.supported) throw new UnsupportedPermissionModeError(providerLabel, mode)
+  if (!support.supported) {
+    throw new UnsupportedPermissionModeError(providerLabel || ProviderClass?.displayLabel, mode)
+  }
 }
