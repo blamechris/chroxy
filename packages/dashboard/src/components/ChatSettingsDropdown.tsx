@@ -254,7 +254,7 @@ export function ChatSettingsDropdown({
           value={permissionMode || ''}
           onChange={e => onPermissionModeChange(e.target.value)}
           // #4019: server-side PERMISSION_MODES carries a `description` for
-          // every mode (e.g. "Auto-approve every tool call without prompting").
+          // every mode (including the Auto protected-path exception).
           // Surface the description for the currently-selected option as a
           // title so the user gets the same trade-off explanation mid-session
           // they get at creation time. Each <option> also carries its own
@@ -263,7 +263,7 @@ export function ChatSettingsDropdown({
           title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
         >
           {availablePermissionModes.map(m => (
-            <option key={m.id} value={m.id} title={m.description}>{m.label}</option>
+            <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
           ))}
         </select>
       )}

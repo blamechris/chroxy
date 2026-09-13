@@ -647,6 +647,10 @@ export class PermissionManager extends EventEmitter {
       this._pendingPermissions.set(requestId, {
         resolve,
         input: input || {},
+        // Preserve the single floor verdict made above. A later mode switch
+        // may drain ordinary prompts, but it must not turn an already pending
+        // protected-path prompt into an implicit approval.
+        protectedTarget,
         // Stashed for the allowAlways branch of respondToPermission so
         // we can echo them back as updatedPermissions per the SDK
         // 'Always allow' flow.
@@ -972,12 +976,13 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
-   * Auto-allow every outstanding permission request. Called when the
+   * Auto-allow every ordinary outstanding permission request. Called when the
    * session switches into auto/bypass mode (#3729) — the user has just
-   * declared "approve everything", so any prompt still on screen should
+   * enabled broad auto-approval, so an ordinary prompt still on screen should
    * resolve as if they had clicked Allow rather than sit there until
    * timeout. Pending AskUserQuestion prompts are NOT touched: those are
-   * solicited user input, not permission gates.
+   * solicited user input, not permission gates. Protected-path prompts also
+   * remain pending because Auto is still subject to the permission floor.
    *
    * #4462: MCP trust prompts (requestMcpTrust) are also exempt — their
    * allow path PERSISTS the binary to ~/.chroxy/mcp-trust.json forever
@@ -992,9 +997,14 @@ export class PermissionManager extends EventEmitter {
     const pendingIds = Array.from(this._pendingPermissions.keys())
     let allowed = 0
     let deniedMcpTrust = 0
+    let preservedProtected = 0
     for (const requestId of pendingIds) {
       const pending = this._pendingPermissions.get(requestId)
       if (!pending) continue
+      if (pending.protectedTarget === true) {
+        preservedProtected += 1
+        continue
+      }
       this._pendingPermissions.delete(requestId)
       this._lastPermissionData.delete(requestId)
       this._clearPermissionTimer(requestId)
@@ -1014,9 +1024,9 @@ export class PermissionManager extends EventEmitter {
       this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
       allowed += 1
     }
-    if (deniedMcpTrust > 0) {
+    if (deniedMcpTrust > 0 || preservedProtected > 0) {
       this._logInfo(
-        `Auto-allowed ${allowed} pending permission(s) and denied ${deniedMcpTrust} MCP trust prompt(s) on auto mode switch (trust not persisted via bypass — #4462)`,
+        `Auto-allowed ${allowed} pending permission(s), denied ${deniedMcpTrust} MCP trust prompt(s), and preserved ${preservedProtected} protected-path prompt(s) on auto mode switch`,
       )
     } else {
       this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)

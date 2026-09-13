@@ -56,6 +56,27 @@ function makeProps(overrides: Partial<{
 }
 
 describe('SettingsBar permission-mode hint (#4213)', () => {
+  it('disables a permission-mode chip reported as unsupported', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps({
+            permissionMode: 'approve',
+            availablePermissionModes: [
+              { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+              { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+            ],
+          })}
+        />,
+      );
+    });
+    const unsupported = tree!.root.findByProps({ testID: 'permission-mode-auto' });
+    expect(unsupported.props.disabled).toBe(true);
+    expect(unsupported.props.accessibilityState).toEqual({ selected: false, disabled: true });
+    expect(collectVisibleText(unsupported)).toContain('Auto (unavailable)');
+  });
+
   it('renders the server-supplied description for the selected mode', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
@@ -93,7 +114,49 @@ describe('SettingsBar permission-mode hint (#4213)', () => {
     });
     const root = tree!.root;
     const hint = root.findByProps({ testID: 'permission-mode-hint' });
-    expect(collectVisibleText(hint)).toContain('Claude is asked to plan before acting');
+    expect(collectVisibleText(hint)).toContain('provider is asked to plan before acting');
+    expect(collectVisibleText(hint)).toContain('enforcement is not reported by this provider');
+    expect(collectVisibleText(hint)).not.toContain('always require a Chroxy prompt');
+  });
+
+  it.each(['approve', 'acceptEdits', 'auto', 'plan'])(
+    'uses conservative fallback copy for %s when enforcement metadata is missing',
+    (mode) => {
+      let tree: renderer.ReactTestRenderer | null = null;
+      act(() => {
+        tree = renderer.create(
+          <SettingsBar
+            {...makeProps({
+              permissionMode: mode,
+              availablePermissionModes: [{ id: mode, label: mode }],
+            })}
+          />,
+        );
+      });
+      const hint = tree!.root.findByProps({ testID: 'permission-mode-hint' });
+      const text = collectVisibleText(hint);
+      expect(text).toContain('enforcement is not reported by this provider');
+      expect(text).not.toContain('always require a Chroxy prompt');
+    },
+  );
+
+  it('retains the protected-path guarantee when the server reports Chroxy enforcement', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps({
+            permissionMode: 'auto',
+            availablePermissionModes: [
+              { id: 'auto', label: 'Auto', supported: true, enforcement: 'chroxy' },
+            ],
+          })}
+        />,
+      );
+    });
+    const hint = tree!.root.findByProps({ testID: 'permission-mode-hint' });
+    expect(collectVisibleText(hint)).toContain('always require a Chroxy prompt');
+    expect(collectVisibleText(hint)).not.toContain('enforcement is not reported');
   });
 
   it('hides the hint when no permission mode is selected', () => {

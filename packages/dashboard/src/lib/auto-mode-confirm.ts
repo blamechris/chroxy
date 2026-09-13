@@ -6,7 +6,7 @@
  * where it respawns the `claude -p` subprocess and drops the in-flight turn
  * (the #3729 "panic-button"). SDK and TUI apply the same switch in-place and
  * leave the running turn alone. Before this helper the dashboard showed one
- * generic confirm ("Tools will run without asking for permission.") that never
+ * generic confirm about skipped prompts that never
  * mentioned the kill — a silent footgun where flipping to Auto to stop being
  * prompted would instead destroy the agent's running response, and only on
  * CLI. This centralizes the wording so the copy reflects the ACTUAL
@@ -37,16 +37,15 @@ export interface AutoModeConfirmInput {
    * never from the streaming flag alone.
    */
   isBusy: boolean
+  /** Which layer, if any, is known to enforce protected-path prompts. */
+  enforcement?: 'chroxy' | 'native-sandbox' | 'unsupported' | 'unknown'
 }
 
-const BASE_COPY = 'Switch to Auto mode? Tools will run without asking for permission.'
-
-const DESTRUCTIVE_COPY =
-  'Switch to Auto mode?\n\n' +
-  'This session is mid-response. On this provider, switching to Auto will ' +
-  'INTERRUPT the running turn and restart the session — the in-flight ' +
-  'response will be dropped.\n\n' +
-  'Tools will then run without asking for permission. Continue?'
+function enforcementCopy(enforcement: AutoModeConfirmInput['enforcement']): string {
+  return enforcement === 'chroxy'
+    ? 'Protected paths and secret reads still require a Chroxy prompt.'
+    : 'Protected-path and secret-read enforcement is not reported by this provider.'
+}
 
 /**
  * Returns the confirm-dialog message for the Auto switch. When the active
@@ -55,8 +54,13 @@ const DESTRUCTIVE_COPY =
  * the standard non-destructive copy.
  */
 export function buildAutoModeConfirmMessage(input: AutoModeConfirmInput): string {
+  const consequence = `Ordinary tools will run without asking. ${enforcementCopy(input.enforcement)}`
   if (input.interruptsTurn && input.isBusy) {
-    return DESTRUCTIVE_COPY
+    return 'Switch to Auto mode?\n\n' +
+      'This session is mid-response. On this provider, switching to Auto will ' +
+      'INTERRUPT the running turn and restart the session — the in-flight ' +
+      'response will be dropped.\n\n' +
+      `${consequence} Continue?`
   }
-  return BASE_COPY
+  return `Switch to Auto mode? ${consequence}`
 }

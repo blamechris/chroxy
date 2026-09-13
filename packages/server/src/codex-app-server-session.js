@@ -185,6 +185,15 @@ export class CodexAppServerSession extends BaseSession {
       // Phase 2 (#6605): approvals are surfaced through the permission pipeline.
       permissions: true,
       inProcessPermissions: true, // requires respondToPermission + respondToQuestion
+      // #7825: `approvalPolicy:'never'` emits no requestApproval RPC, so this
+      // adapter has no pre-execution seam through which Chroxy can preserve the
+      // protected-path floor in Auto. Keep native sandbox truth separate.
+      // Supported modes only surface approvals requested by the native
+      // runtime. Sandbox-authorized tools can execute without an RPC, so
+      // those modes cannot claim complete Chroxy floor interception either.
+      permissionFloor: false,
+      autoPermissionMode: false,
+      nativeSandbox: true,
       modelSwitch: true,
       permissionModeSwitch: true, // mode drives approvalPolicy + PermissionManager
       planMode: false,
@@ -1892,9 +1901,11 @@ export class CodexAppServerSession extends BaseSession {
       : `Codex connector "${server}": is requesting your input${url}`
   }
 
-  // 'auto' (skip all prompts) → codex runs without asking. Every other mode →
-  // 'on-request': codex asks per action and the PermissionManager applies the
-  // mode/rules (auto-allow for acceptEdits/rules, prompt for 'approve').
+  // Codex's underlying Auto mapping is `never`, which emits no approval RPC
+  // for Chroxy to intercept. The provider support gate rejects Auto before
+  // construction or switching; retain the mapping here as protocol truth for
+  // direct state inspection and older persisted objects. Every supported mode
+  // uses `on-request`, where PermissionManager applies its rules and floor.
   _approvalPolicy() {
     return this.permissionMode === 'auto' ? 'never' : 'on-request'
   }
@@ -1992,10 +2003,9 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
-  // Panic-button parity with SdkSession (#3729): switching TO auto drains any
-  // already-emitted approval prompts (they resolve as allow → we answer codex
-  // accept), so the user isn't left staring at a prompt after choosing "approve
-  // everything". approvalPolicy for the NEXT turn is derived from the new mode.
+  // Kept defensively for old/direct callers. BaseSession now rejects Auto for
+  // this adapter before invoking the hook because Codex `never` cannot surface
+  // the protected-path floor.
   _onPermissionModeChanged(mode) {
     if (mode === 'auto') this._permissions.autoAllowPending()
   }

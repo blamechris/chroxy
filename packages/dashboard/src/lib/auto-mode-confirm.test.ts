@@ -11,28 +11,41 @@ import { buildAutoModeConfirmMessage } from './auto-mode-confirm'
 
 describe('buildAutoModeConfirmMessage (#5609)', () => {
   it('warns about interrupting the turn when the provider interrupts AND the session is busy', () => {
-    const msg = buildAutoModeConfirmMessage({ interruptsTurn: true, isBusy: true })
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: true, isBusy: true, enforcement: 'chroxy' })
     expect(msg).toMatch(/INTERRUPT/)
     expect(msg).toMatch(/restart the session/)
     // still explains the bypass consequence
-    expect(msg).toMatch(/without asking for permission/)
+    expect(msg).toMatch(/without asking/)
+    expect(msg).toMatch(/Protected paths and secret reads still require a Chroxy prompt/)
   })
 
   it('uses the plain copy when the provider interrupts but there is no work at risk', () => {
-    const msg = buildAutoModeConfirmMessage({ interruptsTurn: true, isBusy: false })
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: true, isBusy: false, enforcement: 'chroxy' })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('uses the plain copy for non-interrupting providers (SDK/TUI) even when busy', () => {
-    const msg = buildAutoModeConfirmMessage({ interruptsTurn: false, isBusy: true })
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: false, isBusy: true, enforcement: 'chroxy' })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
   })
 
   it('treats an undefined capability flag as non-interrupting', () => {
-    const msg = buildAutoModeConfirmMessage({ interruptsTurn: undefined, isBusy: true })
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: undefined, isBusy: true, enforcement: 'chroxy' })
     expect(msg).not.toMatch(/INTERRUPT/)
-    expect(msg).toMatch(/Tools will run without asking for permission/)
+    expect(msg).toMatch(/Ordinary tools will run without asking/)
+  })
+
+  it('does not promise a protected-path prompt when enforcement is unknown', () => {
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: false, isBusy: false, enforcement: 'unknown' })
+    expect(msg).toMatch(/enforcement is not reported by this provider/i)
+    expect(msg).not.toMatch(/still require a Chroxy prompt/i)
+  })
+
+  it('treats missing enforcement metadata conservatively for older providers', () => {
+    const msg = buildAutoModeConfirmMessage({ interruptsTurn: false, isBusy: false })
+    expect(msg).toMatch(/enforcement is not reported by this provider/i)
+    expect(msg).not.toMatch(/still require a Chroxy prompt/i)
   })
 })

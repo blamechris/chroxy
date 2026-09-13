@@ -561,12 +561,16 @@ export function SettingsBar({
                 <View style={styles.chipRow}>
                   {availablePermissionModes.map((m) => {
                     const isActive = permissionMode === m.id;
+                    const unsupported = m.supported === false;
                     return (
                       <TouchableOpacity
                         key={m.id}
-                        style={[styles.chip, isActive && styles.chipActive]}
+                        testID={`permission-mode-${m.id}`}
+                        style={[styles.chip, isActive && styles.chipActive, unsupported && styles.chipDisabled]}
                         onPress={() => setPermissionMode(m.id)}
                         activeOpacity={0.7}
+                        disabled={unsupported}
+                        accessibilityState={{ selected: isActive, disabled: unsupported }}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
                           {m.label}
@@ -586,14 +590,21 @@ export function SettingsBar({
                 const selected = availablePermissionModes.find((m) => m.id === permissionMode);
                 let hint = selected?.description;
                 if (!hint) {
+                  let baseHint: string | undefined;
                   if (permissionMode === 'auto') {
-                    hint = 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.';
+                    baseHint = 'Auto-approve ordinary tool calls without prompting.';
                   } else if (permissionMode === 'acceptEdits') {
-                    hint = 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.';
+                    baseHint = 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep approval requests. Other approval requests still prompt.';
                   } else if (permissionMode === 'plan') {
-                    hint = 'Claude is asked to plan before acting; each tool call still gates on your approval.';
+                    baseHint = 'Plan mode — the provider is asked to plan before acting; tool approval requests still prompt.';
                   } else if (permissionMode === 'approve') {
-                    hint = 'Default. Each tool call gates on your approval in the dashboard or mobile app.';
+                    baseHint = 'Default. Tool approval requests sent by the provider are shown in the dashboard or mobile app.';
+                  }
+                  if (baseHint) {
+                    const enforcementHint = selected?.enforcement === 'chroxy'
+                      ? ' Protected paths and secret reads always require a Chroxy prompt.'
+                      : ' Protected-path and secret-read enforcement is not reported by this provider.';
+                    hint = `${baseHint}${enforcementHint}`;
                   }
                 }
                 // #4251: parity with dashboard CreateSessionModal.tsx #4019
@@ -1080,6 +1091,9 @@ const styles = StyleSheet.create({
   chipActive: {
     backgroundColor: COLORS.accentBlueSubtle,
     borderColor: COLORS.accentBlueBorderStrong,
+  },
+  chipDisabled: {
+    opacity: 0.45,
   },
   chipText: {
     color: COLORS.textDim,

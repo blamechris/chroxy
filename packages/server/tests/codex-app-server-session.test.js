@@ -962,6 +962,9 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     const c = CodexAppServerSession.capabilities
     assert.equal(c.permissions, true)
     assert.equal(c.inProcessPermissions, true)
+    assert.equal(c.permissionFloor, false, 'native approval RPCs do not intercept every tool')
+    assert.equal(c.autoPermissionMode, false)
+    assert.equal(c.nativeSandbox, true)
     assert.equal(c.permissionModeSwitch, true)
   })
 
@@ -1387,13 +1390,17 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('switching to auto drains a pending approval (autoAllowPending → accept)', async () => {
+  it('rejecting an unsupported Auto switch does not silently drain a pending approval', async () => {
     const { s, cleanup, responded } = mkApprovalSession('approve')
-    capture(s, ['permission_request'])
+    const requests = capture(s, ['permission_request'])
     s._onServerRequest({ id: 21, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
-    s.setPermissionMode('auto') // panic button — must drain the pending prompt
+    assert.equal(s.setPermissionMode('auto'), false)
     await tick()
-    assert.deepEqual(responded, [[21, { decision: 'accept' }]], 'auto drained the pending prompt as accept')
+    assert.equal(s.permissionMode, 'approve')
+    assert.deepEqual(responded, [], 'unsupported Auto must not convert a real prompt into acceptance')
+    s.respondToPermission(requests[0][1].requestId, 'deny')
+    await tick()
+    assert.deepEqual(responded, [[21, { decision: 'decline' }]])
     cleanup()
   })
 

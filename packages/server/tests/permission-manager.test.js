@@ -385,6 +385,27 @@ describe('PermissionManager', () => {
       assert.ok(resolvedEvents.every(e => e.reason === 'auto_mode'))
     })
 
+    it('autoAllowPending() leaves protected-path prompts for an explicit decision', async () => {
+      const requests = []
+      pm.on('permission_request', request => requests.push(request))
+
+      const ordinaryPromise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const protectedPromise = pm.handlePermission('Write', { file_path: '.env', content: 'TOKEN=x' }, null, 'approve')
+      assert.equal(pm._pendingPermissions.size, 2)
+
+      pm.autoAllowPending()
+
+      const ordinaryResult = await ordinaryPromise
+      assert.equal(ordinaryResult.behavior, 'allow')
+      assert.equal(pm._pendingPermissions.size, 1, 'protected prompt must remain pending')
+
+      const protectedRequest = requests.find(request => request.tool === 'Write')
+      assert.ok(protectedRequest)
+      assert.equal(pm.respondToPermission(protectedRequest.requestId, 'deny'), true)
+      const protectedResult = await protectedPromise
+      assert.equal(protectedResult.behavior, 'deny')
+    })
+
     it('autoAllowPending() is a safe no-op when nothing is pending', () => {
       // Defensive — switching to auto with an idle session must not throw.
       assert.doesNotThrow(() => pm.autoAllowPending())

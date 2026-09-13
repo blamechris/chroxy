@@ -96,7 +96,7 @@ function handleSwitchSession(ws, client, msg, ctx) {
   ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchRosterProvider })
   // #6638: also re-send the permission-mode copy so switching to/from a Codex
   // session updates the mode descriptions (Codex has different tools + no plan mode).
-  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchProvider) })
+  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchProvider, entry.session.constructor) })
   broadcastFocusChanged(client, targetId, ctx)
 }
 

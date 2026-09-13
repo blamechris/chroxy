@@ -150,6 +150,9 @@ export type RestoreCheckpointMode = 'files' | 'conversation' | 'both';
 export interface ProviderCapabilities {
   permissions: boolean;
   inProcessPermissions: boolean;
+  permissionFloor?: boolean;
+  autoPermissionMode?: boolean;
+  nativeSandbox?: boolean;
   modelSwitch: boolean;
   permissionModeSwitch: boolean;
   // #5609: true when switching to 'auto' mid-turn interrupts the running

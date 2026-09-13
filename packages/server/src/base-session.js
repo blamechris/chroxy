@@ -19,6 +19,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
 import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
+import { assertProviderPermissionModeSupported, getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 
 const log = createLogger('base-session')
@@ -380,6 +381,7 @@ export class BaseSession extends EventEmitter {
     // Set by subclasses in their init handlers (#3687).
     this.bootedModel = null
     this.permissionMode = permissionMode || 'approve'
+    assertProviderPermissionModeSupported(this.constructor, this.permissionMode)
     // #3185: per-session toggle for the auto-evaluator chain (parent epic
     // #3068). Default `false` — the existing manual `evaluate_draft` flow
     // (PR #3089) is unaffected by this flag. Coerced to a strict boolean
@@ -1278,6 +1280,9 @@ export class BaseSession extends EventEmitter {
    */
   setPermissionMode(mode) {
     if (!ALLOWED_PERMISSION_MODE_IDS.has(mode)) {
+      return false
+    }
+    if (!getProviderPermissionModeSupport(this.constructor, mode).supported) {
       return false
     }
     // 'auto' is the panic-button: a user mid-turn (i.e. _isBusy=true)

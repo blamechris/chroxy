@@ -24,6 +24,7 @@ import {
 } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import { isProviderModelUnrestricted } from '../config.js'
+import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
@@ -310,9 +311,25 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         sendSessionError(ws, ctx, 'This provider does not support plan mode')
         return
       }
-      // Auto permission mode is the ultimate privilege escalation in
-      // the chroxy handler dispatch — it disables all permission
-      // checks, so every subsequent tool call auto-executes. The
+      // #7825 — reject unsupported adapter/mode combinations before the Auto
+      // config/confirmation flow. BaseSession repeats this guard for direct
+      // callers; this wire gate supplies a precise error instead of a generic
+      // post-setter no-op.
+      const modeSupport = getProviderPermissionModeSupport(entry.session.constructor, msg.mode)
+      if (!modeSupport.supported) {
+        sendError(
+          ws,
+          msg?.requestId,
+          'CAPABILITY_NOT_SUPPORTED',
+          `The active provider '${entry.provider || 'unknown'}' cannot use '${msg.mode}' because its adapter cannot guarantee protected-path prompts reach Chroxy's permission floor.`,
+          undefined,
+          ctx,
+        )
+        return
+      }
+      // Auto permission mode is a broad privilege escalation in
+      // the chroxy handler dispatch — ordinary tool calls auto-execute while
+      // the protected-path floor still forces a real decision. The
       // 2026-04-11 audit (Adversary A5) flagged this as a step in
       // the kill chain: an authenticated attacker sends
       // `{mode:'auto', confirmed:true}` and trivially flips the
@@ -366,9 +383,12 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         // keep the plain warning. The warning string is rendered verbatim by
         // the mobile app's confirm Alert (SettingsBar.tsx).
         const interruptsTurn = !!entry.session.constructor.capabilities?.interruptsTurnOnAutoSwitch
+        const enforcementCopy = modeSupport.enforcement === 'chroxy'
+          ? 'Protected paths and secret reads still require a Chroxy prompt.'
+          : 'Protected-path and secret-read enforcement is not reported by this provider.'
         const warning = interruptsTurn && entry.session._isBusy
-          ? 'This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Tools will then run without asking for permission.'
-          : 'Auto mode bypasses all permission checks. Claude will execute tools without asking.'
+          ? `This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Ordinary tools will then run without asking; ${enforcementCopy}`
+          : `Auto mode runs ordinary tools without asking. ${enforcementCopy}`
         ctx.transport.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',

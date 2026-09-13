@@ -40,6 +40,17 @@ function renderDropdown(overrides: Partial<ChatSettingsDropdownProps> = {}) {
 }
 
 describe('ChatSettingsDropdown', () => {
+  it('disables permission modes the active provider reports as unsupported', () => {
+    const { container } = renderDropdown({
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+        { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+      ],
+    })
+    const auto = container.querySelector('select[data-kind="permission"] option[value="auto"]') as HTMLOptionElement
+    expect(auto.disabled).toBe(true)
+  })
+
   // #6220 — the model picker is now a button that opens a modal (was a native
   // <select>). Only permission + thinking remain native <select> comboboxes.
   describe('model trigger button (#6220)', () => {

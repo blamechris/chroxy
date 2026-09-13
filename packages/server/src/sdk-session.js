@@ -126,6 +126,11 @@ export class SdkSession extends BaseSession {
     return {
       permissions: true,
       inProcessPermissions: true,
+      // #7825: Auto installs an SDK PreToolUse callback that routes every tool
+      // through PermissionManager. Benign calls short-circuit immediately;
+      // protected paths reach the shared interactive floor.
+      permissionFloor: true,
+      autoPermissionMode: true,
       modelSwitch: true,
       permissionModeSwitch: true,
       // #5609: SDK applies a mid-turn switch to 'auto' in-process (clears
@@ -768,7 +773,12 @@ export class SdkSession extends BaseSession {
       options.sandbox = this._sandbox
     }
 
-    // In-process permission handling (only when not bypassing).
+    // In-process permission handling. In normal modes the SDK's canUseTool
+    // request reaches PermissionManager. `bypassPermissions` suppresses those
+    // native permission requests, so Auto uses the SDK's PreToolUse hook seam
+    // instead: PreToolUse runs before every tool even under bypass, and the
+    // callback routes the same (tool,input) pair through PermissionManager.
+    // That keeps permission-floor.js as the one protected-path predicate.
     // We forward the SDK-provided `suggestions` to the permission manager
     // so the 'allow always' flow can echo them back via updatedPermissions.
     // Without this, respondToPermission('allowAlways') had nothing to
@@ -781,6 +791,16 @@ export class SdkSession extends BaseSession {
     if (this.permissionMode !== 'auto') {
       options.canUseTool = (toolName, input, { signal, suggestions }) =>
         this._handlePermission(toolName, input, signal, suggestions)
+    } else {
+      options.hooks = {
+        PreToolUse: [{
+          hooks: [(input, _toolUseId, { signal }) => this._handleAutoPreToolUse(input, signal)],
+          // PermissionManager's default human-decision timeout is 300s. Give
+          // its hook callback a small completion margin so the manager owns the
+          // timeout result instead of the SDK aborting it first.
+          timeout: 310,
+        }],
+      }
     }
 
     // Resume existing session if we have one
@@ -1698,6 +1718,38 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * SDK PreToolUse bridge for Auto turns (#7825). The hook contract supplies
+   * the same tool name/input that canUseTool receives, but its response uses
+   * hookSpecificOutput rather than PermissionResult.
+   */
+  async _handleAutoPreToolUse(hookInput, signal) {
+    const toolName = hookInput?.tool_name
+    const input = hookInput?.tool_input
+    if (typeof toolName !== 'string' || !input || typeof input !== 'object' || Array.isArray(input)) {
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'Malformed tool request',
+        },
+      }
+    }
+
+    const result = await this._permissions.handlePermission(toolName, input, signal, this.permissionMode)
+    const allow = result?.behavior === 'allow'
+    return {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: allow ? 'allow' : 'deny',
+        ...(allow && result.updatedInput ? { updatedInput: result.updatedInput } : {}),
+        ...(!allow ? { permissionDecisionReason: result?.message || 'Permission denied' } : {}),
+      },
+    }
+  }
+
+  /**
    * Resolve a pending permission request (called by WsServer when
    * the app sends permission_response).
    */
@@ -1725,11 +1777,9 @@ export class SdkSession extends BaseSession {
 
   _onPermissionModeChanged(mode) {
     this._permissions.clearRules()
-    // #3729: switching TO auto is a "panic button" — drain any pending
-    // permission prompts so the user isn't left staring at modals after
-    // declaring "approve everything". Without this, prompts that were
-    // emitted under the previous mode hang until the user resolves them
-    // or they hit the 5-min timeout, contradicting the bypass semantics.
+    // #3729: switching TO auto drains ordinary pending permission prompts so
+    // the user isn't left staring at stale modals. PermissionManager preserves
+    // protected-path prompts because the floor still applies in Auto.
     if (mode === 'auto') {
       this._permissions.autoAllowPending()
     }

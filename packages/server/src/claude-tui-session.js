@@ -178,6 +178,8 @@ export class ClaudeTuiSession extends BaseSession {
       // PreToolUse hook can phone home.
       permissions: true,
       inProcessPermissions: false,
+      permissionFloor: true,
+      autoPermissionMode: true,
       modelSwitch: false,
       // #4013: TUI supports mid-session permission switch via a sidecar
       // file the hook script re-reads on every tool call. No PTY restart

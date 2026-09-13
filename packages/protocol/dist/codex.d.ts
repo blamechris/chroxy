@@ -41,4 +41,5 @@ export declare const CODEX_SANDBOX_MODE_META: ReadonlyArray<{
     readonly id: CodexSandboxMode;
     readonly label: string;
     readonly description: string;
+    readonly enforcement: 'native-sandbox';
 }>;

@@ -14,6 +14,12 @@ import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
+function permissionModesForProvider(provider) {
+  let ProviderClass
+  try { ProviderClass = provider ? getProvider(provider) : undefined } catch { /* unknown provider */ }
+  return getPermissionModes(provider, ProviderClass)
+}
+
 // #4833 — back-pressure pause for the chunked send loop.
 //
 // `sendChunkedWithBackpressure` emits messages in 20-entry chunks separated by
@@ -691,7 +697,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // client never has to wait for (or react to) the discrete
     // `available_permission_modes` burst frame. The discrete frame is still
     // sent below for older clients that read the enum only from it.
-    availablePermissionModes: getPermissionModes(authOkProvider),
+    availablePermissionModes: permissionModesForProvider(authOkProvider),
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
     streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
@@ -928,7 +934,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // schedule. With no active session activeProvider is null and there is nothing
     // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
-    send(ws, { type: 'available_permission_modes', modes: getPermissionModes(activeProvider) })
+    send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(activeProvider) })
     permissions.resendPendingPermissions(ws, client)
     // #5555: fire the connect-time bootstrap burst (providers + slash commands
     // + agents) so a new client never sends its 3-request list_* round trip.
@@ -976,7 +982,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       type: 'permission_mode_changed',
       mode: cliSession.permissionMode || 'approve',
     })
-    send(ws, { type: 'available_permission_modes', modes: getPermissionModes(legacyProvider) })
+    send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(legacyProvider) })
   }
 
   permissions.resendPendingPermissions(ws)
