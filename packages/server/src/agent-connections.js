@@ -1,6 +1,7 @@
 import { AGENT_CONNECTION_VERSION } from '@chroxy/protocol'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { resolveCredential } from './credential-store.js'
+import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 const ROUTES = new Set(['native', 'api', 'local', 'imported'])
@@ -11,43 +12,6 @@ const INFERENCE_LOCATIONS = new Set(['local', 'remote', 'unknown'])
 // bearer token, custom endpoint, or third-party cloud provider. This is kept
 // local to explicit agent connections so legacy provider-only sessions retain
 // their existing environment behavior.
-const CLAUDE_NATIVE_ROUTE_ENV_DENYLIST = Object.freeze([
-  'ANTHROPIC_API_HOST',
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_AWS_API_KEY',
-  'ANTHROPIC_AWS_BASE_URL',
-  'ANTHROPIC_AWS_WORKSPACE_ID',
-  'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_BEDROCK_BASE_URL',
-  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
-  'ANTHROPIC_FOUNDRY_API_KEY',
-  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
-  'ANTHROPIC_FOUNDRY_BASE_URL',
-  'ANTHROPIC_FOUNDRY_RESOURCE',
-  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
-  'ANTHROPIC_GOOGLE_CLOUD_LOCATION',
-  'ANTHROPIC_GOOGLE_CLOUD_PROJECT',
-  'ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID',
-  'ANTHROPIC_PROFILE',
-  'ANTHROPIC_UNIX_SOCKET',
-  'ANTHROPIC_VERTEX_BASE_URL',
-  'ANTHROPIC_VERTEX_PROJECT_ID',
-  'CLAUDE_CODE_API_BASE_URL',
-  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
-  'CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
-  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
-  'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
-  'CLAUDE_CODE_SIMPLE',
-  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
-  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
-  'CLAUDE_CODE_USE_BEDROCK',
-  'CLAUDE_CODE_USE_FOUNDRY',
-  'CLAUDE_CODE_USE_VERTEX',
-])
-
 export class AgentConnectionError extends Error {
   constructor(code, message, connectionId = null) {
     super(message)
@@ -155,9 +119,7 @@ function unknown(message, reasonCode = 'READINESS_UNVERIFIED') {
 }
 
 function buildClaudeNativeEnv(buildSpawnEnvFn) {
-  const env = { ...buildSpawnEnvFn('claude') }
-  for (const key of CLAUDE_NATIVE_ROUTE_ENV_DENYLIST) delete env[key]
-  return env
+  return buildClaudeNativeRouteEnv(buildSpawnEnvFn('claude'))
 }
 
 function descriptorFor(definition, ProviderClass, readiness, { source = 'configured', model = null, now }) {
@@ -277,7 +239,7 @@ export class AgentConnectionRegistry {
     if (definition.authRoute === 'native' && definition.runtime === 'claude-tui') {
       childEnv = buildClaudeNativeEnv(this._deps.buildSpawnEnv)
       readiness = unknown(
-        'Claude.ai authentication is verified in the selected project context when the session starts.',
+        'Claude.ai authentication and its effective endpoint are verified when the session starts.',
         'NATIVE_AUTH_UNVERIFIED',
       )
     } else if (definition.authRoute === 'native') {

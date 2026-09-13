@@ -639,6 +639,17 @@ export class CodexAppServerSession extends BaseSession {
     return typeof value === 'string' && value.length > 0 ? value : null
   }
 
+  _onModelChanged(model) {
+    if (this.agentConnection) {
+      this.agentConnection.model = {
+        ...this.agentConnection.model,
+        requested: model,
+        resolved: null,
+      }
+    }
+    ;(this._log || log).info(`codex requested model set to ${model ?? 'default'}; resolved model is unknown until the runtime reports it`)
+  }
+
   /**
    * #7730 — the reasoning effort this session is running at: the operator's
    * explicit choice, else the effort codex reported at `thread/start`, else

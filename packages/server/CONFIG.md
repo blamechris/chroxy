@@ -654,17 +654,30 @@ an authoritative source.
 
 For Claude, an explicit native selection removes API-key, bearer-token, custom
 endpoint, and third-party cloud-provider route settings from the child process.
-After the configured binary health, quarantine, signature, and provenance checks,
-session startup runs `claude auth status --json` with that exact verified binary,
-resolved project directory, child environment, and generated settings file. The
-probe requires Claude Code to report `claude.ai` authentication through its
-first-party API provider with no API-key source; other or unverifiable routes are
-blocked before the TUI starts. Respawn repeats that check in the same execution
-context. Discovery remains process-free and reports readiness as unknown until
-startup. Legacy provider-only `claude-tui` sessions keep their existing
-environment behavior. The native route is subscription billed; account identity
-and entitlement eligibility remain `unknown` because the status command does not
-establish either one.
+Session startup pins the generated settings to Anthropic's first-party endpoint
+while retaining the normal Claude Code settings sources. It reruns the configured
+binary health, quarantine, signature, and provenance checks immediately before both
+`claude auth status --json` and the TUI spawn, using the exact binary, resolved
+project directory, child environment, and generated settings file. The auth
+probe must report `claude.ai` authentication through its first-party API provider
+with no API-key source. A shell-free `SessionStart` hook then observes the
+settings environment applied inside the real TUI process; a fresh session-private
+nonce must confirm the exact Anthropic endpoint and the absence of API-key,
+bearer-token, gateway, and third-party cloud selectors before Chroxy marks the
+session ready. Missing, stale, custom, or unverifiable routes stop that TUI.
+Every respawn repeats the full sequence. User, project, local, and managed
+Claude Code settings, instructions, skills, hooks, and plugins continue to load;
+if any effective setting changes the observed authentication or endpoint route,
+the startup check fails closed. Chroxy runtime skills injected with
+`--append-system-prompt` and Chroxy's permission hook/rules also continue to
+apply. This proves the route at each startup, but it cannot prove that an
+administrator will not refresh managed settings later in
+the lifetime of an already-running vendor process. Discovery remains process-free
+and reports readiness as unknown until startup. Legacy provider-only
+`claude-tui` sessions keep their existing environment and settings behavior.
+The native route is subscription billed; account identity and entitlement
+eligibility remain `unknown` because the status command does not establish
+either one.
 
 ### `claude-channel` (research preview)
 

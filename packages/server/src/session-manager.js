@@ -1489,6 +1489,25 @@ export class SessionManager extends EventEmitter {
       providerOpts.connectionAuthRoute = connectionResolution.definition.authRoute
       if (connectionResolution.childEnv) providerOpts.connectionChildEnv = connectionResolution.childEnv
       if (connectionVerifiedBinary) providerOpts.connectionVerifiedBinary = connectionVerifiedBinary
+      if (connectionResolution.definition.authRoute === 'native' && connectionVerifiedBinary) {
+        providerOpts.connectionRuntimePreflight = () => {
+          const repeated = runProviderPreflight(ProviderClass, {
+            provenance: (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
+              ? {
+                mode: this._binaryProvenanceMode,
+                signatureGate: this._binarySignatureGate,
+                ledger: this.binaryProvenanceLedger,
+              }
+              : null,
+          })
+          if (repeated.binaryPath !== connectionVerifiedBinary) {
+            const err = new Error('The verified provider binary path changed before the explicit native route could start.')
+            err.code = 'NATIVE_RUNTIME_UNVERIFIED'
+            throw err
+          }
+          return repeated.binaryPath
+        }
+      }
     }
     // #6638: per-session codex sandbox mode (read-only / workspace-write /
     // danger-full-access). Codex-specific opt read directly by CodexAppServerSession;

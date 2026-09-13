@@ -34,7 +34,7 @@ class ConnectionFixtureSession extends EventEmitter {
 const FIXTURE_RUNTIME = `connection-fixture-${process.pid}`
 registerProvider(FIXTURE_RUNTIME, ConnectionFixtureSession)
 class VerifiedConnectionFixtureSession extends ConnectionFixtureSession {
-  static agentConnectionRoutes = ['local']
+  static agentConnectionRoutes = ['local', 'native']
   static get resolvedBinary() { return process.execPath }
   static get preflight() {
     return { label: 'Verified fixture', binary: { name: 'node', candidates: [] } }
@@ -42,6 +42,7 @@ class VerifiedConnectionFixtureSession extends ConnectionFixtureSession {
   constructor(opts = {}) {
     super(opts)
     VerifiedConnectionFixtureSession.lastVerifiedBinary = opts.connectionVerifiedBinary
+    VerifiedConnectionFixtureSession.lastRuntimePreflight = opts.connectionRuntimePreflight
   }
 }
 const VERIFIED_FIXTURE_RUNTIME = `verified-connection-fixture-${process.pid}`
@@ -179,9 +180,17 @@ describe('AgentConnectionRegistry', () => {
     const resolved = registry.resolve('claude-native')
     assert.equal(resolved.descriptor.readiness.state, 'unknown')
     assert.deepEqual(resolved.descriptor.model, { requested: null, resolved: null })
-    for (const key of Object.keys(alternateRouteEnv)) {
+    const allowedNativeOAuth = new Set([
+      'ANTHROPIC_BASE_URL',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+    ])
+    for (const key of Object.keys(alternateRouteEnv).filter((key) => !allowedNativeOAuth.has(key))) {
       assert.equal(resolved.childEnv[key], undefined, `${key} must not reach the native session child`)
     }
+    assert.equal(resolved.childEnv.ANTHROPIC_BASE_URL, 'https://api.anthropic.com')
+    assert.equal(resolved.childEnv.CLAUDE_CODE_OAUTH_TOKEN, 'fixture-oauth-token')
+    assert.equal(resolved.childEnv.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR, '10')
     assert.equal(resolved.childEnv.SAFE_TOOL_ENV, 'preserved')
   })
 
@@ -317,6 +326,36 @@ describe('SessionManager explicit connection create/restore', () => {
     VerifiedConnectionFixtureSession.lastVerifiedBinary = null
     mgr.createSession({ provider: VERIFIED_FIXTURE_RUNTIME, connectionId: definition.id })
     assert.equal(VerifiedConnectionFixtureSession.lastVerifiedBinary, process.execPath)
+    mgr.destroyAll()
+  })
+
+  it('forwards a configured per-spawn provenance gate for an explicit native route', () => {
+    const definition = {
+      id: 'verified-native',
+      label: 'Verified native fixture',
+      runtime: VERIFIED_FIXTURE_RUNTIME,
+      authRoute: 'native',
+    }
+    const records = new Map()
+    let reads = 0
+    const ledger = {
+      getRecord(path) { reads++; return records.get(path) || null },
+      approve(path, sha256) { records.set(path, { sha256 }) },
+    }
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      defaultCwd: '/tmp',
+      stateFilePath: stateFile('verified-native-binary'),
+      agentConnections: [definition],
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+    })
+    VerifiedConnectionFixtureSession.lastRuntimePreflight = null
+    mgr.createSession({ provider: VERIFIED_FIXTURE_RUNTIME, connectionId: definition.id })
+    assert.equal(typeof VerifiedConnectionFixtureSession.lastRuntimePreflight, 'function')
+    assert.equal(VerifiedConnectionFixtureSession.lastRuntimePreflight(), process.execPath)
+    assert.equal(VerifiedConnectionFixtureSession.lastRuntimePreflight(), process.execPath)
+    assert.equal(reads, 3, 'create plus adjacent auth/PTY checks reuse the configured ledger')
     mgr.destroyAll()
   })
 })

@@ -2304,6 +2304,22 @@ describe('CodexAppServerSession — the effort reaches the wire (#7730)', () => 
 })
 
 describe('CodexAppServerSession — model/rerouted (#7729)', () => {
+  it('an accepted model change updates requested and clears resolved until observation', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      s.model = null
+      s.bootedModel = 'gpt-5.5'
+      s.agentConnection = { model: { requested: null, resolved: 'gpt-5.5' } }
+      assert.equal(s.setModel('gpt-5.4'), true)
+      assert.deepEqual(s.agentConnection.model, { requested: 'gpt-5.4', resolved: null })
+      s._captureBootedModel({ model: 'gpt-5.4-mini' })
+      assert.deepEqual(s.agentConnection.model, { requested: 'gpt-5.4', resolved: 'gpt-5.4-mini' })
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
   it('a mid-turn reroute moves bootedModel and the per-model usage split', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['result'])

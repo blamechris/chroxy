@@ -1,11 +1,60 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'child_process'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ClaudeTuiSession, withHookFsTimeout } from '../src/claude-tui-session.js'
+import { fileURLToPath } from 'url'
+import { ClaudeTuiSession, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import {
+  CLAUDE_NATIVE_FIRST_PARTY_BASE_URL,
+  CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV,
+  observeClaudeNativeRoute,
+} from '../src/utils/claude-native-route.js'
+
+// Independent roster from the locally installed Claude Code 2.1.270 route
+// selectors. Do not derive this from CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV: a new
+// or accidentally deleted implementation row must make the parity check red.
+const EXPECTED_NATIVE_ROUTE_FORBIDDEN_ENV = [
+  'ANTHROPIC_API_HOST',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_AWS_WORKSPACE_ID',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_FOUNDRY_RESOURCE',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_LOCATION',
+  'ANTHROPIC_GOOGLE_CLOUD_PROJECT',
+  'ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID',
+  'ANTHROPIC_PROFILE',
+  'ANTHROPIC_UNIX_SOCKET',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'CLAUDE_CODE_API_BASE_URL',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+  'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CODE_HOST_CREDS_FILE',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CLAUDE_CODE_SIMPLE',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GATEWAY',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_VERTEX',
+  '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
+]
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -169,6 +218,7 @@ describe('ClaudeTuiSession', () => {
       process.env.ANTHROPIC_AUTH_TOKEN = 'ambient-route-token'
       const spawnedEnvs = []
       const authContexts = []
+      let preflightCalls = 0
       try {
         session = new ClaudeTuiSession({
           cwd: '/tmp',
@@ -178,6 +228,10 @@ describe('ClaudeTuiSession', () => {
           connectionAuthRoute: 'native',
           connectionChildEnv: { PATH: process.env.PATH, SAFE_TOOL_ENV: 'native-route' },
           connectionVerifiedBinary: '/fixture/claude',
+          connectionRuntimePreflight: () => {
+            preflightCalls += 1
+            return '/fixture/claude'
+          },
           connectionAuthStatusRunner: async (context) => {
             authContexts.push(context)
             return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }) }
@@ -191,6 +245,7 @@ describe('ClaudeTuiSession', () => {
         }
         session.on('error', () => {})
         session._sessionId = 'native-route-env-uuid'
+        session._sinkDir = fakeHome
         session._settingsPath = join(fakeHome, 'settings.json')
         session._ptyModOverride = {
           spawn: (_cmd, _args, opts) => { spawnedEnvs.push(opts.env); throw new Error('captured-and-bail') },
@@ -199,18 +254,24 @@ describe('ClaudeTuiSession', () => {
         session._resumedFromPersisted = true
         await origSpawnPty.call(session, true)
         assert.equal(spawnedEnvs.length, 2, 'the real _spawnPty passed an environment on both attempts')
-        assert.equal(authContexts.length, 2, 'the initial spawn and a respawn both reverify the route')
+        assert.equal(authContexts.length, 2, 'the initial spawn and a respawn both reverify authentication')
+        assert.equal(preflightCalls, 4,
+          'the configured provenance gate runs before each auth probe and again immediately before each PTY spawn')
         assert.equal(authContexts[0].binary, '/fixture/claude')
         assert.equal(authContexts[0].cwd, realpathSync('/tmp'))
         assert.deepEqual(authContexts[0].args, ['auth', 'status', '--json', '--settings', session._settingsPath])
+        assert.equal(authContexts[0].args.includes('--setting-sources'), false,
+          'native auth keeps the normal Claude Code user/project/local customization sources')
         assert.equal(authContexts[0].env, spawnedEnvs[0], 'the auth probe and PTY receive the same env object')
         assert.equal(authContexts[1].env, spawnedEnvs[1], 'the respawn probe and PTY receive the same env object')
         assert.equal(spawnedEnvs[0].SAFE_TOOL_ENV, 'native-route')
         assert.equal(spawnedEnvs[0].ANTHROPIC_AUTH_TOKEN, undefined,
           'ambient alternate-route auth does not re-enter the explicit native child')
+        assert.equal(spawnedEnvs[0].ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
         assert.equal(session.agentConnection.authentication.observed, 'native')
         assert.deepEqual(session.agentConnection.entitlement, { route: 'subscription', status: 'unknown' })
-        assert.equal(session.agentConnection.readiness.state, 'ready')
+        assert.equal(session.agentConnection.readiness.state, 'unknown',
+          'auth status alone does not claim endpoint readiness before the real TUI marker')
       } finally {
         if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
         else process.env.ANTHROPIC_AUTH_TOKEN = previous
@@ -236,9 +297,11 @@ describe('ClaudeTuiSession', () => {
             connectionAuthRoute: 'native',
             connectionChildEnv: { PATH: process.env.PATH },
             connectionVerifiedBinary: '/fixture/claude',
+            connectionRuntimePreflight: () => '/fixture/claude',
             connectionAuthStatusRunner: async () => result,
           })
           candidate._sessionId = 'blocked-native-route'
+          candidate._sinkDir = fakeHome
           candidate._settingsPath = join(fakeHome, 'settings.json')
           candidate.on('error', () => {})
           candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('unexpected PTY spawn') } }
@@ -262,6 +325,197 @@ describe('ClaudeTuiSession', () => {
       session._sessionId = 'unverified-binary'
       session._settingsPath = join(fakeHome, 'settings.json')
       await assert.rejects(origSpawnPty.call(session, false), (err) => err.code === 'NATIVE_RUNTIME_UNVERIFIED')
+    })
+
+    it('requires a fresh safe marker from the real TUI before native route readiness', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const candidate = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/claude',
+        connectionRuntimePreflight: () => '/fixture/claude',
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      })
+      candidate.agentConnection = {
+        authentication: { requested: 'native', observed: 'unknown' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'unknown' },
+        provenance: { observedAt: null },
+      }
+      candidate._sessionId = 'native-marker-success'
+      candidate._sinkDir = fakeHome
+      candidate._nativeRouteVerifiedForSpawn = true
+      const rawWrites = []
+      candidate._waitForPrompt = async () => {
+        assert.equal(candidate._nativeRouteVerifiedForSpawn, false,
+          'a new spawn resets the prior process route verdict before warmup')
+        assert.equal(candidate.writeTerminalInput('before-marker'), false,
+          'raw input is blocked while the real spawn awaits its marker')
+        assert.deepEqual(rawWrites, [])
+        return true
+      }
+      const term = {
+        pid: 123,
+        write: (data) => rawWrites.push(data),
+        kill: () => {},
+        onData: () => {},
+        onExit: () => {},
+        on: () => {},
+      }
+      let spawnedArgs
+      candidate._ptyModOverride = {
+        spawn: (_binary, args) => {
+          spawnedArgs = args
+          const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+          const hook = settings.hooks.SessionStart[0].hooks[0]
+          assert.equal(hook.command, process.execPath)
+          assert.equal(hook.args.length, 3)
+          const nonce = hook.args[2]
+          assert.match(nonce, /^[a-f0-9]{32}$/)
+          writeFileSync(join(fakeHome, 'native-route.json'), JSON.stringify({
+            version: 1,
+            nonce,
+            safe: true,
+            firstPartyEndpoint: true,
+            blockedKeys: [],
+          }))
+          return term
+        },
+      }
+      await origSpawnPty.call(candidate, false)
+      assert.deepEqual(spawnedArgs.slice(2, 4), ['--settings', candidate._settingsPath])
+      assert.equal(spawnedArgs.includes('--setting-sources'), false,
+        'the real TUI keeps normal Claude Code instructions, skills, hooks, and plugins')
+      const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+      assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
+      for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')
+      assert.equal(candidate.agentConnection.readiness.state, 'ready')
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+      assert.equal(candidate.writeTerminalInput('after-marker'), true)
+      assert.deepEqual(rawWrites, ['after-marker'], 'input opens only after this spawn passes the marker')
+      assert.equal(existsSync(join(fakeHome, 'native-route.json')), false, 'fresh marker is consumed')
+      candidate._term = null
+      await candidate.destroy()
+    })
+
+    it('fails closed after TUI warmup when the effective-route marker is missing or stale', async (t) => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      for (const stale of [false, true]) {
+        await t.test(stale ? 'stale nonce' : 'missing marker', async () => {
+          const sink = mkdtempSync(join(fakeHome, 'marker-'))
+          if (stale) {
+            writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+              version: 1,
+              nonce: 'stale',
+              safe: true,
+              firstPartyEndpoint: true,
+              blockedKeys: [],
+            }))
+          }
+          const candidate = new ClaudeTuiSession({
+            cwd: '/tmp',
+            skillsDir: emptySkillsDir,
+            repoSkillsDir: null,
+            connectionAuthRoute: 'native',
+            connectionChildEnv: { PATH: process.env.PATH },
+            connectionVerifiedBinary: '/fixture/claude',
+            connectionRuntimePreflight: () => '/fixture/claude',
+            connectionAuthStatusRunner: async () => ({
+              status: 0,
+              stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+            }),
+          })
+          let killed = false
+          candidate._sessionId = 'native-marker-failure'
+          candidate._sinkDir = sink
+          candidate._nativeRouteVerifiedForSpawn = true
+          candidate._waitForPrompt = async () => true
+          candidate._ptyModOverride = {
+            spawn: () => ({
+              pid: 123,
+              kill: () => { killed = true },
+              onData: () => {},
+              onExit: () => {},
+              on: () => {},
+            }),
+          }
+          await assert.rejects(
+            origSpawnPty.call(candidate, false),
+            (err) => err.code === (stale ? 'NATIVE_ENDPOINT_ROUTE_MISMATCH' : 'NATIVE_ENDPOINT_UNVERIFIED'),
+          )
+          assert.equal(killed, true, 'unverified PTY is stopped before it can become ready')
+          assert.equal(candidate._term, null)
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        })
+      }
+    })
+
+    it('the marker classifier rejects a custom endpoint and every alternate route selector', () => {
+      const clean = { ANTHROPIC_BASE_URL: CLAUDE_NATIVE_FIRST_PARTY_BASE_URL }
+      assert.deepEqual([...CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV].sort(), [...EXPECTED_NATIVE_ROUTE_FORBIDDEN_ENV].sort(),
+        'native-route selector roster must stay in parity with the verified Claude CLI contract')
+      assert.deepEqual(observeClaudeNativeRoute(clean), {
+        firstPartyEndpoint: true,
+        blockedKeys: [],
+        safe: true,
+      })
+      assert.equal(observeClaudeNativeRoute({ ANTHROPIC_BASE_URL: 'https://gateway.example.test' }).safe, false)
+      for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) {
+        const observed = observeClaudeNativeRoute({ ...clean, [key]: 'configured' })
+        assert.equal(observed.safe, false, `${key} must fail the native route`)
+        assert.deepEqual(observed.blockedKeys, [key])
+      }
+
+      const script = fileURLToPath(new URL('../hooks/claude-native-route-check.mjs', import.meta.url))
+      const marker = join(fakeHome, 'script-marker.json')
+      execFileSync(process.execPath, [script, marker, 'fixture-nonce'], { env: clean })
+      assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), {
+        version: 1,
+        nonce: 'fixture-nonce',
+        safe: true,
+        firstPartyEndpoint: true,
+        blockedKeys: [],
+      })
+    })
+
+    it('uses shell-free hook argv so native route checker paths stay literal on every platform', () => {
+      const hostileDir = join(fakeHome, 'literal-$()-`touch nope`')
+      mkdirSync(hostileDir, { recursive: true })
+      const script = join(hostileDir, 'route $()-`script`.mjs')
+      const marker = join(hostileDir, 'marker $()-`file`.json')
+      const nonce = 'nonce-$()-`literal`'
+      writeFileSync(script, "import { writeFileSync } from 'fs'; writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(2)))")
+      const hook = buildNativeRouteCheckHook({
+        nodePath: process.execPath,
+        scriptPath: script,
+        markerPath: marker,
+        nonce,
+      })
+      assert.deepEqual(hook, {
+        type: 'command',
+        command: process.execPath,
+        args: [script, marker, nonce],
+      })
+      execFileSync(hook.command, hook.args, { cwd: hostileDir })
+      assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), [marker, nonce])
+      assert.equal(existsSync(join(hostileDir, 'nope')), false, 'command substitutions stayed literal')
+
+      const windows = buildNativeRouteCheckHook({
+        nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+        scriptPath: 'C:\\Chroxy $()\\route-check.mjs',
+        markerPath: 'C:\\Temp\\native route.json',
+        nonce,
+      })
+      assert.equal(windows.command, 'C:\\Program Files\\nodejs\\node.exe')
+      assert.deepEqual(windows.args, ['C:\\Chroxy $()\\route-check.mjs', 'C:\\Temp\\native route.json', nonce])
     })
 
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
