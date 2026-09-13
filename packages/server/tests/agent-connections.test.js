@@ -133,6 +133,92 @@ describe('AgentConnectionRegistry', () => {
     assert.throws(() => registry.resolve('claude-native'), (err) => err.code === 'NATIVE_LOGIN_REQUIRED')
   })
 
+  it('uses the same isolated environment for Claude native status and the session child', () => {
+    class ClaudeFixture {
+      static agentConnectionRoutes = ['native']
+      static resolvedBinary = '/fixture/claude'
+    }
+    const alternateRouteEnv = {
+      ANTHROPIC_API_KEY: 'fixture-api-key',
+      ANTHROPIC_AUTH_TOKEN: 'fixture-auth-token',
+      ANTHROPIC_BASE_URL: 'https://gateway.example.test',
+      ANTHROPIC_UNIX_SOCKET: '/tmp/anthropic.sock',
+      ANTHROPIC_PROFILE: 'bedrock-profile',
+      CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: '9',
+      CLAUDE_CODE_OAUTH_TOKEN: 'fixture-oauth-token',
+      CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '10',
+      CLAUDE_CODE_SIMPLE: '1',
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      CLAUDE_CODE_USE_FOUNDRY: '1',
+      CLAUDE_CODE_USE_ANTHROPIC_AWS: '1',
+      CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: '1',
+    }
+    const registry = new AgentConnectionRegistry({
+      definitions: [
+        { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
+      ],
+      getProvider: () => ClaudeFixture,
+      buildSpawnEnvFn: () => ({ ...alternateRouteEnv, PATH: '/bin', SAFE_TOOL_ENV: 'preserved' }),
+      spawnSyncFn: (_binary, _args, opts) => {
+        for (const key of Object.keys(alternateRouteEnv)) {
+          assert.equal(opts.env[key], undefined, `${key} must not influence the native status probe`)
+        }
+        assert.equal(opts.env.SAFE_TOOL_ENV, 'preserved')
+        return {
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }
+      },
+    })
+
+    const resolved = registry.resolve('claude-native')
+    assert.equal(resolved.descriptor.readiness.state, 'ready')
+    for (const key of Object.keys(alternateRouteEnv)) {
+      assert.equal(resolved.childEnv[key], undefined, `${key} must not reach the native session child`)
+    }
+    assert.equal(resolved.childEnv.SAFE_TOOL_ENV, 'preserved')
+  })
+
+  it('fails closed when Claude reports a non-Claude.ai or unverifiable native auth route', () => {
+    class ClaudeFixture {
+      static agentConnectionRoutes = ['native']
+      static resolvedBinary = '/fixture/claude'
+    }
+    const statuses = [
+      { loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' },
+      { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: '/login managed key' },
+      { loggedIn: true, authMethod: 'third_party', apiProvider: 'bedrock' },
+      { loggedIn: true },
+    ]
+
+    for (const status of statuses) {
+      const registry = new AgentConnectionRegistry({
+        definitions: [
+          { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
+        ],
+        getProvider: () => ClaudeFixture,
+        buildSpawnEnvFn: () => ({ PATH: '/bin' }),
+        spawnSyncFn: () => ({ status: 0, stdout: JSON.stringify(status) }),
+      })
+      const descriptor = registry.list()[0]
+      assert.equal(descriptor.readiness.state, 'blocked')
+      assert.equal(descriptor.readiness.reasonCode, 'NATIVE_AUTH_ROUTE_MISMATCH')
+      assert.throws(() => registry.resolve('claude-native'), (err) => err.code === 'NATIVE_AUTH_ROUTE_MISMATCH')
+    }
+
+    const malformed = new AgentConnectionRegistry({
+      definitions: [
+        { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
+      ],
+      getProvider: () => ClaudeFixture,
+      buildSpawnEnvFn: () => ({ PATH: '/bin' }),
+      spawnSyncFn: () => ({ status: 0, stdout: '{not-json' }),
+    }).list()[0]
+    assert.equal(malformed.readiness.state, 'blocked')
+    assert.equal(malformed.readiness.reasonCode, 'NATIVE_AUTH_STATUS_UNVERIFIED')
+  })
+
   it('rejects duplicate ids and secret-shaped inline config', () => {
     const warnings = []
     const rows = validateAgentConnections([

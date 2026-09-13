@@ -646,6 +646,15 @@ routes automatically. Native login verifies the authentication method only, so
 account identity and subscription entitlement remain `unknown` until a provider
 offers an authoritative source.
 
+For Claude, an explicit native selection removes API-key, bearer-token, custom
+endpoint, and third-party cloud-provider route settings from both the
+`claude auth status --json` probe and the spawned TUI. The probe requires Claude
+Code to report `claude.ai` authentication through its first-party API provider
+with no API-key source; other or unverifiable routes are blocked. Legacy
+provider-only `claude-tui` sessions keep their existing environment behavior.
+Account identity and subscription entitlement remain `unknown` because the
+status command does not establish either one.
+
 ### `claude-channel` (research preview)
 
 `claude-channel` drives Claude through Anthropic's first-party **channels MCP

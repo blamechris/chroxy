@@ -312,6 +312,9 @@ export class ClaudeTuiSession extends BaseSession {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
     // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
     const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, monotonicNow } = opts
+    this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
+      ? { ...opts.connectionChildEnv }
+      : null
 
     // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
     // deadlines (hook poll, waitForPrompt, PTY write). Wall-clock (Date.now())
@@ -1795,10 +1798,11 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * Build the env object for the spawned claude TUI PTY.
    *
-   * Unlike the claude-cli path (which goes through buildSpawnEnv('claude')),
-   * the TUI inherits the operator's full shell env (denylist semantics) so
-   * Claude Code tools see the user's environment — but two classes of secret
-   * are stripped:
+   * Legacy provider-only TUI sessions inherit the operator's full shell env
+   * (denylist semantics) so Claude Code tools see the user's environment.
+   * Explicit agent connections instead supply the cloned, route-specific env
+   * that their readiness probe verified. Both paths strip two classes of
+   * secret here as a final spawn-time backstop:
    *   - ANTHROPIC_API_KEY: would pin auth to API billing and defeat the whole
    *     point of this subscription/OAuth provider.
    *   - CHROXY_SECRET_DENYLIST (API_TOKEN): the full-authority primary bearer
@@ -1813,7 +1817,7 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {Record<string, string>}
    */
   _buildPtyEnv(permissionsEnabled) {
-    const env = { ...process.env }
+    const env = this._connectionChildEnv ? { ...this._connectionChildEnv } : { ...process.env }
     // The TUI path must route via OAuth subscription. ANTHROPIC_API_KEY would
     // pin auth to API and defeat the whole point of this provider.
     delete env.ANTHROPIC_API_KEY

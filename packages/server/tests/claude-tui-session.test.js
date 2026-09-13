@@ -163,6 +163,36 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
     })
 
+    it('passes the explicit native connection environment to the REAL TUI spawn', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const previous = process.env.ANTHROPIC_AUTH_TOKEN
+      process.env.ANTHROPIC_AUTH_TOKEN = 'ambient-route-token'
+      let spawnedEnv = null
+      try {
+        session = new ClaudeTuiSession({
+          cwd: '/tmp',
+          port: 12347,
+          skillsDir: emptySkillsDir,
+          repoSkillsDir: null,
+          connectionChildEnv: { PATH: process.env.PATH, SAFE_TOOL_ENV: 'native-route' },
+        })
+        session.on('error', () => {})
+        session._sessionId = 'native-route-env-uuid'
+        session._settingsPath = join(fakeHome, 'settings.json')
+        session._ptyModOverride = {
+          spawn: (_cmd, _args, opts) => { spawnedEnv = opts.env; throw new Error('captured-and-bail') },
+        }
+        await session._spawnPty(true)
+        assert.ok(spawnedEnv, 'the real _spawnPty passed an environment to node-pty')
+        assert.equal(spawnedEnv.SAFE_TOOL_ENV, 'native-route')
+        assert.equal(spawnedEnv.ANTHROPIC_AUTH_TOKEN, undefined,
+          'ambient alternate-route auth does not re-enter the explicit native child')
+      } finally {
+        if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+        else process.env.ANTHROPIC_AUTH_TOKEN = previous
+      }
+    })
+
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
       const persisted = '11111111-2222-3333-4444-555555555555'
       session = new ClaudeTuiSession({

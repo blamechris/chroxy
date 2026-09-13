@@ -7,6 +7,48 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
 const ROUTES = new Set(['native', 'api', 'local', 'imported'])
 const INFERENCE_LOCATIONS = new Set(['local', 'remote', 'unknown'])
 
+// Explicit Claude native connections promise the vendor-owned Claude.ai login
+// route. Build a per-connection environment that cannot select an API key,
+// bearer token, custom endpoint, or third-party cloud provider. This is kept
+// local to explicit agent connections so legacy provider-only sessions retain
+// their existing environment behavior.
+const CLAUDE_NATIVE_ROUTE_ENV_DENYLIST = Object.freeze([
+  'ANTHROPIC_API_HOST',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_AWS_WORKSPACE_ID',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_FOUNDRY_RESOURCE',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_LOCATION',
+  'ANTHROPIC_GOOGLE_CLOUD_PROJECT',
+  'ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID',
+  'ANTHROPIC_PROFILE',
+  'ANTHROPIC_UNIX_SOCKET',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'CLAUDE_CODE_API_BASE_URL',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
+  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+  'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_SIMPLE',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_VERTEX',
+])
+
 export class AgentConnectionError extends Error {
   constructor(code, message, connectionId = null) {
     super(message)
@@ -113,11 +155,17 @@ function unknown(message, reasonCode = 'READINESS_UNVERIFIED') {
   return { state: 'unknown', reasonCode, message, recoveryAction: null }
 }
 
-function probeClaudeNative(ProviderClass, deps) {
+function buildClaudeNativeEnv(buildSpawnEnvFn) {
+  const env = { ...buildSpawnEnvFn('claude') }
+  for (const key of CLAUDE_NATIVE_ROUTE_ENV_DENYLIST) delete env[key]
+  return env
+}
+
+function probeClaudeNative(ProviderClass, deps, childEnv) {
   const binary = ProviderClass?.resolvedBinary
   if (!binary) return blocked('NATIVE_RUNTIME_MISSING', 'Claude Code is not installed.', 'Install Claude Code, then run `claude auth login`.')
   const result = deps.spawnSync(binary, ['auth', 'status', '--json'], {
-    env: deps.buildSpawnEnv('claude'),
+    env: childEnv,
     encoding: 'utf8',
     timeout: 5_000,
   })
@@ -127,11 +175,25 @@ function probeClaudeNative(ProviderClass, deps) {
   try {
     const status = JSON.parse(result.stdout || '{}')
     const loggedIn = status.loggedIn === true || status.logged_in === true || status.authenticated === true
-    return loggedIn
-      ? { state: 'ready', reasonCode: null, message: 'Claude Code native login is available.', recoveryAction: null }
-      : blocked('NATIVE_LOGIN_REQUIRED', 'Claude Code native login is unavailable.', 'Run `claude auth login` on this host.')
+    if (!loggedIn) {
+      return blocked('NATIVE_LOGIN_REQUIRED', 'Claude Code native login is unavailable.', 'Run `claude auth login` on this host.')
+    }
+    const apiKeySource = status.apiKeySource
+    const noApiKeySource = apiKeySource == null || apiKeySource === '' || apiKeySource === 'none'
+    if (status.authMethod !== 'claude.ai' || status.apiProvider !== 'firstParty' || !noApiKeySource) {
+      return blocked(
+        'NATIVE_AUTH_ROUTE_MISMATCH',
+        'Claude Code is logged in through a different authentication or API provider than this native connection allows.',
+        'Remove API-key, managed-key, gateway, or cloud-provider authentication for Claude Code, then run `claude auth login` with a Claude.ai account.',
+      )
+    }
+    return { state: 'ready', reasonCode: null, message: 'Claude Code native Claude.ai login is available.', recoveryAction: null }
   } catch {
-    return unknown('Claude Code auth status could not be interpreted; it will be checked when the session starts.')
+    return blocked(
+      'NATIVE_AUTH_STATUS_UNVERIFIED',
+      'Claude Code auth status could not be interpreted, so the native authentication route cannot be verified.',
+      'Update Claude Code and retry this connection.',
+    )
   }
 }
 
@@ -248,7 +310,8 @@ export class AgentConnectionRegistry {
     let readiness
     let childEnv = null
     if (definition.authRoute === 'native' && definition.runtime === 'claude-tui') {
-      readiness = probeClaudeNative(ProviderClass, this._deps)
+      childEnv = buildClaudeNativeEnv(this._deps.buildSpawnEnv)
+      readiness = probeClaudeNative(ProviderClass, this._deps, childEnv)
     } else if (definition.authRoute === 'native') {
       childEnv = this._deps.buildSpawnEnv('codex')
       delete childEnv.OPENAI_API_KEY
