@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession, withHookFsTimeout } from '../src/claude-tui-session.js'
@@ -163,34 +163,105 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
     })
 
-    it('passes the explicit native connection environment to the REAL TUI spawn', async () => {
+    it('verifies and passes one explicit native execution context to every REAL TUI spawn', async () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       const previous = process.env.ANTHROPIC_AUTH_TOKEN
       process.env.ANTHROPIC_AUTH_TOKEN = 'ambient-route-token'
-      let spawnedEnv = null
+      const spawnedEnvs = []
+      const authContexts = []
       try {
         session = new ClaudeTuiSession({
           cwd: '/tmp',
           port: 12347,
           skillsDir: emptySkillsDir,
           repoSkillsDir: null,
+          connectionAuthRoute: 'native',
           connectionChildEnv: { PATH: process.env.PATH, SAFE_TOOL_ENV: 'native-route' },
+          connectionVerifiedBinary: '/fixture/claude',
+          connectionAuthStatusRunner: async (context) => {
+            authContexts.push(context)
+            return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }) }
+          },
         })
+        session.agentConnection = {
+          authentication: { requested: 'native', observed: 'unknown' },
+          entitlement: { route: 'subscription', status: 'unknown' },
+          readiness: { state: 'unknown' },
+          provenance: { observedAt: '2026-09-13T00:00:00.000Z' },
+        }
         session.on('error', () => {})
         session._sessionId = 'native-route-env-uuid'
         session._settingsPath = join(fakeHome, 'settings.json')
         session._ptyModOverride = {
-          spawn: (_cmd, _args, opts) => { spawnedEnv = opts.env; throw new Error('captured-and-bail') },
+          spawn: (_cmd, _args, opts) => { spawnedEnvs.push(opts.env); throw new Error('captured-and-bail') },
         }
-        await session._spawnPty(true)
-        assert.ok(spawnedEnv, 'the real _spawnPty passed an environment to node-pty')
-        assert.equal(spawnedEnv.SAFE_TOOL_ENV, 'native-route')
-        assert.equal(spawnedEnv.ANTHROPIC_AUTH_TOKEN, undefined,
+        await origSpawnPty.call(session, true)
+        session._resumedFromPersisted = true
+        await origSpawnPty.call(session, true)
+        assert.equal(spawnedEnvs.length, 2, 'the real _spawnPty passed an environment on both attempts')
+        assert.equal(authContexts.length, 2, 'the initial spawn and a respawn both reverify the route')
+        assert.equal(authContexts[0].binary, '/fixture/claude')
+        assert.equal(authContexts[0].cwd, realpathSync('/tmp'))
+        assert.deepEqual(authContexts[0].args, ['auth', 'status', '--json', '--settings', session._settingsPath])
+        assert.equal(authContexts[0].env, spawnedEnvs[0], 'the auth probe and PTY receive the same env object')
+        assert.equal(authContexts[1].env, spawnedEnvs[1], 'the respawn probe and PTY receive the same env object')
+        assert.equal(spawnedEnvs[0].SAFE_TOOL_ENV, 'native-route')
+        assert.equal(spawnedEnvs[0].ANTHROPIC_AUTH_TOKEN, undefined,
           'ambient alternate-route auth does not re-enter the explicit native child')
+        assert.equal(session.agentConnection.authentication.observed, 'native')
+        assert.deepEqual(session.agentConnection.entitlement, { route: 'subscription', status: 'unknown' })
+        assert.equal(session.agentConnection.readiness.state, 'ready')
       } finally {
         if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
         else process.env.ANTHROPIC_AUTH_TOKEN = previous
       }
+    })
+
+    it('fails closed before PTY spawn for alternate or unverifiable native auth status', async (t) => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const cases = [
+        ['api key', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['managed key', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: '/login managed key' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['third-party provider', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'third_party', apiProvider: 'bedrock' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['malformed status', { status: 0, stdout: '{bad-json' }, 'NATIVE_AUTH_STATUS_UNVERIFIED'],
+        ['logged out', { status: 1, stdout: '' }, 'NATIVE_LOGIN_REQUIRED'],
+      ]
+      for (const [name, result, code] of cases) {
+        await t.test(name, async () => {
+          let ptySpawned = false
+          const candidate = new ClaudeTuiSession({
+            cwd: '/tmp',
+            skillsDir: emptySkillsDir,
+            repoSkillsDir: null,
+            connectionAuthRoute: 'native',
+            connectionChildEnv: { PATH: process.env.PATH },
+            connectionVerifiedBinary: '/fixture/claude',
+            connectionAuthStatusRunner: async () => result,
+          })
+          candidate._sessionId = 'blocked-native-route'
+          candidate._settingsPath = join(fakeHome, 'settings.json')
+          candidate.on('error', () => {})
+          candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('unexpected PTY spawn') } }
+          await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === code)
+          assert.equal(ptySpawned, false)
+          await candidate.destroy()
+        })
+      }
+    })
+
+    it('refuses an explicit native session without the binary captured by preflight', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      session = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionAuthStatusRunner: async () => ({ status: 0, stdout: '{}' }),
+      })
+      session._sessionId = 'unverified-binary'
+      session._settingsPath = join(fakeHome, 'settings.json')
+      await assert.rejects(origSpawnPty.call(session, false), (err) => err.code === 'NATIVE_RUNTIME_UNVERIFIED')
     })
 
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {

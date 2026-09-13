@@ -1152,6 +1152,7 @@ export class SessionManager extends EventEmitter {
     if (PreflightProviderClass?.isUserShell === true && !this._userShellEnabled) {
       throw new UserShellDisabledError()
     }
+    let providerPreflight = null
     if (!this._skipPreflight) {
       // #6858: opt-in provenance gate. Only build the provenance bag when the
       // operator opted in (mode warn/block or the signature gate); otherwise pass
@@ -1163,7 +1164,7 @@ export class SessionManager extends EventEmitter {
           ledger: this.binaryProvenanceLedger,
         }
         : null
-      runProviderPreflight(PreflightProviderClass, { provenance })
+      providerPreflight = runProviderPreflight(PreflightProviderClass, { provenance })
     }
     // #6378: a provider opted into `config.providers.allowAnyModel` skips static
     // allowlist validation entirely — the model id passes through verbatim and
@@ -1353,6 +1354,7 @@ export class SessionManager extends EventEmitter {
       presetDescriptor,
       effectiveSessionPreamble,
       connectionResolution,
+      connectionVerifiedBinary: providerPreflight?.binaryPath || null,
     }
   }
 
@@ -1466,6 +1468,7 @@ export class SessionManager extends EventEmitter {
       presetDescriptor,
       effectiveSessionPreamble,
       connectionResolution,
+      connectionVerifiedBinary,
     } = plan
 
     const providerOpts = {
@@ -1485,6 +1488,7 @@ export class SessionManager extends EventEmitter {
     if (connectionResolution) {
       providerOpts.connectionAuthRoute = connectionResolution.definition.authRoute
       if (connectionResolution.childEnv) providerOpts.connectionChildEnv = connectionResolution.childEnv
+      if (connectionVerifiedBinary) providerOpts.connectionVerifiedBinary = connectionVerifiedBinary
     }
     // #6638: per-session codex sandbox mode (read-only / workspace-write /
     // danger-full-access). Codex-specific opt read directly by CodexAppServerSession;
@@ -1603,7 +1607,7 @@ export class SessionManager extends EventEmitter {
         ...connectionResolution.descriptor,
         model: {
           requested: typeof model === 'string' && model.length > 0 ? model : null,
-          resolved: resolvedModel,
+          resolved: null,
         },
       }
       : createLegacyAgentConnection({
@@ -2612,8 +2616,8 @@ export class SessionManager extends EventEmitter {
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
         // Persist the route that actually created the session. Restore compares
-        // its identity/runtime/auth-route tuple with current host config and
-        // fails closed if it was removed or remapped.
+        // descriptor version, stable id, runtime id, and requested auth route
+        // with current host config and fails closed when that identity changes.
         agentConnection: entry.agentConnection || null,
         name: entry.name,
         // #5310 (WP-0.4) — persist the worktree binding so a restored session

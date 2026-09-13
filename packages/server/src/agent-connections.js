@@ -1,4 +1,3 @@
-import { spawnSync } from 'child_process'
 import { AGENT_CONNECTION_VERSION } from '@chroxy/protocol'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { resolveCredential } from './credential-store.js'
@@ -161,42 +160,6 @@ function buildClaudeNativeEnv(buildSpawnEnvFn) {
   return env
 }
 
-function probeClaudeNative(ProviderClass, deps, childEnv) {
-  const binary = ProviderClass?.resolvedBinary
-  if (!binary) return blocked('NATIVE_RUNTIME_MISSING', 'Claude Code is not installed.', 'Install Claude Code, then run `claude auth login`.')
-  const result = deps.spawnSync(binary, ['auth', 'status', '--json'], {
-    env: childEnv,
-    encoding: 'utf8',
-    timeout: 5_000,
-  })
-  if (result.status !== 0) {
-    return blocked('NATIVE_LOGIN_REQUIRED', 'Claude Code native login is unavailable.', 'Run `claude auth login` on this host.')
-  }
-  try {
-    const status = JSON.parse(result.stdout || '{}')
-    const loggedIn = status.loggedIn === true || status.logged_in === true || status.authenticated === true
-    if (!loggedIn) {
-      return blocked('NATIVE_LOGIN_REQUIRED', 'Claude Code native login is unavailable.', 'Run `claude auth login` on this host.')
-    }
-    const apiKeySource = status.apiKeySource
-    const noApiKeySource = apiKeySource == null || apiKeySource === '' || apiKeySource === 'none'
-    if (status.authMethod !== 'claude.ai' || status.apiProvider !== 'firstParty' || !noApiKeySource) {
-      return blocked(
-        'NATIVE_AUTH_ROUTE_MISMATCH',
-        'Claude Code is logged in through a different authentication or API provider than this native connection allows.',
-        'Remove API-key, managed-key, gateway, or cloud-provider authentication for Claude Code, then run `claude auth login` with a Claude.ai account.',
-      )
-    }
-    return { state: 'ready', reasonCode: null, message: 'Claude Code native Claude.ai login is available.', recoveryAction: null }
-  } catch {
-    return blocked(
-      'NATIVE_AUTH_STATUS_UNVERIFIED',
-      'Claude Code auth status could not be interpreted, so the native authentication route cannot be verified.',
-      'Update Claude Code and retry this connection.',
-    )
-  }
-}
-
 function descriptorFor(definition, ProviderClass, readiness, { source = 'configured', model = null, now }) {
   const requested = definition.authRoute
   const observed = readiness.state === 'ready'
@@ -204,9 +167,11 @@ function descriptorFor(definition, ProviderClass, readiness, { source = 'configu
     : 'unknown'
   const entitlementRoute = requested === 'api'
     ? 'api'
-    : requested === 'local'
-      ? 'local'
-      : 'unknown'
+    : requested === 'native'
+      ? 'subscription'
+      : requested === 'local'
+        ? 'local'
+        : 'unknown'
   return {
     version: AGENT_CONNECTION_VERSION,
     id: definition.id,
@@ -221,7 +186,7 @@ function descriptorFor(definition, ProviderClass, readiness, { source = 'configu
         ? readiness.state === 'ready' ? 'available' : readiness.state === 'blocked' ? 'unavailable' : 'unknown'
         : 'unknown',
     },
-    model: { requested: model, resolved: model },
+    model: { requested: model, resolved: null },
     execution: {
       host: ProviderClass?.capabilities?.containerized ? 'container' : 'daemon',
       inference: definition.inferenceLocation,
@@ -256,10 +221,10 @@ export function createLegacyAgentConnection({ runtime, ProviderClass, model = nu
 }
 
 export class AgentConnectionRegistry {
-  constructor({ definitions = [], getProvider, buildSpawnEnvFn = buildSpawnEnv, resolveCredentialFn = resolveCredential, spawnSyncFn = spawnSync, now = () => new Date() } = {}) {
+  constructor({ definitions = [], getProvider, buildSpawnEnvFn = buildSpawnEnv, resolveCredentialFn = resolveCredential, now = () => new Date() } = {}) {
     this._definitions = validateAgentConnections(definitions)
     this._getProvider = getProvider
-    this._deps = { buildSpawnEnv: buildSpawnEnvFn, resolveCredential: resolveCredentialFn, spawnSync: spawnSyncFn }
+    this._deps = { buildSpawnEnv: buildSpawnEnvFn, resolveCredential: resolveCredentialFn }
     this._now = now
   }
 
@@ -311,7 +276,10 @@ export class AgentConnectionRegistry {
     let childEnv = null
     if (definition.authRoute === 'native' && definition.runtime === 'claude-tui') {
       childEnv = buildClaudeNativeEnv(this._deps.buildSpawnEnv)
-      readiness = probeClaudeNative(ProviderClass, this._deps, childEnv)
+      readiness = unknown(
+        'Claude.ai authentication is verified in the selected project context when the session starts.',
+        'NATIVE_AUTH_UNVERIFIED',
+      )
     } else if (definition.authRoute === 'native') {
       childEnv = this._deps.buildSpawnEnv('codex')
       delete childEnv.OPENAI_API_KEY
@@ -332,9 +300,17 @@ export class AgentConnectionRegistry {
       } else {
         const credential = this._deps.resolveCredential(credentialKey)
         readiness = credential.value
-          ? { state: 'ready', reasonCode: null, message: 'Configured API credential is available.', recoveryAction: null }
+          ? definition.runtime === 'codex'
+            ? unknown(
+              'The API credential is available; Codex verifies the selected credential and first-party provider route when the session starts.',
+              'API_ROUTE_UNVERIFIED',
+            )
+            : { state: 'ready', reasonCode: null, message: 'Configured API credential is available.', recoveryAction: null }
           : blocked('API_CREDENTIAL_MISSING', `Connection '${definition.id}' has no configured API credential.`, `Set ${credentialKey} in the environment or credential store.`)
-        if (definition.runtime === 'codex') childEnv = this._deps.buildSpawnEnv('codex')
+        if (definition.runtime === 'codex') {
+          childEnv = this._deps.buildSpawnEnv('codex')
+          delete childEnv.OPENAI_BASE_URL
+        }
       }
     } else if (definition.authRoute === 'local') {
       readiness = unknown(

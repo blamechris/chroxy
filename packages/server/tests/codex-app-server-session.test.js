@@ -1673,6 +1673,7 @@ const THREAD_START_ECHO = Object.freeze({
   approvalPolicy: 'on-request',
   thread: { id: 'th-1', model: 'gpt-5.5', reasoningEffort: 'xhigh', cliVersion: '0.154.0' },
 })
+const FIRST_PARTY_CONFIG = Object.freeze({ config: { model_provider: 'openai' }, origins: {} })
 
 function mkStartedSession(extraOpts = {}, responses = {}) {
   const stub = stubClient(responses)
@@ -1684,17 +1685,21 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
   it('verifies a native connection through account/read before thread/start', async () => {
     const { s, cleanup, calls } = mkStartedSession(
       { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },
-      { 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+      { 'config/read': FIRST_PARTY_CONFIG, 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
     )
     s.agentConnection = {
       authentication: { requested: 'native', observed: 'unknown' },
-      entitlement: { route: 'unknown', status: 'unknown' },
+      entitlement: { route: 'subscription', status: 'unknown' },
+      model: { requested: null, resolved: null },
+      provenance: { observedAt: '2026-09-13T00:00:00.000Z' },
       readiness: {},
     }
     try {
       await s.start()
-      assert.deepEqual(calls.map(([method]) => method).slice(0, 3), ['initialize', 'account/read', 'thread/start'])
+      assert.deepEqual(calls.map(([method]) => method).slice(0, 4), ['initialize', 'config/read', 'account/read', 'thread/start'])
       assert.equal(s.agentConnection.authentication.observed, 'native')
+      assert.deepEqual(s.agentConnection.entitlement, { route: 'subscription', status: 'unknown' })
+      assert.equal(s.agentConnection.model.resolved, 'gpt-5.5')
       assert.deepEqual(s._buildChildEnv(), { PATH: '/native' })
     } finally {
       s.destroy()
@@ -1705,7 +1710,7 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
   it('blocks a mismatched native route before any thread or turn is sent', async () => {
     const { s, cleanup, calls } = mkStartedSession(
       { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },
-      { 'account/read': { account: { type: 'apiKey' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+      { 'config/read': FIRST_PARTY_CONFIG, 'account/read': { account: { type: 'apiKey' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
     )
     try {
       await assert.rejects(s.start(), (err) => err.code === 'NATIVE_LOGIN_REQUIRED')
@@ -1720,12 +1725,78 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
   it('blocks an API connection when Codex reports native auth instead of substituting it', async () => {
     const { s, cleanup, calls } = mkStartedSession(
       { connectionAuthRoute: 'api', connectionChildEnv: { PATH: '/api', OPENAI_API_KEY: 'fixture-key' } },
-      { 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+      { 'config/read': FIRST_PARTY_CONFIG, 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
     )
     try {
       await assert.rejects(s.start(), (err) => err.code === 'API_AUTH_ROUTE_UNAVAILABLE')
       assert.equal(calls.some(([method]) => method === 'thread/start'), false)
       assert.equal(calls.some(([method]) => method === 'turn/start'), false)
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('constrains explicit connections to the built-in OpenAI provider and first-party endpoints', async () => {
+    const stub = stubClient({
+      'config/read': FIRST_PARTY_CONFIG,
+      'account/read': { account: { type: 'chatgpt' } },
+      'thread/start': THREAD_START_ECHO,
+    })
+    let clientConfig = null
+    const { s, cleanup } = mkSession({
+      connectionAuthRoute: 'native',
+      connectionChildEnv: { PATH: '/native' },
+      clientFactory: (config) => { clientConfig = config; return stub.client },
+    })
+    try {
+      await s.start()
+      assert.deepEqual(clientConfig.args, [
+        'app-server',
+        '-c', 'model_provider="openai"',
+        '-c', 'openai_base_url="https://api.openai.com/v1"',
+        '-c', 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
+      ])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('blocks an effective custom provider before account or thread creation', async () => {
+    let binaryRelabelChecks = 0
+    const { s, cleanup, calls } = mkStartedSession(
+      {
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: '/native' },
+        binaryFailureLabeler: () => { binaryRelabelChecks++; return 'incorrect binary relabel' },
+      },
+      { 'config/read': { config: { model_provider: 'custom-openai-gateway' }, origins: {} } },
+    )
+    try {
+      await assert.rejects(s.start(), (err) => err.code === 'CODEX_PROVIDER_ROUTE_UNAVAILABLE')
+      assert.equal(binaryRelabelChecks, 0, 'semantic route failures must bypass spawn/install relabeling')
+      assert.equal(calls.some(([method]) => method === 'account/read'), false)
+      assert.equal(calls.some(([method]) => method === 'thread/start'), false)
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('blocks a custom gateway echoed by thread/start even when it uses ChatGPT auth', async () => {
+    const { s, cleanup, calls } = mkStartedSession(
+      { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },
+      {
+        'config/read': FIRST_PARTY_CONFIG,
+        'account/read': { account: { type: 'chatgpt' } },
+        'thread/start': { ...THREAD_START_ECHO, modelProvider: 'custom-gateway' },
+      },
+    )
+    try {
+      await assert.rejects(s.start(), (err) => err.code === 'CODEX_PROVIDER_ROUTE_MISMATCH')
+      assert.equal(s.isReady, false)
+      assert.equal(calls.some(([method]) => method === 'model/list'), false)
     } finally {
       s.destroy()
       cleanup()
@@ -2237,11 +2308,13 @@ describe('CodexAppServerSession — model/rerouted (#7729)', () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['result'])
     try {
+      s.agentConnection = { model: { requested: 'gpt-5.5', resolved: 'gpt-5.5' } }
       s.bootedModel = 'gpt-5.5'
       s._isBusy = true
       s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
       s._onNotification({ method: 'model/rerouted', params: { threadId: 'th', turnId: 't1', fromModel: 'gpt-5.5', toModel: 'gpt-5.4-mini', reason: 'capacity' } })
       assert.equal(s.bootedModel, 'gpt-5.4-mini')
+      assert.deepEqual(s.agentConnection.model, { requested: 'gpt-5.5', resolved: 'gpt-5.4-mini' })
       s._onNotification({ method: 'thread/tokenUsage/updated', params: { usage: { inputTokens: 10, outputTokens: 2 } } })
       s._onNotification({ method: 'turn/completed', params: { turn: { durationMs: 1 } } })
       assert.notEqual(ev[0][1].modelUsage, null,
@@ -2257,10 +2330,12 @@ describe('CodexAppServerSession — model/rerouted (#7729)', () => {
   it('a reroute BETWEEN turns is still consumed (no active turn)', () => {
     const { s, cleanup } = mkSession()
     try {
+      s.agentConnection = { model: { requested: null, resolved: 'gpt-5.5' } }
       s.bootedModel = 'gpt-5.5'
       assert.equal(s._activeTurn, null)
       s._onNotification({ method: 'model/rerouted', params: { toModel: 'gpt-5.4' } })
       assert.equal(s.bootedModel, 'gpt-5.4')
+      assert.equal(s.agentConnection.model.resolved, 'gpt-5.4')
     } finally {
       s.destroy()
       cleanup()

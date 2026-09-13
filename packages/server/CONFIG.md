@@ -596,8 +596,9 @@ Clients can override the default per-session by passing `provider` in a `create_
 `agentConnections` assigns stable host-local names to explicit authentication
 routes. A current client shows these entries under their runtime before creating
 a session and sends the selected `connectionId`. The daemon persists the selected
-descriptor with the session and refuses restore if the connection was removed or
-changed to another runtime or route.
+descriptor with the session. Restore requires the same descriptor version, stable
+connection id, runtime id, and requested authentication route; if any member of
+that identity tuple changes or the connection is removed, restore is refused.
 
 ```json
 {
@@ -640,20 +641,30 @@ BYOK); unsupported references cannot create a session. Literal `apiKey`,
 Connection descriptors never contain credential values.
 
 For Codex, a native selection removes OpenAI API environment settings from that
-child process and checks `account/read` before `thread/start`; an API selection
-requires Codex to report API-key auth. The daemon never switches between those
-routes automatically. Native login verifies the authentication method only, so
-account identity and subscription entitlement remain `unknown` until a provider
-offers an authoritative source.
+child process; an API selection supplies only the selected Chroxy credential.
+Both explicit routes start Codex with per-process configuration that selects the
+built-in `openai` provider and pins its API and ChatGPT service base URLs to the
+vendor endpoints. Before `thread/start`, the daemon verifies the effective
+provider with `config/read` and the requested credential class with
+`account/read`; it then requires `thread/start` to report the built-in provider
+before marking the connection ready. The daemon never switches between routes
+automatically. Native login establishes the subscription billing route, while
+account identity and entitlement eligibility remain `unknown` until Codex offers
+an authoritative source.
 
 For Claude, an explicit native selection removes API-key, bearer-token, custom
-endpoint, and third-party cloud-provider route settings from both the
-`claude auth status --json` probe and the spawned TUI. The probe requires Claude
-Code to report `claude.ai` authentication through its first-party API provider
-with no API-key source; other or unverifiable routes are blocked. Legacy
-provider-only `claude-tui` sessions keep their existing environment behavior.
-Account identity and subscription entitlement remain `unknown` because the
-status command does not establish either one.
+endpoint, and third-party cloud-provider route settings from the child process.
+After the configured binary health, quarantine, signature, and provenance checks,
+session startup runs `claude auth status --json` with that exact verified binary,
+resolved project directory, child environment, and generated settings file. The
+probe requires Claude Code to report `claude.ai` authentication through its
+first-party API provider with no API-key source; other or unverifiable routes are
+blocked before the TUI starts. Respawn repeats that check in the same execution
+context. Discovery remains process-free and reports readiness as unknown until
+startup. Legacy provider-only `claude-tui` sessions keep their existing
+environment behavior. The native route is subscription billed; account identity
+and entitlement eligibility remain `unknown` because the status command does not
+establish either one.
 
 ### `claude-channel` (research preview)
 

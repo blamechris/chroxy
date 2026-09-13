@@ -8,6 +8,8 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 vi.mock('../hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -72,6 +74,12 @@ describe('CreateSessionModal submit behavior (#1456)', () => {
 
     expect(screen.getByRole('option', { name: /Claude subscription · native · unknown/i })).toBeInTheDocument()
     expect(screen.getByTestId('agent-connection-route')).toHaveTextContent('claude-sdk · remote inference · Ready')
+  })
+
+  it('keeps the connection select at least 44px tall', () => {
+    const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
+    const rule = css.match(/#connection-select\s*\{[^}]*\}/)?.[0] || ''
+    expect(rule.includes('min-height: 44px')).toBe(true)
   })
 
   it('displays serverError when provided', () => {

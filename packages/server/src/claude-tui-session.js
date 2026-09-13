@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
+import { execFile } from 'child_process'
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
@@ -59,6 +60,31 @@ import {
   FormDriver,
   multiSelectReinjectEnabled,
 } from './claude-tui/form-driver.js'
+
+function nativeConnectionError(code, message) {
+  const err = new Error(message)
+  err.code = code
+  return err
+}
+
+function runClaudeAuthStatus({ binary, args, cwd, env }) {
+  return new Promise((resolve, reject) => {
+    execFile(binary, args, {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+    }, (err, stdout) => {
+      if (err && typeof err.code !== 'number') {
+        reject(err)
+        return
+      }
+      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '' })
+    })
+  })
+}
 
 // Re-export the public writeHookSettings helper so existing
 // `import { writeHookSettings } from './claude-tui-session.js'` callers (and the
@@ -315,6 +341,13 @@ export class ClaudeTuiSession extends BaseSession {
     this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
       ? { ...opts.connectionChildEnv }
       : null
+    this._connectionAuthRoute = opts.connectionAuthRoute || null
+    this._connectionVerifiedBinary = typeof opts.connectionVerifiedBinary === 'string'
+      ? opts.connectionVerifiedBinary
+      : null
+    this._connectionAuthStatusRunner = typeof opts.connectionAuthStatusRunner === 'function'
+      ? opts.connectionAuthStatusRunner
+      : runClaudeAuthStatus
 
     // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
     // deadlines (hook poll, waitForPrompt, PTY write). Wall-clock (Date.now())
@@ -1853,6 +1886,78 @@ export class ClaudeTuiSession extends BaseSession {
     return env
   }
 
+  async _verifyNativeConnectionRoute({ binary, cwd, env }) {
+    if (this._connectionAuthRoute !== 'native') return
+    if (!this._connectionVerifiedBinary || binary !== this._connectionVerifiedBinary) {
+      throw nativeConnectionError(
+        'NATIVE_RUNTIME_UNVERIFIED',
+        'Claude Code native authentication cannot be checked because the session binary was not verified.',
+      )
+    }
+
+    let result
+    try {
+      result = await this._connectionAuthStatusRunner({
+        binary,
+        args: ['auth', 'status', '--json', '--settings', this._settingsPath],
+        cwd,
+        env,
+      })
+    } catch (err) {
+      const labeled = labelBinarySpawnFailure({
+        attemptedPath: err?.path || binary,
+        binary: 'claude',
+        prefix: 'Failed to verify Claude Code native authentication',
+      })
+      if (labeled) throw new Error(labeled)
+      throw nativeConnectionError(
+        'NATIVE_AUTH_STATUS_UNVERIFIED',
+        'Claude Code auth status could not be read, so the native authentication route cannot be verified.',
+      )
+    }
+
+    if (result?.status !== 0) {
+      throw nativeConnectionError(
+        'NATIVE_LOGIN_REQUIRED',
+        'Claude Code native login is unavailable. Run `claude auth login`; API credentials are not used as a fallback.',
+      )
+    }
+
+    let status
+    try {
+      status = JSON.parse(result.stdout || '{}')
+    } catch {
+      throw nativeConnectionError(
+        'NATIVE_AUTH_STATUS_UNVERIFIED',
+        'Claude Code auth status could not be interpreted, so the native authentication route cannot be verified.',
+      )
+    }
+    const loggedIn = status.loggedIn === true || status.logged_in === true || status.authenticated === true
+    const apiKeySource = status.apiKeySource
+    const noApiKeySource = apiKeySource == null || apiKeySource === '' || apiKeySource === 'none'
+    if (!loggedIn || status.authMethod !== 'claude.ai' || status.apiProvider !== 'firstParty' || !noApiKeySource) {
+      throw nativeConnectionError(
+        'NATIVE_AUTH_ROUTE_MISMATCH',
+        'Claude Code is using a different authentication or API provider than this native connection allows.',
+      )
+    }
+
+    if (this.agentConnection) {
+      this.agentConnection.authentication = { ...this.agentConnection.authentication, observed: 'native' }
+      this.agentConnection.entitlement = { route: 'subscription', status: 'unknown' }
+      this.agentConnection.readiness = {
+        state: 'ready',
+        reasonCode: null,
+        message: 'Claude Code native Claude.ai authentication was verified for this project.',
+        recoveryAction: null,
+      }
+      this.agentConnection.provenance = {
+        ...this.agentConnection.provenance,
+        observedAt: new Date().toISOString(),
+      }
+    }
+  }
+
   /**
    * Spawn the persistent PTY under node-pty + wait for the TUI to render.
    * Sets `this._term`, wires onData/onExit handlers, then sleeps for
@@ -1863,6 +1968,11 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {boolean} permissionsEnabled
    */
   async _spawnPty(permissionsEnabled) {
+    const cwdReal = realpathSync(this.cwd)
+    const env = this._buildPtyEnv(permissionsEnabled)
+    const attemptedBinary = this._connectionVerifiedBinary || resolveClaudeBinary()
+    await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
+
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
     // REAL arg-builder below runs against it — catching drift on the actual spawn
@@ -1878,9 +1988,6 @@ export class ClaudeTuiSession extends BaseSession {
         return
       }
     }
-
-    const cwdReal = realpathSync(this.cwd)
-    const env = this._buildPtyEnv(permissionsEnabled)
 
     // #5307 (WP-0.1) — on a fresh session, set the conversation uuid with
     // `--session-id <id>` (claude requires a brand-new uuid here). On restore,
@@ -1941,7 +2048,6 @@ export class ClaudeTuiSession extends BaseSession {
 
     // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
     // attempt used, not a fresh re-resolve that could land on a different path.
-    const attemptedBinary = resolveClaudeBinary()
     try {
       // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
       // the Windows resolver lands on a `claude.cmd` shim. node-pty routes

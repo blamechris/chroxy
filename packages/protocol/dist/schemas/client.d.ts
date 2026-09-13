@@ -493,9 +493,9 @@ export declare const CreateSessionSchema: z.ZodObject<{
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         none: "none";
+        container: "container";
         worktree: "worktree";
         sandbox: "sandbox";
-        container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;
@@ -1340,9 +1340,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         none: "none";
+        container: "container";
         worktree: "worktree";
         sandbox: "sandbox";
-        container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;

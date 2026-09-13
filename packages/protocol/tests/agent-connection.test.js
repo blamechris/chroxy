@@ -12,7 +12,7 @@ const CONNECTION = {
   runtime: { id: 'codex', version: null },
   accountRef: null,
   authentication: { requested: 'native', observed: 'unknown' },
-  entitlement: { route: 'unknown', status: 'unknown' },
+  entitlement: { route: 'subscription', status: 'unknown' },
   model: { requested: null, resolved: null },
   execution: { host: 'daemon', inference: 'remote' },
   readiness: {

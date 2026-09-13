@@ -554,6 +554,34 @@ describe('codex app-server client — the argv invariant', () => {
     client.kill()
   })
 
+  it('spawns explicit connection config arguments exactly as supplied', async () => {
+    const spawns = []
+    const child = fakeChild((msg) => {
+      if (msg.method === 'initialize') return { jsonrpc: '2.0', id: msg.id, result: { userAgent: 'chroxy/0.154.0' } }
+      return undefined
+    })
+    const args = [
+      'app-server',
+      '-c', 'model_provider="openai"',
+      '-c', 'openai_base_url="https://api.openai.com/v1"',
+      '-c', 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
+    ]
+    const client = new CodexAppServerClient({
+      bin: '/fake/codex',
+      args,
+      cwd: '/tmp/project',
+      env: { PATH: '/fixture' },
+      spawnFn: (bin, argv, opts) => { spawns.push({ bin, argv, opts }); return child },
+    })
+    await client.initialize({ name: 'chroxy', version: '1' })
+    assert.deepEqual(spawns, [{
+      bin: '/fake/codex',
+      argv: args,
+      opts: { cwd: '/tmp/project', env: { PATH: '/fixture' } },
+    }])
+    client.kill()
+  })
+
   // #7757 review — `spawnFn` is a NEW defaulted injection. Every existing site
   // that constructs a client without it only exercises _onData/_dispatch, so
   // nothing asserted that the default is the production spawn: a broken

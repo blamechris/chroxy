@@ -33,6 +33,19 @@ class ConnectionFixtureSession extends EventEmitter {
 
 const FIXTURE_RUNTIME = `connection-fixture-${process.pid}`
 registerProvider(FIXTURE_RUNTIME, ConnectionFixtureSession)
+class VerifiedConnectionFixtureSession extends ConnectionFixtureSession {
+  static agentConnectionRoutes = ['local']
+  static get resolvedBinary() { return process.execPath }
+  static get preflight() {
+    return { label: 'Verified fixture', binary: { name: 'node', candidates: [] } }
+  }
+  constructor(opts = {}) {
+    super(opts)
+    VerifiedConnectionFixtureSession.lastVerifiedBinary = opts.connectionVerifiedBinary
+  }
+}
+const VERIFIED_FIXTURE_RUNTIME = `verified-connection-fixture-${process.pid}`
+registerProvider(VERIFIED_FIXTURE_RUNTIME, VerifiedConnectionFixtureSession)
 const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-agent-connections-'))
 after(() => rmSync(tempDir, { recursive: true, force: true }))
 
@@ -71,7 +84,10 @@ describe('AgentConnectionRegistry', () => {
     })
     const listed = registry.list()
     assert.equal(listed.find((c) => c.id === 'codex-native').readiness.state, 'unknown')
-    assert.equal(listed.find((c) => c.id === 'codex-api').entitlement.route, 'api')
+    assert.deepEqual(listed.find((c) => c.id === 'codex-native').entitlement, { route: 'subscription', status: 'unknown' })
+    assert.deepEqual(listed.find((c) => c.id === 'codex-api').entitlement, { route: 'api', status: 'unknown' })
+    assert.equal(listed.find((c) => c.id === 'codex-api').readiness.reasonCode, 'API_ROUTE_UNVERIFIED')
+    assert.equal(listed.find((c) => c.id === 'codex-api').authentication.observed, 'unknown')
     assert.equal(listed.find((c) => c.id === 'local').execution.inference, 'local')
     assert.equal(listed.find((c) => c.id === 'local').readiness.reasonCode, 'LOCAL_SERVICE_UNVERIFIED')
     assert.equal(listed.find((c) => c.id === 'imported').readiness.reasonCode, 'IMPORTED_AUTH_UNSUPPORTED')
@@ -100,6 +116,7 @@ describe('AgentConnectionRegistry', () => {
       assert.equal(native.childEnv.OPENAI_API_KEY, undefined)
       assert.equal(native.childEnv.OPENAI_BASE_URL, undefined)
       assert.equal(api.childEnv.OPENAI_API_KEY, 'stored-key')
+      assert.equal(api.childEnv.OPENAI_BASE_URL, undefined)
       assert.equal(process.env.OPENAI_API_KEY, 'ambient-key')
       native.childEnv.PATH = 'changed'
       assert.equal(api.childEnv.PATH, '/bin')
@@ -109,31 +126,28 @@ describe('AgentConnectionRegistry', () => {
     }
   })
 
-  it('blocks a missing Claude native login without consulting API credentials', () => {
+  it('keeps Claude native discovery subprocess-free and defers route readiness to session start', () => {
     class ClaudeFixture {
       static agentConnectionRoutes = ['native']
-      static resolvedBinary = '/fixture/claude'
+      static get resolvedBinary() { throw new Error('connection discovery must not resolve or execute a provider binary') }
     }
     const registry = new AgentConnectionRegistry({
       definitions: [
         { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
       ],
       getProvider: () => ClaudeFixture,
-      buildSpawnEnvFn: () => ({ PATH: '/bin' }),
+      buildSpawnEnvFn: () => ({ ANTHROPIC_AUTH_TOKEN: 'alternate-route', PATH: '/bin' }),
       resolveCredentialFn: () => { throw new Error('native routing must not query API credentials') },
-      spawnSyncFn: (_binary, args, opts) => {
-        assert.deepEqual(args, ['auth', 'status', '--json'])
-        assert.equal(opts.env.ANTHROPIC_API_KEY, undefined)
-        return { status: 1, stdout: '' }
-      },
     })
     const listed = registry.list()[0]
-    assert.equal(listed.readiness.reasonCode, 'NATIVE_LOGIN_REQUIRED')
-    assert.match(listed.readiness.recoveryAction, /claude auth login/)
-    assert.throws(() => registry.resolve('claude-native'), (err) => err.code === 'NATIVE_LOGIN_REQUIRED')
+    assert.equal(listed.readiness.state, 'unknown')
+    assert.equal(listed.readiness.reasonCode, 'NATIVE_AUTH_UNVERIFIED')
+    assert.deepEqual(listed.entitlement, { route: 'subscription', status: 'unknown' })
+    const resolved = registry.resolve('claude-native')
+    assert.equal(resolved.childEnv.ANTHROPIC_AUTH_TOKEN, undefined)
   })
 
-  it('uses the same isolated environment for Claude native status and the session child', () => {
+  it('builds an isolated Claude native child environment without claiming it was observed', () => {
     class ClaudeFixture {
       static agentConnectionRoutes = ['native']
       static resolvedBinary = '/fixture/claude'
@@ -160,63 +174,15 @@ describe('AgentConnectionRegistry', () => {
       ],
       getProvider: () => ClaudeFixture,
       buildSpawnEnvFn: () => ({ ...alternateRouteEnv, PATH: '/bin', SAFE_TOOL_ENV: 'preserved' }),
-      spawnSyncFn: (_binary, _args, opts) => {
-        for (const key of Object.keys(alternateRouteEnv)) {
-          assert.equal(opts.env[key], undefined, `${key} must not influence the native status probe`)
-        }
-        assert.equal(opts.env.SAFE_TOOL_ENV, 'preserved')
-        return {
-          status: 0,
-          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
-        }
-      },
     })
 
     const resolved = registry.resolve('claude-native')
-    assert.equal(resolved.descriptor.readiness.state, 'ready')
+    assert.equal(resolved.descriptor.readiness.state, 'unknown')
+    assert.deepEqual(resolved.descriptor.model, { requested: null, resolved: null })
     for (const key of Object.keys(alternateRouteEnv)) {
       assert.equal(resolved.childEnv[key], undefined, `${key} must not reach the native session child`)
     }
     assert.equal(resolved.childEnv.SAFE_TOOL_ENV, 'preserved')
-  })
-
-  it('fails closed when Claude reports a non-Claude.ai or unverifiable native auth route', () => {
-    class ClaudeFixture {
-      static agentConnectionRoutes = ['native']
-      static resolvedBinary = '/fixture/claude'
-    }
-    const statuses = [
-      { loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' },
-      { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: '/login managed key' },
-      { loggedIn: true, authMethod: 'third_party', apiProvider: 'bedrock' },
-      { loggedIn: true },
-    ]
-
-    for (const status of statuses) {
-      const registry = new AgentConnectionRegistry({
-        definitions: [
-          { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
-        ],
-        getProvider: () => ClaudeFixture,
-        buildSpawnEnvFn: () => ({ PATH: '/bin' }),
-        spawnSyncFn: () => ({ status: 0, stdout: JSON.stringify(status) }),
-      })
-      const descriptor = registry.list()[0]
-      assert.equal(descriptor.readiness.state, 'blocked')
-      assert.equal(descriptor.readiness.reasonCode, 'NATIVE_AUTH_ROUTE_MISMATCH')
-      assert.throws(() => registry.resolve('claude-native'), (err) => err.code === 'NATIVE_AUTH_ROUTE_MISMATCH')
-    }
-
-    const malformed = new AgentConnectionRegistry({
-      definitions: [
-        { id: 'claude-native', label: 'Claude subscription', runtime: 'claude-tui', authRoute: 'native' },
-      ],
-      getProvider: () => ClaudeFixture,
-      buildSpawnEnvFn: () => ({ PATH: '/bin' }),
-      spawnSyncFn: () => ({ status: 0, stdout: '{not-json' }),
-    }).list()[0]
-    assert.equal(malformed.readiness.state, 'blocked')
-    assert.equal(malformed.readiness.reasonCode, 'NATIVE_AUTH_STATUS_UNVERIFIED')
   })
 
   it('rejects duplicate ids and secret-shaped inline config', () => {
@@ -331,6 +297,26 @@ describe('SessionManager explicit connection create/restore', () => {
       (err) => err.code === 'AGENT_CONNECTION_RUNTIME_MISMATCH',
     )
     assert.equal(mgr.listSessions().length, 0)
+    mgr.destroyAll()
+  })
+
+  it('forwards the exact preflight-verified binary into an explicit connection session', () => {
+    const definition = {
+      id: 'verified-local',
+      label: 'Verified local fixture',
+      runtime: VERIFIED_FIXTURE_RUNTIME,
+      authRoute: 'local',
+      inferenceLocation: 'local',
+    }
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      defaultCwd: '/tmp',
+      stateFilePath: stateFile('verified-binary'),
+      agentConnections: [definition],
+    })
+    VerifiedConnectionFixtureSession.lastVerifiedBinary = null
+    mgr.createSession({ provider: VERIFIED_FIXTURE_RUNTIME, connectionId: definition.id })
+    assert.equal(VerifiedConnectionFixtureSession.lastVerifiedBinary, process.execPath)
     mgr.destroyAll()
   })
 })

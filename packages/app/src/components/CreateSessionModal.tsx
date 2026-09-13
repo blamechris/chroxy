@@ -127,8 +127,9 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   // provider round-trip and silently apply to a fresh codex session.
   useEffect(() => {
     setCodexSandbox('');
-    const runtime = provider || DEFAULT_PROVIDER;
-    const connections = availableProviders.find((p) => p.name === runtime)?.connections || [];
+    const connections = provider
+      ? availableProviders.find((p) => p.name === provider)?.connections || []
+      : [];
     setConnectionId(connections[0]?.id || '');
   }, [provider, availableProviders]);
 
@@ -149,7 +150,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
 
   const selectedProviderDetail = providerChips.find((p) => p.id === provider)?.detail ?? '';
   const selectedProviderConnections = availableProviders.find(
-    (p) => p.name === (provider || DEFAULT_PROVIDER),
+    (p) => provider && p.name === provider,
   )?.connections || [];
   const selectedConnection = selectedProviderConnections.find((c) => c.id === connectionId);
   const selectedConnectionUnavailable = selectedConnection?.readiness.state === 'blocked' || selectedConnection?.readiness.state === 'unsupported';
@@ -174,7 +175,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       cwd: sessionCwd,
       worktree: worktree || undefined,
       provider: provider || undefined,
-      connectionId: connectionId || undefined,
+      connectionId: provider ? connectionId || undefined : undefined,
       // #6689/#6903 — only forward the sandbox mode for codex, and only when
       // the user explicitly picked one — '' is the "Default" option → omit so
       // the daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is
@@ -572,6 +573,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
     minHeight: 48,
+    minWidth: 48,
     justifyContent: 'center',
   },
   providerChipActive: {
