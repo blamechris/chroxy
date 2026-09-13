@@ -37,18 +37,15 @@ export interface AutoModeConfirmInput {
    * never from the streaming flag alone.
    */
   isBusy: boolean
+  /** Which layer, if any, is known to enforce protected-path prompts. */
+  enforcement?: 'chroxy' | 'native-sandbox' | 'unsupported' | 'unknown'
 }
 
-const FLOOR_COPY = 'Ordinary tools will run without asking. Protected paths and secret reads still require a Chroxy prompt.'
-
-const BASE_COPY = `Switch to Auto mode? ${FLOOR_COPY}`
-
-const DESTRUCTIVE_COPY =
-  'Switch to Auto mode?\n\n' +
-  'This session is mid-response. On this provider, switching to Auto will ' +
-  'INTERRUPT the running turn and restart the session — the in-flight ' +
-  'response will be dropped.\n\n' +
-  `${FLOOR_COPY} Continue?`
+function enforcementCopy(enforcement: AutoModeConfirmInput['enforcement']): string {
+  return enforcement === 'chroxy'
+    ? 'Protected paths and secret reads still require a Chroxy prompt.'
+    : 'Protected-path and secret-read enforcement is not reported by this provider.'
+}
 
 /**
  * Returns the confirm-dialog message for the Auto switch. When the active
@@ -57,8 +54,13 @@ const DESTRUCTIVE_COPY =
  * the standard non-destructive copy.
  */
 export function buildAutoModeConfirmMessage(input: AutoModeConfirmInput): string {
+  const consequence = `Ordinary tools will run without asking. ${enforcementCopy(input.enforcement)}`
   if (input.interruptsTurn && input.isBusy) {
-    return DESTRUCTIVE_COPY
+    return 'Switch to Auto mode?\n\n' +
+      'This session is mid-response. On this provider, switching to Auto will ' +
+      'INTERRUPT the running turn and restart the session — the in-flight ' +
+      'response will be dropped.\n\n' +
+      `${consequence} Continue?`
   }
-  return BASE_COPY
+  return `Switch to Auto mode? ${consequence}`
 }

@@ -76,7 +76,7 @@ export function getPermissionModes(provider, ProviderClass) {
       ? ''
       : support.enforcement === 'chroxy'
         ? ' Protected paths and secret reads always require a Chroxy prompt.'
-        : ' Protected-path enforcement is not reported by this provider.'
+        : ' Protected-path and secret-read enforcement is not reported by this provider.'
     return { ...mode, description: `${mode.description}${enforcementNote}`, ...support }
   })
 }

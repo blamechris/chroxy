@@ -482,7 +482,7 @@ describe('settings-handlers', () => {
 
       it('warns about interrupting the turn for an interrupting provider mid-turn (CLI)', () => {
         const sessions = new Map()
-        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, true)
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true, permissionFloor: true }, true)
         sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
         const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
         const client = makeClient({ activeSessionId: 's1' })
@@ -497,7 +497,7 @@ describe('settings-handlers', () => {
 
       it('keeps the plain warning for an interrupting provider when idle (CLI, no turn)', () => {
         const sessions = new Map()
-        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, false)
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true, permissionFloor: true }, false)
         sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
         const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
         const client = makeClient({ activeSessionId: 's1' })
@@ -511,7 +511,7 @@ describe('settings-handlers', () => {
 
       it('keeps the plain warning for a non-interrupting provider mid-turn (SDK/TUI)', () => {
         const sessions = new Map()
-        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: false }, true)
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: false, permissionFloor: true }, true)
         sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
         const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
         const client = makeClient({ activeSessionId: 's1' })
@@ -521,6 +521,20 @@ describe('settings-handlers', () => {
         assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
         assert.doesNotMatch(ctx._sent[0].warning, /INTERRUPT/)
         assert.match(ctx._sent[0].warning, /protected paths and secret reads still require/i)
+      })
+
+      it('does not promise a protected-path prompt when the adapter reports no enforcement', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: false }, false)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'future-provider' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.match(ctx._sent[0].warning, /enforcement is not reported by this provider/i)
+        assert.doesNotMatch(ctx._sent[0].warning, /still require a Chroxy prompt/i)
       })
     })
 

@@ -11,7 +11,7 @@ import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
 import { buildProviderLimitationNote, selectOwnModelsForProvider } from '@chroxy/store-core'
-import type { ModelsByProvider } from '@chroxy/store-core'
+import type { ModelsByProvider, PermissionMode } from '@chroxy/store-core'
 import {
   CODEX_PROVIDER,
   CODEX_SANDBOX_MODE_META,
@@ -84,6 +84,66 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 
 const EMPTY_STRINGS: string[] = []
 const EMPTY_MODELS_BY_PROVIDER: ModelsByProvider = {}
+
+type PermissionModeEnforcement = NonNullable<PermissionMode['enforcement']>
+type PermissionModeCapabilities = {
+  permissionFloor?: boolean
+  autoPermissionMode?: boolean
+}
+
+const PERMISSION_MODE_LABELS: Record<string, string> = {
+  approve: 'Approve',
+  acceptEdits: 'Accept Edits',
+  auto: 'Auto',
+  plan: 'Plan',
+}
+
+const PERMISSION_MODE_DESCRIPTIONS: Record<'default' | 'codex', Record<string, string>> = {
+  default: {
+    approve: 'Default. Tool approval requests sent by the provider are shown in the dashboard or mobile app.',
+    acceptEdits: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep approval requests. Other approval requests still prompt.',
+    auto: 'Auto-approve ordinary tool calls without prompting.',
+    plan: 'Plan mode — the provider is asked to plan before acting; tool approval requests still prompt.',
+  },
+  codex: {
+    approve: 'Default. Approval requests sent by codex are shown in Chroxy; sandbox-authorized actions may run without a request.',
+    acceptEdits: 'Auto-approve codex file-edit approval requests (apply_patch). Other native approval requests still prompt; sandbox-authorized actions may run without a request.',
+    auto: 'Auto-approve every codex action without prompting (codex runs with approvalPolicy `never`).',
+    plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
+  },
+}
+
+function permissionModeSupport(
+  mode: string,
+  capabilities: PermissionModeCapabilities | undefined,
+): { supported: boolean; enforcement: PermissionModeEnforcement } {
+  if (mode === 'auto' && capabilities?.autoPermissionMode === false) {
+    return { supported: false, enforcement: 'unsupported' }
+  }
+  return {
+    supported: true,
+    enforcement: capabilities?.permissionFloor === true ? 'chroxy' : 'unknown',
+  }
+}
+
+function selectedProviderPermissionModeDescription(
+  provider: string,
+  mode: string,
+  enforcement: PermissionModeEnforcement,
+): string {
+  if (enforcement === 'unsupported') {
+    return 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.'
+  }
+  const descriptions = provider === CODEX_PROVIDER
+    ? PERMISSION_MODE_DESCRIPTIONS.codex
+    : PERMISSION_MODE_DESCRIPTIONS.default
+  const description = descriptions[mode]
+    ?? 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'
+  const enforcementNote = enforcement === 'chroxy'
+    ? ' Protected paths and secret reads always require a Chroxy prompt.'
+    : ' Protected-path and secret-read enforcement is not reported by this provider.'
+  return `${description}${enforcementNote}`
+}
 
 // #7333: the client-side mirror of the server's era boundary is GONE.
 //
@@ -206,6 +266,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // server's source of truth. Pre-#4019 the modal hardcoded its own copy
   // of the description strings as a ternary chain, which drifted.
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
+  // `availablePermissionModes` describes the active session's provider. The
+  // creation form can select a different provider, so remember which provider
+  // owns that roster before deciding whether its descriptions are reusable.
+  const permissionModesProvider = useConnectionStore(s =>
+    (s.sessions || []).find(session => session.sessionId === s.activeSessionId)?.provider ?? null,
+  )
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -924,13 +990,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               aria-describedby="permission-mode-hint"
             >
               <option value="">Server default</option>
-              {/* #4019: options driven by availablePermissionModes from the
-                  store so the labels stay in sync with the server's
-                  PERMISSION_MODES table. Cold-start fallback labels match
-                  server PERMISSION_MODES (handler-utils.js:19-22) exactly
-                  — so the selected option text doesn't flicker mid-init
-                  when the available_permission_modes message lands.
-                  (#4211 Copilot review.) */}
+              {/* #4019: mode IDs come from availablePermissionModes. Labels
+                  are reusable only when that active-session roster belongs to
+                  the provider selected for this new session. */}
               {(availablePermissionModes.length > 0 ? availablePermissionModes : [
                 { id: 'approve', label: 'Approve' },
                 { id: 'acceptEdits', label: 'Accept Edits' },
@@ -941,39 +1003,37 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 // which can differ from the provider selected in this form.
                 // Creation therefore keys support off the selected provider's
                 // own capability instead of inheriting stale mode metadata.
-                const unsupported = m.id === 'auto' && selectedProviderAutoUnsupported
+                const selectedSupport = permissionModeSupport(m.id, selectedProviderInfo?.capabilities)
+                const unsupported = !selectedSupport.supported
+                const label = permissionModesProvider === provider
+                  ? m.label
+                  : (PERMISSION_MODE_LABELS[m.id] ?? m.label)
                 return (
                   <option key={m.id} value={m.id} disabled={unsupported}>
                     {unsupported
-                      ? (m.label.includes('unavailable') ? m.label : `${m.label} (unavailable)`)
-                      : (m.id === 'auto' ? 'Auto' : m.label)}
+                      ? (label.includes('unavailable') ? label : `${label} (unavailable)`)
+                      : label}
                   </option>
                 )
               })}
             </select>
             <span id="permission-mode-hint" className="form-hint">
-              {/* #4019: hint sourced from availablePermissionModes[].description
-                  (server's PERMISSION_MODES table). Falls back to the
-                  pre-#4019 hardcoded strings when the server didn't send a
-                  description for the selected mode (older server or empty
-                  selection). */}
+              {/* #4019/#7845: use a server description only when its provider,
+                  support bit, and enforcement metadata match the selected
+                  provider. Otherwise derive conservative selected-provider
+                  copy so an active session cannot lend its guarantee to the
+                  session being created. */}
               {(() => {
                 const selected = availablePermissionModes.find((m) => m.id === permissionMode)
-                const staleUnsupportedAuto = permissionMode === 'auto' && selected?.supported === false && !selectedProviderAutoUnsupported
-                if (selected?.description && !staleUnsupportedAuto) return selected.description
-                if (permissionMode === 'auto') {
-                  return 'Ordinary tool calls auto-approve without prompting. Protected paths and secret reads still require a Chroxy prompt.'
+                if (!permissionMode) {
+                  return 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'
                 }
-                if (permissionMode === 'acceptEdits') {
-                  return 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'
-                }
-                if (permissionMode === 'plan') {
-                  return 'Claude is asked to plan before acting; each tool call still gates on your approval.'
-                }
-                if (permissionMode === 'approve') {
-                  return 'Default. Each tool call gates on your approval in the dashboard or mobile app.'
-                }
-                return 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'
+                const support = permissionModeSupport(permissionMode, selectedProviderInfo?.capabilities)
+                const metadataMatchesSelectedProvider = permissionModesProvider === provider
+                  && selected?.supported === support.supported
+                  && selected?.enforcement === support.enforcement
+                if (selected?.description && metadataMatchesSelectedProvider) return selected.description
+                return selectedProviderPermissionModeDescription(provider, permissionMode, support.enforcement)
               })()}
             </span>
           </div>

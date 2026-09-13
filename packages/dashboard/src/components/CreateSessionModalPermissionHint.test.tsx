@@ -49,8 +49,13 @@ beforeEach(() => {
     defaultProvider: 'claude-sdk',
     defaultModel: null,
     modelsByProvider: {},
-    availableProviders: [],
+    availableProviders: [{
+      name: 'claude-sdk',
+      capabilities: { permissionFloor: true, autoPermissionMode: true },
+    }],
     availablePermissionModes: [],
+    sessions: [{ sessionId: 'active-session', provider: 'claude-sdk' }],
+    activeSessionId: 'active-session',
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
@@ -104,11 +109,10 @@ function selectPermissionMode(container: HTMLElement, modeId: string) {
 describe('CreateSessionModal permission-mode hint (#4214)', () => {
   it('disables Auto when the selected provider adapter cannot enforce the floor', () => {
     mockStoreState.defaultProvider = 'codex'
-    mockStoreState.availableProviders = [{
-      name: 'codex',
-      label: 'Codex',
-      capabilities: { autoPermissionMode: false },
-    }]
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
+      { name: 'codex', label: 'Codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+    ]
     mockStoreState.availablePermissionModes = [
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'auto', label: 'Auto', supported: true, enforcement: 'chroxy' },
@@ -122,11 +126,11 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
 
   it('keeps SDK Auto available when the active-session roster came from unsupported Codex Auto', () => {
     mockStoreState.defaultProvider = 'claude-sdk'
-    mockStoreState.availableProviders = [{
-      name: 'claude-sdk',
-      label: 'Claude SDK',
-      capabilities: { autoPermissionMode: true },
-    }]
+    mockStoreState.sessions = [{ sessionId: 'active-session', provider: 'codex' }]
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', label: 'Claude SDK', capabilities: { permissionFloor: true, autoPermissionMode: true } },
+      { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+    ]
     mockStoreState.availablePermissionModes = [
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
@@ -142,8 +146,8 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     // fallback substring — proves the description path produced the
     // text, not the fallback (which would have its own distinct copy).
     mockStoreState.availablePermissionModes = [
-      { id: 'approve', label: 'Approve', description: 'SERVER-PROVIDED DESCRIPTION FOR APPROVE.' },
-      { id: 'plan',    label: 'Plan',    description: 'SERVER-PROVIDED DESCRIPTION FOR PLAN.' },
+      { id: 'approve', label: 'Approve', description: 'SERVER-PROVIDED DESCRIPTION FOR APPROVE.', supported: true, enforcement: 'chroxy' },
+      { id: 'plan',    label: 'Plan',    description: 'SERVER-PROVIDED DESCRIPTION FOR PLAN.', supported: true, enforcement: 'chroxy' },
     ]
     const { container } = renderModal()
 
@@ -167,16 +171,115 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     const { container } = renderModal()
 
     selectPermissionMode(container, 'auto')
-    expect(getHint(container)).toMatch(/Protected paths and secret reads still require a Chroxy prompt/)
+    expect(getHint(container)).toMatch(/Protected paths and secret reads always require a Chroxy prompt/)
 
     selectPermissionMode(container, 'acceptEdits')
-    expect(getHint(container)).toMatch(/Read\/Write\/Edit\/Grep\/Glob\/NotebookEdit/)
+    expect(getHint(container)).toMatch(/Read\/Write\/Edit\/NotebookEdit\/Glob\/Grep/)
 
     selectPermissionMode(container, 'plan')
     expect(getHint(container)).toMatch(/asked to plan before acting/)
 
     selectPermissionMode(container, 'approve')
-    expect(getHint(container)).toMatch(/Each tool call gates on your approval/)
+    expect(getHint(container)).toMatch(/Tool approval requests sent by the provider are shown/)
+  })
+
+  it('uses selected-provider copy for every supported mode when the active roster belongs to SDK', () => {
+    mockStoreState.defaultProvider = 'codex'
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
+      { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', description: 'STALE SDK APPROVE', supported: true, enforcement: 'chroxy' },
+      { id: 'acceptEdits', label: 'Accept Edits', description: 'STALE SDK EDIT', supported: true, enforcement: 'chroxy' },
+      { id: 'auto', label: 'Auto', description: 'STALE SDK AUTO', supported: true, enforcement: 'chroxy' },
+      { id: 'plan', label: 'Plan', description: 'STALE SDK PLAN', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+
+    for (const [mode, expected] of [
+      ['approve', /sandbox-authorized actions may run without a request/],
+      ['acceptEdits', /apply_patch/],
+      ['plan', /has no plan enforcement/],
+    ] as const) {
+      selectPermissionMode(container, mode)
+      expect(getHint(container)).toMatch(expected)
+      expect(getHint(container)).toMatch(/enforcement is not reported by this provider/i)
+      expect(getHint(container)).not.toMatch(/STALE SDK/)
+    }
+
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(true)
+    expect(auto?.textContent).toMatch(/unavailable/i)
+  })
+
+  it('uses selected-provider copy for all four modes when the active roster belongs to Codex', () => {
+    mockStoreState.defaultProvider = 'claude-sdk'
+    mockStoreState.sessions = [{ sessionId: 'active-session', provider: 'codex' }]
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
+      { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', description: 'STALE CODEX APPROVE', supported: true, enforcement: 'unknown' },
+      { id: 'acceptEdits', label: 'Accept Edits', description: 'STALE CODEX EDIT', supported: true, enforcement: 'unknown' },
+      { id: 'auto', label: 'Auto (unavailable)', description: 'STALE CODEX AUTO', supported: false, enforcement: 'unsupported' },
+      { id: 'plan', label: 'Plan', description: 'STALE CODEX PLAN', supported: true, enforcement: 'unknown' },
+    ]
+    const { container } = renderModal()
+
+    for (const mode of ['approve', 'acceptEdits', 'auto', 'plan']) {
+      selectPermissionMode(container, mode)
+      expect(getHint(container)).toMatch(/always require a Chroxy prompt/i)
+      expect(getHint(container)).not.toMatch(/STALE CODEX/)
+      expect(getHint(container)).not.toMatch(/enforcement is not reported/i)
+    }
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(false)
+    expect(auto?.textContent).toBe('Auto')
+  })
+
+  it('keeps Auto available but uses conservative copy for an unknown provider', () => {
+    mockStoreState.defaultProvider = 'future-provider'
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
+      { name: 'future-provider', capabilities: { autoPermissionMode: true } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'auto', label: 'Auto', description: 'STALE SDK AUTO', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+
+    selectPermissionMode(container, 'auto')
+    expect(getHint(container)).toMatch(/enforcement is not reported by this provider/i)
+    expect(getHint(container)).not.toMatch(/always require a Chroxy prompt/i)
+    expect(getHint(container)).not.toMatch(/STALE SDK/)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(false)
+  })
+
+  it('does not reuse provider-specific copy when both providers report unknown enforcement', () => {
+    mockStoreState.defaultProvider = 'future-provider'
+    mockStoreState.sessions = [{ sessionId: 'active-session', provider: 'codex' }]
+    mockStoreState.availableProviders = [
+      { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+      { name: 'future-provider', capabilities: { autoPermissionMode: true } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      {
+        id: 'approve',
+        label: 'Approve',
+        description: 'Codex-specific stale copy: sandbox-authorized actions may run.',
+        supported: true,
+        enforcement: 'unknown',
+      },
+    ]
+    const { container } = renderModal()
+
+    selectPermissionMode(container, 'approve')
+    expect(getHint(container)).toMatch(/Tool approval requests sent by the provider are shown/)
+    expect(getHint(container)).toMatch(/enforcement is not reported by this provider/i)
+    expect(getHint(container)).not.toMatch(/Codex-specific stale copy/)
   })
 
   it('falls back to the server-default copy when no mode is selected', () => {

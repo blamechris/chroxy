@@ -315,7 +315,8 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       // config/confirmation flow. BaseSession repeats this guard for direct
       // callers; this wire gate supplies a precise error instead of a generic
       // post-setter no-op.
-      if (!getProviderPermissionModeSupport(entry.session.constructor, msg.mode).supported) {
+      const modeSupport = getProviderPermissionModeSupport(entry.session.constructor, msg.mode)
+      if (!modeSupport.supported) {
         sendError(
           ws,
           msg?.requestId,
@@ -382,9 +383,12 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         // keep the plain warning. The warning string is rendered verbatim by
         // the mobile app's confirm Alert (SettingsBar.tsx).
         const interruptsTurn = !!entry.session.constructor.capabilities?.interruptsTurnOnAutoSwitch
+        const enforcementCopy = modeSupport.enforcement === 'chroxy'
+          ? 'Protected paths and secret reads still require a Chroxy prompt.'
+          : 'Protected-path and secret-read enforcement is not reported by this provider.'
         const warning = interruptsTurn && entry.session._isBusy
-          ? 'This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Ordinary tools will then run without asking; protected paths and secret reads still require a Chroxy prompt.'
-          : 'Auto mode runs ordinary tools without asking. Protected paths and secret reads still require a Chroxy prompt.'
+          ? `This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Ordinary tools will then run without asking; ${enforcementCopy}`
+          : `Auto mode runs ordinary tools without asking. ${enforcementCopy}`
         ctx.transport.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',

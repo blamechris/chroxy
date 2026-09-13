@@ -4591,6 +4591,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const caps = state.availableProviders.find(
         (p) => p.name === activeProvider,
       )?.capabilities;
+      // Bind the guarantee to the active provider itself. The mode roster can
+      // briefly still describe the previous session during a session switch.
+      const enforcement = caps?.permissionFloor === true ? 'chroxy' : 'unknown';
       // #7335: ask the ONE busy predicate, not `!!streamingMessageId`. The
       // #554 stream-split CLEARS streamingMessageId when a permission prompt
       // arrives, so the old read reported "nothing in flight" for a session
@@ -4603,6 +4606,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             buildAutoModeConfirmMessage({
               interruptsTurn: caps?.interruptsTurnOnAutoSwitch,
               isBusy,
+              enforcement,
             }),
           )
         : true;
