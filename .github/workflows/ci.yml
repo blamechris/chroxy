@@ -1244,6 +1244,10 @@ jobs:
         working-directory: packages/desktop
         run: bash scripts/verify-entitlements.test.sh
 
+      - name: Run desktop server bundle tests
+        working-directory: packages/desktop
+        run: bash scripts/bundle-server.test.sh
+
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)
     # Per-PR Windows compile + unit tests for the Tauri desktop crate on the

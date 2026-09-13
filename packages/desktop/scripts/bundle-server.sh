@@ -46,8 +46,8 @@ else
   echo "[bundle-server] WARNING: packages/dashboard/dist not found — run 'npm run build' in packages/dashboard first"
 fi
 
-# hooks/ (permission-hook.sh, loaded by permission-hook.js)
-cp "$SERVER_DIR/hooks/permission-hook.sh" "$STAGING/hooks/permission-hook.sh"
+# hooks/ (runtime subprocesses resolved relative to the bundled server source)
+cp -R "$SERVER_DIR/hooks/." "$STAGING/hooks/"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
 # Remove workspace deps and postinstall script from package.json before
