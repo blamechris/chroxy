@@ -601,10 +601,10 @@ export function resolveStartupTimeouts(config = {}, log = { warn: () => {} }) {
  * actually forwarded to provider sessions.
  *
  * Omitted values preserve the documented permissive/no-trust defaults.
- * Malformed allowlists and unknown trust modes are disabled here and called
- * out as rejected in diagnostics for programmatic callers that did not pass
- * through validateConfig.
- * The normal CLI config path still treats a wrong top-level type as fatal.
+ * An explicitly malformed allowlist throws before SessionManager construction:
+ * `null` is the loader's permissive sentinel, so falling back to it would fail
+ * open on the supervised child's independent config re-read. Unknown trust
+ * modes remain disabled and are called out as rejected in diagnostics.
  *
  * @param {object} config merged daemon config
  * @returns {{
@@ -626,6 +626,11 @@ export function resolveStartupSkillPolicy(config = {}) {
   const allowlistIsValid = allowlist !== null
     && typeof allowlist === 'object'
     && !Array.isArray(allowlist)
+  if (hasAllowlist && !allowlistIsValid) {
+    const error = new TypeError('Runtime skills: allowlist=rejected (source: config; expected object)')
+    error.code = 'INVALID_PROVIDER_SKILL_ALLOWLIST'
+    throw error
+  }
 
   const hasTrustMode = Object.prototype.hasOwnProperty.call(config, 'trustMismatchMode')
   const trustMode = config.trustMismatchMode
@@ -643,7 +648,7 @@ export function resolveStartupSkillPolicy(config = {}) {
     diagnostics: {
       allowlist: {
         effective: allowlistIsValid ? 'configured' : 'disabled',
-        source: allowlistIsValid ? 'config' : (hasAllowlist ? 'rejected config' : 'default'),
+        source: allowlistIsValid ? 'config' : 'default',
         providerCount: allowlistIsValid ? Object.keys(allowlist).length : 0,
       },
       trust: {

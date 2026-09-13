@@ -24,6 +24,27 @@ function configFile() {
   return configPath('config.json')
 }
 
+/**
+ * Re-read and merge config for each supervised child start. Exported so tests
+ * can exercise the same restart-time path without booting a listener.
+ *
+ * @param {string} [path]
+ * @returns {object}
+ */
+export function loadChildConfig(path = configFile()) {
+  let fileConfig = {}
+  if (existsSync(path)) {
+    fileConfig = JSON.parse(readFileSync(path, 'utf-8'))
+  }
+  return mergeConfig({
+    fileConfig,
+    defaults: {
+      port: 8765,
+      noAuth: false,
+    },
+  })
+}
+
 // Module-level references for drain handler access
 let _sessionManager = null
 let _wsServer = null
@@ -82,17 +103,7 @@ function gracefulExit(code, reason) {
 
 async function main() {
   // Load config (same as cli.js start command)
-  let fileConfig = {}
-  if (existsSync(configFile())) {
-    fileConfig = JSON.parse(readFileSync(configFile(), 'utf-8'))
-  }
-
-  const defaults = {
-    port: 8765,
-    noAuth: false,
-  }
-
-  const config = mergeConfig({ fileConfig, defaults })
+  const config = loadChildConfig()
 
   // Force tunnel=none — supervisor owns the tunnel
   config.tunnel = 'none'

@@ -10,8 +10,7 @@ import {
 } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { loadAndMergeConfig } from '../src/cli/shared.js'
-import { isFatalConfigWarning, validateConfig } from '../src/config.js'
+import { loadChildConfig } from '../src/server-cli-child.js'
 import {
   createDaemonSessionManager,
   formatStartupSkillPolicyDiagnostic,
@@ -92,7 +91,7 @@ describe('daemon startup skill policy (#7834)', () => {
   function loadFixtureConfig(value) {
     const path = join(configDir, 'config.json')
     writeFileSync(path, JSON.stringify(value))
-    return loadAndMergeConfig({ config: path, verbose: false })
+    return loadChildConfig(path)
   }
 
   function createManager(config) {
@@ -168,10 +167,16 @@ describe('daemon startup skill policy (#7834)', () => {
       'Runtime skills: allowlist=disabled (source: default); trust=disabled (source: rejected config)',
     )
 
-    const invalidAllowlist = validateConfig({ providerSkillAllowlist: [] }).warnings
-    assert.ok(
-      invalidAllowlist.some((warning) => isFatalConfigWarning(warning)),
-      'a non-object allowlist remains a fatal config type error',
+  })
+
+  it('rejects a malformed allowlist re-read by the supervised child before manager construction', () => {
+    const malformed = loadFixtureConfig({ providerSkillAllowlist: ['allowed'] })
+    assert.deepEqual(malformed.providerSkillAllowlist, ['allowed'], 'child merge preserves the invalid shape for policy validation')
+    assert.throws(
+      () => createManager(malformed),
+      (err) => err?.code === 'INVALID_PROVIDER_SKILL_ALLOWLIST'
+        && err.message === 'Runtime skills: allowlist=rejected (source: config; expected object)',
     )
+    assert.equal(managers.length, 0, 'factory rejects before constructing a SessionManager')
   })
 })
