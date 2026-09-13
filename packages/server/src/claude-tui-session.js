@@ -707,6 +707,11 @@ export class ClaudeTuiSession extends BaseSession {
    * Kept on the session because external callers (input-handlers.js) and the
    * provider contract call `session.respondToQuestion(...)`; the driving logic
    * lives in form-driver.js, reaching session state/PTY writers via its host.
+   *
+   * #7812: the driver's return value is passed straight through — see
+   * FormDriver#respondToQuestion for the drain-handle contract. Production
+   * callers ignore it; it exists so a test can await the throttled keystroke
+   * drive instead of sleeping a fixed wall-clock guess.
    */
   respondToQuestion(text, answersMap, toolUseId, opts) {
     return this._formDriver.respondToQuestion(text, answersMap, toolUseId, opts)
