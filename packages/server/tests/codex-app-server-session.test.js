@@ -2510,7 +2510,9 @@ describe('CodexAppServerSession — _refreshModelCatalog pushes models_updated (
     const { s, cleanup } = mkSession({ clientFactory: () => ({}) })
     const events = capture(s, ['models_updated'])
     try {
-      s._client = {} // _refreshModelCatalog bails out early with no client
+      // A truthy _client is what lets the refresh path RUN: _refreshModelCatalog
+      // bails out early when there is no client, which would make this test vacuous.
+      s._client = {}
       await withMockedRefresh(rows, () => s._refreshModelCatalog())
       assert.deepEqual(events, [['models_updated', { models: rows }]],
         'the refreshed roster must reach listeners — this is the ONLY path that can push it once the live client has claimed the discovery slot')
