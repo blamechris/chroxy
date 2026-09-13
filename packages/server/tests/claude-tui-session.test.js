@@ -5136,8 +5136,11 @@ describe('ClaudeTuiSession', () => {
         ],
       }
 
-      session.respondToQuestion('App + docs (all 3)')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // #7812: await the drive's drain handle rather than a wall-clock guess.
+      // Only the paste-disable and the first character are written synchronously;
+      // the submit \r and the re-enable land after the per-char throttle, so a
+      // fixed sleep can observe a PREFIX of this 4-write sequence under load.
+      await session.respondToQuestion('App + docs (all 3)')
 
       // disable + '2' + \\r + enable = 4 writes
       assert.equal(writes.length, 4, `expected 4 writes for index path, got ${writes.length}: ${JSON.stringify(writes)}`)
@@ -5178,8 +5181,7 @@ describe('ClaudeTuiSession', () => {
       assert.ok(session._pendingUserAnswers.has('toolu_second'), 'second present')
 
       // Dashboard answers the FIRST one (by toolUseId).
-      session.respondToQuestion('A', undefined, 'toolu_first')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('A', undefined, 'toolu_first')  // #7812: drain, not sleep
 
       // Wrote '1' (1-indexed option for 'A') — proving the route went to the first entry's options.
       assert.equal(writes[1], '1', 'wrote 1-indexed digit for first entry\'s option A')
@@ -5189,8 +5191,7 @@ describe('ClaudeTuiSession', () => {
 
       // Now dashboard answers the SECOND one.
       writes.length = 0
-      session.respondToQuestion('Z', undefined, 'toolu_second')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('Z', undefined, 'toolu_second')  // #7812: drain, not sleep
 
       assert.equal(writes[1], '3', 'wrote 1-indexed digit for second entry\'s option Z')
       assert.equal(session._pendingUserAnswers.size, 0, 'Map empty after both answered')
@@ -5227,8 +5228,16 @@ describe('ClaudeTuiSession', () => {
         options: [{ label: 'Patch' }, { label: 'Minor' }],
       }
 
-      session.respondToQuestion('Brand new freeform answer')
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #7812 - this was the flake. The freeform answer is typed into the PTY
+      // one character per PROMPT_CHAR_DELAY_MS tick; sleeping a fixed 100 ms and
+      // then slicing `writes` read a TRUNCATED prefix on a loaded runner
+      // ('Brand new freeform ans', 22 of 25 chars - run 34731508759). Awaiting
+      // the drive's drain handle settles exactly when the last byte has been
+      // handed to _term.write, so the assertion below cannot race the writer at
+      // any load. The assertion itself is unchanged - it still compares the
+      // FULL expected text, so a genuine truncation bug in the writer is still
+      // a hard red.
+      await session.respondToQuestion('Brand new freeform answer')
 
       // No match → fall through to typing the text per the v0.9.3 behavior.
       // (claude TUI's Other-path may still mis-parse this; tracked at #4288
@@ -5257,8 +5266,7 @@ describe('ClaudeTuiSession', () => {
         const writes = []
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
         session._pendingUserAnswer = { toolUseId: 'toolu-boundary', options }
-        session.respondToQuestion(label)
-        await new Promise((resolve) => setTimeout(resolve, 30))
+        await session.respondToQuestion(label)  // #7812: drain, not sleep
         assert.equal(writes[1], digit, `option "${label}" maps to digit "${digit}"`)
       }
     })
@@ -5285,8 +5293,9 @@ describe('ClaudeTuiSession', () => {
       session.on('error', (e) => errors.push(e))
 
       // opt-9 is index 9 → drive via 9 Down arrows + Enter.
-      session.respondToQuestion('opt-9')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // #7812: 9 Down arrows are paced by the SAME per-char throttle, so the
+      // full-sequence deepEqual below needs the drain, not a 50 ms guess.
+      await session.respondToQuestion('opt-9')
 
       // No too-many error — arrow-nav drives the form natively.
       assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
@@ -5308,8 +5317,7 @@ describe('ClaudeTuiSession', () => {
       session.on('error', (e) => errors.push(e))
 
       // opt-11 is the LAST option (idx 11) → 11 Down arrows + Enter.
-      session.respondToQuestion('opt-11')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('opt-11')  // #7812: drain, not sleep
 
       assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
       const expected = ['\x1b[?2004l', ...Array(11).fill('\x1b[B'), '\r', '\x1b[?2004h']
@@ -5322,8 +5330,7 @@ describe('ClaudeTuiSession', () => {
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_free' /* no options */ }
 
-      session.respondToQuestion('hello')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('hello')  // #7812: drain, not sleep
 
       // Same shape as a regular throttled write — disable + 5 chars + \\r + enable.
       assert.ok(writes.length >= 5 + 3)
@@ -5331,6 +5338,50 @@ describe('ClaudeTuiSession', () => {
       const text = 'hello'
       const charWrites = writes.slice(1, 1 + text.length)
       assert.equal(charWrites.join(''), text)
+    })
+
+    // #7812 - pin the DRAIN HANDLE contract the assertions above now rest on.
+    // respondToQuestion drives the PTY one character per PROMPT_CHAR_DELAY_MS,
+    // so every sibling test that reads `writes` after the call depends on the
+    // returned promise settling only once the drive is finished. Without this
+    // test the contract would be invisible: most sibling assertions read
+    // `writes[1]`, which lands synchronously, so a future refactor that stopped
+    // returning the handle would leave them green (`await undefined` resolves on
+    // the next microtask) and would only resurface as the original flake on a
+    // loaded runner. Here the per-char delay is inflated far past any plausible
+    // fixed sleep, so dropping the handle produces a one-character prefix and a
+    // hard, legible red.
+    it('respondToQuestion returns a drain handle that settles only after the LAST keystroke (#7812)', async () => {
+      const SLOW_CHAR_MS = 20
+      const originalDelay = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS')
+      Object.defineProperty(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS', { value: SLOW_CHAR_MS, configurable: true })
+      try {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = { toolUseId: 'toolu_aq_drain', options: [{ label: 'Patch' }] }
+
+        const text = 'Brand new freeform answer'
+        const handle = session.respondToQuestion(text)
+
+        assert.ok(handle && typeof handle.then === 'function',
+          'respondToQuestion returns a thenable drain handle on the keystroke-drive path')
+        // The drive is genuinely still in flight at return time - only the
+        // paste-disable and the first character are synchronous. If this ever
+        // stops holding, the handle has become meaningless (the write finished
+        // before it was handed back) and the sibling tests are back to reading a
+        // buffer nobody promised was complete.
+        assert.ok(writes.length < 1 + text.length,
+          `drive must still be in flight when the handle is returned, saw ${writes.length} writes: ${JSON.stringify(writes)}`)
+
+        await handle
+
+        // Awaiting it yields the COMPLETE sequence - no prefix, at a per-char
+        // delay 20x the production one.
+        assert.deepEqual(writes, ['\x1b[?2004l', ...text, '\r', '\x1b[?2004h'],
+          `awaiting the handle must yield the complete write sequence, got ${JSON.stringify(writes)}`)
+      } finally {
+        Object.defineProperty(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS', originalDelay)
+      }
     })
 
     it('respondToQuestion is a no-op when no pending answer (defensive)', () => {
@@ -5370,11 +5421,13 @@ describe('ClaudeTuiSession', () => {
 
         // Dashboard sends: answer='Other' (the Other option label),
         // freeformText='my custom answer' (the typed text).
-        session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
+        // #7812: the drain handle covers the WHOLE two-stage drive - stage-1
+        // digit, the OTHER_FREEFORM_SETTLE_MS pause and the stage-2 per-char
+        // text - so this no longer depends on a fixed 250 ms being enough for
+        // all three under load.
+        await session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
           freeformText: 'my custom answer',
         })
-        // Allow throttled writes (digit + settle + per-char text) to drain.
-        await new Promise((resolve) => setTimeout(resolve, 250))
 
         // Sequence shape: [paste-disable, '3' (Other digit), <settle pause>,
         // paste-disable-again, per-char text, '\r', paste-enable]. We pin
@@ -5403,8 +5456,7 @@ describe('ClaudeTuiSession', () => {
         }
 
         // Legacy path: answer matches an option label exactly → 1-indexed digit.
-        session.respondToQuestion('Patch')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('Patch')  // #7812: drain, not sleep
 
         // disable + '1' + \\r + enable = 4 writes (matches the #4290 test shape).
         assert.equal(writes.length, 4, `expected 4 writes for legacy path, got ${writes.length}: ${JSON.stringify(writes)}`)
@@ -5722,10 +5774,13 @@ describe('ClaudeTuiSession', () => {
         }
 
         // Dashboard answers all three in quick succession.
-        session.respondToQuestion('A', undefined, 'toolu_one')
-        session.respondToQuestion('B', undefined, 'toolu_two')
-        session.respondToQuestion('A', undefined, 'toolu_three')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        // #7812: fire all three in the same tick (the rate-limiter's actual
+        // subject) and then drain every drive, instead of sleeping 50 ms.
+        await Promise.all([
+          session.respondToQuestion('A', undefined, 'toolu_one'),
+          session.respondToQuestion('B', undefined, 'toolu_two'),
+          session.respondToQuestion('A', undefined, 'toolu_three'),
+        ])
 
         assert.equal(
           hexDumpLines.length, 1,
@@ -5745,8 +5800,7 @@ describe('ClaudeTuiSession', () => {
           tool_name: 'AskUserQuestion',
           tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
         }, 'msg-hex-rate-2')
-        session.respondToQuestion('A', undefined, 'toolu_turn2')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('A', undefined, 'toolu_turn2')  // #7812: drain, not sleep
 
         assert.equal(hexDumpLines.length, 1, 'new turn resets the rate-limit; first answer emits the dump again')
         assert.equal(skipLines.length, 0, 'no skip notice on the first answer of a new turn')
@@ -5857,8 +5911,7 @@ describe('ClaudeTuiSession', () => {
         // Dashboard sends an answer matching B's option, but OMITS toolUseId
         // (legacy client path). Per fallback contract: warn + route to B,
         // leave A alone.
-        session.respondToQuestion('b3', undefined, undefined)
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('b3', undefined, undefined)  // #7812: drain, not sleep
 
         // (1) WARN log fires naming the fallback condition. Pre-#4688
         // this was silent and the wedge symptom required a code read to

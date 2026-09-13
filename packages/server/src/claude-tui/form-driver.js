@@ -238,6 +238,27 @@ export class FormDriver {
    *   waits ~150 ms for claude TUI's option-menu → text-input prompt swap,
    *   then writes `freeformText` + Enter. Dropped when the chosen option
    *   doesn't exist or sits beyond the single-digit hotkey range.
+   *
+   * @returns {Promise<void>|undefined} — #7812 DRAIN HANDLE. The keystroke
+   *   drive is asynchronous (`_writePtyTextThrottled` paces one character per
+   *   PROMPT_CHAR_DELAY_MS to defeat claude TUI's paste detector — #4269) while
+   *   this method is synchronous by contract, so the drive has always been
+   *   fire-and-forget. On the paths that DO drive keystrokes this now also
+   *   returns the drive's promise, which settles once the last byte (the
+   *   trailing `\r` submit and the bracketed-paste re-enable included) has been
+   *   handed to `_term.write`. `undefined` on the paths that drive nothing
+   *   (no pending entry, stale toolUseId, validation drops) and on the
+   *   multi-select reinject path (#5776), which starts a fresh turn via
+   *   sendMessage rather than driving the form.
+   *
+   *   Production callers (handlers/input-handlers.js) ignore the return value
+   *   and MUST keep ignoring it — returning the handle changes no pacing, no
+   *   keystroke, and no ordering: the body stays synchronous (this method is
+   *   deliberately NOT `async`, so a synchronous throw still propagates
+   *   synchronously) and the drive is started at exactly the same point it
+   *   always was. The handle exists so a test can await the drain instead of
+   *   sleeping a fixed wall-clock guess and asserting on a partially-written
+   *   buffer (#7812: 22 of 25 characters after 100 ms on a loaded runner).
    */
   respondToQuestion(text, answersMap, toolUseId, opts) {
     // #4668: route to the specific pending entry the dashboard answered
@@ -429,7 +450,11 @@ export class FormDriver {
         // input prompt accepts typed input directly (no jump-nav),
         // and the trailing \r submits.
         const tag = prevToolUseId || '?'
-        ;(async () => {
+        // #7812: keep the handle so respondToQuestion can hand it back. The
+        // IIFE is still started here and still not awaited by production —
+        // capturing it adds no handler, so an unhandled rejection inside the
+        // drive behaves exactly as it did before.
+        const drive = (async () => {
           // #4808: destroy() can run during ANY of the awaits below
           // (stage-1 write, settle pause, stage-2 write). Without a
           // guard after each await the IIFE keeps running and:
@@ -474,7 +499,7 @@ export class FormDriver {
           })
         })()
         armWatchdog()
-        return
+        return drive
       }
 
       // #4290: if the chosen label matches one of the structured options
@@ -530,11 +555,13 @@ export class FormDriver {
         if (matchIdx >= 9) {
           const total = options.length
           ;(this._host._log || log).info(`AskUserQuestion single-question: question has ${total} options and the user picked option ${matchIdx + 1} ("${(text || '').slice(0, 40)}") — driving via arrow-key navigation (#4848) (tool=${prevToolUseId || '?'})`)
-          this._host._writePtyArrowNavSequence(matchIdx).catch((err) => {
+          // #7812: `.catch` already made this settle-never-reject; keep the
+          // handle so the caller can await the drain.
+          const drive = this._host._writePtyArrowNavSequence(matchIdx).catch((err) => {
             ;(this._host._log || log).warn(`respondToQuestion arrow-nav PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
           })
           armWatchdog()
-          return
+          return drive
         }
         if (matchIdx >= 0 && matchIdx < 9) {
           writeText = String(matchIdx + 1)
@@ -553,12 +580,15 @@ export class FormDriver {
       // Fire-and-forget — the write is async due to the per-char throttle,
       // but the caller (handleUserQuestionResponse) is sync. Errors here
       // are non-fatal; worst case the user re-sends the answer.
-      this._host._writePtyTextThrottled(writeText).catch((err) => {
+      // #7812: the drive handle is returned so a caller that needs to observe
+      // completion (tests) can await the drain rather than guess a wall-clock
+      // sleep; production still ignores it, so this stays fire-and-forget.
+      const drive = this._host._writePtyTextThrottled(writeText).catch((err) => {
         // #4828: session-scoped.
         ;(this._host._log || log).warn(`respondToQuestion PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
       })
       armWatchdog()
-      return
+      return drive
     }
 
     // #5773: claude TUI multi-QUESTION forms (questions.length > 1) are denied at
