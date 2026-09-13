@@ -12,7 +12,7 @@ import { OUTGOING_QUEUE_MAX } from '../src/base-session.js'
 import { InputSchema } from '@chroxy/protocol/schemas'
 import { buildInputMessage } from '@chroxy/protocol'
 import { inputHandlers } from '../src/handlers/input-handlers.js'
-import { createSpy, nsCtx } from './test-helpers.js'
+import { createSpy, nsCtx, waitFor } from './test-helpers.js'
 
 const root = mkdtempSync(join(tmpdir(), 'chroxy-context-adapters-'))
 after(() => rmSync(root, { recursive: true, force: true }))
@@ -49,8 +49,9 @@ async function dispatchTo(session, msg, { primaryClientId = null } = {}) {
     checkpointManager: { createCheckpoint: async () => {} },
     inputDedupRecords,
   })
-  await inputHandlers.input({}, { id: 'client-1', activeSessionId: 's1' }, msg, ctx)
-  return { sent, recordUserInput, inputDedupRecords }
+  const client = { id: 'client-1', activeSessionId: 's1' }
+  await inputHandlers.input({}, client, msg, ctx)
+  return { sent, recordUserInput, inputDedupRecords, ctx, client }
 }
 
 describe('selected context reaches concrete Claude/Codex adapters (#7822)', () => {
@@ -212,6 +213,67 @@ describe('selected context reaches concrete Claude/Codex adapters (#7822)', () =
     assert.equal(recordUserInput.callCount, 0)
     assert.equal(inputDedupRecords.has('s1'), false)
     session.destroy()
+  })
+
+  it('waits for the JSONL child spawn event before accepting context', async () => {
+    class SpawnedGeminiSession extends GeminiSession {
+      static get resolvedBinary() { return process.execPath }
+      _buildArgs() { return ['-e', 'setTimeout(() => {}, 1000)'] }
+      _buildChildEnv() { return process.env }
+    }
+    const session = new SpawnedGeminiSession({ cwd: root, skillsDir: root, repoSkillsDir: null })
+    session._processReady = true
+    session.on('error', () => {})
+
+    const { sent, recordUserInput } = await dispatchTo(session, contextMessage('jsonl-spawned'))
+    assert.equal(sent.at(-1).status, 'uncertain', 'spawn return alone must not acknowledge admission')
+    await waitFor(() => sent.some((value) => value.type === 'input_ack' && value.status === 'accepted'), {
+      label: 'JSONL spawn admission',
+    })
+    const ack = sent.at(-1)
+    assert.equal(ack.delivery, 'dispatch_started')
+    assert.deepEqual(ack.context?.acceptedItemIds, ['context-1'])
+    assert.equal(recordUserInput.callCount, 1)
+    await session.destroy()
+  })
+
+  it('rejects an asynchronously missing JSONL executable and allows the same id to retry', async () => {
+    class MissingGeminiSession extends GeminiSession {
+      static get resolvedBinary() { return join(root, 'definitely-missing-gemini') }
+      _buildArgs() { return [] }
+      _buildChildEnv() { return process.env }
+      sendMessage(...args) {
+        this.sendAttempts = (this.sendAttempts || 0) + 1
+        return super.sendMessage(...args)
+      }
+    }
+    const session = new MissingGeminiSession({ cwd: root, skillsDir: root, repoSkillsDir: null })
+    session._processReady = true
+    session.on('error', () => {})
+    const msg = contextMessage('jsonl-missing')
+
+    const result = await dispatchTo(session, msg)
+    await waitFor(() => session._process === null && session._isBusy === false, {
+      label: 'first JSONL launch failure cleanup',
+    })
+    let ack = result.sent.at(-1)
+    assert.equal(ack.status, 'rejected')
+    assert.equal(ack.delivery, 'not_dispatched')
+    assert.equal(ack.reason, 'spawn_failed')
+    assert.equal(ack.retrySafe, true)
+    assert.equal(ack.context, undefined)
+    assert.equal(result.recordUserInput.callCount, 0, 'failed launch must not create history')
+    assert.equal(result.inputDedupRecords.has('s1'), false, 'failed launch must release the reservation')
+
+    await inputHandlers.input({}, result.client, msg, result.ctx)
+    await waitFor(() => session.sendAttempts === 2 && session._process === null && session._isBusy === false, {
+      label: 'same-id JSONL launch retry cleanup',
+    })
+    ack = result.sent.at(-1)
+    assert.equal(ack.status, 'rejected', 'retry must not be suppressed as a duplicate')
+    assert.equal(session.sendAttempts, 2)
+    assert.equal(result.recordUserInput.callCount, 0)
+    await session.destroy()
   })
 
   it('rejects image context on a persistent attachment-unsupported adapter without recording history', async () => {

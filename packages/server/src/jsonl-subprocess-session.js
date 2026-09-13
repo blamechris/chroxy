@@ -358,7 +358,25 @@ export class JsonlSubprocessSession extends BaseSession {
       return
     }
 
-    reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
+    // child_process.spawn() returning a ChildProcess does not prove that the
+    // executable launched: ENOENT/EACCES arrive asynchronously via `error`.
+    // Attach both admission listeners immediately, before any other setup, and
+    // distinguish launch failure from errors after the child's `spawn` event.
+    let admissionReported = false
+    const reportAdmissionOnce = (admission) => {
+      if (admissionReported) return
+      admissionReported = true
+      reportInputAdmission(sendOptions, admission)
+    }
+    proc.once('spawn', () => {
+      reportAdmissionOnce({ status: 'accepted', delivery: 'dispatch_started' })
+    })
+    proc.once('error', () => {
+      reportAdmissionOnce({
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'spawn_failed', message: 'The provider process could not be started.',
+      })
+    })
 
     // Spawn succeeded: argv is committed to the wire, so flip the flag.
     if (willPrependSkills) {

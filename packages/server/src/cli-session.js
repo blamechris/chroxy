@@ -603,6 +603,18 @@ export class CliSession extends BaseSession {
 
     this._child = child
 
+    // A returned ChildProcess is not ready proof: missing or non-executable
+    // binaries report ENOENT/EACCES asynchronously. Only expose readiness and
+    // drain startup input after Node confirms the child `spawn` event. Ignore
+    // a late event from a child that was replaced during a restart.
+    child.once('spawn', () => {
+      if (this._destroying || this._child !== child) return
+      this._processReady = true
+      log.info('Process started, ready for messages')
+      this.emit('ready', { sessionId: null, model: this.model, tools: [] })
+      this._drainPendingQueue()
+    })
+
     // Do NOT close stdin — we write messages to it
 
     // Read stdout line by line — each line is a JSON object
@@ -648,6 +660,7 @@ export class CliSession extends BaseSession {
     })
 
     child.on('error', (err) => {
+      if (this._child !== child) return
       this._cleanupReadlines()
       this._processReady = false
       this._child = null
@@ -660,15 +673,10 @@ export class CliSession extends BaseSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => this._handleChildClose(code))
-
-    // stdin is writable immediately — process is ready for NDJSON messages.
-    // system.init arrives with the first response, not at startup.
-    this._processReady = true
-    log.info('Process started, ready for messages')
-    this.emit('ready', { sessionId: null, model: this.model, tools: [] })
-
-    this._drainPendingQueue()
+    child.on('close', (code) => {
+      if (this._child !== child) return
+      this._handleChildClose(code)
+    })
   }
 
   /**
