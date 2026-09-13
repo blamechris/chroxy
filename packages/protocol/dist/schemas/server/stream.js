@@ -467,10 +467,20 @@ export const ServerAvailableModelsSchema = z.object({
     // #6370: every `available_models` sender tags the roster with the provider it
     // came from (ws-history multi/legacy/refresh/switch, server-cli overlay
     // re-broadcast, ws-forwarding, session-handlers) and the wire contract
-    // documents it — declare it so the schema matches. Nullable: several senders
-    // pass an explicit `provider: null` for the default/unscoped roster.
-    // Non-breaking — the handler reads models/defaultModel off the envelope and
-    // ignored the undeclared key before.
+    // documents it — declare it so the schema matches. Non-breaking — the handler
+    // reads models/defaultModel off the envelope and ignored the undeclared key
+    // before.
+    //
+    // NULLABLE FOR BACK-COMPAT ONLY (#7759). It used to say "several senders pass
+    // an explicit `provider: null` for the default/unscoped roster"; since #7759
+    // none do — the four that fell back to `|| null` when they had no session to
+    // read a provider off now resolve the daemon's own default and tag with that,
+    // so the complete sender list emits a concrete string. A pre-provider daemon
+    // is still a real client, so the schema keeps accepting null; but a null tag
+    // FROM A CURRENT BUILD is a regression, not the documented unscoped case, and
+    // a new sender must not reintroduce one. Clients file an untagged roster in
+    // store-core's `UNTAGGED_MODELS_PROVIDER` bucket, which no named provider can
+    // ever read — that is the leak #7759 closed.
     provider: z.string().nullable().optional(),
 });
 export const ServerPermissionModeChangedSchema = z.object({

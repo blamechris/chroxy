@@ -4,7 +4,7 @@
  * Extracted from ws-server.js to separate the post-authentication
  * handshake and history replay concerns from core server orchestration.
  */
-import { toShortModelId, getRegistryForProvider } from './models.js'
+import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
 import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
@@ -893,14 +893,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // seeded from that list. Claude providers share the default registry
     // that is fed by `supportedModels()` on each SDK init.
     // #7728/#7759 — `activeProvider` is null on any post-auth connect with no
-    // active session, and `getRegistryForProvider(null)` answers with the
-    // CLAUDE default registry. The client files a null-tagged roster as
-    // UNTAGGED, which it serves to a session of any provider while it is the
-    // only roster it knows — i.e. this send labels a Claude roster "could be
-    // anyone's". Naming the registry that actually answered is #7759.
+    // active session, and a null TAG is filed in the client's UNTAGGED bucket,
+    // which it serves to a session of any provider while it is the only roster
+    // it knows — a Claude roster labelled "could be anyone's". So the roster is
+    // tagged with the daemon's resolved default instead, and its registry is
+    // resolved from that SAME name (`resolveRosterProvider`) so the tag names
+    // the registry that actually produced the rows.
+    //
+    // `activeProvider` itself is deliberately left as-is: it also drives the
+    // discovery refresh and the permission-mode copy below, and neither should
+    // start firing for a client that has no session.
     const activeProvider = entry?.provider || null
-    const activeRegistry = getRegistryForProvider(activeProvider)
-    send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: activeProvider })
+    const rosterProvider = resolveRosterProvider(activeProvider, billingCanary?.defaultProvider)
+    const activeRegistry = getRegistryForProvider(rosterProvider)
+    send(ws, { type: 'available_models', models: activeRegistry.getModels(), defaultModel: activeRegistry.getDefaultModelId(), provider: rosterProvider })
     // #5421/#5555: dynamic-discovery refresh (ollama /api/tags). `sendSessionInfo`
     // above was told to skip its own `available_models` push (de-dupe on connect),
     // so it also skipped scheduling the refresh — this path now owns the single
@@ -941,10 +947,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #6368: scope the legacy single-session model list to the ACTIVE provider's
     // registry (the cliSession is the default-provider session) instead of the
     // Claude-only module-level getModels(). billingCanary.defaultProvider is the
-    // resolved `config.provider || DEFAULT_PROVIDER`; for Claude (or a null/absent
-    // canary on old ctx) getRegistryForProvider falls back to the default Claude
-    // registry, so behaviour is unchanged today.
-    const legacyProvider = billingCanary?.defaultProvider || null
+    // resolved `config.provider || DEFAULT_PROVIDER`.
+    //
+    // #7759 — an absent canary (old ctx / test fixture) used to leave this
+    // `null`, which resolves to the default Claude registry and then tags the
+    // roster it produced as UNTAGGED at the client. The registry is the same
+    // one either way — DEFAULT_PROVIDER is Claude-family — so what changes is
+    // only that the send now NAMES it.
+    const legacyProvider = resolveRosterProvider(null, billingCanary?.defaultProvider)
     const legacyRegistry = getRegistryForProvider(legacyProvider)
     send(ws, { type: 'available_models', models: legacyRegistry.getModels(), defaultModel: legacyRegistry.getDefaultModelId(), provider: legacyProvider })
     send(ws, {
@@ -1107,7 +1117,7 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
  *   re-tags the dashboard's provider.
  */
 export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
-  const { sessionManager, send } = ctx
+  const { sessionManager, send, billingCanary } = ctx
   const entry = sessionManager?.getSession(sessionId)
   if (!entry) return
   const session = entry.session
@@ -1122,24 +1132,28 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   // the provider seen last, suppressing the picker for every other session;
   // since #7728 each roster is keyed by provider, so what a missing push
   // leaves behind is an EMPTY roster for that provider — no picker, and no
-  // ids belonging to a provider that TAGGED its broadcast. One exception, and
-  // it is this file's own doing: `sendPostAuthInfo` sends `provider: null`
-  // when there is no active session (and `getRegistryForProvider(null)`
-  // answers with the CLAUDE registry), which the client files as UNTAGGED and
-  // still serves to any provider while it is the only roster it knows.
-  // Tagging that send is #7759.
+  // ids belonging to a provider that TAGGED its broadcast.
+  //
+  // #7759 — and no UNTAGGED roster either, on any send path: an entry that
+  // reports no provider (and `sendPostAuthInfo`'s no-active-session case) used
+  // to tag `null`, which the client files in the bucket that means "a
+  // pre-provider daemon" and then serves to a session of any provider. The tag
+  // is the daemon's resolved default in that case, and the registry is
+  // resolved from that same name.
   if (!opts.skipModels) {
-    const activeProvider = entry.provider || null
-    const activeRegistry = getRegistryForProvider(activeProvider)
+    const rosterProvider = resolveRosterProvider(entry.provider, billingCanary?.defaultProvider)
+    const activeRegistry = getRegistryForProvider(rosterProvider)
     send(ws, {
       type: 'available_models',
       models: activeRegistry.getModels(),
       defaultModel: activeRegistry.getDefaultModelId(),
-      provider: activeProvider,
+      provider: rosterProvider,
     })
     // #5421: background dynamic-discovery refresh (ollama /api/tags); a
-    // changed list is re-pushed to this client when the probe lands.
-    scheduleProviderModelsRefresh(ctx, ws, activeProvider)
+    // changed list is re-pushed to this client when the probe lands. Keyed on
+    // the session's OWN provider, not the roster tag — a session that reports
+    // none has nothing to probe.
+    scheduleProviderModelsRefresh(ctx, ws, entry.provider || null)
   }
   send(ws, {
     type: 'model_changed',

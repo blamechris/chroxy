@@ -2,6 +2,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
 import { createSpy, createMockSession, waitFor, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+// #7759 — the codex registry must resolve to the real CodexSession class, which
+// importing providers.js registers.
+import '../../src/providers.js'
 
 function _makeSent() {
   const sent = []
@@ -116,6 +120,49 @@ describe('session-handlers', () => {
       assert.ok(sent, 'session_switched not sent')
       assert.equal(sent.sessionId, 'sess-1')
       assert.equal(sent.conversationId, 'conv-1')
+    })
+
+    // #7759 — the switch push used `entry.provider || null`, and a null tag is
+    // filed in the client's UNTAGGED bucket (store-core/models-by-provider.ts),
+    // which is served to a session of ANY provider while it is the only roster
+    // in play. `getRegistryForProvider(null)` answers with the CLAUDE registry,
+    // so switching to a provider-less entry could put Claude chips in front of
+    // a codex session with `set_model` live on tap.
+    describe('available_models is never tagged null (#7759)', () => {
+      it('tags the daemon default when the entry reports no provider', () => {
+        const ctx = makeCtx({ config: { provider: 'codex' } })
+        ctx._sessions.set('sess-np', { session: createMockSession(), name: 'NoProvider', cwd: '/tmp' })
+
+        sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-np' }, ctx)
+
+        const modelsMsg = ctx._sent.find(m => m.type === 'available_models')
+        assert.ok(modelsMsg, 'available_models not sent on switch')
+        assert.equal(modelsMsg.provider, 'codex', "the daemon's resolved default, not null")
+        assert.ok(modelsMsg.models.length > 0, 'and a roster to go with the tag')
+        assert.ok(!modelsMsg.models.some(m => ['sonnet', 'opus', 'haiku'].includes(m.id)),
+          `a codex-tagged send must not carry the Claude roster, got ${JSON.stringify(modelsMsg.models.map(m => m.id))}`)
+      })
+
+      it("still prefers the entry's own provider when it has one", () => {
+        // The fallback must not shadow the real answer.
+        const ctx = makeCtx({ config: { provider: 'codex' } })
+        ctx._sessions.set('sess-cli', { session: createMockSession(), name: 'CLI', cwd: '/tmp', provider: 'claude-cli' })
+
+        sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-cli' }, ctx)
+
+        const modelsMsg = ctx._sent.find(m => m.type === 'available_models')
+        assert.equal(modelsMsg.provider, 'claude-cli')
+      })
+
+      it('falls back to DEFAULT_PROVIDER when the ctx carries no config', () => {
+        const ctx = makeCtx() // no services.config
+        ctx._sessions.set('sess-np', { session: createMockSession(), name: 'NoProvider', cwd: '/tmp' })
+
+        sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-np' }, ctx)
+
+        const modelsMsg = ctx._sent.find(m => m.type === 'available_models')
+        assert.equal(modelsMsg.provider, DEFAULT_PROVIDER)
+      })
     })
 
     it('re-sends provider-scoped permission modes on switch (codex → codex copy) (#6638)', () => {
