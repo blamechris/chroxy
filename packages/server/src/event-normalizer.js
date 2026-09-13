@@ -224,6 +224,25 @@ Object.assign(EVENT_MAP, {
           mode: entry.session.permissionMode || 'approve',
         },
       })
+      // #7792: the creating client's replay (ws-history.js `sendSessionInfo`)
+      // runs at `session_switched` time, before `thread/start` has answered —
+      // so it can only ever replay whatever was already known (`default` for
+      // a fresh codex session). This `ready` push is the only moment that
+      // can carry the booted effort to the client that created the session.
+      // Same `undefined`-means-unsupported / falsy-means-unknown contract as
+      // ws-history.js:1162-1166, so the two paths can never disagree: a
+      // provider whose `thinkingLevel` getter is `undefined` (the BaseSession
+      // default) sends nothing here either, rather than a bogus 'default'
+      // that would stomp a client that already has the right value.
+      const thinkingLevel = entry.session.thinkingLevel
+      if (thinkingLevel !== undefined) {
+        messages.push({
+          msg: {
+            type: 'thinking_level_changed',
+            level: thinkingLevel || 'default',
+          },
+        })
+      }
     }
     return { messages }
   },

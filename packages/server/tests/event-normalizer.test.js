@@ -593,6 +593,50 @@ describe('EventNormalizer', () => {
       const result = normalizer.normalize('ready', {}, ctx)
       assert.equal(result.messages[1].msg.model, 'opus')
     })
+
+    // #7792: a fresh codex session captures the reasoning effort codex
+    // resolved at `thread/start` (get thinkingLevel), but the creating
+    // client's replay runs before thread/start answers — so the `ready`
+    // burst is the only place that can carry it. Mirrors ws-history.js's
+    // replay contract exactly (undefined = unsupported provider, sends
+    // nothing; a known level, even the string 'default', is pushed as-is).
+    it('pushes thinking_level_changed with the booted reasoning effort (#7792)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-sonnet-4-6', permissionMode: 'approve', thinkingLevel: 'xhigh' },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages.length, 4)
+      const msg = result.messages.find((m) => m.msg.type === 'thinking_level_changed')
+      assert.ok(msg, 'expected a thinking_level_changed message in the ready burst')
+      assert.equal(msg.msg.level, 'xhigh')
+    })
+
+    it('does not push thinking_level_changed when the provider has no thinkingLevel getter (#7792)', () => {
+      // makeCtx()'s default session has no `thinkingLevel` key at all, so the
+      // property read is `undefined` — the BaseSession contract for "this
+      // provider doesn't support thinking levels".
+      const result = normalizer.normalize('ready', {}, makeCtx())
+      assert.equal(result.messages.length, 3)
+      assert.equal(result.messages.some((m) => m.msg.type === 'thinking_level_changed'), false)
+    })
+
+    it('pushes level "default" rather than a bogus falsy level, matching the replay contract (#7792)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: { model: 'claude-sonnet-4-6', permissionMode: 'approve', thinkingLevel: null },
+          name: 'Test',
+          cwd: '/tmp',
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      const msg = result.messages.find((m) => m.msg.type === 'thinking_level_changed')
+      assert.ok(msg, 'a known-but-unset level (null) is still sent, per ws-history.js:1162-1166')
+      assert.equal(msg.msg.level, 'default')
+    })
   })
 
   // ---- EVENT_MAP: conversation_id ----
