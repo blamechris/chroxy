@@ -1127,6 +1127,7 @@ export async function startCliServer(config) {
     binaryProvenanceMode: resolveBinaryProvenanceMode(config),
     binarySignatureGate: isBinarySignatureGateEnabled(config),
     providerType,
+    agentConnections: config.agentConnections || [],
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,

@@ -20,6 +20,7 @@ import { createLogger } from '../logger.js'
 // symlink-destroying, mode-widening bug survived in two places at once. Any new
 // caller that writes this file MUST come through here too.
 import { writeClaudeConfigAtomic } from '../byok-mcp-config.js'
+import { claudeNativeRouteSettingsEnv } from '../utils/claude-native-route.js'
 // Imported at call-time only (circular-safe): the writer methods read the
 // PROMPT_CHAR_DELAY_MS / MAX_THROTTLED_CHARS static getters off the class.
 import { ClaudeTuiSession } from '../claude-tui-session.js'
@@ -33,6 +34,19 @@ const log = createLogger('claude-tui-session')
 // Permission hook script — same one CliSession uses. Lives at
 // packages/server/hooks/permission-hook.sh.
 const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'permission-hook.sh')
+const NATIVE_ROUTE_CHECK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'claude-native-route-check.mjs')
+
+export function buildNativeRouteCheckHook({ nodePath, scriptPath, markerPath, nonce }) {
+  // Claude Code's command-hook exec form passes each `args` entry verbatim,
+  // without a shell, on every platform. Besides avoiding command injection,
+  // this works when node.exe lives under Program Files and when Git Bash is not
+  // installed on Windows. Keep every path out of the shell-form command string.
+  return {
+    type: 'command',
+    command: nodePath,
+    args: [scriptPath, markerPath, nonce],
+  }
+}
 
 // ANSI strip pattern covering the escape categories claude TUI emits
 // during startup + redraw — keeps _outputTail readable for inline
@@ -234,10 +248,10 @@ export function ensureCwdTrusted(cwd) {
 // so a persistent PTY can fire 1..N Stop events across the session
 // lifetime and each turn picks up only its own.
 //
-// This is written ONCE per session at start() — the same settings.json is
-// reused across every turn, so changing it mid-session has no effect
-// (claude reads it at spawn time).
-export function writeHookSettings(sinkDir, { permissionsEnabled }) {
+// Legacy sessions write this once at start. Explicit native connections rewrite
+// it before every spawn/respawn so the SessionStart route marker carries a fresh
+// nonce. The file remains stable across turns within one PTY process.
+export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // Portable unique-id source for hook filenames — see the UUID note above.
@@ -258,7 +272,21 @@ export function writeHookSettings(sinkDir, { permissionsEnabled }) {
     })
   }
   const settings = {
+    ...(nativeRouteNonce ? { env: claudeNativeRouteSettingsEnv() } : {}),
     hooks: {
+      ...(nativeRouteNonce ? {
+        SessionStart: [
+          {
+            matcher: 'startup|resume',
+            hooks: [buildNativeRouteCheckHook({
+              nodePath: process.execPath,
+              scriptPath: NATIVE_ROUTE_CHECK_SCRIPT,
+              markerPath: join(sinkDir, 'native-route.json'),
+              nonce: nativeRouteNonce,
+            })],
+          },
+        ],
+      } : {}),
       Stop: [
         { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/stop-${UUID_CMD}.json` }] },
       ],

@@ -140,8 +140,10 @@ describe('runProviderPreflight — quarantine detection (#6708)', () => {
       verifiedPath = path
       return { ok: true, status: BINARY_STATUS.OK, path, quarantine: null }
     }
-    runProviderPreflight(Provider, { env: {}, verifyBinary: fakeVerify })
+    const result = runProviderPreflight(Provider, { env: {}, verifyBinary: fakeVerify })
     assert.equal(verifiedPath, '/custom/spawn/path/codex')
+    assert.deepEqual(result, { binaryPath: '/custom/spawn/path/codex' },
+      'the exact verified path must be returned to the session spawn path')
   })
 
   it('a not-found result (ok:false) throws ProviderBinaryNotFoundError, not the quarantine error', () => {
@@ -252,6 +254,30 @@ describe('runProviderPreflight — opt-in provenance gate (#6858)', () => {
         provenance: { mode: 'warn', signatureGate: false, ledger: fakeLedger() },
       }),
     )
+  })
+
+  it('returns the same binary path only after the configured provenance gate allows it', () => {
+    const calls = []
+    const checkedPath = '/verified/provider/binary'
+    const ledger = fakeLedger()
+    const result = runProviderPreflight(Provider, {
+      env: {},
+      verifyBinary: () => {
+        calls.push('binary')
+        return { ok: true, status: BINARY_STATUS.OK, path: checkedPath, quarantine: null }
+      },
+      verifyProvenance: (options) => {
+        calls.push('provenance')
+        assert.equal(options.resolvedPath, checkedPath)
+        assert.equal(options.mode, 'block')
+        assert.equal(options.signatureGate, true)
+        assert.equal(options.ledger, ledger)
+        return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path: options.resolvedPath }
+      },
+      provenance: { mode: 'block', signatureGate: true, ledger },
+    })
+    assert.deepEqual(calls, ['binary', 'provenance'])
+    assert.deepEqual(result, { binaryPath: checkedPath })
   })
 
   it('end-to-end: real verifyProvenance pins on first sight, then blocks a swapped hash', () => {

@@ -136,6 +136,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
 | `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form carries three more sub-blocks: `providers.openaiCompatible` — the identical entry shape for endpoints that speak the **OpenAI Chat Completions** API instead (OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom), where `baseUrl` is an OpenAI API base typically ending in `/v1`; `providers.acp` (#7319) — an array of config-driven **Agent Client Protocol** agents, each entry `{ id, label?, command, args?, env? }` spawning an arbitrary ACP-speaking agent over stdio, permissions **denied by default** (no bridge yet — #7320); and `providers.allowAnyModel`, see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven), [OpenAI-compatible endpoints](../../docs/providers.md#openai-compatible-endpoints-config-driven), and [ACP agents](../../docs/providers.md#acp-agents-config-driven). |
+| `agentConnections` | array | - | *(unmapped — see [note](#environment-variable-names))* | Explicit, non-secret agent routes shown in the existing session-creation provider picker. Each entry is `{ id, label, provider?, runtime, authRoute, accountRef?, credentialKey?, inferenceLocation? }`; see [Agent connections](#agent-connections). |
 | `legacyCli` | boolean | `--legacy-cli` | `CHROXY_LEGACY_CLI` | Legacy shorthand that maps to `provider: "claude-cli"` when no explicit `provider` is set. Prefer setting `provider` directly; an explicit `provider` always wins. |
 
 ### Permissions and security gates
@@ -589,6 +590,94 @@ The `provider` key picks which AI CLI backs a session by default:
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
 
 Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
+
+### Agent connections
+
+`agentConnections` assigns stable host-local names to explicit authentication
+routes. A current client shows these entries under their runtime before creating
+a session and sends the selected `connectionId`. The daemon persists the selected
+descriptor with the session. Restore requires the same descriptor version, stable
+connection id, runtime id, and requested authentication route; if any member of
+that identity tuple changes or the connection is removed, restore is refused.
+
+```json
+{
+  "agentConnections": [
+    {
+      "id": "codex-subscription",
+      "label": "Codex subscription",
+      "provider": "openai",
+      "runtime": "codex",
+      "authRoute": "native"
+    },
+    {
+      "id": "codex-api",
+      "label": "Codex API",
+      "provider": "openai",
+      "runtime": "codex",
+      "authRoute": "api",
+      "credentialKey": "OPENAI_API_KEY"
+    },
+    {
+      "id": "local-ollama",
+      "label": "Local Ollama",
+      "provider": "local",
+      "runtime": "ollama",
+      "authRoute": "local",
+      "inferenceLocation": "local"
+    }
+  ]
+}
+```
+
+Supported built-in route/runtime pairs are `claude-tui` + `native`, `codex` +
+`native` or `api`, `claude-byok` + `api`, and `ollama` + `local`. Other pairs,
+including imported ACP authentication, appear as unsupported and cannot create a
+session. Native credentials remain in the vendor CLI's own store. API entries
+refer to the runtime's existing Chroxy credential-store slot or environment
+variable by name (`OPENAI_API_KEY` for Codex and `ANTHROPIC_API_KEY` for Claude
+BYOK); unsupported references cannot create a session. Literal `apiKey`,
+`token`, `credential`, or `secret` fields are rejected.
+Connection descriptors never contain credential values.
+
+For Codex, a native selection removes OpenAI API environment settings from that
+child process; an API selection supplies only the selected Chroxy credential.
+Both explicit routes start Codex with per-process configuration that selects the
+built-in `openai` provider and pins its API and ChatGPT service base URLs to the
+vendor endpoints. Before `thread/start`, the daemon verifies the effective
+provider with `config/read` and the requested credential class with
+`account/read`; it then requires `thread/start` to report the built-in provider
+before marking the connection ready. The daemon never switches between routes
+automatically. Native login establishes the subscription billing route, while
+account identity and entitlement eligibility remain `unknown` until Codex offers
+an authoritative source.
+
+For Claude, an explicit native selection removes API-key, bearer-token, custom
+endpoint, and third-party cloud-provider route settings from the child process.
+Session startup pins the generated settings to Anthropic's first-party endpoint
+while retaining the normal Claude Code settings sources. It reruns the configured
+binary health, quarantine, signature, and provenance checks immediately before both
+`claude auth status --json` and the TUI spawn, using the exact binary, resolved
+project directory, child environment, and generated settings file. The auth
+probe must report `claude.ai` authentication through its first-party API provider
+with no API-key source. A shell-free `SessionStart` hook then observes the
+settings environment applied inside the real TUI process; a fresh session-private
+nonce must confirm the exact Anthropic endpoint and the absence of API-key,
+bearer-token, gateway, and third-party cloud selectors before Chroxy marks the
+session ready. Missing, stale, custom, or unverifiable routes stop that TUI.
+Every respawn repeats the full sequence. User, project, local, and managed
+Claude Code settings, instructions, skills, hooks, and plugins continue to load;
+if any effective setting changes the observed authentication or endpoint route,
+the startup check fails closed. Chroxy runtime skills injected with
+`--append-system-prompt` and Chroxy's permission hook/rules also continue to
+apply. This proves the route at each startup, but it cannot prove that an
+administrator will not refresh managed settings later in
+the lifetime of an already-running vendor process. Discovery remains process-free
+and reports readiness as unknown until startup. Legacy provider-only
+`claude-tui` sessions keep their existing environment and settings behavior.
+The native route is subscription billed; account identity and entitlement
+eligibility remain `unknown` because the status command does not establish
+either one.
 
 ### `claude-channel` (research preview)
 

@@ -690,6 +690,7 @@ export const SandboxSchema = z.object({
 
 export const CreateSessionSchema = z.object({
   type: z.literal('create_session'),
+  connectionId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/).optional(),
   name: z.string().max(200).optional(),
   cwd: z.string().max(4096).optional(),
   provider: z.string().max(256).optional(),

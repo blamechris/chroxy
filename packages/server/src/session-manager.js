@@ -45,6 +45,7 @@ import {
   serializePerSessionSettings,
   restorePerSessionSettings,
 } from './per-session-settings.js'
+import { AgentConnectionRegistry, createLegacyAgentConnection } from './agent-connections.js'
 
 const log = createLogger('session-manager')
 /**
@@ -306,6 +307,8 @@ export class SessionManager extends EventEmitter {
     // explicitly), but kept on the single source of truth so the fallback
     // can't silently diverge from the server's default (#5819).
     providerType = DEFAULT_PROVIDER,
+    agentConnections = [],
+    agentConnectionDeps = {},
 
     // Session behavior
     sessionTimeout,
@@ -556,6 +559,11 @@ export class SessionManager extends EventEmitter {
     this._userShellReapSeams = userShellReapSeams
     this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
+    this._agentConnectionRegistry = new AgentConnectionRegistry({
+      definitions: agentConnections,
+      getProvider,
+      ...agentConnectionDeps,
+    })
 
     // Session behavior
     this._maxToolInput = maxToolInput || null
@@ -1067,7 +1075,7 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
-  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1125,7 +1133,14 @@ export class SessionManager extends EventEmitter {
     // binary surfaces as an opaque ENOENT after the session has already
     // appeared in the UI. Runs BEFORE worktree creation so a failed preflight
     // doesn't leave an orphan worktree behind. (#2962)
-    const resolvedProviderType = provider || this._providerType
+    const connectionResolution = connectionId
+      ? this._agentConnectionRegistry.resolve(connectionId, {
+        provider,
+        restoredSnapshot: restoredAgentConnection,
+        model: resolvedModel,
+      })
+      : null
+    const resolvedProviderType = connectionResolution?.definition.runtime || provider || this._providerType
     const PreflightProviderClass = getProvider(resolvedProviderType)
     // #5985 (epic #5982): fail-closed gate for the embedded user-shell terminal.
     // Enforced here (before any spawn) so it covers EVERY create path — WS
@@ -1137,6 +1152,7 @@ export class SessionManager extends EventEmitter {
     if (PreflightProviderClass?.isUserShell === true && !this._userShellEnabled) {
       throw new UserShellDisabledError()
     }
+    let providerPreflight = null
     if (!this._skipPreflight) {
       // #6858: opt-in provenance gate. Only build the provenance bag when the
       // operator opted in (mode warn/block or the signature gate); otherwise pass
@@ -1148,7 +1164,7 @@ export class SessionManager extends EventEmitter {
           ledger: this.binaryProvenanceLedger,
         }
         : null
-      runProviderPreflight(PreflightProviderClass, { provenance })
+      providerPreflight = runProviderPreflight(PreflightProviderClass, { provenance })
     }
     // #6378: a provider opted into `config.providers.allowAnyModel` skips static
     // allowlist validation entirely — the model id passes through verbatim and
@@ -1337,6 +1353,8 @@ export class SessionManager extends EventEmitter {
       worktreeRepoDir,
       presetDescriptor,
       effectiveSessionPreamble,
+      connectionResolution,
+      connectionVerifiedBinary: providerPreflight?.binaryPath || null,
     }
   }
 
@@ -1413,7 +1431,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1428,6 +1446,8 @@ export class SessionManager extends EventEmitter {
       model,
       permissionMode,
       provider,
+      connectionId,
+      restoredAgentConnection,
       worktree,
       restoreWorktreePath,
       restoreWorktreeRepoDir,
@@ -1447,6 +1467,8 @@ export class SessionManager extends EventEmitter {
       worktreeRepoDir,
       presetDescriptor,
       effectiveSessionPreamble,
+      connectionResolution,
+      connectionVerifiedBinary,
     } = plan
 
     const providerOpts = {
@@ -1462,6 +1484,30 @@ export class SessionManager extends EventEmitter {
       // default (#3200). Same string SessionManager uses to pick the
       // ProviderClass via getProvider() — the registry key.
       provider: resolvedProvider,
+    }
+    if (connectionResolution) {
+      providerOpts.connectionAuthRoute = connectionResolution.definition.authRoute
+      if (connectionResolution.childEnv) providerOpts.connectionChildEnv = connectionResolution.childEnv
+      if (connectionVerifiedBinary) providerOpts.connectionVerifiedBinary = connectionVerifiedBinary
+      if (connectionResolution.definition.authRoute === 'native' && connectionVerifiedBinary) {
+        providerOpts.connectionRuntimePreflight = () => {
+          const repeated = runProviderPreflight(ProviderClass, {
+            provenance: (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
+              ? {
+                mode: this._binaryProvenanceMode,
+                signatureGate: this._binarySignatureGate,
+                ledger: this.binaryProvenanceLedger,
+              }
+              : null,
+          })
+          if (repeated.binaryPath !== connectionVerifiedBinary) {
+            const err = new Error('The verified provider binary path changed before the explicit native route could start.')
+            err.code = 'NATIVE_RUNTIME_UNVERIFIED'
+            throw err
+          }
+          return repeated.binaryPath
+        }
+      }
     }
     // #6638: per-session codex sandbox mode (read-only / workspace-write /
     // danger-full-access). Codex-specific opt read directly by CodexAppServerSession;
@@ -1575,6 +1621,24 @@ export class SessionManager extends EventEmitter {
     // forwarded via BASE_SESSION_OPT_KEYS.
     providerOpts.permissionRuleStore = this.permissionRuleStore
     const session = new ProviderClass(providerOpts)
+    const agentConnection = connectionResolution
+      ? {
+        ...connectionResolution.descriptor,
+        model: {
+          requested: typeof model === 'string' && model.length > 0 ? model : null,
+          resolved: null,
+        },
+      }
+      : createLegacyAgentConnection({
+        runtime: resolvedProvider,
+        ProviderClass,
+        model: resolvedModel,
+        authInfo: getProviderAuthInfo(resolvedProvider, ProviderClass),
+      })
+    // This snapshot is deliberately descriptor-only. Secret material used to
+    // construct a child environment stays in providerOpts and is never attached
+    // to the session entry, persistence payload, events, or logs.
+    session.agentConnection = agentConnection
     // Pre-seed `bootedModel` from a restored snapshot so the dashboard can
     // surface the session's actual model immediately on reconnect, without
     // waiting for the next CLI init event to repopulate it (#3700b). Only
@@ -1603,6 +1667,7 @@ export class SessionManager extends EventEmitter {
       name: sessionName,
       cwd: resolvedCwd,
       provider: resolvedProvider,
+      agentConnection,
       createdAt: Date.now(),
       worktreePath,
       // Original repo dir needed for `git worktree remove` during cleanup.
@@ -1981,20 +2046,25 @@ export class SessionManager extends EventEmitter {
       const stdinDroppedBytes = totals && Number.isFinite(totals.bytes) ? totals.bytes : 0
       const stdinDroppedCount = totals && Number.isFinite(totals.count) ? totals.count : 0
       const resolvedProvider = entry.provider || this._providerType
-      // #5630/#5629: per-session billing class for the dashboard cost labels.
+      // Explicit connection routes are immutable session state. Historical
+      // usage must never be relabelled by a later process.env/store change.
       // Prefer the provider's live resolveAuth().billingClass (it already folds
       // in the era gate + the claude-sdk/claude-cli explicit-key refinement);
       // fall back to billingClassForProvider() for any provider whose
       // resolveAuth predates the field. Wrapped defensively so a misbehaving
       // custom provider's resolveAuth can't crash the snapshot.
-      let billingClass
-      try {
-        billingClass = getProviderAuthInfo(resolvedProvider, ProviderClass)?.billingClass
-      } catch {
-        billingClass = undefined
-      }
-      if (!billingClass) {
-        billingClass = billingClassForProvider(resolvedProvider, Date.now())
+      let billingClass = entry.agentConnection?.entitlement?.route === 'api'
+        ? BILLING_CLASSES.API_KEY
+        : entry.agentConnection?.entitlement?.route === 'subscription'
+          ? BILLING_CLASSES.SUBSCRIPTION
+          : undefined
+      if (!billingClass && entry.agentConnection?.provenance?.source === 'legacy') {
+        try {
+          billingClass = getProviderAuthInfo(resolvedProvider, ProviderClass)?.billingClass
+        } catch {
+          billingClass = undefined
+        }
+        if (!billingClass) billingClass = billingClassForProvider(resolvedProvider, Date.now())
       }
       list.push({
         sessionId,
@@ -2019,6 +2089,7 @@ export class SessionManager extends EventEmitter {
         // cost row per class (api-key → "Cost (BYOK)", programmatic-credit →
         // "Credit spend", subscription → "Included (subscription)").
         billingClass,
+        agentConnection: entry.agentConnection,
         capabilities: ProviderClass.capabilities || {},
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
@@ -2563,6 +2634,10 @@ export class SessionManager extends EventEmitter {
         messageCounter: entry.session._messageCounter || 0,
         permissionMode: entry.session.permissionMode,
         provider: entry.provider || null,
+        // Persist the route that actually created the session. Restore compares
+        // descriptor version, stable id, runtime id, and requested auth route
+        // with current host config and fails closed when that identity changes.
+        agentConnection: entry.agentConnection || null,
         name: entry.name,
         // #5310 (WP-0.4) — persist the worktree binding so a restored session
         // rebinds to its existing worktree (rather than losing it). worktreePath
@@ -2849,6 +2924,12 @@ export class SessionManager extends EventEmitter {
       permissionMode: saved.permissionMode,
       resumeSessionId: saved.sdkSessionId,
       provider: saved.provider || undefined,
+      connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
+        ? saved.agentConnection.id
+        : undefined,
+      restoredAgentConnection: saved.agentConnection?.provenance?.source === 'configured'
+        ? saved.agentConnection
+        : undefined,
       // #5310 (WP-0.4) — rebind to the existing worktree (don't recreate).
       // Only string paths flow through; non-worktree sessions and older
       // state files (no field) pass undefined and take the normal path.
@@ -3296,6 +3377,7 @@ export class SessionManager extends EventEmitter {
         sessionId,
         name: saved.name,
         provider: saved.provider || this._providerType,
+        agentConnection: saved.agentConnection || undefined,
         cwd: saved.cwd,
         model: saved.model || null,
         permissionMode: saved.permissionMode || null,
@@ -4090,19 +4172,25 @@ export class SessionManager extends EventEmitter {
     // Resolved the same way as listSessions; defensive so a misbehaving
     // provider can't break the usage broadcast.
     const usageProvider = entry.provider || this._providerType
-    let billingClass
-    try {
-      billingClass = getProviderAuthInfo(usageProvider, entry.session.constructor)?.billingClass
-    } catch {
-      billingClass = undefined
+    let billingClass = entry.agentConnection?.entitlement?.route === 'api'
+      ? BILLING_CLASSES.API_KEY
+      : entry.agentConnection?.entitlement?.route === 'subscription'
+        ? BILLING_CLASSES.SUBSCRIPTION
+        : undefined
+    if (!billingClass && entry.agentConnection?.provenance?.source === 'legacy') {
+      try {
+        billingClass = getProviderAuthInfo(usageProvider, entry.session.constructor)?.billingClass
+      } catch {
+        billingClass = undefined
+      }
+      if (!billingClass) billingClass = billingClassForProvider(usageProvider, Date.now())
     }
-    if (!billingClass) billingClass = billingClassForProvider(usageProvider, Date.now())
     // Shallow-copy on emit so a subscriber that mutates the payload
     // can't corrupt the canonical accumulator (#4072 review-prep).
     this.emit('session_event', {
       sessionId,
       event: 'session_usage',
-      data: { cumulativeUsage: { ...acc }, billingClass },
+      data: { cumulativeUsage: { ...acc }, billingClass, agentConnection: entry.agentConnection },
     })
     // #5665: feed this turn's cost into the machine-wide monthly
     // programmatic-credit meter, but ONLY for programmatic-credit sessions

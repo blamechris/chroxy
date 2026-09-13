@@ -11,7 +11,7 @@
 
 // #6453 — canonical WIRE attachment type for the sendInput signature (was an
 // inline `{ type; mediaType; data; name }[]`; the app only sends binary).
-import type { BinaryAttachment, ServerPermissionInputMessage, CodexSandboxMode } from '@chroxy/protocol';
+import type { AgentConnection, BinaryAttachment, ServerPermissionInputMessage, CodexSandboxMode } from '@chroxy/protocol';
 
 // Re-export shared protocol types from store-core
 export type {
@@ -265,6 +265,7 @@ export interface ProviderInfo {
   name: string;
   capabilities?: ProviderCapabilities;
   auth?: ProviderAuth;
+  connections?: AgentConnection[];
 }
 
 export interface SessionState extends BaseSessionState {
@@ -506,6 +507,7 @@ export interface CreateSessionOptions {
   name: string;
   cwd?: string;
   provider?: string;
+  connectionId?: string;
   model?: string;
   permissionMode?: string;
   worktree?: boolean;

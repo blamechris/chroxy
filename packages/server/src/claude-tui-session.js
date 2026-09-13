@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'crypto'
+import { execFile } from 'child_process'
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
@@ -29,6 +30,7 @@ import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
+import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
@@ -52,6 +54,7 @@ import {
   AUTH_REQUIRED_MESSAGE,
   ensureCwdTrusted,
   writeHookSettings,
+  buildNativeRouteCheckHook,
   PtyDriverMixin,
 } from './claude-tui/pty-driver.js'
 import {
@@ -60,10 +63,35 @@ import {
   multiSelectReinjectEnabled,
 } from './claude-tui/form-driver.js'
 
+function nativeConnectionError(code, message) {
+  const err = new Error(message)
+  err.code = code
+  return err
+}
+
+function runClaudeAuthStatus({ binary, args, cwd, env }) {
+  return new Promise((resolve, reject) => {
+    execFile(binary, args, {
+      cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: 64 * 1024,
+      windowsHide: true,
+    }, (err, stdout) => {
+      if (err && typeof err.code !== 'number') {
+        reject(err)
+        return
+      }
+      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '' })
+    })
+  })
+}
+
 // Re-export the public writeHookSettings helper so existing
 // `import { writeHookSettings } from './claude-tui-session.js'` callers (and the
 // permission-hook test) keep working unchanged after the #5559 split.
-export { writeHookSettings }
+export { writeHookSettings, buildNativeRouteCheckHook }
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -121,6 +149,7 @@ export function withHookFsTimeout(promise, ms, label) {
 }
 
 export class ClaudeTuiSession extends BaseSession {
+  static agentConnectionRoutes = ['native']
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
   static claudeFamily = true
@@ -311,6 +340,20 @@ export class ClaudeTuiSession extends BaseSession {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
     // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
     const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, monotonicNow } = opts
+    this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
+      ? { ...opts.connectionChildEnv }
+      : null
+    this._connectionAuthRoute = opts.connectionAuthRoute || null
+    this._connectionVerifiedBinary = typeof opts.connectionVerifiedBinary === 'string'
+      ? opts.connectionVerifiedBinary
+      : null
+    this._connectionRuntimePreflight = typeof opts.connectionRuntimePreflight === 'function'
+      ? opts.connectionRuntimePreflight
+      : null
+    this._nativeRouteVerifiedForSpawn = false
+    this._connectionAuthStatusRunner = typeof opts.connectionAuthStatusRunner === 'function'
+      ? opts.connectionAuthStatusRunner
+      : runClaudeAuthStatus
 
     // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
     // deadlines (hook poll, waitForPrompt, PTY write). Wall-clock (Date.now())
@@ -1695,9 +1738,10 @@ export class ClaudeTuiSession extends BaseSession {
 
   /**
    * #5315 (WP-2.1) — re-spawn the persistent PTY in place after an unexpected
-   * death. Reuses the existing sink dir / settings.json / hook secret (does NOT
-   * re-create them) by re-invoking `_spawnPty()` with the same
-   * `permissionsEnabled` decision start() made.
+   * death. Reuses the existing sink dir / hook secret by re-invoking
+   * `_spawnPty()` with the same `permissionsEnabled` decision start() made.
+   * Explicit native connections rewrite settings.json here only to mint the
+   * fresh per-spawn route-marker nonce; legacy sessions reuse the file unchanged.
    *
    * Two subtleties that are load-bearing:
    *   1. Guard reset — `_onPtyGone` latched `_ptyExited=true` (plus
@@ -1731,9 +1775,8 @@ export class ClaudeTuiSession extends BaseSession {
     } else {
       this._resumedFromPersisted = true
     }
-    // Recompute permissionsEnabled exactly as start() did — the sink dir, hook
-    // secret and settings.json are all still in place from the original start,
-    // so we re-use them rather than re-deriving (no re-mint, no re-create).
+    // Recompute permissionsEnabled exactly as start() did — the sink dir and
+    // hook secret are still in place from the original start.
     const permissionsEnabled = !!(this._port && this._hookSecret) && !this.skipPermissions
     try {
       await this._spawnPty(permissionsEnabled)
@@ -1799,10 +1842,11 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * Build the env object for the spawned claude TUI PTY.
    *
-   * Unlike the claude-cli path (which goes through buildSpawnEnv('claude')),
-   * the TUI inherits the operator's full shell env (denylist semantics) so
-   * Claude Code tools see the user's environment — but two classes of secret
-   * are stripped:
+   * Legacy provider-only TUI sessions inherit the operator's full shell env
+   * (denylist semantics) so Claude Code tools see the user's environment.
+   * Explicit agent connections instead supply the cloned, route-specific env
+   * that their readiness probe verified. Both paths strip two classes of
+   * secret here as a final spawn-time backstop:
    *   - ANTHROPIC_API_KEY: would pin auth to API billing and defeat the whole
    *     point of this subscription/OAuth provider.
    *   - CHROXY_SECRET_DENYLIST (API_TOKEN): the full-authority primary bearer
@@ -1817,7 +1861,8 @@ export class ClaudeTuiSession extends BaseSession {
    * @returns {Record<string, string>}
    */
   _buildPtyEnv(permissionsEnabled) {
-    const env = { ...process.env }
+    let env = this._connectionChildEnv ? { ...this._connectionChildEnv } : { ...process.env }
+    if (this._connectionAuthRoute === 'native') env = buildClaudeNativeRouteEnv(env)
     // The TUI path must route via OAuth subscription. ANTHROPIC_API_KEY would
     // pin auth to API and defeat the whole point of this provider.
     delete env.ANTHROPIC_API_KEY
@@ -1853,6 +1898,124 @@ export class ClaudeTuiSession extends BaseSession {
     return env
   }
 
+  async _verifyNativeConnectionRoute({ binary, cwd, env }) {
+    if (this._connectionAuthRoute !== 'native') return
+    if (!this._connectionVerifiedBinary || binary !== this._connectionVerifiedBinary) {
+      throw nativeConnectionError(
+        'NATIVE_RUNTIME_UNVERIFIED',
+        'Claude Code native authentication cannot be checked because the session binary was not verified.',
+      )
+    }
+
+    let result
+    try {
+      result = await this._connectionAuthStatusRunner({
+        binary,
+        args: ['auth', 'status', '--json', '--settings', this._settingsPath],
+        cwd,
+        env,
+      })
+    } catch (err) {
+      const labeled = labelBinarySpawnFailure({
+        attemptedPath: err?.path || binary,
+        binary: 'claude',
+        prefix: 'Failed to verify Claude Code native authentication',
+      })
+      if (labeled) throw new Error(labeled)
+      throw nativeConnectionError(
+        'NATIVE_AUTH_STATUS_UNVERIFIED',
+        'Claude Code auth status could not be read, so the native authentication route cannot be verified.',
+      )
+    }
+
+    if (result?.status !== 0) {
+      throw nativeConnectionError(
+        'NATIVE_LOGIN_REQUIRED',
+        'Claude Code native login is unavailable. Run `claude auth login`; API credentials are not used as a fallback.',
+      )
+    }
+
+    let status
+    try {
+      status = JSON.parse(result.stdout || '{}')
+    } catch {
+      throw nativeConnectionError(
+        'NATIVE_AUTH_STATUS_UNVERIFIED',
+        'Claude Code auth status could not be interpreted, so the native authentication route cannot be verified.',
+      )
+    }
+    const loggedIn = status.loggedIn === true || status.logged_in === true || status.authenticated === true
+    const apiKeySource = status.apiKeySource
+    const noApiKeySource = apiKeySource == null || apiKeySource === '' || apiKeySource === 'none'
+    if (!loggedIn || status.authMethod !== 'claude.ai' || status.apiProvider !== 'firstParty' || !noApiKeySource) {
+      throw nativeConnectionError(
+        'NATIVE_AUTH_ROUTE_MISMATCH',
+        'Claude Code is using a different authentication or API provider than this native connection allows.',
+      )
+    }
+
+    if (this.agentConnection) {
+      this.agentConnection.authentication = { ...this.agentConnection.authentication, observed: 'native' }
+      this.agentConnection.entitlement = { route: 'subscription', status: 'unknown' }
+    }
+  }
+
+  _beginNativeRouteVerification() {
+    if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
+    this.agentConnection.readiness = {
+      state: 'unknown',
+      reasonCode: 'NATIVE_ROUTE_REVERIFYING',
+      message: 'Claude Code native authentication and endpoint are being reverified for this spawn.',
+      recoveryAction: null,
+    }
+  }
+
+  _blockNativeRouteVerification(err) {
+    if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
+    this.agentConnection.readiness = {
+      state: 'blocked',
+      reasonCode: typeof err?.code === 'string' ? err.code : 'NATIVE_ROUTE_UNVERIFIED',
+      message: typeof err?.message === 'string' && err.message
+        ? err.message
+        : 'Claude Code native authentication or endpoint could not be verified for this spawn.',
+      recoveryAction: null,
+    }
+  }
+
+  _verifyNativeRouteMarker(nonce) {
+    if (this._connectionAuthRoute !== 'native') return
+    const markerPath = join(this._sinkDir, 'native-route.json')
+    let marker
+    try {
+      marker = JSON.parse(readFileSync(markerPath, 'utf8'))
+      rmSync(markerPath, { force: true })
+    } catch {
+      throw nativeConnectionError(
+        'NATIVE_ENDPOINT_UNVERIFIED',
+        'Claude Code did not expose its effective endpoint route at startup, so this native connection was stopped.',
+      )
+    }
+    if (marker?.version !== 1 || marker?.nonce !== nonce || marker?.safe !== true || marker?.firstPartyEndpoint !== true || !Array.isArray(marker?.blockedKeys) || marker.blockedKeys.length > 0) {
+      throw nativeConnectionError(
+        'NATIVE_ENDPOINT_ROUTE_MISMATCH',
+        'Claude Code applied a custom endpoint, token, gateway, or cloud provider selector to this native connection.',
+      )
+    }
+    if (this.agentConnection) {
+      this.agentConnection.readiness = {
+        state: 'ready',
+        reasonCode: null,
+        message: 'Claude Code native authentication and direct first-party endpoint were observed at startup.',
+        recoveryAction: null,
+      }
+      this.agentConnection.provenance = {
+        ...this.agentConnection.provenance,
+        observedAt: new Date().toISOString(),
+      }
+    }
+    this._nativeRouteVerifiedForSpawn = true
+  }
+
   /**
    * Spawn the persistent PTY under node-pty + wait for the TUI to render.
    * Sets `this._term`, wires onData/onExit handlers, then sleeps for
@@ -1863,6 +2026,31 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {boolean} permissionsEnabled
    */
   async _spawnPty(permissionsEnabled) {
+    if (this._connectionAuthRoute === 'native') {
+      this._nativeRouteVerifiedForSpawn = false
+      this._beginNativeRouteVerification()
+    }
+    const cwdReal = realpathSync(this.cwd)
+    const env = this._buildPtyEnv(permissionsEnabled)
+    let attemptedBinary
+    let nativeRouteNonce = null
+    try {
+      attemptedBinary = this._connectionAuthRoute === 'native'
+        ? this._connectionRuntimePreflight?.()
+        : this._connectionVerifiedBinary || resolveClaudeBinary()
+      if (this._connectionAuthRoute === 'native' && attemptedBinary !== this._connectionVerifiedBinary) {
+        throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'Claude Code native authentication requires the configured binary provenance check before every spawn.')
+      }
+      nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
+      if (nativeRouteNonce) {
+        this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
+      }
+      await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
+    } catch (err) {
+      this._blockNativeRouteVerification(err)
+      throw err
+    }
+
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
     // REAL arg-builder below runs against it — catching drift on the actual spawn
@@ -1878,9 +2066,6 @@ export class ClaudeTuiSession extends BaseSession {
         return
       }
     }
-
-    const cwdReal = realpathSync(this.cwd)
-    const env = this._buildPtyEnv(permissionsEnabled)
 
     // #5307 (WP-0.1) — on a fresh session, set the conversation uuid with
     // `--session-id <id>` (claude requires a brand-new uuid here). On restore,
@@ -1937,11 +2122,21 @@ export class ClaudeTuiSession extends BaseSession {
     if (skillsPrefix) {
       args.push('--append-system-prompt', skillsPrefix)
     }
+    if (this._connectionAuthRoute === 'native') {
+      try {
+        const spawnBinary = this._connectionRuntimePreflight?.()
+        if (spawnBinary !== attemptedBinary) {
+          throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'The verified Claude Code binary changed between native authentication verification and PTY startup.')
+        }
+      } catch (err) {
+        this._blockNativeRouteVerification(err)
+        throw err
+      }
+    }
     log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
 
     // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
     // attempt used, not a fresh re-resolve that could land on a different path.
-    const attemptedBinary = resolveClaudeBinary()
     try {
       // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
       // the Windows resolver lands on a `claude.cmd` shim. node-pty routes
@@ -2055,6 +2250,17 @@ export class ClaudeTuiSession extends BaseSession {
         `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${this._degradedProbeSuffix()} — proceeding (first sendMessage may stall)\n` +
         `_outputTail dump:\n${this._outputTailLogDump()}`,
       )
+    }
+    if (nativeRouteNonce && !this._ptyExited) {
+      try {
+        this._verifyNativeRouteMarker(nativeRouteNonce)
+      } catch (err) {
+        this._blockNativeRouteVerification(err)
+        this._ptyExited = true
+        try { this._term?.kill?.('SIGTERM') } catch {}
+        this._term = null
+        throw err
+      }
     }
   }
 
@@ -2396,12 +2602,15 @@ export class ClaudeTuiSession extends BaseSession {
    * the throttle exists only for bulk programmatic prompts) and no transform
    * (faithful remote keyboard, including control bytes like \x03 / escape seqs).
    * The handler enforces authority (bound session + primary-ownership gate); this
-   * just writes. No-op (returns false) when there is no live PTY.
+   * just writes. An explicit native connection additionally stays closed until
+   * this PTY spawn's fresh effective-route marker passes. No-op (returns false)
+   * when there is no live or route-verified PTY.
    * @returns {boolean} true if the bytes were written to a live PTY.
    */
   writeTerminalInput(data) {
     if (typeof data !== 'string' || data.length === 0) return false
     if (!this._term || this._ptyExited || this._destroying) return false
+    if (this._connectionAuthRoute === 'native' && !this._nativeRouteVerifiedForSpawn) return false
     try {
       this._term.write(data)
       return true

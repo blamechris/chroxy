@@ -616,7 +616,10 @@ function handleQueryPermissionAudit(ws, client, msg, ctx) {
 }
 
 function handleListProviders(ws, client, msg, ctx) {
-  ctx.transport.send(ws, { type: 'provider_list', providers: listProviders() })
+  ctx.transport.send(ws, {
+    type: 'provider_list',
+    providers: listProviders({ agentConnections: ctx.services?.config?.agentConnections }),
+  })
 }
 
 /**

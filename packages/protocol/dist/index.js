@@ -29,6 +29,7 @@ export const CLIENT_CAPABILITIES = {
  * Clients below this version are rejected during auth.
  */
 export const MIN_PROTOCOL_VERSION = 1;
+export { AGENT_CONNECTION_VERSION, AgentConnectionSchema, } from "./agent-connection.js";
 /**
  * The session provider used when neither `--provider` nor `config.provider`
  * is set. Single source of truth shared by the server (`providers.js`

@@ -123,6 +123,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : undefined
   const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
   const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
+  const connectionId = (typeof msg.connectionId === 'string' && msg.connectionId.trim()) ? msg.connectionId.trim() : undefined
   const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : undefined
   const rawPermMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
   const permissionMode = rawPermMode && ALLOWED_PERMISSION_MODE_IDS.has(rawPermMode) ? rawPermMode : undefined
@@ -234,7 +235,7 @@ function handleCreateSession(ws, client, msg, ctx) {
 
   // #6277 — build the create options + audit identity ONCE; both the synchronous
   // path and the host-approval deferred path replay the identical create.
-  const createOptions = { name, cwd, provider, model, permissionMode, worktree, sandbox, codexSandbox, skipPermissions, agentCommId, ...envOpts }
+  const createOptions = { name, cwd, provider, connectionId, model, permissionMode, worktree, sandbox, codexSandbox, skipPermissions, agentCommId, ...envOpts }
   const isUserShell = provider === USER_SHELL_PROVIDER
   // Capture the audit identity at REQUEST time: the deferred (approved) path may
   // run after the requesting socket is gone, so it can't read a live `client`.
@@ -333,7 +334,14 @@ export function finalizeShellCreate(ws, client, createOptions, ctx, audit) {
   // confirmation so the client can show the "repo preset applied" badge and
   // stage the seed EDITABLE into the composer (never auto-sent). The preamble
   // TEXT never crosses the wire — only its length + seed + trust metadata.
-  const sessionSwitched = { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null }
+  const sessionSwitched = {
+    type: 'session_switched',
+    sessionId,
+    name: entry.name,
+    cwd: entry.cwd,
+    conversationId: entry.session.resumeSessionId || null,
+    agentConnection: entry.agentConnection,
+  }
   const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
     ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
     : null

@@ -44,8 +44,8 @@ export declare const ActivityKindSchema: z.ZodEnum<{
  * either (enforced by `ActivityEntrySchema` below).
  */
 export declare const ActivityStatusSchema: z.ZodEnum<{
-    running: "running";
     blocked: "blocked";
+    running: "running";
     done: "done";
     failed: "failed";
 }>;
@@ -130,8 +130,8 @@ export declare const ActivityEntrySchema: z.ZodObject<{
     }>;
     label: z.ZodString;
     status: z.ZodEnum<{
-        running: "running";
         blocked: "blocked";
+        running: "running";
         done: "done";
         failed: "failed";
     }>;
@@ -166,8 +166,8 @@ export declare const ServerActivitySnapshotSchema: z.ZodObject<{
         }>;
         label: z.ZodString;
         status: z.ZodEnum<{
-            running: "running";
             blocked: "blocked";
+            running: "running";
             done: "done";
             failed: "failed";
         }>;
@@ -218,8 +218,8 @@ export declare const ServerActivityDeltaSchema: z.ZodObject<{
         }>;
         label: z.ZodString;
         status: z.ZodEnum<{
-            running: "running";
             blocked: "blocked";
+            running: "running";
             done: "done";
             failed: "failed";
         }>;

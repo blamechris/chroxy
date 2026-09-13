@@ -138,9 +138,9 @@ export declare const ServerMemoryStackResultSchema: z.ZodObject<{
         skipped: z.ZodBoolean;
         error: z.ZodNullable<z.ZodString>;
         scope: z.ZodEnum<{
+            local: "local";
             project: "project";
             global: "global";
-            local: "local";
             import: "import";
         }>;
         importedFrom: z.ZodNullable<z.ZodString>;
