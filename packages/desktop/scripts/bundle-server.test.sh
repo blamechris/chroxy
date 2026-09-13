@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-EXPECTED_CASES=2
+EXPECTED_CASES=3
 PASS=0
 FAIL=0
 
@@ -38,6 +38,18 @@ check_trees_match() {
     fi
 }
 
+check_executable() {
+    local description="$1"
+    local path="$2"
+    if [ -x "$path" ]; then
+        echo "ok   - $description"
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL - $description" >&2
+        FAIL=$((FAIL + 1))
+    fi
+}
+
 # Run the real staging script against a minimal synthetic monorepo. npm is
 # stubbed because dependency installation is unrelated to the resource-copy
 # contract under test and would make this test depend on the network.
@@ -62,6 +74,13 @@ printf '%s\n' '#!/usr/bin/env bash' > "$FIXTURE_ROOT/packages/server/hooks/permi
 printf '%s\n' '// native route fixture' > "$FIXTURE_ROOT/packages/server/hooks/claude-native-route-check.mjs"
 printf '%s\n' '<!doctype html>' > "$FIXTURE_ROOT/packages/dashboard/dist/index.html"
 
+# This precondition makes the production chmod observable: if the fixture were
+# already executable, removing chmod from bundle-server.sh could stay green.
+if [ -x "$FIXTURE_ROOT/packages/server/hooks/permission-hook.sh" ]; then
+    echo "HARNESS REFUSED: permission-hook.sh fixture must start non-executable" >&2
+    exit 1
+fi
+
 cat > "$TMP_DIR/bin/npm" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -76,6 +95,9 @@ check_trees_match \
     "stages every server runtime hook, including claude-native-route-check.mjs" \
     "$FIXTURE_ROOT/packages/server/hooks" \
     "$STAGED/hooks"
+check_executable \
+    "makes staged permission-hook.sh executable" \
+    "$STAGED/hooks/permission-hook.sh"
 check_file_matches \
     "stages the built dashboard" \
     "$FIXTURE_ROOT/packages/dashboard/dist/index.html" \
