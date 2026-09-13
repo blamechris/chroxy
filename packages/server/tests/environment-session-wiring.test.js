@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
 import { EnvironmentManager } from '../src/environment-manager.js'
+import { createDaemonSessionManager } from '../src/server-cli.js'
 import { sessionHandlers } from '../src/handlers/session-handlers.js'
 import { createSpy, makeSessionIndexCtx, nsCtx } from './test-helpers.js'
 
@@ -306,13 +307,13 @@ describe('#7552 session <-> environment wiring', () => {
  * read of it inside SessionManager is optional-chained (`this._environmentManager?.`)
  * precisely so the feature-off case is a silent no-op. Those two facts compose
  * into a hole the reviewer walked straight through: DELETE the single
- * `environmentManager,` argument from `new SessionManager({…})` in server-cli.js
+ * `environmentManager,` argument from the daemon-manager factory call in server-cli.js
  * and 491 tests stay green — `env.sessions` is `[]` again, the Destroy button is
  * inert again, the exact #7552 state, fully passing.
  *
- * `server-cli.js:811` is the ONLY place the EnvironmentManager reaches the
- * SessionManager. It is a one-token argument with no behaviour of its own, so
- * nothing downstream can observe its absence except by being wired.
+ * The startCliServer call site is the only place its EnvironmentManager enters
+ * the daemon-manager factory. The behavioral cell below separately proves that
+ * the factory preserves an EnvironmentManager it receives.
  *
  * This is entry 25's own lesson one layer down, and the #7262 shape besides: a
  * guard wired to some of its callers, correct for every input it sees. The
@@ -324,22 +325,21 @@ describe('#7552 session <-> environment wiring', () => {
  *
  * Two properties this cell is deliberate about:
  *
- *   ANCHORED to the construction block, not the file. `environmentManager,` on
+ *   ANCHORED to the factory options block, not the file. `environmentManager,` on
  *   its own line appears TWICE in server-cli.js — once here and once in the
  *   `new WsServer({…})` argument list (~:1209, the #7552 re-broadcast wiring).
  *   A file-wide grep is satisfied by the WsServer one and would have reported
  *   green through the reviewer's exact deletion. So the slice is brace-matched
- *   from `new SessionManager({`.
+ *   from `createDaemonSessionManager(config, {`.
  *
  *   COMMENT-BLANKED. The argument carries an eight-line explanatory comment that
  *   says the word "environmentManager" three times. Scanning raw text would let
  *   the comment satisfy the check for the code — a guard reporting on its own
  *   documentation (#7552 review, F2).
  *
- * It is a SOURCE-level pin and that is a real limit, stated rather than papered
- * over: the behavioural version would have to boot `startCliServer`, which spawns
- * tunnels, binds ports and touches the real config dir. What it buys is that the
- * one deletion which silently reverts this PR cannot be green.
+ * The call-site pin remains source-level because booting `startCliServer` spawns
+ * tunnels, binds ports and touches the real config dir. The adjacent behavioral
+ * cell covers the factory boundary without those side effects.
  */
 describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionManager', () => {
   const serverCliSrc = readFileSync(new URL('../src/server-cli.js', import.meta.url), 'utf8')
@@ -355,6 +355,22 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
    */
   function ctorArgSlice(src, ctorName) {
     const open = src.indexOf(`new ${ctorName}({`)
+    if (open === -1) return null
+    let depth = 0
+    for (let i = src.indexOf('{', open); i < src.length; i++) {
+      if (src[i] === '{') depth++
+      else if (src[i] === '}') {
+        depth--
+        if (depth === 0) return src.slice(open, i + 1)
+      }
+    }
+    return null
+  }
+
+  /** The options object passed by startCliServer to the production manager factory. */
+  function daemonFactoryOptionsSlice(src) {
+    const marker = 'createDaemonSessionManager(config, {'
+    const open = src.indexOf(marker)
     if (open === -1) return null
     let depth = 0
     for (let i = src.indexOf('{', open); i < src.length; i++) {
@@ -459,21 +475,21 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
       'the over-run control would not fire on the evaded source — it is not closing the hole')
   })
 
-  it('the SessionManager construction block passes environmentManager', () => {
+  it('the startCliServer factory call passes environmentManager', () => {
     // Positive controls first: the file loaded, and the slice is the block this
     // cell is about — otherwise a rename could make the assertion below vacuous
     // by returning an empty or wrong slice.
     assert.ok(serverCliSrc.length > 1000, 'server-cli.js did not load')
     const blanked = blankComments(serverCliSrc)
-    const slice = ctorArgSlice(blanked, 'SessionManager')
-    assert.ok(slice, 'no `new SessionManager({` in server-cli.js — find where it moved and ' +
+    const slice = daemonFactoryOptionsSlice(blanked)
+    assert.ok(slice, 'no `createDaemonSessionManager(config, {` in server-cli.js — find where it moved and ' +
       're-anchor this cell there')
     // Sibling arguments that must be in the same block, proving the slice really
-    // is the SessionManager one and is not truncated to nothing.
-    assert.ok(/^\s*maxSessions:/m.test(slice), 'slice is not the SessionManager block (no maxSessions)')
+    // is the daemon factory options object and is not truncated to nothing.
+    assert.ok(/^\s*maxSessions:/m.test(slice), 'slice is not the daemon factory options block (no maxSessions)')
     assert.ok(/^\s*sweepOrphanWorktrees:/m.test(slice), 'slice looks truncated (no sweepOrphanWorktrees)')
     // …and the OVER-run control (#7552 review, F5). The two above only detect a
-    // slice that stopped too EARLY. `ctorArgSlice` counts braces without
+    // slice that stopped too EARLY. The options slicer counts braces without
     // tracking string literals, so a single unbalanced `{` inside a string
     // anywhere in this block makes the slice run past its own closing brace,
     // swallow `new WsServer({…})`, and be satisfied by the DECOY — the anchoring
@@ -492,7 +508,7 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
     // way and has its own inverted-parity failure (see the SM note below).
     assert.ok(
       !slice.includes('new WsServer('),
-      'the SessionManager slice swallowed the `new WsServer({…})` constructor — the brace matcher ' +
+      'the daemon factory options slice swallowed the `new WsServer({…})` constructor — the brace matcher ' +
       'over-ran (an unbalanced `{` inside a string literal will do it), so the WsServer\'s own ' +
       '`environmentManager,` argument now satisfies the check about the SessionManager one and the ' +
       'anchoring is gone.',
@@ -500,12 +516,29 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
 
     assert.ok(
       /^\s*environmentManager,\s*$/m.test(slice),
-      'server-cli.js constructs the SessionManager WITHOUT `environmentManager`. That single ' +
+      'startCliServer calls the daemon manager factory WITHOUT `environmentManager`. That single ' +
       'argument is the only path from the EnvironmentManager to the SessionManager; every read ' +
       'of it is optional-chained, so removing it silently reverts #7552 — `EnvironmentInfo.sessions` ' +
       'goes back to `[]` forever and the dashboard\'s "Disconnect all sessions first" Destroy ' +
       'guard goes back to never being able to engage.',
     )
+  })
+
+  it('the daemon factory preserves environmentManager on the constructed manager', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'chroxy-env-factory-wiring-'))
+    const environmentManager = { marker: 'factory-wiring' }
+    let sessionManager
+    try {
+      ;({ sessionManager } = createDaemonSessionManager({}, {
+        skipPreflight: true,
+        stateFilePath: join(tempDir, 'session-state.json'),
+        environmentManager,
+      }))
+      assert.equal(sessionManager._environmentManager, environmentManager)
+    } finally {
+      sessionManager?.destroyAll()
+      rmSync(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('the DECOY is real — server-cli.js passes environmentManager to WsServer too', () => {
@@ -521,7 +554,7 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
       'anchoring, but check before relaxing it')
   })
 
-  it('the anchoring WORKS — deleting only the SessionManager argument is caught', () => {
+  it('the anchoring WORKS — deleting only the startup factory argument is caught', () => {
     // The anchoring proven on a SYNTHETIC two-constructor source rather than by
     // mutating the real file, so this cell keeps testing the DETECTOR whatever
     // state the real tree is in. (Mutating the real source here made this cell
@@ -529,7 +562,7 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
     // already reports properly — red, but for the wrong reason and with the
     // wrong message.)
     const twoCtors = [
-      `const sessionManager = new ${SM}({`,
+      'const { sessionManager } = createDaemonSessionManager(config, {',
       '  maxSessions: 5,',
       '  environmentManager,',
       '  sweepOrphanWorktrees: false,',
@@ -539,34 +572,34 @@ describe('#7552 R1 — server-cli hands the EnvironmentManager to the SessionMan
       '  environmentManager,',
       '})',
     ].join('\n')
-    const hasArg = (src) => /^\s*environmentManager,\s*$/m.test(ctorArgSlice(src, SM))
+    const hasArg = (src) => /^\s*environmentManager,\s*$/m.test(daemonFactoryOptionsSlice(src))
     // Healthy: both the naive grep and the anchored check say yes.
     assert.ok(/^\s*environmentManager,\s*$/m.test(twoCtors), 'positive control: file-wide grep passes')
     assert.ok(hasArg(twoCtors), 'positive control: the anchored check passes on a healthy source')
 
-    // The reviewer's mutation, applied to the SessionManager block only.
+    // The reviewer's mutation, applied to the startup factory block only.
     const mutated = twoCtors.replace('  maxSessions: 5,\n  environmentManager,\n', '  maxSessions: 5,\n')
     assert.notEqual(mutated, twoCtors, 'the synthetic mutation did not apply')
     assert.ok(/^\s*environmentManager,\s*$/m.test(mutated),
       'a file-wide grep still passes on the mutated source — which is exactly why it is useless here')
     assert.ok(!hasArg(mutated),
-      'the anchored check passed on a source whose SessionManager argument was deleted — it is ' +
+      'the anchored check passed on a source whose startup factory argument was deleted — it is ' +
       'matching the WsServer argument, and the guard is worthless')
   })
 
-  it('a comment mentioning environmentManager does not satisfy the check', () => {
+  it('a comment mentioning environmentManager does not satisfy the startup-call check', () => {
     // #7552 review, F2. The real argument carries an eight-line comment naming
     // `environmentManager` three times, so "the code is present" and "the
     // documentation says it should be" are one keystroke apart in a raw scan.
     const commentOnly = [
-      `const sessionManager = new ${SM}({`,
+      'const { sessionManager } = createDaemonSessionManager(config, {',
       '  maxSessions: 5,',
       '  // environmentManager,',
       '  /* environmentManager, */',
       '  sweepOrphanWorktrees: false,',
       '})',
     ].join('\n')
-    const slice = ctorArgSlice(blankComments(commentOnly), SM)
+    const slice = daemonFactoryOptionsSlice(blankComments(commentOnly))
     assert.ok(slice, 'slice extraction failed on the synthetic source')
     assert.ok(/^\s*maxSessions:/m.test(slice), 'positive control: the real args survive blanking')
     assert.ok(!/^\s*environmentManager,\s*$/m.test(slice),
