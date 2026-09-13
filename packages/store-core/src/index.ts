@@ -43,6 +43,7 @@ export {
   selectOwnModelsForProvider,
 } from './models-by-provider'
 export type { ModelsByProvider, ProviderModelRoster } from './models-by-provider'
+export type { AgentConnection, AgentConnectionAuthRoute } from '@chroxy/protocol'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
 // exhaustive `Record<VoiceInputMode, true>` so widening the union is a

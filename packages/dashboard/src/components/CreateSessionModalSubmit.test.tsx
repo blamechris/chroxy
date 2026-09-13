@@ -15,7 +15,29 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ defaultProvider: 'claude-sdk', availableProviders: [], requestDirectoryListing: () => {}, setDirectoryListingCallback: () => {}, defaultCwd: null }),
+    selector({
+      defaultProvider: 'claude-sdk',
+      availableProviders: [{
+        name: 'claude-sdk',
+        connections: [{
+          version: 1,
+          id: 'claude-native',
+          label: 'Claude subscription',
+          provider: 'claude',
+          runtime: { id: 'claude-sdk', version: null },
+          accountRef: null,
+          authentication: { requested: 'native', observed: 'native' },
+          entitlement: { route: 'unknown', status: 'unknown' },
+          model: { requested: null, resolved: null },
+          execution: { host: 'daemon', inference: 'remote' },
+          readiness: { state: 'ready', reasonCode: null, message: 'Ready', recoveryAction: null },
+          provenance: { source: 'configured', observedAt: '2026-09-13T00:00:00.000Z', expiresAt: null },
+        }],
+      }],
+      requestDirectoryListing: () => {},
+      setDirectoryListingCallback: () => {},
+      defaultCwd: null,
+    }),
 }))
 
 import { CreateSessionModal } from './CreateSessionModal'
@@ -40,8 +62,16 @@ describe('CreateSessionModal submit behavior (#1456)', () => {
     fireEvent.click(screen.getByRole('button', { name: /create/i }))
 
     expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ connectionId: 'claude-native' }))
     // Modal should NOT close immediately — must wait for server response
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('shows the selected connection route before create', () => {
+    render(<CreateSessionModal {...baseProps} />)
+
+    expect(screen.getByRole('option', { name: /Claude subscription · native · unknown/i })).toBeInTheDocument()
+    expect(screen.getByTestId('agent-connection-route')).toHaveTextContent('claude-sdk · remote inference · Ready')
   })
 
   it('displays serverError when provided', () => {

@@ -136,6 +136,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 | `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
 | `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form carries three more sub-blocks: `providers.openaiCompatible` — the identical entry shape for endpoints that speak the **OpenAI Chat Completions** API instead (OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom), where `baseUrl` is an OpenAI API base typically ending in `/v1`; `providers.acp` (#7319) — an array of config-driven **Agent Client Protocol** agents, each entry `{ id, label?, command, args?, env? }` spawning an arbitrary ACP-speaking agent over stdio, permissions **denied by default** (no bridge yet — #7320); and `providers.allowAnyModel`, see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven), [OpenAI-compatible endpoints](../../docs/providers.md#openai-compatible-endpoints-config-driven), and [ACP agents](../../docs/providers.md#acp-agents-config-driven). |
+| `agentConnections` | array | - | *(unmapped — see [note](#environment-variable-names))* | Explicit, non-secret agent routes shown in the existing session-creation provider picker. Each entry is `{ id, label, provider?, runtime, authRoute, accountRef?, credentialKey?, inferenceLocation? }`; see [Agent connections](#agent-connections). |
 | `legacyCli` | boolean | `--legacy-cli` | `CHROXY_LEGACY_CLI` | Legacy shorthand that maps to `provider: "claude-cli"` when no explicit `provider` is set. Prefer setting `provider` directly; an explicit `provider` always wins. |
 
 ### Permissions and security gates
@@ -589,6 +590,61 @@ The `provider` key picks which AI CLI backs a session by default:
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
 
 Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
+
+### Agent connections
+
+`agentConnections` assigns stable host-local names to explicit authentication
+routes. A current client shows these entries under their runtime before creating
+a session and sends the selected `connectionId`. The daemon persists the selected
+descriptor with the session and refuses restore if the connection was removed or
+changed to another runtime or route.
+
+```json
+{
+  "agentConnections": [
+    {
+      "id": "codex-subscription",
+      "label": "Codex subscription",
+      "provider": "openai",
+      "runtime": "codex",
+      "authRoute": "native"
+    },
+    {
+      "id": "codex-api",
+      "label": "Codex API",
+      "provider": "openai",
+      "runtime": "codex",
+      "authRoute": "api",
+      "credentialKey": "OPENAI_API_KEY"
+    },
+    {
+      "id": "local-ollama",
+      "label": "Local Ollama",
+      "provider": "local",
+      "runtime": "ollama",
+      "authRoute": "local",
+      "inferenceLocation": "local"
+    }
+  ]
+}
+```
+
+Supported built-in route/runtime pairs are `claude-tui` + `native`, `codex` +
+`native` or `api`, `claude-byok` + `api`, and `ollama` + `local`. Other pairs,
+including imported ACP authentication, appear as unsupported and cannot create a
+session. Native credentials remain in the vendor CLI's own store. API entries
+refer to the runtime's existing Chroxy credential-store slot or environment
+variable by name (`OPENAI_API_KEY` for Codex and `ANTHROPIC_API_KEY` for Claude
+BYOK); unsupported references cannot create a session. Literal `apiKey`,
+`token`, `credential`, or `secret` fields are rejected.
+Connection descriptors never contain credential values.
+
+For Codex, a native selection removes OpenAI API environment settings from that
+child process and checks `account/read` before `thread/start`; an API selection
+requires Codex to report API-key auth. The daemon never switches between those
+routes automatically. Native login verifies the authentication method only, so
+account identity and subscription entitlement remain `unknown` until a provider
+offers an authoritative source.
 
 ### `claude-channel` (research preview)
 

@@ -34,6 +34,7 @@ import {
   cachedResolveCredentialFile,
   resetCachesForTest,
 } from './auth-probes.js'
+import { AgentConnectionRegistry } from './agent-connections.js'
 
 // #6616 — values of CHROXY_CODEX_APPSERVER that opt the codex provider OUT of the
 // (now-default) app-server path and back to the legacy `codex exec` path.
@@ -276,7 +277,11 @@ export function getProviderDataDirs() {
  *
  * @returns {Array<{ name: string, capabilities: object, auth: object }>}
  */
-export function listProviders() {
+export function listProviders({ agentConnections = [] } = {}) {
+  const connections = new AgentConnectionRegistry({
+    definitions: agentConnections,
+    getProvider,
+  }).list()
   const list = []
   for (const name of Object.keys(PROVIDERS)) {
     if (HIDDEN.has(name)) continue
@@ -296,6 +301,7 @@ export function listProviders() {
         thinkingLevelLegacyFallback: thinkingLevelLegacyFallbackApplies(name, ProviderClass),
       },
       auth: getProviderAuthInfo(name, ProviderClass),
+      connections: connections.filter((connection) => connection.runtime.id === name),
     })
   }
   return list

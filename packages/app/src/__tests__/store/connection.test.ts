@@ -1441,7 +1441,7 @@ describe('createSession store action', () => {
     expect(JSON.parse(sent[0])).toEqual({ type: 'create_session', name: 'NewSession' });
   });
 
-  it('sends cwd, worktree, provider when provided', () => {
+  it('sends cwd, worktree, provider, and explicit connection when provided', () => {
     const { socket, sent } = makeMockSocket();
     useConnectionStore.setState({ socket });
     useConnectionStore.getState().createSession({
@@ -1449,6 +1449,7 @@ describe('createSession store action', () => {
       cwd: '/work',
       worktree: true,
       provider: 'sdk',
+      connectionId: 'claude-native',
     });
 
     expect(JSON.parse(sent[0])).toEqual({
@@ -1457,6 +1458,7 @@ describe('createSession store action', () => {
       cwd: '/work',
       worktree: true,
       provider: 'sdk',
+      connectionId: 'claude-native',
     });
   });
 

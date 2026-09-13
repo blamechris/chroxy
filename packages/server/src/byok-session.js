@@ -111,6 +111,8 @@ function boundMcpPromptExpansionText(text, cap = MCP_PROMPT_EXPANSION_DISPLAY_CA
 }
 
 export class ClaudeByokSession extends BaseSession {
+  static agentConnectionRoutes = ['api']
+  static agentConnectionCredentialKey = 'ANTHROPIC_API_KEY'
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // DockerByokSession (docker-byok) extends this and correctly inherits it.
   // NOTE: non-Claude providers that ALSO extend this for the agent loop

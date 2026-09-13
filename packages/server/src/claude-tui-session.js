@@ -121,6 +121,7 @@ export function withHookFsTimeout(promise, ms, label) {
 }
 
 export class ClaudeTuiSession extends BaseSession {
+  static agentConnectionRoutes = ['native']
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
   static claudeFamily = true

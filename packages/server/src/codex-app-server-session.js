@@ -167,6 +167,10 @@ export class CodexAppServerSession extends BaseSession {
   // invoked, and the symptom is a picker that looks like flaky discovery
   // rather than a wiring bug.
   static refreshModels(deps) { return CodexSession.refreshModels(deps) }
+  // Explicit connection routes are supported only on app-server because its
+  // account/read RPC can prove the active auth method before thread/start.
+  static get agentConnectionRoutes() { return ['native', 'api'] }
+  static get agentConnectionCredentialKey() { return 'OPENAI_API_KEY' }
 
   static get capabilities() {
     return {
@@ -212,6 +216,10 @@ export class CodexAppServerSession extends BaseSession {
       provider: opts.provider || 'codex',
       model: opts.model || null,
     }))
+    this._connectionAuthRoute = opts.connectionAuthRoute || null
+    this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
+      ? { ...opts.connectionChildEnv }
+      : null
     this._client = null
     this._threadId = null
     // #7730 — the reasoning effort, split in two on PURPOSE.
@@ -314,7 +322,45 @@ export class CodexAppServerSession extends BaseSession {
     return this._resolvedCodexSandbox || resolveCodexSandbox(this._codexSandbox)
   }
 
-  _buildChildEnv() { return buildSpawnEnv('codex') }
+  _buildChildEnv() {
+    return this._connectionChildEnv ? { ...this._connectionChildEnv } : buildSpawnEnv('codex')
+  }
+
+  async _verifyConnectionAuthRoute() {
+    if (!this._connectionAuthRoute) return
+    const result = await this._client.request('account/read', { refreshToken: false })
+    const actual = result?.account?.type === 'chatgpt'
+      ? 'native'
+      : result?.account?.type === 'apiKey'
+        ? 'api'
+        : 'none'
+    if (actual !== this._connectionAuthRoute) {
+      const err = new Error(
+        this._connectionAuthRoute === 'native'
+          ? 'Codex native login is unavailable for this connection. Run `codex login`; API credentials are not used as a fallback.'
+          : 'Codex API authentication is unavailable for this connection. Configure OPENAI_API_KEY; native login is not used as a fallback.'
+      )
+      err.code = this._connectionAuthRoute === 'native'
+        ? 'NATIVE_LOGIN_REQUIRED'
+        : 'API_AUTH_ROUTE_UNAVAILABLE'
+      throw err
+    }
+    if (this.agentConnection) {
+      this.agentConnection.authentication = {
+        ...this.agentConnection.authentication,
+        observed: actual === 'native' ? 'native' : 'api-key',
+      }
+      this.agentConnection.entitlement = actual === 'api'
+        ? { route: 'api', status: 'available' }
+        : { route: 'unknown', status: 'unknown' }
+      this.agentConnection.readiness = {
+        state: 'ready',
+        reasonCode: null,
+        message: 'The selected authentication route was verified by Codex.',
+        recoveryAction: null,
+      }
+    }
+  }
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -349,6 +395,7 @@ export class CodexAppServerSession extends BaseSession {
       // userAgent leaves every gate UNKNOWN so callers probe rather than assume.
       const init = await this._client.initialize({ name: 'chroxy', version: '1' })
       this._captureHandshake(init)
+      await this._verifyConnectionAuthRoute()
       started = await this._client.request('thread/start', this._buildThreadParams(sandbox))
     } catch (err) {
       // #6708 — the app-server child is spawned inside initialize(); a missing/

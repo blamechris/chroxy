@@ -1681,6 +1681,57 @@ function mkStartedSession(extraOpts = {}, responses = {}) {
 }
 
 describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
+  it('verifies a native connection through account/read before thread/start', async () => {
+    const { s, cleanup, calls } = mkStartedSession(
+      { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },
+      { 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+    )
+    s.agentConnection = {
+      authentication: { requested: 'native', observed: 'unknown' },
+      entitlement: { route: 'unknown', status: 'unknown' },
+      readiness: {},
+    }
+    try {
+      await s.start()
+      assert.deepEqual(calls.map(([method]) => method).slice(0, 3), ['initialize', 'account/read', 'thread/start'])
+      assert.equal(s.agentConnection.authentication.observed, 'native')
+      assert.deepEqual(s._buildChildEnv(), { PATH: '/native' })
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('blocks a mismatched native route before any thread or turn is sent', async () => {
+    const { s, cleanup, calls } = mkStartedSession(
+      { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },
+      { 'account/read': { account: { type: 'apiKey' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+    )
+    try {
+      await assert.rejects(s.start(), (err) => err.code === 'NATIVE_LOGIN_REQUIRED')
+      assert.equal(calls.some(([method]) => method === 'thread/start'), false)
+      assert.equal(calls.some(([method]) => method === 'turn/start'), false)
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('blocks an API connection when Codex reports native auth instead of substituting it', async () => {
+    const { s, cleanup, calls } = mkStartedSession(
+      { connectionAuthRoute: 'api', connectionChildEnv: { PATH: '/api', OPENAI_API_KEY: 'fixture-key' } },
+      { 'account/read': { account: { type: 'chatgpt', email: null, planType: 'unknown' }, requiresOpenaiAuth: true }, 'thread/start': THREAD_START_ECHO },
+    )
+    try {
+      await assert.rejects(s.start(), (err) => err.code === 'API_AUTH_ROUTE_UNAVAILABLE')
+      assert.equal(calls.some(([method]) => method === 'thread/start'), false)
+      assert.equal(calls.some(([method]) => method === 'turn/start'), false)
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
   it('sends thread/start the EXACT param shape the inline object used to build', async () => {
     const prev = process.env.CHROXY_CODEX_SANDBOX
     delete process.env.CHROXY_CODEX_SANDBOX

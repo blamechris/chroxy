@@ -136,6 +136,7 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
     assert.ok(Object.prototype.hasOwnProperty.call(authOk, 'encryption'))
     assert.ok(Object.prototype.hasOwnProperty.call(authOk, 'connectedClients'))
     assert.ok(Object.prototype.hasOwnProperty.call(authOk, 'webFeatures'))
+    assert.equal(authOk.capabilities.agentConnections, true)
   })
 
   it('spreads extra fields into auth_ok', () => {
