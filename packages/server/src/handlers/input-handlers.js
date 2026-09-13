@@ -105,6 +105,7 @@ const MAX_CLIENT_MESSAGE_ID_LEN = 128
 export const INPUT_DEDUP_TTL_MS = 10 * 60 * 1000
 export const INPUT_DEDUP_TOMBSTONE_TTL_MS = 60 * 60 * 1000
 export const INPUT_DEDUP_MAX_PER_SESSION = 4096
+const INPUT_HASH_STRING_CHUNK_CODE_UNITS = 64 * 1024
 // IDs the clients treat specially in their stores (e.g. the "thinking"
 // placeholder shown while waiting for the first stream_delta). Never let a
 // client-supplied id collide with these — it would clobber the placeholder
@@ -131,21 +132,56 @@ function isWellFormedClientMessageId(candidate) {
     !RESERVED_USER_INPUT_IDS.has(candidate)
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+function updateCanonicalHash(hash, value) {
+  if (Array.isArray(value)) {
+    hash.update(`a${value.length}:`)
+    value.forEach((item) => updateCanonicalHash(hash, item))
+    return
   }
-  return JSON.stringify(value)
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort()
+    hash.update(`o${keys.length}:`)
+    keys.forEach((key) => {
+      updateCanonicalHash(hash, key)
+      updateCanonicalHash(hash, value[key])
+    })
+    return
+  }
+  if (typeof value === 'string') {
+    // Length-prefix and feed the original string straight into Hash.update.
+    // UTF-16LE preserves JavaScript code units, including lone surrogates that
+    // UTF-8 would collapse to the same replacement bytes. Bounded slices avoid
+    // building a second multi-megabyte representation for image data.
+    hash.update(`s${value.length}:`)
+    for (let offset = 0; offset < value.length; offset += INPUT_HASH_STRING_CHUNK_CODE_UNITS) {
+      hash.update(value.slice(offset, offset + INPUT_HASH_STRING_CHUNK_CODE_UNITS), 'utf16le')
+    }
+    return
+  }
+  if (value === null) {
+    hash.update('z')
+    return
+  }
+  if (value === undefined) {
+    hash.update('u')
+    return
+  }
+  if (typeof value === 'boolean') {
+    hash.update(value ? 'b1' : 'b0')
+    return
+  }
+  hash.update(`n${String(value)}:`)
 }
 
 function inputPayloadHash(msg) {
-  return createHash('sha256').update(canonicalJson({
+  const hash = createHash('sha256')
+  updateCanonicalHash(hash, {
     data: msg.data,
     attachments: msg.attachments,
     context: msg.context,
     isVoice: !!msg.isVoice,
-  })).digest('hex')
+  })
+  return hash.digest('hex')
 }
 
 function getInputDedupRecords(ctx) {
@@ -156,7 +192,10 @@ function getInputDedupRecords(ctx) {
 function sendInputAck(ws, ctx, record, overrides = {}) {
   if (!record) return
   const status = overrides.status ?? record.status
-  const context = record.contextItemIds?.length && (status === 'accepted' || status === 'queued' || status === 'duplicate')
+  const delivery = overrides.delivery ?? record.delivery
+  const provesContextAdmission = delivery === 'dispatch_started' || delivery === 'queued'
+  const context = record.contextItemIds?.length && provesContextAdmission &&
+    (status === 'accepted' || status === 'queued' || status === 'duplicate')
     ? {
         version: 1,
         acceptedItemIds: [...record.contextItemIds],
@@ -169,7 +208,7 @@ function sendInputAck(ws, ctx, record, overrides = {}) {
     sessionId: record.sessionId,
     clientMessageId: record.clientMessageId,
     status,
-    delivery: record.delivery,
+    delivery,
     retrySafe: false,
     acceptedAt: record.acceptedAt,
     retentionExpiresAt: record.expiresAt,
@@ -224,9 +263,8 @@ function reserveInputRequest(ctx, sessionId, msg) {
     // Retain only bounded identifiers, never image/text payload bytes. The
     // payload hash is sufficient for duplicate/mismatch decisions.
     contextItemIds: msg.context?.items?.map((item) => item.id) ?? null,
-    status: 'accepted',
+    status: 'uncertain',
     delivery: 'unknown',
-    acceptedAt: now,
     expiresAt: now + ttlMs,
     tombstoneExpiresAt: now + ttlMs + tombstoneTtlMs,
   }
@@ -512,7 +550,19 @@ async function handleInput(ws, client, msg, ctx) {
     return
   }
   if (reservation.duplicate) {
-    sendInputAck(ws, ctx, { ...reservation.record, status: 'duplicate' })
+    const accepted = reservation.record.delivery === 'dispatch_started' ||
+      reservation.record.delivery === 'queued' ||
+      reservation.record.delivery === 'evaluation_held'
+    if (accepted) {
+      sendInputAck(ws, ctx, { ...reservation.record, status: 'duplicate' })
+    } else {
+      sendInputAck(ws, ctx, reservation.record, {
+        status: 'uncertain',
+        delivery: 'unknown',
+        reason: 'delivery_uncertain',
+        message: 'This input id is still retained, but provider admission has not been confirmed. It was not submitted again.',
+      })
+    }
     return
   }
   if (reservation.capacity) {
@@ -742,6 +792,7 @@ async function handleInput(ws, client, msg, ctx) {
         if (inputRecord) {
           inputRecord.status = 'accepted'
           inputRecord.delivery = 'evaluation_held'
+          inputRecord.acceptedAt = typeof ctx.now === 'function' ? ctx.now() : Date.now()
           sendInputAck(ws, ctx, inputRecord)
         }
         return
@@ -753,7 +804,7 @@ async function handleInput(ws, client, msg, ctx) {
     }
   }
 
-  // #3636: record history at the forward boundary. All earlier
+  // #3636: prepare history for the forward boundary. All earlier
   // rejection paths (input_conflict pre-await, pending-evaluator guard,
   // post-await re-check) returned without recording. The clarify path
   // already recorded above before its own return.
@@ -761,8 +812,6 @@ async function handleInput(ws, client, msg, ctx) {
   // rewritten string on the rewrite verdict, the original `trimmed`
   // draft on every other path (forward, skip-heuristic, fail-open,
   // cap-bypass).
-  recordHistoryEntry(textToSend)
-
   // #5313 (WP-1.3): sendMessage is fire-and-forget. If a provider's
   // sendMessage returns a rejecting promise, an unhandled rejection escapes
   // to process-level unhandledRejection → process.exit(1), crashing EVERY
@@ -775,19 +824,61 @@ async function handleInput(ws, client, msg, ctx) {
   // `message_queued` mirror carries the id the sender's optimistic copy uses —
   // letting that client reconcile its queued bubble. Providers that send
   // immediately ignore the extra option.
-  const wasRunningAtDispatch = entry.session.isRunning
   const dispatchText = preparedContext
     ? prepareInputContext(textToSend, attachmentsWithoutContext, preparedContext.context).text
     : textToSend
   let sendResult
+  let admissionFinal = false
+  let forwardedEffectsCommitted = false
+  const commitForwardedEffects = () => {
+    if (forwardedEffectsCommitted) return
+    forwardedEffectsCommitted = true
+    recordHistoryEntry(textToSend)
+    ctx.transport.updatePrimary(targetSessionId, client.id)
+    ctx.transport.broadcast(
+      { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
+      (c) => c.id !== client.id
+    )
+  }
+  const onInputAdmission = (admission) => {
+    if (!inputRecord || admissionFinal || !admission || typeof admission !== 'object') return
+    const status = admission.status
+    const delivery = admission.delivery
+    const accepted = (status === 'accepted' && delivery === 'dispatch_started') ||
+      (status === 'queued' && delivery === 'queued')
+    const rejected = status === 'rejected' && delivery === 'not_dispatched'
+    if (!accepted && !rejected) return
+
+    admissionFinal = true
+    inputRecord.status = status
+    inputRecord.delivery = delivery
+    if (accepted) {
+      inputRecord.acceptedAt = typeof ctx.now === 'function' ? ctx.now() : Date.now()
+      sendInputAck(ws, ctx, inputRecord)
+      commitForwardedEffects()
+      return
+    }
+
+    sendInputAck(ws, ctx, inputRecord, {
+      status: 'rejected',
+      delivery: 'not_dispatched',
+      retrySafe: admission.retrySafe === true,
+      reason: typeof admission.reason === 'string' ? admission.reason : 'provider_rejected',
+      message: typeof admission.message === 'string'
+        ? admission.message
+        : 'The provider rejected the input before admission.',
+    })
+    releaseInputRequest(ctx, inputRecord)
+  }
   try {
     sendResult = entry.session.sendMessage(dispatchText, attachments, {
       isVoice: !!msg.isVoice,
       clientMessageId: messageId,
+      ...(inputRecord ? { onInputAdmission } : {}),
       ...(preparedContext?.context ? { context: preparedContext.context } : {}),
     })
   } catch (err) {
-    if (inputRecord) {
+    if (inputRecord && !admissionFinal) {
       inputRecord.status = 'uncertain'
       inputRecord.delivery = 'unknown'
       sendInputAck(ws, ctx, inputRecord, {
@@ -804,23 +895,18 @@ async function handleInput(ws, client, msg, ctx) {
     })
   }
 
-  if (inputRecord) {
-    const queued = sendResult?.status === 'queued' || wasRunningAtDispatch
-    inputRecord.status = queued ? 'queued' : 'accepted'
-    inputRecord.delivery = queued ? 'queued' : 'dispatch_started'
-    sendInputAck(ws, ctx, inputRecord)
+  if (inputRecord && !admissionFinal) {
+    inputRecord.status = 'uncertain'
+    inputRecord.delivery = 'unknown'
+    sendInputAck(ws, ctx, inputRecord, {
+      reason: 'admission_pending',
+      message: 'The provider has not confirmed admission yet. The server will not retry automatically.',
+    })
   }
 
-  ctx.transport.updatePrimary(targetSessionId, client.id)
-
-  // Echo user_input to other clients so they see what was sent (#1119).
-  // The echo carries `trimmed` (the user's original text) so paired
-  // clients can dedup their optimistic copy of what the user typed —
-  // the rewritten text is signalled separately via evaluator_rewrite.
-  ctx.transport.broadcast(
-    { type: 'user_input', sessionId: targetSessionId, clientId: client.id, text: trimmed, messageId, timestamp: Date.now() },
-    (c) => c.id !== client.id
-  )
+  // Older clients have no correlated admission contract. Preserve their
+  // established fire-and-forget history, primary, and peer-echo behavior.
+  if (!inputRecord) commitForwardedEffects()
 }
 
 function handleInterrupt(ws, client, msg, ctx) {

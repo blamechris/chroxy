@@ -1492,6 +1492,12 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       acceptedAt: 20,
       retentionExpiresAt: 620_000,
       dedupScope: 'process',
+      context: {
+        version: 1,
+        acceptedItemIds: ['context-1'],
+        supportedKinds: ['text', 'image'],
+        supportedLifetimes: ['one_turn'],
+      },
     },
     expect: {
       sessions: {

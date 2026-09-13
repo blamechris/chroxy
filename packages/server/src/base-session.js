@@ -49,6 +49,17 @@ export const SESSION_PREAMBLE_MAX_LENGTH = 4000
 // burst of owner follow-ups while still bounding memory if a client wedges.
 export const OUTGOING_QUEUE_MAX = 10
 
+/**
+ * Report the provider's input-admission boundary without waiting for the turn.
+ * Async sendMessage implementations call this before their first await when
+ * possible, or later when an async transport handshake proves admission.
+ */
+export function reportInputAdmission(sendOptions, admission) {
+  const callback = sendOptions?.onInputAdmission
+  if (typeof callback === 'function') callback(admission)
+  return admission
+}
+
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
 // resets the timer; the window only bounds *silent stretches*, not wall-

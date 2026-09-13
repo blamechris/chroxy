@@ -1711,6 +1711,7 @@ describe('shared dispatch table', () => {
         type: 'input_ack', sessionId: 's1', clientMessageId: 'user-1',
         status: 'accepted', delivery: 'dispatch_started', retrySafe: false,
         acceptedAt: 2, retentionExpiresAt: 602_000, dedupScope: 'process',
+        context: { version: 1, acceptedItemIds: ['ocr-1'], supportedKinds: ['text', 'image'], supportedLifetimes: ['one_turn'] },
       })
       expect((env.sessions.s1.inputDeliveries as Record<string, any>)?.['user-1']).toMatchObject({
         status: 'accepted', pendingContextItemIds: [],

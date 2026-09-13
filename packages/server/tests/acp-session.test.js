@@ -170,9 +170,10 @@ describe('AcpSession — real fixture round trip', () => {
   it('full round trip: prompt -> streamed text + thinking -> tool_call/tool_call_update -> result (end_turn)', async () => {
     const { s, cleanup } = mkSession()
     const ev = capture(s, ['stream_start', 'stream_delta', 'stream_end', 'tool_start', 'tool_result', 'result', 'error', 'stopped'])
+    const admissions = []
     await s.start()
     const resultP = waitFor(s, 'result')
-    await s.sendMessage('WITH_TOOL', [])
+    await s.sendMessage('WITH_TOOL', [], { onInputAdmission: (value) => admissions.push(value) })
     const result = await resultP
     await s.destroy()
     cleanup()
@@ -183,6 +184,7 @@ describe('AcpSession — real fixture round trip', () => {
     assert.equal(kinds.filter((k) => k === 'tool_start').length, 1)
     assert.equal(kinds.filter((k) => k === 'tool_result').length, 1, 'no synthetic orphan tool_result')
     assert.equal(kinds.filter((k) => k === 'result').length, 1)
+    assert.deepEqual(admissions, [{ status: 'accepted', delivery: 'dispatch_started' }])
 
     const toolStart = ev.find(([e]) => e === 'tool_start')[1]
     assert.equal(toolStart.toolUseId, 'tc-1')
@@ -303,11 +305,18 @@ describe('AcpSession — real fixture round trip', () => {
 
   it('refuses to send when attachments are present (not yet supported)', async () => {
     const { s, cleanup } = mkSession()
+    const admissions = []
     await s.start()
     const errorP = waitFor(s, 'error')
-    await s.sendMessage('hi', [{ type: 'file_ref', path: 'a.png' }])
+    await s.sendMessage('hi', [{ type: 'file_ref', path: 'a.png' }], {
+      onInputAdmission: (value) => admissions.push(value),
+    })
     const err = await errorP
     assert.match(err.message, /does not support attachments/)
+    assert.deepEqual(admissions, [{
+      status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+      reason: 'unsupported_attachments', message: 'This provider does not support attachments.',
+    }])
     await s.destroy()
     cleanup()
   })

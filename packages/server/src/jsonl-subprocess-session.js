@@ -1,6 +1,6 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { createLogger } from './logger.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { getErrorMessage } from './utils/error-message.js'
@@ -235,18 +235,30 @@ export class JsonlSubprocessSession extends BaseSession {
   // sendMessage — the shared runtime
   // ------------------------------------------------------------------
 
-  async sendMessage(text, attachments, _options) {
+  async sendMessage(text, attachments, sendOptions = {}) {
     if (!this._processReady) {
       this.emit('error', { message: 'Session is not running' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'not_runnable', message: 'The provider session is not running.',
+      })
       return
     }
     if (this._isBusy) {
       this.emit('error', { message: 'Session is busy' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'busy', message: 'The provider session is busy.',
+      })
       return
     }
     if (attachments && attachments.length > 0) {
       this.emit('error', {
         message: `${this.constructor.displayLabel} provider does not support attachments`,
+      })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'unsupported_attachments', message: 'This provider does not support attachments.',
       })
       return
     }
@@ -339,8 +351,14 @@ export class JsonlSubprocessSession extends BaseSession {
       this.emit('error', {
         message: labeled || getErrorMessage(err, `Failed to spawn ${Klass.providerName}`),
       })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'spawn_failed', message: 'The provider process could not be started.',
+      })
       return
     }
+
+    reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
 
     // Spawn succeeded: argv is committed to the wire, so flip the flag.
     if (willPrependSkills) {

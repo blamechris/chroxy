@@ -65,7 +65,11 @@ export function applyInputAcknowledgement(current: InputDeliveryMap | undefined,
   if (!parsed.success) return records
   const ack = parsed.data
   const previous = records[ack.clientMessageId]
-  const clearsOneTurn = ack.status === 'accepted' || ack.status === 'queued' || ack.status === 'duplicate'
+  const provesContextAdmission = ack.delivery === 'dispatch_started' || ack.delivery === 'queued'
+  const acceptedIds = provesContextAdmission &&
+    (ack.status === 'accepted' || ack.status === 'queued' || ack.status === 'duplicate')
+    ? new Set(ack.context?.acceptedItemIds ?? [])
+    : new Set<string>()
   return bounded({
     ...records,
     [ack.clientMessageId]: {
@@ -73,7 +77,7 @@ export function applyInputAcknowledgement(current: InputDeliveryMap | undefined,
       sessionId: ack.sessionId,
       status: ack.status,
       delivery: ack.delivery,
-      pendingContextItemIds: clearsOneTurn ? [] : (previous?.pendingContextItemIds ?? []),
+      pendingContextItemIds: (previous?.pendingContextItemIds ?? []).filter((id) => !acceptedIds.has(id)),
       ...(ack.acceptedAt === undefined ? {} : { acceptedAt: ack.acceptedAt }),
       ...(ack.retentionExpiresAt === undefined ? {} : { retentionExpiresAt: ack.retentionExpiresAt }),
       ...(ack.reason === undefined ? {} : { reason: ack.reason }),

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
-import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS, reportInputAdmission } from './base-session.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
@@ -715,11 +715,21 @@ export class CodexAppServerSession extends BaseSession {
 
   async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
-      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+      const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+      reportInputAdmission(sendOptions, queued
+        ? { status: 'queued', delivery: 'queued' }
+        : {
+            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+            reason: 'queue_full', message: 'The provider input queue is full; retry after queued work advances.',
+          })
       return
     }
     if (!this._processReady || !this._client) {
       this.emit('error', { message: 'Codex app-server session is not started' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'not_runnable', message: 'The provider session is not started.',
+      })
       return
     }
     this._isBusy = true
@@ -761,9 +771,14 @@ export class CodexAppServerSession extends BaseSession {
     ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId} inputItems=${input.length})`)
     try {
       const res = await this._client.request('turn/start', this._buildTurnParams(input))
+      reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       this._skillsPrepended = true
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'turn_start_failed', message: 'The provider rejected the turn before it started.',
+      })
       // turn/start itself failed (dead server, bad thread) — fail this turn.
       this._failTurn(`Codex turn failed to start: ${err.message}`)
     }

@@ -16,7 +16,7 @@
 
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { performance } from 'node:perf_hooks'
-import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
@@ -934,13 +934,31 @@ export class ClaudeByokSession extends BaseSession {
     return [...this._disabledMcpServers].sort()
   }
 
-  async sendMessage(prompt, attachments, _options = {}) {
+  async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'busy', message: 'The provider is already processing a message.',
+      })
       return
     }
     if (this._destroying || !this._processReady || !this._client) {
       this.emit('error', { message: 'Session not ready' })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'not_runnable', message: 'The provider session is not ready to accept input.',
+      })
+      return
+    }
+    if (sendOptions.context && Array.isArray(attachments) && attachments.length > 0) {
+      this.emit('error', {
+        message: `BYOK provider does not yet materialise attachments (${attachments.length} dropped). Track follow-up: file-via-Read tool flow.`,
+      })
+      reportInputAdmission(sendOptions, {
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'unsupported_attachments', message: 'This provider does not support image context.',
+      })
       return
     }
 
@@ -963,6 +981,10 @@ export class ClaudeByokSession extends BaseSession {
         this._isBusy = false
         this.emit('error', {
           message: `MCP prompt /${mcpPromptMatch.prefixedName} failed: ${err?.message || String(err)}`,
+        })
+        reportInputAdmission(sendOptions, {
+          status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+          reason: 'prompt_resolution_failed', message: 'The provider prompt could not be resolved before dispatch.',
         })
         return
       }
@@ -1098,7 +1120,17 @@ export class ClaudeByokSession extends BaseSession {
           if (this._history.length > historyLengthBeforeSend) {
             this._history.length = historyLengthBeforeSend
           }
+          if (round === 0) {
+            reportInputAdmission(sendOptions, {
+              status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+              reason: 'stream_start_failed', message: 'The provider rejected the input before streaming began.',
+            })
+          }
           throw err
+        }
+
+        if (round === 0) {
+          reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
         }
 
         for await (const event of stream) {

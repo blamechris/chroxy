@@ -453,7 +453,9 @@ export function createMockSession(overrides = {}) {
   // BaseSession.setSessionPreamble: string validation, trim+cap, returns
   // true only when the trimmed value differs from the stored value.
   session.sessionPreamble = ''
-  session.sendMessage = createSpy()
+  session.sendMessage = createSpy((_prompt, _attachments, options) => {
+    options?.onInputAdmission?.({ status: 'accepted', delivery: 'dispatch_started' })
+  })
   session.interrupt = createSpy()
   // #7340: every provider inherits `getActiveAgents()` from BaseSession, and
   // `ws-history.reseedActiveAgents` calls it unguarded — deliberately, since a

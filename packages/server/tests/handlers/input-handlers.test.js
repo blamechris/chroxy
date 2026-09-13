@@ -224,6 +224,9 @@ describe('input-handlers', () => {
       const sessions = new Map()
       const session = createMockSession()
       session.isRunning = true
+      session.sendMessage = createSpy((_prompt, _attachments, options) => {
+        options?.onInputAdmission?.({ status: 'queued', delivery: 'queued' })
+      })
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
       ctx.transport.claimPrimary('s1', 'client-1', { force: true })
@@ -305,6 +308,55 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent.at(-1).reason, 'payload_mismatch')
     })
 
+    it('hashes object keys canonically and distinguishes changed image bytes (#7822 review)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const item = {
+        id: 'image-1', kind: 'image', mediaType: 'image/png', sizeBytes: 3, lifetime: 'one_turn',
+        provenance: { source: 'device', label: 'Selection' },
+        content: { type: 'base64', data: 'YWJj' },
+      }
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'inspect', clientMessageId: 'canonical-image', context: { version: 1, items: [item] },
+      }, ctx)
+      await inputHandlers.input(makeWs(), client, {
+        clientMessageId: 'canonical-image', data: 'inspect',
+        context: { items: [{
+          content: { data: 'YWJj', type: 'base64' }, provenance: { label: 'Selection', source: 'device' },
+          lifetime: 'one_turn', sizeBytes: 3, mediaType: 'image/png', kind: 'image', id: 'image-1',
+        }], version: 1 },
+      }, ctx)
+      assert.equal(session.sendMessage.callCount, 1, 'object key order must not change the payload hash')
+      assert.equal(ctx._sent.at(-1).status, 'duplicate')
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'inspect', clientMessageId: 'canonical-image',
+        context: { version: 1, items: [{ ...item, content: { type: 'base64', data: 'ZGVm' } }] },
+      }, ctx)
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx._sent.at(-1).status, 'rejected')
+      assert.equal(ctx._sent.at(-1).reason, 'payload_mismatch')
+    })
+
+    it('distinguishes lone UTF-16 surrogate code units in the payload hash (#7822 review)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1', clientCapabilities: new Set(['input_context_v1']) })
+
+      await inputHandlers.input(makeWs(), client, { data: '\ud800', clientMessageId: 'surrogate-id' }, ctx)
+      await inputHandlers.input(makeWs(), client, { data: '\ud801', clientMessageId: 'surrogate-id' }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx._sent.at(-1).status, 'rejected')
+      assert.equal(ctx._sent.at(-1).reason, 'payload_mismatch')
+    })
+
     it('keeps pre-capability plain-input behavior for older clients (#7822)', async () => {
       const sessions = new Map()
       const session = createMockSession()
@@ -368,6 +420,103 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent.at(-1).status, 'expired')
       assert.equal(ctx._sent.at(-1).retrySafe, false)
       assert.match(ctx._sent.at(-1).message, /retention window expired/i)
+    })
+
+    it('keeps context uncertain on a same-id retry after synchronous dispatch failure (#7822 review)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sendMessage = createSpy(() => { throw new Error('sync dispatch failure') })
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const message = {
+        data: 'compare', clientMessageId: 'uncertain-replay',
+        context: { version: 1, items: [{
+          id: 'clip-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+          provenance: { source: 'clipboard' }, content: { type: 'text', text: 'selected' },
+        }] },
+      }
+
+      await assert.rejects(inputHandlers.input(makeWs(), client, message, ctx), /sync dispatch failure/)
+      const firstAck = ctx._sent.at(-1)
+      assert.equal(firstAck.status, 'uncertain')
+      assert.equal(firstAck.delivery, 'unknown')
+      assert.equal(firstAck.context, undefined)
+
+      await inputHandlers.input(makeWs(), client, message, ctx)
+      const replayAck = ctx._sent.at(-1)
+      assert.equal(session.sendMessage.callCount, 1, 'uncertain retained request is not dispatched twice')
+      assert.equal(replayAck.status, 'uncertain')
+      assert.equal(replayAck.delivery, 'unknown')
+      assert.equal(replayAck.context, undefined, 'uncertain replay must not claim accepted context ids')
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0, 'uncertain dispatch must not create phantom history')
+      assert.equal(ctx.runtime.inputDedupRecords.get('s1').has('uncertain-replay'), true)
+    })
+
+    it('reports an uninstrumented adapter as uncertain and suppresses automatic replay (#7822 review)', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sendMessage = createSpy(() => undefined)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const message = {
+        data: 'compare', clientMessageId: 'uninstrumented-replay',
+        context: { version: 1, items: [{
+          id: 'clip-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+          provenance: { source: 'clipboard' }, content: { type: 'text', text: 'selected' },
+        }] },
+      }
+
+      await inputHandlers.input(makeWs(), client, message, ctx)
+      assert.equal(ctx._sent.at(-1).status, 'uncertain')
+      assert.equal(ctx._sent.at(-1).delivery, 'unknown')
+      assert.equal(ctx._sent.at(-1).reason, 'admission_pending')
+      assert.equal(ctx._sent.at(-1).context, undefined)
+      await inputHandlers.input(makeWs(), client, message, ctx)
+      assert.equal(session.sendMessage.callCount, 1)
+      assert.equal(ctx._sent.at(-1).status, 'uncertain')
+      assert.equal(ctx._sent.at(-1).reason, 'delivery_uncertain')
+      assert.equal(ctx._sent.at(-1).context, undefined)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0)
+    })
+
+    it('keeps context through an evaluator replay whose original is later rejected (#7822 review)', async () => {
+      let resolveEvaluation
+      const evaluation = new Promise((resolve) => { resolveEvaluation = resolve })
+      const sessions = new Map()
+      const session = createMockSession()
+      session.promptEvaluator = true
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions, { evaluateDraft: () => evaluation })
+      const client = makeClient({ activeSessionId: 's1' })
+      const message = {
+        data: 'substantive context draft for evaluator admission', clientMessageId: 'evaluator-replay',
+        context: { version: 1, items: [{
+          id: 'clip-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+          provenance: { source: 'clipboard' }, content: { type: 'text', text: 'selected' },
+        }] },
+      }
+
+      const original = inputHandlers.input(makeWs(), client, message, ctx)
+      await new Promise((resolve) => setImmediate(resolve))
+      await inputHandlers.input(makeWs(), client, message, ctx)
+      const replayAck = ctx._sent.at(-1)
+      assert.equal(replayAck.status, 'uncertain')
+      assert.equal(replayAck.delivery, 'unknown')
+      assert.equal(replayAck.context, undefined)
+      assert.equal(session.sendMessage.callCount, 0)
+
+      session.isRunning = true
+      ctx.transport.claimPrimary('s1', 'other-client', { force: true })
+      resolveEvaluation({ verdict: 'forward', reasoning: '' })
+      await original
+      assert.equal(session.sendMessage.callCount, 0)
+      assert.equal(ctx._sent.at(-1).status, 'rejected')
+      assert.equal(ctx._sent.at(-1).delivery, 'not_dispatched')
+      assert.equal(ctx._sent.at(-1).context, undefined)
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0, 'held then rejected input must not create history')
+      assert.equal(ctx.runtime.inputDedupRecords.has('s1'), false, 'known post-evaluator rejection releases the id for retry')
     })
 
     it('checks session binding before consulting dedup records (#7822)', async () => {
@@ -1572,6 +1721,42 @@ describe('input-handlers', () => {
       // Copilot review on PR #3634.
       assert.equal(ctx.transport.updatePrimary.callCount, 1, 'updatePrimary must be called even on clarify path')
       assert.deepEqual(ctx.transport.updatePrimary.lastCall, ['s1', client.id])
+    })
+
+    it('holds selected context for a later input when the evaluator holds only the draft', async () => {
+      const evaluator = createSpy(async () => ({
+        verdict: 'clarify',
+        rewritten: null,
+        clarification: 'Which part of the image?',
+        reasoning: 'The request needs a target.',
+      }))
+      const { ctx, session } = makeAutoEvalCtx({ promptEvaluator: true, evaluator })
+      const client = makeClient({ activeSessionId: 's1' })
+      const context = {
+        version: 1,
+        items: [
+          {
+            id: 'selection-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn',
+            provenance: { source: 'device' }, content: { type: 'text', text: 'selected' },
+          },
+          {
+            id: 'image-1', kind: 'image', mediaType: 'image/png', sizeBytes: 3, lifetime: 'one_turn',
+            provenance: { source: 'device' }, content: { type: 'base64', data: 'YWJj' },
+          },
+        ],
+      }
+
+      await inputHandlers.input(makeWs(), client, {
+        data: 'explain what is wrong with this selection',
+        clientMessageId: 'clarify-context-1',
+        context,
+      }, ctx)
+
+      assert.equal(session.sendMessage.callCount, 0, 'clarify does not admit context to the provider')
+      const ack = ctx._sent.filter((message) => message.type === 'input_ack').at(-1)
+      assert.equal(ack.status, 'accepted')
+      assert.equal(ack.delivery, 'evaluation_held')
+      assert.equal(ack.context, undefined, 'held draft must not consume context payload that was not retained')
     })
 
     it('force-forwards original draft after 3 consecutive clarify verdicts (max iteration cap)', async () => {
