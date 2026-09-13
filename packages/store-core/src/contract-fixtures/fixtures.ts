@@ -42,6 +42,38 @@
 import type { ChatMessage, SessionInfo } from '../types'
 
 // ---------------------------------------------------------------------------
+// Deterministic clock (#7809)
+// ---------------------------------------------------------------------------
+
+/**
+ * The wall-clock value `contract.test.ts` pins `Date.now()` to while it runs a
+ * fixture through the two client adapters.
+ *
+ * Each fixture is driven through the dispatch table TWICE — once per client —
+ * and the test then compares the two flat stores field-for-field. Any handler
+ * that stamps `Date.now()` into flat state therefore produced two values that
+ * agreed only when both runs landed inside the same millisecond; on a loaded
+ * runner they straddled a boundary and the parity assertion went red for no
+ * reason (#7809, observed on PR #7795 via `server_shutdown`'s
+ * `restartingSince` — `handlers/error.ts`).
+ *
+ * Pinning the clock rather than excluding the key keeps every clock-derived
+ * field INSIDE the deep compare, and does so for all of them at once: no
+ * hand-maintained roster of "non-deterministic keys" to drift out of date as
+ * handlers are added (this repo's `docs/false-safety-guards.md` failure mode of
+ * a hardcoded list beside a growing set).
+ *
+ * Because the clock is pinned to a KNOWN constant, a fixture can also assert the
+ * exact value a handler is contracted to write — see the `server_shutdown`
+ * fixture's `restartingSince`. That is what stops the fix from trading the flake
+ * for a hole: a handler that silently stops writing the field goes red, where a
+ * symmetric exclusion from both sides of the parity compare would not.
+ *
+ * 2023-11-14T22:13:20.000Z — an arbitrary but plausible past instant.
+ */
+export const CONTRACT_FIXED_NOW = 1_700_000_000_000
+
+// ---------------------------------------------------------------------------
 // Fixture shape
 // ---------------------------------------------------------------------------
 
@@ -1579,7 +1611,22 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'server_shutdown',
     message: { type: 'server_shutdown', reason: 'restart', restartEtaMs: 30000 },
     expect: {
-      flat: { shutdownReason: 'restart', restartEtaMs: 30000 },
+      // `restartingSince` is clock-derived (`handlers/error.ts`). The contract
+      // test pins `Date.now()` to CONTRACT_FIXED_NOW for the duration of both
+      // client runs (#7809), so the exact value is assertable here — and a
+      // handler that stops writing the field goes red instead of quietly
+      // dropping out of both sides of the parity compare.
+      //
+      // SCOPE: this literal is only valid under `contract.test.ts`, the one
+      // harness that pins the clock. DISPATCH_FIXTURES is exported from the
+      // package index as data "consumed by BOTH clients' test suites", so a
+      // future app-jest / dashboard-vitest harness driving these rows through a
+      // real `handleMessage` — the shape `contract-switch.test.ts` already has
+      // for SWITCH_FIXTURES — must pin `Date.now()` to CONTRACT_FIXED_NOW too,
+      // or teach its field matcher the #7618 `isTimestamp` branch. It fails
+      // loudly with a value mismatch rather than silently, so this is a trip
+      // hazard to read, not a hole.
+      flat: { shutdownReason: 'restart', restartEtaMs: 30000, restartingSince: CONTRACT_FIXED_NOW },
     },
   },
   {
