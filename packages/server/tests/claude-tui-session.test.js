@@ -2844,6 +2844,26 @@ describe('ClaudeTuiSession', () => {
       assert.ok(ClaudeTuiSession.MAX_THROTTLED_CHARS > 0, 'must be positive')
     })
 
+    // #7812: the fixed sleeps this suite used to carry bounded PROMPT_CHAR_DELAY_MS
+    // BY ACCIDENT — a 30-250ms sleep against a 25-char write went red the moment the
+    // throttle was inflated. Awaiting the drain (correctly) removed that bound, so an
+    // inflated delay would now produce a SLOWER GREEN suite, and at a large enough
+    // value the awaiting tests HANG rather than fail (node --test sets no per-test
+    // timeout) — the green-or-flake-never-red shape of docs/false-safety-guards.md
+    // entry 17. The paste-heuristic tests do not cover it either: LOOSE_MS/TIGHT_MS
+    // assert a LOWER bound on inter-char spacing, so an inflated delay passes them.
+    // Pin the CONSTANT, never a duration — a timing assertion would just reintroduce
+    // the flake this PR exists to remove.
+    it('keeps PROMPT_CHAR_DELAY_MS in the low-single-digit range (#7812)', () => {
+      assert.equal(typeof ClaudeTuiSession.PROMPT_CHAR_DELAY_MS, 'number',
+        'PROMPT_CHAR_DELAY_MS is a numeric static for tunability + assertions')
+      assert.ok(ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0, 'must be positive — 0 would bulk-write')
+      assert.ok(ClaudeTuiSession.PROMPT_CHAR_DELAY_MS <= 5,
+        'the #4269 per-char throttle must stay in the low-single-digit ms range: at 40ms a ' +
+        '4000-char prompt takes 160s, which is the multi-minute silent hang _writePtyTextThrottled ' +
+        'exists to avoid')
+    })
+
     it('_writePtyTextThrottled: bulk-writes the body in one call when text exceeds MAX_THROTTLED_CHARS (#4276)', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._activeTurn = { messageId: 'm-bulk', startedAt: Date.now(), aborted: false, synthSeq: 0 }
