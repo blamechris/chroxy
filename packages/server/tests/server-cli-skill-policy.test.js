@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 import { loadChildConfig } from '../src/server-cli-child.js'
 import {
   createDaemonSessionManager,
@@ -137,7 +137,7 @@ describe('daemon startup skill policy (#7834)', () => {
     assert.ok(existsSync(trustPath), 'first activation persists the configured trust ledger')
     const firstLedger = JSON.parse(readFileSync(trustPath, 'utf8'))
     assert.ok(
-      Object.keys(firstLedger.skills).some((path) => path.endsWith('/allowed.md')),
+      Object.keys(firstLedger.skills).some((path) => basename(path) === 'allowed.md'),
       'first activation records the allowlisted skill hash',
     )
 
