@@ -1807,6 +1807,70 @@ export function usesDefaultModelsRegistry(providerName) {
   return getRegistryForProvider(providerName) === defaultRegistry
 }
 
+/**
+ * #7784 — ONE roster row for a model, from the ROSTER THE CLIENT WAS SENT.
+ *
+ * `available_models` is `getRegistryForProvider(entry.provider).getModels()`
+ * tagged with that provider name, at both send sites in `ws-history.js`, and
+ * the dashboard picks a row out of it by `fullId === active || id === active`
+ * (the #5628 dual match: a session's model arrives as either form). This
+ * function is that same expression on those same rows, so a server-side
+ * consumer asking "what does the active model advertise?" reads the row the
+ * operator is actually looking at.
+ *
+ * That matters because the alternative — calling
+ * `ProviderClass.getModelMetadata(id)` — is a SECOND source with its own
+ * refresh timing, and the two provably disagree: after codex's `model/list`
+ * answers with zero rows the catalog records the empty answer while nothing is
+ * broadcast for it (`refreshDiscoveredModels` never calls `updateModels([])`),
+ * so the registry keeps serving the previously discovered rows — levels and all
+ * — while `getModelMetadata` for those same ids returns null. The picker then
+ * offered the stale row's efforts and the gate refused every one of them
+ * (#7784, and `codex-model-catalog.js`'s own header documents the state).
+ *
+ * A provider whose class has no `getFallbackModels()` lands on the DEFAULT
+ * registry, and this function reads it rather than answering null — deliberately,
+ * because that is the roster the client was SENT for that provider (the send
+ * sites tag whatever registry answered). Deviating here would re-create the
+ * divergence this function exists to remove; that the fallback is the Claude
+ * roster is `getRegistryForProvider`'s documented behaviour and a separate
+ * question.
+ *
+ * @param {string|null|undefined} providerName
+ * @param {string|null|undefined} modelId - short id or full id
+ * @returns {Object|null} the roster row, or null when the roster has no such model
+ */
+export function getRosterModelRow(providerName, modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return null
+  const rows = getRegistryForProvider(providerName).getModels()
+  if (!Array.isArray(rows)) return null
+  for (const row of rows) {
+    if (row?.fullId === modelId || row?.id === modelId) return row
+  }
+  return null
+}
+
+/**
+ * #7784 — does `LEGACY_THINKING_LEVELS` stand in for a model row that
+ * advertises no reasoning levels on this provider?
+ *
+ * The ONE derivation of that question. It is `isClaudeProvider`, because the
+ * legacy triple is the Claude family's real roster and nobody else's — handing
+ * it to a provider that simply has not advertised its own levels yet lets a
+ * level no model offered ride out as if one had (#7782). It lives here rather
+ * than at either consumer because BOTH need the same answer: the server's
+ * `set_thinking_level` gate asks it directly, and `listProviders()` ships it to
+ * clients as the `thinkingLevelLegacyFallback` capability so the picker resolves
+ * its options from the same fact instead of always taking the fallback.
+ *
+ * @param {string|null|undefined} providerName
+ * @param {Function} [ProviderClass] - optional resolved class (authoritative)
+ * @returns {boolean}
+ */
+export function thinkingLevelLegacyFallbackApplies(providerName, ProviderClass = null) {
+  return isClaudeProvider(providerName, ProviderClass)
+}
+
 // Accept both short ids and full model IDs in set_model.
 // Proxy delegates to the default registry's live Set so mutations
 // (from updateModels/resetModels) are always reflected.

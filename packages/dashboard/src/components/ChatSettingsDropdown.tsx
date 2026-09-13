@@ -93,6 +93,12 @@ export interface ChatSettingsDropdownProps {
   // be offered levels codex does not have. Omitted → the Claude triple, which
   // is what `thinkingLevelOptions(null)` resolves to, so a row with no
   // reasoning levels (every Claude provider today) renders exactly as before.
+  //
+  // #7784: that empty-list fallback is the CLAUDE roster, so an EMPTY array
+  // here would put the Claude triple on a provider whose gate refuses all
+  // three. `App` therefore never renders this control with an empty list —
+  // `showThinkingLevel` requires `activeModelThinkingLevels.length > 0` — and a
+  // new call site must do the same rather than relying on the fallback below.
   thinkingLevels?: ThinkingLevelOption[]
   onThinkingLevelChange: (level: string) => void
   // promptEvaluator was originally rendered here as a per-session

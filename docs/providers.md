@@ -468,6 +468,19 @@ has no way to send one).
   Claude providers are unaffected: a row with no advertised levels falls back to
   the legacy `default | high | max` triple, and that fallback is refused on any
   non-Claude provider rather than being handed the Claude vocabulary by accident.
+- **The picker and the gate read ONE roster** (#7784). Both resolve the offered
+  levels from the model row `available_models` carried — the server gate through
+  `getRosterModelRow` (models.js), the dashboard by matching that same row on
+  `fullId || id` — and both decide whether the legacy fallback applies from the
+  same server-side derivation, shipped to clients as the
+  `thinkingLevelLegacyFallback` capability. Two consequences worth knowing:
+  a codex model that has advertised nothing yet gets **no effort control at all**
+  rather than an Auto/High/Max dropdown whose every selection bounced with
+  `THINKING_LEVEL_NOT_APPLIED`; and the control is likewise absent for the moment
+  before a codex roster arrives. `tests/thinking-level-roster-parity.test.js`
+  pins the two rosters together in both directions, including the
+  populated-then-empty `model/list` state below, where the two sources used to
+  disagree by construction.
 - **Seeding is ASYMMETRIC between the two RPCs, and this is easy to get wrong.**
   `thread/start` has **no** top-level `effort` field: the value goes through the
   generic `config` map as `model_reasoning_effort`, spelled exactly as

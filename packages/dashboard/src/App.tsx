@@ -461,28 +461,43 @@ export function App() {
   // #7730: the thinking levels the ACTIVE MODEL offers, from its own roster row
   // (`reasoningLevels` / `defaultReasoningLevel`, put on the wire by
   // #7723/#7726). A row that advertises none — every Claude provider today —
-  // resolves to the legacy `Auto / High / Max` triple, so nothing about the
+  // resolves to the legacy Auto / High / Max triple, so nothing about the
   // Claude header changes.
   //
-  // `activeModel` arrives as either a short id or a full id (the #5628 trap the
-  // model <select> hit), so the row is matched on both. No match yet (a roster
-  // still in flight, a model the roster does not carry) resolves to the same
-  // legacy triple rather than to an empty list: an empty list would blank the
-  // control on a provider whose levels simply have not arrived.
+  // #7784 — ONE source for the offered roster, shared with the server's gate.
   //
-  // #7784 — this and the SERVER's gate read the model row from two different
-  // sources: the picker matches `availableModels` (the modelsByProvider wire
-  // rows), while `resolveSessionThinkingLevels` calls the provider class's
-  // `getModelMetadata` directly. codex-model-catalog.js documents a
-  // populated -> empty divergence in which they disagree by construction, and
-  // since the server now REFUSES the legacy fallback on a non-Claude provider,
-  // that state shows a picker offering Auto/High/Max whose every selection
-  // bounces. Reconciling the two sources is #7784; recorded here rather than
-  // left for the next reader to rediscover.
+  // Two things used to differ between this memo and
+  // `resolveSessionThinkingLevels`, and either one alone offers a level the gate
+  // refuses:
+  //
+  //   1. THE ROW. The gate called `ProviderClass.getModelMetadata(id)` while
+  //      this reads the broadcast roster. They disagree by construction after a
+  //      codex `model/list` that answers with zero rows — the catalog records
+  //      the empty answer, nothing is broadcast for it, so these rows stay and
+  //      that lookup starts returning null. The gate now reads the roster row
+  //      too (`getRosterModelRow`, models.js), i.e. this same row.
+  //   2. THE FALLBACK. A row advertising no levels resolved to the legacy
+  //      triple here unconditionally, while the gate refused that fallback on
+  //      any non-Claude provider — so a pre-catalog codex session got a working
+  //      Auto/High/Max dropdown whose every selection bounced with
+  //      THINKING_LEVEL_NOT_APPLIED. Whether the fallback applies is a
+  //      per-provider fact only the server can derive, and it arrives as the
+  //      `thinkingLevelLegacyFallback` capability. Answering it here from a list
+  //      of provider names would re-create, on the client, the hardcoded roster
+  //      #7730 removed.
+  //
+  // `activeModel` arrives as either a short id or a full id (the #5628 trap the
+  // model <select> hit), so the row is matched on both — the same dual match
+  // `getRosterModelRow` performs. An unmatched row (roster still in flight, a
+  // model the roster does not carry) resolves to the provider's fallback: the
+  // Claude triple where it applies, nothing where it does not, which drops the
+  // control rather than offering a roster nobody claimed (`showThinkingLevel`
+  // below), exactly as #7728 drops the MODEL picker on an empty roster.
   const activeModelThinkingLevels = useMemo(() => {
     const row = availableModels.find(m => m.fullId === activeModel || m.id === activeModel) ?? null
-    return thinkingLevelOptions(row)
-  }, [availableModels, activeModel])
+    const caps = availableProviders.find(p => p.name === activeSessionProvider)?.capabilities
+    return thinkingLevelOptions(row, { legacyFallback: caps?.thinkingLevelLegacyFallback !== false })
+  }, [availableModels, activeModel, availableProviders, activeSessionProvider])
 
   // #3839: dropdown-gating flags derived from the active session's provider
   // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
@@ -502,7 +517,14 @@ export function App() {
       // active provider permanently lacks mid-session model switching (TUI).
       readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
-      showThinkingLevel: !!caps?.thinkingLevel,
+      // #7784: the capability says the provider HAS a reasoning control; the
+      // resolved roster says whether this model has advertised anything for it
+      // to offer. Both are required, because the dropdown's own empty-list
+      // fallback is the legacy triple — rendering it with nothing to show would
+      // put the Claude roster back on a codex session by the back door, which is
+      // the bug this issue is about. Same shape as #7728 dropping the MODEL
+      // picker on an empty roster.
+      showThinkingLevel: !!caps?.thinkingLevel && activeModelThinkingLevels.length > 0,
       // #7725: the composer's magic-keyword highlight is a SEPARATE question
       // from "does this provider take a thinking budget". It reads the
       // capability the server sets only where it actually scans the prompt
@@ -511,7 +533,7 @@ export function App() {
       // highlight.
       highlightThinkingKeywords: !!caps?.thinkingKeywords,
     }
-  }, [activeSessionProvider, availableProviders, activeModel])
+  }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>

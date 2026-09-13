@@ -22,9 +22,9 @@ export declare const ServerByokCredentialsStatusSchema: z.ZodObject<{
         missing: "missing";
     }>;
     source: z.ZodEnum<{
+        none: "none";
         file: "file";
         env: "env";
-        none: "none";
     }>;
     masked: z.ZodOptional<z.ZodString>;
     reason: z.ZodOptional<z.ZodString>;
@@ -46,8 +46,8 @@ export declare const ServerCredentialsStatusSchema: z.ZodObject<{
             missing: "missing";
         }>;
         source: z.ZodEnum<{
-            env: "env";
             none: "none";
+            env: "env";
             store: "store";
             oauth: "oauth";
         }>;
