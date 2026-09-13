@@ -52,5 +52,25 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     maxWorkers: '50%',
+    // #7797 review. `resolve.dedupe` above unifies React for everything vite
+    // transforms, but vitest EXTERNALIZES bare node_modules deps by default —
+    // they are loaded through Node's resolver, which ignores dedupe. `zustand`
+    // is hoisted to the workspace root while `react`/`react-dom` are installed
+    // locally in this package, so an externalized `zustand/esm/react.mjs`
+    // picked up the ROOT react (19.1.0) while the renderer used the LOCAL one
+    // (19.2.5): two React copies, a null dispatcher, and
+    // `Cannot read properties of null (reading 'useCallback')` the moment any
+    // component actually calls `useConnectionStore(...)` against the real
+    // store. Inlining zustand routes it through vite, where dedupe applies.
+    //
+    // This was invisible until SidebarRealStore.test.tsx, because no dashboard
+    // test had ever rendered a component that calls a zustand hook without
+    // mocking the store out first — which is exactly the coverage hole that
+    // test exists to close.
+    server: {
+      deps: {
+        inline: ['zustand'],
+      },
+    },
   },
 })

@@ -261,10 +261,18 @@ export const ServerToolInputDeltaSchema = z.object({
  *     (docker-byok, deepseek, ollama, anthropic-compatible) WHENEVER their
  *     endpoint reports per-round usage — an endpoint that reports none
  *     omits the field.
+ *   - (no `source`)          — codex's app-server driver (#7794): the
+ *     binary's own `tokenUsage.last.totalTokens` (the size the NEXT turn
+ *     starts from — NOT the thread-cumulative `total`, which never steps
+ *     down after a compaction) plus `modelContextWindow` as `maxTokens`. No
+ *     enum value fits — `source` is omitted, which parses as `null`
+ *     client-side and renders un-flagged rather than labelled an estimate,
+ *     since these are the binary's own figures.
  *
- * Providers with no occupancy signal at all (claude-cli, claude-tui, codex,
- * gemini, …) omit the field entirely; clients render their unknown/dash
- * state rather than a fabricated number.
+ * Providers with no occupancy signal at all (claude-cli, claude-tui, gemini,
+ * the legacy codex `exec` driver [`CHROXY_CODEX_APPSERVER=0`], …) omit the
+ * field entirely; clients render their unknown/dash state rather than a
+ * fabricated number.
  */
 export const ServerContextOccupancySnapshotSchema = z.object({
     totalTokens: z.number().nonnegative(),

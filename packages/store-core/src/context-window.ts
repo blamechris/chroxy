@@ -104,6 +104,11 @@ export function resolveContextWindow(
 //     round's true prompt size, i.e. the conversation as last sent to the
 //     API. Emitted only when the endpoint actually reports per-round usage;
 //     an endpoint that reports none produces no snapshot.
+//   - codex's app-server driver (#7794): the binary's own
+//     `tokenUsage.last.totalTokens` (the size the NEXT turn starts from),
+//     carrying `maxTokens` when codex reported `modelContextWindow`. No
+//     `source` tag — see the wire schema's docstring
+//     (packages/protocol/src/schemas/server/stream.ts).
 //
 // A snapshot naturally persists across turns (each result re-reports it) and
 // FOLLOWS A COMPACTION DOWN (the post-compaction snapshot is smaller) —
@@ -111,10 +116,11 @@ export function resolveContextWindow(
 // deliberately not implemented here.)
 //
 // Everything else — claude-cli (aggregate-only stream-json output, no control
-// channel), claude-tui (no usage at all), codex / gemini (aggregate-only) —
-// has NO occupancy signal: the snapshot stays null and every helper here
-// returns null, so the meter renders its honest unknown/dash state. Never
-// fabricate a number from billing usage.
+// channel), claude-tui (no usage at all), the legacy codex `exec` driver
+// (`CHROXY_CODEX_APPSERVER=0`, aggregate-only), gemini (aggregate-only) — has
+// NO occupancy signal: the snapshot stays null and every helper here returns
+// null, so the meter renders its honest unknown/dash state. Never fabricate a
+// number from billing usage.
 // ---------------------------------------------------------------------------
 
 /**
