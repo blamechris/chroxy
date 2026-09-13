@@ -11,7 +11,7 @@
 
 // #6453 — canonical WIRE attachment type for the sendInput signature (was an
 // inline `{ type; mediaType; data; name }[]`; the app only sends binary).
-import type { AgentConnection, BinaryAttachment, ServerPermissionInputMessage, CodexSandboxMode } from '@chroxy/protocol';
+import type { AgentConnection, BinaryAttachment, InputContextEnvelope, ServerPermissionInputMessage, CodexSandboxMode } from '@chroxy/protocol';
 
 // Re-export shared protocol types from store-core
 export type {
@@ -562,7 +562,7 @@ export interface MessageInputActions {
   // and seed an optimistic `queuedMessages` entry (rendered with a "Queued"
   // badge) instead of starting a fresh turn.
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
-  sendInput: (input: string, wireAttachments?: BinaryAttachment[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: BinaryAttachment[], options?: { isVoice?: boolean; clientMessageId?: string; context?: InputContextEnvelope }) => 'sent' | 'queued' | 'uncertain' | false;
   // #6861 — `#`-prefix composer quick-append: send the note to the server, which
   // appends it to the session cwd's project CLAUDE.md and acks with
   // `append_memory_result`. Not offline-queued; returns false when disconnected.

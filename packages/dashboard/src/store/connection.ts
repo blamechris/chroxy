@@ -189,6 +189,9 @@ import {
   // #7603: the one place the container-lost fields are cleared, shared with
   // the app so a dismiss means the same thing on both clients.
   clearContainerLostPatch,
+  buildInputMessage,
+  beginInputDelivery,
+  cancelInputDelivery,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -381,6 +384,7 @@ const EMPTY_INTERVENTIONS: never[] = [];
 // #5937: stable empty outgoing-message queue for the flat-state fallback —
 // same stable-reference rationale as the EMPTY_* constants above.
 const EMPTY_QUEUED_MESSAGES: never[] = [];
+const EMPTY_INPUT_DELIVERIES: Record<string, never> = {};
 
 // #5555.5 — the close/error-path reconnect delay is no longer a fixed
 // constant. Both handlers now climb the shared CONNECT_RETRY_DELAYS ladder
@@ -2317,6 +2321,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6302 — the flat-state fallback has no active session, so no optimistic
       // pending turn owns it.
       pendingClientMessageId: null,
+      inputDeliveries: EMPTY_INPUT_DELIVERIES,
       claudeReady: get().claudeReady,
       activeModel: get().activeModel,
       permissionMode: get().permissionMode,
@@ -3877,7 +3882,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInput: (input, wireAttachments, options) => {
-    const { socket, activeSessionId } = get();
+    const { socket, activeSessionId, serverCapabilities } = get();
+
+    // An older server would accept InputSchema's passthrough field and silently
+    // drop the selected context. Gate before the optimistic user bubble so the
+    // caller can keep the one-shot selection for an actionable retry.
+    if (options?.context && serverCapabilities.inputContextV1 !== true) return false;
 
     // Generate a stable messageId once and use it for both the optimistic
     // UI entry and the wire payload. The server adopts it verbatim as the
@@ -3912,22 +3922,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // bubble so the transcript shows what was attached.
     get().addUserMessage(input, options?.previewAttachments, { clientMessageId, queued: busy });
 
-    const payload: Record<string, unknown> = { type: 'input', data: input, clientMessageId };
-    if (activeSessionId) payload.sessionId = activeSessionId;
-    if (wireAttachments?.length) {
-      payload.attachments = wireAttachments;
+    const payload = buildInputMessage({
+      input,
+      sessionId: activeSessionId,
+      attachments: wireAttachments,
+      isVoice: options?.isVoice,
+      clientMessageId,
+      context: options?.context,
+    });
+    if (options?.context && activeSessionId) {
+      updateSession(activeSessionId, (session) => ({
+        inputDeliveries: beginInputDelivery(
+          session.inputDeliveries,
+          clientMessageId,
+          options.context!,
+          Date.now(),
+          activeSessionId,
+        ),
+      }));
     }
-    if (options?.isVoice) {
-      payload.isVoice = true;
-    }
-    let result: 'sent' | 'queued' | false;
+    let result: 'sent' | 'queued' | 'uncertain' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       // #6283: socket.readyState can flip OPEN → CLOSING before this synchronous
       // send over a flaky tunnel, so wsSend can throw and return false. Fall
       // through to the offline queue so the frame retries on reconnect instead
       // of leaving a permanently 'sent'-looking bubble that never reached the
       // server.
-      result = wsSend(socket, payload) ? 'sent' : enqueueMessage('input', payload);
+      result = wsSend(socket, payload) ? 'sent' : (options?.context ? 'uncertain' : enqueueMessage('input', payload));
     } else {
       result = enqueueMessage('input', payload);
     }
@@ -3979,6 +4000,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         updateSession(sid, (ss) => ({
           queuedMessages: EMPTY_QUEUED_MESSAGES,
           messages: ss.messages.filter((m) => !queuedIds.has(m.id)),
+          inputDeliveries: [...queuedIds].reduce(
+            (records, id) => cancelInputDelivery(records, id),
+            ss.inputDeliveries,
+          ),
         }));
       }
     }
@@ -4051,6 +4076,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // a cancelled message was never sent, so it must not linger as a phantom
         // "sent" bubble once the queued badge clears.
         messages: ss.messages.filter((m) => m.id !== clientMessageId),
+        inputDeliveries: cancelInputDelivery(ss.inputDeliveries, clientMessageId),
       }));
     }
     return 'sent';

@@ -41,9 +41,184 @@ declare const AttachmentSchema: z.ZodUnion<readonly [z.ZodObject<{
     path: z.ZodString;
     name: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>]>;
+export declare const ContextItemSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
+    id: z.ZodString;
+    provenance: z.ZodObject<{
+        source: z.ZodEnum<{
+            file: "file";
+            device: "device";
+            project: "project";
+            clipboard: "clipboard";
+            ocr: "ocr";
+            other: "other";
+        }>;
+        label: z.ZodOptional<z.ZodString>;
+        path: z.ZodOptional<z.ZodString>;
+        capturedAt: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>;
+    mediaType: z.ZodString;
+    sizeBytes: z.ZodNumber;
+    lifetime: z.ZodEnum<{
+        one_turn: "one_turn";
+        task: "task";
+        durable: "durable";
+    }>;
+    kind: z.ZodLiteral<"text">;
+    content: z.ZodObject<{
+        type: z.ZodLiteral<"text">;
+        text: z.ZodString;
+    }, z.core.$strip>;
+}, z.core.$strip>, z.ZodObject<{
+    id: z.ZodString;
+    provenance: z.ZodObject<{
+        source: z.ZodEnum<{
+            file: "file";
+            device: "device";
+            project: "project";
+            clipboard: "clipboard";
+            ocr: "ocr";
+            other: "other";
+        }>;
+        label: z.ZodOptional<z.ZodString>;
+        path: z.ZodOptional<z.ZodString>;
+        capturedAt: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>;
+    mediaType: z.ZodString;
+    sizeBytes: z.ZodNumber;
+    lifetime: z.ZodEnum<{
+        one_turn: "one_turn";
+        task: "task";
+        durable: "durable";
+    }>;
+    kind: z.ZodLiteral<"image">;
+    content: z.ZodObject<{
+        type: z.ZodLiteral<"base64">;
+        data: z.ZodString;
+    }, z.core.$strip>;
+}, z.core.$strip>, z.ZodObject<{
+    id: z.ZodString;
+    provenance: z.ZodObject<{
+        source: z.ZodEnum<{
+            file: "file";
+            device: "device";
+            project: "project";
+            clipboard: "clipboard";
+            ocr: "ocr";
+            other: "other";
+        }>;
+        label: z.ZodOptional<z.ZodString>;
+        path: z.ZodOptional<z.ZodString>;
+        capturedAt: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$loose>;
+    mediaType: z.ZodString;
+    sizeBytes: z.ZodNumber;
+    lifetime: z.ZodEnum<{
+        one_turn: "one_turn";
+        task: "task";
+        durable: "durable";
+    }>;
+    kind: z.ZodEnum<{
+        document: "document";
+        reference: "reference";
+    }>;
+    content: z.ZodObject<{
+        type: z.ZodLiteral<"reference">;
+        uri: z.ZodString;
+    }, z.core.$strip>;
+}, z.core.$strip>], "kind">;
+export declare const InputContextEnvelopeSchema: z.ZodObject<{
+    version: z.ZodLiteral<1>;
+    items: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+        id: z.ZodString;
+        provenance: z.ZodObject<{
+            source: z.ZodEnum<{
+                file: "file";
+                device: "device";
+                project: "project";
+                clipboard: "clipboard";
+                ocr: "ocr";
+                other: "other";
+            }>;
+            label: z.ZodOptional<z.ZodString>;
+            path: z.ZodOptional<z.ZodString>;
+            capturedAt: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$loose>;
+        mediaType: z.ZodString;
+        sizeBytes: z.ZodNumber;
+        lifetime: z.ZodEnum<{
+            one_turn: "one_turn";
+            task: "task";
+            durable: "durable";
+        }>;
+        kind: z.ZodLiteral<"text">;
+        content: z.ZodObject<{
+            type: z.ZodLiteral<"text">;
+            text: z.ZodString;
+        }, z.core.$strip>;
+    }, z.core.$strip>, z.ZodObject<{
+        id: z.ZodString;
+        provenance: z.ZodObject<{
+            source: z.ZodEnum<{
+                file: "file";
+                device: "device";
+                project: "project";
+                clipboard: "clipboard";
+                ocr: "ocr";
+                other: "other";
+            }>;
+            label: z.ZodOptional<z.ZodString>;
+            path: z.ZodOptional<z.ZodString>;
+            capturedAt: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$loose>;
+        mediaType: z.ZodString;
+        sizeBytes: z.ZodNumber;
+        lifetime: z.ZodEnum<{
+            one_turn: "one_turn";
+            task: "task";
+            durable: "durable";
+        }>;
+        kind: z.ZodLiteral<"image">;
+        content: z.ZodObject<{
+            type: z.ZodLiteral<"base64">;
+            data: z.ZodString;
+        }, z.core.$strip>;
+    }, z.core.$strip>, z.ZodObject<{
+        id: z.ZodString;
+        provenance: z.ZodObject<{
+            source: z.ZodEnum<{
+                file: "file";
+                device: "device";
+                project: "project";
+                clipboard: "clipboard";
+                ocr: "ocr";
+                other: "other";
+            }>;
+            label: z.ZodOptional<z.ZodString>;
+            path: z.ZodOptional<z.ZodString>;
+            capturedAt: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$loose>;
+        mediaType: z.ZodString;
+        sizeBytes: z.ZodNumber;
+        lifetime: z.ZodEnum<{
+            one_turn: "one_turn";
+            task: "task";
+            durable: "durable";
+        }>;
+        kind: z.ZodEnum<{
+            document: "document";
+            reference: "reference";
+        }>;
+        content: z.ZodObject<{
+            type: z.ZodLiteral<"reference">;
+            uri: z.ZodString;
+        }, z.core.$strip>;
+    }, z.core.$strip>], "kind">>;
+}, z.core.$strip>;
 export type BinaryAttachment = z.infer<typeof BinaryAttachmentSchema>;
 export type FileRefAttachment = z.infer<typeof FileRefAttachmentSchema>;
 export type Attachment = z.infer<typeof AttachmentSchema>;
+export type ContextItem = z.infer<typeof ContextItemSchema>;
+export type InputContextEnvelope = z.infer<typeof InputContextEnvelopeSchema>;
 export declare const AuthSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth">;
     token: z.ZodString;
@@ -112,6 +287,95 @@ export declare const InputSchema: z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>]>>>;
     isVoice: z.ZodOptional<z.ZodBoolean>;
+    clientMessageId: z.ZodOptional<z.ZodUnknown>;
+    context: z.ZodOptional<z.ZodObject<{
+        version: z.ZodLiteral<1>;
+        items: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodLiteral<"text">;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"text">;
+                text: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>, z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodLiteral<"image">;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"base64">;
+                data: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>, z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodEnum<{
+                document: "document";
+                reference: "reference";
+            }>;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"reference">;
+                uri: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>], "kind">>;
+    }, z.core.$strip>>;
 }, z.core.$loose>;
 export declare const InterruptSchema: z.ZodObject<{
     type: z.ZodLiteral<"interrupt">;
@@ -269,8 +533,8 @@ export declare const SubmitMcpAuthCodeSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const McpConfigScopeSchema: z.ZodEnum<{
-    user: "user";
     project: "project";
+    user: "user";
 }>;
 export declare const AddMcpServerSchema: z.ZodObject<{
     type: z.ZodLiteral<"add_mcp_server">;
@@ -289,8 +553,8 @@ export declare const AddMcpServerSchema: z.ZodObject<{
         headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
     }, z.core.$strip>;
     scope: z.ZodOptional<z.ZodEnum<{
-        user: "user";
         project: "project";
+        user: "user";
     }>>;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
@@ -299,8 +563,8 @@ export declare const RemoveMcpServerSchema: z.ZodObject<{
     type: z.ZodLiteral<"remove_mcp_server">;
     name: z.ZodString;
     scope: z.ZodOptional<z.ZodEnum<{
-        user: "user";
         project: "project";
+        user: "user";
     }>>;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1123,6 +1387,95 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         name: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>]>>>;
     isVoice: z.ZodOptional<z.ZodBoolean>;
+    clientMessageId: z.ZodOptional<z.ZodUnknown>;
+    context: z.ZodOptional<z.ZodObject<{
+        version: z.ZodLiteral<1>;
+        items: z.ZodArray<z.ZodDiscriminatedUnion<[z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodLiteral<"text">;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"text">;
+                text: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>, z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodLiteral<"image">;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"base64">;
+                data: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>, z.ZodObject<{
+            id: z.ZodString;
+            provenance: z.ZodObject<{
+                source: z.ZodEnum<{
+                    file: "file";
+                    device: "device";
+                    project: "project";
+                    clipboard: "clipboard";
+                    ocr: "ocr";
+                    other: "other";
+                }>;
+                label: z.ZodOptional<z.ZodString>;
+                path: z.ZodOptional<z.ZodString>;
+                capturedAt: z.ZodOptional<z.ZodNumber>;
+            }, z.core.$loose>;
+            mediaType: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            lifetime: z.ZodEnum<{
+                one_turn: "one_turn";
+                task: "task";
+                durable: "durable";
+            }>;
+            kind: z.ZodEnum<{
+                document: "document";
+                reference: "reference";
+            }>;
+            content: z.ZodObject<{
+                type: z.ZodLiteral<"reference">;
+                uri: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>], "kind">>;
+    }, z.core.$strip>>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"interrupt">;
 }, z.core.$loose>, z.ZodObject<{
@@ -1198,8 +1551,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
     }, z.core.$strip>;
     scope: z.ZodOptional<z.ZodEnum<{
-        user: "user";
         project: "project";
+        user: "user";
     }>>;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1207,8 +1560,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"remove_mcp_server">;
     name: z.ZodString;
     scope: z.ZodOptional<z.ZodEnum<{
-        user: "user";
         project: "project";
+        user: "user";
     }>>;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;

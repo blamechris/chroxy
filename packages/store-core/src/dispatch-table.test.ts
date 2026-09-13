@@ -1692,6 +1692,33 @@ describe('shared dispatch table', () => {
   })
 
   describe('message_queued / message_dequeued (#5937)', () => {
+    it('routes a late input acknowledgement to the matching session/request (#7822)', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1', messages: [],
+            inputDeliveries: {
+              'user-1': {
+                clientMessageId: 'user-1', sessionId: 's1', status: 'uncertain', delivery: 'unknown',
+                pendingContextItemIds: ['ocr-1'], updatedAt: 1,
+              },
+            },
+          },
+          s2: { sessionId: 's2', messages: [], inputDeliveries: {} },
+        },
+      })
+      dispatch(env, {
+        type: 'input_ack', sessionId: 's1', clientMessageId: 'user-1',
+        status: 'accepted', delivery: 'dispatch_started', retrySafe: false,
+        acceptedAt: 2, retentionExpiresAt: 602_000, dedupScope: 'process',
+        context: { version: 1, acceptedItemIds: ['ocr-1'], supportedKinds: ['text', 'image'], supportedLifetimes: ['one_turn'] },
+      })
+      expect((env.sessions.s1.inputDeliveries as Record<string, any>)?.['user-1']).toMatchObject({
+        status: 'accepted', pendingContextItemIds: [],
+      })
+      expect(env.sessions.s2.inputDeliveries).toEqual({})
+    })
+
     it('reconciles a server message_queued by appending a confirmed entry', () => {
       const env = makeAdapter({
         sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [] } },

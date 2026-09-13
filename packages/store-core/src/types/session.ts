@@ -385,6 +385,12 @@ export interface BaseSessionState {
    * own optimistic turn. Null whenever no faked-fresh turn is outstanding.
    */
   pendingClientMessageId: string | null;
+  /**
+   * #7822 — recent correlated input acceptance state, keyed by the existing
+   * clientMessageId. A context send starts as uncertain until input_ack lands;
+   * accepted/queued/duplicate acknowledgements consume its one-turn item ids.
+   */
+  inputDeliveries: import('../input-delivery').InputDeliveryMap;
   claudeReady: boolean;
   activeModel: string | null;
   permissionMode: string | null;

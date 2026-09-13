@@ -39,7 +39,7 @@
 import { spawn } from 'child_process'
 import { Readable, Writable } from 'stream'
 import * as acp from '@agentclientprotocol/sdk'
-import { BaseSession, buildBaseSessionOpts, CHROXY_CONTEXT_HINT_TEXT } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, CHROXY_CONTEXT_HINT_TEXT, reportInputAdmission } from './base-session.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { killProcessTree } from './platform.js'
@@ -355,11 +355,21 @@ export function createAcpSessionClass(rawEntry) {
 
     async sendMessage(prompt, attachments, sendOptions = {}) {
       if (this._isBusy) {
-        this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+        const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
+        reportInputAdmission(sendOptions, queued
+          ? { status: 'queued', delivery: 'queued' }
+          : {
+              status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+              reason: 'queue_full', message: 'The provider input queue is full; retry after queued work advances.',
+            })
         return
       }
       if (!this._processReady || !this._connection) {
         this.emit('error', { message: 'ACP session is not started' })
+        reportInputAdmission(sendOptions, {
+          status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+          reason: 'not_runnable', message: 'The provider session is not started.',
+        })
         return
       }
       if (Array.isArray(attachments) && attachments.length > 0) {
@@ -368,6 +378,10 @@ export function createAcpSessionClass(rawEntry) {
         // user's files, mirroring JsonlSubprocessSession's attachment refusal.
         this.emit('error', {
           message: `${this.constructor.displayLabel} does not support attachments yet`,
+        })
+        reportInputAdmission(sendOptions, {
+          status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+          reason: 'unsupported_attachments', message: 'This provider does not support attachments.',
         })
         return
       }
@@ -399,10 +413,15 @@ export function createAcpSessionClass(rawEntry) {
 
       let res
       try {
-        res = await this._connection.agent.request(acp.AGENT_METHODS.session_prompt, {
+        const request = this._connection.agent.request(acp.AGENT_METHODS.session_prompt, {
           sessionId: this._sessionId,
           prompt: [{ type: 'text', text }],
         })
+        // request() has synchronously admitted the prompt to the persistent
+        // transport. The promise represents the whole turn, so do not delay
+        // admission until the model response completes.
+        reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
+        res = await request
         if (willPrependFirstTurn) this._skillsPrepended = true
       } catch (err) {
         if (this._activeTurn !== turn) return

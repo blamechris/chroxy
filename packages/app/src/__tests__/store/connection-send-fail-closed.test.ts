@@ -70,6 +70,45 @@ function activeState(): SessionState {
   return useConnectionStore.getState().sessionStates['sess-1'];
 }
 
+describe('#7822 — mobile selected-context delivery', () => {
+  const context = {
+    version: 1 as const,
+    items: [{
+      id: 'ocr-1', kind: 'text' as const, provenance: { source: 'ocr' as const },
+      mediaType: 'text/plain', sizeBytes: 5, lifetime: 'one_turn' as const,
+      content: { type: 'text' as const, text: 'hello' },
+    }],
+  };
+
+  it('uses the shared wire envelope on capable servers', () => {
+    const socket = liveSocket();
+    seedSession({ inputDeliveries: {} } as Partial<SessionState>);
+    useConnectionStore.setState({ socket, serverCapabilities: { inputContextV1: true } } as never);
+
+    expect(useConnectionStore.getState().sendInput('compare', undefined, {
+      clientMessageId: 'mobile-context-1', context,
+    })).toBe('sent');
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({
+      type: 'input', data: 'compare', clientMessageId: 'mobile-context-1', context,
+    });
+    expect(activeState().inputDeliveries['mobile-context-1']).toMatchObject({
+      status: 'uncertain', pendingContextItemIds: ['ocr-1'],
+    });
+  });
+
+  it('does not reconnect-replay an ambiguous socket write', () => {
+    const socket = closingSocket();
+    seedSession({ inputDeliveries: {} } as Partial<SessionState>);
+    useConnectionStore.setState({ socket, serverCapabilities: { inputContextV1: true } } as never);
+
+    expect(useConnectionStore.getState().sendInput('compare', undefined, {
+      clientMessageId: 'mobile-context-2', context,
+    })).toBe('uncertain');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
+  });
+});
+
 describe('#6308 — sendCancelQueued does not lie on a closing socket', () => {
   let warn: jest.SpyInstance;
   beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });

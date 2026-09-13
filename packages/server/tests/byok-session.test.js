@@ -728,8 +728,9 @@ describe('ClaudeByokSession', () => {
         },
       }
       const captured = captureEvents(session)
+      const admissions = []
       await session.start()
-      await session.sendMessage('hi')
+      await session.sendMessage('hi', undefined, { onInputAdmission: (value) => admissions.push(value) })
       const starts = captured.filter((e) => e.name === 'stream_start')
       const deltas = captured.filter((e) => e.name === 'stream_delta')
       const ends = captured.filter((e) => e.name === 'stream_end')
@@ -754,6 +755,7 @@ describe('ClaudeByokSession', () => {
       assert.equal(results[0].payload.usage.output_tokens, 4)
       assert.equal(typeof results[0].payload.duration, 'number')
       assert.ok(results[0].payload.duration >= 0)
+      assert.deepEqual(admissions, [{ status: 'accepted', delivery: 'dispatch_started' }])
       // Cost MUST be on the result payload — session-manager.js:_trackCost
       // (the budget-check + cumulative session-cost feeder) reads it as a
       // typeof === 'number' gate. Omitting it silently disables BYOK cost
@@ -1455,6 +1457,32 @@ describe('ClaudeByokSession', () => {
       assert.ok(errorEvent, 'should warn about dropped attachments')
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result, 'turn should still complete with text-only prompt')
+      await session.destroy()
+    })
+
+    it('rejects image context when attachments cannot be materialized', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      let streamCalls = 0
+      session._client = {
+        messages: {
+          stream: () => { streamCalls += 1 },
+        },
+      }
+      const captured = captureEvents(session)
+      const admissions = []
+      await session.start()
+      await session.sendMessage('describe this', [{ type: 'image', data: 'base64...' }], {
+        context: { version: 1, items: [] },
+        onInputAdmission: (value) => admissions.push(value),
+      })
+      assert.equal(streamCalls, 0)
+      assert.equal(session.isRunning, false)
+      assert.equal(session._currentMessageId, null)
+      assert.equal(captured.some((e) => e.name === 'result'), false)
+      assert.deepEqual(admissions, [{
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'unsupported_attachments', message: 'This provider does not support image context.',
+      }])
       await session.destroy()
     })
   })

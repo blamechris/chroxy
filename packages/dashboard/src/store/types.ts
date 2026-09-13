@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1806,7 +1806,7 @@ export interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   // #6453 — canonical WIRE attachment type (was an inline loose shape with a
   // `[key: string]: string` index); the dashboard sends both file_ref + image.
-  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean; previewAttachments?: MessageAttachment[] }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean; previewAttachments?: MessageAttachment[]; context?: InputContextEnvelope }) => 'sent' | 'queued' | 'uncertain' | false;
   // #6861 — `#`-prefix composer quick-append: send the note to the server, which
   // appends it to the session cwd's project CLAUDE.md and acks with
   // `append_memory_result`. Not offline-queued; returns false when disconnected.

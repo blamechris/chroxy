@@ -3372,7 +3372,7 @@ describe('session_destroyed checkpoint cleanup', () => {
     }
   })
 
-  it('calls clearCheckpoints with string sessionId (not object)', async () => {
+  it('clears checkpoints and bounded input dedup state for the destroyed session', async () => {
     const manager = new EventEmitter()
     const mockSession = createMockSession()
     const sessionsMap = new Map()
@@ -3393,6 +3393,7 @@ describe('session_destroyed checkpoint cleanup', () => {
     server._checkpointManager.clearCheckpoints = (sessionId) => {
       clearCalls.push(sessionId)
     }
+    server._inputDedupRecords.set('sess-1', new Map([['request-1', { status: 'accepted' }]]))
 
     // Emit session_destroyed the way session-manager.js does: { sessionId }
     manager.emit('session_destroyed', { sessionId: 'sess-1' })
@@ -3400,6 +3401,7 @@ describe('session_destroyed checkpoint cleanup', () => {
     assert.equal(clearCalls.length, 1, 'clearCheckpoints should be called once')
     assert.equal(clearCalls[0], 'sess-1', 'clearCheckpoints should receive the string sessionId, not an object')
     assert.equal(typeof clearCalls[0], 'string', 'sessionId must be a string')
+    assert.equal(server._inputDedupRecords.has('sess-1'), false, 'destroy must release retained request ids')
   })
 })
 

@@ -56,6 +56,8 @@ describe('createEmptyBaseSessionState', () => {
       // #5937: outgoing-message queue — empty array on init, populated by
       // message_queued / optimistic enqueue.
       queuedMessages: [],
+      // #7822: correlated input acknowledgements are scoped to one session.
+      inputDeliveries: {},
     })
   })
 
@@ -74,6 +76,7 @@ describe('createEmptyBaseSessionState', () => {
     // #4653: interventions ring is per-session — each fresh state must
     // get its own array so a deny on session A doesn't bleed into session B.
     expect(a.interventions).not.toBe(b.interventions)
+    expect(a.inputDeliveries).not.toBe(b.inputDeliveries)
   })
 
   it('satisfies the BaseSessionState type', () => {
