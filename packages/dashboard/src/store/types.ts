@@ -233,6 +233,7 @@ export interface ProviderInfo {
   name: string;
   capabilities: ProviderCapabilities;
   auth?: ProviderAuth;
+  connections?: import('@chroxy/protocol').AgentConnection[];
 }
 
 // #3855: one provider-credential row in the Settings "Provider Credentials"
@@ -2074,7 +2075,7 @@ export interface ConnectionState {
    * `false` means the socket was closed and nothing was sent, so the caller
    * must skip latching its "Creating…" spinner (no reply will arrive to clear it).
    */
-  createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean; codexSandbox?: CodexSandboxMode }) => boolean;
+  createSession: (opts: { name: string; cwd?: string; provider?: string; connectionId?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean; codexSandbox?: CodexSandboxMode }) => boolean;
   destroySession: (sessionId: string, force?: boolean) => void;
   /** #6006 — operator panic button: request an immediate token revoke (primary-token only). */
   revokeToken: () => void;

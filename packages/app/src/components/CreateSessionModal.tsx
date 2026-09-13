@@ -49,6 +49,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const [cwd, setCwd] = useState('');
   const [worktree, setWorktree] = useState(false);
   const [provider, setProvider] = useState('');
+  const [connectionId, setConnectionId] = useState('');
   // #6689/#6903 — per-session Codex sandbox mode. '' is the "Default" option —
   // it forwards no `codexSandbox`, so the daemon's CHROXY_CODEX_SANDBOX floor
   // (else workspace-write) is honored, matching the dashboard's Default-omit
@@ -87,6 +88,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       setShowBrowser(false);
       setWorktree(false);
       setProvider('');
+      setConnectionId('');
       setCodexSandbox('');
       fetchProviders();
       startProvidersTimeout();
@@ -125,7 +127,11 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   // provider round-trip and silently apply to a fresh codex session.
   useEffect(() => {
     setCodexSandbox('');
-  }, [provider]);
+    const connections = provider
+      ? availableProviders.find((p) => p.name === provider)?.connections || []
+      : [];
+    setConnectionId(connections[0]?.id || '');
+  }, [provider, availableProviders]);
 
   const providerChips = [
     { ...DEFAULT_PROVIDER_CHIP, ready: true, detail: '' },
@@ -143,6 +149,11 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   ];
 
   const selectedProviderDetail = providerChips.find((p) => p.id === provider)?.detail ?? '';
+  const selectedProviderConnections = availableProviders.find(
+    (p) => provider && p.name === provider,
+  )?.connections || [];
+  const selectedConnection = selectedProviderConnections.find((c) => c.id === connectionId);
+  const selectedConnectionUnavailable = selectedConnection?.readiness.state === 'blocked' || selectedConnection?.readiness.state === 'unsupported';
 
   // #6312 / #6352 — mobile parity with the dashboard's session-creation limitation
   // note. When the selected provider reports a capability as `false` (notably the
@@ -156,6 +167,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const providerLimitationNote = buildProviderLimitationNote(selectedProviderCaps);
 
   const handleCreate = () => {
+    if (selectedConnectionUnavailable) return;
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
     const sessionCwd = cwd.trim() || undefined;
     createSession({
@@ -163,6 +175,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
       cwd: sessionCwd,
       worktree: worktree || undefined,
       provider: provider || undefined,
+      connectionId: provider ? connectionId || undefined : undefined,
       // #6689/#6903 — only forward the sandbox mode for codex, and only when
       // the user explicitly picked one — '' is the "Default" option → omit so
       // the daemon's CHROXY_CODEX_SANDBOX floor (else workspace-write) is
@@ -174,6 +187,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     setCwd('');
     setWorktree(false);
     setProvider('');
+    setConnectionId('');
     setCodexSandbox('');
     onClose();
   };
@@ -183,6 +197,7 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
     setCwd('');
     setWorktree(false);
     setProvider('');
+    setConnectionId('');
     setCodexSandbox('');
     onClose();
   };
@@ -322,6 +337,44 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               </Text>
             ) : null}
 
+            {selectedProviderConnections.length > 0 ? (
+              <View testID="agent-connection-field">
+                <Text style={styles.label}>Connection</Text>
+                <View style={styles.providerRow}>
+                  {selectedProviderConnections.map((connection) => {
+                    const unavailable = connection.readiness.state === 'blocked' || connection.readiness.state === 'unsupported';
+                    return (
+                      <TouchableOpacity
+                        key={connection.id}
+                        testID={`agent-connection-chip-${connection.id}`}
+                        style={[
+                          styles.providerChip,
+                          connectionId === connection.id && styles.providerChipActive,
+                          unavailable && styles.providerChipDisabled,
+                        ]}
+                        disabled={unavailable}
+                        onPress={() => setConnectionId(connection.id)}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: connectionId === connection.id, disabled: unavailable }}
+                      >
+                        <Text style={[
+                          styles.providerChipText,
+                          connectionId === connection.id && styles.providerChipTextActive,
+                        ]}>
+                          {connection.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {selectedConnection ? (
+                  <Text style={styles.providerBillingHint} testID="agent-connection-route">
+                    {selectedConnection.authentication.requested} · {selectedConnection.entitlement.route} · {selectedConnection.runtime.id}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+
             {/* #6312 / #6352 — non-blocking capability-limitation note for a
                 reduced-capability provider (notably claude-tui). Additive copy
                 explaining the absent affordances; behaviour is unchanged. */}
@@ -380,8 +433,10 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
               <TouchableOpacity
                 style={styles.createButton}
                 onPress={handleCreate}
+                disabled={selectedConnectionUnavailable}
                 accessibilityRole="button"
                 accessibilityLabel="Create session"
+                accessibilityState={{ disabled: selectedConnectionUnavailable }}
               >
                 <Text style={styles.createButtonText}>Create</Text>
               </TouchableOpacity>
@@ -517,6 +572,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundInput,
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
+    minHeight: 48,
+    minWidth: 48,
+    justifyContent: 'center',
   },
   providerChipActive: {
     backgroundColor: COLORS.accentBlue,

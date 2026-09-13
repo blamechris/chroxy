@@ -1,11 +1,60 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync } from 'fs'
+import { execFileSync } from 'child_process'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ClaudeTuiSession, withHookFsTimeout } from '../src/claude-tui-session.js'
+import { fileURLToPath } from 'url'
+import { ClaudeTuiSession, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import {
+  CLAUDE_NATIVE_FIRST_PARTY_BASE_URL,
+  CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV,
+  observeClaudeNativeRoute,
+} from '../src/utils/claude-native-route.js'
+
+// Independent roster from the locally installed Claude Code 2.1.270 route
+// selectors. Do not derive this from CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV: a new
+// or accidentally deleted implementation row must make the parity check red.
+const EXPECTED_NATIVE_ROUTE_FORBIDDEN_ENV = [
+  'ANTHROPIC_API_HOST',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  'ANTHROPIC_AWS_BASE_URL',
+  'ANTHROPIC_AWS_WORKSPACE_ID',
+  'ANTHROPIC_BEDROCK_BASE_URL',
+  'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_FOUNDRY_BASE_URL',
+  'ANTHROPIC_FOUNDRY_RESOURCE',
+  'ANTHROPIC_GOOGLE_CLOUD_BASE_URL',
+  'ANTHROPIC_GOOGLE_CLOUD_LOCATION',
+  'ANTHROPIC_GOOGLE_CLOUD_PROJECT',
+  'ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID',
+  'ANTHROPIC_PROFILE',
+  'ANTHROPIC_UNIX_SOCKET',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'CLAUDE_CODE_API_BASE_URL',
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  'CLAUDE_CODE_CUSTOM_OAUTH_URL',
+  'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CODE_HOST_CREDS_FILE',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+  'CLAUDE_CODE_SIMPLE',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GATEWAY',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_VERTEX',
+  '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL',
+]
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -161,6 +210,427 @@ describe('ClaudeTuiSession', () => {
       // leaves no live PTY behind (the catch returns before _term is assigned).
       assert.ok(errored, 'the spawn throw surfaces as an error event')
       assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
+    })
+
+    it('verifies and passes one explicit native execution context to every REAL TUI spawn', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const previous = process.env.ANTHROPIC_AUTH_TOKEN
+      process.env.ANTHROPIC_AUTH_TOKEN = 'ambient-route-token'
+      const spawnedEnvs = []
+      const authContexts = []
+      let preflightCalls = 0
+      try {
+        session = new ClaudeTuiSession({
+          cwd: '/tmp',
+          port: 12347,
+          skillsDir: emptySkillsDir,
+          repoSkillsDir: null,
+          connectionAuthRoute: 'native',
+          connectionChildEnv: { PATH: process.env.PATH, SAFE_TOOL_ENV: 'native-route' },
+          connectionVerifiedBinary: '/fixture/claude',
+          connectionRuntimePreflight: () => {
+            preflightCalls += 1
+            return '/fixture/claude'
+          },
+          connectionAuthStatusRunner: async (context) => {
+            authContexts.push(context)
+            return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }) }
+          },
+        })
+        session.agentConnection = {
+          authentication: { requested: 'native', observed: 'unknown' },
+          entitlement: { route: 'subscription', status: 'unknown' },
+          readiness: { state: 'unknown' },
+          provenance: { observedAt: '2026-09-13T00:00:00.000Z' },
+        }
+        session.on('error', () => {})
+        session._sessionId = 'native-route-env-uuid'
+        session._sinkDir = fakeHome
+        session._settingsPath = join(fakeHome, 'settings.json')
+        session._ptyModOverride = {
+          spawn: (_cmd, _args, opts) => { spawnedEnvs.push(opts.env); throw new Error('captured-and-bail') },
+        }
+        await origSpawnPty.call(session, true)
+        session._resumedFromPersisted = true
+        await origSpawnPty.call(session, true)
+        assert.equal(spawnedEnvs.length, 2, 'the real _spawnPty passed an environment on both attempts')
+        assert.equal(authContexts.length, 2, 'the initial spawn and a respawn both reverify authentication')
+        assert.equal(preflightCalls, 4,
+          'the configured provenance gate runs before each auth probe and again immediately before each PTY spawn')
+        assert.equal(authContexts[0].binary, '/fixture/claude')
+        assert.equal(authContexts[0].cwd, realpathSync('/tmp'))
+        assert.deepEqual(authContexts[0].args, ['auth', 'status', '--json', '--settings', session._settingsPath])
+        assert.equal(authContexts[0].args.includes('--setting-sources'), false,
+          'native auth keeps the normal Claude Code user/project/local customization sources')
+        assert.equal(authContexts[0].env, spawnedEnvs[0], 'the auth probe and PTY receive the same env object')
+        assert.equal(authContexts[1].env, spawnedEnvs[1], 'the respawn probe and PTY receive the same env object')
+        assert.equal(spawnedEnvs[0].SAFE_TOOL_ENV, 'native-route')
+        assert.equal(spawnedEnvs[0].ANTHROPIC_AUTH_TOKEN, undefined,
+          'ambient alternate-route auth does not re-enter the explicit native child')
+        assert.equal(spawnedEnvs[0].ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
+        assert.equal(session.agentConnection.authentication.observed, 'native')
+        assert.deepEqual(session.agentConnection.entitlement, { route: 'subscription', status: 'unknown' })
+        assert.equal(session.agentConnection.readiness.state, 'unknown',
+          'auth status alone does not claim endpoint readiness before the real TUI marker')
+      } finally {
+        if (previous === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+        else process.env.ANTHROPIC_AUTH_TOKEN = previous
+      }
+    })
+
+    it('fails closed before PTY spawn for alternate or unverifiable native auth status', async (t) => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const cases = [
+        ['api key', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'api_key', apiProvider: 'firstParty', apiKeySource: 'ANTHROPIC_API_KEY' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['managed key', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: '/login managed key' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['third-party provider', { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'third_party', apiProvider: 'bedrock' }) }, 'NATIVE_AUTH_ROUTE_MISMATCH'],
+        ['malformed status', { status: 0, stdout: '{bad-json' }, 'NATIVE_AUTH_STATUS_UNVERIFIED'],
+        ['logged out', { status: 1, stdout: '' }, 'NATIVE_LOGIN_REQUIRED'],
+      ]
+      for (const [name, result, code] of cases) {
+        await t.test(name, async () => {
+          let ptySpawned = false
+          const candidate = new ClaudeTuiSession({
+            cwd: '/tmp',
+            skillsDir: emptySkillsDir,
+            repoSkillsDir: null,
+            connectionAuthRoute: 'native',
+            connectionChildEnv: { PATH: process.env.PATH },
+            connectionVerifiedBinary: '/fixture/claude',
+            connectionRuntimePreflight: () => '/fixture/claude',
+            connectionAuthStatusRunner: async () => result,
+          })
+          candidate._sessionId = 'blocked-native-route'
+          candidate._sinkDir = fakeHome
+          candidate._settingsPath = join(fakeHome, 'settings.json')
+          candidate.agentConnection = {
+            authentication: { requested: 'native', observed: 'native' },
+            entitlement: { route: 'subscription', status: 'unknown' },
+            readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+            provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+          }
+          candidate.on('error', () => {})
+          candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('unexpected PTY spawn') } }
+          await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === code)
+          assert.equal(ptySpawned, false)
+          assert.equal(candidate.agentConnection.readiness.state, 'blocked')
+          assert.equal(candidate.agentConnection.readiness.reasonCode, code)
+          assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
+          await candidate.destroy()
+        })
+      }
+    })
+
+    it('refuses an explicit native session without the binary captured by preflight', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      session = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionAuthStatusRunner: async () => ({ status: 0, stdout: '{}' }),
+      })
+      session._sessionId = 'unverified-binary'
+      session._settingsPath = join(fakeHome, 'settings.json')
+      await assert.rejects(origSpawnPty.call(session, false), (err) => err.code === 'NATIVE_RUNTIME_UNVERIFIED')
+    })
+
+    it('requires a fresh safe marker from the real TUI before native route readiness', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const candidate = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/claude',
+        connectionRuntimePreflight: () => '/fixture/claude',
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      })
+      candidate.agentConnection = {
+        authentication: { requested: 'native', observed: 'unknown' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+      }
+      candidate._sessionId = 'native-marker-success'
+      candidate._sinkDir = fakeHome
+      candidate._nativeRouteVerifiedForSpawn = true
+      const rawWrites = []
+      candidate._waitForPrompt = async () => {
+        assert.equal(candidate._nativeRouteVerifiedForSpawn, false,
+          'a new spawn resets the prior process route verdict before warmup')
+        assert.equal(candidate.writeTerminalInput('before-marker'), false,
+          'raw input is blocked while the real spawn awaits its marker')
+        assert.equal(candidate.agentConnection.readiness.state, 'unknown',
+          'the prior spawn readiness is retired while this spawn is being verified')
+        assert.equal(candidate.agentConnection.readiness.reasonCode, 'NATIVE_ROUTE_REVERIFYING')
+        assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z',
+          'the prior successful observation remains available as historical provenance')
+        assert.deepEqual(rawWrites, [])
+        return true
+      }
+      const term = {
+        pid: 123,
+        write: (data) => rawWrites.push(data),
+        kill: () => {},
+        onData: () => {},
+        onExit: () => {},
+        on: () => {},
+      }
+      let spawnedArgs
+      candidate._ptyModOverride = {
+        spawn: (_binary, args) => {
+          spawnedArgs = args
+          const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+          const hook = settings.hooks.SessionStart[0].hooks[0]
+          assert.equal(hook.command, process.execPath)
+          assert.equal(hook.args.length, 3)
+          const nonce = hook.args[2]
+          assert.match(nonce, /^[a-f0-9]{32}$/)
+          writeFileSync(join(fakeHome, 'native-route.json'), JSON.stringify({
+            version: 1,
+            nonce,
+            safe: true,
+            firstPartyEndpoint: true,
+            blockedKeys: [],
+          }))
+          return term
+        },
+      }
+      await origSpawnPty.call(candidate, false)
+      assert.deepEqual(spawnedArgs.slice(2, 4), ['--settings', candidate._settingsPath])
+      assert.equal(spawnedArgs.includes('--setting-sources'), false,
+        'the real TUI keeps normal Claude Code instructions, skills, hooks, and plugins')
+      const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+      assert.equal(settings.env.ANTHROPIC_BASE_URL, CLAUDE_NATIVE_FIRST_PARTY_BASE_URL)
+      for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) assert.equal(settings.env[key], '')
+      assert.equal(candidate.agentConnection.readiness.state, 'ready')
+      assert.notEqual(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+      assert.equal(candidate.writeTerminalInput('after-marker'), true)
+      assert.deepEqual(rawWrites, ['after-marker'], 'input opens only after this spawn passes the marker')
+      assert.equal(existsSync(join(fakeHome, 'native-route.json')), false, 'fresh marker is consumed')
+      candidate._term = null
+      await candidate.destroy()
+    })
+
+    it('fails closed after TUI warmup when the effective-route marker is missing or stale', async (t) => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      for (const stale of [false, true]) {
+        await t.test(stale ? 'stale nonce' : 'missing marker', async () => {
+          const sink = mkdtempSync(join(fakeHome, 'marker-'))
+          if (stale) {
+            writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+              version: 1,
+              nonce: 'stale',
+              safe: true,
+              firstPartyEndpoint: true,
+              blockedKeys: [],
+            }))
+          }
+          const candidate = new ClaudeTuiSession({
+            cwd: '/tmp',
+            skillsDir: emptySkillsDir,
+            repoSkillsDir: null,
+            connectionAuthRoute: 'native',
+            connectionChildEnv: { PATH: process.env.PATH },
+            connectionVerifiedBinary: '/fixture/claude',
+            connectionRuntimePreflight: () => '/fixture/claude',
+            connectionAuthStatusRunner: async () => ({
+              status: 0,
+              stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+            }),
+          })
+          let killed = false
+          candidate._sessionId = 'native-marker-failure'
+          candidate._sinkDir = sink
+          candidate.agentConnection = {
+            authentication: { requested: 'native', observed: 'native' },
+            entitlement: { route: 'subscription', status: 'unknown' },
+            readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+            provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+          }
+          candidate._nativeRouteVerifiedForSpawn = true
+          candidate._waitForPrompt = async () => true
+          candidate._ptyModOverride = {
+            spawn: () => ({
+              pid: 123,
+              kill: () => { killed = true },
+              onData: () => {},
+              onExit: () => {},
+              on: () => {},
+            }),
+          }
+          await assert.rejects(
+            origSpawnPty.call(candidate, false),
+            (err) => err.code === (stale ? 'NATIVE_ENDPOINT_ROUTE_MISMATCH' : 'NATIVE_ENDPOINT_UNVERIFIED'),
+          )
+          assert.equal(killed, true, 'unverified PTY is stopped before it can become ready')
+          assert.equal(candidate._term, null)
+          assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+          assert.equal(candidate.agentConnection.readiness.state, 'blocked')
+          assert.equal(
+            candidate.agentConnection.readiness.reasonCode,
+            stale ? 'NATIVE_ENDPOINT_ROUTE_MISMATCH' : 'NATIVE_ENDPOINT_UNVERIFIED',
+          )
+          assert.match(candidate.agentConnection.readiness.message, stale ? /custom endpoint/ : /did not expose/)
+          assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')
+          await candidate.destroy()
+          rmSync(sink, { recursive: true, force: true })
+        })
+      }
+    })
+
+    it('retires ready metadata on a failed native respawn and restores it only after a verified retry', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      const sink = mkdtempSync(join(fakeHome, 'respawn-route-'))
+      const priorObservedAt = '2026-09-12T00:00:00.000Z'
+      let failProvenance = true
+      let scheduled = 0
+      const candidate = new ClaudeTuiSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/claude',
+        connectionRuntimePreflight: () => {
+          if (failProvenance) {
+            const err = new Error('Configured Claude binary failed its provenance ledger check.')
+            err.code = 'PROVIDER_BINARY_PROVENANCE'
+            throw err
+          }
+          return '/fixture/claude'
+        },
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      })
+      candidate.agentConnection = {
+        authentication: { requested: 'native', observed: 'native' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: priorObservedAt },
+      }
+      candidate._sessionId = 'native-respawn-readiness'
+      candidate._sinkDir = sink
+      candidate._settingsPath = join(sink, 'settings.json')
+      candidate._processReady = true
+      candidate._scheduleRespawn = () => { scheduled += 1 }
+      candidate._waitForPrompt = async () => true
+      candidate.on('error', () => {})
+      candidate._ptyModOverride = {
+        spawn: () => {
+          const settings = JSON.parse(readFileSync(candidate._settingsPath, 'utf8'))
+          const nonce = settings.hooks.SessionStart[0].hooks[0].args[2]
+          writeFileSync(join(sink, 'native-route.json'), JSON.stringify({
+            version: 1,
+            nonce,
+            safe: true,
+            firstPartyEndpoint: true,
+            blockedKeys: [],
+          }))
+          return {
+            pid: 123,
+            write: () => {},
+            kill: () => {},
+            onData: () => {},
+            onExit: () => {},
+            on: () => {},
+          }
+        },
+      }
+
+      await candidate._respawnPty()
+      assert.equal(candidate._processReady, false)
+      assert.deepEqual(candidate.agentConnection.readiness, {
+        state: 'blocked',
+        reasonCode: 'PROVIDER_BINARY_PROVENANCE',
+        message: 'Configured Claude binary failed its provenance ledger check.',
+        recoveryAction: null,
+      })
+      assert.equal(candidate.agentConnection.provenance.observedAt, priorObservedAt,
+        'a failed respawn retains the last successful observation only as history')
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
+      assert.equal(scheduled, 1)
+
+      failProvenance = false
+      await candidate._respawnPty()
+      assert.equal(candidate._processReady, true)
+      assert.equal(candidate.agentConnection.readiness.state, 'ready')
+      assert.equal(candidate.agentConnection.readiness.reasonCode, null)
+      assert.notEqual(candidate.agentConnection.provenance.observedAt, priorObservedAt)
+      assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
+      assert.equal(scheduled, 1, 'the verified retry does not schedule another respawn')
+
+      await candidate.destroy()
+      rmSync(sink, { recursive: true, force: true })
+    })
+
+    it('the marker classifier rejects a custom endpoint and every alternate route selector', () => {
+      const clean = { ANTHROPIC_BASE_URL: CLAUDE_NATIVE_FIRST_PARTY_BASE_URL }
+      assert.deepEqual([...CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV].sort(), [...EXPECTED_NATIVE_ROUTE_FORBIDDEN_ENV].sort(),
+        'native-route selector roster must stay in parity with the verified Claude CLI contract')
+      assert.deepEqual(observeClaudeNativeRoute(clean), {
+        firstPartyEndpoint: true,
+        blockedKeys: [],
+        safe: true,
+      })
+      assert.equal(observeClaudeNativeRoute({ ANTHROPIC_BASE_URL: 'https://gateway.example.test' }).safe, false)
+      for (const key of CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV) {
+        const observed = observeClaudeNativeRoute({ ...clean, [key]: 'configured' })
+        assert.equal(observed.safe, false, `${key} must fail the native route`)
+        assert.deepEqual(observed.blockedKeys, [key])
+      }
+
+      const script = fileURLToPath(new URL('../hooks/claude-native-route-check.mjs', import.meta.url))
+      const marker = join(fakeHome, 'script-marker.json')
+      execFileSync(process.execPath, [script, marker, 'fixture-nonce'], { env: clean })
+      assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), {
+        version: 1,
+        nonce: 'fixture-nonce',
+        safe: true,
+        firstPartyEndpoint: true,
+        blockedKeys: [],
+      })
+    })
+
+    it('uses shell-free hook argv so native route checker paths stay literal on every platform', () => {
+      const hostileDir = join(fakeHome, 'literal-$()-`touch nope`')
+      mkdirSync(hostileDir, { recursive: true })
+      const script = join(hostileDir, 'route $()-`script`.mjs')
+      const marker = join(hostileDir, 'marker $()-`file`.json')
+      const nonce = 'nonce-$()-`literal`'
+      writeFileSync(script, "import { writeFileSync } from 'fs'; writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(2)))")
+      const hook = buildNativeRouteCheckHook({
+        nodePath: process.execPath,
+        scriptPath: script,
+        markerPath: marker,
+        nonce,
+      })
+      assert.deepEqual(hook, {
+        type: 'command',
+        command: process.execPath,
+        args: [script, marker, nonce],
+      })
+      execFileSync(hook.command, hook.args, { cwd: hostileDir })
+      assert.deepEqual(JSON.parse(readFileSync(marker, 'utf8')), [marker, nonce])
+      assert.equal(existsSync(join(hostileDir, 'nope')), false, 'command substitutions stayed literal')
+
+      const windows = buildNativeRouteCheckHook({
+        nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+        scriptPath: 'C:\\Chroxy $()\\route-check.mjs',
+        markerPath: 'C:\\Temp\\native route.json',
+        nonce,
+      })
+      assert.equal(windows.command, 'C:\\Program Files\\nodejs\\node.exe')
+      assert.deepEqual(windows.args, ['C:\\Chroxy $()\\route-check.mjs', 'C:\\Temp\\native route.json', nonce])
     })
 
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
@@ -2844,6 +3314,26 @@ describe('ClaudeTuiSession', () => {
       assert.ok(ClaudeTuiSession.MAX_THROTTLED_CHARS > 0, 'must be positive')
     })
 
+    // #7812: the fixed sleeps this suite used to carry bounded PROMPT_CHAR_DELAY_MS
+    // BY ACCIDENT — a 30-250ms sleep against a 25-char write went red the moment the
+    // throttle was inflated. Awaiting the drain (correctly) removed that bound, so an
+    // inflated delay would now produce a SLOWER GREEN suite, and at a large enough
+    // value the awaiting tests HANG rather than fail (node --test sets no per-test
+    // timeout) — the green-or-flake-never-red shape of docs/false-safety-guards.md
+    // entry 17. The paste-heuristic tests do not cover it either: LOOSE_MS/TIGHT_MS
+    // assert a LOWER bound on inter-char spacing, so an inflated delay passes them.
+    // Pin the CONSTANT, never a duration — a timing assertion would just reintroduce
+    // the flake this PR exists to remove.
+    it('keeps PROMPT_CHAR_DELAY_MS in the low-single-digit range (#7812)', () => {
+      assert.equal(typeof ClaudeTuiSession.PROMPT_CHAR_DELAY_MS, 'number',
+        'PROMPT_CHAR_DELAY_MS is a numeric static for tunability + assertions')
+      assert.ok(ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0, 'must be positive — 0 would bulk-write')
+      assert.ok(ClaudeTuiSession.PROMPT_CHAR_DELAY_MS <= 5,
+        'the #4269 per-char throttle must stay in the low-single-digit ms range: at 40ms a ' +
+        '4000-char prompt takes 160s, which is the multi-minute silent hang _writePtyTextThrottled ' +
+        'exists to avoid')
+    })
+
     it('_writePtyTextThrottled: bulk-writes the body in one call when text exceeds MAX_THROTTLED_CHARS (#4276)', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._activeTurn = { messageId: 'm-bulk', startedAt: Date.now(), aborted: false, synthSeq: 0 }
@@ -5136,8 +5626,11 @@ describe('ClaudeTuiSession', () => {
         ],
       }
 
-      session.respondToQuestion('App + docs (all 3)')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // #7812: await the drive's drain handle rather than a wall-clock guess.
+      // Only the paste-disable and the first character are written synchronously;
+      // the submit \r and the re-enable land after the per-char throttle, so a
+      // fixed sleep can observe a PREFIX of this 4-write sequence under load.
+      await session.respondToQuestion('App + docs (all 3)')
 
       // disable + '2' + \\r + enable = 4 writes
       assert.equal(writes.length, 4, `expected 4 writes for index path, got ${writes.length}: ${JSON.stringify(writes)}`)
@@ -5178,8 +5671,7 @@ describe('ClaudeTuiSession', () => {
       assert.ok(session._pendingUserAnswers.has('toolu_second'), 'second present')
 
       // Dashboard answers the FIRST one (by toolUseId).
-      session.respondToQuestion('A', undefined, 'toolu_first')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('A', undefined, 'toolu_first')  // #7812: drain, not sleep
 
       // Wrote '1' (1-indexed option for 'A') — proving the route went to the first entry's options.
       assert.equal(writes[1], '1', 'wrote 1-indexed digit for first entry\'s option A')
@@ -5189,8 +5681,7 @@ describe('ClaudeTuiSession', () => {
 
       // Now dashboard answers the SECOND one.
       writes.length = 0
-      session.respondToQuestion('Z', undefined, 'toolu_second')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('Z', undefined, 'toolu_second')  // #7812: drain, not sleep
 
       assert.equal(writes[1], '3', 'wrote 1-indexed digit for second entry\'s option Z')
       assert.equal(session._pendingUserAnswers.size, 0, 'Map empty after both answered')
@@ -5227,8 +5718,16 @@ describe('ClaudeTuiSession', () => {
         options: [{ label: 'Patch' }, { label: 'Minor' }],
       }
 
-      session.respondToQuestion('Brand new freeform answer')
-      await new Promise((resolve) => setTimeout(resolve, 100))
+      // #7812 - this was the flake. The freeform answer is typed into the PTY
+      // one character per PROMPT_CHAR_DELAY_MS tick; sleeping a fixed 100 ms and
+      // then slicing `writes` read a TRUNCATED prefix on a loaded runner
+      // ('Brand new freeform ans', 22 of 25 chars - run 34731508759). Awaiting
+      // the drive's drain handle settles exactly when the last byte has been
+      // handed to _term.write, so the assertion below cannot race the writer at
+      // any load. The assertion itself is unchanged - it still compares the
+      // FULL expected text, so a genuine truncation bug in the writer is still
+      // a hard red.
+      await session.respondToQuestion('Brand new freeform answer')
 
       // No match → fall through to typing the text per the v0.9.3 behavior.
       // (claude TUI's Other-path may still mis-parse this; tracked at #4288
@@ -5257,8 +5756,7 @@ describe('ClaudeTuiSession', () => {
         const writes = []
         session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
         session._pendingUserAnswer = { toolUseId: 'toolu-boundary', options }
-        session.respondToQuestion(label)
-        await new Promise((resolve) => setTimeout(resolve, 30))
+        await session.respondToQuestion(label)  // #7812: drain, not sleep
         assert.equal(writes[1], digit, `option "${label}" maps to digit "${digit}"`)
       }
     })
@@ -5285,8 +5783,9 @@ describe('ClaudeTuiSession', () => {
       session.on('error', (e) => errors.push(e))
 
       // opt-9 is index 9 → drive via 9 Down arrows + Enter.
-      session.respondToQuestion('opt-9')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      // #7812: 9 Down arrows are paced by the SAME per-char throttle, so the
+      // full-sequence deepEqual below needs the drain, not a 50 ms guess.
+      await session.respondToQuestion('opt-9')
 
       // No too-many error — arrow-nav drives the form natively.
       assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
@@ -5308,8 +5807,7 @@ describe('ClaudeTuiSession', () => {
       session.on('error', (e) => errors.push(e))
 
       // opt-11 is the LAST option (idx 11) → 11 Down arrows + Enter.
-      session.respondToQuestion('opt-11')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('opt-11')  // #7812: drain, not sleep
 
       assert.equal(errors.length, 0, `expected no errors, got ${JSON.stringify(errors)}`)
       const expected = ['\x1b[?2004l', ...Array(11).fill('\x1b[B'), '\r', '\x1b[?2004h']
@@ -5322,8 +5820,7 @@ describe('ClaudeTuiSession', () => {
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
       session._pendingUserAnswer = { toolUseId: 'toolu_aq_free' /* no options */ }
 
-      session.respondToQuestion('hello')
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await session.respondToQuestion('hello')  // #7812: drain, not sleep
 
       // Same shape as a regular throttled write — disable + 5 chars + \\r + enable.
       assert.ok(writes.length >= 5 + 3)
@@ -5331,6 +5828,50 @@ describe('ClaudeTuiSession', () => {
       const text = 'hello'
       const charWrites = writes.slice(1, 1 + text.length)
       assert.equal(charWrites.join(''), text)
+    })
+
+    // #7812 - pin the DRAIN HANDLE contract the assertions above now rest on.
+    // respondToQuestion drives the PTY one character per PROMPT_CHAR_DELAY_MS,
+    // so every sibling test that reads `writes` after the call depends on the
+    // returned promise settling only once the drive is finished. Without this
+    // test the contract would be invisible: most sibling assertions read
+    // `writes[1]`, which lands synchronously, so a future refactor that stopped
+    // returning the handle would leave them green (`await undefined` resolves on
+    // the next microtask) and would only resurface as the original flake on a
+    // loaded runner. Here the per-char delay is inflated far past any plausible
+    // fixed sleep, so dropping the handle produces a one-character prefix and a
+    // hard, legible red.
+    it('respondToQuestion returns a drain handle that settles only after the LAST keystroke (#7812)', async () => {
+      const SLOW_CHAR_MS = 20
+      const originalDelay = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS')
+      Object.defineProperty(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS', { value: SLOW_CHAR_MS, configurable: true })
+      try {
+        const writes = []
+        session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+        session._pendingUserAnswer = { toolUseId: 'toolu_aq_drain', options: [{ label: 'Patch' }] }
+
+        const text = 'Brand new freeform answer'
+        const handle = session.respondToQuestion(text)
+
+        assert.ok(handle && typeof handle.then === 'function',
+          'respondToQuestion returns a thenable drain handle on the keystroke-drive path')
+        // The drive is genuinely still in flight at return time - only the
+        // paste-disable and the first character are synchronous. If this ever
+        // stops holding, the handle has become meaningless (the write finished
+        // before it was handed back) and the sibling tests are back to reading a
+        // buffer nobody promised was complete.
+        assert.ok(writes.length < 1 + text.length,
+          `drive must still be in flight when the handle is returned, saw ${writes.length} writes: ${JSON.stringify(writes)}`)
+
+        await handle
+
+        // Awaiting it yields the COMPLETE sequence - no prefix, at a per-char
+        // delay 20x the production one.
+        assert.deepEqual(writes, ['\x1b[?2004l', ...text, '\r', '\x1b[?2004h'],
+          `awaiting the handle must yield the complete write sequence, got ${JSON.stringify(writes)}`)
+      } finally {
+        Object.defineProperty(ClaudeTuiSession, 'PROMPT_CHAR_DELAY_MS', originalDelay)
+      }
     })
 
     it('respondToQuestion is a no-op when no pending answer (defensive)', () => {
@@ -5370,11 +5911,13 @@ describe('ClaudeTuiSession', () => {
 
         // Dashboard sends: answer='Other' (the Other option label),
         // freeformText='my custom answer' (the typed text).
-        session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
+        // #7812: the drain handle covers the WHOLE two-stage drive - stage-1
+        // digit, the OTHER_FREEFORM_SETTLE_MS pause and the stage-2 per-char
+        // text - so this no longer depends on a fixed 250 ms being enough for
+        // all three under load.
+        await session.respondToQuestion('Other', undefined, 'toolu_aq_other_freeform', {
           freeformText: 'my custom answer',
         })
-        // Allow throttled writes (digit + settle + per-char text) to drain.
-        await new Promise((resolve) => setTimeout(resolve, 250))
 
         // Sequence shape: [paste-disable, '3' (Other digit), <settle pause>,
         // paste-disable-again, per-char text, '\r', paste-enable]. We pin
@@ -5403,8 +5946,7 @@ describe('ClaudeTuiSession', () => {
         }
 
         // Legacy path: answer matches an option label exactly → 1-indexed digit.
-        session.respondToQuestion('Patch')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('Patch')  // #7812: drain, not sleep
 
         // disable + '1' + \\r + enable = 4 writes (matches the #4290 test shape).
         assert.equal(writes.length, 4, `expected 4 writes for legacy path, got ${writes.length}: ${JSON.stringify(writes)}`)
@@ -5722,10 +6264,13 @@ describe('ClaudeTuiSession', () => {
         }
 
         // Dashboard answers all three in quick succession.
-        session.respondToQuestion('A', undefined, 'toolu_one')
-        session.respondToQuestion('B', undefined, 'toolu_two')
-        session.respondToQuestion('A', undefined, 'toolu_three')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        // #7812: fire all three in the same tick (the rate-limiter's actual
+        // subject) and then drain every drive, instead of sleeping 50 ms.
+        await Promise.all([
+          session.respondToQuestion('A', undefined, 'toolu_one'),
+          session.respondToQuestion('B', undefined, 'toolu_two'),
+          session.respondToQuestion('A', undefined, 'toolu_three'),
+        ])
 
         assert.equal(
           hexDumpLines.length, 1,
@@ -5745,8 +6290,7 @@ describe('ClaudeTuiSession', () => {
           tool_name: 'AskUserQuestion',
           tool_input: { questions: [{ question: 'Q?', options: [{ label: 'A' }] }] },
         }, 'msg-hex-rate-2')
-        session.respondToQuestion('A', undefined, 'toolu_turn2')
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('A', undefined, 'toolu_turn2')  // #7812: drain, not sleep
 
         assert.equal(hexDumpLines.length, 1, 'new turn resets the rate-limit; first answer emits the dump again')
         assert.equal(skipLines.length, 0, 'no skip notice on the first answer of a new turn')
@@ -5857,8 +6401,7 @@ describe('ClaudeTuiSession', () => {
         // Dashboard sends an answer matching B's option, but OMITS toolUseId
         // (legacy client path). Per fallback contract: warn + route to B,
         // leave A alone.
-        session.respondToQuestion('b3', undefined, undefined)
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await session.respondToQuestion('b3', undefined, undefined)  // #7812: drain, not sleep
 
         // (1) WARN log fires naming the fallback condition. Pre-#4688
         // this was silent and the wedge symptom required a code read to

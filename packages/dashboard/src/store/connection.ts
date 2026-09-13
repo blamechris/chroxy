@@ -5352,13 +5352,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the socket is closed the create is a silent no-op, so the caller must NOT
   // latch its "Creating…" spinner (it would wedge forever — nothing arrives to
   // clear it). Mirrors revokeToken's not-open guard: false = nothing sent.
-  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions, codexSandbox }): boolean => {
+  createSession: ({ name, cwd, provider, connectionId, model, permissionMode, worktree, environmentId, skipPermissions, codexSandbox }): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
       if (name) msg.name = name;
       if (cwd) msg.cwd = cwd;
       if (provider) msg.provider = provider;
+      if (connectionId) msg.connectionId = connectionId;
       if (model) msg.model = model;
       if (permissionMode) msg.permissionMode = permissionMode;
       if (worktree) msg.worktree = true;

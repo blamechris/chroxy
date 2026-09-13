@@ -5,6 +5,7 @@
  * ../server.ts (barrel). Split per #6201 Tier-3.
  */
 import { z } from 'zod';
+import { AgentConnectionSchema } from "../../agent-connection.js";
 import { BillingCanarySnapshotSchema, MAX_SANE_DURATION_MS } from "./connection.js";
 import { CumulativeUsageSchema } from "./session.js";
 // #4178: generic server `error` envelope shape — the catch-all schema for
@@ -187,6 +188,7 @@ export const ServerSessionUsageSchema = z.object({
     // so consumers can construct the message without it pre-broadcast.
     sessionId: z.string().optional(),
     cumulativeUsage: CumulativeUsageSchema,
+    agentConnection: AgentConnectionSchema.optional(),
 });
 // #4075: soft per-session cost-threshold crossing. Fires ONCE per
 // session when cumulativeUsage.costUsd >= the configured threshold.

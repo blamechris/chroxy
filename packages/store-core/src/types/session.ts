@@ -8,7 +8,7 @@ import type { ChatMessage } from './chat'
 // #6901: the Codex sandbox enum, single-sourced from the protocol package so the
 // client-side SessionInfo.codexSandbox field stays in lockstep with the wire
 // schema (ServerSessionListEntrySchema) and the create-time selector.
-import type { CodexSandboxMode } from '@chroxy/protocol'
+import type { AgentConnection, CodexSandboxMode } from '@chroxy/protocol'
 
 /**
  * Per-turn BILLING token counts from the most recent `result.usage` — the
@@ -105,6 +105,7 @@ export interface SessionInfo {
   lastActivityAt?: number;
   conversationId: string | null;
   provider?: string;
+  agentConnection?: AgentConnection;
   // #5630/#5629: era-aware billing class for the cost-label renderers.
   // Optional because older servers omit it; consumers fall back to deriving
   // it from `provider`.

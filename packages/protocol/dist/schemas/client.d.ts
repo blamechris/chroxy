@@ -725,6 +725,7 @@ export declare const SandboxSchema: z.ZodObject<{
 }, z.core.$loose>;
 export declare const CreateSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"create_session">;
+    connectionId: z.ZodOptional<z.ZodString>;
     name: z.ZodOptional<z.ZodString>;
     cwd: z.ZodOptional<z.ZodString>;
     provider: z.ZodOptional<z.ZodString>;
@@ -756,9 +757,9 @@ export declare const CreateSessionSchema: z.ZodObject<{
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         none: "none";
+        container: "container";
         worktree: "worktree";
         sandbox: "sandbox";
-        container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;
@@ -1660,6 +1661,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"create_session">;
+    connectionId: z.ZodOptional<z.ZodString>;
     name: z.ZodOptional<z.ZodString>;
     cwd: z.ZodOptional<z.ZodString>;
     provider: z.ZodOptional<z.ZodString>;
@@ -1691,9 +1693,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }>>;
     isolation: z.ZodOptional<z.ZodEnum<{
         none: "none";
+        container: "container";
         worktree: "worktree";
         sandbox: "sandbox";
-        container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;

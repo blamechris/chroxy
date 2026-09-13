@@ -39,15 +39,6 @@ const posixOnly = process.platform === 'win32'
   ? 'POSIX/darwin/linux-only — not applicable on Windows (#6651)'
   : false
 
-// #6651 — the getFullServiceStatus tests fetch a REAL localhost port (8765 /
-// config) and assert nothing answers. The self-hosted `chroxy-win` runner is a
-// developer box that may have a live chroxy daemon on 8765, which would make
-// them flake. Skip on Windows; the port-parsing + fetch-timeout logic they cover
-// is platform-agnostic and stays green on the ubuntu/macOS jobs.
-const skipRealPortOnWin = process.platform === 'win32'
-  ? 'fetches a real localhost port that may be live on the self-hosted Windows runner (#6651)'
-  : false
-
 describe('service', () => {
   let tmpDir
 
@@ -1025,7 +1016,10 @@ describe('service', () => {
   })
 
   describe('getFullServiceStatus fetch timeout and port parsing (#745)', () => {
-    it('handles fetch timeout when server is not responding', { skip: skipRealPortOnWin }, async () => {
+    it('handles fetch timeout when server is not responding', async (t) => {
+      const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+        throw new DOMException('Simulated health-probe timeout', 'TimeoutError')
+      })
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -1034,12 +1028,19 @@ describe('service', () => {
         assert.equal(status.installed, true)
         assert.equal(status.running, true)
         assert.equal(status.health, null)
+        assert.equal(fetchMock.mock.callCount(), 1)
+        const [url, options] = fetchMock.mock.calls[0].arguments
+        assert.equal(url, 'http://127.0.0.1:8765/')
+        assert.ok(options.signal instanceof AbortSignal)
       } finally {
         rmSync(dir, { recursive: true })
       }
     })
 
-    it('reads port from config.json when available', { skip: skipRealPortOnWin }, async () => {
+    it('reads port from config.json when available', async (t) => {
+      const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+        throw new DOMException('Simulated health-probe timeout', 'TimeoutError')
+      })
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
@@ -1048,18 +1049,29 @@ describe('service', () => {
         const status = await getFullServiceStatus({ configDir: dir })
         assert.equal(status.installed, true)
         assert.equal(status.health, null)
+        assert.equal(fetchMock.mock.callCount(), 1)
+        const [url, options] = fetchMock.mock.calls[0].arguments
+        assert.equal(url, 'http://127.0.0.1:9999/')
+        assert.ok(options.signal instanceof AbortSignal)
       } finally {
         rmSync(dir, { recursive: true })
       }
     })
 
-    it('falls back to default port 8765 when no port info available', { skip: skipRealPortOnWin }, async () => {
+    it('falls back to default port 8765 when no port info available', async (t) => {
+      const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+        throw new DOMException('Simulated health-probe timeout', 'TimeoutError')
+      })
       const dir = mkdtempSync(join(tmpdir(), 'chroxy-timeout-'))
       try {
         saveServiceState({ installed: true, type: 'launchd' }, dir)
         writeFileSync(join(dir, 'supervisor.pid'), String(process.pid))
         const status = await getFullServiceStatus({ configDir: dir })
         assert.equal(status.health, null)
+        assert.equal(fetchMock.mock.callCount(), 1)
+        const [url, options] = fetchMock.mock.calls[0].arguments
+        assert.equal(url, 'http://127.0.0.1:8765/')
+        assert.ok(options.signal instanceof AbortSignal)
       } finally {
         rmSync(dir, { recursive: true })
       }

@@ -594,6 +594,99 @@ export function resolveStartupTimeouts(config = {}, log = { warn: () => {} }) {
   }
 }
 
+/**
+ * Resolve runtime-skill policy once for both SessionManager construction and
+ * startup diagnostics (#7834). Keeping the effective values beside their
+ * diagnostic source prevents startup from reporting a policy that was not
+ * actually forwarded to provider sessions.
+ *
+ * Omitted values preserve the documented permissive/no-trust defaults.
+ * An explicitly malformed allowlist throws before SessionManager construction:
+ * `null` is the loader's permissive sentinel, so falling back to it would fail
+ * open on the supervised child's independent config re-read. Unknown trust
+ * modes remain disabled and are called out as rejected in diagnostics.
+ *
+ * @param {object} config merged daemon config
+ * @returns {{
+ *   sessionManagerOptions: {
+ *     maxSkillBytes: number|null,
+ *     maxTotalSkillBytes: number|null,
+ *     providerSkillAllowlist: object|null,
+ *     trustMismatchMode: 'warn'|'block'|null,
+ *   },
+ *   diagnostics: {
+ *     allowlist: { effective: 'configured'|'disabled', source: 'config'|'default'|'rejected config', providerCount: number },
+ *     trust: { effective: 'warn'|'block'|'disabled', source: 'config'|'default'|'rejected config' },
+ *   },
+ * }}
+ */
+export function resolveStartupSkillPolicy(config = {}) {
+  const hasAllowlist = Object.prototype.hasOwnProperty.call(config, 'providerSkillAllowlist')
+  const allowlist = config.providerSkillAllowlist
+  const allowlistIsValid = allowlist !== null
+    && typeof allowlist === 'object'
+    && !Array.isArray(allowlist)
+  if (hasAllowlist && !allowlistIsValid) {
+    const error = new TypeError('Runtime skills: allowlist=rejected (source: config; expected object)')
+    error.code = 'INVALID_PROVIDER_SKILL_ALLOWLIST'
+    throw error
+  }
+
+  const hasTrustMode = Object.prototype.hasOwnProperty.call(config, 'trustMismatchMode')
+  const trustMode = config.trustMismatchMode
+  const trustModeIsValid = trustMode === 'warn' || trustMode === 'block'
+
+  return {
+    sessionManagerOptions: {
+      // Keep byte budgets in this builder too: all runtime-skill startup
+      // options now cross the daemon boundary through one production seam.
+      maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
+      maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
+      providerSkillAllowlist: allowlistIsValid ? allowlist : null,
+      trustMismatchMode: trustModeIsValid ? trustMode : null,
+    },
+    diagnostics: {
+      allowlist: {
+        effective: allowlistIsValid ? 'configured' : 'disabled',
+        source: allowlistIsValid ? 'config' : 'default',
+        providerCount: allowlistIsValid ? Object.keys(allowlist).length : 0,
+      },
+      trust: {
+        effective: trustModeIsValid ? trustMode : 'disabled',
+        source: trustModeIsValid ? 'config' : (hasTrustMode ? 'rejected config' : 'default'),
+      },
+    },
+  }
+}
+
+/** Format the content-free operator diagnostic for resolved skill policy. */
+export function formatStartupSkillPolicyDiagnostic(diagnostics) {
+  const allowlist = diagnostics?.allowlist || { effective: 'disabled', source: 'default', providerCount: 0 }
+  const trust = diagnostics?.trust || { effective: 'disabled', source: 'default' }
+  const providers = allowlist.effective === 'configured'
+    ? `, providers: ${allowlist.providerCount}`
+    : ''
+  return `Runtime skills: allowlist=${allowlist.effective} (source: ${allowlist.source}${providers}); trust=${trust.effective} (source: ${trust.source})`
+}
+
+/**
+ * Construct the daemon SessionManager with its resolved runtime-skill policy.
+ * Tests use this same production factory so removing the final constructor
+ * forwarding cannot leave a resolver-only test green (#7834).
+ *
+ * @param {object} config merged daemon config
+ * @param {object} sessionManagerOptions remaining daemon constructor options
+ * @returns {{ sessionManager: SessionManager, startupSkillPolicy: object }}
+ */
+export function createDaemonSessionManager(config, sessionManagerOptions) {
+  const startupSkillPolicy = resolveStartupSkillPolicy(config)
+  const sessionManager = new SessionManager({
+    ...sessionManagerOptions,
+    ...startupSkillPolicy.sessionManagerOptions,
+  })
+  return { sessionManager, startupSkillPolicy }
+}
+
 export function initFileLoggingFromConfig(config = {}) {
   if (process.env.CHROXY_NO_FILE_LOGGING === '1') {
     return { enabled: false, level: 'info', logDir: null }
@@ -991,7 +1084,7 @@ export async function startCliServer(config) {
     inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
 
   // 1. Create session manager
-  const sessionManager = new SessionManager({
+  const { sessionManager, startupSkillPolicy } = createDaemonSessionManager(config, {
     maxSessions: config.maxSessions || 5,
     port: PORT,
     apiToken: API_TOKEN,
@@ -1034,6 +1127,7 @@ export async function startCliServer(config) {
     binaryProvenanceMode: resolveBinaryProvenanceMode(config),
     binarySignatureGate: isBinarySignatureGateEnabled(config),
     providerType,
+    agentConnections: config.agentConnections || [],
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
@@ -1083,9 +1177,6 @@ export async function startCliServer(config) {
     // over-24h operator value falls back to null here so byok-mcp-client
     // applies its default (and the operator gets a warn log).
     mcpToolCallTimeoutMs: startupTimeouts.mcpToolCallTimeoutMs,
-    // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
-    maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
-    maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
   })
 
   // #3749 / #3899: surface the effective inactivity timeouts at startup so
@@ -1099,6 +1190,7 @@ export async function startCliServer(config) {
     ? 'disabled'
     : `${formatIdleDuration(effectiveStreamStallTimeoutMs)} (${effectiveStreamStallTimeoutMs}ms)`
   log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms); stream-stall: ${stallLabel}`)
+  log.info(formatStartupSkillPolicyDiagnostic(startupSkillPolicy.diagnostics))
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId

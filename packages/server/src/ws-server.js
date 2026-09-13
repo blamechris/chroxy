@@ -1015,6 +1015,7 @@ export class WsServer {
       protocolVersion: SERVER_PROTOCOL_VERSION,
       minProtocolVersion: MIN_PROTOCOL_VERSION,
       get webTaskManager() { return self._webTaskManager },
+      get agentConnections() { return self.config?.agentConnections ?? [] },
       send: sendFn,
       broadcast: broadcastFn,
       getConnectedClientList: () => self._getConnectedClientList(),

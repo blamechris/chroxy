@@ -149,6 +149,7 @@ export class ProviderCredentialMissingError extends Error {
  * @param {{ mode?: string, signatureGate?: boolean, ledger?: object }|null} [options.provenance]
  *   - opt-in provenance config + pin ledger; null/disabled ⇒ gate skipped
  * @param {Function} [options.verifyProvenance] - provenance checker (injected in tests)
+ * @returns {{ binaryPath: string|null }} exact healthy path allowed by all enabled gates
  * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderBinaryProvenanceError|ProviderCredentialMissingError}
  */
 export function runProviderPreflight(ProviderClass, {
@@ -157,17 +158,18 @@ export function runProviderPreflight(ProviderClass, {
   provenance = null,
   verifyProvenance = defaultVerifyProvenance,
 } = {}) {
-  if (!ProviderClass) return
+  if (!ProviderClass) return { binaryPath: null }
 
   // Containerised providers run their binary inside the container, so a host
   // preflight check would always fail (or worse — silently pass against a
   // wrong binary). Trust the container image / health probe instead.
-  if (ProviderClass.capabilities?.containerized) return
+  if (ProviderClass.capabilities?.containerized) return { binaryPath: null }
 
   const spec = ProviderClass.preflight
-  if (!spec) return
+  if (!spec) return { binaryPath: null }
 
   const providerLabel = spec.label || ProviderClass.name || 'provider'
+  let binaryPath = null
 
   if (spec.binary && spec.binary.name) {
     const candidates = spec.binary.candidates || []
@@ -202,6 +204,7 @@ export function runProviderPreflight(ProviderClass, {
         installHint: spec.binary.installHint,
       })
     }
+    binaryPath = health.path
 
     // #6858: opt-in provenance gate on the SAME healthy path the spawn will use.
     // Skipped entirely unless the operator opted in (mode warn/block or the
@@ -242,7 +245,7 @@ export function runProviderPreflight(ProviderClass, {
   if (spec.credentials && Array.isArray(spec.credentials.envVars) && spec.credentials.envVars.length > 0) {
     // Optional credentials never block creation — Claude can authenticate
     // via a prior `claude login` subscription instead of ANTHROPIC_API_KEY.
-    if (spec.credentials.optional) return
+    if (spec.credentials.optional) return { binaryPath }
     const matched = spec.credentials.envVars.find(v => env[v])
     if (!matched) {
       throw new ProviderCredentialMissingError({
@@ -252,4 +255,5 @@ export function runProviderPreflight(ProviderClass, {
       })
     }
   }
+  return { binaryPath }
 }

@@ -7297,8 +7297,13 @@ button.sidebar-token-view-session-row:hover {
   border: 1px solid var(--scrollbar-thumb);
   border-radius: 6px;
   padding: 6px 10px;
+  min-height: 44px;
   font-size: var(--text-md);
   cursor: pointer;
+}
+
+#connection-select {
+  min-height: 44px;
 }
 
 .provider-select select:focus {
