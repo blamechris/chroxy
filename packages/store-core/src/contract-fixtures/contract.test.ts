@@ -308,19 +308,32 @@ describe('what the static parity guard could not catch (#5556.5)', () => {
 // ---------------------------------------------------------------------------
 
 describe('flat-parity is independent of the wall clock (#7809)', () => {
-  const shutdown = DISPATCH_FIXTURES.find((f) =>
-    f.name.startsWith('server_shutdown writes shutdownReason'),
-  )!
+  // Select on the contract surface (`type`), not the human label — renaming a
+  // fixture must not silently un-test the race. Asserting uniqueness is the
+  // other half: `find` on a non-unique key would quietly take whichever row
+  // came first, which is how a guard ends up pointed at the wrong subject.
+  const shutdowns = DISPATCH_FIXTURES.filter((f) => f.type === 'server_shutdown')
+  it('the red-proof below is pointed at exactly one fixture', () => {
+    expect(shutdowns).toHaveLength(1)
+  })
+  const shutdown = shutdowns[0]!
 
-  /** Run `fn` with a `Date.now` that advances one millisecond per CALL. */
+  /**
+   * Run `fn` with a `Date.now` that advances one millisecond per CALL.
+   *
+   * `vi.spyOn` rather than assigning the global directly (the shape
+   * `chat-activity.test.ts` already uses, and what `runBothClients` uses): the
+   * spy is tracked by vitest and `mockRestore` puts back the original
+   * descriptor, so a leak is visible to `vi.isMockFunction` instead of being an
+   * ordinary function that merely looks right.
+   */
   function withAdvancingClock<T>(fn: () => T): T {
-    const realNow = Date.now
     let tick = CONTRACT_FIXED_NOW
-    Date.now = () => ++tick
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => ++tick)
     try {
       return fn()
     } finally {
-      Date.now = realNow
+      spy.mockRestore()
     }
   }
 
@@ -366,6 +379,10 @@ describe('flat-parity is independent of the wall clock (#7809)', () => {
       },
     } as unknown as ContractFixture
     expect(() => runBothClients(exploding)).toThrow('boom')
-    expect(Date.now()).not.toBe(CONTRACT_FIXED_NOW)
+    // Assert the SPY is gone, not that the wall clock happens to differ from a
+    // literal: a value comparison is a proxy that would also pass if the spy had
+    // been swapped for a DIFFERENT mock, and it couples the assertion to the
+    // real clock never being that instant.
+    expect(vi.isMockFunction(Date.now)).toBe(false)
   })
 })
