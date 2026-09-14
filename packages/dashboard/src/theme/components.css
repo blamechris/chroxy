@@ -3694,6 +3694,22 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /* ---- Tool Bubble ---- */
+/* #7336 / #6620: all raw tool text shares the same containment rules.
+   Target the inner <pre> explicitly: its browser default overrides inherited
+   white-space, including in the unbounded Show-more result panel. */
+.tool-input,
+.tool-result,
+.tool-result pre,
+.tool-input-partial,
+.tool-input-partial pre,
+.tool-group-entry-detail-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .tool-bubble {
   background: var(--bg-tool-bubble);
   border: 1px solid var(--border-primary);
@@ -3703,6 +3719,8 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-muted);
   align-self: flex-start;
   max-width: 85%;
+  min-width: 0;
+  overflow: hidden;
   cursor: pointer;
 }
 
@@ -3720,7 +3738,6 @@ button.sidebar-token-view-session-row:hover {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid var(--border-primary);
-  white-space: pre-wrap;
   font-family: var(--font-mono);
   font-size: 11px;
   max-height: 200px;
@@ -3998,16 +4015,6 @@ button.sidebar-token-view-session-row:hover {
   background: color-mix(in srgb, var(--border-primary) 25%, transparent);
   padding: 6px 8px;
   border-radius: 4px;
-  white-space: pre-wrap;
-  /* #6620: `overflow-wrap: anywhere` breaks a long unbreakable token (long path
-     / URL with no spaces) that `word-break: break-word` can leave overflowing;
-     `max-width: 100%` + `min-width: 0` keep the <pre> inside the card, and the
-     `overflow: auto` below gives a horizontal scrollbar as the last resort
-     instead of bleeding past the boundary. */
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  max-width: 100%;
-  min-width: 0;
   /*
    * #4283: outer .tool-group-list caps at 220px; the inner scroller has to
    * sit comfortably under that so the outer wins first instead of nesting
@@ -6848,7 +6855,7 @@ button.sidebar-token-view-session-row:hover {
   align-self: flex-start;
 }
 
-/* #5953 (epic #5951): in-chat "Claude is working" indicator at the streaming
+/* #5953 (epic #5951): in-chat "Agent is working" indicator at the streaming
    tail — the animated dots plus a label surfacing the current activity, so a
    live turn reads as actively working rather than a static/hung view. The
    nested `.thinking-dots` drops its own padding so the row aligns tightly. */

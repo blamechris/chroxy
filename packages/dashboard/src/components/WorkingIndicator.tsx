@@ -1,12 +1,12 @@
 /**
- * WorkingIndicator (#5953, epic #5951) — the in-chat "Claude is working" signal
+ * WorkingIndicator (#5953, epic #5951) — the in-chat "Agent is working" signal
  * shown at the streaming tail while a turn is in progress.
  *
  * Replaces the bare three-dot `ThinkingDots` with a labelled affordance so a
- * live turn reads as "Claude is actively doing something" rather than a static
+ * live turn reads as "the agent is actively doing something" rather than a static
  * view that could be mistaken for a hang. The label surfaces the current
  * activity — the in-flight tool ("Running Bash…") when one is running, else a
- * generic "Claude is working…". `ThinkingDots` is kept INSIDE so its animation +
+ * generic "Agent is working…". `ThinkingDots` is kept INSIDE so its animation +
  * `thinking-dots` test id are preserved for existing callers/tests.
  *
  * Presentational: the label is computed by the parent (App derives it from the
@@ -15,7 +15,7 @@
  */
 import { ThinkingDots } from './ThinkingDots'
 
-export const DEFAULT_WORKING_LABEL = 'Claude is working…'
+export const DEFAULT_WORKING_LABEL = 'Agent is working…'
 
 export function WorkingIndicator({ label }: { label?: string }) {
   // role="status" + aria-live="polite" so a screen reader announces the working
