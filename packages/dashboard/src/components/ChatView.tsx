@@ -210,10 +210,10 @@ export interface ChatViewProps {
    */
   onEditQueued?: (id: string, text: string) => void
   /**
-   * #5953 (epic #5951): label for the in-chat "Claude is working" indicator
+   * #5953 (epic #5951): label for the in-chat "Agent is working" indicator
    * shown at the streaming tail. The parent derives it from the active session's
    * in-flight tool ("Running Bash…") or passes nothing for the generic default
-   * ("Claude is working…"). A stable string so it doesn't churn per token.
+   * ("Agent is working…"). A stable string so it doesn't churn per token.
    */
   workingLabel?: string
   /**

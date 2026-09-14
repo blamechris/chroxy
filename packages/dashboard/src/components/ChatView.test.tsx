@@ -333,7 +333,7 @@ describe('ChatView', () => {
   it('shows the working indicator with the generic default label when streaming', () => {
     render(<ChatView messages={makeMessages(1)} isStreaming />)
     expect(screen.getByTestId('working-indicator')).toBeInTheDocument()
-    expect(screen.getByTestId('working-label')).toHaveTextContent('Claude is working…')
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Agent is working…')
   })
 
   it('surfaces the in-flight activity via workingLabel', () => {

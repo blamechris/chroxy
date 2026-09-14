@@ -368,10 +368,10 @@ export function App() {
     [queuedMessages],
   )
 
-  // #5953 (epic #5951): label for the in-chat "Claude is working" indicator.
+  // #5953 (epic #5951): label for the in-chat "Agent is working" indicator.
   // Surfaces the current in-flight tool ("Running Bash…") using the same
   // detection the ActivityIndicator uses; falls back to undefined so the
-  // indicator shows its generic default ("Claude is working…"). The walk is
+  // indicator shows its generic default ("Agent is working…"). The walk is
   // O(1) in practice (the unresolved tool is at the tail) and the label string
   // is stable across response tokens (it only changes when the tool changes).
   const workingLabel = useMemo(() => {

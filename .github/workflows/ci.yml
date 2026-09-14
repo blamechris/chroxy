@@ -1710,6 +1710,9 @@ jobs:
           done
           echo "::error::chroxy server did not come up within 40s"; tail -50 /tmp/chroxy-server.log; exit 1
 
+      - name: Verify tool card layout
+        run: node --test packages/dashboard/scripts/tool-layout.test.mjs
+
       - name: Run dashboard smoke test
         working-directory: packages/server
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture

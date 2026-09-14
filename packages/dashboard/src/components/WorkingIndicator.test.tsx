@@ -3,19 +3,19 @@
  */
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
-import { WorkingIndicator, DEFAULT_WORKING_LABEL } from './WorkingIndicator'
+import { WorkingIndicator } from './WorkingIndicator'
 
 afterEach(cleanup)
 
 describe('WorkingIndicator', () => {
   it('shows the generic default label when none is supplied', () => {
     render(<WorkingIndicator />)
-    expect(screen.getByTestId('working-label')).toHaveTextContent(DEFAULT_WORKING_LABEL)
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Agent is working…')
   })
 
   it('falls back to the default for an empty label', () => {
     render(<WorkingIndicator label="" />)
-    expect(screen.getByTestId('working-label')).toHaveTextContent(DEFAULT_WORKING_LABEL)
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Agent is working…')
   })
 
   it('surfaces a provided activity label (e.g. the in-flight tool)', () => {
