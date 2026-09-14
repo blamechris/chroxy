@@ -1711,7 +1711,10 @@ jobs:
           echo "::error::chroxy server did not come up within 40s"; tail -50 /tmp/chroxy-server.log; exit 1
 
       - name: Verify tool card layout
-        run: node packages/dashboard/scripts/tool-layout.test.mjs
+        run: |
+          set -o pipefail
+          node packages/dashboard/scripts/tool-layout.test.mjs | tee /tmp/chroxy-tool-layout.tap
+          node scripts/lib/assert-test-count.mjs --min 15 cat /tmp/chroxy-tool-layout.tap > /dev/null
 
       - name: Run dashboard smoke test
         working-directory: packages/server

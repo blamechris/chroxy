@@ -178,6 +178,9 @@ const SHEBANG = /^#!(?:\/usr\/bin\/env[ \t]+|\/(?:usr\/)?bin\/)(bash|node)[ \t]*
  * scripts/lib/assert-test-count.mjs guards, one layer up from here.
  */
 const EXCLUDED_HARNESSES = [
+  // Uses node:test, not hand-rolled verdict counters. Dashboard Smoke checks
+  // its TAP summary with assert-test-count.mjs (minimum 15 browser cases).
+  'packages/dashboard/scripts/tool-layout.test.mjs',
   'packages/store-core/scripts/__tests__/export-targets.test.mjs',
 ]
 
