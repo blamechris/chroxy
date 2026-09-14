@@ -27,6 +27,7 @@ import {
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createEmptySessionState } from '../../store/utils';
 import {
+  buildChatViewMessages,
   PERMISSION_ALREADY_ANSWERED_NOTICE,
   PERMISSION_DECISION_TOKENS,
   isLivePermissionPrompt,
@@ -3011,6 +3012,91 @@ describe('reconnect replay dedup', () => {
     expect(msgs).toHaveLength(2);
     expect(msgs[1].type).toBe('response');
     expect(msgs[1].content).toBe('output');
+  });
+
+  it('keeps colliding replayed tool and response identities stable across full and delta replay (#7849)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [], streamingMessageId: null },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+
+    const collisionId = 'msg-collision';
+    const toolUseId = 'tool-use-1';
+    const replay = (fullHistory: boolean) => {
+      _testMessageHandler.handle({
+        type: 'history_replay_start', sessionId: 's1', fullHistory,
+      });
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: collisionId,
+        toolUseId,
+        tool: 'Bash',
+        input: { command: 'printf ok' },
+        timestamp: 10,
+        historySeq: 1,
+        sessionId: 's1',
+      });
+      _testMessageHandler.handle({
+        type: 'tool_result',
+        toolUseId,
+        result: 'ok',
+        timestamp: 20,
+        historySeq: 2,
+        sessionId: 's1',
+      });
+      _testMessageHandler.handle({
+        type: 'message',
+        messageType: 'response',
+        messageId: collisionId,
+        content: 'finished',
+        timestamp: 30,
+        historySeq: 3,
+        sessionId: 's1',
+      });
+      _testMessageHandler.handle({
+        type: 'history_replay_end', sessionId: 's1', latestSeq: 3,
+      });
+    };
+
+    const expectStableTranscript = () => {
+      const messages = store.getState().sessionStates.s1.messages;
+      expect(messages.map((message: any) => ({
+        id: message.id,
+        type: message.type,
+        content: message.content,
+        toolResult: message.toolResult,
+      }))).toEqual([
+        { id: collisionId, type: 'tool_use', content: '{"command":"printf ok"}', toolResult: 'ok' },
+        { id: `${collisionId}-response`, type: 'response', content: 'finished', toolResult: undefined },
+      ]);
+      expect(new Set(messages.map((message: any) => message.id)).size).toBe(2);
+
+      const view = buildChatViewMessages(messages, null);
+      expect(view.chatMessages.map((message) => message.id)).toEqual([
+        collisionId,
+        `${collisionId}-response`,
+      ]);
+      expect(view.storeMsgMap.get(collisionId)).toMatchObject({
+        type: 'tool_use',
+        toolResult: 'ok',
+      });
+      expect(view.storeMsgMap.get(`${collisionId}-response`)).toMatchObject({
+        type: 'response',
+        content: 'finished',
+      });
+    };
+
+    replay(true);
+    expectStableTranscript();
+    replay(true);
+    expectStableTranscript();
+    replay(false);
+    expectStableTranscript();
   });
 
   it('message handler: deduplicates non-response messages by content and timestamp', () => {

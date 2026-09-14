@@ -237,9 +237,16 @@ export function handleMessage(
     }
   }
 
+  // A provider may reuse a tool's wire ID for its final response. Replay must
+  // use the same response identity as stream_start or renderers collapse the
+  // two rows and lose the tool-result lookup (#7849).
+  const messageId = stableMessageId || nextMessageId(msgType)
+  const resolvedMessageId = msgType === 'response'
+    ? resolveStreamId(cachedMessages.find(message => message.id === messageId), messageId).resolvedId
+    : messageId
+
   const chatMessage: ChatMessage = {
-    // Canonical: preserve server-stamped messageId for ALL types (#2902).
-    id: stableMessageId || nextMessageId(msgType),
+    id: resolvedMessageId,
     type: msgType as ChatMessage['type'],
     content: msg.content,
     tool: typeof msg.tool === 'string' ? msg.tool : undefined,
@@ -599,9 +606,10 @@ export function handleToolResult(
     patch,
     resultText,
     applyTo: (messages) => {
-      const idx = messages.findIndex(
-        (m) => m.type === 'tool_use' && m.toolUseId === toolUseId,
-      )
+      // Full rebuilds retain the old transcript prefix until replay ends.
+      // Patch the newest copy: the prefix is discarded after reconciliation.
+      let idx = messages.length - 1
+      while (idx >= 0 && !(messages[idx]!.type === 'tool_use' && messages[idx]!.toolUseId === toolUseId)) idx--
       if (idx === -1) return messages
       const updated = [...messages]
       updated[idx] = { ...updated[idx]!, ...patch }
@@ -834,15 +842,16 @@ export function handleStreamStart(
   const existing = existingMessages.find((m) => m.id === streamId)
   const { resolvedId, remap } = resolveStreamId(existing, streamId)
 
-  if (existing && existing.type === 'response') {
-    // Reuse existing response message (reconnect replay dedup) — caller only
-    // updates streamingMessageId.
+  const existingResponse = existingMessages.find(message => message.id === resolvedId && message.type === 'response')
+  if (existingResponse) {
+    // Reuse raw or remapped responses after replay/repeated starts. Keep the
+    // remap so subsequent wire-ID deltas still reach the resolved response.
     return {
       sessionId,
       streamingMessageId: resolvedId,
       isNewMessage: false,
       newMessage: null,
-      remap: null,
+      remap: remap ?? null,
     }
   }
 
