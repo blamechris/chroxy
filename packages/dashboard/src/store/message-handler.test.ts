@@ -4327,24 +4327,15 @@ describe('dashboard message-handler dispatch', () => {
       expect(answeredOf(2)).toBeUndefined()
     })
 
-    // KNOWN LIMIT (#7577), pinned at the wire level in both clients because it
-    // lands on the exact path this family exists to protect: the optimistic bubble
-    // a user types mid-replay.
+    // #7577 — a user typing mid-replay puts an optimistic bubble and the
+    // `thinking` placeholder into the observed append run. The next replayed
+    // message must remove that placeholder BEFORE its own append is observed.
     //
     // `sendMessage` appends the user's bubble AND a `{ id: 'thinking' }`
-    // placeholder in ONE update, and every `message` frame — every replayed
-    // history entry included — STRIPS that placeholder while appending. The next
-    // replayed entry is therefore a remove-then-append, which is neither an append
-    // at the end nor an untouched run, so the provenance record is dropped and the
-    // swap falls back to array order for the rest of the window.
-    //
-    // Nothing is lost, duplicated or moved: the result is byte-for-byte pre-#7519.
-    // This asserts the CURRENT degraded behaviour — a `go red with the docs` pin
-    // rather than a red-first one — and it REACHES red: the naive repair (treat a
-    // single removal plus a single trailing append as remove-then-append) flips
-    // it, measured as mutant 13 in store-core. When #7577 lands, this is the test
-    // that says so.
-    it('KNOWN LIMIT: a user typing mid-replay loses the reorder for that window (#7577)', () => {
+    // placeholder in one update. Splitting the handler's removal and append
+    // gives the observer two ordinary shapes it already understands, preserving
+    // the positional record without teaching it a filtered-append diff.
+    it('keeps replay order when a user types and a thinking placeholder is stripped mid-replay (#7577)', () => {
       seedOne([{ id: 'old-1', type: 'response', content: 'before', timestamp: 1 }])
       const entry = (messageId: string, extra: Record<string, unknown> = {}) => ({
         type: 'message',
@@ -4368,7 +4359,7 @@ describe('dashboard message-handler dispatch', () => {
           { id: 'thinking', type: 'thinking', content: '', timestamp: 200 },
         ],
       })) as any)
-      // The next replayed entry strips the placeholder while appending.
+      // The next replayed entry strips the placeholder, then appends.
       handleMessage(entry('h-1', { historySeq: 1 }) as any, ctx() as any)
       handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
       handleMessage({ type: 'history_replay_end', sessionId: 's1' }, ctx() as any)
@@ -4376,10 +4367,39 @@ describe('dashboard message-handler dispatch', () => {
       const msgs = (store.getState() as any).sessionStates.s1.messages
       // Nothing lost, prefix gone — the swap really happened...
       expect(msgs.map((m: any) => m.id).slice().sort()).toEqual(['h-1', 'h-2', 'racer', 'u-1'])
-      // ...but in ARRAY order, with the oldest history entry last. The truth is
-      // ['h-1','h-2','racer','u-1'], and the control two tests up shows the fix
-      // delivering exactly that when nobody types.
-      expect(msgs.map((m: any) => m.id)).toEqual(['h-2', 'racer', 'u-1', 'h-1'])
+      // ...and the history is restored before both live racers.
+      expect(msgs.map((m: any) => m.id)).toEqual(['h-1', 'h-2', 'racer', 'u-1'])
+    })
+
+    it('uses an extra message update only when a thinking placeholder exists (#7577)', () => {
+      seedOne([{ id: 'thinking', type: 'thinking', content: '', timestamp: 1 }])
+      const withPlaceholder = vi.spyOn(store, 'setState')
+      handleMessage({
+        type: 'message',
+        messageType: 'response',
+        content: 'first',
+        messageId: 'first',
+        sessionId: 's1',
+        timestamp: 2,
+      }, ctx() as any)
+      // The shared message dispatch also applies one metadata state update;
+      // placeholder removal adds exactly one call over the no-placeholder case.
+      expect(withPlaceholder).toHaveBeenCalledTimes(3)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['first'])
+      withPlaceholder.mockRestore()
+
+      seedOne()
+      const withoutPlaceholder = vi.spyOn(store, 'setState')
+      handleMessage({
+        type: 'message',
+        messageType: 'response',
+        content: 'second',
+        messageId: 'second',
+        sessionId: 's1',
+        timestamp: 2,
+      }, ctx() as any)
+      expect(withoutPlaceholder).toHaveBeenCalledTimes(2)
+      expect((store.getState() as any).sessionStates.s1.messages.map((m: any) => m.id)).toEqual(['second'])
     })
 
     // #7524 — the same nested DELTA -> FULL interleave, plus the one extra user
