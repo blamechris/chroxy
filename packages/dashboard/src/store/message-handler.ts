@@ -5725,11 +5725,22 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
+        // #7577 — placeholder removal and message append are two different
+        // replay-observer shapes. Combining them into one filtered append made
+        // the positional provenance record unclassifiable, so one replayed
+        // entry could disable ordering for the rest of the window. The replay
+        // observer recognizes the exact terminal-placeholder removal, then the
+        // ordinary trailing append is recordable.
+        // Avoid the extra store update when there is no placeholder to remove.
+        const hasThinkingPlaceholder = newMsg.id !== 'thinking'
+          && get().sessionStates[targetId]!.messages.some((message) => message.id === 'thinking')
+        if (hasThinkingPlaceholder) {
+          updateSession(targetId, (ss) => ({
+            messages: ss.messages.filter((message) => message.id !== 'thinking'),
+          }));
+        }
         updateSession(targetId, (ss) => ({
-          messages: [
-            ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
-            newMsg,
-          ],
+          messages: [...ss.messages, newMsg],
         }));
       } else {
         get().addMessage(newMsg);

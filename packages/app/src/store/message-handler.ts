@@ -2765,11 +2765,21 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const newMsg = result.chatMessage;
       const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
       if (effectiveId && get().sessionStates[effectiveId]) {
+        // #7577 — keep the replay observer's two known shapes separate: first
+        // remove the optimistic placeholder, then record the trailing append.
+        // The observer recognizes the exact terminal-placeholder removal; a
+        // filtered append combines both and invalidates the positional record.
+        // Most messages have no placeholder, so only pay for the second update
+        // when needed.
+        const hasThinkingPlaceholder = newMsg.id !== 'thinking'
+          && get().sessionStates[effectiveId]!.messages.some((message) => message.id === 'thinking');
+        if (hasThinkingPlaceholder) {
+          updateSession(effectiveId, (ss) => ({
+            messages: ss.messages.filter((message) => message.id !== 'thinking'),
+          }));
+        }
         updateSession(effectiveId, (ss) => ({
-          messages: [
-            ...ss.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
-            newMsg,
-          ],
+          messages: [...ss.messages, newMsg],
         }));
       }
       // #7603 — the container-health state rides in on this same `error`

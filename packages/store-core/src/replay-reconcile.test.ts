@@ -986,25 +986,108 @@ describe('append PROVENANCE orders the swapped tail (#7519)', () => {
     ])
   })
 
-  // --- the `thinking` placeholder, on the racer path (#7574 review, finding 1)
+  // --- deliberately unsupported combined placeholder mutations ------------
   //
-  // `sendMessage` appends the user's bubble AND a `{ id: 'thinking' }`
-  // placeholder (`connection.ts:3550` dashboard, `:1710` app), and every
-  // `message` frame — every replayed history entry included — STRIPS that
-  // placeholder while appending
-  // (`ss.messages.filter((m) => m.id !== 'thinking' || …)`). So a user typing
-  // mid-replay makes the next replayed entry a remove-then-append, which is
-  // neither branch of `noteReplayMessagesUpdate`.
+  // #7577 changed both clients to report placeholder removal and trailing
+  // append as separate store updates, so production no longer asks the
+  // observer to classify either combined mutation below.
   //
-  // These two pin the CURRENT, degraded behaviour, and they are `go red with
-  // the docs` pins rather than red-first ones: they cannot fail today because
-  // they describe today. What makes them worth writing is that they REACH red
-  // — a naive repair that simply accepts remove-then-append as an append flips
-  // both — so when the repair lands (#7577) these are the tests that say so,
-  // and they go with it rather than being discovered stale. Neither shape
-  // loses, duplicates or reorders a message: both land on exactly pre-#7519
-  // behaviour.
-  it('KNOWN LIMIT: a user typing mid-replay drops the record for the window (#7577)', () => {
+  // Keep the observer conservative. Teaching it that a removal plus append is
+  // safe requires distinguishing this shape from a genuine reorder, which is
+  // the positional ambiguity #7556 refuses. These pins ensure a future change
+  // does not weaken that refusal just because clients avoid the shape.
+  it('keeps provenance aligned across a separate terminal thinking removal (#7577)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', false, live)
+    replayed('s1', live, 'h-2', 2)
+    arrivedLive('s1', live, 'racer')
+    reconcileReplayStart('s1', true, live)
+    frame('s1', live, null, (m) => m.push({ id: 'u-1' }, { id: 'thinking' }))
+
+    // The real client handler performs these as two updates inside the same
+    // replayed frame: exact terminal placeholder removal, ordinary append.
+    beginReplayFrame({ type: 'message', historySeq: 1 })
+    try {
+      let before = live.slice()
+      live.pop()
+      noteReplayMessagesUpdate('s1', before, live)
+      before = live.slice()
+      live.push({ id: 'h-1' })
+      noteReplayMessagesUpdate('s1', before, live)
+    } finally {
+      endReplayFrame()
+    }
+
+    expect(getReplayAppendProvenance('s1')).toEqual([
+      { id: 'h-2', seq: 2 },
+      { id: 'racer', seq: null },
+      { id: 'u-1', seq: null },
+      { id: 'h-1', seq: 1 },
+    ])
+    expect(reconcileReplayEnd('s1', live).swappedMessages).toBeNull()
+    expect(idsOf(reconcileReplayEnd('s1', live).swappedMessages)).toEqual([
+      'h-1',
+      'h-2',
+      'racer',
+      'u-1',
+    ])
+  })
+
+  it('does not forgive removal of a recorded non-placeholder tail (#7577 guard)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'ordinary')
+    const before = live.slice()
+    live.pop()
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
+  it('does not forgive a thinking removal that also changes the prefix (#7577 guard)', () => {
+    const old = { id: 'old' }
+    const live: Msg[] = [old]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'thinking')
+    const before = live.slice()
+    live.splice(0, live.length, { id: 'old' }) // equal id, different identity
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
+  it('does not forgive removing more than the terminal thinking placeholder (#7577 guard)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'ordinary')
+    arrivedLive('s1', live, 'thinking')
+    const before = live.slice()
+    live.splice(1, 2)
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
+  it('does not forgive an unobserved replacement of the thinking tail (#7577 guard)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'thinking')
+    live[live.length - 1] = { id: 'replacement' } // bypass the observer first
+    const before = live.slice()
+    live.pop()
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
+  it('does not pop non-thinking provenance after an unobserved placeholder replacement (#7577 guard)', () => {
+    const live: Msg[] = [{ id: 'old' }]
+    reconcileReplayStart('s1', true, live)
+    arrivedLive('s1', live, 'ordinary')
+    live[live.length - 1] = { id: 'thinking' } // bypass the observer first
+    const before = live.slice()
+    live.pop()
+    noteReplayMessagesUpdate('s1', before, live)
+    expect(getReplayAppendProvenance('s1')).toBeNull()
+  })
+
+  it('a combined placeholder removal and append drops the record rather than guessing (#7577)', () => {
     const live: Msg[] = [{ id: 'old' }]
     reconcileReplayStart('s1', false, live)
     replayed('s1', live, 'h-2', 2)
@@ -1032,7 +1115,7 @@ describe('append PROVENANCE orders the swapped tail (#7519)', () => {
     ])
   })
 
-  it('KNOWN LIMIT: a strip while the record is still EMPTY under-counts instead (#7577)', () => {
+  it('a combined strip and append with an empty record safely under-counts (#7577)', () => {
     // The quieter second shape: the placeholder is already on screen when the
     // window opens (send, drop, reconnect inside the safety-net timer), so the
     // strip lands at `n === 0`. Branch 2 is vacuous there — deliberately, it is

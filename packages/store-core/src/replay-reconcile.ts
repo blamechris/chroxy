@@ -951,31 +951,19 @@ export function endReplayFrame(): void {
  *     the tail, so it is dropped and the swap reverts to its pre-#7519
  *     behaviour for the rest of the window.
  *
- * THE DEGRADATION THAT ACTUALLY BITES, named rather than left inside "anything
- * else" (#7577, found reviewing #7574). `sendMessage` appends the user's bubble
- * AND a `{ id: 'thinking' }` placeholder in one update (`connection.ts:3550`
- * dashboard, `:1710` app), and every `message` frame — every replayed history
- * entry included — STRIPS that placeholder while appending
- * (`ss.messages.filter((m) => m.id !== 'thinking' || …)`). So a user typing
- * mid-replay makes the next replayed entry a remove-then-append: the third shape
- * above, on the exact path — the optimistic bubble racing a replay — that this
- * whole family of issues exists to protect. Measured through the real dashboard
- * handler: `['h-2','racer','u-1','h-1']` against a truth of
- * `['h-1','h-2','racer','u-1']`, i.e. the #7519 artifact verbatim, and identical
- * to pre-#7519 (nothing lost, nothing duplicated, nothing moved).
+ * #7577 keeps the clients inside two independently provable shapes. A generic
+ * `message` handler first removes an existing terminal `{ id: 'thinking' }`
+ * placeholder, then appends the incoming entry in a separate store update.
+ * The observer recognizes only that exact one-element tail removal and removes
+ * its matching terminal provenance entry; the ordinary append is then recorded
+ * normally. With no placeholder, the handler performs only the append update.
  *
- * The same strip landing while the record is still EMPTY is quieter and not the
- * same shape: branch 2 is vacuous at `n === 0`, so the record is KEPT and the
- * append it could not classify is simply never recorded — an under-count, which
- * `resolveCut`'s `Math.min` and the swap's exact-alignment gate make safe. Both
- * are pinned (`KNOWN LIMIT: a user typing mid-replay …`, `KNOWN LIMIT: a strip
- * while the record is still EMPTY …`, plus one per client handler suite).
- *
- * Not repaired here because the repair is not the cheap thing it looks like:
- * telling a remove-then-append apart from a genuine reorder is a diff engine
- * over the record, and its wrong answer is a positionally DRIFTED provenance
- * array — the one state #7556 rules out. #7577 carries it, with both shapes and
- * that constraint.
+ * A caller that still combines placeholder removal with append remains in the
+ * third shape. With a non-empty record it drops provenance; with an empty one it
+ * safely under-counts. The observer tests pin both outcomes because accepting
+ * that combined mutation would require a diff engine able to distinguish it
+ * from a genuine reorder. A wrong answer would create the positionally drifted
+ * provenance array #7556 rules out, so the observer continues to refuse it.
  *
  * A third source of un-provenanced appends, recorded rather than degraded: the
  * "Sync Full History" JSONL slice (`handleRequestFullHistory`,
@@ -1024,6 +1012,24 @@ export function noteReplayMessagesUpdate(
     return
   }
   const recordAnchorId = n === 0 ? null : (appends[n - 1] as ReplayAppend).id
+  // #7577 — the clients split their old filtered append into two updates, but
+  // the optimistic `thinking` placeholder can itself be part of this recorded
+  // tail. Removing that last array element therefore has one equally precise
+  // provenance operation: remove the last record entry. Keep the recognition
+  // deliberately narrower than a generic removal/diff — exactly one terminal
+  // element, its id and the record anchor both `thinking`, and every preceding
+  // element still the same object in the same position. Any duplicate/stale
+  // placeholder elsewhere, interior removal, clone, or reorder falls through
+  // to the conservative record-drop branch below.
+  const removesRecordedThinkingTail =
+    after.length === before.length - 1 &&
+    recordAnchorId === 'thinking' &&
+    idOf(before[before.length - 1] ?? null) === 'thinking' &&
+    after.every((message, index) => message === before[index])
+  if (removesRecordedThinkingTail) {
+    appends.pop()
+    return
+  }
   // Branch 1's anchor — the position the append happened AT must be unmoved.
   // With entries recorded that is the record's last id. With an EMPTY record
   // there is no recorded id to check it with, and this used to accept
