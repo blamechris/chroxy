@@ -59,6 +59,7 @@ import {
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import {
+  buildChatViewMessages,
   isLivePermissionPrompt,
   resetReplayReconcile,
   wasPromptLiveDuringReplay,
@@ -5508,6 +5509,103 @@ describe('dashboard message-handler dispatch', () => {
       const msgs = (store.getState() as any).sessionStates.s1.messages
       expect(msgs).toHaveLength(1)
       expect(msgs[0].id).toBe('tool-1')
+    })
+
+    it('keeps colliding replayed tool and response identities stable across full and delta replay (#7849)', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: {
+            s1: { ...createEmptySessionState(), messages: [] },
+          },
+        }),
+      )
+      setStore(store)
+
+      const collisionId = 'msg-collision'
+      const toolUseId = 'tool-use-1'
+      const replay = (fullHistory: boolean) => {
+        handleMessage(
+          { type: 'history_replay_start', sessionId: 's1', fullHistory },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'tool_start',
+            messageId: collisionId,
+            toolUseId,
+            tool: 'Bash',
+            input: { command: 'printf ok' },
+            timestamp: 10,
+            historySeq: 1,
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'tool_result',
+            toolUseId,
+            result: 'ok',
+            timestamp: 20,
+            historySeq: 2,
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          {
+            type: 'message',
+            messageType: 'response',
+            messageId: collisionId,
+            content: 'finished',
+            timestamp: 30,
+            historySeq: 3,
+            sessionId: 's1',
+          },
+          ctx() as any,
+        )
+        handleMessage(
+          { type: 'history_replay_end', sessionId: 's1', latestSeq: 3 },
+          ctx() as any,
+        )
+      }
+
+      const expectStableTranscript = () => {
+        const messages = (store.getState() as any).sessionStates.s1.messages
+        expect(messages.map((message: any) => ({
+          id: message.id,
+          type: message.type,
+          content: message.content,
+          toolResult: message.toolResult,
+        }))).toEqual([
+          { id: collisionId, type: 'tool_use', content: '{"command":"printf ok"}', toolResult: 'ok' },
+          { id: `${collisionId}-response`, type: 'response', content: 'finished', toolResult: undefined },
+        ])
+        expect(new Set(messages.map((message: any) => message.id)).size).toBe(2)
+
+        const view = buildChatViewMessages(messages, null)
+        expect(view.chatMessages.map((message) => message.id)).toEqual([
+          collisionId,
+          `${collisionId}-response`,
+        ])
+        expect(view.storeMsgMap.get(collisionId)).toMatchObject({
+          type: 'tool_use',
+          toolResult: 'ok',
+        })
+        expect(view.storeMsgMap.get(`${collisionId}-response`)).toMatchObject({
+          type: 'response',
+          content: 'finished',
+        })
+      }
+
+      replay(true)
+      expectStableTranscript()
+      replay(true)
+      expectStableTranscript()
+      replay(false)
+      expectStableTranscript()
     })
 
     it('appends new tool_use whose id is not yet in cache (legitimate replay)', () => {

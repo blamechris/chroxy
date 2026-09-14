@@ -6550,6 +6550,21 @@ describe('handleUserInput', () => {
 // handleMessage
 // ---------------------------------------------------------------------------
 describe('handleMessage', () => {
+  it('keeps replayed tool and response identities distinct (#7849)', () => {
+    const cached: ChatMessage[] = [
+      { id: 'turn-1', type: 'tool_use', content: 'Shell', toolResult: 'ready', timestamp: 1 },
+    ]
+    const frame = { messageType: 'response', messageId: 'turn-1', content: 'Final answer', timestamp: 2 }
+    const replay = handleMessage(frame, 's1', true, cached)
+    expect(replay.shouldDispatch).toBe(true)
+    if (!replay.shouldDispatch) throw new Error('Response was dropped')
+    expect(replay.chatMessage.id).toBe('turn-1-response')
+    cached.push(replay.chatMessage)
+    expect(new Set(cached.map(message => message.id)).size).toBe(2)
+    expect(handleMessage(frame, 's1', true, cached).shouldDispatch).toBe(false)
+    expect(cached[0]!.toolResult).toBe('ready')
+  })
+
   it('uses messageType field when present, falling back to type', () => {
     const out1 = handleMessage(
       { messageType: 'response', type: 'message', content: 'hi', timestamp: 1 },
@@ -7964,6 +7979,16 @@ describe('handleToolStart', () => {
 // handleToolResult
 // ---------------------------------------------------------------------------
 describe('handleToolResult', () => {
+  it('patches the replayed tool copy instead of the preserved full-rebuild prefix (#7849)', () => {
+    const oldTool: ChatMessage = { id: 'tool-1', type: 'tool_use', toolUseId: 'call-1', content: 'Shell', timestamp: 1 }
+    const replayedTool = { ...oldTool }
+    const result = handleToolResult({ toolUseId: 'call-1', result: 'ready' }, 's1')!
+    const updated = result.applyTo([oldTool, replayedTool])
+    expect(updated[1]!.toolResult).toBe('ready')
+    expect(updated[0]).toBe(oldTool)
+    expect(oldTool.toolResult).toBeUndefined()
+  })
+
   it('returns null when toolUseId is missing', () => {
     const out = handleToolResult({ result: 'ok' }, 'sess-active')
     expect(out).toBeNull()
@@ -8555,6 +8580,21 @@ describe('handleToolInputDelta', () => {
 // handleStreamStart
 // ---------------------------------------------------------------------------
 describe('handleStreamStart', () => {
+  it('reuses a remapped response and retains delta routing on repeated starts (#7849)', () => {
+    const existing: ChatMessage[] = [
+      { id: 'turn-1', type: 'tool_use', content: 'Shell', timestamp: 1 },
+      { id: 'turn-1-response', type: 'response', content: 'Final answer', timestamp: 2 },
+    ]
+    for (let repeat = 0; repeat < 2; repeat++) {
+      const result = handleStreamStart({ messageId: 'turn-1', sessionId: 's1' }, 's1', existing)
+      expect(result.isNewMessage).toBe(false)
+      expect(result.newMessage).toBeNull()
+      expect(result.streamingMessageId).toBe('turn-1-response')
+      expect(result.remap).toEqual({ from: 'turn-1', to: 'turn-1-response' })
+    }
+    expect(existing[1]!.content).toBe('Final answer')
+  })
+
   it('reuses existing response message (no new message, no remap)', () => {
     const existing: ChatMessage[] = [
       { id: 'msg-1', type: 'response', content: 'partial', timestamp: 1 },
