@@ -62,6 +62,7 @@ for (const width of [320, 800, 1440]) {
         if (scenario === 'long-expanded') await page.getByTestId('tool-result-expand-long').click()
         const measurements = await section.evaluate(section => {
           const card = section.querySelector('.tool-bubble, .tool-group')
+          if (!card) throw new Error('Fixture must render a tool card (.tool-bubble or .tool-group)')
           const bounds = card.getBoundingClientRect()
           const content = [...section.querySelectorAll('.tool-bubble pre, .tool-input, .tool-group-entry-detail-content')]
           return {
