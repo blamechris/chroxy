@@ -111,12 +111,7 @@ function resolveReconnectDeadlineMs(optValue, logger = log) {
 const log = createLogger('codex-app-server')
 const CODEX_FIRST_PARTY_API_BASE_URL = 'https://api.openai.com/v1'
 const CODEX_FIRST_PARTY_CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api/'
-const CODEX_FIRST_PARTY_CONNECTION_ARGS = Object.freeze([
-  'app-server',
-  '-c', 'model_provider="openai"',
-  '-c', `openai_base_url="${CODEX_FIRST_PARTY_API_BASE_URL}"`,
-  '-c', `chatgpt_base_url="${CODEX_FIRST_PARTY_CHATGPT_BASE_URL}"`,
-])
+const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 
 /**
  * Codex session driven through the `codex app-server` JSON-RPC protocol
@@ -347,9 +342,25 @@ export class CodexAppServerSession extends BaseSession {
   }
 
   _buildClientArgs() {
-    return this._connectionAuthRoute
-      ? [...CODEX_FIRST_PARTY_CONNECTION_ARGS]
-      : ['app-server']
+    if (!this._connectionAuthRoute) return ['app-server']
+    if (!['native', 'api'].includes(this._connectionAuthRoute)) {
+      const err = new Error('Unsupported Codex connection authentication route. Select native or API authentication.')
+      err.code = 'CODEX_AUTH_ROUTE_UNSUPPORTED'
+      throw err
+    }
+    // #7852: openai_base_url overrides Codex's auth-dependent inference URL.
+    // Pin the ChatGPT backend for native login and the API backend for API keys;
+    // using the API URL for both sends subscription tokens to the wrong service.
+    // Keep explicit overrides so user config cannot redirect either connection.
+    const inferenceBaseUrl = this._connectionAuthRoute === 'native'
+      ? CODEX_FIRST_PARTY_NATIVE_BASE_URL
+      : CODEX_FIRST_PARTY_API_BASE_URL
+    return [
+      'app-server',
+      '-c', 'model_provider="openai"',
+      '-c', `openai_base_url="${inferenceBaseUrl}"`,
+      '-c', `chatgpt_base_url="${CODEX_FIRST_PARTY_CHATGPT_BASE_URL}"`,
+    ]
   }
 
   async _verifyConnectionAuthRoute() {

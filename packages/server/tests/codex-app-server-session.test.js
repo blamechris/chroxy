@@ -1744,26 +1744,74 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
     }
   })
 
-  it('constrains explicit connections to the built-in OpenAI provider and first-party endpoints', async () => {
+  for (const { route, accountType, expectedBaseUrl } of [
+    { route: 'native', accountType: 'chatgpt', expectedBaseUrl: 'https://chatgpt.com/backend-api/codex' },
+    { route: 'api', accountType: 'apiKey', expectedBaseUrl: 'https://api.openai.com/v1' },
+  ]) {
+    it(`pins the ${route} connection's inference endpoint to the matching authentication backend (#7852)`, async () => {
+      const stub = stubClient({
+        'config/read': FIRST_PARTY_CONFIG,
+        'account/read': { account: { type: accountType } },
+        'thread/start': THREAD_START_ECHO,
+      })
+      let clientConfig = null
+      const { s, cleanup } = mkSession({
+        connectionAuthRoute: route,
+        connectionChildEnv: { PATH: '/isolated' },
+        clientFactory: (config) => { clientConfig = config; return stub.client },
+      })
+      try {
+        await s.start()
+        const args = clientConfig.args
+        assert.equal(args[0], 'app-server')
+        const overrides = new Map()
+        for (let i = 1; i < args.length; i += 2) {
+          assert.equal(args[i], '-c')
+          const separator = args[i + 1].indexOf('=')
+          const key = args[i + 1].slice(0, separator)
+          assert.equal(overrides.has(key), false, `duplicate ${key} override`)
+          overrides.set(key, JSON.parse(args[i + 1].slice(separator + 1)))
+        }
+        assert.equal(overrides.get('model_provider'), 'openai')
+        assert.equal(overrides.get('openai_base_url'), expectedBaseUrl,
+          'the explicit inference URL must match the verified account, not merely the OpenAI provider name')
+        assert.equal(overrides.get('chatgpt_base_url'), 'https://chatgpt.com/backend-api/')
+        assert.equal(new URL('responses', `${overrides.get('openai_base_url')}/`).href,
+          route === 'native'
+            ? 'https://chatgpt.com/backend-api/codex/responses'
+            : 'https://api.openai.com/v1/responses')
+        assert.equal(s.isReady, true)
+      } finally {
+        s.destroy()
+        cleanup()
+      }
+    })
+  }
+
+  it('leaves implicit connection endpoint selection with the Codex runtime (#7852)', () => {
+    const { s, cleanup } = mkSession()
+    try {
+      assert.deepEqual(s._buildClientArgs(), ['app-server'])
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('rejects an unsupported explicit authentication route before creating a client (#7852)', async () => {
+    let clientCreations = 0
     const stub = stubClient({
       'config/read': FIRST_PARTY_CONFIG,
-      'account/read': { account: { type: 'chatgpt' } },
+      'account/read': { account: { type: 'apiKey' } },
       'thread/start': THREAD_START_ECHO,
     })
-    let clientConfig = null
     const { s, cleanup } = mkSession({
-      connectionAuthRoute: 'native',
-      connectionChildEnv: { PATH: '/native' },
-      clientFactory: (config) => { clientConfig = config; return stub.client },
+      connectionAuthRoute: 'imported',
+      clientFactory: () => { clientCreations++; return stub.client },
     })
     try {
-      await s.start()
-      assert.deepEqual(clientConfig.args, [
-        'app-server',
-        '-c', 'model_provider="openai"',
-        '-c', 'openai_base_url="https://api.openai.com/v1"',
-        '-c', 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
-      ])
+      await assert.rejects(s.start(), (err) => err.code === 'CODEX_AUTH_ROUTE_UNSUPPORTED')
+      assert.equal(clientCreations, 0, 'unsupported routes must not start a subprocess or select an endpoint')
     } finally {
       s.destroy()
       cleanup()
