@@ -343,6 +343,11 @@ export class CodexAppServerSession extends BaseSession {
 
   _buildClientArgs() {
     if (!this._connectionAuthRoute) return ['app-server']
+    if (!['native', 'api'].includes(this._connectionAuthRoute)) {
+      const err = new Error('Unsupported Codex connection authentication route. Select native or API authentication.')
+      err.code = 'CODEX_AUTH_ROUTE_UNSUPPORTED'
+      throw err
+    }
     // #7852: openai_base_url overrides Codex's auth-dependent inference URL.
     // Pin the ChatGPT backend for native login and the API backend for API keys;
     // using the API URL for both sends subscription tokens to the wrong service.

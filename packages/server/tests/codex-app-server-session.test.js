@@ -1798,6 +1798,26 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
     }
   })
 
+  it('rejects an unsupported explicit authentication route before creating a client (#7852)', async () => {
+    let clientCreations = 0
+    const stub = stubClient({
+      'config/read': FIRST_PARTY_CONFIG,
+      'account/read': { account: { type: 'apiKey' } },
+      'thread/start': THREAD_START_ECHO,
+    })
+    const { s, cleanup } = mkSession({
+      connectionAuthRoute: 'imported',
+      clientFactory: () => { clientCreations++; return stub.client },
+    })
+    try {
+      await assert.rejects(s.start(), (err) => err.code === 'CODEX_AUTH_ROUTE_UNSUPPORTED')
+      assert.equal(clientCreations, 0, 'unsupported routes must not start a subprocess or select an endpoint')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
   it('blocks an effective custom provider before account or thread creation', async () => {
     let binaryRelabelChecks = 0
     const { s, cleanup, calls } = mkStartedSession(
