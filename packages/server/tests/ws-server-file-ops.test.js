@@ -1668,6 +1668,54 @@ describe('get_diff handler', () => {
     }
   })
 
+  it('#7298: an oversized base never reaches a rev-parse argv, even when it names a real commit', async () => {
+    // The test above asserts the LOG LINE, and the log line is not the gate.
+    // Deleting `rawBase.length <= MAX_DIFF_BASE_LENGTH &&` from the candidate
+    // conjunction — the term that actually keeps the oversized value out of
+    // the two `rev-parse` argvs — leaves the `log.warn` above it untouched, so
+    // the whole suite stays green while the bound is gone: a guard whose
+    // observable is not the behaviour it claims (docs/false-safety-guards.md).
+    //
+    // This is the observable that separates them, and it needs no exec seam
+    // (createReaderOps has none — #7871). `<ref>^0` names the commit <ref>
+    // itself and CHAINS, so a real branch padded with `^0` is a revision built
+    // only from charset-allowed characters, carrying no leading dash, that git
+    // resolves to a real non-HEAD commit at any length (measured, git 2.55.0).
+    // Over the bound it must be indistinguishable from the HEAD fallback.
+    writeFileSync(join(tempDir, 'file.txt'), 'second content\n')
+    execFileSync(GIT, ['add', 'file.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['branch', 'chroxy-7298-long', 'HEAD~1'], { cwd: tempDir, stdio: 'pipe' })
+
+    const padded = 'chroxy-7298-long' + '^0'.repeat(130)
+    assert.ok(padded.length > 256, `the probe must exceed the bound; got ${padded.length} chars`)
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // Control: the SAME ref, unpadded, does resolve and does reach git — so a
+    // red below is the length diverting it, not the ref being unresolvable.
+    // Without this the assertion would pass for a branch that never existed.
+    send(ws, { type: 'get_diff', base: 'chroxy-7298-long' })
+    const short = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(short.error, null)
+    assert.deepEqual(
+      short.files.map(f => f.path), ['file.txt'],
+      'control: the unpadded ref must resolve to its own commit and show the second commit'
+    )
+
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: padded })
+    const long = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(long.error, null)
+    assert.deepEqual(
+      long.files.map(f => f.path), [],
+      'an oversized base must be the HEAD fallback (clean) — resolving it to HEAD~1 means the value reached a rev-parse argv'
+    )
+
+    ws.close()
+  })
+
   it('#7298: a git failure detail is bounded before it reaches the log', () => {
     // The wire gets a fixed string and the detail goes to the log; this keeps
     // the log copy bounded too. An execFile rejection's `message` carries the
