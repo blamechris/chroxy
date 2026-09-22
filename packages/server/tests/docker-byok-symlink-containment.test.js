@@ -2,7 +2,7 @@ import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -79,9 +79,15 @@ function buildFixture() {
  * A `_dockerBackend` that executes the daemon's command in a real bash against
  * the fixture. `calls` records every command so a test can assert on the shape
  * the daemon SENT, not only on what came back.
+ *
+ * `pathPrefix` is prepended to `PATH` for the bash run, which is how a test
+ * swaps in a stand-in for one of the external programs the script reaches for
+ * (currently only `readlink`). Without it the run inherits this machine's
+ * environment unchanged.
  */
-function bashBackend() {
+function bashBackend({ pathPrefix } = {}) {
   const calls = []
+  const env = pathPrefix ? { ...process.env, PATH: `${pathPrefix}:${process.env.PATH}` } : undefined
   return {
     calls,
     async execInEnvironment(containerId, opts) {
@@ -99,7 +105,7 @@ function bashBackend() {
         // stderr" branch turn every empty Glob into `Glob failed`. The script
         // silences the option itself now (`2>/dev/null`), so there is nothing
         // to strip, and a harness that filtered would have kept it hidden.
-        const { stdout, stderr } = await pexec('bash', ['-c', local], { maxBuffer: 8 << 20 })
+        const { stdout, stderr } = await pexec('bash', ['-c', local], { maxBuffer: 8 << 20, env })
         return { stdout, stderr }
       } catch (err) {
         // Mirrors execInEnvironment's contract closely enough for these tools:
@@ -499,11 +505,48 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
     // is reachable. A `readlink` that read `--` as a path would refuse every
     // legitimate symlink — the resolver falls back to the bare form, which is
     // safe here because `$__p` is always absolute by that line.
-    const backend = bashBackend()
-    const session = buildSession(backend)
-    await session._dispatchBuiltinTool({ toolName: 'Read', input: { file_path: 'ok/b.ts' } })
-    const cmd = backend.calls[0].cmd
-    assert.ok(cmd.includes('readlink -- "$__p" 2>/dev/null || readlink "$__p"'), 'no readlink fallback')
+    //
+    // This RUNS that fallback rather than asserting its spelling: a regex over
+    // the emitted script is the shape `docs/false-safety-guards.md` catalogues
+    // (`#7646`), and the whole claim here is about a program this machine's
+    // `readlink` does not behave like. So the program is replaced.
+    //
+    // A symlinked FILE is the only thing that reaches `readlink` at all — a
+    // symlinked DIRECTORY is resolved by `cd -P`, a shell builtin.
+    const realReadlink = ['/usr/bin/readlink', '/bin/readlink'].find((p) => existsSync(p))
+    assert.ok(realReadlink, 'no system readlink to build the stand-in on — this test would prove nothing')
+
+    const shimDir = join(fixtureRoot, 'busybox-bin')
+    mkdirSync(shimDir, { recursive: true })
+    writeFileSync(join(shimDir, 'readlink'), [
+      '#!/bin/sh',
+      '# BusyBox shape: no `--` terminator, and a leading `-` operand is an option.',
+      'case "$1" in',
+      '  --) echo "readlink: --: No such file or directory" >&2; exit 1 ;;',
+      '  -*) echo "readlink: unrecognized option: $1" >&2; exit 1 ;;',
+      'esac',
+      `exec ${realReadlink} "$1"`,
+      '',
+    ].join('\n'))
+    chmodSync(join(shimDir, 'readlink'), 0o755)
+
+    // Named so the stand-in would reject it as an option if the resolver ever
+    // handed `readlink` a RELATIVE name — which is the guarantee the fallback
+    // rests on, and the one thing that would make dropping `--` a repeat of
+    // `#7295` rather than a harmless widening.
+    symlinkSync(join(workspaceDir, 'real', 'b.ts'), join(workspaceDir, '-n'))
+
+    const session = buildSession(bashBackend({ pathPrefix: shimDir }))
+    const inside = await session._dispatchBuiltinTool({ toolName: 'Read', input: { file_path: '-n' } })
+    assert.equal(inside.isError, false, `a dash-named in-bounds symlink was refused: ${inside.content}`)
+    assert.ok(inside.content.includes('export const b = 2'), `wrong body: ${inside.content}`)
+
+    // ... and the fallback opened no hole: a symlinked file pointing OUT is
+    // still an ESCAPE, not an unresolvable error and not a read.
+    const outside = await session._dispatchBuiltinTool({ toolName: 'Read', input: { file_path: 'leak.txt' } })
+    assert.equal(outside.isError, true)
+    assert.ok(/resolves outside the workspace/.test(outside.content), `wrong refusal: ${outside.content}`)
+    assert.equal(outside.content.includes('TOPSECRET_7354'), false, 'leaked the file it refused')
   })
 
   it('an unparseable container reply is an error for all three tools, not "no matches"', async () => {
