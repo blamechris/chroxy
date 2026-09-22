@@ -806,6 +806,42 @@ describe('container Write/Edit symlink containment (#7876)', { skip: POSIX_ONLY 
     assert.equal(readFileSync(join(wfWs, 'real', 'new', 'file.txt'), 'utf8'), 'RACED_7876\n')
   })
 
+  it('TOCTOU — a link swapped AFTER the check cannot redirect Edit\'s read (cat uses the resolved path)', async () => {
+    // The read half of the test above. The harness swaps `alias` from `real`
+    // to `outside` at the instant the body's `cat` runs. `old_string` occurs
+    // ONLY in the outside file, so the tool_result is the observable: a `cat`
+    // that went back through the lexical alias reads the outside file, finds a
+    // match, and gets as far as the write-back (which the second resolution
+    // then refuses) — a content oracle on a file outside the workspace. A
+    // `cat "$__cx_target"` reads `real/hosts` and reports no match.
+    const realCat = ['/bin/cat', '/usr/bin/cat'].find((p) => existsSync(p))
+    assert.ok(realCat, 'no system cat to build the stand-in on — this test would prove nothing')
+    writeFileSync(join(wfWs, 'real', 'hosts'), 'INSIDE_HOSTS_7876\n')
+    const shimDir = join(wfRoot, 'swap-bin')
+    const marker = join(wfRoot, 'swapped')
+    mkdirSync(shimDir, { recursive: true })
+    writeFileSync(join(shimDir, 'cat'), [
+      '#!/bin/sh',
+      `if [ ! -e '${marker}' ]; then`,
+      `  : > '${marker}'`,
+      `  rm -f '${join(wfWs, 'alias')}' && ln -s '${wfOut}' '${join(wfWs, 'alias')}'`,
+      'fi',
+      `exec ${realCat} "$@"`,
+      '',
+    ].join('\n'))
+    chmodSync(join(shimDir, 'cat'), 0o755)
+
+    const session = buildSession(wfBackend({ pathPrefix: shimDir }))
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Edit',
+      input: { file_path: 'alias/hosts', old_string: 'ORIGINAL_HOSTS', new_string: 'PWNED' },
+    })
+    assert.ok(existsSync(marker), 'the swap never happened — this test proved nothing')
+    assert.equal(readFileSync(join(wfOut, 'hosts'), 'utf8'), 'ORIGINAL_HOSTS_7876\n', 'wrote through the swapped link')
+    assert.equal(result.isError, true, result.content)
+    assert.ok(/old_string not found/.test(result.content), `Edit read the file behind the swapped link: ${result.content}`)
+  })
+
   // ── Positive controls ────────────────────────────────────────────────────
 
   it('POSITIVE — Write and Edit through a symlink that stays INSIDE the workspace work', async () => {
@@ -861,15 +897,23 @@ describe('container Write/Edit symlink containment (#7876)', { skip: POSIX_ONLY 
   })
 
   it('POSITIVE — Edit of a missing file is the tool error, not a containment error', async () => {
-    const session = buildSession(wfBackend())
-    const result = await session._dispatchBuiltinTool({
-      toolName: 'Edit',
-      input: { file_path: 'real/nope.txt', old_string: 'a', new_string: 'b' },
-    })
-    assert.equal(result.isError, true)
-    assert.equal(/resolves outside the workspace/.test(result.content), false, result.content)
-    assert.equal(/could not resolve/.test(result.content), false, result.content)
-    assert.ok(/No such file/.test(result.content), `wrong error: ${result.content}`)
+    // Both depths: a missing leaf under an existing parent, and a missing leaf
+    // whose PARENTS are missing too. The second is what separates the create-
+    // mode walk Edit's read uses from the read-mode resolver, which needs the
+    // parent to exist and would answer "could not resolve" instead — the
+    // behaviour `_containerEdit`'s JSDoc promises ("at any depth").
+    for (const file_path of ['real/nope.txt', 'nodir/deeper/nope.txt']) {
+      const session = buildSession(wfBackend())
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path, old_string: 'a', new_string: 'b' },
+      })
+      assert.equal(result.isError, true, `${file_path}: ${result.content}`)
+      assert.equal(/resolves outside the workspace/.test(result.content), false, `${file_path}: ${result.content}`)
+      assert.equal(/could not resolve/.test(result.content), false, `${file_path}: ${result.content}`)
+      assert.ok(/No such file/.test(result.content), `${file_path}: wrong error: ${result.content}`)
+    }
+    assert.equal(existsSync(join(wfWs, 'nodir')), false, 'a refused Edit created a directory')
   })
 
   // ── Fail closed on a reply the host cannot account for ───────────────────
@@ -986,6 +1030,25 @@ describe('__cx_resolve_new — the create-mode walk, driven directly (#7876)', {
     const r = await run('/workspace/alias')
     assert.equal(r.ok, true)
     assert.equal(r.body, `${realpathSync(wfWs)}/real\n`)
+  })
+
+  it('refuses a RELATIVE target instead of looping forever', async () => {
+    // The walk's termination rests on its absolute-path guard: `${p%/*}` of a
+    // path with no `/` is the path itself, so a relative target that does not
+    // exist is peeled forever. No caller passes one (`remapToContainerPath`
+    // always yields `/workspace/...`), so only driving the function proves the
+    // guard — and its failure mode is a HANG, which reads as flake rather than
+    // red (docs/false-safety-guards.md, #7340). Bound the run so a missing
+    // guard goes red, legibly, in seconds.
+    const cmd = buildConfinedContainerCommand({ target: 'nope-7876/x.txt', body: 'true', mode: 'create' })
+    const local = cmd.split(CONTAINER_WORKSPACE).join(wfWs)
+    let stdout
+    try {
+      ({ stdout } = await pexec('bash', ['-c', local], { cwd: wfRoot, timeout: 5000 }))
+    } catch (err) {
+      assert.fail(`the walk did not terminate on a relative target (killed=${err.killed}, signal=${err.signal})`)
+    }
+    assert.deepEqual(parseConfinedContainerStdout(stdout), { ok: false, reason: 'error' })
   })
 })
 
