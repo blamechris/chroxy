@@ -12,6 +12,34 @@ import { isSafeArgvValue } from '../utils/argv-safety.js'
 const execFileAsync = promisify(execFileCb)
 const log = createLogger('ws')
 
+/**
+ * Longest `base` getDiff will hand to git. A revision is short — a full OID is
+ * 40 characters and a ref name far less — so this rejects nothing legitimate,
+ * and it bounds what an unconstrained wire field (`GetDiffSchema` is
+ * `.passthrough()`, #7870) can spend: two `rev-parse` argvs per request, plus
+ * whatever git echoes back into an error message.
+ */
+const MAX_DIFF_BASE_LENGTH = 256
+
+/** Longest error detail written to the server log in one line (#7298). */
+const MAX_LOGGED_ERROR_LENGTH = 500
+
+/**
+ * Bound one error detail before it reaches the log.
+ *
+ * An `execFile` rejection's `message` carries the whole command line — which
+ * includes the client's own `base` — followed by the child's stderr, and
+ * neither is bounded by anything the caller controls. Logging it raw turns an
+ * oversized input into log amplification, so the log gets a prefix and the
+ * original length instead.
+ */
+export function truncateForLog(message) {
+  const text = String(message ?? '')
+  return text.length > MAX_LOGGED_ERROR_LENGTH
+    ? `${text.slice(0, MAX_LOGGED_ERROR_LENGTH)}… (truncated, ${text.length} chars)`
+    : text
+}
+
 /** Image extensions to MIME type mapping (module-level to avoid per-call allocation) */
 const IMAGE_MIME = {
   png: 'image/png',
@@ -558,7 +586,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         // resolved git binary path, for every non-128 failure (git missing,
         // timeout, EACCES). 'Not a git repository' stays: it is a fixed
         // classification, not a forwarded message.
-        log.error(`git rev-parse --git-dir failed: ${revParseErr.message}`)
+        log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
         sendFn(ws, {
           type: 'diff_result',
           files: [],
@@ -612,7 +640,20 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // which the old `unknown revision` recovery predicate missed — and `--`
       // does not stop option parsing for a token that precedes it anyway
       // (#7290, utils/argv-safety.js).
-      const candidate = (isSafeArgvValue(rawBase) && /^[a-zA-Z0-9._\-\/~^@{}]+$/.test(rawBase))
+      // The length bound is the third gate, and it is about COST rather than
+      // about the oracle: `base` is unconstrained on the wire (#7870), and
+      // every byte of it is spawned twice (both `rev-parse` calls) and can be
+      // echoed back into an error message. A revision is short, so nothing
+      // legitimate is rejected. Only the LENGTH is logged — never the value,
+      // which is the input this whole function exists to distrust.
+      if (rawBase.length > MAX_DIFF_BASE_LENGTH) {
+        log.warn(`get_diff base rejected: ${rawBase.length} chars exceeds the ${MAX_DIFF_BASE_LENGTH}-char limit`)
+      }
+      const candidate = (
+        rawBase.length <= MAX_DIFF_BASE_LENGTH &&
+        isSafeArgvValue(rawBase) &&
+        /^[a-zA-Z0-9._\-\/~^@{}]+$/.test(rawBase)
+      )
         ? rawBase
         : 'HEAD'
 
@@ -654,7 +695,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         // any git failure can name a path (the workspace, an object, a
         // config), so the detail stays server-side and the wire gets a fixed
         // string. Both halves are load-bearing; neither is redundant.
-        log.error(`git diff failed: ${err.message}`)
+        log.error(`git diff failed: ${truncateForLog(err.message)}`)
         sendFn(ws, {
           type: 'diff_result',
           files: [],
@@ -775,7 +816,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // session cwd is gone (removed worktree, unmounted volume, rename).
       // That is the same `cwdReal` leak the issue is about, reachable by a
       // bound client sending a bare `get_diff` with no crafted base at all.
-      log.error(`getDiff failed: ${err.message}`)
+      log.error(`getDiff failed: ${truncateForLog(err.message)}`)
       sendFn(ws, {
         type: 'diff_result',
         files: [],

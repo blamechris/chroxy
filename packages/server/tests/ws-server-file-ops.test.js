@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
-import { setLogListener } from '../src/logger.js'
+import { setLogListener, addLogListener, removeLogListener } from '../src/logger.js'
+import { truncateForLog } from '../src/ws-file-ops/reader.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -1619,6 +1620,75 @@ describe('get_diff handler', () => {
     assert.deepEqual(result.files, [])
 
     ws.close()
+  })
+
+  it('#7298: an oversized base is rejected by length, and only its length is logged', async () => {
+    // Copilot review of this PR: `base` is unconstrained on the wire
+    // (GetDiffSchema is .passthrough(), #7870), so every byte of it is spawned
+    // twice — once per `rev-parse` — and can be echoed back into an error
+    // message. The oracle is closed either way (an oversized base resolves to
+    // no commit and falls back to HEAD), so the observable here is the COST
+    // gate, not the reply: the rejection is logged, by length, before git is
+    // spawned at all.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // Registered AFTER start(): the test wrapper's start() calls
+    // setLogListener(null), which clears every listener including this one.
+    const entries = []
+    const listener = (entry) => entries.push(entry)
+    addLogListener(listener)
+
+    try {
+      send(ws, { type: 'get_diff', base: 'a'.repeat(5000) })
+      const result = await waitForMessage(messages, 'diff_result', 5000)
+
+      // The reply is the ordinary fallback — an oversized base is not an error.
+      assert.equal(result.error, null)
+      assert.equal(result.files.length, 1)
+
+      const rejection = entries.find(e => /base rejected/.test(e.message || ''))
+      assert.ok(rejection, `expected a rejection log line; got: ${entries.map(e => e.message).join(' | ').slice(0, 300)}`)
+      assert.ok(
+        rejection.message.includes('5000'),
+        `the rejection must name the length; got: ${rejection.message}`
+      )
+      assert.ok(
+        !rejection.message.includes('aaaaaaaaaa'),
+        'the rejected value must never be logged — only its length'
+      )
+
+      ws.close()
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('#7298: a git failure detail is bounded before it reaches the log', () => {
+    // The wire gets a fixed string and the detail goes to the log; this keeps
+    // the log copy bounded too. An execFile rejection's `message` carries the
+    // whole command line plus the child's stderr, and nothing in either is
+    // bounded by the caller.
+    //
+    // Asserted on the helper rather than through a forced git failure ON
+    // PURPOSE: every git failure this suite can provoke yields a SHORT message
+    // (`stdout maxBuffer length exceeded` and friends), so an integration
+    // assertion on the length would pass identically with the truncation
+    // deleted — a test that cannot fail. The end-to-end amplification path is
+    // covered by the length gate in the test above, which stops an oversized
+    // input reaching the argv this message quotes.
+    const short = 'git diff failed: stdout maxBuffer length exceeded'
+    assert.equal(truncateForLog(short), short, 'a short detail passes through unchanged')
+
+    const long = 'z'.repeat(2000)
+    const bounded = truncateForLog(long)
+    assert.ok(
+      bounded.length < 600,
+      `a 2000-char detail must be bounded; got ${bounded.length} chars`
+    )
+    assert.ok(bounded.includes('2000'), 'the bound must record the original length')
+    assert.equal(truncateForLog(undefined), '', 'a missing detail is the empty string, never "undefined"')
   })
 })
 
