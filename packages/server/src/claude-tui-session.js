@@ -941,6 +941,13 @@ export class ClaudeTuiSession extends BaseSession {
    * recreated" path an ENOSPC takes, and the same fail-closed answer start()
    * gives: no hook sink, no pretending there is one.
    *
+   * SCOPE, so this is not mistaken for a mid-session re-validation (#7875):
+   * the check is on the RECREATE branch, and this method only runs when the
+   * poll loop's readdir already FAILED. A squat that leaves a readable dir at
+   * the sink path makes readdir succeed, so neither this nor the `isDir`
+   * branch above ever checks the base. Closing that needs the read path, not
+   * this one.
+   *
    * @param {Error} [cause] the readdir error that triggered recovery
    * @returns {boolean} true if the sink is usable afterward
    */
