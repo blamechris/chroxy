@@ -247,8 +247,10 @@ The provider hard-fails at `start()` with `OPENAI_API_KEY environment variable i
 ### Verify
 
 ```bash
-# Confirm the binary works standalone
-codex exec "hello" --json
+# Confirm the binary works standalone. The `--` mirrors what the daemon emits
+# (#7342): everything after it is the prompt, so a message that starts with a
+# dash — a markdown bullet, say — is read as text rather than as a flag.
+codex exec --json -- "hello"
 
 # Start Chroxy with the codex provider
 OPENAI_API_KEY=sk-... chroxy start --provider codex
@@ -620,7 +622,9 @@ The provider hard-fails at `start()` only if **neither** a key (`GEMINI_API_KEY`
 ### Verify
 
 ```bash
-gemini -p "hello" --output-format stream-json -y
+# The `=`-joined form is what the daemon emits (#7342) — `-p <text>` is
+# `requiresArg`, so it rejects a prompt that starts with a dash.
+gemini "--prompt=hello" --output-format stream-json -y
 
 GEMINI_API_KEY=... chroxy start --provider gemini
 ```
