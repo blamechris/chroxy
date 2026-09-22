@@ -586,7 +586,15 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         // resolved git binary path, for every non-128 failure (git missing,
         // timeout, EACCES). 'Not a git repository' stays: it is a fixed
         // classification, not a forwarded message.
-        log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
+        //
+        // Only the UNEXPECTED failure is logged. "Not a git repository" is the
+        // ordinary state of a session whose cwd is not a checkout, and it
+        // arrives on every `get_diff` that session sends — logging it at error
+        // level buries the failures worth reading, which is the same defect as
+        // not logging at all (Copilot review of #7862).
+        if (!isNotGitRepo) {
+          log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
+        }
         sendFn(ws, {
           type: 'diff_result',
           files: [],

@@ -1495,11 +1495,14 @@ describe('get_diff handler', () => {
     // larger than getDiff's 2MB maxBuffer. execFile rejects with
     // 'stdout maxBuffer length exceeded', which the old `error: err.message`
     // branch handed straight to the client.
-    const big = 'x'.repeat(3 * 1024 * 1024) + '\n'
-    writeFileSync(join(tempDir, 'big.txt'), big)
+    // 1.5MB per side: the diff carries both, so it is ~3MB against a 2MB
+    // maxBuffer — over the limit with margin, at half the I/O of the 3MB
+    // payload this started with (Copilot review of #7862).
+    const SIDE = 1536 * 1024
+    writeFileSync(join(tempDir, 'big.txt'), 'x'.repeat(SIDE) + '\n')
     execFileSync(GIT, ['add', 'big.txt'], { cwd: tempDir, stdio: 'pipe' })
     execFileSync(GIT, ['commit', '-m', 'big'], { cwd: tempDir, stdio: 'pipe' })
-    writeFileSync(join(tempDir, 'big.txt'), 'y'.repeat(3 * 1024 * 1024) + '\n')
+    writeFileSync(join(tempDir, 'big.txt'), 'y'.repeat(SIDE) + '\n')
 
     const { ws, messages } = await createDiffTestServer()
 
@@ -1689,6 +1692,44 @@ describe('get_diff handler', () => {
     )
     assert.ok(bounded.includes('2000'), 'the bound must record the original length')
     assert.equal(truncateForLog(undefined), '', 'a missing detail is the empty string, never "undefined"')
+  })
+
+  it('#7298: a non-repo cwd is classified without logging an error every request', async () => {
+    // "Not a git repository" is the ordinary state of a session whose cwd is
+    // not a checkout, and it recurs on EVERY get_diff that session sends. The
+    // fixed-string sweep above wired a log.error into that path; logging a
+    // routine classification at error level buries the failures worth reading
+    // (Copilot review of this PR).
+    const plainDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-norepo-'))
+
+    try {
+      const { ws, messages } = await createDiffTestServer(plainDir)
+
+      // After start(), which clears every listener.
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        send(ws, { type: 'get_diff' })
+        const result = await waitForMessage(messages, 'diff_result', 5000)
+
+        // The client still gets the classification — silence is not the fix.
+        assert.equal(result.error, 'Not a git repository')
+
+        const errors = entries.filter(e => e.level === 'error')
+        assert.deepEqual(
+          errors.map(e => e.message), [],
+          'an expected non-repo cwd must not log at error level'
+        )
+
+        ws.close()
+      } finally {
+        removeLogListener(listener)
+      }
+    } finally {
+      rmSync(plainDir, { recursive: true, force: true })
+    }
   })
 })
 
