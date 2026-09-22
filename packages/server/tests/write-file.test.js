@@ -122,7 +122,8 @@ describe('writeFile handler', () => {
   it('allows writing through a symlink that resolves within CWD', async () => {
     responses.length = 0
     // Internal symlink: points to a file within CWD — realpath resolves it,
-    // validation passes, and O_NOFOLLOW writes to the resolved real file.
+    // validation passes, and the symlink-refusing open (openNoFollow) writes
+    // to the RESOLVED real file, which is not itself a symlink.
     const realFile = join(tmpDir, 'real-target.txt')
     await writeFile(realFile, 'real content', 'utf-8')
     const linkPath = join(tmpDir, 'internal-link.txt')
@@ -149,7 +150,9 @@ describe('writeFile handler', () => {
   })
 
   it('blocks new-file write through a PARENT directory symlink pointing outside CWD (2026-04-11 audit blocker 4)', async () => {
-    // Pre-audit: O_NOFOLLOW only checks the final path component.
+    // Pre-audit: the symlink-refusing open checks only the FINAL path
+    // component (true of O_NOFOLLOW on POSIX and of the win32 lstat +
+    // fd-identity emulation added in #7280 alike).
     // `validatePathWithinCwd` fell back to the lexical path on ENOENT for
     // a non-existent target, so it never noticed that a PARENT of the new
     // file was a symlink escaping the workspace. Creating a new file like

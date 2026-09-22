@@ -1,8 +1,9 @@
-import { stat, open } from 'fs/promises'
+import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { realpathOfDeepestAncestor } from './common.js'
+import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
 
@@ -157,9 +158,11 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
 /**
  * Phase 2 of the confined-memory-file read: `stat`/`open`/read an ALREADY
  * resolved+validated real path (see `resolveConfinedMemoryPath`). The final
- * open uses O_NOFOLLOW to close the post-validation TOCTOU window (a symlink
- * swapped in at the target between validation and open is rejected, not
- * followed).
+ * open goes through `openNoFollow`, which closes the post-validation TOCTOU
+ * window (a symlink swapped in at the target between validation and open is
+ * rejected with ELOOP, not followed) on win32 as well as POSIX — the bare
+ * `O_NOFOLLOW` flag this used to pass is undefined on Windows and ORed to 0,
+ * so the refusal documented here was not actually happening there (#7280).
  *
  * @param {string} resolvedPath - Real (post-realpath, already containment-checked) path
  * @returns {Promise<{path: string, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
@@ -185,7 +188,7 @@ async function readResolvedMemoryFile(resolvedPath) {
   let buf
   let fh
   try {
-    fh = await open(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    fh = await openNoFollow(resolvedPath, fsConstants.O_RDONLY)
     buf = await fh.readFile()
   } catch (err) {
     if (err.code === 'ELOOP') {
