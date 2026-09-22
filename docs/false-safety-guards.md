@@ -440,6 +440,26 @@ failure can still name a path of its own (the workspace, an object, a config).
 `base='/etc/passwd'` leaked `cwdReal`, the daemon's absolute workspace path,
 through exactly that channel.
 
+**Half 2 first went into the branch the issue had measured, and only that
+one** — the shape this catalogue calls *a guard wired to only some of its
+callers*. `getDiff` has three reply branches that carried a raw `err.message`,
+and the fix reached one. The other two survived a review that had the issue
+open in front of it, because the issue named the `git diff` catch by name and
+the sweep was never widened past it. The sharper of the two needs **no crafted
+base at all**: the function's outer catch wraps `resolveSessionCwd`, whose
+`realpath()` throws
+
+```
+ENOENT: no such file or directory, realpath '<cwdReal>'
+```
+
+once the session cwd is gone (a removed worktree, an unmounted volume, a
+rename) — the same `cwdReal` on the wire that the issue is about, reachable by
+a bound share-a-session client sending a bare `get_diff`. The third, the
+`rev-parse --git-dir` preflight, forwarded git's stderr for every non-128
+failure. **When a fix is "stop forwarding X", its unit is the reply surface,
+not the line the reporter happened to measure.**
+
 The two halves overlap on the probes above, which is why **one test cannot
 prove both** and the suite in `tests/ws-server-file-ops.test.js` isolates them
 separately — the recurring mistake this document is about. Drop half 2 and the
@@ -449,6 +469,31 @@ Drop half 1 and the two replies become equal — the oracle closed by *scrubbing
 the message* rather than by refusing to ask — so a second test forces a git
 failure half 1 cannot pre-empt (a diff over the 2MB `maxBuffer`) and pins the
 error string. Both mutations were run and both go red.
+
+**And a mutation that reverts two changes at once cannot say which one the
+tests were pinning.** "Half 1" was really two independent edits — dropping `:`
+from the charset, and resolving with `rev-parse` — reverted together as a
+unit, which went red and read as proof of both. The finer mutation says
+otherwise: restore *only* the `rev-parse` bypass, leave the charset narrowed,
+and the whole suite is **green**, because every probe in it is a `HEAD:<path>`
+or an absolute path, and the charset alone already diverts those to the HEAD
+fallback. The load-bearing half — the one the entry above argues *is* the
+lesson — was the untested one, and a later "the charset already handles this"
+cleanup would have deleted it against a green suite.
+
+The observable that separates them is a base that passes the charset, names no
+commit, and **does** name a file, which git then reads as a pathspec
+(git 2.55.0):
+
+```
+git diff --name-only            -> file.txt, second.txt
+git diff --name-only file.txt   -> file.txt          (exit 0, narrower reply)
+```
+
+Resolution refuses that question and falls back to the full HEAD diff; the
+charset never sees it. A test pins the equality, and it goes red under the
+bypass. **Mutate one edit at a time, and when a "half" turns out to be two
+things, the mutation list grows to match.**
 
 And do not "harden" this by appending a `--` to the diff argv: that turns an
 unresolvable base's error into `fatal: bad revision`, which the old

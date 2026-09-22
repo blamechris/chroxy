@@ -1090,9 +1090,9 @@ describe('get_diff handler', () => {
     rmDirRobust(tempDir)
   })
 
-  async function createDiffTestServer() {
+  async function createDiffTestServer(cwd = tempDir) {
     const mockSession = createMockSession()
-    mockSession.cwd = tempDir
+    mockSession.cwd = cwd
 
     server = new WsServer({
       port: 0,
@@ -1537,6 +1537,86 @@ describe('get_diff handler', () => {
     const head = await waitForMessage(messages, 'diff_result', 5000)
     assert.equal(head.error, null)
     assert.deepEqual(head.files, [], 'HEAD is clean, so the two bases must differ')
+
+    ws.close()
+  })
+
+  it('#7298: a base naming a repo path is not handed to git as a pathspec (the RESOLUTION, not the charset)', async () => {
+    // The mutation that proved "half 1" reverted TWO independent changes at
+    // once — `:` back in the charset AND the rev-parse bypassed — so it could
+    // not tell which of them the tests were pinning. Reverting only the
+    // rev-parse (charset left narrowed) leaves the rest of this suite GREEN,
+    // because every probe above is a `HEAD:<path>` or an absolute path, and
+    // the charset alone already diverts those to the HEAD fallback.
+    //
+    // This is the observable that separates them. A base that passes the
+    // charset and names no commit but DOES name a file is read by git as a
+    // PATHSPEC, and the reply narrows to that one file (measured, git 2.55.0):
+    //
+    //     git diff --name-only            -> file.txt, second.txt
+    //     git diff --name-only file.txt   -> file.txt      (exit 0)
+    //
+    // so the reply is observably different from the fallback, and a client
+    // can walk the workspace one path at a time. Resolution refuses the
+    // question; the charset never sees it.
+    writeFileSync(join(tempDir, 'second.txt'), 'second initial\n')
+    execFileSync(GIT, ['add', 'second.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second file'], { cwd: tempDir, stdio: 'pipe' })
+    // Two tracked files modified, so a pathspec-filtered reply is narrower
+    // than the fallback one rather than accidentally identical to it.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    writeFileSync(join(tempDir, 'second.txt'), 'second modified\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const baseline = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(baseline.error, null)
+    assert.deepEqual(
+      baseline.files.map(f => f.path).sort(), ['file.txt', 'second.txt'],
+      'baseline must show BOTH modified files, or the assertion below is vacuous'
+    )
+
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'file.txt' })
+    const pathBase = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(pathBase.error, baseline.error)
+    assert.deepEqual(
+      pathBase.files.map(f => f.path).sort(), ['file.txt', 'second.txt'],
+      'a base naming no commit must fall back to HEAD — reaching git, which reads it as a pathspec, narrows the reply and answers whether that path exists'
+    )
+
+    ws.close()
+  })
+
+  it('#7298: the workspace path stays server-side on EVERY error branch, not just the git-diff one', async () => {
+    // Half 2 was applied to the `git diff` catch only. Two other branches of
+    // getDiff still forwarded a raw `err.message`, and this one names the
+    // workspace with no crafted base at all: the outer catch wraps
+    // `resolveSessionCwd`, whose realpath() throws
+    // `ENOENT: no such file or directory, realpath '<cwdReal>'` once the
+    // session cwd is gone — a removed worktree, an unmounted volume, a
+    // rename. A bound (share-a-session) client reaches it with a bare
+    // `get_diff`.
+    // A cwd of its own, so the removal below cannot race the suite's own
+    // tempDir teardown (and never has to delete a .git dir on Windows).
+    const goneDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-gone-'))
+    const goneReal = realpathSync(goneDir)
+    const { ws, messages } = await createDiffTestServer(goneDir)
+
+    rmSync(goneDir, { recursive: true, force: true })
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    const serialized = JSON.stringify(result)
+    assert.ok(
+      !serialized.includes(goneDir) && !serialized.includes(goneReal),
+      `the workspace path must never reach the client; got: ${serialized.slice(0, 400)}`
+    )
+    assert.equal(result.error, 'Failed to run git diff')
+    assert.deepEqual(result.files, [])
 
     ws.close()
   })

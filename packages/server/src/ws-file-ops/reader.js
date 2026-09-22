@@ -552,12 +552,17 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
         const isNotGitRepo = stderr.includes('not a git repository') ||
           revParseErr.code === 128
+        // #7298 — half 2 is a property of getDiff's WHOLE reply surface, not
+        // of the one branch the issue measured. This branch forwarded
+        // `revParseErr.message`, which carries git's own stderr plus the
+        // resolved git binary path, for every non-128 failure (git missing,
+        // timeout, EACCES). 'Not a git repository' stays: it is a fixed
+        // classification, not a forwarded message.
+        log.error(`git rev-parse --git-dir failed: ${revParseErr.message}`)
         sendFn(ws, {
           type: 'diff_result',
           files: [],
-          error: isNotGitRepo
-            ? 'Not a git repository'
-            : `Git error: ${revParseErr.message || 'unknown failure'}`,
+          error: isNotGitRepo ? 'Not a git repository' : 'Failed to run git diff',
         })
         return
       }
@@ -763,10 +768,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         error: null,
       })
     } catch (err) {
+      // #7298 — the last raw-message branch, and the one that names the
+      // workspace without any help from the client: this catch wraps
+      // `resolveSessionCwd`, whose `realpath()` throws
+      // `ENOENT: no such file or directory, realpath '<cwdReal>'` when the
+      // session cwd is gone (removed worktree, unmounted volume, rename).
+      // That is the same `cwdReal` leak the issue is about, reachable by a
+      // bound client sending a bare `get_diff` with no crafted base at all.
+      log.error(`getDiff failed: ${err.message}`)
       sendFn(ws, {
         type: 'diff_result',
         files: [],
-        error: err.message || 'Unknown error',
+        error: 'Failed to run git diff',
       })
     }
   }
