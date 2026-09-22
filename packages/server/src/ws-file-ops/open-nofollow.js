@@ -60,6 +60,17 @@ import { constants as fsConstants } from 'fs'
  * between 1 and 2, then restore the original inode before 3) is not detected.
  * Detecting that requires an OS primitive Windows does not expose here.
  *
+ * ONE win32-only SIDE EFFECT of check-open-recheck, stated because a refusal
+ * that is not free is exactly the kind of thing a comment quietly omits: the
+ * open happens BEFORE the verification, so a caller passing `O_TRUNC` has
+ * already truncated the file by the time step 3 refuses. POSIX `O_NOFOLLOW`
+ * decides before anything is touched. Today the difference is unreachable —
+ * win32 rejects `O_WRONLY | O_TRUNC` with EINVAL outright, for an unrelated
+ * reason (#7284, measured in docs/records/windows-path-containment-7273.md) —
+ * but it goes live the moment #7284 is fixed by adding a create disposition.
+ * A truncating win32 caller must then read a refusal as "the file may already
+ * be empty", not as "nothing happened".
+ *
  * NEITHER PLATFORM closes the non-final components: `O_NOFOLLOW` checks only
  * the FINAL path component, and so does this — a symlinked PARENT directory is
  * followed by both. That gap is closed a layer up, by the componentwise
@@ -85,9 +96,19 @@ export const defaultOpenNoFollowDeps = Object.freeze({
   fstat: (fh) => fh.stat({ bigint: true }),
 })
 
+/**
+ * The one refusal. `code: 'ELOOP'` is the WIRE contract — every caller keys on
+ * it and maps it to "access denied" — but the MESSAGE must not claim more than
+ * the refusal knows. Only some of these refusals saw a symlink; the rest are
+ * "this open could not be proven symlink-free" (an identity mismatch, an lstat
+ * that failed, a volume with no usable file index). Saying "symlink refused"
+ * for all of them sends whoever reads the log hunting for a symlink that was
+ * never there, so the detail carries the actual reason and the headline stays
+ * generic.
+ */
 function eloop(path, detail) {
   return Object.assign(
-    new Error(`ELOOP: symlink refused at ${path} (${detail})`),
+    new Error(`ELOOP: refusing ${path} — the open could not be proven symlink-free (${detail})`),
     { code: 'ELOOP', path }
   )
 }
