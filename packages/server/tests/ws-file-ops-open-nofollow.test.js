@@ -330,6 +330,27 @@ describe('#7280 openNoFollow — forced win32 branch (runs on every platform)', 
   })
 })
 
+/** Bindings that can open a path without the symlink refusal (#7280). */
+const OPEN_CAPABLE = new Set(['open', 'openSync', 'promises'])
+
+/**
+ * The IMPORTED names in `import { a, b as c } from '<mod>'`, or null when the
+ * file has no such import. `b as c` yields `b`: the alias is what an evasion
+ * renames, so the imported name is the one worth judging. `[^}]` matches a
+ * newline, so a reformatted multi-line import is still parsed rather than
+ * silently read as "no import".
+ */
+function namedImportsFrom(src, mod) {
+  const m = src.match(new RegExp(`^import\\s*\\{([^}]*)\\}\\s*from\\s*'(?:node:)?${mod.replace('/', '\\/')}'`, 'm'))
+  if (!m) return null
+  return m[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean)
+}
+
+/** Every import statement in `src` that pulls from `fs` or `fs/promises`. */
+function fsFamilyImports(src) {
+  return src.match(/^import\s[^;\n]*?from\s*'(?:node:)?fs(?:\/promises)?'/gm) || []
+}
+
 describe('#7280 source sweep — every O_NOFOLLOW open goes through the one helper', () => {
   // Collapsed to a boolean before asserting (CLAUDE.md "Collapse to a boolean
   // before asserting against file text"): a failing assert.match against a
@@ -346,12 +367,28 @@ describe('#7280 source sweep — every O_NOFOLLOW open goes through the one help
         `${name} still references fsConstants.O_NOFOLLOW directly — on win32 that term is undefined and ORs to 0, so the symlink guard silently no-ops (#7280). Route the open through openNoFollow().`)
     })
 
-    it(`${name} does not import a raw open from fs/promises`, () => {
-      const importLine = src.match(/^import\s+\{([^}]*)\}\s+from\s+'(?:node:)?fs\/promises'/m)
-      assert.ok(importLine, `${name}: could not find the fs/promises import to inspect`)
-      const named = importLine[1].split(',').map((s) => s.trim())
-      assert.ok(!named.includes('open'),
-        `${name} imports \`open\` from fs/promises — a raw open here cannot refuse a symlink on win32 (#7280). Use openNoFollow().`)
+    it(`${name} imports no open-capable binding from fs or fs/promises`, () => {
+      // Judge the IMPORTED name, never the local one. An earlier form of this
+      // assertion compared the raw `a, b as c` entries against 'open', so
+      // `import { open as rawOpen }` read as the unrelated name
+      // `'open as rawOpen'` and passed — and a NEW raw-open site added under
+      // that alias survived all three sweep assertions (the call count stays
+      // put because no openNoFollow site was removed). Proven by mutation
+      // before this was widened.
+      const promisesNames = namedImportsFrom(src, 'fs/promises')
+      assert.ok(promisesNames, `${name}: could not find the fs/promises import to inspect — the sweep cannot verify what it cannot parse (#7280)`)
+
+      const leaked = [...promisesNames, ...(namedImportsFrom(src, 'fs') || [])]
+        .filter((n) => OPEN_CAPABLE.has(n))
+      assert.deepEqual(leaked, [],
+        `${name} imports ${leaked.join(', ')} from fs/fs-promises — any of these can open a path without refusing a symlink on win32 (#7280). Use openNoFollow().`)
+
+      // A namespace or default import re-exposes the whole module under one
+      // local name, which no named-import check can see through. Every
+      // fs-family import must therefore be a pure `{ ... }` named import.
+      const nonNamed = fsFamilyImports(src).filter((stmt) => !/^import\s*\{/.test(stmt))
+      assert.deepEqual(nonNamed, [],
+        `${name} takes a namespace or default import of fs/fs-promises — that re-exposes open() under a local name the sweep cannot follow (#7280). Import only the named helpers you need.`)
     })
 
     it(`${name} imports and calls openNoFollow ${calls}x`, () => {

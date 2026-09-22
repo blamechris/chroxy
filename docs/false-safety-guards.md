@@ -2458,10 +2458,20 @@ O_NOFOLLOW term contributed nothing.
 Six `open()` calls across `ws-file-ops/reader.js` and `ws-file-ops/memory.js`
 relied on that flag to refuse a symlink at the final component — the
 post-validation TOCTOU defence for every dashboard file read, write, append and
-memory read. On Windows every one of them opened the symlink's **target**
-instead: silently, no error, no log line. The comments around them asserted the
+memory read. On Windows **four** of them — the three `O_RDONLY` reads and the
+`O_APPEND | O_CREAT` append — opened the symlink's **target** instead:
+silently, no error, no log line. The comments around them asserted the
 protection in plain English (`memory.js`: "The final open uses O_NOFOLLOW to
 refuse a symlink"), which was true on POSIX and false on win32.
+
+The other two pass `O_WRONLY | O_TRUNC`, which Windows rejects with `EINVAL`
+outright for an entirely unrelated reason (#7284, measured in
+`docs/records/windows-path-containment-7273.md`). Worth stating rather than
+rounding up to "all six", because the distinction is the point of this
+catalogue: those two were not *defended*, they were *unreachable*, and the
+accident that made them safe disappears the moment #7284 is fixed by adding a
+create disposition. A guard whose current safety is supplied by a neighbouring
+bug is the same false safety one layer over.
 
 **Why no test could go red.** Each site's refusal is observed through its ELOOP
 branch. With the flag gone the open SUCCEEDS, so the ELOOP branch is
@@ -2498,10 +2508,21 @@ one that keeps the fix from decaying:
    reds five. The symlink-PLANTING cases carry `SKIP_NO_SYMLINK` (the Windows CI
    account has no symlink privilege — entry 11), and the injected-lstat cases
    need no fixture, so the Windows runner still executes the branch;
-3. a source sweep asserts neither file references `fsConstants.O_NOFOLLOW`, that
-   neither imports a raw `open` from `fs/promises`, and that each calls
-   `openNoFollow()` exactly N times. Leaving ONE of the six sites unconverted
-   reds three assertions.
+3. a source sweep asserts neither file references `fsConstants.O_NOFOLLOW`,
+   that neither imports an open-capable binding from `fs`/`fs/promises`, and
+   that each calls `openNoFollow()` exactly N times. Leaving ONE of the six
+   sites unconverted reds three assertions.
+
+   That middle assertion is itself a worked example of cause 1. Its first form
+   compared the raw `a, b as c` import entries against the string `'open'`, so
+   `import { open as rawOpen }` read as the unrelated name `'open as rawOpen'`
+   and passed — and because adding a NEW raw-open site removes no
+   `openNoFollow()` call, the pinned count did not move either. A brand-new
+   unguarded open evaded all three assertions of the sweep written to forbid
+   exactly that, and only a mutation found it. It now judges the IMPORTED name
+   rather than the local one, covers `open`/`openSync`/`promises`, and refuses
+   a namespace or default import of either module outright — because a local
+   alias is precisely what a named-import check cannot see through.
 
 **Guard against it:** a platform-conditional CONSTANT is a silent no-op waiting
 to happen — `undefined | x` is `x`, and nothing announces it. When a guard's
