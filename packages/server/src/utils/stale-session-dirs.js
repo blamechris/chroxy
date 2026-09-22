@@ -27,6 +27,10 @@ export const OWNED_DIR_SWEEP_GRACE_MS = 60_000
 export const OWNER_PID_FILE = 'owner.pid'
 
 /**
+ * Never deletes through a base it does not own: a `base` that is a symlink, is
+ * not a directory, or (POSIX) belongs to another uid is skipped with a warning
+ * and zero counts (#7872). A missing base returns zero counts silently.
+ *
  * @param {string} base      Parent dir to scan (e.g. `/tmp/chroxy-claude-tui`).
  * @param {object} [opts]
  * @param {string} [opts.prefix='s-']  Only entries with this prefix are considered.
@@ -36,6 +40,30 @@ export const OWNER_PID_FILE = 'owner.pid'
  * @returns {{swept:number, kept:number}}
  */
 export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_SWEEP_GRACE_MS, logger, label = base } = {}) {
+  // #7872 — refuse a base we do not own BEFORE listing it. The sweep runs at
+  // boot, before any session start, so before ensureOwnedBaseDir has ever
+  // looked at this path. On a shared /tmp another local user can pre-create
+  // the base as a symlink to a directory of their choosing, and an unchecked
+  // readdir + rmSync would then delete that directory's orphan-looking `s-*`
+  // children. Same refusal as ensureOwnedBaseDir, with one deliberate
+  // difference: this SKIPS with a warning instead of throwing. The sweep is
+  // hygiene, not correctness, and a throwing refusal would let one planted
+  // symlink wedge daemon boot. Nothing here mutates `base` — adopting and
+  // chmod-ing it stays ensureOwnedBaseDir's job.
+  let st
+  try { st = lstatSync(base) } catch { return { swept: 0, kept: 0 } } // missing base: the common path, stay silent
+  const refuse = (reason) => {
+    logger?.warn?.(`stale-dir sweep: refusing to sweep ${base}: ${reason}`)
+    return { swept: 0, kept: 0 }
+  }
+  if (st.isSymbolicLink()) return refuse('it is a symlink')
+  if (!st.isDirectory()) return refuse('it is not a directory')
+  // POSIX only, as in ensureOwnedBaseDir: Windows has no uid, and its per-user
+  // profile tmpdir already provides the isolation this check stands in for.
+  // The symlink and is-a-directory checks above apply everywhere.
+  const uid = process.getuid?.()
+  if (uid !== undefined && st.uid !== uid) return refuse(`it is owned by uid ${st.uid}, not ${uid}`)
+
   let entries
   try { entries = readdirSync(base) } catch { return { swept: 0, kept: 0 } }
   let swept = 0
