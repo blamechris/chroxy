@@ -27,7 +27,20 @@
  * Bash on the machine can already call `docker pull` directly. This
  * check prevents the WS handler itself from being used as a
  * privileged pull primitive.
+ *
+ * 3. Option-shape refusal (#7296) — the allowlist above constrains the
+ *    PREFIX of an image reference, never its POSITION in an argv. A
+ *    pattern's `startsWith` test therefore said nothing about whether
+ *    the value would be read by `docker run` as an image or as a FLAG,
+ *    and an exact pattern laundered one outright. The shipped default
+ *    list was safe only by accident of its prefixes, so the refusal is
+ *    now explicit: an image reference can never legitimately begin with
+ *    `-` (nor contain NUL/CR/LF), and `isSafeArgvValue` is the one
+ *    predicate that decides it. `DockerBackend._startContainer` carries
+ *    the belt to this braces — a `--` separator immediately before the
+ *    image positional.
  */
+import { isSafeArgvValue } from './utils/argv-safety.js'
 
 export const DEFAULT_ALLOWED_DOCKER_IMAGES = [
   // Node.js base images
@@ -51,12 +64,16 @@ export const DEFAULT_ALLOWED_DOCKER_IMAGES = [
  * Check whether a given image string matches any pattern in the
  * allowlist. Patterns support a single trailing `*` for wildcarding.
  *
+ * An option-shaped reference is refused BEFORE the patterns are
+ * consulted, so no pattern — not a catch-all `*`, not an exact entry —
+ * can admit one (#7296).
+ *
  * @param {string} image - The image reference to check (e.g. `node:22`)
  * @param {string[]} patterns - Allowlist patterns (exact or prefix-with-*)
  * @returns {boolean}
  */
 export function imageMatchesAllowlist(image, patterns) {
-  if (typeof image !== 'string' || image.length === 0) return false
+  if (!isSafeArgvValue(image)) return false
   if (!Array.isArray(patterns) || patterns.length === 0) return false
   for (const pattern of patterns) {
     if (typeof pattern !== 'string' || pattern.length === 0) continue
@@ -85,6 +102,11 @@ export function validateDockerImage(image, config = null) {
   // No image specified — caller gets the environment manager's
   // built-in default, which is always safe.
   if (!image) return null
+  // #7296 — answered before the allowlist so the denial reason is the real
+  // one (position, not membership) whatever the operator's patterns say.
+  if (!isSafeArgvValue(image)) {
+    return `Docker image ${JSON.stringify(String(image).slice(0, 64))} is not a valid image reference.`
+  }
   const configured = Array.isArray(config?.allowedDockerImages)
     ? config.allowedDockerImages
     : null

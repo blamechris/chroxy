@@ -100,3 +100,75 @@ describe('validateDockerImage — 2026-04-11 audit Adversary A7', () => {
     assert.ok(err, 'exact match must not match a different tag')
   })
 })
+
+/**
+ * #7296 — option-shaped images.
+ *
+ * `image` is a bare positional in the `docker run` argv built by
+ * `DockerBackend._startContainer`, and it arrives from the wire
+ * (`create_environment` → `feature-handlers` → `validateDockerImage`). The
+ * allowlist was the only control, and it constrained the PREFIX, not the
+ * POSITION: `pattern.endsWith('*')` → `image.startsWith(prefix)` admits
+ * `--privileged` under any pattern whose prefix it happens to carry, and an
+ * exact pattern admits it outright. The shipped default list was safe only by
+ * accident of its prefixes.
+ *
+ * Every case below is a negative control — it asserts a REFUSAL, so deleting
+ * the guard turns it red. The positive controls exist so a guard that refused
+ * everything could not pass this file.
+ */
+describe('option-shaped images — argv option injection (#7296)', () => {
+  const OPTION_SHAPED = [
+    '--privileged',
+    '-v/:/host',
+    '--pull=always',
+    '--entrypoint=/bin/sh',
+    '--network=host',
+    '-',
+    '--',
+  ]
+
+  it('refuses an option-shaped image under a catch-all pattern', () => {
+    for (const image of OPTION_SHAPED) {
+      assert.equal(imageMatchesAllowlist(image, ['*']), false,
+        `catch-all pattern must not admit ${JSON.stringify(image)}`)
+    }
+    // Positive control: the same catch-all still admits real references.
+    assert.equal(imageMatchesAllowlist('node:22', ['*']), true)
+  })
+
+  it('refuses an option-shaped image even when a pattern matches it EXACTLY', () => {
+    // The POSITION is what makes it unsafe, not the pattern's reach — an
+    // operator who literally lists `--privileged` still must not get a flag
+    // smuggled into the `docker run` positional slot.
+    for (const image of OPTION_SHAPED) {
+      assert.equal(imageMatchesAllowlist(image, [image]), false,
+        `exact pattern must not launder ${JSON.stringify(image)}`)
+    }
+  })
+
+  it('refuses an image carrying NUL / CR / LF', () => {
+    assert.equal(imageMatchesAllowlist('node:22\n--privileged', ['node:*']), false)
+    assert.equal(imageMatchesAllowlist('node:22\r--privileged', ['node:*']), false)
+    assert.equal(imageMatchesAllowlist('node:22\0', ['node:*']), false)
+  })
+
+  it('validateDockerImage refuses an option-shaped image under a permissive operator allowlist', () => {
+    const config = { allowedDockerImages: ['*'] }
+    assert.equal(validateDockerImage('node:22', config), null, 'positive control')
+    for (const image of OPTION_SHAPED) {
+      const err = validateDockerImage(image, config)
+      assert.ok(err, `validateDockerImage must reject ${JSON.stringify(image)}`)
+      // The denial must name the real reason — the POSITION, not allowlist
+      // membership — whatever the operator's patterns happen to say.
+      assert.match(err, /not a valid image reference/,
+        `denial for ${JSON.stringify(image)} must not be reported as an allowlist miss`)
+    }
+  })
+
+  it('positive control: ordinary references still pass the default allowlist', () => {
+    for (const image of ['node:22', 'python:3.12-slim', 'mcr.microsoft.com/devcontainers/base:ubuntu']) {
+      assert.equal(validateDockerImage(image), null, `${image} must still be allowed`)
+    }
+  })
+})

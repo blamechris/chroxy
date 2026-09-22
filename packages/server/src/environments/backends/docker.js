@@ -665,7 +665,15 @@ export class DockerBackend {
         runArgs.push('--add-host', 'host.docker.internal:host-gateway')
       }
 
-      runArgs.push(image, 'sleep', 'infinity')
+      // #7296 — `image` reaches here from the wire (`create_environment`), and
+      // a bare positional is option-parsed by `docker run`. The allowlist
+      // refuses a dash-leading reference; this terminates option parsing so
+      // the refusal is not the only thing standing between a flag and the
+      // daemon. Measured on Docker 29.7.2: `docker run -- --help sleep
+      // infinity` does NOT print help (the `--` is consumed and `--help`
+      // becomes the image), while the same argv without `--` does. Everything
+      // above is chroxy's own flags, so nothing legitimate is lost.
+      runArgs.push('--', image, 'sleep', 'infinity')
 
       this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
         if (err) {

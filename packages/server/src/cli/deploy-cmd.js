@@ -5,6 +5,35 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync } from '
 import { join } from 'path'
 import { configDir } from './shared.js'
 import { isWindows } from '../platform.js'
+import { isGitShaRef } from '../utils/argv-safety.js'
+
+const SERVER_SRC_PATHSPEC = 'packages/server/src/'
+
+/**
+ * #7296 — the git argv that lists the server sources to syntax-check.
+ *
+ * `knownGoodRef` is read from `<config dir>/known-good-ref` and used to sit in
+ * a REVISION slot: `['diff', '--name-only', ref, '--', …]`. The `--` there is
+ * inert for this defect — it ends option parsing at its OWN position and
+ * cannot retroactively protect a value that precedes it (measured on git
+ * 2.54.0 while fixing #7290: `git diff --stat --` still applies `--stat`).
+ *
+ * The datum is always a SHA that `chroxy deploy` wrote itself, so the guard is
+ * fix shape (1), REJECT, using the same predicate the supervisor's rollback
+ * path applies to the same file. On refusal we fall back to the `git ls-files`
+ * branch — the same conservative widening `getDiff` does when it cannot
+ * resolve a base — rather than failing the deploy: a validated-out ref means
+ * "check everything", never "check nothing".
+ *
+ * @param {unknown} knownGoodRef - contents of the known-good-ref file, or null.
+ * @returns {string[]} argv for `git`, never containing an unvalidated ref.
+ */
+export function gitChangedServerFilesArgv(knownGoodRef) {
+  if (isGitShaRef(knownGoodRef)) {
+    return ['diff', '--name-only', knownGoodRef, '--', SERVER_SRC_PATHSPEC]
+  }
+  return ['ls-files', '--', SERVER_SRC_PATHSPEC]
+}
 
 export function registerDeployCommand(program) {
   program
@@ -54,11 +83,8 @@ export function registerDeployCommand(program) {
           ? readFileSync(KNOWN_GOOD_FILE, 'utf-8').trim()
           : null
 
-        const jsFiles = knownGoodRef
-          ? execFileSync('git', ['diff', '--name-only', knownGoodRef, '--', 'packages/server/src/'], { encoding: 'utf-8' })
-              .trim().split('\n').filter((f) => f.endsWith('.js'))
-          : execFileSync('git', ['ls-files', '--', 'packages/server/src/'], { encoding: 'utf-8' })
-              .trim().split('\n').filter((f) => f.endsWith('.js'))
+        const jsFiles = execFileSync('git', gitChangedServerFilesArgv(knownGoodRef), { encoding: 'utf-8' })
+          .trim().split('\n').filter((f) => f.endsWith('.js'))
 
         let validationErrors = 0
         for (const file of jsFiles) {
