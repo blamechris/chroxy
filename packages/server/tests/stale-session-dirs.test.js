@@ -20,11 +20,13 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { sweepStaleOwnedDirs, OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
+import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { CliSession } from '../src/cli-session.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 function recordingLog() {
@@ -100,6 +102,75 @@ describe('sweepStaleOwnedDirs — base ownership (#7872)', () => {
     assert.ok(log.warns[0].includes(base) && log.warns[0].includes(`uid ${realUid}`),
       `the warning must name the path and the owning uid; got ${JSON.stringify(log.warns[0])}`)
   })
+
+  // Root is where the ownership check matters most, and uid 0 is FALSY: an
+  // `if (uid && …)` rewrite of the `uid !== undefined` test switches the check
+  // off for exactly the process whose recursive delete can do the most damage.
+  // Every other test here runs with a non-zero uid, and that mutant survived
+  // all of them. Running as root (the Linux docker runners), the fixture is
+  // built for real with chown; otherwise the process claims uid 0.
+  it('refuses a foreign base when the daemon runs as root (uid 0)', { skip: typeof process.getuid !== 'function' }, () => {
+    const base = join(root, 'foreign-to-root')
+    mkdirSync(base)
+    const orphan = makeAgedOrphan(base, 's-orphan')
+
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    if (realUid === 0) chownSync(base, 1, 1)
+    let result
+    const log = recordingLog()
+    try {
+      if (realUid !== 0) process.getuid = () => 0
+      result = sweepStaleOwnedDirs(base, { logger: log })
+    } finally {
+      process.getuid = realGetuid
+    }
+
+    assert.equal(existsSync(orphan), true, 'a root daemon must not sweep a base owned by another uid')
+    assert.deepEqual(result, { swept: 0, kept: 0 })
+    assert.equal(log.warns.length, 1, `exactly one warning; got ${JSON.stringify(log.warns)}`)
+    assert.ok(log.warns[0].includes(base) && log.warns[0].includes('not 0'),
+      `the warning must name the path and the daemon's uid; got ${JSON.stringify(log.warns[0])}`)
+  })
+
+  // Both boot callers, driven through their real static entry points with
+  // only the base getter redirected (the pattern claude-tui-session.test.js
+  // and cli-permission-mode-sidecar.test.js already use). Every other test in
+  // this file calls sweepStaleOwnedDirs directly, so a caller that resolved its
+  // base first — `sweepStaleOwnedDirs(realpathSync(SINK_BASE), …)`, a natural
+  // "normalise /var → /private/var" change — would hand the check the link's
+  // TARGET, pass the symlink test by construction, and stay green here while
+  // the boot sweep deletes through the squat again (#7262's shape: a guard
+  // correct for every input it sees and never reached by a caller).
+  for (const [label, Cls, prop, sweep] of [
+    ['claude-tui sink', ClaudeTuiSession, 'SINK_BASE', 'sweepStaleSinkDirs'],
+    ['claude-cli sidecar', CliSession, 'PERMISSION_MODE_SIDECAR_BASE', 'sweepStaleSidecarDirs'],
+  ]) {
+    it(`boot caller ${Cls.name}.${sweep} (${label}) refuses a symlinked base`, { skip: SKIP_NO_SYMLINK }, () => {
+      const target = join(root, 'someone-elses-dir')
+      mkdirSync(target)
+      const victim = makeAgedOrphan(target, 's-victim')
+      const base = join(root, 'squatted-base')
+      symlinkSync(target, base)
+
+      const original = Object.getOwnPropertyDescriptor(Cls, prop)
+      assert.ok(original && typeof original.get === 'function', `${Cls.name}.${prop} is expected to be a static getter`)
+      const log = recordingLog()
+      let result
+      try {
+        Object.defineProperty(Cls, prop, { get: () => base, configurable: true })
+        result = Cls[sweep](log)
+      } finally {
+        Object.defineProperty(Cls, prop, original)
+      }
+
+      assert.equal(existsSync(victim), true, `${Cls.name}.${sweep} deleted through a symlinked base`)
+      assert.deepEqual(result, { swept: 0, kept: 0 })
+      assert.equal(log.warns.length, 1, `exactly one warning; got ${JSON.stringify(log.warns)}`)
+      assert.ok(log.warns[0].includes(base) && /symlink/i.test(log.warns[0]),
+        `the warning must name the configured base and the reason; got ${JSON.stringify(log.warns[0])}`)
+    })
+  }
 
   it('refuses a base that is a regular file', () => {
     const base = join(root, 'not-a-dir')

@@ -45,11 +45,12 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
   // looked at this path. On a shared /tmp another local user can pre-create
   // the base as a symlink to a directory of their choosing, and an unchecked
   // readdir + rmSync would then delete that directory's orphan-looking `s-*`
-  // children. Same refusal as ensureOwnedBaseDir, with one deliberate
-  // difference: this SKIPS with a warning instead of throwing. The sweep is
-  // hygiene, not correctness, and a throwing refusal would let one planted
-  // symlink wedge daemon boot. Nothing here mutates `base` — adopting and
-  // chmod-ing it stays ensureOwnedBaseDir's job.
+  // children. Same refusal as ensureOwnedBaseDir (symlink, not a directory,
+  // foreign uid), with one deliberate difference: this SKIPS with a warning
+  // instead of throwing. The sweep is hygiene, not correctness, and a throwing
+  // refusal would let one planted symlink wedge daemon boot. Nothing here
+  // mutates `base` — so an owned base that is group/other-writable is swept
+  // as-is; chmod-ing it back to 0700 stays ensureOwnedBaseDir's job.
   let st
   try { st = lstatSync(base) } catch { return { swept: 0, kept: 0 } } // missing base: the common path, stay silent
   const refuse = (reason) => {
@@ -133,8 +134,9 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
  * per-user directory at 0700 — which is exactly why this needs an explicit
  * check rather than a platform assumption.
  *
- * Throws when the base is a symlink, is not ours, or is group/other-writable.
- * What a caller DOES with that refusal is the caller's call, and the two
+ * Throws when the base is a symlink, is not a directory, or (POSIX) is owned by
+ * another uid. A base we DO own that is group/other-writable is not refused:
+ * it is chmod-ed back to 0700 before use. What a caller DOES with that refusal is the caller's call, and the two
  * callers deliberately differ (#7372): `CliSession` degrades to env-var-only,
  * because its base carries only the permission-mode sidecar and losing
  * mid-session mode switching beats losing the session. `ClaudeTuiSession`
