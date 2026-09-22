@@ -171,4 +171,24 @@ describe('option-shaped images — argv option injection (#7296)', () => {
       assert.equal(validateDockerImage(image), null, `${image} must still be allowed`)
     }
   })
+
+  it('positive control: digest and registry-port references survive the new refusal', () => {
+    // The refusal is `isSafeArgvValue`, which forbids a leading `-` and
+    // NUL/CR/LF — NOT an image-reference grammar. The two legitimate shapes
+    // most likely to be broken by a future tightening of that predicate are a
+    // pinned digest (`@sha256:…`, which carries `@` and a second `:`) and a
+    // registry with an explicit port (`localhost:5000/…`, whose FIRST colon is
+    // a port, not a tag). Both are matched against a pattern that reaches
+    // them, so a failure here means the refusal started rejecting valid
+    // references rather than that the allowlist is too narrow.
+    const digest = `ghcr.io/blamechris/chroxy:1.0@sha256:${'a'.repeat(64)}`
+    assert.equal(imageMatchesAllowlist(digest, ['ghcr.io/blamechris/*']), true,
+      'a digest-pinned reference must still be allowed')
+    assert.equal(imageMatchesAllowlist('localhost:5000/img', ['localhost:5000/*']), true,
+      'a registry with an explicit port must still be allowed')
+    assert.equal(
+      validateDockerImage(digest, { allowedDockerImages: ['ghcr.io/blamechris/*'] }), null,
+      'the message-level guard must not reject a digest-pinned reference either'
+    )
+  })
 })
