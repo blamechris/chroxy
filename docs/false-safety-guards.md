@@ -2446,3 +2446,65 @@ place", the guard has no failing input. When an assertion's subject is a value
 the test itself computed, ask what production seam would have to be wrong for it
 to fire — if there isn't one, it is decoration. And read a mutation's output, not
 just its exit code — `!= 0` hides which assertion actually fired.
+
+### 34. The containment check that could not see the filesystem it guarded — `#7354`
+
+Entry 15's fix was right about **where** to check (the output, not the input) and
+still could not close the hole, because it checked the output in the wrong
+**process**.
+
+Container `Glob` confines its results with `globMatchEscapesRoot`: a match is
+refused if it begins with `/` or contains a `..` segment. Container `Grep` and
+`Read` confine their `path` / `file_path` with `remapToContainerPath`: an absolute
+path outside the mount, or a `..` that escapes it, is refused. Both are purely
+LEXICAL, and both ran on the **host**. The filesystem they were reasoning about is
+the **container's**.
+
+So `esc/passwd`, where `/workspace/esc` is a symlink to `/etc` inside the
+container, has no leading `/`, no `..`, and sails through every one of them:
+
+```
+IN   {"pattern":"esc/*"}          -> esc/passwd, esc/shadow      isError:false
+IN   {"pattern":"*","path":"esc"} -> passwd, shadow              isError:false
+```
+
+The shape: **a guard asking a question about state it has no access to, and
+answering it from the string instead.** The host cannot stat, realpath or readlink
+anything in the container, so "does this path resolve inside /workspace" was not
+merely answered wrongly — it was not answerable at that layer at all, and the
+lexical check reads as a containment boundary precisely because it is spelled like
+the host's (`confineGlobMatches`, which really does realpath every match).
+
+Three things that made it survive:
+
+1. *The residual was documented and therefore felt handled.* `docker-byok-session.js`
+   carried a `RESIDUAL, tracked by #7354` comment naming the exact bypass. A known
+   gap with an issue number attached looks like work in progress rather than a live
+   hole — and `Glob` is auto-approved in `acceptEdits` via `ACCEPT_EDITS_TOOLS`
+   while `Bash`, which owns this capability honestly, is refused a whitelist
+   outright by `NEVER_AUTO_ALLOW`.
+2. *The stub could not have caught it.* Every container test fed the dispatcher
+   canned stdout. A canned reply is the test author's belief about what the
+   container returns, so the pre-fix half of any red/green claim was an assertion
+   about that belief. The fix's suite runs the daemon's actual `docker exec` script
+   through a real `bash` against a real symlink tree, with `/workspace` rewritten to
+   a temp dir: delete the resolution and bash genuinely hands back `esc/secret.txt`.
+3. *Fixing the directory case invites walking past the file case.* The issue named
+   symlinked DIRECTORIES. `/workspace/leak.txt -> /etc/passwd` is the same defect
+   one field over and is covered by the same resolver — but only because it was
+   looked for (project memory: `adjacent_field_wire_cap_pattern`).
+
+The fix moves the question inside: a bash preamble resolves the path physically
+(`cd -P` per directory component, a bounded `readlink` loop for a symlinked leaf),
+compares it against the resolved workspace, and prints one of three sentinels. The
+host refuses **any** reply whose first line is not one of them — an unparseable
+container reply is an error, never "no matches". The lexical checks stay as the
+first layer: they need nothing from the guest's userland, and the two are
+independent (one reads the string, the other reads the filesystem), so this is not
+the "two readings, one shared rule" pairing where agreement proves nothing.
+
+**Guard against it:** when a guard's predicate names state — a file, a link, a
+permission — ask which process can actually observe that state. If it is not the
+process running the guard, the check is a spelling test, whatever its variable
+names claim. And when a fake stands in for that other process, make the fake run
+the real thing, or the red half of red-before-green is a fixture.

@@ -233,23 +233,223 @@ export function globPatternEscapeMessage(reason) {
   return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
 }
 
+// ---------------------------------------------------------------------------
+// Container path confinement (#7354) — resolve INSIDE the container
+// ---------------------------------------------------------------------------
+
 /**
- * Build the bash command that lists files matching `pattern` under `root`.
+ * SECURITY (#7354) — the sentinel the container-side confinement preamble
+ * prints as the FIRST line of stdout when the target resolved inside the
+ * workspace and the body is about to run.
  *
- * CONTAINER-ONLY since #7341. The host Glob no longer shells out at all — it
- * uses `node:fs/promises`'s `glob`, which has no tilde expansion, no word
- * splitting, no quote removal and no brace-body quirks to model, so the entire
- * "what will bash do with this string" question disappears. The container
- * cannot run JS inside itself, so it keeps this, and pairs it with
- * {@link globMatchEscapesRoot} over the RESULTS.
+ * It exists so the host can tell "the guard ran and passed" apart from "the
+ * guard did not run at all". Without it, a command that lost the preamble
+ * would be indistinguishable from one that passed it — success and
+ * not-checking would be the same observable, which is the defect class
+ * `docs/false-safety-guards.md` is a catalogue of.
+ */
+export const CONTAINER_CONFINE_OK = '__chroxy_confine_ok__'
+
+/** Printed when the target resolved OUTSIDE the workspace. */
+export const CONTAINER_CONFINE_ESCAPE = '__chroxy_confine_escape__'
+
+/** Printed when the target could not be resolved at all (fail closed). */
+export const CONTAINER_CONFINE_ERROR = '__chroxy_confine_error__'
+
+/**
+ * Max symlink hops `__cx_resolve` follows before giving up (ELOOP guard).
+ * Linux's own limit is 40; matching it means we refuse exactly what the
+ * kernel refuses rather than inventing a stricter one.
+ */
+const CONTAINER_RESOLVE_MAX_HOPS = 40
+
+/**
+ * SECURITY (#7354) — the bash source of `__cx_resolve`, which resolves a path
+ * to its PHYSICAL location inside the container: every symlinked directory
+ * component via `cd -P`, and a symlinked leaf via a bounded `readlink` loop.
+ *
+ * Why this has to run in the container at all: `globMatchEscapesRoot` and
+ * `remapToContainerPath` are both LEXICAL. `esc/passwd`, where `/workspace/esc`
+ * is a symlink to `/etc` in the CONTAINER's filesystem, has no leading `/` and
+ * no `..` segment — it is lexically spotless and resolves out. The host cannot
+ * see that link (it is not on the host's filesystem), so the only place the
+ * question can be answered is inside the container. That is the whole of #7354.
+ *
+ * UTILITIES: `cd -P`, `pwd -P`, `case`, `${x%/*}` and `local` are bash
+ * builtins/syntax, and `execInEnvironment` already invokes `bash -c` (the
+ * existing Glob command uses `shopt`, so bash is a standing requirement, not a
+ * new one). The ONLY external program is `readlink`, and it is reached only
+ * when a component is actually a symlink — it ships in GNU coreutils (the
+ * default `node:22-slim` image) and in busybox (alpine). If it is missing the
+ * `$(readlink ...)` fails, the function returns non-zero, and the caller emits
+ * CONTAINER_CONFINE_ERROR: unresolvable is refused, never waved through.
+ *
+ * `unset CDPATH` before every `cd`: with CDPATH set, bash's `cd` ECHOES the
+ * directory it landed in on stdout, which would corrupt the `$( ... )` capture
+ * (project memory: cdpath_corrupts_cd_pwd_capture).
+ *
+ * Contract: prints the physical path and returns 0, or prints nothing and
+ * returns non-zero. A MISSING LEAF still resolves — its parent directory does,
+ * and the leaf is appended — so `Read` of a file that is not there keeps
+ * reporting the tool's own "No such file", not a containment error. A missing
+ * or unreadable PARENT is a failure, which is correct for these three tools:
+ * Read/Glob/Grep only ever name a path that must already exist.
+ */
+const CONTAINER_RESOLVE_FN = [
+  '__cx_resolve() {',
+  '  local __p=$1 __d __b __t __n=0',
+  `  while [ "$__n" -lt ${CONTAINER_RESOLVE_MAX_HOPS} ]; do`,
+  '    if [ -d "$__p" ]; then ( unset CDPATH; cd -P -- "$__p" 2>/dev/null && pwd -P ) || return 1; return 0; fi',
+  '    case $__p in */*) __d=${__p%/*}; __b=${__p##*/} ;; *) __d=.; __b=$__p ;; esac',
+  '    [ -n "$__d" ] || __d=/',
+  '    __d=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ) || return 1',
+  '    __p=$__d/$__b',
+  '    if [ -L "$__p" ]; then',
+  '      __t=$(readlink -- "$__p") || return 1',
+  '      case $__t in /*) __p=$__t ;; *) __p=$__d/$__t ;; esac',
+  '      __n=$((__n+1))',
+  '      continue',
+  '    fi',
+  '    printf \'%s\\n\' "$__p"',
+  '    return 0',
+  '  done',
+  '  return 1',
+  '}',
+].join('\n')
+
+/**
+ * SECURITY (#7354) — wrap `body` in the container-side confinement preamble.
+ *
+ * The emitted script resolves `workspace` and `target` physically, refuses
+ * unless the resolved target is the resolved workspace or under it, and only
+ * then prints {@link CONTAINER_CONFINE_OK} and runs `body`. `body` receives the
+ * RESOLVED target in `"$__cx_target"` and must use it in place of the lexical
+ * path — the same thing the host does (`safeResolveRoot` hands bash the
+ * realpath, not the symlinked alias), so a link swapped after the check cannot
+ * redirect the read.
+ *
+ * FAIL CLOSED, in both directions: every bail prints a sentinel and `exit 0`,
+ * so the failure arrives as a parseable reply rather than as a non-zero exit
+ * that `execInEnvironment` turns into a thrown Error; and the host refuses any
+ * stdout whose first line is not one of the three sentinels, so a reply it
+ * cannot account for is an error and never "no matches".
+ *
+ * @param {{ target: string, body: string, setup?: string, workspace?: string }} opts
+ *   `setup` runs AFTER the containment check and BEFORE the OK sentinel; it
+ *   must be a single command whose non-zero exit means "could not proceed".
+ */
+export function buildConfinedContainerCommand({ target, body, setup = '', workspace = '/workspace' }) {
+  const bail = (sentinel) => `{ printf '%s\\n' '${sentinel}'; exit 0; }`
+  const lines = [
+    CONTAINER_RESOLVE_FN,
+    `__cx_ws=$(__cx_resolve ${shellQuote(workspace)}) || ${bail(CONTAINER_CONFINE_ERROR)}`,
+    `__cx_target=$(__cx_resolve ${shellQuote(target)}) || ${bail(CONTAINER_CONFINE_ERROR)}`,
+    `case $__cx_target in "$__cx_ws"|"$__cx_ws"/*) ;; *) ${bail(CONTAINER_CONFINE_ESCAPE)} ;; esac`,
+  ]
+  if (setup) lines.push(`${setup} || ${bail(CONTAINER_CONFINE_ERROR)}`)
+  lines.push(`printf '%s\\n' '${CONTAINER_CONFINE_OK}'`)
+  lines.push(body)
+  return lines.join('\n')
+}
+
+/**
+ * SECURITY (#7354) — the container-side Glob body: expand `pattern` under the
+ * already-confined `"$__cx_target"` and emit only the matches that RESOLVE
+ * inside it.
+ *
+ * The pattern route needs its own layer because the search root is clean and
+ * the MATCH is what leaves: `{"pattern":"esc/*"}` produces `esc/passwd`, which
+ * `globMatchEscapesRoot` reads as perfectly in-bounds.
+ *
+ * Withheld matches are dropped SILENTLY here — no sentinel, no count. That is
+ * the #7341 rule and it is deliberate: anything that separates "matched, but
+ * outside" from "matched nothing" is an existence oracle on a tool that
+ * `ACCEPT_EDITS_TOOLS` auto-approves. An escaping `path` ARGUMENT is different
+ * and does return an error — the caller named that directory outright, so
+ * refusing it tells them nothing they did not already supply.
+ *
+ * COST: one subshell per unique directory, not per match. The last directory's
+ * verdict is memoised in two plain variables (glob output is sorted, so runs of
+ * matches share a directory) rather than in a bash-4 associative array, and the
+ * entry itself is resolved only when the glob already found it to be a symlink
+ * — the same shape as the host's `confineGlobMatches`.
+ *
+ * FAIL CLOSED: a match whose resolution fails is withheld, never emitted.
  *
  * `pattern` MUST already be validated against GLOB_PATTERN_SHELL_METACHARS AND
- * {@link globPatternEscapeReason} by the caller (it is interpolated unquoted so
- * the shell expands it — that expansion is the whole point, and is also why
- * containment cannot be delegated to `shellQuote`).
+ * {@link globPatternEscapeReason} by the caller — it is interpolated UNQUOTED so
+ * the shell expands it, which is the whole point of the tool and also why
+ * containment cannot be delegated to `shellQuote`.
+ *
+ * This replaced an unconfined `buildGlobCommand` (#7354). The old builder was
+ * deleted rather than left beside it: an exported "same thing, no resolution"
+ * variant is how a guard comes to be wired to only some of its callers
+ * (`docs/false-safety-guards.md`, #7262), and it had exactly one caller.
  */
-export function buildGlobCommand(pattern, root) {
-  return `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
+export function buildConfinedGlobBody(pattern) {
+  return [
+    // Two statements, not `shopt -s nullglob globstar`: an image whose bash
+    // predates globstar (3.2, still the system bash on macOS) makes the
+    // combined form fail, and `nullglob` — the one that decides whether an
+    // unmatched pattern is emitted VERBATIM — must not be lost with it.
+    'shopt -s nullglob',
+    'shopt -s globstar',
+    // \x01 cannot appear in a path, so the first iteration always misses.
+    '__cx_lastd=$\'\\001\'; __cx_lastv=n',
+    `for f in ${pattern}; do`,
+    '  case $f in */*) __cx_d=${f%/*} ;; *) __cx_d=. ;; esac',
+    '  if [ "$__cx_d" != "$__cx_lastd" ]; then',
+    '    if __cx_r=$(__cx_resolve "$__cx_d"); then',
+    '      case $__cx_r in "$__cx_target"|"$__cx_target"/*) __cx_lastv=y ;; *) __cx_lastv=n ;; esac',
+    '    else',
+    '      __cx_lastv=n',
+    '    fi',
+    '    __cx_lastd=$__cx_d',
+    '  fi',
+    '  [ "$__cx_lastv" = y ] || continue',
+    '  if [ -L "$f" ]; then',
+    '    __cx_r=$(__cx_resolve "$f") || continue',
+    '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) continue ;; esac',
+    '  fi',
+    '  printf \'%s\\n\' "$f"',
+    'done',
+  ].join('\n')
+}
+
+/**
+ * SECURITY (#7354) — host side of {@link buildConfinedContainerCommand}: split
+ * the sentinel off the container's stdout.
+ *
+ * ONLY the three sentinels are accepted. Anything else — an empty reply, a
+ * banner some image prints on shell startup, a truncated stream — is
+ * `{ ok:false, reason:'unparseable' }`, which callers surface as an error.
+ * Treating it as "no matches" instead would be the catalogue's second recurring
+ * cause verbatim: "cannot check this" silently treated as "nothing to check".
+ *
+ * @param {string} stdout
+ * @returns {{ ok: true, body: string } | { ok: false, reason: 'escape'|'error'|'unparseable' }}
+ */
+export function parseConfinedContainerStdout(stdout) {
+  if (typeof stdout !== 'string') return { ok: false, reason: 'unparseable' }
+  const nl = stdout.indexOf('\n')
+  const first = nl === -1 ? stdout : stdout.slice(0, nl)
+  const rest = nl === -1 ? '' : stdout.slice(nl + 1)
+  if (first === CONTAINER_CONFINE_OK) return { ok: true, body: rest }
+  if (first === CONTAINER_CONFINE_ESCAPE) return { ok: false, reason: 'escape' }
+  if (first === CONTAINER_CONFINE_ERROR) return { ok: false, reason: 'error' }
+  return { ok: false, reason: 'unparseable' }
+}
+
+/**
+ * The tool_result message for a confinement failure. `reason` comes from
+ * {@link parseConfinedContainerStdout}; `label` is the tool name.
+ */
+export function confinedContainerFailureMessage(label, reason, path) {
+  const where = typeof path === 'string' && path.length > 0 ? ` ${path}` : ''
+  if (reason === 'escape') {
+    return `${label} refused:${where} resolves outside the workspace inside the container (symlinked path)`
+  }
+  return `${label} failed: could not resolve${where} inside the container (missing, inaccessible, or a symlink loop)`
 }
 
 /**
@@ -311,11 +511,22 @@ export function buildGrepArgs(input) {
  * `tests/built-in-tools/grep-argv-injection.test.js`, which spawns the built
  * command and asserts the preprocessor never runs.
  *
- * @param {{ pattern: string, root: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
+ * `rootExpr` (#7354) replaces the quoted literal root with a shell EXPRESSION —
+ * the container passes `"$__cx_target"`, the variable the confinement preamble
+ * left the physically-resolved root in. It exists so the container can search
+ * the resolved path rather than the symlinked alias it was handed, which is
+ * exactly what the host already does (`buildGrepCommand` is called with
+ * `safeResolveRoot`'s realpath). The caller owns the quoting of that expression;
+ * the `--` terminator — the part that carries the #7295 property — is unchanged
+ * either way, so a root that still begins with `-` cannot reach rg's own option
+ * parser through this door.
+ *
+ * @param {{ pattern: string, root?: string, rootExpr?: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
  */
-export function buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit = false }) {
-  const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${shellQuote(root)}`
-  const grepCmd = `grep -r ${ci} ${ln} -e ${shellQuote(pattern)} -- ${shellQuote(root)}`
+export function buildGrepCommand({ pattern, root, rootExpr, ci, ln, globArg, maskExit = false }) {
+  const rootArg = typeof rootExpr === 'string' && rootExpr.length > 0 ? rootExpr : shellQuote(root)
+  const rgCmd = `rg --no-config ${ci} ${ln} --no-heading${globArg} -e ${shellQuote(pattern)} -- ${rootArg}`
+  const grepCmd = `grep -r ${ci} ${ln} -e ${shellQuote(pattern)} -- ${rootArg}`
   const core = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
   return maskExit ? `${core}; true` : core
 }

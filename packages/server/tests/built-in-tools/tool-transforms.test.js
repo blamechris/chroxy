@@ -7,9 +7,14 @@ import {
   globPatternEscapeReason,
   globPatternEscapeMessage,
   globMatchEscapesRoot,
-  buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
+  buildConfinedContainerCommand,
+  buildConfinedGlobBody,
+  confinedContainerFailureMessage,
+  CONTAINER_CONFINE_OK,
+  CONTAINER_CONFINE_ESCAPE,
+  CONTAINER_CONFINE_ERROR,
 } from '../../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -104,12 +109,82 @@ describe('GLOB_PATTERN_SHELL_METACHARS', () => {
   })
 })
 
-describe('buildGlobCommand', () => {
-  it('builds the globstar listing command, quoting the root but not the pattern', () => {
-    assert.equal(
-      buildGlobCommand('**/*.ts', '/work/repo'),
-      `shopt -s globstar nullglob; cd '/work/repo' && for f in **/*.ts; do printf '%s\\n' "$f"; done`,
-    )
+describe('buildConfinedGlobBody (#7354)', () => {
+  // Collapsed to booleans: the subject is a multi-line script, and a failing
+  // `assert.match` carries the whole of it into the TAP stream (#7340).
+  const body = buildConfinedGlobBody('**/*.ts')
+
+  it('expands the pattern UNQUOTED — the expansion is the tool', () => {
+    assert.ok(body.includes('for f in **/*.ts; do'))
+  })
+
+  it('sets nullglob in its own statement so an old bash keeps it', () => {
+    // `shopt -s nullglob globstar` fails as a unit where globstar does not
+    // exist, and losing nullglob means an unmatched pattern is emitted VERBATIM.
+    assert.ok(/^shopt -s nullglob$/m.test(body))
+    assert.ok(/^shopt -s globstar$/m.test(body))
+  })
+
+  it('resolves every match and compares it against the resolved root', () => {
+    assert.ok(body.includes('__cx_resolve "$__cx_d"'), 'must resolve the match directory')
+    assert.ok(body.includes('__cx_resolve "$f"'), 'must resolve a symlinked entry')
+    assert.ok(body.includes('"$__cx_target"|"$__cx_target"/*'), 'must compare against the root')
+  })
+
+  it('withholds an unresolvable match rather than emitting it (fail closed)', () => {
+    assert.ok(body.includes('__cx_resolve "$f") || continue'))
+    assert.ok(body.includes('__cx_lastv=n'))
+  })
+
+  it('emits no marker for a withheld match (no existence oracle, #7341)', () => {
+    // The only thing the loop ever prints is a kept match.
+    const printed = body.split('\n').filter((l) => l.includes('printf'))
+    assert.deepEqual(printed.map((l) => l.trim()), [`printf '%s\\n' "$f"`])
+  })
+
+  it('exports no unconfined variant alongside it', async () => {
+    // The old `buildGlobCommand` built the same listing WITHOUT the resolution
+    // pass. Leaving it exported is how a guard ends up wired to only some of
+    // its callers (docs/false-safety-guards.md).
+    const mod = await import('../../src/built-in-tools/tool-transforms.js')
+    assert.equal('buildGlobCommand' in mod, false)
+  })
+})
+
+describe('buildConfinedContainerCommand (#7354)', () => {
+  const cmd = buildConfinedContainerCommand({ target: '/workspace/src', body: 'echo hi' })
+
+  it('resolves the workspace and the target before running the body', () => {
+    assert.ok(cmd.includes(`__cx_resolve '/workspace'`))
+    assert.ok(cmd.includes(`__cx_resolve '/workspace/src'`))
+    assert.ok(cmd.indexOf(CONTAINER_CONFINE_OK) < cmd.indexOf('echo hi'))
+  })
+
+  it('bails to a sentinel and exit 0 — never a non-zero the runner would throw on', () => {
+    for (const sentinel of [CONTAINER_CONFINE_ESCAPE, CONTAINER_CONFINE_ERROR]) {
+      assert.ok(cmd.includes(`printf '%s\\n' '${sentinel}'; exit 0;`), `missing bail for ${sentinel}`)
+    }
+  })
+
+  it('unsets CDPATH around every cd, so `cd` cannot echo into the capture', () => {
+    const cds = cmd.split('\n').filter((l) => l.includes('cd -P --'))
+    assert.ok(cds.length > 0)
+    assert.ok(cds.every((l) => l.includes('unset CDPATH')), 'a cd without `unset CDPATH`')
+  })
+
+  it('shell-quotes the target, so a path with a quote cannot break out', () => {
+    const evil = buildConfinedContainerCommand({ target: `/workspace/a'; id; '`, body: 'true' })
+    assert.ok(evil.includes(`__cx_resolve '/workspace/a'\\''; id; '\\'''`))
+  })
+
+  it('runs an optional setup after the check and before the OK sentinel', () => {
+    const withSetup = buildConfinedContainerCommand({
+      target: '/workspace', body: 'echo hi', setup: 'cd x',
+    })
+    const setupAt = withSetup.indexOf('cd x')
+    assert.ok(setupAt > withSetup.indexOf('case $__cx_target'))
+    assert.ok(setupAt < withSetup.indexOf(CONTAINER_CONFINE_OK))
+    assert.ok(withSetup.includes(`cd x || { printf '%s\\n' '${CONTAINER_CONFINE_ERROR}'`))
   })
 })
 
@@ -141,6 +216,53 @@ describe('buildGrepCommand', () => {
 
   it('threads the glob arg into the rg command', () => {
     assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
+  })
+
+  it('rootExpr substitutes a shell expression for the quoted root (#7354)', () => {
+    // The container searches the path its confinement preamble RESOLVED, the
+    // same thing the host does (it passes safeResolveRoot's realpath).
+    const cmd = buildGrepCommand({ ...base, root: undefined, rootExpr: '"$__cx_target"' })
+    assert.ok(cmd.includes(`-e 'TODO' -- "$__cx_target";`), 'rg must search the resolved root')
+    assert.ok(cmd.includes(`grep -r -i -n -e 'TODO' -- "$__cx_target"`), 'so must the fallback')
+    assert.equal(cmd.includes(`'undefined'`), false, 'the unused literal root must not leak in')
+  })
+
+  it('keeps the `--` terminator under rootExpr (the #7295 property)', () => {
+    // shellQuote closes SHELL injection only; `--` is what stops rg's own
+    // option parser seeing a root that begins with `-`. Swapping the root for
+    // an expression must not take it with it.
+    const cmd = buildGrepCommand({ ...base, rootExpr: '"$__cx_target"' })
+    assert.equal(cmd.split('-- "$__cx_target"').length - 1, 2, 'both arms need the terminator')
+  })
+
+  it('falls back to the quoted literal root when rootExpr is absent or empty', () => {
+    for (const rootExpr of [undefined, '', null]) {
+      assert.ok(buildGrepCommand({ ...base, rootExpr }).includes(`-- '/work'`), `rootExpr=${rootExpr}`)
+    }
+  })
+})
+
+describe('confinedContainerFailureMessage (#7354)', () => {
+  it('names the escape without echoing anything from outside the workspace', () => {
+    const msg = confinedContainerFailureMessage('Glob', 'escape', 'esc')
+    assert.ok(msg.includes('Glob refused'))
+    assert.ok(msg.includes('resolves outside the workspace'))
+    assert.ok(msg.includes('esc'))
+  })
+
+  it('distinguishes an unresolvable path from an escape', () => {
+    for (const reason of ['error', 'unparseable']) {
+      const msg = confinedContainerFailureMessage('Read', reason, 'a.ts')
+      assert.ok(msg.includes('could not resolve'), reason)
+      assert.equal(msg.includes('resolves outside the workspace'), false, reason)
+    }
+  })
+
+  it('omits the path clause when there is no path to name', () => {
+    assert.equal(
+      confinedContainerFailureMessage('Grep', 'escape', undefined).includes('undefined'),
+      false,
+    )
   })
 })
 
