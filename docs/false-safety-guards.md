@@ -495,6 +495,30 @@ charset never sees it. A test pins the equality, and it goes red under the
 bypass. **Mutate one edit at a time, and when a "half" turns out to be two
 things, the mutation list grows to match.**
 
+**The third gate then repeated the shape one layer along: its test asserted the
+LOG LINE, and the log line is not the gate.** `MAX_DIFF_BASE_LENGTH` is two
+pieces of code — a `log.warn` that reports an oversized `base`, and a
+`rawBase.length <= MAX_DIFF_BASE_LENGTH &&` conjunct that keeps the value out
+of both `rev-parse` argvs — and only the first is observable from a test that
+reads the log. Delete the conjunct alone and the warn still fires, the reply is
+still the HEAD fallback, and the suite is **green** with the bound gone.
+Success and not-checking were the same observable *again*, one commit after the
+entry above was written about it.
+
+Nothing on the wire can separate them, because closing the oracle is precisely
+what makes an oversized base and an unresolvable one indistinguishable, and
+`createReaderOps` has no exec seam to watch the argv with (#7871). The probe
+that works is one that is oversized **and** resolvable: `<ref>^0` names the
+commit `<ref>` itself and *chains*, so a real branch padded with `^0`×130 is a
+264-character revision made only of charset-allowed characters, carrying no
+leading dash, that git resolves to a real non-HEAD commit (git 2.55.0). Over
+the bound it must be indistinguishable from the HEAD fallback; without the
+conjunct it resolves to `HEAD~1` and the reply changes. **When a guard both
+logs and decides, a test that reads the log has pinned the logging.** And note
+the honest cost the probe exposes: the bound *can* reject a legitimate
+revision — "rejects nothing legitimate" is a statement about real-world ref
+names, not about git's grammar.
+
 And do not "harden" this by appending a `--` to the diff argv: that turns an
 unresolvable base's error into `fatal: bad revision`, which the old
 `unknown revision` recovery predicate missed — a *narrower* recovery wearing
