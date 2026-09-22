@@ -5,10 +5,40 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
+import { createLogger } from '../logger.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
 
 const execFileAsync = promisify(execFileCb)
+const log = createLogger('ws')
+
+/**
+ * Longest `base` getDiff will hand to git. A revision is short — a full OID is
+ * 40 characters and a ref name far less — so this rejects nothing legitimate,
+ * and it bounds what an unconstrained wire field (`GetDiffSchema` is
+ * `.passthrough()`, #7870) can spend: two `rev-parse` argvs per request, plus
+ * whatever git echoes back into an error message.
+ */
+const MAX_DIFF_BASE_LENGTH = 256
+
+/** Longest error detail written to the server log in one line (#7298). */
+const MAX_LOGGED_ERROR_LENGTH = 500
+
+/**
+ * Bound one error detail before it reaches the log.
+ *
+ * An `execFile` rejection's `message` carries the whole command line — which
+ * includes the client's own `base` — followed by the child's stderr, and
+ * neither is bounded by anything the caller controls. Logging it raw turns an
+ * oversized input into log amplification, so the log gets a prefix and the
+ * original length instead.
+ */
+export function truncateForLog(message) {
+  const text = String(message ?? '')
+  return text.length > MAX_LOGGED_ERROR_LENGTH
+    ? `${text.slice(0, MAX_LOGGED_ERROR_LENGTH)}… (truncated, ${text.length} chars)`
+    : text
+}
 
 /** Image extensions to MIME type mapping (module-level to avoid per-call allocation) */
 const IMAGE_MIME = {
@@ -550,12 +580,25 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
         const isNotGitRepo = stderr.includes('not a git repository') ||
           revParseErr.code === 128
+        // #7298 — half 2 is a property of getDiff's WHOLE reply surface, not
+        // of the one branch the issue measured. This branch forwarded
+        // `revParseErr.message`, which carries git's own stderr plus the
+        // resolved git binary path, for every non-128 failure (git missing,
+        // timeout, EACCES). 'Not a git repository' stays: it is a fixed
+        // classification, not a forwarded message.
+        //
+        // Only the UNEXPECTED failure is logged. "Not a git repository" is the
+        // ordinary state of a session whose cwd is not a checkout, and it
+        // arrives on every `get_diff` that session sends — logging it at error
+        // level buries the failures worth reading, which is the same defect as
+        // not logging at all (Copilot review of #7862).
+        if (!isNotGitRepo) {
+          log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
+        }
         sendFn(ws, {
           type: 'diff_result',
           files: [],
-          error: isNotGitRepo
-            ? 'Not a git repository'
-            : `Git error: ${revParseErr.message || 'unknown failure'}`,
+          error: isNotGitRepo ? 'Not a git repository' : 'Failed to run git diff',
         })
         return
       }
@@ -567,8 +610,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // used to be the only check, and it put `-` INSIDE its character class,
       // so every single-token option passed it: `--stat`, `-p`, `--exit-code`,
       // `--ext-diff`, and `-O<path>` — which makes git read <path> as a diff
-      // orderfile and report whether it could, straight back to the client via
-      // the `error: err.message` branches below.
+      // orderfile and report whether it could, straight back to the client,
+      // which at the time forwarded `err.message` verbatim (see #7298 below).
       //
       // isSafeArgvValue is the load-bearing half (it rejects the leading dash);
       // the allowlist stays as a charset narrowing. A `--` separator canNOT
@@ -577,62 +620,100 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // correct here; falling back to 'HEAD' preserves the pre-existing
       // contract for any unusable base.
       //
-      // SCOPE — this closes the LEADING-DASH route and only that. A path
-      // oracle survives here that needs no dash at all, because `:` and `/`
-      // are both in the charset and git's stderr is forwarded verbatim:
+      // #7298 — HALF 1 of 2. The charset above is a NARROWING, never a
+      // decision: it cannot tell a revision from a path, and `:` and `/` used
+      // to be members, so `HEAD:<path>` and a bare absolute path both reached
+      // git as revisions and git answered on the wire (measured, git 2.55.0):
       //
       //     base='HEAD:/etc/passwd' -> fatal: path '/etc/passwd' exists on
       //                                disk, but not in 'HEAD'
       //     base='HEAD:absent'      -> fatal: path 'absent' does not exist in 'HEAD'
-      //     base='/etc/passwd'      -> fatal: '/etc/passwd' is outside repository
-      //     base='/no/such/file'    -> fatal: ambiguous argument ...
+      //     base='/etc/passwd'      -> fatal: '/etc/passwd' is outside
+      //                                repository at '<cwdReal>'
       //
-      // That is pre-existing (charset and stderr-forwarding are both unchanged
-      // by #7290) and is tracked separately; closing it means resolving the
-      // base with `rev-parse --verify` and not forwarding raw git stderr,
-      // which is a wider contract change than this fix. Do not read the guard
-      // below as sealing the oracle — it seals one route into it.
-      const diffBase = (isSafeArgvValue(rawBase) && /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase))
+      // — a filesystem-wide path-existence oracle, as the daemon user,
+      // escaping the session cwd, plus the workspace path itself.
+      //
+      // So RESOLVE the base instead of pattern-matching it: only a revision
+      // that names a real commit in THIS repo is ever handed to `git diff`,
+      // and everything else falls back to HEAD (the pre-existing contract for
+      // an unusable base) without git being asked the client's question at
+      // all. `rev-parse --verify --quiet` is silent on failure — it exits 1
+      // with empty stderr for every probe above — so the resolution step is
+      // not itself an oracle. `:` is dropped from the charset in the same
+      // change: `<rev>:<path>` names a BLOB, never a commit.
+      //
+      // Do NOT "harden" this by appending a `--` to the diff argv instead.
+      // That changes an unresolvable base's error to `fatal: bad revision`,
+      // which the old `unknown revision` recovery predicate missed — and `--`
+      // does not stop option parsing for a token that precedes it anyway
+      // (#7290, utils/argv-safety.js).
+      // The length bound is the third gate, and it is about COST rather than
+      // about the oracle: `base` is unconstrained on the wire (#7870), and
+      // every byte of it is spawned twice (both `rev-parse` calls) and can be
+      // echoed back into an error message. A revision is short, so nothing
+      // legitimate is rejected. Only the LENGTH is logged — never the value,
+      // which is the input this whole function exists to distrust.
+      if (rawBase.length > MAX_DIFF_BASE_LENGTH) {
+        log.warn(`get_diff base rejected: ${rawBase.length} chars exceeds the ${MAX_DIFF_BASE_LENGTH}-char limit`)
+      }
+      const candidate = (
+        rawBase.length <= MAX_DIFF_BASE_LENGTH &&
+        isSafeArgvValue(rawBase) &&
+        /^[a-zA-Z0-9._\-\/~^@{}]+$/.test(rawBase)
+      )
         ? rawBase
         : 'HEAD'
 
+      /** Resolve a revision to a commit OID, or null when it names no commit. */
+      const resolveCommit = async (rev) => {
+        try {
+          const { stdout } = await execFileAsync(
+            GIT, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`],
+            { cwd: cwdReal, timeout: 5000 }
+          )
+          return stdout.trim() || null
+        } catch {
+          return null
+        }
+      }
+
+      const headOid = await resolveCommit('HEAD')
+      // An unresolvable base is HEAD. HEAD itself is unresolvable only in a
+      // repo with no commits, where `git diff HEAD` used to fail into the
+      // `unknown revision` recovery — so go straight to the plain `git diff`
+      // that recovery ran, and drop the stderr-substring predicate with it.
+      const baseOid = candidate === 'HEAD'
+        ? headOid
+        : (await resolveCommit(candidate)) || headOid
+      const baseIsHead = baseOid === null || baseOid === headOid
+
       let diffOutput = ''
       try {
-        const { stdout } = await execFileAsync(GIT, ['diff', diffBase], {
+        const { stdout } = await execFileAsync(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
         })
         diffOutput = stdout
       } catch (err) {
-        if (err.message && err.message.includes('unknown revision')) {
-          try {
-            const { stdout } = await execFileAsync(GIT, ['diff'], {
-              cwd: cwdReal,
-              maxBuffer: 2 * 1024 * 1024,
-              timeout: 10000,
-            })
-            diffOutput = stdout
-          } catch (innerErr) {
-            sendFn(ws, {
-              type: 'diff_result',
-              files: [],
-              error: innerErr.message || 'Failed to run git diff',
-            })
-            return
-          }
-        } else {
-          sendFn(ws, {
-            type: 'diff_result',
-            files: [],
-            error: err.message || 'Failed to run git diff',
-          })
-          return
-        }
+        // #7298 — HALF 2 of 2. Raw git stderr used to go to the client
+        // verbatim, which is what made every message above readable on the
+        // wire. Half 1 keeps the client's own string out of that stderr, but
+        // any git failure can name a path (the workspace, an object, a
+        // config), so the detail stays server-side and the wire gets a fixed
+        // string. Both halves are load-bearing; neither is redundant.
+        log.error(`git diff failed: ${truncateForLog(err.message)}`)
+        sendFn(ws, {
+          type: 'diff_result',
+          files: [],
+          error: 'Failed to run git diff',
+        })
+        return
       }
 
-      // Also get staged changes if diffBase is HEAD
-      if (diffBase === 'HEAD') {
+      // Also get staged changes if the effective base is HEAD
+      if (baseIsHead) {
         try {
           const { stdout: stagedOutput } = await execFileAsync(GIT, ['diff', '--cached', 'HEAD'], {
             cwd: cwdReal,
@@ -736,10 +817,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         error: null,
       })
     } catch (err) {
+      // #7298 — the last raw-message branch, and the one that names the
+      // workspace without any help from the client: this catch wraps
+      // `resolveSessionCwd`, whose `realpath()` throws
+      // `ENOENT: no such file or directory, realpath '<cwdReal>'` when the
+      // session cwd is gone (removed worktree, unmounted volume, rename).
+      // That is the same `cwdReal` leak the issue is about, reachable by a
+      // bound client sending a bare `get_diff` with no crafted base at all.
+      log.error(`getDiff failed: ${truncateForLog(err.message)}`)
       sendFn(ws, {
         type: 'diff_result',
         files: [],
-        error: err.message || 'Unknown error',
+        error: 'Failed to run git diff',
       })
     }
   }

@@ -405,22 +405,130 @@ The field is unconstrained on the wire: `GetDiffSchema` is
 `z.object({ type: z.literal('get_diff') }).passthrough()`, so nothing upstream
 narrows it either.
 
-**The fix closes the leading-dash route and only that.** Said plainly because
-the first draft of this entry did not: `:` and `/` are both in the charset
-allowlist, and git's stderr is still forwarded verbatim, so a path oracle
-needing no dash at all survives —
+**`#7290`'s fix closed the leading-dash route and only that.** Said plainly
+because the first draft of this entry did not: `:` and `/` were both in the
+charset allowlist, and git's stderr was still forwarded verbatim, so a path
+oracle needing no dash at all survived it —
 
 ```
 base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk, but not in 'HEAD'
 base='HEAD:absent'       -> fatal: path 'absent' does not exist in 'HEAD'
-base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository at '<cwdReal>'
 base='/no/such/file'     -> fatal: ambiguous argument …
 ```
 
-— which is pre-existing, tracked separately, and needs `rev-parse --verify`
-plus not forwarding raw git stderr. A guard entry that overstates its own
-reach is the same defect in miniature, which is why it is corrected here
-rather than left to read as sealed.
+A guard entry that overstates its own reach is the same defect in miniature,
+which is why it was corrected here rather than left to read as sealed.
+
+**That surviving route is now closed too — `#7298`.** The lesson it adds is
+about the shape of the guard, not about one more character in a class: **a
+charset allowlist is a narrowing, never a decision.** It cannot tell a
+revision from a path, so every round of it is a round of guessing which
+characters a path needs — and `HEAD:<path>` needs none that a branch name does
+not. The fix stops pattern-matching the base and **resolves** it instead:
+
+```js
+git rev-parse --verify --quiet <base>^{commit}
+```
+
+Only a revision naming a real commit in *this* repo reaches `git diff`;
+anything else falls back to `HEAD` — the pre-existing contract for an unusable
+base — without git ever being asked the client's question. `--verify --quiet`
+is silent on failure (exit 1, empty stderr, for all four probes above), so the
+resolution step is not itself an oracle. `:` came out of the charset in the
+same change, because `<rev>:<path>` names a blob and never a commit.
+
+**The second half was not optional, and neither was the first.** Raw git
+stderr no longer goes to the client at all — the wire gets a fixed
+`'Failed to run git diff'` and the detail is logged server-side — because half
+1 keeps only the *client's own string* out of git's error, while any git
+failure can still name a path of its own (the workspace, an object, a config).
+`base='/etc/passwd'` leaked `cwdReal`, the daemon's absolute workspace path,
+through exactly that channel.
+
+**Half 2 first went into the branch the issue had measured, and only that
+one** — the shape this catalogue calls *a guard wired to only some of its
+callers*. `getDiff` has three reply branches that carried a raw `err.message`,
+and the fix reached one. The other two survived a review that had the issue
+open in front of it, because the issue named the `git diff` catch by name and
+the sweep was never widened past it. The sharper of the two needs **no crafted
+base at all**: the function's outer catch wraps `resolveSessionCwd`, whose
+`realpath()` throws
+
+```
+ENOENT: no such file or directory, realpath '<cwdReal>'
+```
+
+once the session cwd is gone (a removed worktree, an unmounted volume, a
+rename) — the same `cwdReal` on the wire that the issue is about, reachable by
+a bound share-a-session client sending a bare `get_diff`. The third, the
+`rev-parse --git-dir` preflight, forwarded git's stderr for every non-128
+failure. **When a fix is "stop forwarding X", its unit is the reply surface,
+not the line the reporter happened to measure.**
+
+The two halves overlap on the probes above, which is why **one test cannot
+prove both** and the suite in `tests/ws-server-file-ops.test.js` isolates them
+separately — the recurring mistake this document is about. Drop half 2 and the
+two `HEAD:<path>` replies still differ from the DEFAULT reply, so the negative
+control asserts equality with the no-base reply, not merely with each other.
+Drop half 1 and the two replies become equal — the oracle closed by *scrubbing
+the message* rather than by refusing to ask — so a second test forces a git
+failure half 1 cannot pre-empt (a diff over the 2MB `maxBuffer`) and pins the
+error string. Both mutations were run and both go red.
+
+**And a mutation that reverts two changes at once cannot say which one the
+tests were pinning.** "Half 1" was really two independent edits — dropping `:`
+from the charset, and resolving with `rev-parse` — reverted together as a
+unit, which went red and read as proof of both. The finer mutation says
+otherwise: restore *only* the `rev-parse` bypass, leave the charset narrowed,
+and the whole suite is **green**, because every probe in it is a `HEAD:<path>`
+or an absolute path, and the charset alone already diverts those to the HEAD
+fallback. The load-bearing half — the one the entry above argues *is* the
+lesson — was the untested one, and a later "the charset already handles this"
+cleanup would have deleted it against a green suite.
+
+The observable that separates them is a base that passes the charset, names no
+commit, and **does** name a file, which git then reads as a pathspec
+(git 2.55.0):
+
+```
+git diff --name-only            -> file.txt, second.txt
+git diff --name-only file.txt   -> file.txt          (exit 0, narrower reply)
+```
+
+Resolution refuses that question and falls back to the full HEAD diff; the
+charset never sees it. A test pins the equality, and it goes red under the
+bypass. **Mutate one edit at a time, and when a "half" turns out to be two
+things, the mutation list grows to match.**
+
+**The third gate then repeated the shape one layer along: its test asserted the
+LOG LINE, and the log line is not the gate.** `MAX_DIFF_BASE_LENGTH` is two
+pieces of code — a `log.warn` that reports an oversized `base`, and a
+`rawBase.length <= MAX_DIFF_BASE_LENGTH &&` conjunct that keeps the value out
+of both `rev-parse` argvs — and only the first is observable from a test that
+reads the log. Delete the conjunct alone and the warn still fires, the reply is
+still the HEAD fallback, and the suite is **green** with the bound gone.
+Success and not-checking were the same observable *again*, one commit after the
+entry above was written about it.
+
+Nothing on the wire can separate them, because closing the oracle is precisely
+what makes an oversized base and an unresolvable one indistinguishable, and
+`createReaderOps` has no exec seam to watch the argv with (#7871). The probe
+that works is one that is oversized **and** resolvable: `<ref>^0` names the
+commit `<ref>` itself and *chains*, so a real branch padded with `^0`×130 is a
+264-character revision made only of charset-allowed characters, carrying no
+leading dash, that git resolves to a real non-HEAD commit (git 2.55.0). Over
+the bound it must be indistinguishable from the HEAD fallback; without the
+conjunct it resolves to `HEAD~1` and the reply changes. **When a guard both
+logs and decides, a test that reads the log has pinned the logging.** And note
+the honest cost the probe exposes: the bound *can* reject a legitimate
+revision — "rejects nothing legitimate" is a statement about real-world ref
+names, not about git's grammar.
+
+And do not "harden" this by appending a `--` to the diff argv: that turns an
+unresolvable base's error into `fatal: bad revision`, which the old
+`unknown revision` recovery predicate missed — a *narrower* recovery wearing
+the look of a fix. `rev-parse` removes the string-matching predicate entirely.
 
 **The obvious fix does not work, and the issue itself proposed it.** Appending
 a `--` separator — `['diff', diffBase, '--']` — is ineffective, because `--`
