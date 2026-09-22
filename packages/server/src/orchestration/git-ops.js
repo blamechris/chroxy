@@ -167,6 +167,17 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
   // and total byte caps with explicit truncation markers so a small worker
   // model isn't handed a 2MB patch.
   const computeCappedDiff = async ({ repoDir, baseSha, headRef = 'HEAD', maxBytes = 65_536, maxFileBytes = 8_192 }) => {
+    // #7342: these were the only ref slots in this module that skipped the
+    // guard every neighbour applies. `<base>..<head>` is a positional REVISION,
+    // and a `--` separator does NOT protect one (measured in
+    // utils/argv-safety.js: `git diff -O/etc/nope --` still reads the
+    // orderfile), so rejection is the only correct shape. Both values come
+    // from captureHead()'s rev-parse output today — this closes the gap before
+    // a caller wires a client-supplied ref in. Unlike a git failure (returned
+    // as a structured result below), an unsafe ref is a programming error and
+    // throws.
+    assertSafeRef(baseSha, 'base ref')
+    assertSafeRef(headRef, 'head ref')
     const statR = await run(['-C', repoDir, 'diff', '--stat', `${baseSha}..${headRef}`], { maxBuffer: DIFF_MAX_BUFFER })
     const patchR = await run(['-C', repoDir, 'diff', `${baseSha}..${headRef}`], { maxBuffer: DIFF_MAX_BUFFER })
     const stat = statR.ok ? statR.stdout : ''
@@ -269,6 +280,9 @@ export function createGitOps({ git = GIT, now = () => Date.now(), worktreesRoot 
 
   const createIntegrationWorktree = async ({ repoDir, runId, branchName, baseSha }) => {
     assertSafeRef(branchName, 'branch')
+    // #7342: `baseSha` is the final positional operand of `worktree add`, so a
+    // dash-leading value would be read as an option there too.
+    assertSafeRef(baseSha, 'base ref')
     const worktreePath = integrationWorktreePath(runId)
     fs.mkdirSync(runWorktreesDir(runId), { recursive: true })
     await runOrThrow(['-C', repoDir, 'worktree', 'add', '-b', branchName, worktreePath, baseSha])

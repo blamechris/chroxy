@@ -14,7 +14,9 @@ import {
 import { BILLING_CLASSES } from './billing-class.js'
 
 /**
- * Manages a Gemini CLI session using `gemini -p --output-format stream-json`.
+ * Manages a Gemini CLI session using
+ * `gemini --prompt=<text> --output-format stream-json`. The prompt is
+ * `=`-joined to its flag, never a second token — see `_buildArgs` (#7342).
  *
  * Implements the same EventEmitter interface as SdkSession/CliSession so
  * SessionManager and WsServer work identically regardless of provider.
@@ -338,10 +340,25 @@ export class GeminiSession extends JsonlSubprocessSession {
   // JsonlSubprocessSession overrides
   // ------------------------------------------------------------------
 
+  // #7342/#7291 — the prompt and the model id are `=`-JOINED to their long
+  // flags, never passed as a second token. `text` is the raw client chat
+  // message; gemini-cli's yargs declares `-p/--prompt` and `-m/--model` with
+  // `requiresArg`, which REFUSES a dash-leading value in the two-token form.
+  // Measured against gemini-cli 0.46.0:
+  //
+  //   gemini -p "- first bullet"        → "Not enough arguments following: p", exit 1
+  //   gemini … -m "--yolo"              → "Not enough arguments following: m", exit 1
+  //   gemini "--prompt=- first bullet"  → parses, value taken literally
+  //   gemini "--prompt=--version"       → runs the turn; does NOT print a version
+  //
+  // So this fails closed rather than open — but it is a live functional bug:
+  // any message starting with `-` (a markdown bullet) errored the turn out.
+  // `--` is NOT the fix here and would make it worse: an end-of-options
+  // separator BREAKS a `requiresArg` flag (see utils/argv-safety.js case 3).
   _buildArgs(text) {
-    const args = ['-p', text, '--output-format', 'stream-json', '-y']
+    const args = [`--prompt=${text}`, '--output-format', 'stream-json', '-y']
     if (this.model) {
-      args.push('-m', this.model)
+      args.push(`--model=${this.model}`)
     }
     return args
   }

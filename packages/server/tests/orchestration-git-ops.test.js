@@ -115,6 +115,33 @@ test('createBranch / mergeNoFf / deleteBranch reject an option-injecting ref nam
   await assert.rejects(() => gitOps.createBranch(wt, 'bad\nname'), /unsafe branch/)
 })
 
+// #7342: `baseSha` and `headRef` were the only ref slots in this module that
+// did NOT go through assertSafeRef, while every neighbour did. They are
+// positional REVISIONS (`<base>..<head>`, and the final operand of
+// `worktree add`), and `--` does not protect a revision — git measured in
+// utils/argv-safety.js still honours `-O<file>` in `git diff ... --`. Today
+// both come from `captureHead()` (git's own rev-parse output), so this is
+// defence-in-depth rather than a reachable hole; it closes the inconsistency
+// before a future caller wires a client-supplied ref into either slot.
+test('computeCappedDiff / createIntegrationWorktree reject an option-injecting ref (#7342)', async () => {
+  const { gitOps } = mkGitOps()
+  const repo = mkRepo()
+  await assert.rejects(
+    () => gitOps.computeCappedDiff({ repoDir: repo, baseSha: '-O/etc/passwd' }),
+    /unsafe base ref/)
+  await assert.rejects(
+    () => gitOps.computeCappedDiff({ repoDir: repo, baseSha: 'HEAD', headRef: '--output=/tmp/pwned' }),
+    /unsafe head ref/)
+  await assert.rejects(
+    () => gitOps.computeCappedDiff({ repoDir: repo, baseSha: 'HEAD', headRef: 'bad\nref' }),
+    /unsafe head ref/)
+  await assert.rejects(
+    () => gitOps.createIntegrationWorktree({
+      repoDir: repo, runId: 'run_evil', branchName: 'chroxy/orch/run_evil/integration', baseSha: '--detach',
+    }),
+    /unsafe base ref/)
+})
+
 // --- auto-commit -----------------------------------------------------------
 
 test('autoCommit uses the orch identity, does not leak to config, and survives removal', async () => {

@@ -18,13 +18,18 @@
  *      and it sits in a POSITIONAL slot → do not reject; terminate option
  *      parsing with a `--` separator placed BEFORE the value, and put every
  *      flag the command needs BEFORE the `--`. This is what the `claude`
- *      web-task argv does.
+ *      web-task argv does, and (since #7342) what `buildCodexArgs` does on
+ *      both the first-turn and `resume` forms of `codex exec` — including the
+ *      resume SESSION_ID, which is itself a positional and so must also
+ *      precede the separator.
  *
  *   3. The value legitimately can, and it is the ARGUMENT TO A NAMED FLAG that
  *      the CLI declares as requiring one → `=`-join the long form,
  *      `--flag=<value>`, binding the value to the flag in a single token.
- *      Neither (1) nor (2) works here. Measured against gemini-cli 0.45.2,
- *      whose `-p/--prompt` and `-m/--model` use yargs `requiresArg`:
+ *      Neither (1) nor (2) works here. This is what `GeminiSession._buildArgs`
+ *      does for BOTH its prompt and its model id (since #7342). Measured
+ *      against gemini-cli 0.45.2 and re-measured on 0.46.0, whose `-p/--prompt`
+ *      and `-m/--model` use yargs `requiresArg`:
  *
  *          gemini -p "- first bullet"       usage error, exit 1
  *          gemini -p -- --list-extensions   usage error, exit 1  (`--` BREAKS it)
@@ -83,6 +88,28 @@ export function assertSafeArgvValue(value, kind = 'value') {
   if (!isSafeArgvValue(value)) {
     throw new Error(`unsafe ${kind}: ${JSON.stringify(value)}`)
   }
+}
+
+/**
+ * A git commit SHA, full or abbreviated — the shape of fix (1) for the one
+ * datum this repo persists as a ref: `<config dir>/known-good-ref`, written by
+ * `chroxy deploy` and read back by both `chroxy deploy` and the supervisor's
+ * rollback path.
+ *
+ * Deliberately stricter than {@link isSafeArgvValue}: the datum is always a
+ * SHA that chroxy wrote itself, so hex-only rejects not just `--exit-code` and
+ * `-O/etc/passwd` but every branch name, refspec and revision expression a
+ * corrupted file could otherwise smuggle into a `git` argv. Short SHAs of ≥ 7
+ * chars are accepted to match the supervisor's historical behaviour.
+ *
+ * Lives here, and NOT copied to a second call site: this predicate had one
+ * implementation inline in supervisor.js, and #7296 added the second consumer.
+ *
+ * @param {unknown} ref
+ * @returns {boolean}
+ */
+export function isGitShaRef(ref) {
+  return typeof ref === 'string' && /^[0-9a-f]{7,40}$/i.test(ref)
 }
 
 /**

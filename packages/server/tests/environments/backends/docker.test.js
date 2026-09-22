@@ -72,6 +72,40 @@ describe('DockerBackend.createEnvironment()', () => {
     assert.ok(runCall.args.includes('node:22-slim'))
   })
 
+  it('terminates docker option parsing immediately before the image positional (#7296)', async () => {
+    // Measured against Docker 29.7.2: `docker run -- --help sleep infinity`
+    // does NOT print run's help (it proceeds to the daemon with `--help` as
+    // the image), while `docker run --help sleep infinity` does. So the `--`
+    // is honoured — but only for what FOLLOWS it, which is why this asserts
+    // the separator's POSITION rather than its mere presence.
+    const mockExec = createMockExecFile({
+      results: { run: 'dash-ctr\n', exec: '/usr/local\n' },
+    })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.createEnvironment({
+      envId: 'env-dash',
+      cwd: '/home/user/project',
+      image: 'node:22-slim',
+      memoryLimit: '2g',
+      cpuLimit: '2',
+      containerUser: 'chroxy',
+    })
+
+    const runCall = mockExec.calls.find(c => c.args[0] === 'run')
+    const dashIndex = runCall.args.indexOf('--')
+    assert.notEqual(dashIndex, -1, 'docker run argv must carry a bare -- separator')
+    assert.deepEqual(
+      runCall.args.slice(dashIndex),
+      ['--', 'node:22-slim', 'sleep', 'infinity'],
+      // An EARLIER bare `--` fails this too, and that matters: it would
+      // terminate option parsing ahead of ours, turning chroxy's own
+      // hardening flags into positionals. `indexOf` would find it, and the
+      // slice would then carry those tokens rather than just these four.
+      'the separator must sit IMMEDIATELY before the image — a later -- protects nothing'
+    )
+  })
+
   it('names the container chroxy-env-{envId}', async () => {
     const mockExec = createMockExecFile({
       results: { run: 'named-ctr\n', exec: '/usr/local\n' },

@@ -106,8 +106,15 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
  * check rather than a platform assumption.
  *
  * Throws when the base is a symlink, is not ours, or is group/other-writable.
- * Callers are expected to treat that as "no sidecar" and degrade, not to fail
- * session start.
+ * What a caller DOES with that refusal is the caller's call, and the two
+ * callers deliberately differ (#7372): `CliSession` degrades to env-var-only,
+ * because its base carries only the permission-mode sidecar and losing
+ * mid-session mode switching beats losing the session. `ClaudeTuiSession`
+ * REFUSES to start — its base carries the whole hook pipeline (settings.json,
+ * the hook payloads AND the sidecar), so running on would be a session that
+ * reports success while the permission floor is silently unenforced. Do not
+ * read either as the contract for a third caller; decide it from what the
+ * base holds.
  *
  * @param {string} base Directory to create or adopt.
  * @returns {string} `base`, once it is safe to write into.

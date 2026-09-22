@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
+import { CONTAINER_CONFINE_OK } from '../src/built-in-tools/tool-transforms.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
 
@@ -64,6 +65,18 @@ function execFileStub(byCmd = {}) {
  * Stub DockerBackend that captures `execInEnvironment` calls and returns
  * a canned `{ stdout, stderr }`. Lets us assert the exact bash commands
  * the docker-byok tool dispatcher constructs for each tool.
+ *
+ * #7354 — the canned stdout is prefixed with the confinement OK sentinel WHEN
+ * AND ONLY WHEN the command the daemon sent actually carries the in-container
+ * confinement preamble. A real container running that script prints the
+ * sentinel; one running a script without it does not. Emitting it
+ * unconditionally would make the stub lie in the one direction that matters —
+ * a Glob/Grep/Read that lost its guard would still look guarded here.
+ *
+ * Symlink resolution itself is NOT emulated. That question is answered against
+ * real symlinks and a real bash in `docker-byok-symlink-containment.test.js`;
+ * this file stays what it has always been, an assertion about the command
+ * shapes the dispatcher builds.
  */
 function backendStub({ execResponses = {}, defaultResponse = { stdout: '', stderr: '' } } = {}) {
   const calls = []
@@ -73,7 +86,12 @@ function backendStub({ execResponses = {}, defaultResponse = { stdout: '', stder
       calls.push({ containerId, ...opts })
       const matcher = Object.keys(execResponses).find((needle) => opts.cmd.includes(needle))
       const resp = matcher ? execResponses[matcher] : defaultResponse
-      return { stdout: resp.stdout || '', stderr: resp.stderr || '' }
+      const body = resp.stdout || ''
+      const confined = opts.cmd.includes(CONTAINER_CONFINE_OK)
+      return {
+        stdout: confined ? `${CONTAINER_CONFINE_OK}\n${body}` : body,
+        stderr: resp.stderr || '',
+      }
     },
   }
 }
@@ -439,7 +457,18 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(result.isError, false)
     assert.match(result.content, /file contents here/)
     assert.equal(_dockerBackend.calls.length, 1)
-    assert.match(_dockerBackend.calls[0].cmd, /sed -n '1,2000p' '\/workspace\/foo\.txt'/)
+    // #7354 — the slice runs against `"$__cx_target"`, the path the
+    // in-container preamble RESOLVED, not the lexical `/workspace/foo.txt` it
+    // was handed. The lexical path is still what gets resolved, and it is
+    // asserted as the preamble's argument below.
+    assert.ok(
+      /sed -n '1,2000p' "\$__cx_target"/.test(_dockerBackend.calls[0].cmd),
+      'Read must slice the resolved path',
+    )
+    assert.ok(
+      _dockerBackend.calls[0].cmd.includes(`__cx_resolve '/workspace/foo.txt'`),
+      'Read must resolve the remapped path in-container',
+    )
     assert.match(_dockerBackend.calls[0].cmd, /head -c/)
     // PR #5021 review fix (Copilot, comment id 3348029235): the awk
     // pass formats each line as 5-space-padded line number + arrow,

@@ -6,6 +6,63 @@ import { CloudflareTunnelAdapter } from '../tunnel/index.js'
 import { writeFileRestricted } from '../platform.js'
 import { configDir, configFile, prompt } from './shared.js'
 
+/**
+ * #7296 — writer-side check on the interactively-prompted tunnel name.
+ *
+ * `config.tunnelName` lands in three bare positional slots
+ * (`tunnel create <name>`, `tunnel route dns <name> <hostname>`, and
+ * `tunnel run … <name>` in tunnel/cloudflare.js). Each of those argvs now
+ * carries a `--` separator — that is the guard that actually covers the slots,
+ * and it covers them whatever wrote the value.
+ *
+ * This check is a SECOND layer over ONE of the value's three producers, and
+ * saying so precisely matters here: claiming more coverage than the code has
+ * is the defect class this whole PR is closing. The three producers are the
+ * interactive `chroxy tunnel setup` prompt (below), `CHROXY_TUNNEL_NAME`
+ * (config.js's env map), and `--tunnel-name <name>` (cli/shared.js). Only the
+ * prompt is checked. The other two are typed by the operator into their own
+ * shell or service file, so an option-shaped value there is self-inflicted and
+ * the separator is the appropriate — and sufficient — control; a reject there
+ * would break an operator whose pre-existing tunnel carries an exotic name,
+ * for no attacker they do not already outrank.
+ *
+ * Cloudflare tunnel names are alphanumerics plus `.`, `_` and `-`; requiring
+ * the FIRST character to be alphanumeric is what excludes the option shape.
+ *
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isValidTunnelName(name) {
+  return typeof name === 'string' &&
+    name.length <= 64 &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)
+}
+
+/**
+ * argv for `cloudflared tunnel create <name>`, with option parsing terminated
+ * immediately before the positional (#7296). Measured on cloudflared 2026.8.3
+ * with a bogus `--origincert`: `tunnel create --help` prints help,
+ * `tunnel create -- --help` does not.
+ *
+ * @param {string} tunnelName
+ * @returns {string[]}
+ */
+export function cloudflaredCreateArgv(tunnelName) {
+  return ['tunnel', 'create', '--', tunnelName]
+}
+
+/**
+ * argv for `cloudflared tunnel route dns <name> <hostname>`, with option
+ * parsing terminated immediately before the positionals (#7296).
+ *
+ * @param {string} tunnelName
+ * @param {string} hostname
+ * @returns {string[]}
+ */
+export function cloudflaredRouteDnsArgv(tunnelName, hostname) {
+  return ['tunnel', 'route', 'dns', '--', tunnelName, hostname]
+}
+
 export function registerTunnelCommand(program) {
   const tunnelCmd = program
     .command('tunnel')
@@ -51,9 +108,14 @@ async function setupCloudflare() {
 
   console.log('Step 2: Create a tunnel\n')
   const tunnelName = (await prompt('Tunnel name (default \'chroxy\'): ')) || 'chroxy'
+  if (!isValidTunnelName(tunnelName)) {
+    console.error(`\n❌ Invalid tunnel name: ${JSON.stringify(tunnelName.slice(0, 64))}`)
+    console.error('   Use letters, digits, \'.\', \'_\' or \'-\', starting with a letter or digit.')
+    process.exit(1)
+  }
 
   try {
-    execFileSync('cloudflared', ['tunnel', 'create', tunnelName], { stdio: 'inherit' })
+    execFileSync('cloudflared', cloudflaredCreateArgv(tunnelName), { stdio: 'inherit' })
   } catch {
     console.log(`\nTunnel '${tunnelName}' may already exist. Continuing...\n`)
   }
@@ -68,7 +130,7 @@ async function setupCloudflare() {
   }
 
   try {
-    execFileSync('cloudflared', ['tunnel', 'route', 'dns', tunnelName, hostname], { stdio: 'inherit' })
+    execFileSync('cloudflared', cloudflaredRouteDnsArgv(tunnelName, hostname), { stdio: 'inherit' })
   } catch {
     console.log('\nDNS route may already exist. Continuing...\n')
   }

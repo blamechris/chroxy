@@ -414,9 +414,46 @@ describe('CloudflareTunnelAdapter', () => {
       const result = await tunnel.start()
 
       assert.ok(capturedArgv)
-      assert.deepEqual(capturedArgv, ['tunnel', 'run', '--url', 'http://localhost:3000', 'chroxy'])
+      assert.deepEqual(capturedArgv, ['tunnel', 'run', '--url', 'http://localhost:3000', '--', 'chroxy'])
       assert.equal(result.httpUrl, 'https://chroxy.example.com')
       assert.equal(result.wsUrl, 'wss://chroxy.example.com')
+
+      await tunnel.stop()
+    })
+
+    it('terminates option parsing immediately before the tunnel-name positional (#7296)', async () => {
+      // `tunnelName` is operator config (config.js types it as a bare string
+      // with no pattern) landing in a BARE POSITIONAL slot, so an
+      // option-shaped value is read by cloudflared as a flag.
+      //
+      // Measured against cloudflared 2026.8.3, with a bogus --origincert so
+      // nothing reaches the account:
+      //   cloudflared tunnel run --help      → prints run's help
+      //   cloudflared tunnel run -- --help   → "error parsing tunnel ID"
+      // i.e. the `--` is honoured and the value becomes the NAME.
+      let capturedArgv = null
+      const mockSpawn = (argv) => {
+        capturedArgv = argv
+        return createNamedMockProcess()
+      }
+
+      const tunnel = new TestCloudflareAdapter({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        config: { tunnelName: '--config=/tmp/evil.yml', tunnelHostname: 'chroxy.example.com' },
+      })
+
+      await tunnel.start()
+
+      assert.ok(capturedArgv)
+      const dashIndex = capturedArgv.indexOf('--')
+      assert.notEqual(dashIndex, -1, 'argv must carry a bare -- separator')
+      assert.deepEqual(
+        capturedArgv.slice(dashIndex),
+        ['--', '--config=/tmp/evil.yml'],
+        'the separator must sit IMMEDIATELY before the name, with every flag ahead of it'
+      )
 
       await tunnel.stop()
     })

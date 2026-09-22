@@ -901,9 +901,10 @@ describe('CodexSession', () => {
   // `-m` / `-c model=...` flag when no model was supplied.
   // ---------------------------------------------------------------------------
   describe('buildCodexArgs()', () => {
-    it('always emits `exec <text> --json` as the first three args', () => {
+    it('always emits `exec --json` first and the text LAST, behind a `--` (#7342)', () => {
       const args = buildCodexArgs('hello', null)
-      assert.deepEqual(args.slice(0, 3), ['exec', 'hello', '--json'])
+      assert.deepEqual(args.slice(0, 2), ['exec', '--json'])
+      assert.deepEqual(args.slice(-2), ['--', 'hello'])
     })
 
     it('omits the -c model=... override when model is null', () => {
@@ -967,7 +968,10 @@ describe('CodexSession', () => {
         // it is a behaviour change wearing a hardening's clothes.
         for (const id of ['gpt-5-codex', 'gpt-5', 'gpt-4.1', 'gpt-4o', 'o1', 'o3', 'gpt-5.5']) {
           assert.equal(toTomlBasicString(id), `"${id}"`)
-          assert.equal(buildCodexArgs('hi', id).at(-1), `model="${id}"`)
+          // #7342 moved the prompt to the END behind a `--`, so the model
+          // override is read off its own flag rather than off the tail.
+          const args = buildCodexArgs('hi', id)
+          assert.equal(args[args.indexOf('-c') + 1], `model="${id}"`)
         }
       })
 
@@ -1121,8 +1125,13 @@ describe('CodexSession', () => {
         // SESSION_ID and PROMPT follow the `resume` subcommand
         const resumeIdx = args.indexOf('resume')
         assert.ok(resumeIdx > 0, 'resume subcommand must be present')
-        assert.equal(args[resumeIdx + 1], 'thread-abc-123')
-        assert.equal(args[resumeIdx + 2], 'continue')
+        // #7342: the SESSION_ID is still the first positional after `resume`,
+        // but every flag now precedes the `--` terminator, so the id sits
+        // immediately before it and the PROMPT immediately after.
+        const sepIdx = args.indexOf('--')
+        assert.ok(sepIdx > resumeIdx, 'the `--` terminator follows the resume subcommand')
+        assert.equal(args[sepIdx - 1], 'thread-abc-123')
+        assert.equal(args[sepIdx + 1], 'continue')
         assert.ok(args.includes('--json'))
         assert.ok(args.includes('--skip-git-repo-check'))
         const sandboxIdx = args.indexOf('--sandbox')
@@ -1151,23 +1160,106 @@ describe('CodexSession', () => {
         const args = buildCodexArgs('continue', 'o3', 'thread-abc')
         const resumeIdx = args.indexOf('resume')
         assert.ok(resumeIdx > 0)
-        assert.equal(args[resumeIdx + 1], 'thread-abc')
+        // #7342: the id is the last token before the `--` terminator.
+        assert.equal(args[args.indexOf('--') - 1], 'thread-abc')
         const cIdx = args.indexOf('-c')
         assert.equal(args[cIdx + 1], 'model="o3"')
+        assert.ok(cIdx < args.indexOf('--'), '-c must stay BEFORE the terminator to remain an option')
       })
 
       it('falls back to first-turn form when threadId is null', () => {
         const args = buildCodexArgs('hi', null, null)
         assert.equal(args[0], 'exec')
-        assert.equal(args[1], 'hi')
+        assert.deepEqual(args.slice(-2), ['--', 'hi'])
         assert.ok(!args.includes('resume'))
       })
 
       it('falls back to first-turn form when threadId is omitted', () => {
         const args = buildCodexArgs('hi', null)
         assert.equal(args[0], 'exec')
-        assert.equal(args[1], 'hi')
+        assert.deepEqual(args.slice(-2), ['--', 'hi'])
         assert.ok(!args.includes('resume'))
+      })
+    })
+
+    // ---------------------------------------------------------------------
+    // #7342 / #7291 — `text` is the raw client chat message, the most directly
+    // attacker-controlled string in the daemon, and it sat in a BARE POSITIONAL
+    // slot on both branches. Measured against codex-cli 0.154.0:
+    //
+    //   codex exec "--sandbox=bogus-mode" --json …
+    //     → error: invalid value 'bogus-mode' for '--sandbox'  (exit 2)
+    //   codex exec "- first bullet" --json …
+    //     → error: unexpected argument '- ' found
+    //       tip: to pass '- ' as a value, use '-- - '          (exit 2)
+    //   codex exec --sandbox read-only resume thr-1 "--thread-source=x" --json …
+    //     → the token is CONSUMED as an option; the prompt slot falls empty and
+    //       codex drops to "Reading prompt from stdin..."     (exit 1)
+    //
+    // `resume` declares `--dangerously-bypass-approvals-and-sandbox`, so that
+    // last shape is a sandbox-escape primitive, not just a parse nuisance. A
+    // leading dash is LEGITIMATE chat input, so the fix is a `--` terminator
+    // (argv-safety.js case 2), not rejection — which means every flag codex
+    // needs has to move BEFORE it, since everything after `--` is positional.
+    // ---------------------------------------------------------------------
+    describe('the prompt sits behind a `--` option terminator (#7342, #7291)', () => {
+      const HOSTILE = [
+        '- first bullet',                             // legitimate markdown input
+        '--dangerously-bypass-approvals-and-sandbox', // declared on exec AND resume
+        '--sandbox=danger-full-access',
+        '--thread-source=injected',
+        '-c',
+      ]
+
+      for (const threadId of [null, 'thread-abc']) {
+        const form = threadId ? 'resume' : 'first-turn'
+
+        it(`[${form}] terminates option parsing immediately before the prompt`, () => {
+          const args = buildCodexArgs('hi', 'o3', threadId)
+          const sepIdx = args.indexOf('--')
+          assert.ok(sepIdx > 0, `a \`--\` terminator must be present: ${JSON.stringify(args)}`)
+          assert.equal(args[sepIdx + 1], 'hi', 'the prompt must sit immediately after the terminator')
+          assert.equal(
+            args.length, sepIdx + 2,
+            `nothing may follow the prompt — everything after \`--\` is positional: ${JSON.stringify(args)}`,
+          )
+        })
+
+        it(`[${form}] keeps every flag codex needs BEFORE the terminator`, () => {
+          const args = buildCodexArgs('hi', 'o3', threadId)
+          const sepIdx = args.indexOf('--')
+          for (const flag of ['--json', '--skip-git-repo-check', '--sandbox', '-c']) {
+            const idx = args.indexOf(flag)
+            assert.ok(idx >= 0, `${flag} must still be passed`)
+            assert.ok(idx < sepIdx, `${flag} (idx ${idx}) must precede \`--\` (idx ${sepIdx}) or codex reads it as text`)
+          }
+          // The #3867 invariant survives the reshuffle: --sandbox is declared
+          // only on the parent `exec`, never on `resume`.
+          if (threadId) {
+            assert.ok(args.indexOf('--sandbox') < args.indexOf('resume'),
+              '--sandbox must stay before the resume subcommand')
+          }
+        })
+
+        it(`[${form}] carries a flag-shaped prompt through verbatim, after the terminator`, () => {
+          for (const hostile of HOSTILE) {
+            const args = buildCodexArgs(hostile, null, threadId)
+            const sepIdx = args.indexOf('--')
+            assert.equal(args[sepIdx + 1], hostile, `prompt must survive verbatim: ${JSON.stringify(args)}`)
+            assert.equal(args.length, sepIdx + 2, `prompt must be the LAST token: ${JSON.stringify(args)}`)
+            assert.equal(
+              args.slice(0, sepIdx).includes(hostile), false,
+              `the prompt must never appear in an option-parsed position: ${JSON.stringify(args)}`,
+            )
+          }
+        })
+      }
+
+      it('emits exactly ONE terminator (a `--` prompt is data, not a second separator)', () => {
+        const args = buildCodexArgs('--', null)
+        assert.equal(args.filter((a) => a === '--').length, 2, 'the terminator plus the prompt itself')
+        assert.equal(args.at(-1), '--')
+        assert.equal(args.at(-2), '--')
       })
     })
 
@@ -1416,7 +1508,7 @@ describe('CodexSession', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       const first = session._buildArgs('hi')
       assert.equal(first[0], 'exec')
-      assert.equal(first[1], 'hi')
+      assert.deepEqual(first.slice(-2), ['--', 'hi'])
       assert.ok(!first.includes('resume'))
 
       session._processJsonlLine(
@@ -1428,8 +1520,12 @@ describe('CodexSession', () => {
       assert.equal(second[0], 'exec')
       const resumeIdx = second.indexOf('resume')
       assert.ok(resumeIdx > 0, 'resume subcommand present on subsequent turns')
-      assert.equal(second[resumeIdx + 1], 't-1234')
-      assert.equal(second[resumeIdx + 2], 'continue')
+      // #7342: SESSION_ID is the last token before the `--` terminator, the
+      // prompt the first after it.
+      const sepIdx = second.indexOf('--')
+      assert.ok(sepIdx > resumeIdx, 'the terminator follows the resume subcommand')
+      assert.equal(second[sepIdx - 1], 't-1234')
+      assert.equal(second[sepIdx + 1], 'continue')
     })
 
     it('result event includes the captured sessionId (was null pre-#3865)', () => {
