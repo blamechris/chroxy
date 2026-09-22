@@ -2447,7 +2447,7 @@ the test itself computed, ask what production seam would have to be wrong for it
 to fire — if there isn't one, it is decoration. And read a mutation's output, not
 just its exit code — `!= 0` hides which assertion actually fired.
 
-### 34. The containment check that could not see the filesystem it guarded — `#7354`
+### 35. The containment check that could not see the filesystem it guarded — `#7354`
 
 Entry 15's fix was right about **where** to check (the output, not the input) and
 still could not close the hole, because it checked the output in the wrong
@@ -2502,6 +2502,19 @@ container reply is an error, never "no matches". The lexical checks stay as the
 first layer: they need nothing from the guest's userland, and the two are
 independent (one reads the string, the other reads the filesystem), so this is not
 the "two readings, one shared rule" pairing where agreement proves nothing.
+
+One half of the fix re-created the shape in miniature and had to be paid for
+separately. A Glob MATCH that resolves outside is withheld rather than refused —
+`isError:false`, "No matches" — because telling the model "matched, but outside"
+is an existence oracle on a tool `acceptEdits` auto-approves. That is the right
+call for the model and the wrong one for the operator: the successful outcome of
+the guard was byte-identical to the outcome of no guard at all, on the only path
+where nothing else is observable. The container now counts what it withheld and
+prints the count as a trailer the host strips and logs (`[container-confine]`),
+so the guard firing has a trace. Counts, never paths — logging the names and
+link targets would move the disclosure rather than close it. **A guard that can
+only ever report success needs a channel that is not the caller's**; when the
+answer cannot go to the requester, it still has to go somewhere.
 
 **Guard against it:** when a guard's predicate names state — a file, a link, a
 permission — ask which process can actually observe that state. If it is not the

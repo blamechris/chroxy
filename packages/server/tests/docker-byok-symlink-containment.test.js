@@ -11,8 +11,11 @@ import {
   CONTAINER_CONFINE_OK,
   CONTAINER_CONFINE_ESCAPE,
   CONTAINER_CONFINE_ERROR,
+  CONTAINER_CONFINE_WITHHELD,
   parseConfinedContainerStdout,
+  splitWithheldTrailer,
 } from '../src/built-in-tools/tool-transforms.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 const pexec = promisify(execFile)
 
@@ -45,20 +48,6 @@ const pexec = promisify(execFile)
 
 /** Windows has no bash and no POSIX symlink semantics — see project memory. */
 const POSIX_ONLY = process.platform === 'win32'
-
-/**
- * bash 3.2 (still the system bash on macOS) has no `globstar` and writes
- * `shopt: globstar: invalid shell option name` to stderr. The container's
- * image ships bash 5, where the option exists and the line does not. Dropping
- * exactly that line — and nothing else — keeps the local harness honest about
- * every OTHER thing the script may write to stderr.
- */
-function stripBash32GlobstarNoise(stderr) {
-  return stderr
-    .split('\n')
-    .filter((l) => !/shopt: globstar: invalid shell option name/.test(l))
-    .join('\n')
-}
 
 let fixtureRoot
 let workspaceDir
@@ -104,8 +93,14 @@ function bashBackend() {
       assert.ok(parts.length > 1, 'fixture rewrite matched no /workspace in the command')
       const local = parts.join(workspaceDir)
       try {
+        // stderr is passed through UNFILTERED. An earlier draft stripped
+        // bash 3.2's `shopt: globstar: invalid shell option name` here, which
+        // hid a real defect: that line made the caller's "no stdout AND
+        // stderr" branch turn every empty Glob into `Glob failed`. The script
+        // silences the option itself now (`2>/dev/null`), so there is nothing
+        // to strip, and a harness that filtered would have kept it hidden.
         const { stdout, stderr } = await pexec('bash', ['-c', local], { maxBuffer: 8 << 20 })
-        return { stdout, stderr: stripBash32GlobstarNoise(stderr) }
+        return { stdout, stderr }
       } catch (err) {
         // Mirrors execInEnvironment's contract closely enough for these tools:
         // it rejects on a non-zero exit. Every path the fix adds exits 0.
@@ -385,6 +380,118 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
     }
   })
 
+  it('the Glob script silences globstar so an old bash cannot turn containment into an error', async () => {
+    // A guard for a defect that is INVISIBLE on the CI runner: bash 5 accepts
+    // `globstar` silently, so dropping the redirect reds nothing on Linux. The
+    // image is the variable, not the runner — assert the emitted text.
+    const backend = bashBackend()
+    const session = buildSession(backend)
+    await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern: 'src/*.ts' } })
+    const cmd = backend.calls[0].cmd
+    assert.ok(cmd.includes('shopt -s globstar 2>/dev/null'), 'globstar is not silenced')
+    assert.ok(cmd.includes('shopt -s nullglob'), 'nullglob lost')
+  })
+
+  // ── The operator's trace for a silent withhold (#7354) ───────────────────
+
+  it('a withheld match is silent to the MODEL and logged for the OPERATOR', async () => {
+    // The whole reason the withhold is silent is the no-oracle rule, and the
+    // whole reason that is not false safety is this line. A containment whose
+    // only successful outcome is an ordinary success is indistinguishable from
+    // one that was never wired up.
+    const lines = []
+    const listener = (entry) => lines.push(typeof entry === 'string' ? entry : (entry?.msg ?? JSON.stringify(entry)))
+    addLogListener(listener)
+    try {
+      const backend = bashBackend()
+      const session = buildSession(backend)
+      session._sourceSessionId = 'sess-7354'
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'esc/*' },
+      })
+      assert.equal(result.isError, false)
+      assert.match(result.content, /^No matches for/)
+      const hit = lines.find((l) => l.includes('[container-confine]') && l.includes('withheld'))
+      assert.ok(hit, `no containment log line; saw ${JSON.stringify(lines)}`)
+      assert.ok(/withheld 2 match\(es\)/.test(hit), `wrong count in ${JSON.stringify(hit)}`)
+      assert.ok(hit.includes('session=sess-7354'), 'log line lost the session id')
+      assert.ok(hit.includes('container=CONTAINER_73'), 'log line lost the container id')
+      // The thing containment refused must not reappear in the log.
+      assert.equal(hit.includes('secret'), false, 'logged a withheld path')
+      assert.equal(hit.includes('/etc'), false, 'logged a resolved target')
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('a clean Glob logs nothing and never forwards the withheld trailer', async () => {
+    const lines = []
+    const listener = (entry) => lines.push(typeof entry === 'string' ? entry : (entry?.msg ?? JSON.stringify(entry)))
+    addLogListener(listener)
+    try {
+      const backend = bashBackend()
+      const session = buildSession(backend)
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Glob',
+        input: { pattern: 'src/*.ts' },
+      })
+      assert.equal(result.content.trim(), 'src/a.ts')
+      assert.equal(result.content.includes(CONTAINER_CONFINE_WITHHELD), false, 'trailer reached the model')
+      assert.equal(lines.some((l) => l.includes('[container-confine]')), false, 'logged a clean Glob')
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('a container reply with no withheld trailer is logged as UNKNOWN, not as zero', async () => {
+    // "Cannot measure this" must not read as "nothing to measure" — the second
+    // recurring cause in docs/false-safety-guards.md, one register down.
+    const lines = []
+    const listener = (entry) => lines.push(typeof entry === 'string' ? entry : (entry?.msg ?? JSON.stringify(entry)))
+    addLogListener(listener)
+    try {
+      const backend = {
+        calls: [],
+        async execInEnvironment() {
+          return { stdout: `${CONTAINER_CONFINE_OK}\nsrc/a.ts\n`, stderr: '' }
+        },
+      }
+      const session = buildSession(backend)
+      const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern: '*' } })
+      assert.equal(result.content.trim(), 'src/a.ts')
+      assert.ok(
+        lines.some((l) => l.includes('[container-confine]') && l.includes('withheld-count unavailable')),
+        `no unavailable-count line; saw ${JSON.stringify(lines)}`,
+      )
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('a refused path is logged for the operator on all three tools', async () => {
+    const cases = [
+      ['Glob', { pattern: '*', path: 'esc' }],
+      ['Grep', { pattern: 'TOPSECRET_7354', path: 'esc' }],
+      ['Read', { file_path: 'esc/secret.txt' }],
+    ]
+    for (const [toolName, input] of cases) {
+      const lines = []
+      const listener = (entry) => lines.push(typeof entry === 'string' ? entry : (entry?.msg ?? JSON.stringify(entry)))
+      addLogListener(listener)
+      try {
+        const session = buildSession(bashBackend())
+        await session._dispatchBuiltinTool({ toolName, input })
+        assert.ok(
+          lines.some((l) => l.includes('[container-confine]') && l.includes(`${toolName}: refused a path (escape)`)),
+          `${toolName} logged no refusal; saw ${JSON.stringify(lines)}`,
+        )
+      } finally {
+        removeLogListener(listener)
+      }
+    }
+  })
+
   // ── Fail-closed on a reply the host cannot account for ───────────────────
 
   it('an unparseable container reply is an error for all three tools, not "no matches"', async () => {
@@ -471,5 +578,46 @@ describe('parseConfinedContainerStdout (#7354)', () => {
         `accepted ${JSON.stringify(bad)}`,
       )
     }
+  })
+})
+
+describe('splitWithheldTrailer (#7354)', () => {
+  it('strips the trailer and returns the count', () => {
+    assert.deepEqual(
+      splitWithheldTrailer(`src/a.ts\nsrc/b.ts\n${CONTAINER_CONFINE_WITHHELD} 3\n`),
+      { body: 'src/a.ts\nsrc/b.ts\n', withheld: 3 },
+    )
+  })
+
+  it('handles a body that is ONLY the trailer', () => {
+    assert.deepEqual(
+      splitWithheldTrailer(`${CONTAINER_CONFINE_WITHHELD} 2\n`),
+      { body: '', withheld: 2 },
+    )
+  })
+
+  it('reports zero as zero, not as absent', () => {
+    assert.deepEqual(
+      splitWithheldTrailer(`${CONTAINER_CONFINE_WITHHELD} 0\n`),
+      { body: '', withheld: 0 },
+    )
+  })
+
+  it('reports an ABSENT trailer as null, never as zero', () => {
+    for (const body of ['src/a.ts\n', '', 'x', null, undefined]) {
+      assert.equal(splitWithheldTrailer(body).withheld, null, `claimed a count for ${JSON.stringify(body)}`)
+    }
+  })
+
+  it('only the LAST line can be the trailer', () => {
+    // A file named like the trailer, in the middle of the results, must stay a
+    // result — and must not hand the log a number the container never sent.
+    const body = `${CONTAINER_CONFINE_WITHHELD} 9\nsrc/a.ts\n`
+    assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
+  })
+
+  it('rejects a malformed count rather than coercing it', () => {
+    const body = `src/a.ts\n${CONTAINER_CONFINE_WITHHELD} -1\n`
+    assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
   })
 })

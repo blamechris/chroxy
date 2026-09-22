@@ -15,6 +15,7 @@ import {
   CONTAINER_CONFINE_OK,
   CONTAINER_CONFINE_ESCAPE,
   CONTAINER_CONFINE_ERROR,
+  CONTAINER_CONFINE_WITHHELD,
 } from '../../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -122,7 +123,16 @@ describe('buildConfinedGlobBody (#7354)', () => {
     // `shopt -s nullglob globstar` fails as a unit where globstar does not
     // exist, and losing nullglob means an unmatched pattern is emitted VERBATIM.
     assert.ok(/^shopt -s nullglob$/m.test(body))
-    assert.ok(/^shopt -s globstar$/m.test(body))
+    assert.ok(/^shopt -s globstar 2>\/dev\/null$/m.test(body))
+  })
+
+  it('silences globstar so an old bash cannot turn containment into a tool error', () => {
+    // Without the redirect, bash 3.2 writes `shopt: globstar: invalid shell
+    // option name` to stderr, and _containerGlob's "no stdout AND stderr"
+    // branch then reports `Glob failed` for every empty result — including one
+    // whose matches were all WITHHELD. CI runs bash 5, where the option is
+    // accepted silently, so nothing but this assertion can see the regression.
+    assert.ok(body.includes('shopt -s globstar 2>/dev/null'))
   })
 
   it('resolves every match and compares it against the resolved root', () => {
@@ -132,14 +142,27 @@ describe('buildConfinedGlobBody (#7354)', () => {
   })
 
   it('withholds an unresolvable match rather than emitting it (fail closed)', () => {
-    assert.ok(body.includes('__cx_resolve "$f") || continue'))
+    assert.ok(body.includes('if ! __cx_r=$(__cx_resolve "$f"); then'))
     assert.ok(body.includes('__cx_lastv=n'))
   })
 
   it('emits no marker for a withheld match (no existence oracle, #7341)', () => {
-    // The only thing the loop ever prints is a kept match.
-    const printed = body.split('\n').filter((l) => l.includes('printf'))
-    assert.deepEqual(printed.map((l) => l.trim()), [`printf '%s\\n' "$f"`])
+    // The only per-match thing the loop prints is a KEPT match. The trailer is
+    // printed once, after the loop, and the host strips it before the model
+    // ever sees the body — see splitWithheldTrailer.
+    const printed = body.split('\n').filter((l) => l.includes('printf')).map((l) => l.trim())
+    assert.deepEqual(printed, [
+      `printf '%s\\n' "$f"`,
+      `printf '%s %s\\n' '${CONTAINER_CONFINE_WITHHELD}' "$__cx_withheld"`,
+    ])
+  })
+
+  it('counts every withheld match, on all three withhold branches', () => {
+    // A count that is right for two of three branches understates the trace by
+    // exactly the cases an operator most wants to see.
+    const increments = body.split('\n').filter((l) => l.includes('__cx_withheld=$((__cx_withheld+1))'))
+    assert.equal(increments.length, 3)
+    assert.ok(body.includes('__cx_withheld=0'), 'the counter must start at a known value')
   })
 
   it('exports no unconfined variant alongside it', async () => {

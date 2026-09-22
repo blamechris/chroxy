@@ -212,10 +212,11 @@ export function globPatternEscapeReason(pattern) {
  * the output needs no model of the shell and therefore has no round seven.
  *
  * The host does strictly better than this (`confineGlobMatches` realpaths each
- * match), so this is the CONTAINER's boundary: its matches are produced inside
- * the container where no host realpath can reach them. What it cannot see is a
- * symlinked directory inside `/workspace` — lexically clean, resolves out. See
- * `_containerGlob` for that residual.
+ * match). What this cannot see is a symlinked directory inside `/workspace` —
+ * lexically clean, resolves out. That is no longer a residual: since #7354 the
+ * container resolves every match physically in-container
+ * ({@link buildConfinedGlobBody}), and this stays in FRONT of it as the layer
+ * that needs nothing from the guest's userland.
  */
 export function globMatchEscapesRoot(match) {
   if (typeof match !== 'string') return true
@@ -255,6 +256,27 @@ export const CONTAINER_CONFINE_ESCAPE = '__chroxy_confine_escape__'
 
 /** Printed when the target could not be resolved at all (fail closed). */
 export const CONTAINER_CONFINE_ERROR = '__chroxy_confine_error__'
+
+/**
+ * SECURITY (#7354) — the trailer the Glob body prints as its LAST line,
+ * carrying the number of matches the in-container resolution WITHHELD.
+ *
+ * Withheld matches stay invisible to the MODEL (see {@link buildConfinedGlobBody}
+ * — distinguishing "matched, but outside" from "matched nothing" is an existence
+ * oracle on a tool `acceptEdits` auto-approves). They must not be invisible to
+ * the OPERATOR. A containment that fires silently and reports success is the
+ * exact shape `docs/false-safety-guards.md` catalogues: the daemon log line the
+ * host writes from this count is the difference between "the guard held" and
+ * "nothing was there", which is otherwise unobservable from outside the
+ * container.
+ *
+ * The count is a count, never a path: the names and link targets of what was
+ * withheld would put the very thing containment refused into the daemon log.
+ */
+export const CONTAINER_CONFINE_WITHHELD = '__chroxy_confine_withheld__'
+
+/** Matches the trailer line emitted by {@link buildConfinedGlobBody}. */
+const WITHHELD_TRAILER_RE = new RegExp(`^${CONTAINER_CONFINE_WITHHELD} (\\d+)$`)
 
 /**
  * Max symlink hops `__cx_resolve` follows before giving up (ELOOP guard).
@@ -361,12 +383,20 @@ export function buildConfinedContainerCommand({ target, body, setup = '', worksp
  * the MATCH is what leaves: `{"pattern":"esc/*"}` produces `esc/passwd`, which
  * `globMatchEscapesRoot` reads as perfectly in-bounds.
  *
- * Withheld matches are dropped SILENTLY here — no sentinel, no count. That is
- * the #7341 rule and it is deliberate: anything that separates "matched, but
- * outside" from "matched nothing" is an existence oracle on a tool that
+ * Withheld matches are dropped silently AS FAR AS THE MODEL IS CONCERNED — the
+ * tool_result is indistinguishable from "matched nothing". That is the #7341
+ * rule and it is deliberate: anything that separates "matched, but outside"
+ * from "matched nothing" is an existence oracle on a tool that
  * `ACCEPT_EDITS_TOOLS` auto-approves. An escaping `path` ARGUMENT is different
  * and does return an error — the caller named that directory outright, so
  * refusing it tells them nothing they did not already supply.
+ *
+ * Silent to the model is NOT silent to the operator. The body counts what it
+ * withheld and prints {@link CONTAINER_CONFINE_WITHHELD} as a trailer, which
+ * the host strips (never forwarding it) and writes to the daemon log. A guard
+ * whose only successful outcome is an ordinary-looking success leaves an
+ * operator no way to tell it from a guard that was never wired — the shape
+ * `docs/false-safety-guards.md` exists to catalogue.
  *
  * COST: one subshell per unique directory, not per match. The last directory's
  * verdict is memoised in two plain variables (glob output is sorted, so runs of
@@ -393,9 +423,15 @@ export function buildConfinedGlobBody(pattern) {
     // combined form fail, and `nullglob` — the one that decides whether an
     // unmatched pattern is emitted VERBATIM — must not be lost with it.
     'shopt -s nullglob',
-    'shopt -s globstar',
+    // `2>/dev/null` is not cosmetic. On a bash with no `globstar` (3.2) the
+    // option name is rejected on STDERR, and the caller's "no stdout AND
+    // stderr" branch then turns every empty Glob — including one whose matches
+    // were all WITHHELD — into `Glob failed: ...` instead of `No matches`.
+    // Losing globstar degrades `**` to `*`, which is the intended degradation;
+    // turning containment into a container error is not.
+    'shopt -s globstar 2>/dev/null',
     // \x01 cannot appear in a path, so the first iteration always misses.
-    '__cx_lastd=$\'\\001\'; __cx_lastv=n',
+    '__cx_lastd=$\'\\001\'; __cx_lastv=n; __cx_withheld=0',
     `for f in ${pattern}; do`,
     '  case $f in */*) __cx_d=${f%/*} ;; *) __cx_d=. ;; esac',
     '  if [ "$__cx_d" != "$__cx_lastd" ]; then',
@@ -406,13 +442,17 @@ export function buildConfinedGlobBody(pattern) {
     '    fi',
     '    __cx_lastd=$__cx_d',
     '  fi',
-    '  [ "$__cx_lastv" = y ] || continue',
+    '  if [ "$__cx_lastv" != y ]; then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '  if [ -L "$f" ]; then',
-    '    __cx_r=$(__cx_resolve "$f") || continue',
-    '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) continue ;; esac',
+    '    if ! __cx_r=$(__cx_resolve "$f"); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
+    '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) __cx_withheld=$((__cx_withheld+1)); continue ;; esac',
     '  fi',
     '  printf \'%s\\n\' "$f"',
     'done',
+    // The operator's trace. Always emitted, including as `... 0`, so the host
+    // can tell "nothing was withheld" from "the trailer never arrived" — the
+    // same reason the OK sentinel exists.
+    `printf '%s %s\\n' '${CONTAINER_CONFINE_WITHHELD}' "$__cx_withheld"`,
   ].join('\n')
 }
 
@@ -438,6 +478,36 @@ export function parseConfinedContainerStdout(stdout) {
   if (first === CONTAINER_CONFINE_ESCAPE) return { ok: false, reason: 'escape' }
   if (first === CONTAINER_CONFINE_ERROR) return { ok: false, reason: 'error' }
   return { ok: false, reason: 'unparseable' }
+}
+
+/**
+ * SECURITY (#7354) — split the {@link CONTAINER_CONFINE_WITHHELD} trailer off a
+ * confined Glob body.
+ *
+ * The trailer NEVER reaches the model: stripping it here is what keeps the
+ * no-oracle rule while still giving the daemon log a count. It is always the
+ * last line, so it is matched positionally rather than by scanning — a file
+ * literally named `__chroxy_confine_withheld__ 3` in the middle of the results
+ * cannot be mistaken for it.
+ *
+ * `withheld: null` means the trailer was absent, which is reported as "unknown"
+ * rather than as zero. The count is observability, not containment (the
+ * withholding already happened in the container), so a missing trailer must not
+ * read as "nothing was withheld" — that is the catalogue's "cannot check this
+ * treated as nothing to check" one register down.
+ *
+ * @param {string} body
+ * @returns {{ body: string, withheld: number | null }}
+ */
+export function splitWithheldTrailer(body) {
+  if (typeof body !== 'string') return { body: '', withheld: null }
+  const trailing = body.endsWith('\n') ? '\n' : ''
+  const lines = body.split('\n')
+  if (trailing) lines.pop()
+  const match = lines.length > 0 ? WITHHELD_TRAILER_RE.exec(lines[lines.length - 1]) : null
+  if (!match) return { body, withheld: null }
+  lines.pop()
+  return { body: lines.length > 0 ? lines.join('\n') + trailing : '', withheld: Number(match[1]) }
 }
 
 /**
