@@ -1,11 +1,12 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
-import { ClaudeTuiSession, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
+import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import {
@@ -871,6 +872,143 @@ describe('ClaudeTuiSession', () => {
 
       assert.equal(session._processReady, false, 'not ready after destroy race')
       assert.equal(readys.length, 0, 'no ready emitted on a destroy-race abort')
+    })
+
+    // ---- #7372: the hook-sink BASE dir is attacker-reachable on a shared /tmp --
+    //
+    // `mkdirSync(base, { recursive: true })` returns silently when `base`
+    // already exists — INCLUDING when it is a symlink to a directory — and then
+    // creates children through it. On Linux `os.tmpdir()` is the shared `/tmp`,
+    // so another local user can pre-create `/tmp/chroxy-claude-tui` (or point it
+    // elsewhere) and substitute a session dir. For claude-tui that dir holds
+    // `settings.json`, the hook payloads AND the permission-mode sidecar, so the
+    // substitution decides whether tool calls are prompted at all.
+    //
+    // Unlike CliSession (#7337), which degrades to env-var-only, this one FAILS
+    // CLOSED: the sink is load-bearing for the permission floor on the default
+    // provider, and a silently degraded session is exactly the false-safety shape
+    // `docs/false-safety-guards.md` catalogues.
+    describe('untrusted sink base dir (#7372)', () => {
+      let origBase
+      let baseTmp
+
+      beforeEach(() => {
+        origBase = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'SINK_BASE')
+        baseTmp = mkdtempSync(join(tmpdir(), 'chroxy-tui-basedir-'))
+      })
+
+      afterEach(() => {
+        if (origBase) Object.defineProperty(ClaudeTuiSession, 'SINK_BASE', origBase)
+        if (baseTmp) rmSync(baseTmp, { recursive: true, force: true })
+        baseTmp = null
+      })
+
+      function pinBase(path) {
+        Object.defineProperty(ClaudeTuiSession, 'SINK_BASE', { get: () => path, configurable: true })
+      }
+
+      // Gated on the PROBED capability, not on `process.platform` (#7273): the
+      // CI service account on Windows has no SeCreateSymbolicLinkPrivilege, so
+      // only the FIXTURE is unbuildable there. The refusal itself is not
+      // platform-gated and runs in full on every POSIX CI job.
+      it('refuses to start when the base is a symlink', { skip: SKIP_NO_SYMLINK }, async () => {
+        const attackerDir = join(baseTmp, 'attacker-owned')
+        const squatted = join(baseTmp, 'squatted-base')
+        mkdirSync(attackerDir, { recursive: true })
+        symlinkSync(attackerDir, squatted)
+        pinBase(squatted)
+
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const errors = []
+        const readys = []
+        session.on('error', (e) => errors.push(e))
+        session.on('ready', (e) => readys.push(e))
+
+        await assert.rejects(session.start(), /symlink/i,
+          'a symlinked base lets another local user substitute the dir holding settings.json, the hook payloads and the permission-mode sidecar')
+
+        assert.equal(readys.length, 0, 'no ready emitted for a session with an untrusted sink base')
+        assert.equal(session._processReady, false, 'not ready')
+        assert.equal(errors.length, 1, 'the failure surfaced on the normal session error channel')
+        assert.match(errors[0].message, /symlink/i)
+        assert.ok(errors[0].message.includes(squatted), 'the error names the offending path')
+        assert.match(errors[0].message, /remove or fix ownership/i, 'the error is actionable')
+        assert.equal(errors[0].code, SINK_BASE_UNTRUSTED_CODE, 'carries a specific code, not a bare Error')
+
+        // The whole point: nothing was written THROUGH the link.
+        assert.deepEqual(readdirSync(attackerDir), [],
+          'a plain mkdirSync would have created the session dir inside the attacker-controlled target')
+        assert.equal(session._sinkDir, null, 'no sink dir adopted')
+      })
+
+      // A foreign-uid base cannot be forged without root, so the uid branch is
+      // covered by `ensureOwnedBaseDir`'s own unit tests
+      // (tests/cli-permission-mode-sidecar.test.js). What IS forgeable here is
+      // the other non-symlink refusal the helper raises — a base that exists and
+      // is not a directory at all — which proves the session propagates EVERY
+      // refusal, not just the one branch above.
+      it('refuses to start when the base exists and is not a directory', async () => {
+        const notADir = join(baseTmp, 'not-a-dir')
+        writeFileSync(notADir, 'i am a file')
+        pinBase(notADir)
+
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const errors = []
+        const readys = []
+        session.on('error', (e) => errors.push(e))
+        session.on('ready', (e) => readys.push(e))
+
+        await assert.rejects(session.start(), (err) => {
+          assert.equal(err.code, SINK_BASE_UNTRUSTED_CODE)
+          assert.ok(err.message.includes(notADir), 'the error names the offending path')
+          return true
+        })
+        assert.equal(readys.length, 0, 'no ready emitted')
+        assert.equal(errors.length, 1, 'surfaced on the session error channel')
+      })
+
+      // Positive control (docs/false-safety-guards.md): a refusal that refused
+      // EVERYTHING would satisfy both assertions above while breaking the default
+      // provider outright. This fails such a fix.
+      it('starts normally on a clean base, and creates it owner-only', async () => {
+        const clean = join(baseTmp, 'clean-base')
+        pinBase(clean)
+
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        const readys = []
+        session.on('error', () => {})
+        session.on('ready', (e) => readys.push(e))
+
+        await session.start()
+
+        assert.equal(readys.length, 1, 'a clean base must still start the session')
+        assert.equal(session._processReady, true, 'ready')
+        assert.ok(session._sinkDir.startsWith(clean + '/'), 'the sink dir lives under the pinned base')
+        assert.ok(existsSync(session._settingsPath), 'settings.json written into it')
+        if (process.platform !== 'win32') {
+          assert.equal(statSync(clean).mode & 0o777, 0o700,
+            'the base must be 0700 — world-readable would leak the session uuid another user needs to substitute a session dir')
+          assert.equal(statSync(session._sinkDir).mode & 0o777, 0o700,
+            'and so must the per-session dir holding the permission-mode sidecar')
+        }
+      })
+
+      // The adopted-dir half of the hardening: `mkdirSync`'s mode applies only
+      // to a dir it CREATES, so a base left 0777 by an earlier run (or planted
+      // by another user at 0777 and then chowned away) must be tightened.
+      it('re-asserts 0700 on an adopted base that is group/other-writable', { skip: process.platform === 'win32' }, async () => {
+        const loose = join(baseTmp, 'loose-base')
+        mkdirSync(loose, { recursive: true })
+        chmodSync(loose, 0o777)
+        pinBase(loose)
+
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session.on('error', () => {})
+        await session.start()
+
+        assert.equal(statSync(loose).mode & 0o777, 0o700,
+          'an ADOPTED base keeps whatever mode it had — re-assert rather than trust the create')
+      })
     })
   })
 

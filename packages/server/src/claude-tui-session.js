@@ -24,7 +24,7 @@ import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
-import { sweepStaleOwnedDirs, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
+import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
@@ -147,6 +147,13 @@ export function withHookFsTimeout(promise, ms, label) {
   })
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
+
+/**
+ * #7372 — start() refused the shared hook-sink base dir under `os.tmpdir()`.
+ * Distinct code so the client can tell a host-hygiene problem apart from a
+ * spawn failure or AUTH_REQUIRED.
+ */
+export const SINK_BASE_UNTRUSTED_CODE = 'SINK_BASE_UNTRUSTED'
 
 export class ClaudeTuiSession extends BaseSession {
   static agentConnectionRoutes = ['native']
@@ -1257,12 +1264,20 @@ export class ClaudeTuiSession extends BaseSession {
     // #7337: the reaper itself lives in utils/stale-session-dirs.js — CliSession
     // now has a per-session dir of its own to sweep, and two hand-written copies
     // of a "delete directories under /tmp" loop is not a drift this repo accepts.
-    return sweepStaleOwnedDirs(join(tmpdir(), 'chroxy-claude-tui'), {
+    return sweepStaleOwnedDirs(ClaudeTuiSession.SINK_BASE, {
       graceMs: ClaudeTuiSession.SINK_SWEEP_GRACE_MS,
       logger,
       label: 'claude-tui sink',
     })
   }
+
+  /**
+   * Base dir the per-session hook-sink dirs live under (#7372). Named once so
+   * start() and the boot sweep cannot drift onto two different paths — the
+   * defect shape `docs/false-safety-guards.md` calls a hardcoded copy beside a
+   * growing set. Mirrors `CliSession.PERMISSION_MODE_SIDECAR_BASE`.
+   */
+  static get SINK_BASE() { return join(tmpdir(), 'chroxy-claude-tui') }
 
   // Upper bounds on how long we'll wait for status=idle before falling
   // through (and writing anyway, with a warn). Spawn warmup is generous
@@ -1340,10 +1355,46 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     // Create per-session sink dir for hook payloads + settings.json.
-    const base = join(tmpdir(), 'chroxy-claude-tui')
-    mkdirSync(base, { recursive: true })
+    //
+    // #7372 — FAIL CLOSED on a base another local user could have prepared.
+    // `mkdirSync(base, { recursive: true })` returns silently when `base`
+    // already exists, INCLUDING when it is a symlink to a directory, and then
+    // creates children through it at the umask default (0755 dir / 0644 file).
+    // On Linux `os.tmpdir()` is the shared `/tmp`, so another local user can
+    // pre-create `/tmp/chroxy-claude-tui` (or point it elsewhere), read the
+    // world-readable base to learn the session uuid, and substitute the session
+    // dir. That dir holds `settings.json`, the hook payloads AND the
+    // permission-mode sidecar, so the substitution decides whether tool calls
+    // are prompted at all. macOS is unaffected (per-user `$TMPDIR` at 0700) —
+    // which is exactly why this is an explicit check and not a platform
+    // assumption. `ensureOwnedBaseDir` is the one implementation of the rule
+    // (#7337); this is its second caller, not a second copy.
+    //
+    // Unlike CliSession, which degrades to env-var-only when its base is
+    // unusable, this REFUSES: the sink is load-bearing for the permission floor
+    // on the default provider, and a session that ran on without hook
+    // permissions would be the false-safety shape docs/false-safety-guards.md
+    // catalogues — success and not-checking reported identically. Surfaced on
+    // the same `error`-then-throw path as the PTY/auth failures below, so
+    // SessionManager tears the session down instead of leaving a zombie.
+    const sinkBase = ClaudeTuiSession.SINK_BASE
+    let base
+    try {
+      base = ensureOwnedBaseDir(sinkBase)
+    } catch (err) {
+      const message = `claude-tui hook sink base ${sinkBase} is not usable: ${err.message}. `
+        + `Chroxy will not start a session without hook permissions — remove or fix ownership of ${sinkBase} and try again.`
+      log.error(message)
+      this.emit('error', { code: SINK_BASE_UNTRUSTED_CODE, message })
+      const wrapped = new Error(message)
+      wrapped.code = SINK_BASE_UNTRUSTED_CODE
+      throw wrapped
+    }
     this._sinkDir = join(base, `s-${randomUUID()}`)
-    mkdirSync(this._sinkDir, { recursive: true })
+    // 0700 explicitly: the base is shared between sessions, so a umask-default
+    // 0755 session dir would leave the hook payloads and the permission-mode
+    // sidecar world-readable even under a correctly-owned base.
+    mkdirSync(this._sinkDir, { recursive: true, mode: 0o700 })
     // #5323 (WP-5.1) — stamp the owning pid so the boot-time sweep
     // (sweepStaleSinkDirs) can tell a live daemon's sink dir from one orphaned
     // by a prior crash. Best-effort: a missing pidfile just makes the dir

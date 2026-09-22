@@ -1040,7 +1040,7 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 - **No live model switch, no plan mode, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
 - **One PTY per session** — pays a ~3.5s warmup cost on `start()`, then every `sendMessage` writes to the same PTY. Concurrent sessions in the same `cwd` are not protected against each other; treat as one session per repo.
 - **Tool events are reconstructed from `PreToolUse` / `PostToolUse` hooks** — `tool_use_id` is taken from the hook payload when present, otherwise synthesized per turn (`<messageId>-tool-N`). Pre/Post pairing breaks if tool calls overlap or a Pre fires without a matching Post.
-- **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`.
+- **Hook payloads write to a per-session directory under `tmpdir()/chroxy-claude-tui/s-<uuid>/`**. Cleaned up on `destroy()`. Both that dir and the shared base are created `0700`, and `start()` **refuses** (`SINK_BASE_UNTRUSTED`) if the base is a symlink, is owned by another uid, or is not a directory — on Linux `tmpdir()` is the shared `/tmp`, and this dir holds `settings.json`, the hook payloads and the permission-mode sidecar (#7372; see [`security/permission-floor.md`](security/permission-floor.md)).
 
 ### `claude-channel`
 
