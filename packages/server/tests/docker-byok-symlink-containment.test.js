@@ -2,7 +2,10 @@ import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, chmodSync, existsSync } from 'node:fs'
+import {
+  mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, chmodSync, existsSync,
+  readFileSync, readdirSync, lstatSync, realpathSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,10 +15,12 @@ import {
   CONTAINER_CONFINE_ESCAPE,
   CONTAINER_CONFINE_ERROR,
   CONTAINER_CONFINE_WITHHELD,
+  buildConfinedContainerCommand,
   parseConfinedContainerStdout,
   splitWithheldTrailer,
 } from '../src/built-in-tools/tool-transforms.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 const pexec = promisify(execFile)
 
@@ -84,8 +89,12 @@ function buildFixture() {
  * swaps in a stand-in for one of the external programs the script reaches for
  * (currently only `readlink`). Without it the run inherits this machine's
  * environment unchanged.
+ *
+ * `root` replaces the directory `/workspace` is rewritten to (default: this
+ * suite's `workspaceDir`), so the #7876 block below can run the same harness
+ * against its own fixture.
  */
-function bashBackend({ pathPrefix } = {}) {
+function bashBackend({ pathPrefix, root } = {}) {
   const calls = []
   const env = pathPrefix ? { ...process.env, PATH: `${pathPrefix}:${process.env.PATH}` } : undefined
   return {
@@ -97,7 +106,7 @@ function bashBackend({ pathPrefix } = {}) {
       // nothing the script would run against a /workspace that does not exist
       // here, and every assertion below would be about the wrong thing.
       assert.ok(parts.length > 1, 'fixture rewrite matched no /workspace in the command')
-      const local = parts.join(workspaceDir)
+      const local = parts.join(root ?? workspaceDir)
       try {
         // stderr is passed through UNFILTERED. An earlier draft stripped
         // bash 3.2's `shopt: globstar: invalid shell option name` here, which
@@ -604,6 +613,404 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
     // ... and distinct from an unparseable reply: the error sentinel means the
     // container DID answer, about the path.
     assert.equal(/no valid confinement verdict/.test(result.content), false)
+  })
+})
+
+// ── #7876 — container Write/Edit through a symlinked directory ─────────────
+//
+// Same harness as the #7354 block above (real bash, real symlinks, `/workspace`
+// rewritten to a temp dir), so the red half of every escape below is a real
+// shell run and not a fixture. A separate `describe` with its own fixture
+// rather than more entries in the one above: these cases add a DANGLING link
+// and a leaf alias to the workspace root, and the Glob tests above assert the
+// exact listing and withheld count of that root.
+
+let wfRoot
+let wfWs
+let wfOut
+
+function buildWriteFixture() {
+  wfRoot = mkdtempSync(join(tmpdir(), 'chroxy-7876-'))
+  wfWs = join(wfRoot, 'ws')
+  wfOut = join(wfRoot, 'outside')
+  mkdirSync(join(wfWs, 'real'), { recursive: true })
+  mkdirSync(wfOut, { recursive: true })
+  writeFileSync(join(wfOut, 'hosts'), 'ORIGINAL_HOSTS_7876\n')
+  writeFileSync(join(wfOut, 'target.txt'), 'ORIGINAL_TARGET_7876\n')
+  writeFileSync(join(wfWs, 'plain.txt'), 'hello plain world\n')
+  // The bug: a symlinked DIRECTORY inside the workspace pointing out.
+  symlinkSync(wfOut, join(wfWs, 'esc'))
+  // A symlinked LEAF pointing out.
+  symlinkSync(join(wfOut, 'target.txt'), join(wfWs, 'alias.txt'))
+  // A DANGLING directory link whose target cannot be created.
+  symlinkSync(join(wfRoot, 'nonexistent', 'dir'), join(wfWs, 'dangling'))
+  // A DANGLING leaf link pointing out — `>` follows it and CREATES the target.
+  symlinkSync(join(wfOut, 'created.txt'), join(wfWs, 'dleaf.txt'))
+  // The positive control: a link that stays inside.
+  symlinkSync(join(wfWs, 'real'), join(wfWs, 'alias'))
+}
+
+/** `bashBackend`, pointed at this block's fixture. */
+function wfBackend(opts = {}) {
+  return bashBackend({ ...opts, root: wfWs })
+}
+
+function outsideListing() {
+  return readdirSync(wfOut).sort()
+}
+
+describe('container Write/Edit symlink containment (#7876)', { skip: POSIX_ONLY || SKIP_NO_SYMLINK }, () => {
+  let savedHome
+  let savedConfigDir
+  let savedApiKey
+
+  beforeEach(() => {
+    buildWriteFixture()
+    savedHome = process.env.HOME
+    savedConfigDir = process.env.CHROXY_CONFIG_DIR
+    savedApiKey = process.env.ANTHROPIC_API_KEY
+    process.env.HOME = wfRoot
+    process.env.CHROXY_CONFIG_DIR = join(wfRoot, '.chroxy')
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
+  })
+
+  afterEach(() => {
+    if (savedHome) process.env.HOME = savedHome
+    else delete process.env.HOME
+    if (savedConfigDir) process.env.CHROXY_CONFIG_DIR = savedConfigDir
+    else delete process.env.CHROXY_CONFIG_DIR
+    if (savedApiKey) process.env.ANTHROPIC_API_KEY = savedApiKey
+    else delete process.env.ANTHROPIC_API_KEY
+    rmSync(wfRoot, { recursive: true, force: true })
+  })
+
+  // ── Escapes ──────────────────────────────────────────────────────────────
+
+  it('ESCAPE — Write through a symlinked directory is refused and creates nothing outside', async () => {
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'esc/hosts', content: 'PWNED_7876\n' },
+    })
+    assert.equal(result.isError, true, `Write escaped: ${result.content}`)
+    assert.equal(readFileSync(join(wfOut, 'hosts'), 'utf8'), 'ORIGINAL_HOSTS_7876\n', 'overwrote a file outside')
+    assert.deepEqual(outsideListing(), ['hosts', 'target.txt'])
+    assert.ok(/resolves outside the workspace/.test(result.content), `wrong refusal: ${result.content}`)
+    // Existence-oracle rule (#7341/#7354): say THAT it resolves outside, never WHERE.
+    assert.equal(result.content.includes(wfRoot), false, 'the refusal revealed the resolved path')
+    assert.equal(result.content.includes(realpathSync(wfRoot)), false, 'the refusal revealed the resolved path')
+    assert.equal(result.content.includes('outside/'), false, 'the refusal revealed the resolved path')
+  })
+
+  it('ESCAPE — Write to a NOT-YET-EXISTING deep path through a symlinked directory is refused', async () => {
+    // The case that needs the deepest-existing-ancestor walk: `esc/new/deeper`
+    // does not exist, so resolving the whole path fails, and `mkdir -p` of the
+    // lexical parent would create `new/deeper` OUTSIDE.
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'esc/new/deeper/file.txt', content: 'PWNED_7876\n' },
+    })
+    assert.equal(result.isError, true, `Write escaped: ${result.content}`)
+    assert.deepEqual(outsideListing(), ['hosts', 'target.txt'], 'created a directory outside')
+    assert.equal(existsSync(join(wfWs, 'new')), false, 'created `new/` inside instead')
+    assert.equal(existsSync(join(wfWs, 'real', 'new')), false, 'created `new/` under another dir')
+    assert.ok(/resolves outside the workspace/.test(result.content), `wrong refusal: ${result.content}`)
+    assert.equal(result.content.includes(realpathSync(wfRoot)), false, 'the refusal revealed the resolved path')
+  })
+
+  it('ESCAPE — Edit through a symlinked directory neither reads nor writes', async () => {
+    const backend = wfBackend()
+    const session = buildSession(backend)
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Edit',
+      input: { file_path: 'esc/hosts', old_string: 'ORIGINAL', new_string: 'PWNED' },
+    })
+    assert.equal(result.isError, true, `Edit escaped: ${result.content}`)
+    assert.equal(result.content.includes('ORIGINAL_HOSTS_7876'), false, 'leaked the file contents')
+    assert.equal(readFileSync(join(wfOut, 'hosts'), 'utf8'), 'ORIGINAL_HOSTS_7876\n', 'wrote through the link')
+    assert.equal(backend.calls.length, 1, 'Edit went on to a write-back after the refused read')
+    assert.equal(backend.calls[0].cmd.includes('base64 -d'), false, 'the read call carried a write')
+    assert.ok(/resolves outside the workspace/.test(result.content), `wrong refusal: ${result.content}`)
+    assert.equal(result.content.includes(realpathSync(wfRoot)), false, 'the refusal revealed the resolved path')
+  })
+
+  it('ESCAPE — Write to a symlinked LEAF pointing outside is refused', async () => {
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'alias.txt', content: 'PWNED_7876\n' },
+    })
+    assert.equal(result.isError, true, `Write escaped: ${result.content}`)
+    assert.equal(readFileSync(join(wfOut, 'target.txt'), 'utf8'), 'ORIGINAL_TARGET_7876\n', 'overwrote the link target')
+    assert.ok(/resolves outside the workspace/.test(result.content), `wrong refusal: ${result.content}`)
+  })
+
+  it('ESCAPE — Write to a DANGLING leaf link pointing outside does not create its target', async () => {
+    // `>` follows a dangling link and CREATES what it names. The walk must
+    // treat the dangling link as EXISTING (`-e || -L`): with `-e` alone it
+    // walks past it, resolves only the workspace, and the write then lands
+    // wherever the link pointed.
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'dleaf.txt', content: 'PWNED_7876\n' },
+    })
+    assert.equal(result.isError, true, `Write escaped: ${result.content}`)
+    assert.equal(existsSync(join(wfOut, 'created.txt')), false, 'created the dangling link target outside')
+    assert.deepEqual(outsideListing(), ['hosts', 'target.txt'])
+  })
+
+  it('FAIL CLOSED — Write through a DANGLING directory link is an error and creates nothing', async () => {
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'dangling/x.txt', content: 'PWNED_7876\n' },
+    })
+    assert.equal(result.isError, true, `Write succeeded through a dangling link: ${result.content}`)
+    assert.equal(existsSync(join(wfRoot, 'nonexistent')), false, 'created the dangling link target')
+    assert.equal(lstatSync(join(wfWs, 'dangling')).isSymbolicLink(), true, 'the link itself was replaced')
+  })
+
+  it('TOCTOU — a link swapped AFTER the check cannot redirect the write (body uses the resolved path)', async () => {
+    // Simulates the race the issue names: the harness swaps `alias` from
+    // `real` to `outside` at the instant the body's `mkdir` runs, i.e. after
+    // the containment check passed. A body that used the lexical alias would
+    // follow the swapped link out; one that uses `"$__cx_target"` never goes
+    // through `alias` again. (A swap INSIDE the resolved prefix is the
+    // accepted check-then-use residual — this is the swap that is not.)
+    const realMkdir = ['/bin/mkdir', '/usr/bin/mkdir'].find((p) => existsSync(p))
+    assert.ok(realMkdir, 'no system mkdir to build the stand-in on — this test would prove nothing')
+    const shimDir = join(wfRoot, 'swap-bin')
+    const marker = join(wfRoot, 'swapped')
+    mkdirSync(shimDir, { recursive: true })
+    writeFileSync(join(shimDir, 'mkdir'), [
+      '#!/bin/sh',
+      `if [ ! -e '${marker}' ]; then`,
+      `  : > '${marker}'`,
+      `  rm -f '${join(wfWs, 'alias')}' && ln -s '${wfOut}' '${join(wfWs, 'alias')}'`,
+      'fi',
+      `exec ${realMkdir} "$@"`,
+      '',
+    ].join('\n'))
+    chmodSync(join(shimDir, 'mkdir'), 0o755)
+
+    const session = buildSession(wfBackend({ pathPrefix: shimDir }))
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'alias/new/file.txt', content: 'RACED_7876\n' },
+    })
+    assert.ok(existsSync(marker), 'the swap never happened — this test proved nothing')
+    assert.deepEqual(outsideListing(), ['hosts', 'target.txt'], 'the write followed the swapped link out')
+    assert.equal(result.isError, false, `in-bounds write failed: ${result.content}`)
+    assert.equal(readFileSync(join(wfWs, 'real', 'new', 'file.txt'), 'utf8'), 'RACED_7876\n')
+  })
+
+  // ── Positive controls ────────────────────────────────────────────────────
+
+  it('POSITIVE — Write and Edit through a symlink that stays INSIDE the workspace work', async () => {
+    // A fix that refused every symlink would be a regression, not a fix.
+    const session = buildSession(wfBackend())
+    const w = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'alias/new/file.txt', content: 'inside alpha\n' },
+    })
+    assert.equal(w.isError, false, `in-bounds link write refused: ${w.content}`)
+    assert.equal(readFileSync(join(wfWs, 'real', 'new', 'file.txt'), 'utf8'), 'inside alpha\n')
+    const e = await session._dispatchBuiltinTool({
+      toolName: 'Edit',
+      input: { file_path: 'alias/new/file.txt', old_string: 'alpha', new_string: 'beta' },
+    })
+    assert.equal(e.isError, false, `in-bounds link edit refused: ${e.content}`)
+    assert.equal(readFileSync(join(wfWs, 'real', 'new', 'file.txt'), 'utf8'), 'inside beta\n')
+  })
+
+  it('POSITIVE — plain Write (new deep path, overwrite, empty) and Edit still work', async () => {
+    const session = buildSession(wfBackend())
+    const deep = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'a/b/c/new.txt', content: 'deep\n' },
+    })
+    assert.equal(deep.isError, false, deep.content)
+    assert.ok(/Wrote 5 bytes to a\/b\/c\/new\.txt/.test(deep.content), deep.content)
+    assert.equal(readFileSync(join(wfWs, 'a', 'b', 'c', 'new.txt'), 'utf8'), 'deep\n')
+
+    const over = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'plain.txt', content: 'replaced\n' },
+    })
+    assert.equal(over.isError, false, over.content)
+    assert.equal(readFileSync(join(wfWs, 'plain.txt'), 'utf8'), 'replaced\n')
+
+    const empty = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'plain.txt', content: '' },
+    })
+    assert.equal(empty.isError, false, empty.content)
+    assert.ok(/Wrote 0 bytes/.test(empty.content), empty.content)
+    assert.equal(readFileSync(join(wfWs, 'plain.txt'), 'utf8'), '')
+
+    writeFileSync(join(wfWs, 'edit.txt'), 'one two three')
+    const edit = await session._dispatchBuiltinTool({
+      toolName: 'Edit',
+      input: { file_path: 'edit.txt', old_string: 'two', new_string: 'TWO' },
+    })
+    assert.equal(edit.isError, false, edit.content)
+    // No trailing newline in, none out: the sentinel split must not eat or add bytes.
+    assert.equal(readFileSync(join(wfWs, 'edit.txt'), 'utf8'), 'one TWO three')
+  })
+
+  it('POSITIVE — Edit of a missing file is the tool error, not a containment error', async () => {
+    const session = buildSession(wfBackend())
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Edit',
+      input: { file_path: 'real/nope.txt', old_string: 'a', new_string: 'b' },
+    })
+    assert.equal(result.isError, true)
+    assert.equal(/resolves outside the workspace/.test(result.content), false, result.content)
+    assert.equal(/could not resolve/.test(result.content), false, result.content)
+    assert.ok(/No such file/.test(result.content), `wrong error: ${result.content}`)
+  })
+
+  // ── Fail closed on a reply the host cannot account for ───────────────────
+
+  it('an unparseable container reply is an error for Write and Edit, never a success', async () => {
+    for (const [toolName, input] of [
+      ['Write', { file_path: 'x.txt', content: 'hello' }],
+      ['Edit', { file_path: 'x.txt', old_string: 'hello', new_string: 'bye' }],
+    ]) {
+      const calls = []
+      const backend = {
+        async execInEnvironment(id, opts) {
+          calls.push(opts)
+          return { stdout: 'hello\n', stderr: '' }
+        },
+      }
+      const session = buildSession(backend)
+      const result = await session._dispatchBuiltinTool({ toolName, input })
+      assert.equal(result.isError, true, `${toolName} accepted an unguarded reply: ${result.content}`)
+      assert.ok(/no valid confinement verdict/.test(result.content), `${toolName}: ${result.content}`)
+      assert.equal(calls.length, 1, `${toolName} went on after an unguarded reply`)
+    }
+  })
+
+  it('an empty container reply to Write is an error', async () => {
+    const backend = { async execInEnvironment() { return { stdout: '', stderr: '' } } }
+    const session = buildSession(backend)
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'x.txt', content: 'hello' },
+    })
+    assert.equal(result.isError, true)
+  })
+
+  it('a refused Write/Edit is logged for the operator', async () => {
+    for (const [toolName, input] of [
+      ['Write', { file_path: 'esc/hosts', content: 'x' }],
+      ['Edit', { file_path: 'esc/hosts', old_string: 'ORIGINAL', new_string: 'x' }],
+    ]) {
+      const lines = []
+      const listener = (entry) => lines.push(typeof entry === 'string' ? entry : (entry?.msg ?? JSON.stringify(entry)))
+      addLogListener(listener)
+      try {
+        await buildSession(wfBackend())._dispatchBuiltinTool({ toolName, input })
+        const hit = lines.find((l) => l.includes('[container-confine]') && l.includes(`${toolName}: refused a path (escape)`))
+        assert.ok(hit, `${toolName} logged no refusal; saw ${JSON.stringify(lines)}`)
+        assert.equal(hit.includes(realpathSync(wfRoot)), false, 'logged the resolved path')
+      } finally {
+        removeLogListener(listener)
+      }
+    }
+  })
+
+  it('every container Write/Edit carries the create-mode resolver and writes only the resolved path', async () => {
+    // Booleans, not assert.match: the subject is a multi-KB script (#7340).
+    for (const [toolName, input, lexical] of [
+      ['Write', { file_path: 'src/new.js', content: 'hello' }, "'/workspace/src/new.js'"],
+      ['Edit', { file_path: 'plain.txt', old_string: 'plain', new_string: 'PLAIN' }, "'/workspace/plain.txt'"],
+    ]) {
+      const backend = wfBackend()
+      await buildSession(backend)._dispatchBuiltinTool({ toolName, input })
+      assert.ok(backend.calls.length >= 1, `${toolName} issued no docker exec`)
+      for (const { cmd } of backend.calls) {
+        assert.ok(cmd.includes('__cx_resolve_new()'), `${toolName} lost the create-mode resolver`)
+        assert.ok(cmd.includes(CONTAINER_CONFINE_OK), `${toolName} lost the OK sentinel`)
+        assert.ok(cmd.includes(CONTAINER_CONFINE_ESCAPE), `${toolName} lost the escape sentinel`)
+        assert.ok(cmd.includes('"$__cx_target"'), `${toolName} does not use the resolved path`)
+        // The lexical path appears exactly once — as the resolver's argument.
+        assert.equal(cmd.split(lexical).length - 1, 1, `${toolName} uses the lexical path outside the resolver`)
+      }
+    }
+  })
+})
+
+describe('__cx_resolve_new — the create-mode walk, driven directly (#7876)', { skip: POSIX_ONLY || SKIP_NO_SYMLINK }, () => {
+  // The remainder refusals cannot be reached from the tool input:
+  // `remapToContainerPath` runs `posix.join`, which collapses `.`, `..` and
+  // `//` before the path ever reaches the container. The walk refuses them
+  // anyway so its safety does not rest on that caller — and a refusal no
+  // input can reach is only proven by driving the function itself.
+  beforeEach(() => { buildWriteFixture() })
+  afterEach(() => { rmSync(wfRoot, { recursive: true, force: true }) })
+
+  async function run(target, body = 'printf \'%s\\n\' "$__cx_target"') {
+    const cmd = buildConfinedContainerCommand({ target, body, mode: 'create' })
+    const local = cmd.split(CONTAINER_WORKSPACE).join(wfWs)
+    const { stdout } = await pexec('bash', ['-c', local])
+    return parseConfinedContainerStdout(stdout)
+  }
+
+  const writeBody = 'mkdir -p "${__cx_target%/*}" && printf x > "$__cx_target"'
+
+  it('a `..` in the not-yet-existing remainder is refused, not walked out of the workspace', async () => {
+    const r = await run('/workspace/newdir/../../outside/x.txt', writeBody)
+    assert.equal(r.ok, false, 'a `..` remainder passed containment')
+    assert.equal(existsSync(join(wfOut, 'x.txt')), false, 'wrote outside through a `..` remainder')
+    assert.equal(existsSync(join(wfWs, 'newdir')), false, 'created the remainder\'s first component')
+  })
+
+  it('`.` and empty remainder components are refused', async () => {
+    for (const t of ['/workspace/newdir/./x.txt', '/workspace/newdir//x.txt', '/workspace/newdir/x.txt/']) {
+      const r = await run(t)
+      assert.deepEqual(r, { ok: false, reason: 'error' }, `accepted ${t}`)
+    }
+  })
+
+  it('re-appends the remainder to the PHYSICAL deepest existing ancestor', async () => {
+    const r = await run('/workspace/alias/new/deeper/file.txt')
+    assert.equal(r.ok, true)
+    assert.equal(r.body, `${realpathSync(wfWs)}/real/new/deeper/file.txt\n`)
+  })
+
+  it('degenerates to the read resolver when the whole path exists', async () => {
+    const r = await run('/workspace/alias')
+    assert.equal(r.ok, true)
+    assert.equal(r.body, `${realpathSync(wfWs)}/real\n`)
+  })
+})
+
+describe('buildConfinedContainerCommand modes (#7876)', () => {
+  it('the default mode emits the read resolver only, unchanged by create mode existing', () => {
+    const cmd = buildConfinedContainerCommand({ target: '/workspace/a', body: 'true' })
+    assert.equal(cmd.includes('__cx_resolve_new'), false, 'read mode picked up the create-mode walk')
+    assert.ok(cmd.includes(`__cx_target=$(__cx_resolve '/workspace/a')`), 'read mode lost __cx_resolve')
+    assert.deepEqual(
+      cmd,
+      buildConfinedContainerCommand({ target: '/workspace/a', body: 'true', mode: 'read' }),
+    )
+  })
+
+  it('create mode resolves the target with the walk and the workspace with __cx_resolve', () => {
+    const cmd = buildConfinedContainerCommand({ target: '/workspace/a', body: 'true', mode: 'create' })
+    assert.ok(cmd.includes(`__cx_target=$(__cx_resolve_new '/workspace/a')`), 'create mode lost the walk')
+    assert.ok(cmd.includes(`__cx_ws=$(__cx_resolve '/workspace')`), 'create mode changed the workspace resolution')
+  })
+
+  it('an unknown mode throws instead of silently picking a resolver', () => {
+    assert.throws(
+      () => buildConfinedContainerCommand({ target: '/workspace/a', body: 'true', mode: 'write' }),
+      /unknown mode/,
+    )
   })
 })
 

@@ -2754,3 +2754,21 @@ permission — ask which process can actually observe that state. If it is not t
 process running the guard, the check is a spelling test, whatever its variable
 names claim. And when a fake stands in for that other process, make the fake run
 the real thing, or the red half of red-before-green is a fixture.
+
+**Residual closed by `#7876`.** Container `Write` and `Edit` were left lexical by
+the fix above, and they were the worse half: `{"file_path":"esc/hosts"}` WROTE
+through the link, and `Edit` read it first with `cat`. The read resolver could not
+simply be reused, because it needs the parent to exist and `Write` names paths
+several levels short of existing, then `mkdir -p`s the gap. The fix is a
+**deepest-existing-ancestor walk** (`__cx_resolve_new`, `'create'` mode of the
+same preamble): peel components off the end until what is left exists, resolve
+THAT physically, refuse unless it lands inside the workspace, re-append the
+remainder (refusing any `..`, `.` or empty component in it), and have the body
+create and write only under the resolved path, never the lexical alias. The one
+line most likely to be written wrong is "exists". `[ -e ]` follows a link, so a
+DANGLING link reads as absent: the walk steps past it, resolves only the
+workspace, passes, and `>` then follows the link and CREATES its target outside.
+The test is `[ -e ] || [ -L ]`, which stops on the link and hands it to the
+resolver, where it is an escape or a failure but never a pass. The mutation that
+drops `-L` reds exactly one test (the dangling LEAF), and nothing else in the
+suite notices, which is why that test exists.
