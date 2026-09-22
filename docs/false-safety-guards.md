@@ -399,22 +399,61 @@ The field is unconstrained on the wire: `GetDiffSchema` is
 `z.object({ type: z.literal('get_diff') }).passthrough()`, so nothing upstream
 narrows it either.
 
-**The fix closes the leading-dash route and only that.** Said plainly because
-the first draft of this entry did not: `:` and `/` are both in the charset
-allowlist, and git's stderr is still forwarded verbatim, so a path oracle
-needing no dash at all survives —
+**`#7290`'s fix closed the leading-dash route and only that.** Said plainly
+because the first draft of this entry did not: `:` and `/` were both in the
+charset allowlist, and git's stderr was still forwarded verbatim, so a path
+oracle needing no dash at all survived it —
 
 ```
 base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk, but not in 'HEAD'
 base='HEAD:absent'       -> fatal: path 'absent' does not exist in 'HEAD'
-base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository at '<cwdReal>'
 base='/no/such/file'     -> fatal: ambiguous argument …
 ```
 
-— which is pre-existing, tracked separately, and needs `rev-parse --verify`
-plus not forwarding raw git stderr. A guard entry that overstates its own
-reach is the same defect in miniature, which is why it is corrected here
-rather than left to read as sealed.
+A guard entry that overstates its own reach is the same defect in miniature,
+which is why it was corrected here rather than left to read as sealed.
+
+**That surviving route is now closed too — `#7298`.** The lesson it adds is
+about the shape of the guard, not about one more character in a class: **a
+charset allowlist is a narrowing, never a decision.** It cannot tell a
+revision from a path, so every round of it is a round of guessing which
+characters a path needs — and `HEAD:<path>` needs none that a branch name does
+not. The fix stops pattern-matching the base and **resolves** it instead:
+
+```js
+git rev-parse --verify --quiet <base>^{commit}
+```
+
+Only a revision naming a real commit in *this* repo reaches `git diff`;
+anything else falls back to `HEAD` — the pre-existing contract for an unusable
+base — without git ever being asked the client's question. `--verify --quiet`
+is silent on failure (exit 1, empty stderr, for all four probes above), so the
+resolution step is not itself an oracle. `:` came out of the charset in the
+same change, because `<rev>:<path>` names a blob and never a commit.
+
+**The second half was not optional, and neither was the first.** Raw git
+stderr no longer goes to the client at all — the wire gets a fixed
+`'Failed to run git diff'` and the detail is logged server-side — because half
+1 keeps only the *client's own string* out of git's error, while any git
+failure can still name a path of its own (the workspace, an object, a config).
+`base='/etc/passwd'` leaked `cwdReal`, the daemon's absolute workspace path,
+through exactly that channel.
+
+The two halves overlap on the probes above, which is why **one test cannot
+prove both** and the suite in `tests/ws-server-file-ops.test.js` isolates them
+separately — the recurring mistake this document is about. Drop half 2 and the
+two `HEAD:<path>` replies still differ from the DEFAULT reply, so the negative
+control asserts equality with the no-base reply, not merely with each other.
+Drop half 1 and the two replies become equal — the oracle closed by *scrubbing
+the message* rather than by refusing to ask — so a second test forces a git
+failure half 1 cannot pre-empt (a diff over the 2MB `maxBuffer`) and pins the
+error string. Both mutations were run and both go red.
+
+And do not "harden" this by appending a `--` to the diff argv: that turns an
+unresolvable base's error into `fatal: bad revision`, which the old
+`unknown revision` recovery predicate missed — a *narrower* recovery wearing
+the look of a fix. `rev-parse` removes the string-matching predicate entirely.
 
 **The obvious fix does not work, and the issue itself proposed it.** Appending
 a `--` separator — `['diff', diffBase, '--']` — is ineffective, because `--`

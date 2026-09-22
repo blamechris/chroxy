@@ -1401,6 +1401,145 @@ describe('get_diff handler', () => {
 
     ws.close()
   })
+
+  // ── #7298: the dash-free path oracle ──────────────────────────────────────
+  //
+  // #7290 closed the LEADING-DASH route (`-O<path>`). This is the route that
+  // needs no dash: `:` and `/` were both members of the charset allowlist, so
+  // `HEAD:<path>` and a bare absolute path both reached git as revisions, and
+  // git's stderr was forwarded verbatim. Measured against git 2.55.0, every
+  // one of these passed both halves of the old guard:
+  //
+  //   base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk,
+  //                              but not in 'HEAD'
+  //   base='HEAD:absent.txt'   -> fatal: path 'absent.txt' does not exist in 'HEAD'
+  //   base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+  //                              at '<cwdReal>'          <- also leaks the cwd
+  //
+  // The fix has two halves and each of the tests below isolates ONE of them,
+  // deliberately — a single test cannot, because the halves overlap on the
+  // probes above (drop half 2 and the two `HEAD:<path>` replies still differ
+  // from the DEFAULT reply; drop half 1 and they no longer differ from each
+  // other, but raw stderr is still forwarded on any other git failure):
+  //
+  //   half 1  resolve the base with `rev-parse --verify --quiet <base>^{commit}`
+  //           and drop `:` from the charset -> an unusable base is silently
+  //           equivalent to the default base
+  //   half 2  never forward raw git stderr -> a fixed 'Failed to run git diff'
+
+  it('#7298: HEAD:<path> bases are indistinguishable from each other and from the default (half 1)', async () => {
+    // A non-empty working tree, so "fell back to HEAD" and "errored out" are
+    // observably different replies rather than both being an empty file list.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // Baseline: no base at all. This is what an unusable base must look like.
+    send(ws, { type: 'get_diff' })
+    const baseline = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(baseline.error, null)
+    assert.equal(baseline.files.length, 1, 'baseline must be a real, non-empty diff')
+
+    // A path that DOES exist on the daemon's filesystem, outside the cwd.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD:/etc/passwd' })
+    const present = await waitForMessage(messages, 'diff_result', 5000)
+
+    // A path that does NOT exist.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD:/chroxy-7298/definitely/not/here' })
+    const absent = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(
+      present.error, absent.error,
+      'a path that exists and one that does not must produce the SAME error'
+    )
+    assert.deepEqual(
+      present.files, absent.files,
+      'a path that exists and one that does not must produce the SAME files'
+    )
+    // …and both must be the default reply, not an error of any kind. Without
+    // this clause the pair is equal under half 2 alone (both error out with
+    // the same fixed string) and the oracle is closed only by scrubbing the
+    // message, never by refusing to ask git the question.
+    assert.equal(present.error, baseline.error, 'an unusable base falls back to HEAD')
+    assert.deepEqual(present.files, baseline.files, 'an unusable base falls back to HEAD')
+
+    ws.close()
+  })
+
+  it('#7298: an absolute-path base does not leak the daemon cwd', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: '/etc/passwd' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    const serialized = JSON.stringify(result)
+    assert.ok(
+      !serialized.includes(tempDir) && !serialized.includes(realpathSync(tempDir)),
+      `the workspace path must never reach the client; got: ${serialized.slice(0, 400)}`
+    )
+    assert.ok(
+      !/outside repository|exists on disk|ambiguous argument/i.test(result.error || ''),
+      `raw git stderr must not be forwarded; got error: ${result.error}`
+    )
+
+    ws.close()
+  })
+
+  it('#7298: raw git stderr is never forwarded to the client (half 2)', async () => {
+    // Force `git diff` itself to fail in a way half 1 cannot pre-empt: a diff
+    // larger than getDiff's 2MB maxBuffer. execFile rejects with
+    // 'stdout maxBuffer length exceeded', which the old `error: err.message`
+    // branch handed straight to the client.
+    const big = 'x'.repeat(3 * 1024 * 1024) + '\n'
+    writeFileSync(join(tempDir, 'big.txt'), big)
+    execFileSync(GIT, ['add', 'big.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'big'], { cwd: tempDir, stdio: 'pipe' })
+    writeFileSync(join(tempDir, 'big.txt'), 'y'.repeat(3 * 1024 * 1024) + '\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 10000)
+
+    assert.equal(
+      result.error, 'Failed to run git diff',
+      'the git failure detail must stay server-side'
+    )
+    assert.deepEqual(result.files, [])
+
+    ws.close()
+  })
+
+  it('#7298: a branch name still resolves to its own commit (positive control)', async () => {
+    // rev-parse is the new gate; prove it does not reject legitimate bases.
+    writeFileSync(join(tempDir, 'file.txt'), 'second content\n')
+    execFileSync(GIT, ['add', 'file.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['branch', 'chroxy-7298-base', 'HEAD~1'], { cwd: tempDir, stdio: 'pipe' })
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // The branch points at the FIRST commit, so the second commit shows up.
+    send(ws, { type: 'get_diff', base: 'chroxy-7298-base' })
+    const branch = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(branch.error, null)
+    assert.equal(branch.files.length, 1, 'a branch name must reach git as a real revision')
+    assert.equal(branch.files[0].path, 'file.txt')
+
+    // …and it must differ from HEAD, which is clean. Asserting "no error"
+    // alone would pass for a guard that silently rewrote every base to HEAD.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD' })
+    const head = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(head.error, null)
+    assert.deepEqual(head.files, [], 'HEAD is clean, so the two bases must differ')
+
+    ws.close()
+  })
 })
 
 // ---------------------------------------------------------------------------
