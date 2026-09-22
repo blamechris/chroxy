@@ -93,6 +93,26 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   `.git`/`.claude` with no prompt. The hook now asks the daemon instead of
   re-deriving path rules in bash (a shell copy would be a second source of truth and
   would drift — the #6986/#7001 lesson).
+- **The hook-routed pipeline's own files are floored by the filesystem, and the base
+  dir is checked rather than assumed** (#7337 for `claude-cli`, #7372 for
+  `claude-tui`). Both providers keep their per-session state — `settings.json` that
+  registers the hook, the hook payloads, and the re-readable `permission-mode`
+  sidecar the hook consults on every tool call — in a dir under `os.tmpdir()`.
+  `mkdirSync(base, { recursive: true })` returns silently when the base already
+  exists, *including when it is a symlink to a directory*, and then creates children
+  through it at the umask default. On Linux `os.tmpdir()` is the shared `/tmp`, so
+  another local user could pre-create `/tmp/chroxy-claude-tui`, read the
+  world-readable base to learn the session uuid, and substitute a session dir whose
+  `permission-mode` reads `auto`. `ensureOwnedBaseDir()` in
+  `packages/server/src/utils/stale-session-dirs.js` is the one implementation of the
+  check — it creates the base at `0700`, refuses a symlinked or foreign-uid base, and
+  re-asserts the mode on an adopted one. macOS is unaffected (per-user `$TMPDIR` at
+  `0700`), which is precisely why this is an explicit check and not a platform
+  assumption. The two providers differ on the *response*, deliberately: `claude-cli`
+  degrades to env-var-only (losing mid-session mode switching), while **`claude-tui`
+  fails session start** with `SINK_BASE_UNTRUSTED` — its sink carries the whole hook
+  pipeline, so running on without it would be a session that reports success while
+  the floor is silently unenforced.
 - **SDK Auto uses the SDK's native `PreToolUse` callback.** `bypassPermissions`
   suppresses `canUseTool`, but the callback still runs before every tool. It sends
   the tool name and input through the same `PermissionManager`: benign operations
