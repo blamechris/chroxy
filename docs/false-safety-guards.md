@@ -2596,6 +2596,90 @@ the test itself computed, ask what production seam would have to be wrong for it
 to fire — if there isn't one, it is decoration. And read a mutation's output, not
 just its exit code — `!= 0` hides which assertion actually fired.
 
+### 34. The flag that does not exist on half the fleet — `#7280`
+
+`O_NOFOLLOW` is a POSIX flag. Node exports it only under `#ifdef O_NOFOLLOW`, so
+on win32 `fsConstants.O_NOFOLLOW` is `undefined` — and `undefined` in a bitwise
+OR **coerces to `0`**. Measured on the chroxy-win host (Win 11, Node 22.23.1):
+`O_NOFOLLOW: undefined`, `O_WRONLY | O_NOFOLLOW | O_TRUNC === 513`. The
+O_NOFOLLOW term contributed nothing.
+
+Six `open()` calls across `ws-file-ops/reader.js` and `ws-file-ops/memory.js`
+relied on that flag to refuse a symlink at the final component — the
+post-validation TOCTOU defence for every dashboard file read, write, append and
+memory read. On Windows **four** of them — the three `O_RDONLY` reads and the
+`O_APPEND | O_CREAT` append — opened the symlink's **target** instead:
+silently, no error, no log line. The comments around them asserted the
+protection in plain English (`memory.js`: "The final open uses O_NOFOLLOW to
+refuse a symlink"), which was true on POSIX and false on win32.
+
+The other two pass `O_WRONLY | O_TRUNC`, which Windows rejects with `EINVAL`
+outright for an entirely unrelated reason (#7284, measured in
+`docs/records/windows-path-containment-7273.md`). Worth stating rather than
+rounding up to "all six", because the distinction is the point of this
+catalogue: those two were not *defended*, they were *unreachable*, and the
+accident that made them safe disappears the moment #7284 is fixed by adding a
+create disposition. A guard whose current safety is supplied by a neighbouring
+bug is the same false safety one layer over.
+
+**Why no test could go red.** Each site's refusal is observed through its ELOOP
+branch. With the flag gone the open SUCCEEDS, so the ELOOP branch is
+unreachable and every symlink-refusal test passes on Windows *by never reaching
+the branch it means to test* — cause 2 in its purest form, and the reason this
+is not a coverage problem: the coverage is real, it just measures a different
+platform's code path. The Windows CI job runs all these files and was green
+throughout.
+
+**Two things that make this class hard to see.** The flag is a CONSTANT, so
+there is no call to inspect and nothing to stub; and the degradation is a
+silent numeric identity (`x | undefined === x`), not a throw. A missing FUNCTION
+would have been a `TypeError` on the first Windows run. A missing constant is a
+no-op that type-checks, lints, and reads correctly at the call site.
+
+**The fix** is one helper — `ws-file-ops/open-nofollow.js` — that every site
+routes through. POSIX ORs the real flag in, unchanged. win32 assembles the
+refusal: `lstat` before the open (a reparse-point symlink or junction is refused
+without opening it), the open, then `fstat(fd)` against a fresh `lstat(path)` on
+`dev` + `ino` with `{ bigint: true }`, because a Windows file index does not fit
+in a Number. A mismatch, a symlink that appeared, an lstat that failed, or an
+inode of `0` (the comparison would be vacuous) all close the fd and refuse with
+`code: 'ELOOP'`, so the callers' existing handling is untouched. An unexpected
+platform — no `O_NOFOLLOW`, not win32 — throws `ENOSYS` rather than degrading to
+a plain open: this whole entry is about what a silent fallback costs.
+
+**What the guard is, and how it goes red.** Three groups, and the third is the
+one that keeps the fix from decaying:
+1. the POSIX branch's flag is pinned through the injected `open` — dropping
+   `| oNofollow` reds it, and reds the real planted-symlink case too;
+2. the win32 branch is exercised **on every platform** by injecting
+   `hasONoFollow: false`, so macOS/Linux CI proves the Windows path. Deleting
+   the identity comparison reds one test; deleting the whole post-open check
+   reds five. The symlink-PLANTING cases carry `SKIP_NO_SYMLINK` (the Windows CI
+   account has no symlink privilege — entry 11), and the injected-lstat cases
+   need no fixture, so the Windows runner still executes the branch;
+3. a source sweep asserts neither file references `fsConstants.O_NOFOLLOW`,
+   that neither imports an open-capable binding from `fs`/`fs/promises`, and
+   that each calls `openNoFollow()` exactly N times. Leaving ONE of the six
+   sites unconverted reds three assertions.
+
+   That middle assertion is itself a worked example of cause 1. Its first form
+   compared the raw `a, b as c` import entries against the string `'open'`, so
+   `import { open as rawOpen }` read as the unrelated name `'open as rawOpen'`
+   and passed — and because adding a NEW raw-open site removes no
+   `openNoFollow()` call, the pinned count did not move either. A brand-new
+   unguarded open evaded all three assertions of the sweep written to forbid
+   exactly that, and only a mutation found it. It now judges the IMPORTED name
+   rather than the local one, covers `open`/`openSync`/`promises`, and refuses
+   a namespace or default import of either module outright — because a local
+   alias is precisely what a named-import check cannot see through.
+
+**Guard against it:** a platform-conditional CONSTANT is a silent no-op waiting
+to happen — `undefined | x` is `x`, and nothing announces it. When a guard's
+strength comes from a constant, assert the constant exists on the platforms that
+should have it AND that the code still passes it; then give the platforms that
+lack it an explicit branch, and make an unrecognised platform a refusal. And
+when a security branch exists for one OS, put a seam in it so every OS's CI can
+run it — a branch only Windows reaches is a branch nothing proves.
 ### 35. The containment check that could not see the filesystem it guarded — `#7354`
 
 Entry 15's fix was right about **where** to check (the output, not the input) and

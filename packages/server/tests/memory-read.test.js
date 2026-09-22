@@ -137,24 +137,28 @@ describe('memory_read (readMemory) handler', () => {
     // Two @import references to the SAME file must still only produce one
     // entry (dedup already worked before the fix) — the assertion that
     // matters here is that the underlying file is only actually opened
-    // ONCE, not once per reference. Requires a module instance whose
-    // `fs/promises` `open` binding resolves to the mock below, so this
-    // dynamically re-imports memory.js under a cache-busted specifier
-    // AFTER registering the mock — a plain top-of-file static import (as
-    // used by `fileOps` elsewhere in this suite) would already be bound to
-    // the real `open` before any per-test mock.module() call could apply.
+    // ONCE, not once per reference. Requires a module instance whose `open`
+    // binding resolves to the mock below, so this dynamically re-imports
+    // memory.js under a cache-busted specifier AFTER registering the mock —
+    // a plain top-of-file static import (as used by `fileOps` elsewhere in
+    // this suite) would already be bound to the real one before any per-test
+    // mock.module() call could apply.
+    //
+    // #7280 moved the seam: memory.js no longer calls `fs/promises`' `open`
+    // directly, because a bare `O_NOFOLLOW` is undefined (and ORs to 0) on
+    // win32. It goes through `openNoFollow`, so that is what is counted here.
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-dupimport-'))
     await writeFile(join(dir, 'dup.md'), 'dup content', 'utf-8')
     await writeFile(join(dir, 'CLAUDE.md'), 'See @dup.md and again @dup.md here.', 'utf-8')
 
-    const realFsp = await import('fs/promises')
+    const realNoFollow = await import('../src/ws-file-ops/open-nofollow.js')
     const dupOpens = []
-    const mockHandle = mock.module('fs/promises', {
+    const mockHandle = mock.module('../src/ws-file-ops/open-nofollow.js', {
       namedExports: {
-        ...realFsp,
-        open: async (...args) => {
+        ...realNoFollow,
+        openNoFollow: (...args) => {
           if (String(args[0]).endsWith('dup.md')) dupOpens.push(args[0])
-          return realFsp.open(...args)
+          return realNoFollow.openNoFollow(...args)
         },
       },
     })

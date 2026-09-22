@@ -1,10 +1,11 @@
-import { readFile, stat, mkdir, realpath, open } from 'fs/promises'
+import { readFile, stat, mkdir, realpath } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
+import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
@@ -185,14 +186,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
-      // Open with O_NOFOLLOW to close the post-validation TOCTOU window:
-      // if the file at resolvedAbsPath was replaced with a symlink between
-      // validatePathWithinCwd() and this open(), the kernel rejects it (ELOOP).
+      // openNoFollow closes the post-validation TOCTOU window: if the file at
+      // resolvedAbsPath was replaced with a symlink between
+      // validatePathWithinCwd() and this open, it is rejected with ELOOP — by
+      // the kernel on POSIX (O_NOFOLLOW), by an lstat + fd-identity check on
+      // win32, where O_NOFOLLOW does not exist and the bare flag silently
+      // no-opped until #7280. See open-nofollow.js for the exact per-platform
+      // guarantee and the race it cannot close.
       let buf
       {
         let fh
         try {
-          fh = await open(resolvedAbsPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+          fh = await openNoFollow(resolvedAbsPath, fsConstants.O_RDONLY)
           buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -324,7 +329,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const absInCwd = normalize(resolve(cwdReal, requestedPath.trim()))
 
       // Determine whether the target file already exists so we can choose
-      // between O_NOFOLLOW (existing) and parent-validated creation (new).
+      // between a symlink-refusing truncate (existing) and parent-validated
+      // creation (new).
       let resolvedTarget
       let fileExists = false
       try {
@@ -368,17 +374,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Create parent directories if needed
       await mkdir(resolve(absPath, '..'), { recursive: true })
 
-      // Write the file using O_NOFOLLOW to close the post-validation TOCTOU
-      // window: if a symlink is swapped in at absPath between validation and
-      // this open(), the kernel rejects it with ELOOP.
+      // Write the file through openNoFollow to close the post-validation TOCTOU
+      // window: a symlink swapped in at absPath between validation and this
+      // open is rejected with ELOOP on every platform (#7280 — the bare
+      // O_NOFOLLOW flag this used to pass is undefined on win32 and ORed to 0).
       const data = Buffer.from(content || '', 'utf-8')
       {
         let fh
         try {
           const flags = fileExists
-            ? fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC
-            : fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_CREAT | fsConstants.O_EXCL
-          fh = await open(absPath, flags, 0o666)
+            ? fsConstants.O_WRONLY | fsConstants.O_TRUNC
+            : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+          fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -394,7 +401,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             // Race: file was created between our existence check and O_EXCL open.
             // Retry once using the existing-file path (O_TRUNC without O_EXCL).
             try {
-              fh = await open(absPath, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC, 0o666)
+              fh = await openNoFollow(absPath, fsConstants.O_WRONLY | fsConstants.O_TRUNC, 0o666)
               await fh.writeFile(data)
             } catch (retryErr) {
               if (retryErr.code === 'ELOOP') {
@@ -440,8 +447,9 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
    * The TARGET is chosen SERVER-side (`<cwd>/CLAUDE.md`) — the client sends only
    * the note text, never a path — so the write is path-confined BY CONSTRUCTION.
    * validatePathWithinCwd is still run for symlink-escape defence (a CLAUDE.md
-   * symlinked out of the workspace is rejected), and the open uses O_NOFOLLOW to
-   * close the post-validation TOCTOU window, matching writeFileContent above.
+   * symlinked out of the workspace is rejected), and the open goes through
+   * openNoFollow to close the post-validation TOCTOU window, matching
+   * writeFileContent above.
    *
    * The write uses O_APPEND (+ O_CREAT): each append lands atomically at EOF, so
    * concurrent appends can't lose a line and a crash can't truncate the file —
@@ -506,7 +514,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           if (st.size > 0) {
             let rfh
             try {
-              rfh = await open(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+              rfh = await openNoFollow(absPath, fsConstants.O_RDONLY)
               const tail = Buffer.alloc(1)
               await rfh.read(tail, 0, 1, st.size - 1)
               needsLeadingNewline = tail[0] !== 0x0a
@@ -523,13 +531,14 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // O_APPEND: atomic append at EOF (no lost-update / truncation window).
       // O_CREAT (WITHOUT O_EXCL) opens-or-creates, so there is no EEXIST race to
-      // retry — a concurrent creator just means we append instead. O_NOFOLLOW
-      // keeps the symlink-escape defence on the final component.
+      // retry — a concurrent creator just means we append instead. openNoFollow
+      // keeps the symlink-escape defence on the final component, on win32 as
+      // well as POSIX (#7280).
       {
         let fh
         try {
-          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW
-          fh = await open(absPath, flags, 0o666)
+          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+          fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
