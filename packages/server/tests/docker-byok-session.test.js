@@ -515,10 +515,16 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.match(result.content, /Wrote 5 bytes/)
     assert.equal(_dockerBackend.calls.length, 1)
     const cmd = _dockerBackend.calls[0].cmd
-    assert.match(cmd, /mkdir -p '\/workspace\/src'/)
-    assert.match(cmd, /base64 -d > '\/workspace\/src\/new\.js'/)
+    // #7876 — the lexical `/workspace/src/new.js` is resolved in-container by
+    // the create-mode walk; the parent is created and the content written
+    // under the RESOLVED `"$__cx_target"`, never under the lexical path.
+    // Booleans, not assert.match: the subject is a multi-KB script (#7340).
+    assert.ok(cmd.includes(`__cx_resolve_new '/workspace/src/new.js'`), 'Write must resolve the remapped path in-container')
+    assert.ok(cmd.includes('mkdir -p "${__cx_target%/*}"'), 'Write must create the RESOLVED parent')
+    assert.ok(cmd.includes('base64 -d > "$__cx_target"'), 'Write must write the RESOLVED path')
+    assert.equal(cmd.includes(`mkdir -p '/workspace/src'`), false, 'Write created the lexical parent')
     // The base64 of 'hello' is aGVsbG8=
-    assert.match(cmd, /aGVsbG8=/)
+    assert.ok(cmd.includes('aGVsbG8='), 'content not base64-encoded into the command')
   })
 
   it('Write refuses missing/non-string content with EINVAL', async () => {

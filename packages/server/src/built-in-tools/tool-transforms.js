@@ -347,6 +347,69 @@ const CONTAINER_RESOLVE_FN = [
 ].join('\n')
 
 /**
+ * SECURITY (#7876) — the bash source of `__cx_resolve_new`, the CREATE-mode
+ * resolver for container Write/Edit: the DEEPEST-EXISTING-ANCESTOR walk.
+ *
+ * `__cx_resolve` is right for Read/Glob/Grep because they only ever name a path
+ * whose parent exists. Write names paths that may be several levels short of
+ * existing (`esc/new/deeper/file.txt`) and `mkdir -p`s the gap, so resolving
+ * the whole path fails outright — and resolving nothing leaves `mkdir -p` free
+ * to walk through `esc -> /etc`. This walk:
+ *
+ *   1. peels components off the END of the lexical path until what is left
+ *      EXISTS. "Exists" is `[ -e ] || [ -L ]`, never `-e` alone: `-e` follows
+ *      the link, so a DANGLING link reads as absent, the walk steps past it,
+ *      and the later `mkdir -p` / `>` goes through it to wherever it points
+ *      (`>` CREATES a dangling link's target). Stopping on the link hands it to
+ *      `__cx_resolve`, which resolves it to its target — outside is an escape,
+ *      unresolvable is a failure, never a pass;
+ *   2. refuses any peeled component that is `..`, `.` or empty (`//`, a
+ *      trailing `/`). `remapToContainerPath` already collapses those lexically,
+ *      and this refusal deliberately does not trust it: the peeled remainder is
+ *      re-appended WITHOUT resolution, so a `..` in it would be resolved by the
+ *      kernel only at `mkdir` time — after the containment check. The remainder
+ *      cannot be absolute: it is built from components, none of which contain
+ *      `/`;
+ *   3. resolves the existing prefix physically with `__cx_resolve` (reused, not
+ *      reimplemented — a second resolution loop is a second thing to drift);
+ *   4. prints `<resolved-prefix>/<remainder>`. When the whole path exists the
+ *      remainder is empty and this is exactly `__cx_resolve target`, i.e. the
+ *      Read route.
+ *
+ * Every component the caller's body creates afterwards is created under the
+ * RESOLVED prefix, never under the lexical alias, so a link swapped on the
+ * alias after the check does not redirect the write. A link swapped INSIDE the
+ * already-resolved prefix between the check and the write is the same
+ * check-then-use window the host-side tools and #7354 accept.
+ *
+ * Absolute paths only: every caller hands it a `/workspace/...` path from
+ * `remapToContainerPath`, and refusing a relative one keeps the walk's
+ * termination (it always reaches `/`, which exists) unconditional.
+ */
+const CONTAINER_RESOLVE_NEW_FN = [
+  '__cx_resolve_new() {',
+  '  local __p=$1 __rest= __c __r',
+  '  case $__p in /*) ;; *) return 1 ;; esac',
+  '  while ! { [ -e "$__p" ] || [ -L "$__p" ]; }; do',
+  '    __c=${__p##*/}',
+  '    case $__c in \'\'|.|..) return 1 ;; esac',
+  '    __rest=$__c${__rest:+/$__rest}',
+  '    __p=${__p%/*}',
+  '    [ -n "$__p" ] || __p=/',
+  '  done',
+  '  __r=$(__cx_resolve "$__p") || return 1',
+  '  if [ -z "$__rest" ]; then printf \'%s\\n\' "$__r"; return 0; fi',
+  '  case $__r in */) printf \'%s%s\\n\' "$__r" "$__rest" ;; *) printf \'%s/%s\\n\' "$__r" "$__rest" ;; esac',
+  '}',
+].join('\n')
+
+/** Resolver per confinement mode — see {@link buildConfinedContainerCommand}. */
+const CONFINE_MODES = new Map([
+  ['read', { fns: [CONTAINER_RESOLVE_FN], resolver: '__cx_resolve' }],
+  ['create', { fns: [CONTAINER_RESOLVE_FN, CONTAINER_RESOLVE_NEW_FN], resolver: '__cx_resolve_new' }],
+])
+
+/**
  * SECURITY (#7354) — wrap `body` in the container-side confinement preamble.
  *
  * The emitted script resolves `workspace` and `target` physically, refuses
@@ -363,16 +426,29 @@ const CONTAINER_RESOLVE_FN = [
  * stdout whose first line is not one of the three sentinels, so a reply it
  * cannot account for is an error and never "no matches".
  *
- * @param {{ target: string, body: string, setup?: string, workspace?: string }} opts
+ * `mode` picks how `target` is resolved; the workspace is always resolved with
+ * `__cx_resolve` and the containment `case` is the same in both:
+ *   - `'read'` (default) — `__cx_resolve`: the parent must exist. Read, Glob and
+ *     Grep; their emitted script is unchanged by the existence of `'create'`.
+ *   - `'create'` (#7876) — `__cx_resolve_new`, the deepest-existing-ancestor
+ *     walk, for a target that may not exist yet. Write and Edit. The body must
+ *     create anything it creates under `"$__cx_target"` (e.g.
+ *     `mkdir -p "${__cx_target%/*}"`), never under the lexical path.
+ *
+ * @param {{ target: string, body: string, setup?: string, workspace?: string, mode?: 'read'|'create' }} opts
  *   `setup` runs AFTER the containment check and BEFORE the OK sentinel; it
  *   must be a single command whose non-zero exit means "could not proceed".
  */
-export function buildConfinedContainerCommand({ target, body, setup = '', workspace = '/workspace' }) {
+export function buildConfinedContainerCommand({ target, body, setup = '', workspace = '/workspace', mode = 'read' }) {
+  const confine = CONFINE_MODES.get(mode)
+  // An unknown mode is a caller bug. Falling back to either resolver would pick
+  // a containment policy the caller did not ask for, silently.
+  if (!confine) throw new Error(`buildConfinedContainerCommand: unknown mode ${JSON.stringify(mode)}`)
   const bail = (sentinel) => `{ printf '%s\\n' '${sentinel}'; exit 0; }`
   const lines = [
-    CONTAINER_RESOLVE_FN,
+    ...confine.fns,
     `__cx_ws=$(__cx_resolve ${shellQuote(workspace)}) || ${bail(CONTAINER_CONFINE_ERROR)}`,
-    `__cx_target=$(__cx_resolve ${shellQuote(target)}) || ${bail(CONTAINER_CONFINE_ERROR)}`,
+    `__cx_target=$(${confine.resolver} ${shellQuote(target)}) || ${bail(CONTAINER_CONFINE_ERROR)}`,
     `case $__cx_target in "$__cx_ws"|"$__cx_ws"/*) ;; *) ${bail(CONTAINER_CONFINE_ESCAPE)} ;; esac`,
   ]
   if (setup) lines.push(`${setup} || ${bail(CONTAINER_CONFINE_ERROR)}`)

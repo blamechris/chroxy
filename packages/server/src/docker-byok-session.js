@@ -2104,15 +2104,20 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
-   * RESIDUAL, tracked by #7876 — unlike Read/Glob/Grep, this path is still
-   * confined LEXICALLY only, so a symlinked directory inside /workspace (a link
-   * on the CONTAINER's filesystem, invisible to `remapToContainerPath`) still
-   * redirects the write. #7354's resolver does not transfer as-is: Write names
-   * paths that do not exist yet and `mkdir -p`s their parents, so it needs a
-   * deepest-existing-ancestor walk rather than a `cd -P` of the whole path.
+   * SECURITY (#7876) — confined INSIDE the container, like Read/Glob/Grep.
+   * `remapToContainerPath` is lexical and cannot see a symlinked directory in
+   * /workspace (the link is on the CONTAINER's filesystem), so the write runs
+   * under `buildConfinedContainerCommand` in `'create'` mode: the
+   * deepest-existing-ancestor walk resolves the longest existing prefix of the
+   * path physically, refuses unless it lands inside the resolved workspace, and
+   * re-appends the not-yet-existing remainder. The body then `mkdir -p`s,
+   * writes and measures ONLY `"$__cx_target"` — every directory it creates is
+   * created under the RESOLVED ancestor, never under the lexical alias, so a
+   * link swapped on the alias after the check cannot redirect the write.
    *
-   * The issue exists. #7354's first lesson was a comment claiming a residual was
-   * "tracked separately" when nothing tracked it.
+   * Known residual: a link swapped INSIDE the already-resolved prefix between
+   * the check and the write — the same check-then-use window the host-side
+   * tools and #7354 accept.
    */
   async _containerWrite(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
@@ -2136,17 +2141,33 @@ export class DockerByokSession extends ClaudeByokSession {
     // We base64-encode on the way in to dodge any quoting hazards
     // with newlines / single quotes / backticks in `content`.
     const encoded = Buffer.from(content, 'utf8').toString('base64')
-    const parentDir = posix.dirname(containerPath)
-    const cmd = [
-      `mkdir -p ${shellQuote(parentDir)}`,
-      `echo ${shellQuote(encoded)} | base64 -d > ${shellQuote(containerPath)}`,
-      `wc -c < ${shellQuote(containerPath)}`,
-    ].join(' && ')
+    // `${__cx_target%/*}` is the resolved parent. `__cx_target` is always an
+    // absolute path under the resolved workspace (the preamble refused
+    // anything else), so it can neither be empty nor begin with `-`.
+    const cmd = buildConfinedContainerCommand({
+      target: containerPath,
+      mode: 'create',
+      body: [
+        'mkdir -p "${__cx_target%/*}"',
+        `echo ${shellQuote(encoded)} | base64 -d > "$__cx_target"`,
+        'wc -c < "$__cx_target"',
+      ].join(' && '),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      // The message names only the path the caller supplied — never where it
+      // resolved (existence-oracle rule, #7341/#7354).
+      this._logContainment('Write', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Write', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (stderr && stderr.trim()) {
       return { content: `Write failed: ${stderr.trim()}`, isError: true }
     }
-    const bytesWritten = Number(stdout.trim()) || 0
+    const bytesWritten = Number(confined.body.trim()) || 0
     return {
       content: `Wrote ${bytesWritten} bytes to ${input.file_path}.`,
       isError: false,
@@ -2154,10 +2175,18 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
-   * RESIDUAL, tracked by #7876 — same lexical-only confinement as
-   * `_containerWrite`, and this one READS through the link too (the `cat`
-   * below), so #7354's read-side escape is reachable here by a route #7867 did
-   * not close.
+   * SECURITY (#7876) — the READ half (`cat`) runs under the same in-container
+   * confinement as `_containerWrite`, so a symlinked directory inside
+   * /workspace can neither be read through nor, since a refused read returns
+   * before the write-back, written through.
+   *
+   * `'create'` mode, not the default read mode: both resolve a path whose leaf
+   * exists identically, but `'create'` is the resolver the write-back uses, so
+   * the file Edit reads and the file it writes are resolved by the same walk. A
+   * missing file (at any depth) still resolves to an in-workspace path and
+   * surfaces as `cat`'s own "No such file", not as a containment error — the
+   * Read route's contract. The write-back through `_containerWrite` resolves
+   * again, independently; that second resolution is a second check, not a gap.
    */
   async _containerEdit(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
@@ -2167,13 +2196,26 @@ export class DockerByokSession extends ClaudeByokSession {
     }
     // Read the file via the same execInEnvironment path so a missing
     // file surfaces as a tool_result rather than an exception.
-    const { stdout: existing, stderr: readErr } = await this._execAsContainerUser({
-      cmd: `cat ${shellQuote(containerPath)}`,
+    const { stdout: readOut, stderr: readErr } = await this._execAsContainerUser({
+      cmd: buildConfinedContainerCommand({
+        target: containerPath,
+        mode: 'create',
+        body: 'cat "$__cx_target"',
+      }),
       timeout: 30_000,
     })
+    const confined = parseConfinedContainerStdout(readOut)
+    if (!confined.ok) {
+      this._logContainment('Edit', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Edit', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (readErr && readErr.trim()) {
       return { content: `Edit failed: ${readErr.trim()}`, isError: true }
     }
+    const existing = confined.body
     // Strict-unique-match + NO_CHANGE guard + LITERAL replacement via the shared
     // transform (same one the host file-ops Edit uses) — #5882 closes the drift
     // where this path lacked the NO_CHANGE guard and used slice vs the host's
