@@ -485,6 +485,41 @@ program still runs its own option parser over that array. The two are different
 classes with different fixes, and "we use execFile, not exec" is an answer to
 only one of them.
 
+**The sweep's remaining sites closed in `#7296`, and the Docker one adds a
+variant worth naming: an allowlist constrains a value's PREFIX, never its
+POSITION.** `create_environment`'s image reached a bare positional in
+`docker run`, and `docker-image-allowlist.js` was the control — a header
+claiming it "prevents the WS handler itself from being used as a privileged
+pull primitive" over matching that is `pattern.endsWith('*')` →
+`image.startsWith(prefix)`. That says nothing about whether the value will be
+read as an image or as a FLAG: a catch-all pattern admits `--privileged`, and
+an exact pattern launders it outright. The shipped default list was safe only
+by accident of its prefixes — entry 13's shape again, a comment claiming more
+than its code performs. The fix is the rejection (`isSafeArgvValue`, since an
+image reference can never legitimately begin with `-`) with a `--` separator in
+the argv as the belt. The other two sites — cloudflared's tunnel name and
+`chroxy deploy`'s `known-good-ref` — are the two established shapes: a `--`
+before the positional, and a reject. The ref's argv already carried a `--`,
+*after* the ref, which is the inert case this entry measured.
+
+Fix shape is still per-CLI and still measured, this time on the shipped
+binaries, with probes that could not reach a daemon or an account (a dead
+`DOCKER_HOST`, a nonexistent `--origincert`):
+
+| probe | without `--` | with `--` |
+|---|---|---|
+| `docker 29.7.2 run … --help sleep infinity` | prints run's help | `--help` taken as the IMAGE |
+| `cloudflared 2026.8.3 tunnel run … --help` | prints run's help | "error parsing tunnel ID" |
+| `cloudflared tunnel create … --help` | prints create's help | consumed as the NAME |
+
+A partial guard is how this class survives, so the cloudflared name is also
+refused at the **writer** — the interactive `chroxy tunnel setup` prompt is the
+only producer of `config.tunnelName`, and it now rejects anything that is not
+`[A-Za-z0-9][A-Za-z0-9._-]*`. And the deploy ref's predicate moved into
+`utils/argv-safety.js` (`isGitShaRef`) rather than being transcribed a second
+time: the supervisor's rollback path already validated the same file, and a
+second copy of a security regex is the drift this document is full of.
+
 ### 14. The quoting that stopped the wrong injection — `#7295`
 
 Entry 13 closed with a generalisation: `execFile` with an array argv stops

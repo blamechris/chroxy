@@ -91,6 +91,28 @@ export function assertSafeArgvValue(value, kind = 'value') {
 }
 
 /**
+ * A git commit SHA, full or abbreviated — the shape of fix (1) for the one
+ * datum this repo persists as a ref: `<config dir>/known-good-ref`, written by
+ * `chroxy deploy` and read back by both `chroxy deploy` and the supervisor's
+ * rollback path.
+ *
+ * Deliberately stricter than {@link isSafeArgvValue}: the datum is always a
+ * SHA that chroxy wrote itself, so hex-only rejects not just `--exit-code` and
+ * `-O/etc/passwd` but every branch name, refspec and revision expression a
+ * corrupted file could otherwise smuggle into a `git` argv. Short SHAs of ≥ 7
+ * chars are accepted to match the supervisor's historical behaviour.
+ *
+ * Lives here, and NOT copied to a second call site: this predicate had one
+ * implementation inline in supervisor.js, and #7296 added the second consumer.
+ *
+ * @param {unknown} ref
+ * @returns {boolean}
+ */
+export function isGitShaRef(ref) {
+  return typeof ref === 'string' && /^[0-9a-f]{7,40}$/i.test(ref)
+}
+
+/**
  * Does a CLI's `--help` output advertise `flag` as a flag in its OWN right?
  *
  * A bare `help.includes('--remote')` is a false-safety guard: it reports

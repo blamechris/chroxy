@@ -13,6 +13,7 @@ import QRCode from 'qrcode'
 import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
 import { PushManager } from './push.js'
 import { configPath } from './config-dir.js'
+import { isGitShaRef } from './utils/argv-safety.js'
 
 function maskToken(token) {
   if (!token) return ''
@@ -860,7 +861,11 @@ export class Supervisor extends EventEmitter {
       // ≥ 7 chars to match historical behavior but require
       // hex-only content. Rejects arbitrary branch names, refspecs,
       // option flags (-rf, --help), etc.
-      if (!/^[0-9a-f]{7,40}$/i.test(ref)) {
+      //
+      // #7296: `chroxy deploy` reads the SAME file into a `git diff` argv, so
+      // the predicate moved to utils/argv-safety.js and both call sites share
+      // it. A second transcription of this regex is the drift this prevents.
+      if (!isGitShaRef(ref)) {
         this._log.error(`Invalid known-good ref format: "${ref.slice(0, 64)}"`)
         return false
       }
