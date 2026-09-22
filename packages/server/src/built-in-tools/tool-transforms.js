@@ -327,7 +327,14 @@ const CONTAINER_RESOLVE_FN = [
   '    __d=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ) || return 1',
   '    __p=$__d/$__b',
   '    if [ -L "$__p" ]; then',
-  '      __t=$(readlink -- "$__p") || return 1',
+  // The `--` first, then WITHOUT it (Copilot, PR #7867): the image is a user
+  // opt, there is no allowlist, and a BusyBox `readlink` that did not honour
+  // `--` would refuse every legitimate symlink in an Alpine container. Dropping
+  // `--` costs nothing here and cannot recreate #7295: by this line `$__p` is
+  // `$__d/$__b` where `__d` came from `pwd -P`, so it ALWAYS begins with `/`
+  // and can never be read as an option. The `--` stays first so the guarantee
+  // does not rest on that invariant where a utility honours the terminator.
+  '      __t=$(readlink -- "$__p" 2>/dev/null || readlink "$__p") || return 1',
   '      case $__t in /*) __p=$__t ;; *) __p=$__d/$__t ;; esac',
   '      __n=$((__n+1))',
   '      continue',
@@ -518,6 +525,16 @@ export function confinedContainerFailureMessage(label, reason, path) {
   const where = typeof path === 'string' && path.length > 0 ? ` ${path}` : ''
   if (reason === 'escape') {
     return `${label} refused:${where} resolves outside the workspace inside the container (symlinked path)`
+  }
+  // `unparseable` is NOT a fact about the path (Copilot, PR #7867). The error
+  // sentinel says the container resolved the path and failed; an unparseable
+  // reply says the container's verdict never arrived — the guard may not have
+  // run at all, stdout may have been truncated, an image may have printed a
+  // banner. Collapsing the two sends an operator to look at the file when the
+  // thing to look at is the container. The refusal is the same either way; the
+  // diagnosis is not.
+  if (reason === 'unparseable') {
+    return `${label} failed: the container returned no valid confinement verdict${where} — the reply was missing or malformed, so the guard's result is unknown and the output was withheld rather than reported as no matches`
   }
   return `${label} failed: could not resolve${where} inside the container (missing, inaccessible, or a symlink loop)`
 }

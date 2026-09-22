@@ -276,9 +276,22 @@ describe('confinedContainerFailureMessage (#7354)', () => {
   it('distinguishes an unresolvable path from an escape', () => {
     for (const reason of ['error', 'unparseable']) {
       const msg = confinedContainerFailureMessage('Read', reason, 'a.ts')
-      assert.ok(msg.includes('could not resolve'), reason)
       assert.equal(msg.includes('resolves outside the workspace'), false, reason)
+      assert.ok(msg.includes('a.ts'), reason)
     }
+  })
+
+  it('distinguishes an unparseable REPLY from an unresolvable PATH', () => {
+    // The error sentinel means the container answered, about the path. An
+    // unparseable reply means the verdict never arrived — the guard may not
+    // have run. Collapsing them sends an operator to the wrong place, and the
+    // second case is the one that needs looking at.
+    const err = confinedContainerFailureMessage('Read', 'error', 'a.ts')
+    const unp = confinedContainerFailureMessage('Read', 'unparseable', 'a.ts')
+    assert.ok(err.includes('could not resolve'))
+    assert.equal(err.includes('no valid confinement verdict'), false)
+    assert.ok(unp.includes('no valid confinement verdict'))
+    assert.equal(unp.includes('could not resolve'), false)
   })
 
   it('omits the path clause when there is no path to name', () => {

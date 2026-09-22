@@ -494,6 +494,18 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
 
   // ── Fail-closed on a reply the host cannot account for ───────────────────
 
+  it('resolves a symlink even where readlink does not honour `--` (BusyBox/Alpine)', async () => {
+    // The image is a user opt and there is no allowlist, so an Alpine container
+    // is reachable. A `readlink` that read `--` as a path would refuse every
+    // legitimate symlink — the resolver falls back to the bare form, which is
+    // safe here because `$__p` is always absolute by that line.
+    const backend = bashBackend()
+    const session = buildSession(backend)
+    await session._dispatchBuiltinTool({ toolName: 'Read', input: { file_path: 'ok/b.ts' } })
+    const cmd = backend.calls[0].cmd
+    assert.ok(cmd.includes('readlink -- "$__p" 2>/dev/null || readlink "$__p"'), 'no readlink fallback')
+  })
+
   it('an unparseable container reply is an error for all three tools, not "no matches"', async () => {
     // "cannot check this" silently treated as "nothing to check" is the second
     // recurring cause in docs/false-safety-guards.md. A reply with no sentinel
@@ -514,6 +526,11 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
       const result = await session._dispatchBuiltinTool({ toolName, input })
       assert.equal(result.isError, true, `${toolName} accepted an unguarded reply`)
       assert.equal(result.content.includes('src/b.ts'), false, `${toolName} emitted the payload`)
+      // An unparseable reply is a fact about the CONTAINER, not about the path.
+      // Reporting it as "could not resolve <path>" sends an operator to look at
+      // the file when the thing to look at is the guard.
+      assert.match(result.content, /no valid confinement verdict/)
+      assert.equal(/could not resolve/.test(result.content), false, `${toolName} blamed the path`)
     }
   })
 
@@ -541,6 +558,9 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
     assert.equal(result.isError, true)
     assert.match(result.content, /could not resolve/)
     assert.equal(/resolves outside the workspace/.test(result.content), false)
+    // ... and distinct from an unparseable reply: the error sentinel means the
+    // container DID answer, about the path.
+    assert.equal(/no valid confinement verdict/.test(result.content), false)
   })
 })
 
