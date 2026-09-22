@@ -939,14 +939,24 @@ describe('ClaudeTuiSession', () => {
         assert.deepEqual(readdirSync(attackerDir), [],
           'a plain mkdirSync would have created the session dir inside the attacker-controlled target')
         assert.equal(session._sinkDir, null, 'no sink dir adopted')
+        assert.equal(session._term, null, 'refused before the PTY was spawned')
       })
 
       // A foreign-uid base cannot be forged without root, so the uid branch is
       // covered by `ensureOwnedBaseDir`'s own unit tests
-      // (tests/cli-permission-mode-sidecar.test.js). What IS forgeable here is
-      // the other non-symlink refusal the helper raises — a base that exists and
-      // is not a directory at all — which proves the session propagates EVERY
-      // refusal, not just the one branch above.
+      // (tests/cli-permission-mode-sidecar.test.js). The helper-specific
+      // coverage here is the symlink case above and the adopted-mode case below
+      // — both go red when `ensureOwnedBaseDir` is swapped back for a bare
+      // `mkdirSync`, which is what proves they test the check and not the call.
+      //
+      // This one does NOT, and says so rather than overclaiming: `mkdirSync(p,
+      // { recursive: true })` on an existing FILE throws EEXIST before the
+      // helper's own `!isDirectory()` branch is ever reached, so it survives
+      // that mutation (measured: 1 pass / 3 fail). What it pins is still worth
+      // pinning, and nothing else pins it — that ANY failure of the base
+      // creation, whatever raises it, reaches the client fail-closed with the
+      // specific code and the offending path, rather than as a bare Error or a
+      // session that started anyway.
       it('refuses to start when the base exists and is not a directory', async () => {
         const notADir = join(baseTmp, 'not-a-dir')
         writeFileSync(notADir, 'i am a file')
@@ -965,6 +975,10 @@ describe('ClaudeTuiSession', () => {
         })
         assert.equal(readys.length, 0, 'no ready emitted')
         assert.equal(errors.length, 1, 'surfaced on the session error channel')
+        // `readys.length === 0` alone would also hold for a session that DID
+        // spawn and merely failed later — assert the PTY was never reached.
+        // (`_spawnPty` is stubbed in this describe to assign a fake `_term`.)
+        assert.equal(session._term, null, 'refused before the PTY was spawned')
       })
 
       // Positive control (docs/false-safety-guards.md): a refusal that refused
@@ -1529,7 +1543,11 @@ describe('ClaudeTuiSession', () => {
       })
 
       function makeSinkDir(suffix, pidContent, { ageMs = 0 } = {}) {
-        const base = join(tmpdir(), 'chroxy-claude-tui')
+        // Read the base off the class (#7372) rather than re-spelling it: the
+        // whole point of SINK_BASE is that start() and the sweep cannot drift
+        // onto two paths, and a test that hardcodes the third copy is how that
+        // claim stops being true.
+        const base = ClaudeTuiSession.SINK_BASE
         mkdirSync(base, { recursive: true })
         const dir = join(base, `s-${suffix}-${process.pid}-${Math.random().toString(36).slice(2)}`)
         mkdirSync(dir, { recursive: true })
@@ -1560,7 +1578,7 @@ describe('ClaudeTuiSession', () => {
 
       it('returns zero counts (no throw) when the base dir does not exist', () => {
         // Genuinely exercise the missing-base catch: remove the base dir first.
-        rmSync(join(tmpdir(), 'chroxy-claude-tui'), { recursive: true, force: true })
+        rmSync(ClaudeTuiSession.SINK_BASE, { recursive: true, force: true })
         const result = ClaudeTuiSession.sweepStaleSinkDirs({ info() {}, warn() {} })
         assert.deepEqual(result, { swept: 0, kept: 0 })
       })
@@ -7859,6 +7877,45 @@ describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
     }
     const transient = warnLines.filter((m) => /readdir failed though .* is a directory/.test(m))
     assert.equal(transient.length, 1, 'transient warn is throttled to one across rapid repeats')
+  })
+
+  // #7372 — the recovery path must re-establish what start() guarantees, not a
+  // weaker copy of it. Its own trigger is "something under os.tmpdir() was
+  // cleared", which on a shared /tmp is exactly when another local user's squat
+  // wins the race, so a bare recursive mkdir here would re-open the hole start()
+  // now closes — mid-session, silently, on the default provider.
+  it('recreates the sink dir 0700 rather than at the umask default (#7372)', { skip: process.platform === 'win32' }, () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-mode')
+    // Pin the umask so the mutant is killed on ANY host: with a 077 umask a bare
+    // mkdirSync would yield 0700 by accident and this assertion would pass
+    // having proven nothing.
+    const prevUmask = process.umask(0o022)
+    try {
+      assert.equal(session._recoverSinkDir(new Error('ENOENT')), true)
+      assert.equal(statSync(session._sinkDir).mode & 0o777, 0o700,
+        'a umask-default 0755 recreate leaves the permission-mode sidecar and the hook payloads world-readable again')
+    } finally {
+      process.umask(prevUmask)
+    }
+  })
+
+  it('refuses to recreate through a base another user replaced with a symlink (#7372)', { skip: SKIP_NO_SYMLINK }, () => {
+    const attackerDir = join(dir, 'attacker-owned')
+    const squattedBase = join(dir, 'squatted-base')
+    mkdirSync(attackerDir, { recursive: true })
+    symlinkSync(attackerDir, squattedBase)
+
+    session = makeSession()
+    session._sinkDir = join(squattedBase, 's-through-link')
+
+    const ok = session._recoverSinkDir(new Error('ENOENT'))
+
+    assert.equal(ok, false, 'an untrusted base is not a usable sink — fail closed, as start() does')
+    assert.deepEqual(readdirSync(attackerDir), [],
+      'a bare recursive mkdir would have recreated the session dir inside the attacker-controlled target')
+    assert.ok(errorLines.some((m) => /could NOT be recreated/.test(m)),
+      'surfaced on the existing loud path, not swallowed')
   })
 
   it('replaces a non-directory squatting the sink path (file/symlink) with a real dir', () => {

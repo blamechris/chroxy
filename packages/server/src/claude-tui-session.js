@@ -929,6 +929,18 @@ export class ClaudeTuiSession extends BaseSession {
    * recreation itself fails (e.g. /tmp is full → ENOSPC), surface it loudly
    * (throttled) instead of spinning silently.
    *
+   * #7372 — the recreate re-establishes the SAME guarantees start() makes, not
+   * a weaker copy of them. The trigger for this path is "something under
+   * os.tmpdir() was cleared", which on a shared /tmp is precisely the moment
+   * another local user's squat can win: a bare `mkdirSync(sinkDir, { recursive:
+   * true })` would re-create the BASE too, through whatever is now at that path
+   * (recursive mkdir resolves symlinks) and at the umask default, silently
+   * undoing both halves of the hardening mid-session. So the base goes back
+   * through `ensureOwnedBaseDir` and the session dir is re-created 0700. A
+   * refusal lands in the catch below — the same loud, throttled "could NOT be
+   * recreated" path an ENOSPC takes, and the same fail-closed answer start()
+   * gives: no hook sink, no pretending there is one.
+   *
    * @param {Error} [cause] the readdir error that triggered recovery
    * @returns {boolean} true if the sink is usable afterward
    */
@@ -955,7 +967,11 @@ export class ClaudeTuiSession extends BaseSession {
       // Clear a non-directory squatting the path (no-op if nothing is there)
       // so mkdir can create a real directory.
       try { rmSync(this._sinkDir, { recursive: true, force: true }) } catch { /* best effort */ }
-      mkdirSync(this._sinkDir, { recursive: true })
+      // #7372: re-check the BASE (dirname, not the static — this recreates the
+      // path this session actually holds) before creating through it, and put
+      // the session dir back at 0700. Throws → the catch below.
+      ensureOwnedBaseDir(dirname(this._sinkDir))
+      mkdirSync(this._sinkDir, { recursive: true, mode: 0o700 })
       try { writeFileSync(join(this._sinkDir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
       if (this._permissionModeFile) {
         try { this._writePermissionModeSidecarAtomic(this._permissionModeFile, this.permissionMode || 'approve') } catch { /* hook falls back to env var */ }
