@@ -348,16 +348,22 @@ is handed to something that parses it under a different grammar — a pathspec, 
 revision, a glob, a shell word, a URL — the validation proves nothing.** The
 sibling instances that audit turned up are `#7290` (a revision allowlist whose
 comment claims it blocks flags, while `-` is inside its character class) and
-`#7291` (client prompts in positional argv slots with no `--`) — both
+`#7291`/`#7342` (client prompts in positional argv slots with no `--`) — all
 now catalogued as entry 13.
 
-### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291` (partial)
+### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291`
 
-`#7290` is closed. `#7291` is **not** — its `codex-session.js` half is still
-open, because fixing it needs an argv reorder around a documented
-`--sandbox`-before-`resume` invariant that only the repo's spawn-and-assert
-clap harness can verify, and that harness needs a working codex binary. This
-entry describes the half that landed; do not read it as closing `#7291`.
+`#7290` and `#7291` are both closed. The `codex-session.js` half outlived the
+first fix by two months for a mechanical reason worth recording: it needed an
+argv reorder around a documented `--sandbox`-before-`resume` invariant that
+only the repo's spawn-and-assert clap harness can verify, and that harness
+needs a working codex binary. `#7342` finished it against codex-cli 0.154.0 —
+the prompt now sits behind a `--` terminator on both branches with every flag
+moved ahead of it, and `tests/integration/codex-spawn-argv.integration.test.js`
+spawns the real binary on a dash-leading prompt (plus a hand-built pre-fix
+control that must stay red) rather than asserting an argv shape alone. The same
+PR took gemini's `-p <text>` / `-m <id>` to the `=`-joined form that CLI's
+`requiresArg` flags require.
 
 Entry 12 predicted these two as its siblings. Both are the same shape: a guard
 whose *comment* describes a stronger check than its *code* performs.

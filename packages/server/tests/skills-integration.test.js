@@ -42,6 +42,60 @@ import { waitFor } from './test-helpers.js'
 // cleanly without a fallback emit. The shim exits 0 to avoid an `error` emit
 // racing with the test assertion.
 
+// ---------------------------------------------------------------------------
+// Prompt extractors — read the prompt out of a recorded argv BY CONTRACT
+// ---------------------------------------------------------------------------
+//
+// #7342 moved the client prompt out of the bare positional slot these tests
+// used to index by hand (`recordedArgv[1]`). Codex now emits every flag first
+// and the prompt LAST behind a `--` option terminator; Gemini `=`-joins the
+// prompt to its long flag. A fixed index is what made eight tests here go red
+// on a change that was correct — so these helpers locate the prompt the same
+// way the CLI's own parser would, and ASSERT the argv contract while they do
+// it. That makes this file a second, independent witness to the terminator:
+// drop the `--` from buildCodexArgs and every codex case below fails on the
+// extractor, not on an index that happens to have shifted.
+
+const GEMINI_PROMPT_FLAG = '--prompt='
+
+/**
+ * Pull the prompt out of a recorded `codex exec` argv, asserting the #7342
+ * contract: exactly one `--` terminator, prompt immediately after it, and
+ * nothing at all following the prompt (everything after `--` is positional,
+ * so a trailing flag would silently become part of the message).
+ */
+function codexPromptFrom(argv) {
+  const sepIdx = argv.indexOf('--')
+  assert.ok(
+    sepIdx > 0,
+    `codex argv must carry a \`--\` option terminator before the prompt (#7342): ${JSON.stringify(argv)}`,
+  )
+  assert.equal(
+    argv.length, sepIdx + 2,
+    `the prompt must be the LAST token — nothing may follow it (#7342): ${JSON.stringify(argv)}`,
+  )
+  return argv[sepIdx + 1]
+}
+
+/**
+ * Pull the prompt out of a recorded `gemini` argv, asserting the #7342
+ * contract: the prompt is `=`-joined to `--prompt` in a SINGLE token, because
+ * gemini-cli declares `-p/--prompt` with yargs `requiresArg` and so refuses a
+ * dash-leading value in the two-token form.
+ */
+function geminiPromptFrom(argv) {
+  const matches = argv.filter((a) => typeof a === 'string' && a.startsWith(GEMINI_PROMPT_FLAG))
+  assert.equal(
+    matches.length, 1,
+    `gemini argv must carry exactly one \`${GEMINI_PROMPT_FLAG}<text>\` token (#7342): ${JSON.stringify(argv)}`,
+  )
+  assert.equal(
+    argv.includes('-p'), false,
+    `the two-token \`-p <text>\` form must be gone (#7342): ${JSON.stringify(argv)}`,
+  )
+  return matches[0].slice(GEMINI_PROMPT_FLAG.length)
+}
+
 function writeShim(shimPath) {
   writeFileSync(shimPath, [
     '#!/usr/bin/env node',
@@ -235,11 +289,16 @@ describe('skills integration — true end-to-end', () => {
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
       // The shim records `process.argv.slice(2)`, so `recordedArgv` is the
-      // actual Codex args: ['exec', <effectiveText>, '--json', ...]
+      // actual Codex args: ['exec', '--json', ..., '--', <effectiveText>].
       assert.equal(recordedArgv[0], 'exec', 'first arg should be `exec`')
-      assert.equal(recordedArgv[2], '--json', 'third arg should be `--json`')
+      const jsonIdx = recordedArgv.indexOf('--json')
+      assert.ok(jsonIdx > 0, '`--json` must still be passed')
+      assert.ok(
+        jsonIdx < recordedArgv.indexOf('--'),
+        '`--json` must precede the terminator or codex reads it as prompt text',
+      )
 
-      const sentText = recordedArgv[1]
+      const sentText = codexPromptFrom(recordedArgv)
       assert.ok(typeof sentText === 'string' && sentText.length > 0,
         'spawn must have been called with a non-empty prompt arg')
       assert.ok(sentText.includes('SKILL_MARKER_ALPHA'),
@@ -267,7 +326,7 @@ describe('skills integration — true end-to-end', () => {
       await waitFor(() => !session.isRunning, { label: 'second close' })
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-      const sentText = recordedArgv[1]
+      const sentText = codexPromptFrom(recordedArgv)
       assert.equal(sentText, 'second',
         'second message must pass through unmodified — skills already prepended once')
       assert.ok(!sentText.includes('SKILL_MARKER_ALPHA'),
@@ -284,7 +343,7 @@ describe('skills integration — true end-to-end', () => {
         await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
 
         const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-        assert.equal(recordedArgv[1], 'plain message',
+        assert.equal(codexPromptFrom(recordedArgv), 'plain message',
           'with no skills, the spawned argv must contain only the user message')
       } finally {
         rmSync(empty, { recursive: true, force: true })
@@ -314,7 +373,7 @@ describe('skills integration — true end-to-end', () => {
         await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
 
         const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-        const sentText = recordedArgv[1]
+        const sentText = codexPromptFrom(recordedArgv)
         assert.ok(sentText.includes('SKILL_MARKER_CODEX_ONLY'),
           `codex-scoped skill must be present in spawned argv; got: ${sentText.slice(0, 200)}`)
       } finally {
@@ -349,7 +408,7 @@ describe('skills integration — true end-to-end', () => {
         await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
 
         const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-        const sentText = recordedArgv[1]
+        const sentText = codexPromptFrom(recordedArgv)
         const headerCount = (sentText.match(/# User skills/g) || []).length
         assert.equal(headerCount, 1,
           `expected exactly one '# User skills' header in spawned argv, got ${headerCount}\n---\n${sentText.slice(0, 600)}`)
@@ -400,11 +459,12 @@ describe('skills integration — true end-to-end', () => {
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
       // The shim records `process.argv.slice(2)`, so `recordedArgv` is the
-      // actual Gemini args: ['-p', <text>, '--output-format', 'stream-json', '-y', ...]
-      assert.equal(recordedArgv[0], '-p', 'first arg must be `-p`')
-      const sentText = recordedArgv[1]
-      assert.equal(recordedArgv[2], '--output-format')
-      assert.equal(recordedArgv[3], 'stream-json')
+      // actual Gemini args:
+      //   ['--prompt=<text>', '--output-format', 'stream-json', '-y', ...]
+      const sentText = geminiPromptFrom(recordedArgv)
+      const fmtIdx = recordedArgv.indexOf('--output-format')
+      assert.ok(fmtIdx >= 0, '`--output-format` must still be passed')
+      assert.equal(recordedArgv[fmtIdx + 1], 'stream-json')
 
       assert.ok(typeof sentText === 'string' && sentText.length > 0)
       assert.ok(sentText.includes('SKILL_MARKER_ALPHA'),
@@ -428,9 +488,10 @@ describe('skills integration — true end-to-end', () => {
       await waitFor(() => !session.isRunning, { label: 'second close' })
 
       const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-      assert.equal(recordedArgv[1], 'second',
+      const sentText = geminiPromptFrom(recordedArgv)
+      assert.equal(sentText, 'second',
         'second message must pass through unmodified — skills already prepended once')
-      assert.ok(!recordedArgv[1].includes('SKILL_MARKER_ALPHA'),
+      assert.ok(!sentText.includes('SKILL_MARKER_ALPHA'),
         'skill text must not appear in subsequent messages')
     })
 
@@ -444,7 +505,7 @@ describe('skills integration — true end-to-end', () => {
         await waitFor(() => !session.isRunning, { label: 'subprocess closed' })
 
         const recordedArgv = JSON.parse(readFileSync(recordPath, 'utf-8'))
-        assert.equal(recordedArgv[1], 'plain message',
+        assert.equal(geminiPromptFrom(recordedArgv), 'plain message',
           'with no skills, the spawned argv must contain only the user message')
       } finally {
         rmSync(empty, { recursive: true, force: true })

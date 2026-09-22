@@ -448,6 +448,83 @@ describe('GeminiSession', () => {
   })
 
   // ---------------------------------------------------------------------------
+  // #7342 / #7291 — argument injection into `_buildArgs()`.
+  //
+  // `text` is the raw client chat message; `this.model` is a client-settable
+  // id. gemini-cli's yargs declares `-p/--prompt` and `-m/--model` with
+  // `requiresArg`, which REFUSES a dash-leading value in the two-token form.
+  // Measured against gemini-cli 0.46.0 (the shape `utils/argv-safety.js`
+  // prescribes for exactly this case):
+  //
+  //   gemini -p "- first bullet"        → "Not enough arguments following: p", exit 1
+  //   gemini ... -m "--yolo"            → "Not enough arguments following: m", exit 1
+  //   gemini "--prompt=- first bullet"  → parses, value taken literally
+  //   gemini "--prompt=--version"       → runs a turn; does NOT print a version
+  //
+  // So the two-token form fails closed rather than open here — but it is still
+  // a live functional bug (any prompt starting with `-` errors the turn out),
+  // and `--` is NOT the fix for a flag argument: it BREAKS a `requiresArg`
+  // flag. The `=`-joined long form binds the value to the flag in one token.
+  // ---------------------------------------------------------------------------
+  describe('argv option-injection: prompt and model are =-joined (#7342, #7291)', () => {
+    const buildArgs = (text, model = null) => {
+      const session = new GeminiSession({ cwd: '/tmp', model })
+      try {
+        return session._buildArgs(text)
+      } finally {
+        session.destroy()
+      }
+    }
+
+    it('binds the prompt to --prompt in a single token', () => {
+      const args = buildArgs('hello')
+      assert.ok(args.includes('--prompt=hello'), `expected a --prompt=<text> token, got ${JSON.stringify(args)}`)
+      assert.equal(args.includes('-p'), false, 'the two-token -p form must be gone')
+      assert.equal(args.includes('--prompt'), false, 'a bare --prompt token is the two-token form')
+      assert.equal(args.includes('hello'), false, 'the prompt must not sit in a slot of its own')
+    })
+
+    // The load-bearing case: a leading dash is LEGITIMATE chat input
+    // ("- first bullet"), so the fix must carry it through verbatim rather
+    // than reject it. A test feeding only ordinary text passes before and
+    // after this fix and proves nothing.
+    it('carries a dash-leading prompt through verbatim', () => {
+      for (const hostile of ['- first bullet', '--version', '--yolo', '--output-format=text']) {
+        const args = buildArgs(hostile)
+        assert.ok(
+          args.includes(`--prompt=${hostile}`),
+          `expected --prompt=${hostile} as ONE token, got ${JSON.stringify(args)}`,
+        )
+        assert.equal(
+          args.includes(hostile), false,
+          `${hostile} must never stand alone in argv — gemini would option-parse it`,
+        )
+      }
+    })
+
+    it('binds the model to --model in a single token, including a dash-leading id', () => {
+      const args = buildArgs('hi', 'gemini-2.5-pro')
+      assert.ok(args.includes('--model=gemini-2.5-pro'), `expected --model=<id>, got ${JSON.stringify(args)}`)
+      assert.equal(args.includes('-m'), false, 'the two-token -m form must be gone')
+
+      // Same adjacent field, same sink: `-m` is `requiresArg` too, so a
+      // dash-leading id (reachable when a provider is configured with
+      // allowAnyModel) errors the turn out in the two-token form.
+      const hostile = buildArgs('hi', '--yolo')
+      assert.ok(hostile.includes('--model=--yolo'), `expected --model=--yolo as ONE token, got ${JSON.stringify(hostile)}`)
+      assert.equal(hostile.includes('--yolo'), false, 'the model id must never stand alone in argv')
+    })
+
+    it('still passes the stream-json output format and -y', () => {
+      const args = buildArgs('hi')
+      const fmtIdx = args.indexOf('--output-format')
+      assert.ok(fmtIdx >= 0, '--output-format must be present')
+      assert.equal(args[fmtIdx + 1], 'stream-json')
+      assert.ok(args.includes('-y'))
+    })
+  })
+
+  // ---------------------------------------------------------------------------
   // sendMessage() through the FULL spawn pipeline of the JsonlSubprocessSession
   // base class — closes #2991.
   //

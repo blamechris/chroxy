@@ -18,13 +18,18 @@
  *      and it sits in a POSITIONAL slot → do not reject; terminate option
  *      parsing with a `--` separator placed BEFORE the value, and put every
  *      flag the command needs BEFORE the `--`. This is what the `claude`
- *      web-task argv does.
+ *      web-task argv does, and (since #7342) what `buildCodexArgs` does on
+ *      both the first-turn and `resume` forms of `codex exec` — including the
+ *      resume SESSION_ID, which is itself a positional and so must also
+ *      precede the separator.
  *
  *   3. The value legitimately can, and it is the ARGUMENT TO A NAMED FLAG that
  *      the CLI declares as requiring one → `=`-join the long form,
  *      `--flag=<value>`, binding the value to the flag in a single token.
- *      Neither (1) nor (2) works here. Measured against gemini-cli 0.45.2,
- *      whose `-p/--prompt` and `-m/--model` use yargs `requiresArg`:
+ *      Neither (1) nor (2) works here. This is what `GeminiSession._buildArgs`
+ *      does for BOTH its prompt and its model id (since #7342). Measured
+ *      against gemini-cli 0.45.2 and re-measured on 0.46.0, whose `-p/--prompt`
+ *      and `-m/--model` use yargs `requiresArg`:
  *
  *          gemini -p "- first bullet"       usage error, exit 1
  *          gemini -p -- --list-extensions   usage error, exit 1  (`--` BREAKS it)
