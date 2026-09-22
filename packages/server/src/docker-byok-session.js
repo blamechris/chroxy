@@ -132,9 +132,13 @@ import {
   globPatternEscapeReason,
   globPatternEscapeMessage,
   globMatchEscapesRoot,
-  buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
+  buildConfinedContainerCommand,
+  buildConfinedGlobBody,
+  parseConfinedContainerStdout,
+  splitWithheldTrailer,
+  confinedContainerFailureMessage,
 } from './built-in-tools/tool-transforms.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import {
@@ -2022,6 +2026,41 @@ export class DockerByokSession extends ClaudeByokSession {
     })
   }
 
+  /**
+   * SECURITY (#7354) — the operator's view of the containment seam.
+   *
+   * Every other outcome of these three tools is visible to SOMEBODY: a refusal
+   * reaches the model as `isError`, a match reaches it as content. A WITHHELD
+   * match reaches nobody — the tool_result is byte-identical to "matched
+   * nothing", deliberately, because anything else is an existence oracle on a
+   * tool `acceptEdits` auto-approves. That leaves an operator unable to tell a
+   * containment that is holding from one that was never wired up, which is the
+   * false-safety shape itself. This line is the difference.
+   *
+   * Counts only. The names of what was withheld, and the paths they resolved
+   * to, are exactly what containment refused to disclose — putting them in the
+   * daemon log would move the leak rather than close it.
+   */
+  _logContainment(label, detail) {
+    const session = this._sourceSessionId || '-'
+    const container = typeof this._containerId === 'string' ? this._containerId.slice(0, 12) : '-'
+    log.warn(`[container-confine] ${label}: ${detail} (session=${session} container=${container})`)
+  }
+
+  /** #7354 — one line per Glob that withheld something, or whose count was lost. */
+  _logWithheldGlobMatches(inContainer, lexical) {
+    if (inContainer === null) {
+      // Not a containment failure — the withholding already happened in the
+      // container. It IS an observability failure, and saying so beats
+      // reporting a count of zero we did not measure.
+      this._logContainment('Glob', `withheld-count unavailable from the container; ${lexical} withheld by the host lexical layer`)
+      return
+    }
+    const total = inContainer + lexical
+    if (total === 0) return
+    this._logContainment('Glob', `withheld ${total} match(es) resolving outside ${CONTAINER_WORKSPACE} (in-container ${inContainer}, host-lexical ${lexical})`)
+  }
+
   async _containerRead(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     // Use sed for offset/limit slicing inside the container so we
@@ -2040,14 +2079,41 @@ export class DockerByokSession extends ClaudeByokSession {
     // regardless of provider. The `awk` runs INSIDE the container after
     // the `sed | head` slice, so we still apply the line cap and the
     // byte cap before formatting (a 1GB line stays bounded).
-    const cmd = `sed -n '${startLine},${endLine}p' ${shellQuote(containerPath)} | head -c ${READ_MAX_BYTES} | awk -v start=${startLine} 'BEGIN{n=start} {printf "%5d→%s\\n", n, $0; n++}'`
+    //
+    // #7354 — `remapToContainerPath` is LEXICAL, so `esc/passwd` (where
+    // `/workspace/esc` is a symlink to `/etc` inside the container) passes it
+    // untouched. The confinement preamble resolves the path physically in the
+    // container and hands the body the RESOLVED path in `"$__cx_target"`.
+    const cmd = buildConfinedContainerCommand({
+      target: containerPath,
+      body: `sed -n '${startLine},${endLine}p' "$__cx_target" | head -c ${READ_MAX_BYTES} | awk -v start=${startLine} 'BEGIN{n=start} {printf "%5d→%s\\n", n, $0; n++}'`,
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      this._logContainment('Read', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Read', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (stderr && stderr.trim()) {
       return { content: `Read failed: ${stderr.trim()}`, isError: true }
     }
-    return { content: stdout, isError: false }
+    return { content: confined.body, isError: false }
   }
 
+  /**
+   * RESIDUAL, tracked by #7876 — unlike Read/Glob/Grep, this path is still
+   * confined LEXICALLY only, so a symlinked directory inside /workspace (a link
+   * on the CONTAINER's filesystem, invisible to `remapToContainerPath`) still
+   * redirects the write. #7354's resolver does not transfer as-is: Write names
+   * paths that do not exist yet and `mkdir -p`s their parents, so it needs a
+   * deepest-existing-ancestor walk rather than a `cd -P` of the whole path.
+   *
+   * The issue exists. #7354's first lesson was a comment claiming a residual was
+   * "tracked separately" when nothing tracked it.
+   */
   async _containerWrite(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     // Fix for PR #5021 review (Copilot, comment id 3348029266): host-side
@@ -2087,6 +2153,12 @@ export class DockerByokSession extends ClaudeByokSession {
     }
   }
 
+  /**
+   * RESIDUAL, tracked by #7876 — same lexical-only confinement as
+   * `_containerWrite`, and this one READS through the link too (the `cat`
+   * below), so #7354's read-side escape is reachable here by a route #7867 did
+   * not close.
+   */
   async _containerEdit(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     const oldString = typeof input?.old_string === 'string' ? input.old_string : ''
@@ -2183,33 +2255,61 @@ export class DockerByokSession extends ClaudeByokSession {
     const root = input?.path
       ? remapToContainerPath(input.path, this.cwd)
       : CONTAINER_WORKSPACE
-    const cmd = buildGlobCommand(pattern, root)
+    // #7354 — TWO layers now, and the lexical one below is still the first.
+    // The preamble resolves `root` physically inside the container and refuses
+    // when it lands outside /workspace (the `path` route), and the body resolves
+    // each MATCH before emitting it (the `pattern` route). Both are things only
+    // the container can answer: the symlink lives on ITS filesystem.
+    const cmd = buildConfinedContainerCommand({
+      target: root,
+      // `cd -P` into the resolved root, so `$PWD` and `$__cx_target` are the
+      // same physical directory and the per-match comparison in the body is
+      // against the place the glob actually ran in.
+      setup: '{ unset CDPATH; cd -P -- "$__cx_target"; }',
+      body: buildConfinedGlobBody(pattern),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
-    if (!stdout && stderr && stderr.trim()) {
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      // An escaping `path` ARGUMENT is an explicit refusal — the caller named
+      // that directory outright, so the error tells them nothing they did not
+      // already supply. Matches that escape are a different thing entirely and
+      // are dropped silently in the container (see buildConfinedGlobBody).
+      this._logContainment('Glob', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Glob', confined.reason, input?.path),
+        isError: true,
+      }
+    }
+    // #7354 — the withheld-count trailer is stripped BEFORE anything else looks
+    // at the body: it must never reach the model (no-oracle), and it must never
+    // make the "no stdout, but stderr" branch below unreachable by keeping the
+    // body permanently non-empty.
+    const { body: globBody, withheld: withheldInContainer } = splitWithheldTrailer(confined.body)
+    if (!globBody && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
     }
     // #7341 — confine the RESULTS, not just the pattern. This is the layer
     // that actually holds: it inspects what the shell PRODUCED (a leading `/`
     // or a `..` segment) rather than trying to predict what it will produce,
     // and every one of the six expansion bypasses found in review is plainly
-    // visible here while being invisible in the pattern text. The host does
-    // strictly better (a realpath walk per match); from out here the matches
-    // are inside the container, so lexical is what is reachable.
+    // visible here while being invisible in the pattern text.
     //
-    // RESIDUAL, tracked by #7354: a symlinked directory inside /workspace
-    // (`esc -> /etc` in the CONTAINER's filesystem) produces a lexically clean
-    // match that resolves out. Closing it needs the match resolved in-container,
-    // and it is reachable through `input.path` as well as `pattern` — that route
-    // is shared with _containerGrep/_containerRead, so it is wider than Glob.
+    // #7354 KEPT IT, and deliberately: the in-container resolution above is
+    // strictly stronger, but it is also the layer that can be defeated by an
+    // image whose `readlink` is missing or whose shell misbehaves, and this one
+    // needs neither. Deleting it would trade a check that cannot fail for one
+    // that depends on the guest's userland. The two are independent — one reads
+    // the string, the other reads the filesystem — so they are not the
+    // "shared rule = free pass" pairing.
     //
-    // This comment said "tracked separately" while nothing tracked it, which is
-    // the same false-safety shape as the bug above: an assertion of a stronger
-    // state than reality, in a place no test can check. The issue now exists.
-    //
-    // Withheld matches read as no match — no count, no marker. Anything that
-    // distinguishes "matched, but outside" from "matched nothing" is an
-    // existence oracle on a tool auto-approved in `acceptEdits`.
-    const files = stdout.split('\n').filter(Boolean).filter((f) => !globMatchEscapesRoot(f))
+    // Withheld matches read as no match TO THE MODEL — no count, no marker.
+    // Anything that distinguishes "matched, but outside" from "matched nothing"
+    // is an existence oracle on a tool auto-approved in `acceptEdits`. The
+    // operator gets the count instead, in the daemon log (#7354).
+    const emitted = globBody.split('\n').filter(Boolean)
+    const files = emitted.filter((f) => !globMatchEscapesRoot(f))
+    this._logWithheldGlobMatches(withheldInContainer, emitted.length - files.length)
     if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
     return { content: files.join('\n'), isError: false }
   }
@@ -2231,13 +2331,31 @@ export class DockerByokSession extends ClaudeByokSession {
     // review, Copilot comment 3348029186) — without the mask the legitimate
     // "No matches" branch below would be unreachable.
     const { ci, ln, globArg } = buildGrepArgs(input)
-    const cmd = buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit: true })
+    // #7354 — the `path` route is shared with Read/Glob and is lexical, so
+    // `{"path":"esc"}` searched `/etc` through a symlinked directory. Resolve
+    // it in-container and search the RESOLVED root (`rootExpr`), which is what
+    // the host already does — it passes `safeResolveRoot`'s realpath, never the
+    // alias it was handed.
+    const cmd = buildConfinedContainerCommand({
+      target: root,
+      body: buildGrepCommand({
+        pattern, rootExpr: '"$__cx_target"', ci, ln, globArg, maskExit: true,
+      }),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
-    if (!stdout && stderr && stderr.trim()) {
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      this._logContainment('Grep', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Grep', confined.reason, input?.path),
+        isError: true,
+      }
+    }
+    if (!confined.body && stderr && stderr.trim()) {
       return { content: `Grep failed: ${stderr.trim()}`, isError: true }
     }
-    if (!stdout) return { content: `No matches for ${pattern}`, isError: false }
-    return { content: stdout, isError: false }
+    if (!confined.body) return { content: `No matches for ${pattern}`, isError: false }
+    return { content: confined.body, isError: false }
   }
 
   /**

@@ -52,6 +52,20 @@ searches. Containment for `Glob` therefore lives at the tool, not in the floor �
 actual boundary. When auditing whether a tool is covered, ask what the tool *reads*,
 not which of its fields the floor happens to scan.
 
+**And ask which process can see the filesystem the answer depends on** (#7354). Every
+check named above runs on the **host**, and for the container provider the paths belong
+to the **container**. A lexical rule cannot see a symlinked directory inside
+`/workspace`, so `{"pattern":"esc/*"}` and `{"path":"esc"}` — with `/workspace/esc ->
+/etc` in the guest — were both spotless to `globMatchEscapesRoot` and to
+`remapToContainerPath`, and both read the image's `/etc`. Container `Glob`, `Grep` and
+`Read` now wrap their `docker exec` in a confinement preamble
+(`buildConfinedContainerCommand` in `built-in-tools/tool-transforms.js`) that resolves
+the path physically *inside* the container and refuses unless it lands under the
+resolved `/workspace`; the body then operates on the resolved path, not the alias. The
+host-side lexical checks are kept in front of it — they need nothing from the guest's
+userland — and the host refuses any container reply that does not carry the preamble's
+sentinel, so a command that lost the guard is an error rather than a quiet "no matches".
+
 ## 2. Precedence — the floor beats every lenient mode
 
 The floor is checked **before** any short-circuit, on **both** pipelines:
