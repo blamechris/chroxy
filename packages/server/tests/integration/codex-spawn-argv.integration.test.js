@@ -131,6 +131,10 @@ if (!SHOULD_RUN) {
   // does start, we are not racking up tokens.
   const TRIVIAL_PROMPT = 'reply with the single word OK and nothing else'
 
+  // #7342: a leading dash is LEGITIMATE chat input (a markdown bullet), and
+  // before the `--` terminator landed it made codex exit 2 before any turn ran.
+  const DASH_LEADING_PROMPT = `- ${TRIVIAL_PROMPT}`
+
   // A syntactically valid UUID for the `resume` form. Codex silently falls
   // back to a fresh thread when the id is unknown (documented in
   // codex-session.js), so this still exercises the resume-form argv parse.
@@ -312,6 +316,38 @@ if (!SHOULD_RUN) {
         result.exitCode, CLAP_PARSE_ERROR_EXIT,
         `expected exit ${CLAP_PARSE_ERROR_EXIT} from clap parse error, got ${result.exitCode}`,
       )
+    })
+
+    // #7342 control: the PRE-FIX shape (prompt in a bare positional slot) is
+    // rejected outright for a legitimately dash-leading chat message. Built by
+    // hand, NOT via buildCodexArgs, so it keeps proving the harness can see the
+    // difference after the fix lands. Measured on codex-cli 0.154.0:
+    // `error: unexpected argument '- ' found / tip: … use '-- - '`.
+    it('sanity check: an UNTERMINATED dash-leading prompt IS rejected by clap (proves the harness)', async () => {
+      const brokenArgv = [
+        'exec', DASH_LEADING_PROMPT, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write',
+      ]
+      const result = await spawnCodexAndWait(brokenArgv)
+      assert.ok(
+        result.stderr.includes('unexpected argument'),
+        `expected clap to reject an unterminated dash-leading prompt, got:\n${result.stderr}`,
+      )
+      assert.equal(
+        result.exitCode, CLAP_PARSE_ERROR_EXIT,
+        `expected exit ${CLAP_PARSE_ERROR_EXIT} from clap parse error, got ${result.exitCode}`,
+      )
+    })
+
+    it('first-turn argv with a dash-leading prompt is accepted by clap (#7342)', async () => {
+      const argv = buildCodexArgs(DASH_LEADING_PROMPT, null)
+      const result = await spawnCodexAndWait(argv)
+      assertArgvAccepted(result, argv, 'first-turn / dash-leading prompt')
+    })
+
+    it('resume argv with a dash-leading prompt is accepted by clap (#7342)', async () => {
+      const argv = buildCodexArgs(DASH_LEADING_PROMPT, null, DUMMY_THREAD_ID)
+      const result = await spawnCodexAndWait(argv)
+      assertArgvAccepted(result, argv, 'resume / dash-leading prompt')
     })
 
     it('first-turn argv (no model, no thread) is accepted by clap', async () => {

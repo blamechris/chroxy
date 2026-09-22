@@ -164,7 +164,7 @@ Per-provider feature support. Capability-contract rows (Permission handling, Liv
 | Conversation resume | Y | Y | — | — |
 | Reasoning / thinking level | Y | — | — | Y (per-model levels) |
 | Attachments | Y | Y | — (error on use) | Y (images → vision, other files by reference) |
-| Backing binary / SDK | `@anthropic-ai/claude-agent-sdk` | `claude -p` | `gemini -p` | `codex app-server` |
+| Backing binary / SDK | `@anthropic-ai/claude-agent-sdk` | `claude -p` | `gemini --prompt=` | `codex app-server` |
 | Required env | Claude Code login / `ANTHROPIC_API_KEY` | Claude Code login | `GEMINI_API_KEY` | `OPENAI_API_KEY` or a `codex login` session |
 
 Two cells above are worth reading twice, because they were stale here while [docs/providers.md](providers.md) had them right:

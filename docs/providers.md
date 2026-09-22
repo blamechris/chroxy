@@ -11,7 +11,7 @@ Nine first-party providers ship built-in (one, `claude-channel`, is a research-p
 - `claude-byok` — "Bring your own key": the Anthropic Messages API driven directly via `@anthropic-ai/sdk`, no `claude` binary. Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP servers).
 - `deepseek` — DeepSeek's Anthropic-compatible API. A subclass of `claude-byok` — same agent loop, DeepSeek credentials/endpoint/pricing.
 - `ollama` — Local models via Ollama's Anthropic-compatible API (v0.14+). Same agent loop, no API key, cost always $0. See [Ollama (local models)](#ollama-local-models).
-- `gemini` — Google Gemini CLI (`gemini -p`).
+- `gemini` — Google Gemini CLI (`gemini --prompt=<text>`).
 - `codex` — OpenAI Codex CLI (`codex exec`).
 
 Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` run their `claude-cli` / `claude-sdk` provider inside the container, while `docker-byok` keeps the `claude-byok` agent loop on the host and redirects only built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) into the container.
@@ -1100,7 +1100,7 @@ Legacy `codex exec` driver only (`CHROXY_CODEX_APPSERVER=0`):
 
 ### `gemini`
 
-- **No conversation continuity** — each `sendMessage` spawns a fresh `gemini -p`. No persistent context across turns.
+- **No conversation continuity** — each `sendMessage` spawns a fresh `gemini --prompt=<text>`. No persistent context across turns. (The prompt is `=`-joined to its flag, not passed as a second token: gemini-cli's `requiresArg` rejects a dash-leading value in the two-token form — #7342.)
 - **No permission handling** — `-y` is always passed to Gemini. The provider reports `permissions: false`.
 - **No plan mode, no attachments, no agent tracking.**
 - **No cost reporting** — `result.cost` is always `null`. Token counts may be emitted when present.
