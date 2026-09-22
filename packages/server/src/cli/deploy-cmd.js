@@ -83,6 +83,15 @@ export function registerDeployCommand(program) {
           ? readFileSync(KNOWN_GOOD_FILE, 'utf-8').trim()
           : null
 
+        // #7296 — the fallback widens the check, so it is safe, but a SILENT
+        // widening hides a corrupted known-good-ref file: the supervisor's
+        // rollback path logs its refusal of the same file and deploy must not
+        // be the quiet one. `null` is the ordinary "never deployed yet" case
+        // and is not worth a warning.
+        if (knownGoodRef && !isGitShaRef(knownGoodRef)) {
+          console.warn(`[deploy] Ignoring malformed known-good ref ${JSON.stringify(knownGoodRef.slice(0, 64))} in ${KNOWN_GOOD_FILE} — syntax-checking all server sources instead.`)
+        }
+
         const jsFiles = execFileSync('git', gitChangedServerFilesArgv(knownGoodRef), { encoding: 'utf-8' })
           .trim().split('\n').filter((f) => f.endsWith('.js'))
 

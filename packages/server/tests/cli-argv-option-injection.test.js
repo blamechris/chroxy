@@ -75,17 +75,25 @@ describe('cloudflared argv builders — separator position (#7296)', () => {
     )
   })
 
-  it('leaves nothing option-parsable ahead of an option-shaped value', () => {
-    for (const argv of [
-      cloudflaredCreateArgv('--config=/tmp/evil.yml'),
-      cloudflaredRouteDnsArgv('--config=/tmp/evil.yml', 'h.example.com'),
+  it('an option-shaped name lands after the separator, which is the only bare --', () => {
+    // The subject is the SEPARATOR'S POSITION relative to the caller-supplied
+    // value, so that is all this asserts. It deliberately does NOT assert that
+    // no token ahead of the separator starts with `-`: a constant flag
+    // (`--origincert`, say) is legitimate there, and an assertion that forbids
+    // one would go red on a safe change while catching no attacker. What DOES
+    // matter is that the separator we placed is the FIRST bare `--` in the
+    // argv — an earlier one would terminate option parsing ahead of ours and
+    // silently change which tokens are flags.
+    for (const [argv, prefix] of [
+      [cloudflaredCreateArgv('--config=/tmp/evil.yml'), ['tunnel', 'create']],
+      [cloudflaredRouteDnsArgv('--config=/tmp/evil.yml', 'h.example.com'), ['tunnel', 'route', 'dns']],
     ]) {
       const dashIndex = argv.indexOf('--')
       assert.notEqual(dashIndex, -1, 'argv must carry a bare -- separator')
+      assert.deepEqual(argv.slice(0, dashIndex), prefix,
+        'only the constant subcommand may precede the separator')
       assert.equal(argv[dashIndex + 1], '--config=/tmp/evil.yml',
         'the value must be the FIRST token after the separator')
-      assert.ok(argv.slice(0, dashIndex).every((a) => !a.startsWith('-')),
-        'nothing ahead of the separator may itself be attacker-influenced')
     }
   })
 })

@@ -671,8 +671,16 @@ export class DockerBackend {
       // the refusal is not the only thing standing between a flag and the
       // daemon. Measured on Docker 29.7.2: `docker run -- --help sleep
       // infinity` does NOT print help (the `--` is consumed and `--help`
-      // becomes the image), while the same argv without `--` does. Everything
-      // above is chroxy's own flags, so nothing legitimate is lost.
+      // becomes the image), while the same argv without `--` does.
+      //
+      // What the separator needs from the argv above it is narrow and worth
+      // stating exactly: every FLAG NAME there is a chroxy literal, so no
+      // earlier token is a bare `--` that would terminate option parsing
+      // ahead of this one. The flag VALUES are not all chroxy's own
+      // (memoryLimit/cpuLimit arrive from the wire; containerEnv, mounts and
+      // forwardPorts from devcontainer.json) — but each sits in a slot pflag
+      // consumes as the preceding flag's argument, so it is a bad-value error
+      // there, never a new option.
       runArgs.push('--', image, 'sleep', 'infinity')
 
       this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {

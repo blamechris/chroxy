@@ -9,12 +9,22 @@ import { configDir, configFile, prompt } from './shared.js'
 /**
  * #7296 — writer-side check on the interactively-prompted tunnel name.
  *
- * The prompt is the ONLY producer of `config.tunnelName`, and that value later
- * lands in three bare positional slots (`tunnel create <name>`,
- * `tunnel route dns <name> <hostname>`, and `tunnel run … <name>` in
- * tunnel/cloudflare.js). Each of those argvs now carries a `--` separator, but
- * a partial guard is how this defect class survives — so the name is refused
- * at the writer as well, and can never be option-shaped in the first place.
+ * `config.tunnelName` lands in three bare positional slots
+ * (`tunnel create <name>`, `tunnel route dns <name> <hostname>`, and
+ * `tunnel run … <name>` in tunnel/cloudflare.js). Each of those argvs now
+ * carries a `--` separator — that is the guard that actually covers the slots,
+ * and it covers them whatever wrote the value.
+ *
+ * This check is a SECOND layer over ONE of the value's three producers, and
+ * saying so precisely matters here: claiming more coverage than the code has
+ * is the defect class this whole PR is closing. The three producers are the
+ * interactive `chroxy tunnel setup` prompt (below), `CHROXY_TUNNEL_NAME`
+ * (config.js's env map), and `--tunnel-name <name>` (cli/shared.js). Only the
+ * prompt is checked. The other two are typed by the operator into their own
+ * shell or service file, so an option-shaped value there is self-inflicted and
+ * the separator is the appropriate — and sufficient — control; a reject there
+ * would break an operator whose pre-existing tunnel carries an exotic name,
+ * for no attacker they do not already outrank.
  *
  * Cloudflare tunnel names are alphanumerics plus `.`, `_` and `-`; requiring
  * the FIRST character to be alphanumeric is what excludes the option shape.

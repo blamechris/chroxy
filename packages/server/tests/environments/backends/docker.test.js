@@ -98,6 +98,10 @@ describe('DockerBackend.createEnvironment()', () => {
     assert.deepEqual(
       runCall.args.slice(dashIndex),
       ['--', 'node:22-slim', 'sleep', 'infinity'],
+      // An EARLIER bare `--` fails this too, and that matters: it would
+      // terminate option parsing ahead of ours, turning chroxy's own
+      // hardening flags into positionals. `indexOf` would find it, and the
+      // slice would then carry those tokens rather than just these four.
       'the separator must sit IMMEDIATELY before the image — a later -- protects nothing'
     )
   })
