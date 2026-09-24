@@ -36,15 +36,19 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 > relocatable. Two consequences are security-relevant and easy to miss:
 >
 > - **The 0600 mode is a property of the file, not of the root, and the daemon
->   does not check it uniformly.** Relocating onto a filesystem that cannot
+>   now checks it uniformly (#7246).** Relocating onto a filesystem that cannot
 >   express POSIX modes (a mounted share, an exFAT/FAT volume, some bind-mounted
->   container volumes) is therefore not uniformly detected.
->   `session-tokens.json` **fails closed** — `session-token-store.js` refuses to
->   read a non-0600 file and logs `devices will re-pair`, so the symptom is
->   visible. `ingest-secret` sets `0600` at exclusive create
->   (`event-ingest.js`, `openSync(…, 'ax', 0o600)`) but **never re-checks the mode
->   on read**, so a root that silently widens it is read anyway. Prefer a local,
->   user-owned directory on a POSIX filesystem.
+>   container volumes) is therefore detected the same way regardless of which
+>   store is relocated. `session-tokens.json` **fails closed** —
+>   `session-token-store.js` refuses to read a non-0600 file and logs `devices
+>   will re-pair`, so the symptom is visible. `ingest-secret` sets `0600` at
+>   exclusive create (`event-ingest.js`, `openSync(…, 'ax', 0o600)`) **and
+>   re-checks the mode on every existing-file read** (`assertIngestSecretFileTrusted`
+>   — POSIX only, matching the win32 carve-out every sibling store uses):
+>   a mode other than exactly 0600, or a file owned by a uid other than the
+>   one the daemon runs as, is refused rather than trusted, and a `statSync`
+>   failure other than the file being absent refuses rather than assumes
+>   absence. Prefer a local, user-owned directory on a POSIX filesystem.
 > - **Relocating does not move existing secrets.** The old root keeps its copies
 >   until you remove them — `chroxy config-dir status` reports what was left behind
 >   (#7240). A stale `~/.chroxy/session-tokens.json` still grants its sessions'
