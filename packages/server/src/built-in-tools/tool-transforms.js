@@ -272,6 +272,12 @@ export const CONTAINER_CONFINE_ERROR = '__chroxy_confine_error__'
  *
  * The count is a count, never a path: the names and link targets of what was
  * withheld would put the very thing containment refused into the daemon log.
+ *
+ * #7357 — this line is STILL `\n`-terminated (unlike the matches above it,
+ * which are NUL-delimited): it is host-authored fixed text, never a filename,
+ * so it cannot itself contain a stray delimiter, and keeping it human-legible
+ * on its own line is what let {@link splitWithheldTrailer} stay a boundary
+ * split rather than a scan.
  */
 export const CONTAINER_CONFINE_WITHHELD = '__chroxy_confine_withheld__'
 
@@ -498,6 +504,17 @@ export function buildConfinedContainerCommand({ target, body, setup = '', worksp
  * deleted rather than left beside it: an exported "same thing, no resolution"
  * variant is how a guard comes to be wired to only some of its callers
  * (`docs/false-safety-guards.md`, #7262), and it had exactly one caller.
+ *
+ * #7357 — matches are NUL-delimited (`printf '%s\0'`), not `\n`-delimited. A
+ * filename may legally contain a newline; a `\n`-joined stream can't tell "one
+ * match with an embedded newline" apart from "two matches", so the HOST's
+ * parser ({@link splitWithheldTrailer}, then the caller's `split('\0')`) would
+ * silently turn one real match into two lines — one of them a path that does
+ * not exist as spelled. NUL is the one byte a POSIX filename cannot contain,
+ * so it is the only delimiter that is unambiguous for every legal match. The
+ * withheld-count TRAILER stays `\n`-terminated (see {@link CONTAINER_CONFINE_WITHHELD}) —
+ * it is fixed host-authored text, not a filename, so it carries no ambiguity
+ * and is the one line the host can split on safely.
  */
 export function buildConfinedGlobBody(pattern) {
   return [
@@ -530,7 +547,7 @@ export function buildConfinedGlobBody(pattern) {
     '    if ! __cx_r=$(__cx_resolve "$f"); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) __cx_withheld=$((__cx_withheld+1)); continue ;; esac',
     '  fi',
-    '  printf \'%s\\n\' "$f"',
+    '  printf \'%s\\0\' "$f"',
     'done',
     // The operator's trace. Always emitted, including as `... 0`, so the host
     // can tell "nothing was withheld" from "the trailer never arrived" — the
@@ -569,9 +586,18 @@ export function parseConfinedContainerStdout(stdout) {
  *
  * The trailer NEVER reaches the model: stripping it here is what keeps the
  * no-oracle rule while still giving the daemon log a count. It is always the
- * last line, so it is matched positionally rather than by scanning — a file
- * literally named `__chroxy_confine_withheld__ 3` in the middle of the results
- * cannot be mistaken for it.
+ * last thing in the body, so it is matched positionally rather than by
+ * scanning — a file literally named `__chroxy_confine_withheld__ 3` in the
+ * middle of the results cannot be mistaken for it.
+ *
+ * #7357 — matches above the trailer are NUL-delimited (see
+ * {@link buildConfinedGlobBody}), so the trailer is found by locating the
+ * LAST `\0` rather than the last `\n`: everything before and including it is
+ * the (still NUL-delimited) match stream, untouched; everything after it is
+ * the trailer's own `\n`-terminated line. When there are zero matches the
+ * body is just the trailer line with no NUL at all, which the `lastIndexOf`
+ * fallback (`-1` → treat the whole body as the trailer candidate) handles the
+ * same way.
  *
  * `withheld: null` means the trailer was absent, which is reported as "unknown"
  * rather than as zero. The count is observability, not containment (the
@@ -584,13 +610,13 @@ export function parseConfinedContainerStdout(stdout) {
  */
 export function splitWithheldTrailer(body) {
   if (typeof body !== 'string') return { body: '', withheld: null }
-  const trailing = body.endsWith('\n') ? '\n' : ''
-  const lines = body.split('\n')
-  if (trailing) lines.pop()
-  const match = lines.length > 0 ? WITHHELD_TRAILER_RE.exec(lines[lines.length - 1]) : null
+  const lastNul = body.lastIndexOf('\0')
+  const matches = lastNul === -1 ? '' : body.slice(0, lastNul + 1)
+  const trailerPart = lastNul === -1 ? body : body.slice(lastNul + 1)
+  const trailerLine = trailerPart.endsWith('\n') ? trailerPart.slice(0, -1) : trailerPart
+  const match = WITHHELD_TRAILER_RE.exec(trailerLine)
   if (!match) return { body, withheld: null }
-  lines.pop()
-  return { body: lines.length > 0 ? lines.join('\n') + trailing : '', withheld: Number(match[1]) }
+  return { body: matches, withheld: Number(match[1]) }
 }
 
 /**

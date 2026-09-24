@@ -19,7 +19,7 @@
  */
 
 import { dirname, join, relative } from 'node:path'
-import { glob as fsGlob } from 'node:fs/promises'
+import { glob as fsGlob, readdir } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
@@ -407,7 +407,22 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
     return { content: `Glob timed out after ${timeoutMs}ms`, isError: true }
   }
   if (stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
-  const kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl)
+  let kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl, pattern)
+  // #7357 — a match containing an embedded newline cannot be told apart, in a
+  // '\n'-joined text result, from two separate matches: `sub/deep/nl\nSECRET`
+  // reads back as `sub/deep/nl` and `SECRET` on two lines, and the second of
+  // those is a path that does not exist as spelled. NUL is the only byte a
+  // POSIX filename cannot contain, but the tool_result handed back to the
+  // model is plain '\n'-joined text (not NUL-delimited), so there is no
+  // encoding that stays both unambiguous AND a single text line. Dropping is
+  // the one option of the two the issue names ("emitted unambiguously or
+  // skipped, never split") that needs no new escape syntax for the model to
+  // learn, and it is applied identically here and in the container path
+  // (docker-byok-session.js's `_containerGlob`) so the two backends agree on
+  // what "the same input" means. This is a display-format decision, not a
+  // containment one — the match is not a security-relevant withholding, so it
+  // gets no daemon-log line the way an escaping match does.
+  kept = kept.filter((f) => !f.includes('\n'))
   // A withheld match is reported as no match, with no count and no marker.
   // Anything that distinguishes "matched, but outside" from "matched nothing"
   // is an existence ORACLE: a workspace that contains `esc -> /` turns one bit
@@ -466,11 +481,28 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * FAIL-CLOSED: a match that cannot be resolved (EACCES, ELOOP, depth bomb) is
  * withheld, never emitted.
  *
+ * SECURITY (#7355) — also enforces CASE-SENSITIVE matching. `fs.glob` hard-codes
+ * `nocase: isWindows || isMacOS` internally (measured on Node 22.22.3: an
+ * explicit `nocase: false` is silently ignored), so on those two platforms a
+ * literal segment like `Config.ts` matches an on-disk `config.ts`, and — worse —
+ * for a fully-literal pattern the returned "match" is the PATTERN's own
+ * spelling, not a real path (`Glob ABC.TS` against a real `ABC.ts` returns
+ * `ABC.TS`, which does not exist as written). The container shells out to bash,
+ * whose globbing has no such override and is case-sensitive by construction, so
+ * an unfixed host silently disagrees with both the container and with Claude
+ * Code's own Glob. {@link caseCheckPasses} re-decides case-sensitively, using
+ * the REAL on-disk name at every path segment ({@link realSegmentNames}) rather
+ * than trusting the candidate's own text — the pattern-echo bug above means the
+ * candidate's text cannot be trusted for a literal segment in the first place.
+ *
  * @param {{path: string, isSymlink: boolean}[]} files
+ * @param {string} pattern The original Glob pattern, for the case re-check.
  * @returns {Promise<string[]>} The matches that are inside the workspace.
  */
-async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
+async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl, pattern) {
   const dirVerdicts = new Map()
+  const direntCache = new Map()
+  const caseCheck = compileCaseCheck(pattern)
   const kept = []
   for (const { path: f, isSymlink } of files) {
     // Relative to realRoot — that is the directory the glob ran in. Pass the
@@ -483,9 +515,234 @@ async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl) {
       dirVerdicts.set(rawDir, ok)
     }
     if (ok && isSymlink) ok = await isWithin(f, realRoot, cwdRealCache, cwdCacheTtl)
+    if (ok) {
+      const realSegments = await realSegmentNames(realRoot, splitRelPath(f), direntCache)
+      ok = realSegments !== null && caseCheckPasses(caseCheck, realSegments)
+    }
     if (ok) kept.push(f)
   }
   return kept
+}
+
+/**
+ * #7355 — split a Glob match's relative path into segments, separating on
+ * BOTH `/` and `\` (the match came from `node:path`'s `relative()`, which is
+ * platform-native — see #6928 for why a single-separator split is unsafe).
+ * The pattern itself never needs this: `\` is one of the characters
+ * {@link GLOB_PATTERN_SHELL_METACHARS} rejects outright, so a pattern is
+ * always plain `/`-delimited.
+ */
+function splitRelPath(f) {
+  return f.split(/[/\\]+/).filter(Boolean)
+}
+
+/**
+ * #7355 — reconstruct the REAL on-disk name of every segment of a match path,
+ * via a cached `readdir` at each level.
+ *
+ * Why this cannot just trust the segment text `fs.glob` handed back: for a
+ * segment that contains NO glob metacharacter, `fs.glob` verifies existence
+ * case-INSENSITIVELY and then echoes the PATTERN's own text for that segment —
+ * not the real Dirent name (measured: pattern `upper.ts` against a real
+ * `Upper.TS` returns the match spelled `upper.ts`). Only a segment containing a
+ * metacharacter is guaranteed real (it came from an actual directory listing).
+ * Re-deriving every segment from `readdir` — cheap here since it is cached per
+ * directory, the same shape as `confineGlobMatches`' own `dirVerdicts` — sidesteps
+ * needing to know, path by path, which case applied.
+ *
+ * The case-insensitive `toLowerCase()` lookup only RELOCATES an entry `fs.glob`
+ * already proved exists (by matching it, insensitively); it does not itself
+ * decide anything security-relevant. {@link caseCheckPasses} is what enforces
+ * case-sensitivity, by testing the pattern against the name this returns.
+ *
+ * FAIL-CLOSED: an unreadable directory, or a segment with no case-insensitive
+ * match in a real listing (should not happen — `fs.glob` already found one),
+ * returns `null`, and the caller withholds the match.
+ *
+ * @returns {Promise<string[]|null>}
+ */
+async function realSegmentNames(realRoot, segments, direntCache) {
+  const real = []
+  let dirAbs = realRoot
+  for (const seg of segments) {
+    let names = direntCache.get(dirAbs)
+    if (names === undefined) {
+      try {
+        names = await readdir(dirAbs)
+      } catch {
+        names = null
+      }
+      direntCache.set(dirAbs, names)
+    }
+    if (!names) return null
+    const lower = seg.toLowerCase()
+    const realName = names.find((n) => n.toLowerCase() === lower)
+    if (realName === undefined) return null
+    real.push(realName)
+    dirAbs = join(dirAbs, realName)
+  }
+  return real
+}
+
+/**
+ * #7355 — compile a single glob PATTERN SEGMENT (no `/`) to case-SENSITIVE
+ * RegExp source. Scope is exactly the syntax {@link GLOB_PATTERN_SHELL_METACHARS}
+ * lets through to `fs.glob`: `*`, `?`, `[...]`/`[!...]`/`[^...]` bracket
+ * expressions (with `-` ranges), and `{a,b}` brace alternation (recursive — an
+ * alternative may itself contain any of the above, including nested braces).
+ * No backslash escapes: `\` is rejected from every Glob pattern upstream, so
+ * none are interpreted here either — every other character is a literal.
+ *
+ * `*`/`?` compile to `[\s\S]` runs rather than `.`, so they still match a
+ * literal newline WITHIN a segment (a filename may legally contain one — see
+ * #7357) — irrelevant to matching correctness (a segment can never contain
+ * `/`, so there is nothing for `[\s\S]` to over-match into), but it keeps this
+ * check from silently rejecting a real file for an unrelated reason.
+ */
+function segmentToRegexSource(seg) {
+  let out = ''
+  let i = 0
+  while (i < seg.length) {
+    const c = seg[i]
+    if (c === '*') {
+      out += '[\\s\\S]*'
+      i++
+    } else if (c === '?') {
+      out += '[\\s\\S]'
+      i++
+    } else if (c === '[') {
+      const parsed = parseBracketExpr(seg, i)
+      if (parsed) {
+        out += parsed.source
+        i = parsed.next
+      } else {
+        out += '\\['
+        i++
+      }
+    } else if (c === '{') {
+      const close = findMatchingBrace(seg, i)
+      if (close === -1) {
+        out += '\\{'
+        i++
+      } else {
+        const alts = splitTopLevelCommas(seg.slice(i + 1, close))
+        out += `(?:${alts.map(segmentToRegexSource).join('|')})`
+        i = close + 1
+      }
+    } else {
+      out += /[.*+?^${}()|[\]\\]/.test(c) ? `\\${c}` : c
+      i++
+    }
+  }
+  return out
+}
+
+/**
+ * Parse a `[...]` bracket expression starting at `seg[openIdx] === '['`.
+ * Returns `null` (caller treats `[` as a literal) when there is no closing
+ * `]` — the same "unmatched metachar is literal" rule glob implementations
+ * use. A `]` immediately after `[` or `[!`/`[^` is a literal `]`, per POSIX.
+ */
+function parseBracketExpr(seg, openIdx) {
+  let j = openIdx + 1
+  let negate = false
+  if (seg[j] === '!' || seg[j] === '^') {
+    negate = true
+    j++
+  }
+  const start = j
+  if (seg[j] === ']') j++
+  while (j < seg.length && seg[j] !== ']') j++
+  if (j >= seg.length) return null
+  const body = seg.slice(start, j)
+  if (body.length === 0) return null
+  // '-' is left alone (ranges mean the same thing in a JS class); '^' and ']'
+  // are escaped so an unlucky position (leading '^', an already-consumed
+  // leading ']') can't be misread as class syntax.
+  const classBody = body.replace(/\^/g, '\\^').replace(/\]/g, '\\]')
+  return { source: `[${negate ? '^' : ''}${classBody}]`, next: j + 1 }
+}
+
+/** Index of the `}` matching `seg[openIdx] === '{'`, or -1 if unmatched. */
+function findMatchingBrace(seg, openIdx) {
+  let depth = 1
+  let j = openIdx + 1
+  while (j < seg.length) {
+    if (seg[j] === '{') depth++
+    else if (seg[j] === '}') { depth--; if (depth === 0) return j }
+    j++
+  }
+  return -1
+}
+
+/** Split a `{a,b,c}` body on top-level commas (commas inside nested `{}` don't count). */
+function splitTopLevelCommas(s) {
+  const parts = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '{') depth++
+    else if (s[i] === '}') depth--
+    else if (s[i] === ',' && depth === 0) {
+      parts.push(s.slice(start, i))
+      start = i + 1
+    }
+  }
+  parts.push(s.slice(start))
+  return parts
+}
+
+/**
+ * #7355 — compile a whole Glob pattern into the pieces {@link caseCheckPasses}
+ * needs: the pattern has no `/` inside a segment (patterns are always
+ * `/`-delimited — `\` is rejected upstream), so it is split on `/` and each
+ * segment compiled independently via {@link segmentToRegexSource}.
+ *
+ * `**` alignment: a standalone `**` segment matches zero or more REAL path
+ * segments, which are — by construction — always real Dirent names (a `**`
+ * carries no literal text of its own to mismatch), so segments it absorbs need
+ * no case check at all. With AT MOST ONE `**`, the segments before it align
+ * with the match's leading segments and the segments after it align with the
+ * match's trailing segments, leaving the (possibly empty) middle unchecked.
+ *
+ * A pattern with TWO OR MORE `**` segments is marked `ambiguous`: figuring out
+ * which match segments each one consumed needs real backtracking, which this
+ * intentionally does not implement (the existing security-relevant containment
+ * checks stay unaffected either way — this only feeds the case re-check).
+ * `caseCheckPasses` fails closed on `ambiguous`, which can only ever REJECT a
+ * match that might have been a legitimate case-correct one; it can never let a
+ * case-mismatched one through. Real Glob usage overwhelmingly uses zero or one
+ * `**`, so this is a documented, safe-by-construction narrowing, not a gap.
+ */
+function compileCaseCheck(pattern) {
+  const patSegs = pattern.split('/')
+  const globstarIdxs = []
+  patSegs.forEach((s, i) => { if (s === '**') globstarIdxs.push(i) })
+  if (globstarIdxs.length > 1) return { ambiguous: true }
+  if (globstarIdxs.length === 0) {
+    return { ambiguous: false, exact: true, head: patSegs.map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)), tail: [] }
+  }
+  const k = globstarIdxs[0]
+  return {
+    ambiguous: false,
+    exact: false,
+    head: patSegs.slice(0, k).map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)),
+    tail: patSegs.slice(k + 1).map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)),
+  }
+}
+
+/** Test a {@link compileCaseCheck} result against a match's REAL segment names. */
+function caseCheckPasses(check, realSegments) {
+  if (check.ambiguous) return false
+  const { head, tail, exact } = check
+  if (exact) {
+    if (realSegments.length !== head.length) return false
+    return head.every((re, i) => re.test(realSegments[i]))
+  }
+  if (realSegments.length < head.length + tail.length) return false
+  if (!head.every((re, i) => re.test(realSegments[i]))) return false
+  const tailStart = realSegments.length - tail.length
+  return tail.every((re, i) => re.test(realSegments[tailStart + i]))
 }
 
 /**

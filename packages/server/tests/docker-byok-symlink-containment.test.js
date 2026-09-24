@@ -469,7 +469,9 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
       const backend = {
         calls: [],
         async execInEnvironment() {
-          return { stdout: `${CONTAINER_CONFINE_OK}\nsrc/a.ts\n`, stderr: '' }
+          // #7357 — NUL-terminated match, matching buildConfinedGlobBody's
+          // real delimiter; the trailer is what's absent here, not the NUL.
+          return { stdout: `${CONTAINER_CONFINE_OK}\nsrc/a.ts\0`, stderr: '' }
         },
       }
       const session = buildSession(backend)
@@ -1114,15 +1116,20 @@ describe('parseConfinedContainerStdout (#7354)', () => {
   })
 })
 
-describe('splitWithheldTrailer (#7354)', () => {
-  it('strips the trailer and returns the count', () => {
+describe('splitWithheldTrailer (#7354 / #7357)', () => {
+  // #7357 — matches are NUL-delimited (buildConfinedGlobBody), not '\n'-joined:
+  // a filename may legally contain a newline, and joining on '\n' cannot tell
+  // "one match with an embedded newline" apart from "two matches". The
+  // trailer stays its own '\n'-terminated line — fixed host-authored text,
+  // never a filename, so it carries no such ambiguity.
+  it('strips the trailer and returns the NUL-delimited matches', () => {
     assert.deepEqual(
-      splitWithheldTrailer(`src/a.ts\nsrc/b.ts\n${CONTAINER_CONFINE_WITHHELD} 3\n`),
-      { body: 'src/a.ts\nsrc/b.ts\n', withheld: 3 },
+      splitWithheldTrailer(`src/a.ts\0src/b.ts\0${CONTAINER_CONFINE_WITHHELD} 3\n`),
+      { body: 'src/a.ts\0src/b.ts\0', withheld: 3 },
     )
   })
 
-  it('handles a body that is ONLY the trailer', () => {
+  it('handles a body that is ONLY the trailer (zero matches — no NUL at all)', () => {
     assert.deepEqual(
       splitWithheldTrailer(`${CONTAINER_CONFINE_WITHHELD} 2\n`),
       { body: '', withheld: 2 },
@@ -1137,20 +1144,37 @@ describe('splitWithheldTrailer (#7354)', () => {
   })
 
   it('reports an ABSENT trailer as null, never as zero', () => {
-    for (const body of ['src/a.ts\n', '', 'x', null, undefined]) {
+    for (const body of ['src/a.ts\0', '', 'x', null, undefined]) {
       assert.equal(splitWithheldTrailer(body).withheld, null, `claimed a count for ${JSON.stringify(body)}`)
     }
   })
 
-  it('only the LAST line can be the trailer', () => {
-    // A file named like the trailer, in the middle of the results, must stay a
-    // result — and must not hand the log a number the container never sent.
-    const body = `${CONTAINER_CONFINE_WITHHELD} 9\nsrc/a.ts\n`
-    assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
+  it('only what follows the LAST NUL can be the trailer', () => {
+    // A MATCH whose name happens to look exactly like the trailer text — a
+    // real file could be named that — must stay a match, and only the true
+    // final trailer (after the last NUL) is stripped. Getting this backwards
+    // would hand the log a number the container never sent (a match text
+    // mistaken for the trailer) or leak the trailer into the model-facing
+    // body (the true trailer mistaken for a match).
+    const body = `${CONTAINER_CONFINE_WITHHELD} 9\0src/a.ts\0${CONTAINER_CONFINE_WITHHELD} 3\n`
+    assert.deepEqual(splitWithheldTrailer(body), {
+      body: `${CONTAINER_CONFINE_WITHHELD} 9\0src/a.ts\0`,
+      withheld: 3,
+    })
   })
 
   it('rejects a malformed count rather than coercing it', () => {
-    const body = `src/a.ts\n${CONTAINER_CONFINE_WITHHELD} -1\n`
+    const body = `src/a.ts\0${CONTAINER_CONFINE_WITHHELD} -1\n`
     assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
+  })
+
+  it('an embedded newline inside a match survives as part of ONE entry', () => {
+    // The whole point of the NUL delimiter: `nl\nSECRET.ts` must come back as
+    // a single match, not split into `nl` and `SECRET.ts` by anything that
+    // still keys off '\n'.
+    assert.deepEqual(
+      splitWithheldTrailer(`nl\nSECRET.ts\0keep.ts\0${CONTAINER_CONFINE_WITHHELD} 0\n`),
+      { body: 'nl\nSECRET.ts\0keep.ts\0', withheld: 0 },
+    )
   })
 })

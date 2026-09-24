@@ -800,6 +800,134 @@ describe('executeBuiltinTool', () => {
         assert.equal(r.content.includes('No matches'), false, `${pattern} must still match`)
       }
     })
+
+    // #7355 — host Glob must be case-SENSITIVE, matching the container (bash's
+    // own globbing has no case-folding override) and Claude Code's own Glob.
+    // `fs.glob` hard-codes `nocase: isWindows || isMacOS` (measured on Node
+    // 22.22.3: an explicit `nocase: false` is silently ignored), so these
+    // reproduce on a case-insensitive filesystem (this machine) and are inert
+    // — not red, not proof of anything — on a case-sensitive one (Linux CI),
+    // where the underlying `fs.glob` call was never case-folding in the first
+    // place. That asymmetry is inherent to the bug, not a gap in the test.
+    describe('case sensitivity (#7355)', () => {
+      it('a wildcard pattern does not match a wrong-case extension', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('a wildcard pattern still matches the SAME case (positive control)', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.TS' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'Upper.TS')
+      })
+
+      it('a literal (magic-free) pattern with the wrong case is "No matches", never the pattern\'s own spelling', async () => {
+        // Pre-fix, `fs.glob` verifies existence case-INSENSITIVELY for a fully
+        // literal pattern and then echoes the PATTERN's own text back as the
+        // "match" — `upper.ts` against a real `Upper.TS` returned `upper.ts`,
+        // a path that does not exist as spelled.
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'upper.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality: the standard "No matches for <pattern>" message
+        // legitimately contains the pattern's own text, so only an exact
+        // match rules out a fabricated `upper.ts` being returned as if it
+        // were a real result line alongside that message.
+        assert.equal(r.content, 'No matches for upper.ts')
+      })
+
+      it('a literal pattern with the correct case still matches (positive control)', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'Upper.TS' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'Upper.TS')
+      })
+
+      it('a literal DIRECTORY segment with the wrong case is rejected', async () => {
+        mkdirSync(join(dir, 'dir'), { recursive: true })
+        writeFileSync(join(dir, 'dir/dir.ts'), '1')
+        const wrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'DIR/*.ts' }, ...ctx() })
+        assert.equal(wrong.isError, false)
+        assert.match(wrong.content, /No matches/)
+        // Positive control, same fixture: the correctly-cased directory still works.
+        const right = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'dir/*.ts' }, ...ctx() })
+        assert.equal(right.content, 'dir/dir.ts')
+      })
+
+      it('bracket and brace expressions still work, case-sensitively on their literal parts', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const bracketRight = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[Uu]pper.TS' }, ...ctx() })
+        assert.equal(bracketRight.content, 'Upper.TS', '[Uu] must still match the U')
+        const bracketWrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[Uu]pper.ts' }, ...ctx() })
+        assert.match(bracketWrong.content, /No matches/, 'the literal .ts suffix must still reject .TS')
+        const braceRight = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{Upper,Other}.TS' }, ...ctx() })
+        assert.equal(braceRight.content, 'Upper.TS')
+        const braceWrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{upper,other}.TS' }, ...ctx() })
+        assert.match(braceWrong.content, /No matches/)
+      })
+
+      it('a recursive ** pattern still finds nested matches after the case filter', async () => {
+        mkdirSync(join(dir, 'sub'), { recursive: true })
+        writeFileSync(join(dir, 'sub/keep.ts'), '1')
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /sub\/keep\.ts/)
+        assert.equal(r.content.includes('Upper.TS'), false)
+      })
+    })
+
+    // #7357 — two output-integrity defects the review panel on PR #7349 found.
+    describe('dangling symlinks and embedded newlines (#7357)', () => {
+      // Re-verification (not a new fix): #6923's component-wise resolver
+      // (ws-file-ops/common.js -> utils/componentwise-resolver.js), which
+      // `isWithin` already delegates to, resolves ENOENT on a dangling
+      // symlink's target by applying the remaining tail LEXICALLY rather than
+      // throwing — so the containment decision already lands on where the
+      // target STRING points, in or out of the workspace, never on a plain
+      // `realpath()` throw. These three tests PIN that already-correct
+      // behavior (measured green against origin/main; #6923 landed before
+      // #7357 was filed) rather than fix anything host-side.
+      it('lists a dangling symlink whose target is inside the workspace', { skip: process.platform === 'win32' }, async () => {
+        // symlinkSync needs a privilege the Windows CI runner lacks (#7288).
+        symlinkSync('./nonexistent-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'broken.ts')
+      })
+
+      it('withholds a dangling symlink whose absolute target string points outside the workspace', { skip: process.platform === 'win32' }, async () => {
+        symlinkSync('/definitely-nonexistent-outside-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('withholds a dangling symlink whose relative target escapes the workspace via ..', { skip: process.platform === 'win32' }, async () => {
+        symlinkSync('../../../etc/nonexistent-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('a match whose name contains a newline is dropped, never split into two entries', {
+        // Windows rejects control characters (including \n, 0x0A) in
+        // filenames via the Win32 API — there is nothing to reproduce there.
+        skip: process.platform === 'win32',
+      }, async () => {
+        writeFileSync(join(dir, 'keep.ts'), '1')
+        writeFileSync(join(dir, 'nl\nSECRET.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality, not a substring match: proves the newline-bearing
+        // name is ABSENT, not merely that "SECRET.ts" as a fabricated
+        // second line is absent (which a half-fixed split could still pass).
+        assert.equal(r.content, 'keep.ts')
+      })
+    })
   })
 
   describe('Grep', () => {

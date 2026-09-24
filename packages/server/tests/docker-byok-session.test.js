@@ -763,8 +763,11 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
         globPatternEscapeReason(pattern), null,
         `precondition: ${pattern} must reach the shell, or this tests the wrong layer`,
       )
+      // #7357 — NUL-delimited, matching the real buildConfinedGlobBody output;
+      // a '\n'-joined fixture here would test a shape the container no longer
+      // produces.
       const _dockerBackend = backendStub({
-        defaultResponse: { stdout: '../etc/passwd\n/etc/shadow\nsrc/ok.ts\n', stderr: '' },
+        defaultResponse: { stdout: '../etc/passwd\0/etc/shadow\0src/ok.ts\0', stderr: '' },
       })
       const { session } = buildSession({ backend: _dockerBackend })
       const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern } })
@@ -782,9 +785,10 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     // nested braces — and every one of them is invisible in the pattern and
     // plainly visible HERE, in what the shell produced. So this test bypasses
     // the pattern guard entirely and feeds the escaping output straight back.
+    // #7357 — NUL-delimited, matching the real buildConfinedGlobBody output.
     const _dockerBackend = backendStub({
       defaultResponse: {
-        stdout: '/etc/passwd\n../../etc/shadow\nsrc/a.ts\n..\n',
+        stdout: '/etc/passwd\0../../etc/shadow\0src/a.ts\0..\0',
         stderr: '',
       },
     })
@@ -803,7 +807,7 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
 
   it('Glob reports an all-withheld result as no match, with no count (oracle)', async () => {
     const _dockerBackend = backendStub({
-      defaultResponse: { stdout: '/etc/passwd\n/etc/shadow\n', stderr: '' },
+      defaultResponse: { stdout: '/etc/passwd\0/etc/shadow\0', stderr: '' },
     })
     const { session } = buildSession({ backend: _dockerBackend })
     const result = await session._dispatchBuiltinTool({
@@ -817,7 +821,7 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
   it('Glob still runs an ordinary in-workspace pattern (positive control #7341)', async () => {
     // Without this the test above would pass just as well against a Glob that
     // refused every pattern outright.
-    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\n', stderr: '' } })
+    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\0', stderr: '' } })
     const { session } = buildSession({ backend: _dockerBackend })
     const result = await session._dispatchBuiltinTool({
       toolName: 'Glob',
