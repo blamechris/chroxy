@@ -39,13 +39,13 @@ import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopback
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
-import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
+import { registerDockerProvider, resolveProviderLabel, getRegisteredProviderNames, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { registerAcpProviders } from './acp-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { getRegistryForProvider, watchModelsOverlay, usesDefaultModelsRegistry } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay, usesDefaultModelsRegistry, isClaudeProvider, resolveRosterProvider } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -394,15 +394,66 @@ export function clientActiveProvider(client, sessionManager) {
  * into its broadcast set and send each entry ONLY to the clients that registry
  * is the roster for (`overlayBroadcastReachesProvider`).
  *
+ * #7756 — the DEFAULT (Claude) entry additionally gets RE-TAGGED per recipient
+ * instead of sent verbatim. `claude-sdk`, `claude-cli` and `claude-tui` share
+ * this one registry, so `overlayBroadcastReachesProvider` correctly decides all
+ * three should receive it — but since #7728 the client keys each roster by the
+ * EXACT tag it arrived under (`modelsByProvider`,
+ * store-core/src/models-by-provider.ts), so a single `claude-sdk` literal
+ * never refreshes a `claude-cli`/`claude-tui` client's OWN bucket even though
+ * routing already decided it should. Each recipient is instead served the same roster
+ * tagged with the name `resolveRosterProvider` would give IT on a fresh
+ * connect (`ws-history.js`'s own resolution), so a reload and a reconnect agree
+ * on what a session's roster is called — no reconnect-vs-reload skew.
+ *
+ * The concrete tag set is derived from the provider REGISTRY
+ * (`getRegisteredProviderNames` + `isClaudeProvider`, #5858's single source of
+ * truth), never a hand-maintained name literal — the exact defect class #5855
+ * fixed for `isClaudeProvider` itself. That includes `claude-byok`
+ * (`static claudeFamily = true`, byok-session.js) — see the paragraph below
+ * for why an earlier revision of this fix excluded it and why that was wrong.
+ *
+ * A residual broadcast (still tagged with the reload's own literal) covers
+ * whatever does not resolve to a known tag — an unregistered/custom provider
+ * name, or one whose own registry build throws — preserving the pre-#7756
+ * fail-open delivery for that edge case (`overlayBroadcastReachesProvider`'s
+ * own try/catch) rather than silently dropping it. That roster was already
+ * "delivered and discarded" for such a client before this fix (its own bucket
+ * key never matched `claude-sdk` either), so nothing regresses; #7756 is about
+ * the KNOWN Claude-family names landing in the wrong bucket, not this edge
+ * case.
+ *
+ * `claude-byok` MUST be in `knownTags`, not the residual: `ws-history.js`'s
+ * post-auth connect path (`resolveRosterProvider(entry.provider, ...)` at
+ * `ws-history.js:928`) tags a byok client's roster `'claude-byok'` exactly,
+ * same registry as claude-sdk/cli/tui. A prior revision of this fix instead
+ * excluded `claude-byok` from `knownTags` and explicitly skipped it in the
+ * residual, reasoning that connect never refreshed a byok client's own
+ * bucket either — but that reasoning rested on a stale reading of #7756
+ * (`static claudeFamily = false`) that does not match this class. Excluding
+ * it here reproduces the EXACT #7756 bug for a fourth provider: the roster is
+ * delivered (via the residual, tagged with the reload's own literal) and
+ * discarded, because a byok client's bucket key is `'claude-byok'`, not
+ * whatever the residual's literal happens to be. Folding it into the same
+ * per-tag treatment as claude-cli/claude-tui is what keeps a reload and a
+ * reconnect agreeing on a byok session's roster tag, exactly as they do for
+ * the other three.
+ *
  * A factory rather than an inline closure so the wiring is a single named
  * reference at the call site AND the behaviour is directly executable in a test
  * — the previous inline closure lived inside `startCliServer()`, which no test
  * can run, so the only available check was a source grep over its body.
  *
- * @param {{ wsServer: { _broadcast: Function }, sessionManager: object, logger?: object }} deps
+ * @param {{ wsServer: { _broadcast: Function }, sessionManager: object, logger?: object, defaultProvider?: string|null }} deps
+ *   `defaultProvider` is this daemon's resolved default (`config.provider ||
+ *   DEFAULT_PROVIDER`) — the same value `ws-history.js` feeds
+ *   `resolveRosterProvider` from `billingCanary.defaultProvider`. Omitted (as
+ *   every existing caller/test does), `resolveRosterProvider` falls back to
+ *   `DEFAULT_PROVIDER` itself, which is a true statement only when the daemon
+ *   was not started with an explicit `--provider` override.
  * @returns {(reload: object) => void}
  */
-export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logger = log }) {
+export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logger = log, defaultProvider = null }) {
   return (reload) => {
     for (const message of buildOverlayReloadBroadcasts(reload)) {
       logger.info(`Models overlay reloaded (${message.provider}): ${message.models.map((m) => m.id).join(', ')}`)
@@ -412,11 +463,50 @@ export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logge
       // other tag is in the message only because `reloadModelsOverlay` just
       // built (and therefore cached) that provider's registry.
       const tagIsDefault = usesDefaultModelsRegistry(message.provider ?? null)
-      wsServer._broadcast(message, (client) => overlayBroadcastReachesProvider(
-        message,
-        clientActiveProvider(client, sessionManager),
-        tagIsDefault,
-      ))
+
+      if (!tagIsDefault) {
+        // Per-provider (non-default) roster: unchanged from #7722 — the tag
+        // already names the exact registry it came from, so the recipient's
+        // own provider must match it exactly. No re-tagging needed: a codex
+        // roster is never right for anyone but a codex session.
+        wsServer._broadcast(message, (client) => overlayBroadcastReachesProvider(
+          message,
+          clientActiveProvider(client, sessionManager),
+          tagIsDefault,
+        ))
+        continue
+      }
+
+      // #7756 — the concrete Claude-family names this daemon currently has
+      // registered (built-ins + docker-* once registerDockerProvider() has run
+      // + any config-driven endpoint), INCLUDING claude-byok — see the
+      // docstring above. Read fresh on every reload rather than captured
+      // once, so a provider registered after this broadcaster was built
+      // (docker-*, hot-registered endpoints) is still covered.
+      const knownTags = new Set(
+        getRegisteredProviderNames().filter((name) => isClaudeProvider(name)),
+      )
+      // The tag a client with no active session — or a session reporting no
+      // provider — is served. Same resolution `ws-history.js` uses on connect,
+      // so an idle client's bucket key matches whichever of the two sent last.
+      knownTags.add(resolveRosterProvider(null, defaultProvider))
+
+      for (const tag of knownTags) {
+        wsServer._broadcast({ ...message, provider: tag }, (client) => resolveRosterProvider(
+          clientActiveProvider(client, sessionManager),
+          defaultProvider,
+        ) === tag)
+      }
+
+      // Residual fallback — see the docstring above. `claude-byok` IS in
+      // `knownTags` now, so it is excluded from the residual by the same
+      // generic `knownTags.has(...)` check every other known Claude-family
+      // provider is — no separate byok guard needed or wanted.
+      wsServer._broadcast(message, (client) => {
+        const activeProvider = clientActiveProvider(client, sessionManager)
+        if (knownTags.has(resolveRosterProvider(activeProvider, defaultProvider))) return false
+        return overlayBroadcastReachesProvider(message, activeProvider, tagIsDefault)
+      })
     }
   }
 }
@@ -1535,9 +1625,21 @@ export async function startCliServer(config) {
   // reload, re-broadcast `available_models` for every registry the overlay
   // CHANGED — the default (Claude) one plus each provider-tagged slice (#7722)
   // — routed so each client only ever receives the roster for the provider its
-  // active session runs on. A malformed save is ignored (last-good kept).
+  // active session runs on, RE-TAGGED per recipient for the default registry
+  // (#7756) so a claude-cli/claude-tui/claude-byok client's own bucket
+  // refreshes too. A malformed save is ignored (last-good kept).
+  //
+  // #7756: `defaultProvider` mirrors `billingCanaryMonitor`'s own
+  // `getDefaultProvider` below (`config.provider || DEFAULT_PROVIDER`) — the
+  // same resolution `ws-history.js` feeds `resolveRosterProvider` via
+  // `billingCanary.defaultProvider` — so a no-session client's roster is
+  // tagged identically whether it arrives on connect or on a reload.
   const modelsOverlayWatcher = watchModelsOverlay({
-    onReload: createOverlayReloadBroadcaster({ wsServer, sessionManager }),
+    onReload: createOverlayReloadBroadcaster({
+      wsServer,
+      sessionManager,
+      defaultProvider: config.provider || DEFAULT_PROVIDER,
+    }),
   })
 
   // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
