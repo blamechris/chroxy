@@ -24,10 +24,12 @@ on:
 # runs had to be cancelled by hand.
 #
 # THE FIX, per GitHub's documented concurrency semantics (Using jobs > Using
-# concurrency): with `cancel-in-progress` false (its default, and what
-# `pull_request` events now resolve to false), "any existing pending job or
-# workflow in the same concurrency group will be canceled and the new queued
-# job or workflow will take its place," and by default "at most one job or
+# concurrency): with `cancel-in-progress` false (its default, and what every
+# NON-`pull_request` event — i.e. a `push` to `main` — now resolves to; a
+# `pull_request` event still resolves it to `true`, unchanged from before),
+# "any existing pending job or workflow in the same concurrency group will be
+# canceled and the new queued job or workflow will take its place," and by
+# default "at most one job or
 # workflow run can be pending" per group — a run already IN PROGRESS is left to
 # finish. `github.ref` for a `push` is "the branch or tag ref that was pushed"
 # (`refs/heads/main` here, since `on.push.branches` names only `main`) — the
