@@ -416,6 +416,15 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // setting a flag the walk's own loop observes on its very next iteration —
   // not, as with `fs.glob`, hoping a signal it ignores gets noticed.
   const { matchers } = compileCaseCheck(pattern)
+  // #7910 review round 2 (parity) — a pattern ending in `/` (any number of
+  // trailing slashes; `compileCaseCheck` already drops the empty segment(s)
+  // they produce, so the compiled `matchers` are identical either way) means
+  // DIRECTORIES ONLY, matching `fs.glob`'s own observed behavior exactly:
+  // verified directly, `sub/*/` matches a real subdirectory but not a plain
+  // file NOR a symlink pointing at a directory (`sub/dirlink -> inner` is
+  // excluded from `sub/*/`'s results) — so this is `dirent.isDirectory()`
+  // specifically, never "dir-like".
+  const directoryOnly = pattern.endsWith('/')
   const files = []
   // ONE timer sets the flag and releases the race, so the two cannot resolve
   // in either order — a second, independent timer would let the race finish
@@ -430,7 +439,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   deadline.unref?.()
   const onAbort = () => { state.stop = 'interrupted'; releaseDeadline() }
   signal?.addEventListener?.('abort', onAbort, { once: true })
-  const collect = walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries })
+  const collect = walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
   // Attach a catch BEFORE the race: if the walk rejects after the deadline has
   // already settled it, the rejection would otherwise be unhandled.
   let walkError = null
@@ -532,24 +541,33 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * it. FAIL-CLOSED: a symlink that cannot be resolved (ELOOP, EACCES, a depth
  * bomb) is withheld the same way.
  *
- * SECURITY (review of #7901, TOCTOU) — an ordinary (non-symlink-AT-LISTING-
- * TIME) directory is NOT trusted on `dirent`'s type alone before being
- * opened: `fs.promises.opendir` batches several dirents per underlying
- * `readdir(2)` call, and this walk is strictly sequential within a directory,
- * so an entry late in a large listing is reached only after every earlier one
- * (including a deep subtree) has been fully processed — the type Node
- * captured for it can be stale by then. Chroxy fans every tool block a model
- * approves in one turn out CONCURRENTLY (`byok-session.js`'s `Promise.all`,
- * #7356), so a Bash call approved in the SAME turn as a Glob call can replace
- * a plain directory with a symlink to anywhere while this walk is still busy
+ * SECURITY (review of #7901, TOCTOU — closed properly in round 2) — an
+ * ordinary (non-symlink-AT-LISTING-TIME) directory is NOT trusted on
+ * `dirent`'s type alone before being opened: `fs.promises.opendir` batches
+ * several dirents per underlying `readdir(2)` call, and this walk is
+ * strictly sequential within a directory, so an entry late in a large
+ * listing is reached only after every earlier one (including a deep
+ * subtree) has been fully processed — the type Node captured for it can be
+ * stale by then. Chroxy fans every tool block a model approves in one turn
+ * out CONCURRENTLY (`byok-session.js`'s `Promise.all`, #7356), so a Bash
+ * call approved in the SAME turn as a Glob call can replace a plain
+ * directory with a symlink to anywhere while this walk is still busy
  * elsewhere in the tree. Measured directly (byok-tool-executor.test.js): an
  * unpatched walk over a 60-sibling directory followed exactly such a swap
  * straight into the attacker's target and returned matches from OUTSIDE the
- * workspace, reported under a workspace-looking `relPath`. `walk`'s call site
- * routes every directory-shaped descent — symlink-flagged or not — through
- * {@link resolveNonSymlinkDescend} (a no-op for the already-validated symlink
- * case) so the OPEN decision is always made on a freshly-`lstat`ed path, never
- * a possibly-stale dirent.
+ * workspace, reported under a workspace-looking `relPath`. A first attempt
+ * at closing this (round 2's `resolveNonSymlinkDescend`) re-`lstat`ed
+ * immediately before returning a path string for `walk` to `opendir` — but
+ * that is STILL check-then-use: the two calls are independent, so a swap
+ * landing in the gap between them is exactly as invisible as one landing
+ * before the check. `walk`'s call site now routes every directory-shaped
+ * descent — symlink-flagged or not — through
+ * {@link openVerifiedDirForDescend}, which performs the `opendir` ITSELF,
+ * immediately re-verifies device+inode identity against the pre-open check
+ * before returning, and hands `walk` the already-open, already-verified
+ * `Dir` directly — no path is ever handed back for a second, disconnected
+ * open to (not) re-check. See that function's doc for exactly what this
+ * closes and the residual risk that remains.
  *
  * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
  * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
@@ -575,10 +593,33 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * VISITED regardless of match count, for the #7356 shape (an enormous tree, almost no
  * matches) where the collect ceiling never engages.
  *
- * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number}} args
+ * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number, directoryOnly?: boolean}} args
  */
-async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries }) {
+async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries, directoryOnly, __testDescendSeam }) {
   const m = matchers.length
+  // SECURITY/DoS (#7910 review round 2) — real directories on the CURRENT
+  // descent path (root down to here), keyed by `dev:ino`. A plain filesystem
+  // tree can never revisit an ancestor directory — that would require an
+  // actual cycle — so tracking every descent unconditionally costs nothing
+  // there and only ever REFUSES when a symlink's resolved target is already
+  // an ancestor of the entry naming it, which is exactly the shape measured
+  // directly here: `**/selfloop/**` against `selfloop -> .` (self-referential)
+  // grew UNBOUNDED on the round-2 code (200+ matches, no cap but `maxEntries`/
+  // the componentwise resolver's own symlink-depth ceiling) because the
+  // existing `detHandoff`/`canDescendSymlink` gate answers "was this entry
+  // named determinately", not "have we already been here" — a determinate
+  // literal segment re-matching the SAME repeating name at every depth of its
+  // own self-loop sails through that gate every time. Stack discipline (added
+  // in `walk`, removed in its `finally`) means a real DIAMOND — the same real
+  // directory reached via two separate, non-overlapping symlinks elsewhere in
+  // the tree — is not spuriously refused; only an actual ancestor-revisit is.
+  const visitedDirs = new Set()
+  // `{ bigint: true }` stats (see `openVerifiedDirForDescend`) — a plain
+  // Number would lose precision for a large volume's inode, and this key
+  // needs exact equality: a false COLLISION (two different directories
+  // hashing the same key) would wrongly refuse a legitimate descent — safe
+  // (fail-closed), but not correct — while precision here is free.
+  function dirKey(stat) { return `${stat.dev}:${stat.ino}` }
   // #7910 review (parity/DoS) — precomputed ONCE per Glob call: which matcher
   // positions are DETERMINATE segments (no bare `*`/`?` anywhere in the
   // segment — a fully-literal segment, a bracket class, or a brace whose every
@@ -602,14 +643,42 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     return state.stop !== null || results.length >= GLOB_COLLECT_CEILING
   }
 
-  async function walk(dirAbs, relPrefix, active) {
-    if (shouldStop()) return
-    let dh
-    try {
-      dh = await opendir(dirAbs)
-    } catch {
-      return // unreadable or gone — FAIL CLOSED: no children found, never a crash
+  async function walk(dirAbs, relPrefix, active, preOpened) {
+    // `preOpened` (`{dh, key}`) — #7910 review round 2 (TOCTOU) — every
+    // recursive call below already went through `openVerifiedDirForDescend`,
+    // which opened AND identity-verified this exact directory itself;
+    // opening it a SECOND time here, by path, would throw that verification
+    // away and reintroduce the very race it exists to close (see that
+    // function's doc). Only the top-level call (the walk's `realRoot`,
+    // resolved once by the caller before any concurrent tool call could
+    // interfere with it) opens fresh. A pre-opened handle must still be
+    // closed on the early-stop path below — it is already-open regardless of
+    // whether `walk` goes on to use it.
+    if (shouldStop()) {
+      if (preOpened) await preOpened.dh.close().catch(() => {})
+      return
     }
+    let dh = preOpened?.dh
+    let key = preOpened?.key
+    if (!dh) {
+      try {
+        dh = await opendir(dirAbs)
+      } catch {
+        return // unreadable or gone — FAIL CLOSED: no children found, never a crash
+      }
+      // SECURITY/DoS (#7910 review round 2) — only the TOP-LEVEL (root) call
+      // reaches here without a `preOpened.key` already computed by
+      // `openVerifiedDirForDescend`; register the root itself so a symlink
+      // ANYWHERE in the tree that resolves back to it is also caught as a
+      // cycle, not just a loop among its descendants.
+      try {
+        key = dirKey(await lstat(dirAbs, { bigint: true }))
+      } catch {
+        await dh.close().catch(() => {})
+        return
+      }
+    }
+    visitedDirs.add(key)
     try {
       for await (const dirent of dh) {
         if (shouldStop()) return
@@ -645,24 +714,6 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         }
         closeGlobstars(next)
 
-        // SECURITY/DoS (#7910 review, item 3) — a TRAILING `**` closing with
-        // ZERO width (matching no real segment of its own) onto a
-        // NON-directory entry is only valid when the entry that immediately
-        // precedes the close was named by a DETERMINATE segment (verified
-        // directly: `plainfile.txt/**`/`[p]lainfile.txt/**` match a plain
-        // FILE `plainfile.txt`; `pl?infile.txt/**`/`*.txt/**` do not) — or
-        // when the globstar legitimately ABSORBED this entry's own name via
-        // its own dot-guarded test (`globstarAbsorbedLast`; that case needs
-        // no gate at all, since the entry was genuinely consumed as a real
-        // segment, file or directory, same as any ordinary `**` leaf match —
-        // `sub/**` finding a plain file `sub/file.ts` is completely ordinary).
-        // A directory entry never needs this gate: `**` matching zero of a
-        // real directory's contents is always well-formed.
-        if (next[m] && m >= 1 && matchers[m - 1] === CASE_CHECK_GLOBSTAR && !globstarAbsorbedLast) {
-          const isDirLike = dirent.isDirectory() || dirent.isSymbolicLink()
-          if (!isDirLike && !detHandoff[m - 1]) next[m] = false
-        }
-
         // #7901 round 2 (Windows parity) — `join()`, not a hardcoded `/`, so
         // the result carries the PLATFORM-native separator (`\` on Windows),
         // matching what the pre-#7901 walk returned via `path.relative()`
@@ -686,7 +737,46 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           childAbs = join(dirAbs, name)
         }
 
-        if (next[m]) results.push(relPath)
+        // SECURITY/DoS (#7910 review, item 3 — corrected in round 2) — a
+        // TRAILING `**` closing with ZERO width (matching no real segment of
+        // its own) onto a NON-directory entry is only valid when the entry
+        // that immediately precedes the close was named by a DETERMINATE
+        // segment (verified directly: `plainfile.txt/**`/`[p]lainfile.txt/**`
+        // match a plain FILE `plainfile.txt`; `pl?infile.txt/**`/`*.txt/**`
+        // do not — same rule for a symlink: `[f]ile-link.txt/**` matches a
+        // symlink to a FILE exactly like a plain file does, verified
+        // directly) — or when the globstar legitimately ABSORBED this
+        // entry's own name via its own dot-guarded test
+        // (`globstarAbsorbedLast`; that case needs no gate at all, since the
+        // entry was genuinely consumed as a real segment, file or directory,
+        // same as any ordinary `**` leaf match — `sub/**` finding a plain
+        // file `sub/file.ts` is completely ordinary). A PLAIN directory
+        // entry never needs the determinate check at all: `**` matching
+        // zero of a real directory's contents is always well-formed,
+        // determinate or not. A SYMLINK entry is NOT automatically
+        // "dir-like" the way round 2's original `isDirLike =
+        // dirent.isDirectory() || dirent.isSymbolicLink()` treated it — that
+        // unconditionally exempted EVERY symlink from this gate regardless
+        // of what named it, letting `*/**`/`?rc-link/**`/`[s]*-link/**` (all
+        // NON-determinate — `[s]*-link` contains a bare `*` token, so
+        // `isDeterminateSegmentTokens` correctly still calls the whole
+        // segment non-determinate) spuriously close zero-width onto a
+        // symlinked directory, and `*.txt/**` onto a symlinked FILE, none of
+        // which real `fs.glob` does (verified directly: all four give zero
+        // matches). Unlike the DESCEND decision below, target type (file vs
+        // directory) does NOT gate this closure — `detHandoff[m-1]` alone
+        // is the exact line `fs.glob` draws here, same as a plain file.
+        if (next[m] && m >= 1 && matchers[m - 1] === CASE_CHECK_GLOBSTAR && !globstarAbsorbedLast) {
+          const closesWithZeroWidth = isSymlink ? detHandoff[m - 1] : (dirent.isDirectory() || detHandoff[m - 1])
+          if (!closesWithZeroWidth) next[m] = false
+        }
+
+        // SECURITY/parity (#7910 review round 2) — a pattern ending in `/`
+        // (`directoryOnly`, from `runGlob`) means directories only, matching
+        // `fs.glob` exactly: verified directly, a symlink pointing AT a
+        // directory is still excluded (`dirent.isDirectory()`, never
+        // "dir-like") — same as a plain file.
+        if (next[m] && (!directoryOnly || dirent.isDirectory())) results.push(relPath)
         if (shouldStop()) return
 
         let canContinuePattern = false
@@ -709,19 +799,26 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         // how it was reached.
         const canDescendSymlink = !isSymlink || detHandoff.slice(0, m).some(Boolean)
         if (canContinuePattern && canDescendSymlink && (dirent.isDirectory() || isSymlink)) {
-          // SECURITY (review of #7901, TOCTOU) — a symlink-flagged entry's
-          // `childAbs` above already comes from a validation done immediately
-          // before use; a plain-directory-flagged one has NOT been re-checked
-          // since `dirent` was read, and `dirent`'s type can be stale by the
-          // time we get here (see `resolveNonSymlinkDescend`'s doc). Route it
-          // through the same freshness check before opening.
-          const openAbs = isSymlink
-            ? childAbs
-            : await resolveNonSymlinkDescend(childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl)
-          if (openAbs) await walk(openAbs, relPath, next)
+          // SECURITY (review of #7901 round 2, TOCTOU) — `childAbs` (for a
+          // symlink-flagged entry, `resolved.realPath` from the
+          // `validateRawPathWithinCwd` call above; for a plain-directory-
+          // flagged one, a plain `join`) is a DECISION, not a proof that
+          // survives to the `opendir` about to happen — some real time still
+          // elapses between deciding "this is what we'd open" and actually
+          // opening it (at minimum, the `await` boundary below; `dirent`'s
+          // own type can already be stale before this line even runs, see
+          // `openVerifiedDirForDescend`'s doc). Route through it rather than
+          // opening `childAbs` directly, so the open and the LAST identity
+          // check that vouches for it are inseparable — no path is ever
+          // handed back for a caller to re-resolve blind.
+          const descend = await openVerifiedDirForDescend(
+            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam,
+          )
+          if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key })
         }
       }
     } finally {
+      visitedDirs.delete(key)
       await dh.close().catch(() => {})
     }
   }
@@ -733,38 +830,161 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
 }
 
 /**
- * SECURITY (review of #7901, TOCTOU) — decide whether, and where, to descend
- * for a directory-shaped entry `walkGlob`'s `dirent` did NOT flag as a
- * symlink. See the SECURITY doc on `walkGlob` for the exploit this closes:
- * `dirent`'s type can be stale (opendir batches several dirents per
- * underlying readdir(2) call, and this walk is strictly sequential within a
- * directory), and chroxy dispatches every tool block a model approves in one
- * turn concurrently, so a plain directory `dirent` claims exists can already
- * be a symlink to anywhere by the time this runs. A fresh `lstat`, taken
- * immediately before `opendir` would otherwise run, is authoritative: if the
- * entry is now a symlink, it is routed through the SAME
- * `validateRawPathWithinCwd` confinement check the originally-flagged-symlink
- * branch in `walk` already has, rather than trusted on `dirent`'s word.
+ * SECURITY (review of #7901 round 2, TOCTOU) — open AND identity-verify a
+ * directory for `walk` to descend into, for EITHER a symlink-flagged entry
+ * or a plain-directory-flagged one. This replaces a round-2 version
+ * (`resolveNonSymlinkDescend`) that only re-`lstat`ed a plain-directory
+ * candidate and then handed the caller back a PATH STRING for `walk` to
+ * `opendir` a second time, independently — which is still check-then-use:
+ * the swap this exists to catch can land in the gap between THIS function's
+ * lstat and `walk`'s later, disconnected `opendir` just as easily as it
+ * could land before the lstat. There is no way with Node's public `fs` API
+ * to bind `opendir` to an already-open, already-`O_NOFOLLOW`-verified file
+ * descriptor (`fs.promises.opendir` takes only a path, never an fd — verified
+ * directly: it throws `ERR_INVALID_ARG_TYPE` given one), so two syscalls
+ * (open, then a later use) can never be fully collapsed into one atomic
+ * operation here. What CAN be done, and is: this function performs the
+ * `opendir` itself, immediately re-`lstat`s the SAME path right after, and
+ * compares device+inode (via `{ bigint: true }` — a 32-bit Number would lose
+ * precision on a large volume's inode) against the pre-open `lstat`. A
+ * mismatch, a symlink now sitting at the path, or a zero inode (no usable
+ * file index — the comparison would be vacuous) all mean the object at this
+ * path was NOT the one just opened, and the `Dir` is closed and withheld,
+ * BEFORE the caller ever iterates it — so no entry a swapped-in directory
+ * could produce is ever consumed. `walk` then receives this already-open,
+ * already-verified `Dir` directly (see its `preOpenedDh` parameter) instead
+ * of a path to re-resolve — handing back a path here would throw this
+ * verification away exactly the way the round-2 version did.
  *
- * @returns {Promise<string|null>} absolute path to open, or `null` to withhold.
+ * `isKnownSymlink` — true when `dirent` was ALREADY flagged as a symlink at
+ * listing time and `candidateAbs` is therefore already the confinement-
+ * validated `resolved.realPath` from the `validateRawPathWithinCwd` call in
+ * `walk` (skips the redundant re-lstat-and-resolve below; the pre-open
+ * identity check still runs against the resolved target). False for a
+ * plain-directory-flagged entry, where `candidateAbs` has not been
+ * re-checked since `dirent` was read and may itself now BE a symlink — that
+ * case is routed through the same `validateRawPathWithinCwd` confinement
+ * check the originally-flagged-symlink branch already has, rather than
+ * trusted on `dirent`'s stale word.
+ *
+ * RESIDUAL RISK, stated rather than implied: two syscalls (the pre-open
+ * check and the `opendir`) still cannot be fully atomic through this API, so
+ * an attacker who could win BOTH races — swap in the gap, then swap back to
+ * an object with the IDENTICAL device+inode before the post-open check runs
+ * — would not be caught. That requires recreating a specific already-freed
+ * inode number, which is not something an unprivileged attacker can target
+ * (inode reuse is an implementation detail of the filesystem's free-list, not
+ * an attacker-controlled value) — the same residual this codebase already
+ * accepts and documents for the win32 branch of `openNoFollow`
+ * (`ws-file-ops/open-nofollow.js`). What this DOES close is the actual
+ * measured exploit (#7910 review): an attacker-controlled swap to a symlink
+ * pointing anywhere, landing in the (now minimal, and — unlike before —
+ * DETECTED) window between the check and the open.
+ *
+ * `__testSeam(target, phase)`, if given, is awaited at two points — the ONLY
+ * way to hit either window deterministically in a test; a real concurrent
+ * race is flaky by construction (see the test file for a real-race test and
+ * two seam-driven ones): `phase: 'before-open'` immediately after the
+ * pre-open lstat and before the `opendir` call (the check-to-open window this
+ * function's doc is about), and `phase: 'after-verify'` immediately after the
+ * post-open identity check has PASSED and before the already-open `Dir` is
+ * returned to `walk` — proving a path-level swap happening AFTER that point
+ * does not corrupt what gets listed, because `walk` uses the already-open
+ * `Dir` directly and never re-resolves `target` by path again.
+ *
+ * SECURITY/DoS (#7910 review round 2) — `visitedDirs`/`dirKey` add a SECOND,
+ * independent check alongside the identity one above: once `sameObject` is
+ * confirmed, the verified `postStat`'s `dev:ino` is checked against the set
+ * of real directories already on the CURRENT descent path (root down to the
+ * caller). A hit means this entry's real target is its OWN ancestor — an
+ * actual symlink cycle (`selfloop -> .`), not merely a diamond (the same
+ * real directory reached twice via two separate, non-overlapping symlinks,
+ * which is NOT refused, since `visitedDirs` is path-scoped by `walk`'s own
+ * push/pop, not global to the whole walk). Refusing here, BEFORE `walk` ever
+ * touches this `Dir`'s entries, is what closes the DoS `walkGlob`'s existing
+ * `detHandoff`/`canDescendSymlink` gate does not: that gate answers "was
+ * this entry named by a determinate segment", which a self-loop's REPEATING
+ * name satisfies at every depth it is encountered, forever — see `walkGlob`'s
+ * `visitedDirs` doc for the measured blowup this replaces.
+ *
+ * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string}|null>}
  */
-async function resolveNonSymlinkDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl) {
-  let freshStat
-  try {
-    freshStat = await lstat(candidateAbs)
-  } catch {
-    return null // gone since it was listed — nothing to descend into
-  }
-  if (freshStat.isSymbolicLink()) {
-    let resolved
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam) {
+  let target = candidateAbs
+  let preStat = null
+  if (!isKnownSymlink) {
     try {
-      resolved = await validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl)
+      preStat = await lstat(candidateAbs, { bigint: true })
     } catch {
-      resolved = null // FAIL CLOSED — ELOOP, EACCES, etc.
+      return null // gone since it was listed — nothing to descend into
     }
-    return resolved && resolved.valid ? resolved.realPath : null
+    if (preStat.isSymbolicLink()) {
+      // Became a symlink since `dirent` was read — resolve+confine it exactly
+      // like the originally-flagged-symlink branch in `walk` does, instead of
+      // trusting `candidateAbs` as a plain directory.
+      let resolved
+      try {
+        resolved = await validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl)
+      } catch {
+        resolved = null // FAIL CLOSED — ELOOP, EACCES, etc.
+      }
+      if (!resolved || !resolved.valid) return null
+      target = resolved.realPath
+      preStat = null // that lstat was for the OLD path — the resolved target needs its own
+    } else if (!preStat.isDirectory()) {
+      return null // no longer a directory (e.g. swapped for a plain file) — nothing to open
+    }
   }
-  return freshStat.isDirectory() ? candidateAbs : null
+
+  if (!preStat) {
+    try {
+      preStat = await lstat(target, { bigint: true })
+    } catch {
+      return null
+    }
+    if (preStat.isSymbolicLink() || !preStat.isDirectory()) return null
+  }
+
+  if (__testSeam) await __testSeam(target, 'before-open')
+
+  let dh
+  try {
+    dh = await opendir(target)
+  } catch {
+    return null
+  }
+
+  let postStat
+  try {
+    postStat = await lstat(target, { bigint: true })
+  } catch {
+    await dh.close().catch(() => {})
+    return null
+  }
+  const sameObject =
+    !postStat.isSymbolicLink() &&
+    postStat.ino !== 0n &&
+    postStat.dev === preStat.dev &&
+    postStat.ino === preStat.ino
+  if (!sameObject) {
+    // Swapped between the check and the open — withhold rather than trust an
+    // object we never verified. Nothing has been read from `dh` yet, so a
+    // swapped-in directory's entries are never consumed.
+    await dh.close().catch(() => {})
+    return null
+  }
+  const key = dirKey(postStat)
+  if (visitedDirs.has(key)) {
+    // Cycle: this real directory is already an ancestor on the CURRENT
+    // descent path (#7910 review round 2, DoS). Not a diamond — a diamond's
+    // target is not yet in `visitedDirs` because `walk` only holds a key
+    // while it is actively inside that directory (or one of its
+    // descendants), never after backtracking out of it.
+    await dh.close().catch(() => {})
+    return null
+  }
+  if (__testSeam) await __testSeam(target, 'after-verify')
+  return { dh, path: target, key }
 }
 
 /**

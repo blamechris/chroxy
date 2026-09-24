@@ -1524,6 +1524,218 @@ describe('executeBuiltinTool', () => {
         }
       })
 
+      // #7910 review round 2 — the test above is a REAL concurrent race: the
+      // 60 siblings buy the racer time, but nothing PROVES the swap landed in
+      // the specific window this fix targets (between the pre-open check and
+      // the `opendir` call) rather than earlier, where even the round-1 fix
+      // already caught it. A race that happens to pass is not evidence the
+      // narrow window is closed — it is evidence SOME window is. `walkGlob`'s
+      // `__testDescendSeam` hook is awaited at that EXACT point (see
+      // `openVerifiedDirForDescend`'s doc), so this test performs the swap
+      // deterministically inside the window itself rather than hoping to win
+      // a real race — the honest way to test a fix whose whole point is a
+      // window measured in microseconds.
+      it('closes the swap even when it lands in the EXACT window between the pre-open check and opendir (security #7910 review round 2, deterministic)', async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-seam-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          const targetAbs = join(dir, 'subtree', 'target')
+          mkdirSync(targetAbs)
+          writeFileSync(join(targetAbs, 'innocent.ts'), '1') // would be a match if not swapped
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          let seamFired = false
+          await walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+            __testDescendSeam: async (target) => {
+              if (target !== targetAbs) return // only the one directory under test
+              seamFired = true
+              await rmAsync(targetAbs, { recursive: true, force: true })
+              await symlinkAsync(outer, targetAbs)
+            },
+          })
+
+          assert.ok(seamFired, 'the seam must have fired for the swap to have been attempted at all')
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a swap landing in the exact check-to-open window must still never be traversed',
+          )
+          assert.equal(
+            results.some((r) => r.includes('innocent.ts')),
+            false,
+            'the directory was withheld entirely (swapped-away before opendir even ran) — its original contents are gone from disk, not merely filtered',
+          )
+          // Positive control: the walk did not just silently stop dead —
+          // "subtree" itself (which the swap never touched) is still a match.
+          assert.ok(results.includes('subtree'), 'the walk must still find unrelated matches, not fail closed on everything')
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review round 2 — the mirror image of the test above: the seam
+      // fires but does NOT swap anything, proving the new pre-open/post-open
+      // identity check does not reject a legitimate, un-tampered directory
+      // (a check that withholds everything would also make the test above
+      // pass, for the wrong reason — docs/false-safety-guards.md).
+      it('still descends normally when the seam fires but nothing is swapped (positive control, #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'subtree'))
+        const targetAbs = join(dir, 'subtree', 'target')
+        mkdirSync(targetAbs)
+        writeFileSync(join(targetAbs, 'innocent.ts'), '1')
+
+        const { matchers } = compileCaseCheck('subtree/**')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        let seamFired = false
+        await walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 10_000_000,
+          __testDescendSeam: async (target) => { if (target === targetAbs) seamFired = true },
+        })
+
+        assert.ok(seamFired, 'the seam must have been reached for this to be a meaningful control')
+        assert.ok(
+          results.some((r) => r.includes('innocent.ts')),
+          'an untampered directory must still be descended into and its contents matched',
+        )
+      })
+
+      // #7910 review round 2 (parity re-review) — the round-2 fix's
+      // `detHandoff`/`canDescendSymlink` gate answers "was this entry named
+      // by a determinate segment THIS step" — which a SELF-REFERENTIAL
+      // symlink's repeating name satisfies at every depth it recurs to,
+      // forever. `**/selfloop/**` against `selfloop -> .` measured 200+
+      // matches (unbounded growth with sibling count) on the round-2 code,
+      // bounded only by the componentwise resolver's own symlink-depth
+      // ceiling — a real DoS shape, not merely a parity gap. `visitedDirs`
+      // (real directories on the current descent path, by dev:ino) closes
+      // it: entering a real directory that is already an ancestor on THIS
+      // path is refused before any of its entries are read.
+      it('does not grow unbounded on a self-referential symlink loop reached via a determinate segment inside \'**\' (DoS #7910 review round 2)', { timeout: 10_000 }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+        for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
+
+        const { matchers } = compileCaseCheck('**/selfloop/**')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        const t0 = Date.now()
+        await walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 50_000_000,
+        })
+        const ms = Date.now() - t0
+
+        assert.ok(ms < 2000, `a self-loop through a determinate segment must not blow up the walk time, took ${ms}ms`)
+        // Bounded LINEARLY in the number of siblings (visiting each real
+        // entry a small constant number of times), never exponentially —
+        // the unpatched shape grew past 1,600 matches on an equivalent
+        // 40-sibling fixture.
+        assert.ok(
+          results.length < 100,
+          `a self-loop must not produce unbounded matches, got ${results.length} (unpatched: 1,640+ on this fixture shape)`,
+        )
+        assert.ok(
+          state.visited < 200,
+          `a self-loop must not visit an unbounded number of filesystem entries, visited ${state.visited}`,
+        )
+      })
+
+      // #7910 review round 2 — the mirror image: two SEPARATE, non-
+      // overlapping symlinks that happen to point at the SAME real directory
+      // (a diamond, not a cycle) must still each be followed independently —
+      // `visitedDirs` is path-scoped (pushed on descent, popped on
+      // backtracking in `walk`'s `finally`), not a global "seen once, never
+      // again" set, precisely so this does not regress.
+      it('still follows two independent symlinks to the SAME real directory (not a cycle) — positive control (#7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'real'))
+        writeFileSync(join(dir, 'real', 'shared.ts'), '1')
+        mkdirSync(join(dir, 'branchA'))
+        mkdirSync(join(dir, 'branchB'))
+        symlinkSync(join(dir, 'real'), join(dir, 'branchA', 'lnk'))
+        symlinkSync(join(dir, 'real'), join(dir, 'branchB', 'lnk'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/lnk/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /branchA\/lnk\/shared\.ts/, 'the first independent symlink to the shared real directory must still be followed')
+        assert.match(r.content, /branchB\/lnk\/shared\.ts/, 'the second independent symlink to the SAME real directory must ALSO still be followed — it is not an ancestor of the first')
+      })
+
+      // #7910 review round 2 (parity re-review) — round 2's zero-width `**`
+      // closure gate used `isDirLike = dirent.isDirectory() ||
+      // dirent.isSymbolicLink()`, which is true for EVERY symlink regardless
+      // of how it was discovered — exempting every symlink from the
+      // determinate-segment requirement `canDescendSymlink` (just below)
+      // already enforces for descending. Verified directly against Node 22's
+      // `glob()`: a NON-determinate segment naming a symlinked directory
+      // (`*/**`) produces ZERO matches for that symlink, only a determinate
+      // one (`[s]rc-link/**`) does.
+      it('a trailing ** does not close with zero width onto a symlinked directory named by a non-determinate segment (parity #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'src'))
+        writeFileSync(join(dir, 'src', 'index.ts'), '1')
+        symlinkSync(join(dir, 'src'), join(dir, 'src-link'))
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/**' }, ...ctx() })
+        assert.equal(wild.isError, false)
+        assert.equal(wild.content.includes('src-link'), false, '"*/**" (non-determinate) must not close zero-width onto the symlinked directory itself')
+
+        const bracket = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[s]rc-link/**' }, ...ctx() })
+        assert.equal(bracket.isError, false)
+        assert.match(bracket.content, /^src-link$/m, '"[s]rc-link/**" (determinate) still closes zero-width onto the symlink itself (matches fs.glob)')
+      })
+
+      // Same gate, for a symlink to a FILE rather than a directory — verified
+      // directly against Node 22's `glob()`: `*.txt/**` (non-determinate)
+      // produces no match for a symlinked `.txt` file; a determinate literal
+      // does, exactly like an ordinary (non-symlink) file (`plainfile.txt/**`,
+      // tested elsewhere in this file).
+      it('a trailing ** does not close with zero width onto a symlinked FILE named by a non-determinate segment (parity #7910 review round 2)', async () => {
+        writeFileSync(join(dir, 'real-file.txt'), '1')
+        symlinkSync(join(dir, 'real-file.txt'), join(dir, 'file-link.txt'))
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.txt/**' }, ...ctx() })
+        assert.equal(wild.isError, false)
+        assert.equal(wild.content.includes('file-link.txt'), false, '"*.txt/**" (non-determinate) must not close zero-width onto the symlinked file')
+
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'file-link.txt/**' }, ...ctx() })
+        assert.equal(lit.isError, false)
+        assert.match(lit.content, /^file-link\.txt$/m, 'a determinate literal still closes zero-width onto a symlinked file (matches a plain file, and matches fs.glob)')
+      })
+
+      // #7910 review round 2 (parity re-review) — a pattern ending in `/`
+      // means directories only, matching `fs.glob` exactly (verified
+      // directly): `sub/*/` excludes a plain file AND a symlink pointing at
+      // a directory, keeping only a real (non-symlink) directory entry.
+      // `compileCaseCheck` already drops the trailing empty segment a
+      // trailing slash produces, so without this the flag was silently lost
+      // and `sub/*/` behaved identically to `sub/*`.
+      it('a pattern ending in / matches directories only, excluding files and symlinks-to-directories (parity #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'sub'))
+        mkdirSync(join(dir, 'sub', 'realdir'))
+        writeFileSync(join(dir, 'sub', 'plainfile.txt'), '1')
+        symlinkSync(join(dir, 'sub', 'realdir'), join(dir, 'sub', 'dirlink'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/*/' }, ...ctx() })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('sub/realdir'), 'a real directory must still match a trailing-slash pattern')
+        assert.equal(lines.includes('sub/plainfile.txt'), false, 'a plain file must be excluded by a trailing-slash (directory-only) pattern')
+        assert.equal(lines.includes('sub/dirlink'), false, 'a symlink pointing at a directory must ALSO be excluded — fs.glob requires a REAL directory, not merely "dir-like"')
+
+        // Positive control: without the trailing slash, the same pattern
+        // finds all three (proving the exclusion is the `/`, not something
+        // else about this fixture).
+        const noSlash = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/*' }, ...ctx() })
+        const noSlashLines = noSlash.content.split('\n')
+        assert.ok(noSlashLines.includes('sub/plainfile.txt') && noSlashLines.includes('sub/dirlink'), 'without the trailing slash, the file and the symlink must both be listed (positive control)')
+      })
+
       // #7910 review (security/DoS) — a symlinked directory is only descended
       // into when a DETERMINATE segment (literal, bracket class, or brace
       // alternation — no bare `*`/`?`) explicitly named it, matching Node
