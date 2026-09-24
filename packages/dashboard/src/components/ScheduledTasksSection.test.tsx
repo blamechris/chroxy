@@ -48,7 +48,7 @@ vi.mock('../store/connection', () => ({
 }))
 
 // Imported after the mock so the component picks it up.
-const { ScheduledTasksSection } = await import('./ScheduledTasksSection')
+const { ScheduledTasksSection, toDatetimeLocalValue } = await import('./ScheduledTasksSection')
 
 const GATE_ON = { enabled: true, engineArmed: true, restartRequired: false, source: 'config' as const }
 const GATE_OFF = { enabled: false, engineArmed: false, restartRequired: false, source: 'default' as const }
@@ -690,15 +690,89 @@ describe('ScheduledTasksSection — an unrenderable `once` cadence degrades inst
 
   it('a VALID once cadence still seeds the datetime-local field', () => {
     // The guard must not have broken the normal path.
+    //
+    // The expectation is derived from the SAME Date the component formats
+    // (local getFullYear/getMonth/…), not from Date.UTC — #7135. A UTC-pinned
+    // expectation happens to match on a UTC test runner and silently drifts by
+    // the runner's own offset everywhere else, which is exactly how the
+    // datetime-local/UTC mismatch this test exists to catch went unnoticed.
     const at = Date.UTC(2026, 6, 24, 9, 30)
+    const seeded = new Date(at)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const expected = `${seeded.getFullYear()}-${pad(seeded.getMonth() + 1)}-${pad(seeded.getDate())}T${pad(seeded.getHours())}:${pad(seeded.getMinutes())}`
     resetStore({
       selectedScheduledTaskId: 'task-1',
       scheduledTasks: mkSnapshot({ tasks: [mkTask({ cadence: { kind: 'once', at } })] }),
     })
     render(<ScheduledTasksSection now={() => 1900000000000} />)
     fireEvent.click(screen.getByTestId('sched-edit'))
-    expect((screen.getByTestId('sched-form-once') as HTMLInputElement).value).toBe('2026-07-24T09:30')
+    expect((screen.getByTestId('sched-form-once') as HTMLInputElement).value).toBe(expected)
     expect(screen.queryByTestId('sched-form-once-invalid')).toBeNull()
+  })
+})
+
+/**
+ * #7135 — `toDatetimeLocalValue` must seed the `datetime-local` input with the
+ * LOCAL wall clock, matching how `Date.parse` reads a zone-less datetime-local
+ * string back (also local). A UTC-formatted seed (`toISOString().slice(0, 16)`)
+ * round-trips correctly only when the runner's own offset is zero — which is
+ * exactly how this bug shipped: CI can run in UTC, and the property below is
+ * trivially true there regardless of which formatter is used. So every case
+ * here pins a non-UTC `process.env.TZ` and PROVES the zone took effect
+ * (`getTimezoneOffset() !== 0`) before trusting the round-trip assertion —
+ * a TZ pin vitest's worker silently ignores would otherwise pass vacuously.
+ */
+describe('toDatetimeLocalValue — round-trips the local wall clock (#7135)', () => {
+  let originalTz: string | undefined
+
+  beforeEach(() => {
+    originalTz = process.env.TZ
+  })
+
+  afterEach(() => {
+    // Restore so this worker's TZ doesn't leak into whatever test file runs
+    // next in the same vitest worker process.
+    if (originalTz === undefined) delete process.env.TZ
+    else process.env.TZ = originalTz
+  })
+
+  function setNonUtcTz(tz: string) {
+    process.env.TZ = tz
+    if (new Date(0).getTimezoneOffset() === 0) {
+      throw new Error(
+        `process.env.TZ = '${tz}' did not change Date's timezone offset (still UTC) — ` +
+          'the round-trip assertion below would pass vacuously, the same way this bug hid on a UTC CI runner',
+      )
+    }
+  }
+
+  it('round-trips under a negative-offset zone (America/Los_Angeles)', () => {
+    setNonUtcTz('America/Los_Angeles')
+    const ms = Date.UTC(2026, 3, 15, 18, 45) // 2026-04-15T18:45:00Z
+    const truncatedToMinute = Math.floor(ms / 60000) * 60000
+    expect(Date.parse(toDatetimeLocalValue(ms))).toBe(truncatedToMinute)
+  })
+
+  it('round-trips under a positive, half-hour-offset zone (Asia/Kolkata)', () => {
+    setNonUtcTz('Asia/Kolkata')
+    const ms = Date.UTC(2026, 10, 3, 4, 5) // 2026-11-03T04:05:00Z
+    const truncatedToMinute = Math.floor(ms / 60000) * 60000
+    expect(Date.parse(toDatetimeLocalValue(ms))).toBe(truncatedToMinute)
+  })
+
+  it('round-trips across a DST spring-forward boundary (America/Los_Angeles, 2026-03-08)', () => {
+    setNonUtcTz('America/Los_Angeles')
+    // 2026-03-08 02:00 local does not exist there (clocks jump straight to
+    // 03:00). Pick instants either side of the transition and first confirm
+    // the offset actually differs between them, so this is not just another
+    // same-offset case wearing a DST label.
+    const beforeMs = Date.UTC(2026, 2, 8, 9, 0) // 01:00 PST (UTC-8)
+    const afterMs = Date.UTC(2026, 2, 8, 10, 0) // 03:00 PDT (UTC-7)
+    expect(new Date(beforeMs).getTimezoneOffset()).not.toBe(new Date(afterMs).getTimezoneOffset())
+    for (const ms of [beforeMs, afterMs]) {
+      const truncatedToMinute = Math.floor(ms / 60000) * 60000
+      expect(Date.parse(toDatetimeLocalValue(ms))).toBe(truncatedToMinute)
+    }
   })
 })
 
