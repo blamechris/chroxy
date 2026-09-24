@@ -1076,7 +1076,7 @@ describe('executeBuiltinTool', () => {
     // for the derivation.
     //
     // Every timing test below passes `{ timeout }` (node:test's own option,
-    // well above the 250ms assertion budget). Documented honestly, because
+    // well above the 2000ms assertion budget). Documented honestly, because
     // this round's own mutation proof (revert the `alt`-branch batching from
     // 65831e075, see the PR comment) measured its actual limit: `caseCheckPasses`
     // is a purely SYNCHRONOUS, CPU-bound call that never yields to the event
@@ -1106,7 +1106,13 @@ describe('executeBuiltinTool', () => {
         return s
       }
 
-      const PERF_BUDGET_MS = 250
+      // 2000ms, not 250: on the loaded self-hosted CI runner the fixed code measured
+      // up to 712ms for a row that takes ~41ms locally (a ~17x slowdown), which
+      // made the 250ms budget fail unrelated PRs. Every regression this guard
+      // exists to catch is ~10x ABOVE 2000ms (backtracking ReDoS 5.9s at 32 chars;
+      // un-batched brace branch 19.4s / 76.6s), so the guard still goes red on
+      // all of them.
+      const PERF_BUDGET_MS = 2000
 
       it('globPatternComplexityReason accepts an ordinary pattern', () => {
         assert.equal(globPatternComplexityReason('packages/**/src/**/*.test.js'), null)
@@ -1136,7 +1142,7 @@ describe('executeBuiltinTool', () => {
       // and not the generic "Tool Glob failed: <exception message>" a
       // RangeError would otherwise surface as (see the worst-case-bound
       // comment's "what the time bound does not cover" section).
-      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 2000 }, async () => {
+      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 10000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1150,7 +1156,7 @@ describe('executeBuiltinTool', () => {
         assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
       })
 
-      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 2000 }, async () => {
+      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 10000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1172,7 +1178,7 @@ describe('executeBuiltinTool', () => {
       // only becomes a problem once nothing stops depth from growing toward
       // pattern-length/2 (measured 301.88ms at depth 4000 with no cap, in the
       // COMPLEXITY BOUND comment above compileCaseCheck).
-      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 2000 }, () => {
+      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 10000 }, () => {
         const check = compileCaseCheck(nestedBraceChain(32))
         const t0 = Date.now()
         const noMatch = caseCheckPasses(check, ['nope'])
@@ -1192,7 +1198,7 @@ describe('executeBuiltinTool', () => {
       // Each row is checked against a 5000-char real segment name, the same
       // adversarial scale every prior round used. Measured on this machine
       // (fixed, batched code — see each row's `measuredMs`), all comfortably
-      // under the 250ms budget; this round's mutation proof (revert
+      // under the 2000ms budget; this round's mutation proof (revert
       // 65831e075's batching, see the PR comment) reproduces round 3's
       // original blowup on the two brace rows — 76.6s and 19.4s respectively
       // — confirming the table is actually exercising the code the batching
@@ -1230,7 +1236,7 @@ describe('executeBuiltinTool', () => {
         },
       ]
       for (const { label, pattern, name, expect } of perfTable) {
-        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 2000 }, () => {
+        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 10000 }, () => {
           assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
           const check = compileCaseCheck(pattern)
           const t0 = Date.now()
@@ -1249,7 +1255,7 @@ describe('executeBuiltinTool', () => {
       // round 2/3 used direct calls: fs.glob's own walk has an independent,
       // out-of-scope backtracking issue (#7901) that would dominate any
       // integration-level timing here. Measured on this machine: ~0.2ms.
-      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 2000 }, () => {
+      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 10000 }, () => {
         const patSegs = []
         for (let i = 0; i < 25; i++) {
           patSegs.push('**')
