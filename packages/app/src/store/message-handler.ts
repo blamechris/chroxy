@@ -32,7 +32,8 @@ import {
   handleClaudeReady as sharedClaudeReady,
   // #7603: shared release path for the container-lost state (see `case 'result'`).
   clearContainerLostPatch,
-  handleThinkingLevelChanged as sharedThinkingLevelChanged,
+  // thinking_level_changed handled via the shared dispatch table (#7807;
+  // runDispatch) — no local import needed.
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)

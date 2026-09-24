@@ -473,6 +473,49 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
+  // 3c. thinking_level_changed (#7803/#7807) — set the target session's
+  // thinkingLevel. Byte-identical shape to model_changed's
+  // sessionPatchDispatcher; migrated from the dashboard's dashboard-local
+  // HANDLERS-map entry, which did the same resolveSessionId + updateSession
+  // by hand and had no flat mirror (not in DASHBOARD_FLAT_MIRROR_KEYS).
+  {
+    name: 'thinking_level_changed sets thinkingLevel on the explicit target session',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'default' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'xhigh' },
+    expect: { sessions: { s1: { thinkingLevel: 'xhigh' } } },
+  },
+  {
+    name: 'thinking_level_changed falls back to the active session when sessionId is absent',
+    type: 'thinking_level_changed',
+    init: { activeSessionId: 'active', sessions: { active: { thinkingLevel: 'default' } } },
+    message: { type: 'thinking_level_changed', level: 'high' },
+    expect: { sessions: { active: { thinkingLevel: 'high' } } },
+  },
+  {
+    name: 'thinking_level_changed for an unknown session is a no-op',
+    type: 'thinking_level_changed',
+    init: { activeSessionId: 'active', sessions: { active: { thinkingLevel: 'keep' } } },
+    message: { type: 'thinking_level_changed', sessionId: 'ghost', level: 'ignored' },
+    expect: { noop: true },
+  },
+  {
+    // #7730 — an open string roster: a level neither client has a name for is
+    // KEPT verbatim, not coerced to the legacy default.
+    name: 'thinking_level_changed keeps a level this client has never heard of',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'default' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: 'turbo' },
+    expect: { sessions: { s1: { thinkingLevel: 'turbo' } } },
+  },
+  {
+    name: 'thinking_level_changed falls back to the legacy default for a malformed level',
+    type: 'thinking_level_changed',
+    init: { sessions: { s1: { thinkingLevel: 'high' } } },
+    message: { type: 'thinking_level_changed', sessionId: 's1', level: '../../etc' },
+    expect: { sessions: { s1: { thinkingLevel: 'default' } } },
+  },
+
   // 4. budget_resumed — append system message (target session OR flat addMessage)
   {
     name: 'budget_resumed appends the system message to the target session',
