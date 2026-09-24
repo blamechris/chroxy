@@ -2155,10 +2155,13 @@ describe('PodAgent', () => {
       session.activeWs = null
 
       // Drain fires after the WS is gone — wait for the drain handler's own
-      // deterministic completion signal (the draining flag clearing), which
-      // in agent.js runs synchronously AFTER the resume-skip check — so this
-      // is a genuine positive control, not a blind timing bet, for the
-      // absence assertion below.
+      // deterministic completion signal (the draining flag clearing). In
+      // agent.js the flag clears, the timer is cancelled, and the
+      // resume-skip check runs, all synchronously in the same 'drain'
+      // listener invocation — so by the time this predicate can observe the
+      // flag as false, the resume-skip check has already run too. That
+      // makes this a genuine positive control, not a blind timing bet, for
+      // the absence assertion below.
       fakeStdin.emit('drain')
       await waitFor(() => session._stdinDraining === false, {
         label: 'draining flag cleared after drain (stale ws)',
