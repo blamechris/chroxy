@@ -264,6 +264,98 @@ describe('registry.applyOverlay (#5932)', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('#7806\'s cache-warmed fix does not strip provenance from a row the provider STILL reports (#7888 re-review, inverse case)', () => {
+    // The inverse of the #7806 regression above: base-1 is declared by the
+    // overlay AND is on disk as a provider-reported cache row. isUnpersistableDeclaredRow
+    // is `declared && !reported` — a reported id must come back false, so
+    // stripUnpersistableProvenance must leave this row's provenance alone.
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      getModelMetadata: (fullId) => (fullId === 'base-1'
+        ? { fullId, id: 'vendor-short', label: 'Vendor Label', contextWindow: 128000, provenance: 'catalogued' }
+        : null),
+    })
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-cache-warmed-inverse-7888-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      // base-1 IS on disk this time — the provider reported it.
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000, provenance: 'catalogued' }],
+        defaultModelId: 'base',
+      }))
+      assert.equal(reg.loadCache(cachePath), true)
+      assert.equal(reg.getModels().find((m) => m.fullId === 'base-1')?.provenance, 'catalogued', 'reported row keeps provenance after loadCache')
+
+      reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed' } }))
+
+      const row = reg.getModels().find((m) => m.fullId === 'base-1')
+      assert.ok(row, 'the reported row is still in the picker')
+      // #7808: the cache row wins outright for a reported id, so the overlay
+      // label does not even apply here — that is a separate, already-tested
+      // precedence rule. The point of THIS test is provenance only.
+      assert.equal(row.provenance, 'catalogued', 'a row the provider still reports must not lose its provenance to the declared-only strip')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('construction with an overlay override of a base row does not broadcast provenance: catalogued before any loadCache/updateModels (#7888)', () => {
+    // Fourth site: `let activeModels = fallbackModels` at construction. No
+    // loadCache()/updateModels() has run — providerReportedFullIds is still
+    // empty — so an overlay supplied directly via hooks.overlay that
+    // overrides a base row must not broadcast that base row's own
+    // provenance stamp the moment a caller does getModels().
+    const overlay = overlayMap({ 'base-1': { label: 'Renamed' } })
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      overlay,
+    })
+    const row = reg.getModels().find((m) => m.fullId === 'base-1')
+    assert.ok(row, 'the overlay-declared override is in the initial roster')
+    assert.equal(row.label, 'Renamed', 'the operator label still applies')
+    assert.equal(row.provenance, undefined, 'must not masquerade as provider-catalogued truth before any cache/SDK load')
+  })
+
+  it('applyOverlay\'s fully-cold branch (no cache, no SDK) does not broadcast provenance: catalogued for a declared override (#7888)', () => {
+    // Fifth site: applyOverlay's `else` branch — a hot-reload before
+    // loadCache() has ever succeeded (first boot, no cache file yet) or an
+    // overlay reload racing the first refresh.
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+    })
+    reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed' } }))
+    const row = reg.getModels().find((m) => m.fullId === 'base-1')
+    assert.ok(row, 'the overlay-declared override is restored')
+    assert.equal(row.label, 'Renamed', 'the operator label still applies')
+    assert.equal(row.provenance, undefined, 'must not masquerade as provider-catalogued truth on the cold reload path')
+  })
+
+  it('resetModels() does not restore provenance: catalogued for a declared-only override (#7888)', () => {
+    // Sixth site: resetModels() explicitly clears providerReportedFullIds
+    // back to empty (making every declared override declaration-only again)
+    // but re-applied raw fallbackModels, which was never routed through the
+    // strip in the first place.
+    const overlay = overlayMap({ 'base-1': { label: 'Renamed' } })
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      overlay,
+    })
+    reg.resetModels()
+    const row = reg.getModels().find((m) => m.fullId === 'base-1')
+    assert.ok(row, 'the overlay-declared override survives the reset')
+    assert.equal(row.label, 'Renamed', 'the operator label still applies')
+    assert.equal(row.provenance, undefined, 'must not masquerade as provider-catalogued truth after resetModels()')
+  })
 })
 
 // #7777 — the #7761 union gate is scoped to the STATIC seed so operator overlay

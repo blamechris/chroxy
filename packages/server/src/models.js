@@ -847,6 +847,21 @@ export function createModelsRegistry(hooks = {}) {
    * as `unionRowMetadataSources`'s own doc comment describes for the other two
    * sites. Applied to an already-built, frozen row (there is no separate
    * `providerMeta`/`fb` pair here to route through `withModelMetadata`).
+   *
+   * Re-review (#7888) — the same taint is reachable through THREE more sites
+   * that assign `fallbackModels` (or a row built from it) straight to
+   * `activeModels` with no union at all, because there is no learned roster
+   * yet for anything to union AGAINST: the `activeModels` initializer below
+   * (construction, before any `loadCache`/`updateModels` has run —
+   * `providerReportedFullIds` is still empty so every declared override
+   * qualifies), `applyOverlay`'s own fully-cold `else` branch (neither
+   * `lastSdkModels` nor `lastCacheModels` set — first boot with no cache file
+   * yet, or an overlay hot-reload racing the first refresh), and
+   * `resetModels()` (which explicitly clears `providerReportedFullIds` back
+   * to empty and then re-applies `fallbackModels` raw). All three are mapped
+   * through this same helper for the same reason: the predicate
+   * (`isUnpersistableDeclaredRow`) is already correct for each of these
+   * states, only the routing was missing.
    */
   function stripUnpersistableProvenance(row) {
     if (row.provenance === undefined) return row
@@ -855,7 +870,15 @@ export function createModelsRegistry(hooks = {}) {
     return Object.freeze(rest)
   }
 
-  let activeModels = fallbackModels
+  // #7888 re-review — bare construction has no learned roster to union
+  // against (`providerReportedFullIds` is still empty here), so an overlay
+  // override supplied at construction time (`hooks.overlay`) of a base row
+  // that carries its own `provenance` can reach `getModels()` unstripped the
+  // moment a caller obtains the registry and never calls `loadCache()`, or
+  // calls it into a cache miss (first boot, no cache file yet — see
+  // `getRegistryForProvider`). Same helper, same predicate, as the three
+  // union sites above and the two siblings below.
+  let activeModels = fallbackModels.map(stripUnpersistableProvenance)
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
@@ -1087,7 +1110,13 @@ export function createModelsRegistry(hooks = {}) {
         const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
         applyModels(next, defaultModelId)
       } else {
-        applyModels(fallbackModels, defaultModelId)
+        // #7888 re-review — the fully-cold reload (no SDK data, no cache
+        // warmed yet: first boot before `loadCache()` ever succeeds, or a
+        // hot-reload racing the first refresh). Same construction-time gap as
+        // the `activeModels` initializer above: `fallbackModels` can carry a
+        // declared-only override's stray `provenance` straight from the base
+        // row it overrides, and this branch has no union to route it through.
+        applyModels(fallbackModels.map(stripUnpersistableProvenance), defaultModelId)
       }
       return activeModels
     },
@@ -1399,7 +1428,14 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
-      applyModels(fallbackModels, null)
+      // #7888 re-review — the line above is exactly what makes an overlay
+      // override of a base row declaration-only again, so `fallbackModels`
+      // must be routed through the same strip the other bare-fallback sites
+      // use: without it a row that HAD lost `provenance` (stripped by an
+      // earlier construction/applyOverlay/union pass) reacquires the base
+      // row's stamp straight from `fallbackModels`, which never had it
+      // stripped in the first place.
+      applyModels(fallbackModels.map(stripUnpersistableProvenance), null)
       lastSavedSnapshot = null
     },
 
