@@ -1011,15 +1011,21 @@ test_pipefail_sigpipe_self_test() {
   }
 
   # The OLD, buggy shape — reproduced locally, as evidence only. Nowhere else
-  # in this file pipes a captured variable into grep any more.
+  # in this file pipes a captured variable into grep any more. This is
+  # supporting evidence for the fix below, not the assertion under test: a
+  # kernel/runner whose pipe buffering doesn't race on this exact haystack
+  # shape must not fail the suite over an environmental non-repro, so it is a
+  # NOTE, not a return 1. The fixed (here-string) behavior a few lines down is
+  # what's actually asserted.
   if emit_sigpipe_selftest_haystack | grep -qF -- "$needle" 2>/dev/null; then
-    echo "    old piped grep -q form unexpectedly found the needle cleanly —" >&2
-    echo "    could not reproduce the SIGPIPE race on this host/size" >&2
-    return 1
+    echo "    NOTE: old piped grep -q form found the needle cleanly on this host —" >&2
+    echo "    could not reproduce the SIGPIPE race here (environment-dependent, not a failure)" >&2
+  else
+    echo "    old piped grep -q form reproduced the SIGPIPE race (needle IS present, reported as not found)" >&2
   fi
-  # Falling through here IS the proof: the needle genuinely is present (shown
-  # below), but the piped form reported otherwise once pipefail promoted
-  # printf's broken-pipe write error to the pipeline's exit status.
+  # The needle genuinely is present (shown below); on a host where the old
+  # piped form races, it reports otherwise once pipefail promotes printf's
+  # broken-pipe write error to the pipeline's exit status.
 
   local haystack
   haystack="$(emit_sigpipe_selftest_haystack)"
@@ -1038,18 +1044,40 @@ test_pipefail_sigpipe_self_test() {
   return 0
 }
 
-# Static guard: no `producer | grep -q` pattern (the shape all 15 sites above
-# used to have) may remain in this file's CODE. The functional tests above
-# use real (small) bump-version.sh output and would not reliably trip the
-# SIGPIPE race the way test_pipefail_sigpipe_self_test's synthetic haystack
-# does, so a regression on any ONE of those 15 sites would otherwise go
-# unnoticed until CI got unlucky again — this catches all of them at once,
-# structurally. Comment lines (this file quotes the buggy shape as
-# documentation above) are excluded so the guard cannot flag its own prose.
+# Static guard: no `echo`/`printf` capturing a shell variable and piping it
+# into an early-exiting `grep -q` (the shape all 15 sites above used to have)
+# may remain in this file's CODE. The functional tests above use real (small)
+# bump-version.sh output and would not reliably trip the SIGPIPE race the way
+# test_pipefail_sigpipe_self_test's synthetic haystack does, so a regression
+# on any ONE of those 15 sites would otherwise go unnoticed until CI got
+# unlucky again — this catches all of them at once, structurally. Comment
+# lines (this file quotes the buggy shape as documentation above) are
+# excluded so the guard cannot flag its own prose.
+#
+# Scope: this only matches `echo`/`printf` producers, because those are the
+# only shape this file ever had (a captured shell variable re-emitted and
+# piped straight into grep). It does NOT cover every `producer | grep -q` in
+# this file — e.g. `head -N "$file" | grep -q` and `awk '...' "$file" | grep
+# -qx` also appear here, reading a handful of short lines straight off disk.
+# Those write their (tiny, single-shot) output in one syscall well under
+# either platform's pipe buffer, so they cannot reproduce the "producer still
+# writing in separate syscalls when grep exits" race this guard exists for —
+# widening the match to cover them would not close a real gap, just add noise.
+# If a future site pipes a LARGE captured variable through anything other than
+# echo/printf into a `-q`-flavored grep, add that producer name here.
+#
+# The pipe and the grep invocation are matched loosely on purpose: `\|[[:space:]]*grep`
+# tolerates zero spaces or a tab around the pipe (`echo "$x"|grep -q`), and
+# `-[A-Za-z]*q[A-Za-z]*|--quiet` matches -q with -q in ANY position among other
+# short flags (-Eq, -qF, -iq, -Fq, ...) or --quiet — not just a bare `-q`. A
+# flag-order variation is exactly the kind of edit someone reaches for without
+# thinking of it as touching this pattern (e.g. switching to -Eq for a real
+# regex needle), and the earlier literal `grep -q` substring match let every
+# one of those through.
 test_no_unsafe_grep_pipe_pattern_remains() {
   local self="$REPO_ROOT/scripts/__tests__/bump-version.test.sh"
   local hits
-  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\| grep -q' || true)"
+  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
   if [ -n "$hits" ]; then
     echo "    found unsafe pipe-into-grep pattern(s) in $self:" >&2
     echo "$hits" >&2
