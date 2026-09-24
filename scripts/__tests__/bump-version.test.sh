@@ -13,6 +13,15 @@
 #
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUMP="$REPO_ROOT/scripts/bump-version.sh"
 
@@ -21,7 +30,7 @@ BUMP="$REPO_ROOT/scripts/bump-version.sh"
 # case executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=27
+EXPECTED_CASES=29
 
 PASS=0
 FAIL=0
@@ -433,6 +442,103 @@ EOF
 
   # CHANGELOG must be unchanged (no 0.2.0 section)
   ! grep -q "^## \[0.2.0\]" "$dir/CHANGELOG.md" || return 1
+}
+
+# #7907 — the TODO check used to be `echo "$PRIOR_SECTION" | grep -qE
+# "^- TODO:"`. This script runs under `set -euo pipefail` (line 19). grep -q
+# exits the instant it finds a match without draining the rest of its stdin;
+# if the producer (echo) is still writing when that happens, SIGPIPE hits it
+# and pipefail promotes that broken-pipe write error into the whole
+# pipeline's exit status — even though grep itself matched. That flips the
+# `if` false, silently SKIPPING the abort — a normal short TODO section (as
+# in the case above) can't trigger this, since the whole echo fits in one
+# write() syscall, but a large prior section can. Reproduced 3/3 against the
+# pre-fix script (see the PR body for the transcript): the bump proceeded and
+# wrote a 0.2.0 CHANGELOG section despite the unresolved TODO. The fix
+# (`grep -qE "^- TODO:" <<<"$PRIOR_SECTION"`) hands grep the data directly, so
+# there is no separate writer process for SIGPIPE to land on.
+test_blocks_when_prior_todo_unresolved_survives_pipefail_sigpipe() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+
+  # TODO marker on the very first line of the section (matches ^- TODO: right
+  # away), followed by a single >390KB padding line — the same shape that
+  # reproduces the SIGPIPE race 10/10 on this repo's dev/CI hosts.
+  local pad
+  pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
+  {
+    echo "# Changelog"
+    echo ""
+    echo "## [0.1.0] - 2026-01-01"
+    echo ""
+    echo "- TODO: describe additions for this release (or delete this section)"
+    echo "$pad"
+  } > "$dir/CHANGELOG.md"
+
+  local output
+  output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.2.0 2>&1)
+  local status=$?
+
+  [ "$status" -ne 0 ] || {
+    echo "    expected non-zero exit (TODO guard should have blocked the bump), got 0" >&2
+    return 1
+  }
+
+  ! grep -q "^## \[0.2.0\]" "$dir/CHANGELOG.md" || {
+    echo "    TODO guard was SKIPPED — bump wrote a 0.2.0 section despite the unresolved TODO" >&2
+    return 1
+  }
+  return 0
+}
+
+# #7907 — the version-format check used to be `echo "$NEW_VERSION" | grep -qE
+# '^[0-9]+\.[0-9]+\.[0-9]+$'`. Same pipefail+SIGPIPE shape as the TODO check
+# above: an ordinary short version string can't race (fits in one write()
+# syscall), but a caller-supplied value with an embedded newline followed by
+# a large trailing payload reproduces it — the FIRST line is a genuinely
+# valid "x.y.z", grep matches on it and exits, and the shell is still
+# mid-write on the remaining padding when the pipe closes. Reproduced 3/3
+# against the pre-fix script: a valid leading version was rejected as
+# "Invalid version format" with a literal `write error: Broken pipe` on
+# stderr — the exact signature #7892's CI failure had. The fix
+# (`grep -qE '...' <<<"$NEW_VERSION"`) hands grep the data directly, so
+# there is no separate writer process for SIGPIPE to land on.
+test_version_format_check_survives_pipefail_sigpipe() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.1.0" "### Fixed
+- Something"
+
+  local pad
+  pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
+  local new_version="1.2.3
+$pad"
+
+  local output
+  output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh "$new_version" 2>&1)
+
+  if grep -q "Broken pipe" <<<"$output"; then
+    echo "    saw a Broken pipe write error — the SIGPIPE race reproduced" >&2
+  fi
+
+  if grep -q "Invalid version format" <<<"$output"; then
+    echo "    a genuinely valid leading version (1.2.3) was rejected as invalid: $output" >&2
+    return 1
+  fi
+  # Accepted the version and proceeded past the format check (further
+  # failures from the embedded-newline value propagating into later stages
+  # are out of scope for this check — the point under test is the FIRST gate).
+  grep -q "^Bumping version:" <<<"$output" || {
+    echo "    did not proceed past the version-format check as expected: $output" >&2
+    return 1
+  }
+  return 0
 }
 
 test_no_changelog_flag_skips_scaffold() {
@@ -1100,6 +1206,10 @@ run_test "is idempotent when a section for the new version already exists" \
   test_idempotent_when_section_exists
 run_test "blocks the bump when the prior section still has a TODO" \
   test_blocks_when_prior_todo_unresolved
+run_test "#7907 — TODO check survives pipefail+SIGPIPE on a >128KB prior section" \
+  test_blocks_when_prior_todo_unresolved_survives_pipefail_sigpipe
+run_test "#7907 — version-format check survives pipefail+SIGPIPE on a padded argument" \
+  test_version_format_check_survives_pipefail_sigpipe
 run_test "--no-changelog flag skips the scaffold and TODO check" \
   test_no_changelog_flag_skips_scaffold
 run_test "--no-changelog flag works in either argument order" \

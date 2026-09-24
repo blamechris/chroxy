@@ -943,6 +943,18 @@ jobs:
         # must run after a normal (non-sparse) checkout.
         run: bash scripts/lint-no-nul-bytes.sh
 
+      - name: No producer piped into an early-exiting grep -q under pipefail
+        # #7907 — under `set -o pipefail`, `echo/printf/cat "$x" | grep -q PAT`
+        # can report "not found" when PAT genuinely is present: grep -q exits on
+        # its first match without draining stdin, and pipefail promotes the
+        # still-writing producer's SIGPIPE into the pipeline's exit status. Hit
+        # live in CI on PR #7892 (scripts/__tests__/merge-updater-feeds.test.sh,
+        # fixed by #7908 alongside bump-version.test.sh). #7907 fixed the
+        # PRODUCTION sites this lint now watches — including the pre-merge
+        # review gate, where a false "not found" silently SKIPS the gate. Needs
+        # the full git index, so it must run after a normal checkout.
+        run: bash scripts/lint-no-pipe-into-grep-q.sh
+
   store-core-tests:
     name: Store Core Tests
     # Self-hosted (#6046): the prior install OOM (exit 137) was the 7.7GB Docker
@@ -1472,6 +1484,15 @@ jobs:
         # because the token survived via the exported API_TOKEN.
         run: bash scripts/__tests__/docker-entrypoint.test.sh
 
+      - name: Run require-review-before-merge.sh tests
+        # #7907 — the pre-merge review gate's "does this command mention pr
+        # merge" check used to be `echo "$COMMAND" | grep -q 'pr merge'` under
+        # this script's own `set -euo pipefail`; a pipefail+SIGPIPE race on a
+        # large COMMAND (the batch-merge-script/heredoc shape this hook is
+        # explicitly meant to catch) could silently SKIP the whole gate. `gh`
+        # is stubbed deterministically — no network, no real gh auth needed.
+        run: bash scripts/__tests__/require-review-before-merge.test.sh
+
       - name: Run merge-updater-feeds.mjs tests
         # #7504 — this suite existed, was executable, and ran in NO workflow.
         # Its subject is release-critical: release.yml's `github-release` job
@@ -1512,6 +1533,16 @@ jobs:
 
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
+
+      - name: Run lint-no-pipe-into-grep-q golden test
+        # #7907 — positive/negative controls for the guard above: every flag
+        # variation (-Eq, -qF, --quiet, no-space pipe, -E -q) must be caught,
+        # file-backed and here-string forms must NOT be flagged, a script
+        # without pipefail is out of scope, the allowlist comment (both forms)
+        # suppresses a reviewed case, and the lint's own source does not
+        # self-match. Also proves an empty scan dir fails loud (exit 2) rather
+        # than reporting a silent, indistinguishable "clean".
+        run: bash scripts/__tests__/lint-no-pipe-into-grep-q.test.sh
 
       - name: Run lint-thinking-level-roster golden test
         # #7730 — positive controls for the guard above: a restored Set, a TS

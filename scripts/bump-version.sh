@@ -105,7 +105,7 @@ else
 fi
 
 # Validate version format (semver x.y.z)
-if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$NEW_VERSION"; then
   echo "Error: Invalid version format '$NEW_VERSION' — must be x.y.z"
   exit 1
 fi
@@ -477,7 +477,7 @@ if [ "$SKIP_CHANGELOG" -eq 0 ] && [ -f "$CHANGELOG" ]; then
       }
       seen { print }
     ' "$CHANGELOG")
-    if echo "$PRIOR_SECTION" | grep -qE "^- TODO:"; then
+    if grep -qE "^- TODO:" <<<"$PRIOR_SECTION"; then
       echo "Error: Previous CHANGELOG.md section still contains a '- TODO:' placeholder." >&2
       echo "       Fill it in before bumping again, or re-run with --no-changelog to override." >&2
       exit 1
