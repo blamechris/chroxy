@@ -1092,6 +1092,484 @@ describe('overlay override of a static id survives a refresh (#7777)', () => {
   })
 })
 
+describe('a declaration-only row\'s learned contextWindow survives a restart (#7810)', () => {
+  // The exact shape #7810 measured: a registry with NO discovery seam
+  // (gemini / deepseek) — nothing ever calls updateModels() on it, so a
+  // declared id can NEVER acquire provider provenance and
+  // isUnpersistableDeclaredRow withholds the row from the persisted cache
+  // forever. `resolveContextWindow` (4242) and the static seed's window
+  // (1000) are deliberately distinct from the ratcheted value (272000) so a
+  // wrong fallback is never accidentally the right number.
+  function makeNoSeamRegistry(path) {
+    return createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000 }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      hasDiscoverySeam: false,
+      cachePath: () => path,
+    })
+  }
+
+  let dir, cachePath
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'learned-context-window-7810-'))
+    cachePath = join(dir, 'cache.json')
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('RED PROOF — a ratchet-learned window on a declaration-only row survives a restart', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+
+    const before = reg.getModels().find((m) => m.fullId === 'my-model')
+    assert.ok(before, 'the declared id is live in-process')
+    assert.equal(before.contextWindow, 4242, 'starts from the heuristic')
+
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000,
+      'the ratchet applies in-process immediately')
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.deepEqual(payload.models.map((m) => m.fullId), ['base-1'],
+      'the declaration-only row itself must still not reach disk — #7799 is not reopened')
+    assert.equal(payload.learnedContextWindows?.['my-model'], 272000,
+      'but its ratchet-learned window is persisted under its own cache key')
+
+    // Simulate a restart: a FRESH registry, same declaration, no live
+    // updateContextWindow call — the only source for the window is disk.
+    const restarted = makeNoSeamRegistry(cachePath)
+    restarted.applyOverlay(declaration)
+    assert.equal(restarted.loadCache(cachePath), true)
+
+    const row = restarted.getModels().find((m) => m.fullId === 'my-model')
+    assert.ok(row, 'still declared → still in the picker after a restart')
+    assert.equal(row.contextWindow, 272000, 'and the LEARNED window, not the 4242 heuristic')
+  })
+
+  it('an operator-pinned contextWindow beats the learned one on restart', () => {
+    const declaration = overlayMap({ 'my-model': { contextWindow: 50000 } })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true)
+    assert.equal(reg.saveCache(cachePath), true)
+
+    const restarted = makeNoSeamRegistry(cachePath)
+    restarted.applyOverlay(declaration)
+    assert.equal(restarted.loadCache(cachePath), true)
+    const row = restarted.getModels().find((m) => m.fullId === 'my-model')
+    assert.equal(row.contextWindow, 50000,
+      'the operator\'s explicit contextWindow outranks the learned map, per the stated precedence')
+  })
+
+  it('once the declaration is deleted, the learned window is pruned from disk and does not resurrect the row', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true)
+    assert.equal(reg.saveCache(cachePath), true)
+    let payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(payload.learnedContextWindows?.['my-model'], 272000, 'sanity: the learned window is on disk')
+
+    // Operator deletes the models.json entry; daemon restarts with the
+    // declaration gone and the binary unreachable (no refresh either).
+    const withoutDeclaration = makeNoSeamRegistry(cachePath)
+    withoutDeclaration.applyOverlay(new Map())
+    assert.equal(withoutDeclaration.loadCache(cachePath), true)
+    assert.equal(withoutDeclaration.getModels().some((m) => m.fullId === 'my-model'), false,
+      'the row does not come back once nobody declares it — #7799\'s invariant holds')
+
+    // loadCache's own heal pass must already have rewritten the file — no
+    // explicit saveCache() call from the test.
+    payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'the stale learned entry is pruned off DISK once the declaration is gone, not just in memory')
+
+    // Re-declaring the same id later must not resurrect the OLD window —
+    // proof the prune actually reached disk rather than only this process.
+    const redeclared = makeNoSeamRegistry(cachePath)
+    redeclared.applyOverlay(declaration)
+    assert.equal(redeclared.loadCache(cachePath), true)
+    const row = redeclared.getModels().find((m) => m.fullId === 'my-model')
+    assert.ok(row, 're-declaring brings the row back')
+    assert.equal(row.contextWindow, 4242, 'from the heuristic — the old learned window was pruned, not revived')
+  })
+
+  it('a malformed value in learnedContextWindows on disk is ignored, not loaded (#7771)', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const cases = [
+      ['a negative integer', -5],
+      ['a fractional number', 4242.5],
+      ['zero', 0],
+      ['a numeric string', '272000'],
+      ['null', null],
+    ]
+    for (const [label, badValue] of cases) {
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000 }],
+        learnedContextWindows: { 'my-model': badValue },
+        defaultModelId: 'base-1',
+        savedAt: Date.now(),
+      }))
+      const reg = makeNoSeamRegistry(cachePath)
+      reg.applyOverlay(declaration)
+      assert.equal(reg.loadCache(cachePath), true, `loadCache still succeeds with ${label}`)
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.ok(row, `the declared row is still reconstructed (${label})`)
+      assert.equal(row.contextWindow, 4242, `a ${label} learned value is ignored — falls back to the heuristic`)
+    }
+  })
+
+  it('an old-format cache with no learnedContextWindows key loads cleanly', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      v: MODELS_CACHE_SCHEMA_VERSION,
+      models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000 }],
+      defaultModelId: 'base-1',
+      savedAt: Date.now(),
+    }))
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(reg.loadCache(cachePath), true, 'loads despite the field being entirely absent')
+    const row = reg.getModels().find((m) => m.fullId === 'my-model')
+    assert.ok(row, 'the declared row is still reconstructed from the union')
+    assert.equal(row.contextWindow, 4242, 'from the heuristic — there is nothing to learn from')
+  })
+
+  it('a ratchet-only change on an already-saved registry still triggers a real write', () => {
+    // The write-skip key must describe the payload (#7799 round 3's own
+    // lesson, reopened for this map): a ratchet on a declaration-only row
+    // never changes `persistableModels()` — the row is excluded from it by
+    // definition — so if the hash doesn't ALSO cover the learned map, this
+    // second save wrongly compares equal to the first and is skipped.
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.saveCache(cachePath), true)
+    let payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.deepEqual(payload.learnedContextWindows ?? {}, {}, 'sanity: nothing learned on the first save')
+
+    assert.equal(reg.updateContextWindow('my-model', 272000), true)
+    assert.equal(reg.saveCache(cachePath), true)
+    payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(payload.learnedContextWindows?.['my-model'], 272000,
+      'the second save must actually write the newly-learned window, not skip as a no-op')
+  })
+
+  it('the learned window also survives a live refresh after restart — the updateModels union copy (ollama-shaped)', () => {
+    // #7810's other affected shape: `unionsStaticFallbacks: true` (ollama),
+    // where a discovery seam exists (updateModels() IS called) but the seed
+    // unions unconditionally, so a refresh that never mentions the declared
+    // id still leaves it declaration-only. This exercises the OTHER union
+    // copy — updateModels()'s, not loadCache's — after a restart.
+    function makeUnionRegistry(path) {
+      return createModelsRegistry({
+        fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000 }],
+        deriveId: (id) => id,
+        resolveContextWindow: () => 4242,
+        unionsStaticFallbacks: true,
+        cachePath: () => path,
+      })
+    }
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeUnionRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    // A refresh happens but never mentions my-model.
+    reg.updateModels([{ value: 'installed-1', displayName: 'Installed 1' }])
+    assert.equal(reg.updateContextWindow('my-model', 272000), true)
+    assert.equal(reg.saveCache(cachePath), true)
+
+    const restarted = makeUnionRegistry(cachePath)
+    restarted.applyOverlay(declaration)
+    assert.equal(restarted.loadCache(cachePath), true)
+    let row = restarted.getModels().find((m) => m.fullId === 'my-model')
+    assert.equal(row?.contextWindow, 272000, 'loadCache\'s own union copy restores the learned window')
+
+    // A live refresh now happens post-restart, rebuilding activeModels
+    // through updateModels()'s union copy instead of loadCache's.
+    restarted.updateModels([{ value: 'installed-1', displayName: 'Installed 1' }])
+    row = restarted.getModels().find((m) => m.fullId === 'my-model')
+    assert.equal(row?.contextWindow, 272000,
+      'the updateModels union copy must consult the learned map too, not only loadCache\'s')
+  })
+
+  it('resetModels() clears the learned map along with contextWindowOverrides', () => {
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(reg.updateContextWindow('my-model', 272000), true)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    reg.resetModels()
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 4242,
+      'reset forgets the ratchet, the same as it forgets contextWindowOverrides')
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.deepEqual(payload.learnedContextWindows ?? {}, {}, 'nothing learned survives a reset')
+  })
+
+  it('a NaN ratchet is never written into the learned map (#7771)', () => {
+    // updateContextWindow's OWN input guard (`typeof contextWindow !== 'number'
+    // || contextWindow <= 0`) admits NaN — `typeof NaN === 'number'` is true and
+    // `NaN <= 0` is false, so neither clause fires. That is a pre-existing gap
+    // tracked separately (#7771); what THIS fix must not do is compound it by
+    // writing a NaN through the new persistence path. `activeModels` is allowed
+    // to carry the NaN in-process (unrelated, out of scope) — the learned MAP
+    // specifically must refuse it.
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(reg.updateContextWindow('my-model', NaN), true,
+      'sanity: the pre-existing top-level guard does not reject NaN (#7771)')
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'the NaN ratchet must not reach the learned map on disk')
+
+    const restarted = makeNoSeamRegistry(cachePath)
+    restarted.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(restarted.loadCache(cachePath), true)
+    const row = restarted.getModels().find((m) => m.fullId === 'my-model')
+    assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
+  })
+
+  // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
+  // declaration-only row (`docs/false-safety-guards.md`'s "guard wired to only
+  // some of its callers" shape, #7888's exact lesson for this same registry):
+  // its fully-cold branch (`applyModels(fallbackModels, …)`) and its
+  // cache-warmed branch's `seedOnly` rows both come straight from
+  // `computeFallbackModels`, which has no visibility into
+  // `contextWindowOverrides` or `learnedContextWindows`. An overlay hot-reload
+  // (`reloadModelsOverlay`, e.g. an unrelated edit to `~/.chroxy/models.json`)
+  // therefore reverts a live-learned window back to the heuristic MID-SESSION
+  // — no restart involved — even though `updateModels()`/`loadCache()` would
+  // both still return the learned value if asked.
+  it('an overlay hot-reload does not revert a live-ratcheted window (applyOverlay fully-cold branch)', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    // No loadCache()/updateModels() has ever succeeded on this registry
+    // instance (lastSdkModels and lastCacheModels are both still null) — an
+    // unrelated overlay hot-reload takes the FULLY-COLD branch.
+    reg.applyOverlay(declaration)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 272000,
+      'the ratcheted window must survive an overlay hot-reload with no restart in between')
+  })
+
+  it('an overlay hot-reload does not revert a live-ratcheted window (applyOverlay cache-warmed branch)', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      v: MODELS_CACHE_SCHEMA_VERSION,
+      models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000 }],
+      defaultModelId: 'base-1',
+      savedAt: Date.now(),
+    }))
+    const reg = makeNoSeamRegistry(cachePath)
+    assert.equal(reg.loadCache(cachePath), true, 'cache-warmed: sets lastCacheModels')
+
+    const declaration = overlayMap({ 'my-model': {} })
+    // First declaration of 'my-model' — added via the cache-warmed branch's
+    // `seedOnly`, since it was not part of the cache file loadCache() just read.
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    // A second, unrelated overlay hot-reload — still cache-warmed (no
+    // loadCache() call happened in between, so `lastCacheModels` still does
+    // not carry 'my-model').
+    reg.applyOverlay(declaration)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 272000,
+      'the ratcheted window must survive a second overlay hot-reload with no restart in between')
+  })
+
+  // #7810 round 2 — RED PROOF for a bug in round 1's `withLiveOrLearnedWindow`:
+  // it returned a declaration-only row UNCHANGED whenever the operator had
+  // pinned an explicit contextWindow, which skipped the LIVE OVERRIDE too, not
+  // only the learned map — inverting this feature's own documented precedence
+  // ("live override > operator-declared > learned > heuristic", stated in the
+  // PR body and in updateModels()'s union-loop comment). Reachable in
+  // production: a live turn ratchets a declaration-only row, then an unrelated
+  // models.json edit (or the SAME edit, adding a pin for this id) fires
+  // reloadModelsOverlay() — round 1 silently reverted the just-measured window
+  // back to the operator's pin for the rest of the process.
+  it('a live override still wins over an operator pin added by a LATER overlay hot-reload (#7810 round 2)', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it, unpinned')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    // The operator now edits models.json to ADD a pin for the SAME id — a
+    // plausible real edit ("let me just double check this looks right"), and
+    // the daemon's file watcher fires reloadModelsOverlay(). No restart, no
+    // fresh updateContextWindow call: the only source for 272000 by now is
+    // contextWindowOverrides (and, since the write side sets both together,
+    // learnedContextWindows too) — the pin must not beat either.
+    const pinned = overlayMap({ 'my-model': { contextWindow: 50000 } })
+    reg.applyOverlay(pinned)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 272000,
+      'the live-measured window still outranks a pin the operator added AFTER the measurement')
+
+    // Sanity: the pin is not simply ignored — clear the live state a reset
+    // would clear and confirm the pin then takes over, proving the pin DOES
+    // reach the row when nothing outranks it.
+    reg.resetModels()
+    reg.applyOverlay(pinned)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 50000,
+      'sanity: with no live override or learned window left, the pin is honoured')
+  })
+
+  // #7810 round 2 — one shared fixture (a bare declaration-only id, a learned
+  // window W already on disk, live override ABSENT) driven through every
+  // place that can place a declaration-only row into activeModels, per the
+  // review task's enumeration: construction, updateModels, loadCache,
+  // applyOverlay (cold + cache-warmed), resetModels, updateContextWindow.
+  // Each assertion names which of those it exercises. Mutation: strip the
+  // `resolveDeclaredRowWindow(...)` call out of `setActiveModels` (or any of
+  // its three `??` terms) and every test below that reaches that code path
+  // goes red for a legible reason.
+  describe('#7810 round 2 — the learned-window fixture through every entry point (guard)', () => {
+    const W = 272000
+    const HEURISTIC = 4242
+
+    function makeRegistry(path, extraHooks = {}) {
+      return createModelsRegistry({
+        fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000 }],
+        deriveId: (id) => id,
+        resolveContextWindow: () => HEURISTIC,
+        hasDiscoverySeam: false,
+        cachePath: () => path,
+        ...extraHooks,
+      })
+    }
+
+    // A cache file whose `models` array holds only the always-persisted base
+    // row (a declaration-only row is never written there — #7799) and whose
+    // `learnedContextWindows` carries W for 'my-model' — exactly the shape
+    // `saveCacheImpl` itself produces after a live ratchet on a declaration-
+    // only id. This is the ONLY way to get W into a fresh registry's
+    // `learnedContextWindows` without also setting `contextWindowOverrides`
+    // (the public API has no other injection point for the learned map, and
+    // `updateContextWindow` sets both maps together).
+    function seedLearnedCache(dir) {
+      const path = join(dir, 'cache.json')
+      writeFileSync(path, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000 }],
+        learnedContextWindows: { 'my-model': W },
+        defaultModelId: 'base-1',
+        savedAt: Date.now(),
+      }))
+      return path
+    }
+
+    let dir
+    beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'learned-guard-7810-')) })
+    afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+    it('construction — a bare declaration with nothing hydrated yet renders the heuristic, not W', () => {
+      // Documents the baseline the other cases build on: `learnedContextWindows`
+      // starts empty on every registry and only ever gains an entry via
+      // loadCache() or a live updateContextWindow() call, neither of which has
+      // happened here yet, even though W already sits on disk.
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path)
+      reg.applyOverlay(overlayMap({ 'my-model': {} }))
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.ok(row, 'declared, so present in-process')
+      assert.equal(row.contextWindow, HEURISTIC, 'W is on disk but nothing has read it yet')
+    })
+
+    it('loadCache — hydrates the map from disk and applies W', () => {
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path)
+      reg.applyOverlay(overlayMap({ 'my-model': {} }))
+      assert.equal(reg.loadCache(path), true)
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.equal(row.contextWindow, W)
+    })
+
+    it("updateModels' union copy — applies W to a row loadCache already hydrated", () => {
+      // unionsStaticFallbacks so updateModels() re-runs the #3075 union and
+      // reaches the declaration-only branch even though the SDK refresh
+      // below never mentions 'my-model'.
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path, { unionsStaticFallbacks: true })
+      reg.applyOverlay(overlayMap({ 'my-model': {} }))
+      assert.equal(reg.loadCache(path), true)
+      reg.updateModels([{ value: 'installed-1', displayName: 'Installed 1' }])
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.equal(row?.contextWindow, W,
+        "updateModels' union loop no longer reads learnedContextWindows itself — setActiveModels must restore W")
+    })
+
+    it('applyOverlay cache-warmed branch — applies W across a second hot-reload with no live override', () => {
+      // Declared BEFORE loadCache() — matching production, where the overlay
+      // is read and folded in at registry construction, ahead of the single
+      // `bootRegistry.loadCache()` call in server-cli.js. Declaring AFTER
+      // loadCache() would have `prunedLearnedContextWindows()` delete the
+      // not-yet-declared id's entry during the very hydration that was
+      // supposed to preserve it — a real invariant (a file saved before a
+      // declaration was REMOVED shouldn't resurrect it), just not the one
+      // this fixture is after.
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path)
+      const declaration = overlayMap({ 'my-model': {} })
+      reg.applyOverlay(declaration)
+      assert.equal(reg.loadCache(path), true, 'hydrates W and sets lastCacheModels (my-model included, via its own union loop)')
+      assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, W, 'sanity: loadCache already applies W')
+
+      // A second, unrelated hot-reload — still cache-warmed (no further
+      // loadCache() call), no live updateContextWindow() call in between, so
+      // contextWindowOverrides stays empty throughout. Whatever `next` carries
+      // forward from `lastCacheModels` must still resolve to W here, not
+      // whatever raw value that snapshot happened to carry internally.
+      reg.applyOverlay(declaration)
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.equal(row?.contextWindow, W,
+        'a second cache-warmed hot-reload, with no live override in play, still resolves to the learned window')
+    })
+
+    it('updateContextWindow — a fresh measurement wins over a stale learned value already on disk', () => {
+      // W is on disk from an EARLIER boot; this boot's live turn measures a
+      // DIFFERENT value. The row must show the fresh measurement, not W —
+      // proving the write path (contextWindowOverrides.set) isn't shadowed by
+      // the read side re-applying the OLD learned value underneath it.
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path)
+      reg.applyOverlay(overlayMap({ 'my-model': {} }))
+      assert.equal(reg.loadCache(path), true)
+      assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, W, 'sanity: W hydrated first')
+
+      const fresh = 900000
+      assert.equal(reg.updateContextWindow('my-model', fresh), true)
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.equal(row.contextWindow, fresh, 'the new measurement, not the stale W read off disk')
+    })
+
+    it('resetModels — the documented exception: forgets W along with everything else learned', () => {
+      // #7810's own resetModels() comment: "a reset forgets everything
+      // learned" — same semantics as contextWindowOverrides.clear(), and
+      // resetModels() has no production caller (test-only reset hook), so
+      // dropping W here is intentional, not a gap in the guard above.
+      const path = seedLearnedCache(dir)
+      const reg = makeRegistry(path)
+      reg.applyOverlay(overlayMap({ 'my-model': {} }))
+      assert.equal(reg.loadCache(path), true)
+      assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, W, 'sanity: W hydrated first')
+
+      reg.resetModels()
+      const row = reg.getModels().find((m) => m.fullId === 'my-model')
+      assert.equal(row?.contextWindow, HEURISTIC, 'reset forgets the learned map — back to the heuristic')
+    })
+  })
+})
+
 describe('reloadModelsOverlay (#5932)', () => {
   let dir, path
   beforeEach(() => {
