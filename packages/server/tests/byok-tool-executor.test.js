@@ -5,7 +5,7 @@ import { glob as fsGlob } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, walkGlob } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -1065,6 +1065,54 @@ describe('executeBuiltinTool', () => {
       })
     })
 
+    // #7899 — Node's `fs.glob` hard-codes case-INSENSITIVE candidate
+    // generation on macOS/Windows, and for a NEGATED bracket class
+    // (`[^X]`/`[!x]`) that folding excludes BOTH cases of the named character
+    // from the candidate set it generates — not just the named one — so
+    // `[^X]*.ts` against a real `xyz.ts` produced no candidates from `fs.glob`
+    // itself, and #7898's case-check post-filter could never recover a match
+    // `fs.glob` never produced in the first place. #7901 removes `fs.glob`
+    // from the host path entirely: `walkGlob` tests every real directory
+    // entry directly against `segmentMatches` (case-sensitive by
+    // construction, no folding of any kind), so there is no separate
+    // candidate-generation step left to disagree with the case check. These
+    // pin the issue's own acceptance criteria — a real file is created on
+    // ONE side of the case distinction at a time because this dev machine's
+    // filesystem (like the CI macOS runner) is case-INSENSITIVE and
+    // case-PRESERVING: `xyz.ts` and `Xyz.ts` cannot coexist as two files, only
+    // as two possible spellings of the same inode.
+    describe('negated bracket class case (#7899)', () => {
+      it('[^X]*.ts matches a real lowercase xyz.ts; [!x]*.ts excludes it', async () => {
+        writeFileSync(join(dir, 'xyz.ts'), '1')
+        const included = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[^X]*.ts' }, ...ctx(),
+        })
+        assert.equal(included.isError, false)
+        assert.equal(included.content, 'xyz.ts', '[^X] must not fold away the real lowercase file')
+
+        const excluded = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[!x]*.ts' }, ...ctx(),
+        })
+        assert.equal(excluded.isError, false)
+        assert.match(excluded.content, /No matches/, '[!x] must exclude the real lowercase-x file')
+      })
+
+      it('[!x]*.ts matches a real uppercase Xyz.ts; [^X]*.ts excludes it', async () => {
+        writeFileSync(join(dir, 'Xyz.ts'), '1')
+        const included = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[!x]*.ts' }, ...ctx(),
+        })
+        assert.equal(included.isError, false)
+        assert.equal(included.content, 'Xyz.ts', '[!x] must not fold away the real uppercase file')
+
+        const excluded = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[^X]*.ts' }, ...ctx(),
+        })
+        assert.equal(excluded.isError, false)
+        assert.match(excluded.content, /No matches/, '[^X] must exclude the real uppercase-X file')
+      })
+    })
+
     // #7898 round 4 — every prior round (1-3) found a NEW super-linear
     // blow-up in this matcher (silent false negatives, a backtracking-regex
     // ReDoS, an O(n^2) brace-alternative branch). This suite is the
@@ -1268,6 +1316,254 @@ describe('executeBuiltinTool', () => {
         const elapsedMs = Date.now() - t0
         assert.equal(result, true)
         assert.ok(elapsedMs < PERF_BUDGET_MS, `50-level path must stay fast, took ${elapsedMs}ms`)
+      })
+    })
+
+    // #7901 / #7356 — the self-implemented `walkGlob` (byok-tool-executor.js)
+    // that replaced `fs.glob` on the host path entirely. Build helpers shared
+    // by the tests below.
+    describe('self-implemented walk (#7901 / #7356)', () => {
+      function buildBigTree(base, dirs, filesPerDir) {
+        for (let d = 0; d < dirs; d++) {
+          const sub = join(base, `d${String(d).padStart(3, '0')}`)
+          mkdirSync(sub, { recursive: true })
+          for (let i = 0; i < filesPerDir; i++) {
+            writeFileSync(join(sub, `f${String(i).padStart(4, '0')}.ts`), '')
+          }
+        }
+      }
+
+      // #7901's own repro, run through the FULL executeBuiltinTool dispatch —
+      // not possible before this fix (see the comment on the `export` at the
+      // bottom of byok-tool-executor.js): `runGlob`'s walk used to call
+      // Node's OWN `fs.glob`, whose internal matcher backtracks
+      // catastrophically on this pattern shape independently of
+      // `compileCaseCheck`'s DP (#7898 already made THAT side safe) —
+      // measured directly against `node:fs/promises`'s `glob()` alone, no
+      // chroxy code involved: ~8.7s for this exact (pattern, 40-char
+      // near-miss name) pair on this machine, and the issue's own repro
+      // measured 87s. `walkGlob` never calls `fs.glob` at all, so this
+      // pathological pattern now costs exactly what `compileCaseCheck`'s own
+      // direct-call perf-guard tests already proved it costs: milliseconds.
+      it('the fs.glob-backtracking pattern returns fast through the real Glob dispatch', { timeout: 15_000 }, async () => {
+        const evilPattern = '*a*a*a*a*a*a*a*a*a*a*b.ts'
+        const nearMiss = 'a'.repeat(37) + '.ts' // 40 chars, no trailing "b" -- the issue's own repro shape
+        writeFileSync(join(dir, nearMiss), '1')
+
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: evilPattern }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+        assert.ok(elapsedMs < 3000, `must return fast, took ${elapsedMs}ms (pre-#7901 this took ~8.7s on this machine)`)
+      })
+
+      // #7901's second acceptance bullet: the event loop must keep turning
+      // WHILE a large walk is in flight — a concurrent timer probe firing on
+      // schedule is the direct, daemon-relevant observable (`fs.glob`'s
+      // synchronous internal matching is what froze every session, every WS
+      // client and the tunnel health checks for the duration). A moderately
+      // adversarial-but-ordinary pattern shape gives it several probe ticks
+      // to observe without needing an unrealistically huge fixture.
+      it('the event loop keeps turning during a large walk (concurrent timer probe)', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+
+        const gaps = []
+        let last = Date.now()
+        const probe = setInterval(() => {
+          const now = Date.now()
+          gaps.push(now - last)
+          last = now
+        }, 5)
+
+        let r
+        try {
+          r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        } finally {
+          clearInterval(probe)
+        }
+
+        assert.equal(r.isError, false)
+        assert.ok(
+          gaps.length >= 4,
+          `probe must have fired several times during the walk (fired ${gaps.length}) — the walk finished too fast to prove anything; enlarge the fixture`,
+        )
+        const maxGap = Math.max(...gaps)
+        assert.ok(
+          maxGap < 200,
+          `event loop must keep turning throughout the walk, max observed gap between probe ticks was ${maxGap}ms (probe fired ${gaps.length} times, nominal interval 5ms)`,
+        )
+      })
+
+      // #7356 — the TOOL CALL returns promptly on abort, proven on a large
+      // tree, by comparing the ABORTED call's duration against an UNABORTED
+      // control over the identical tree. NOTE what this test does and does
+      // NOT prove: `runGlob`'s deadline/abort race
+      // (`Promise.race([collect, deadlineReached])`) resolves via
+      // `deadlineReached` — a timer/abort callback independent of whether the
+      // WALK itself ever notices `state.stop` — so this proves the CALLER
+      // gets its answer back quickly, but not that the walk stops generating
+      // filesystem work afterward. That second property — the actual #7356
+      // defect (a 200,000-file/9,111-dir tree left orphans running up to 15s
+      // after the tool returned pre-fix, wasting up to 2.3GB RSS and 63x
+      // request-latency inflation) — is proven by the next test, which calls
+      // `walkGlob` directly and times its OWN promise.
+      it('an aborted walk stops promptly on a large tree, far short of a full walk', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+
+        // POSITIVE CONTROL first: how long does an uninterrupted walk of this
+        // exact tree take? Without this, "the aborted call was fast" could
+        // just mean the whole tree walks fast anyway, proving nothing about
+        // cancellation.
+        const t0 = Date.now()
+        const full = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        const fullMs = Date.now() - t0
+        assert.equal(full.isError, false)
+
+        const controller = new AbortController()
+        setTimeout(() => controller.abort(), 2)
+        const t1 = Date.now()
+        const aborted = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '**/*.ts' }, signal: controller.signal, ...ctx(),
+        })
+        const abortedMs = Date.now() - t1
+
+        assert.equal(aborted.isError, true, 'an aborted walk must not report success')
+        assert.match(aborted.content, /interrupted/i)
+        assert.ok(
+          abortedMs < Math.max(500, fullMs / 2),
+          `aborted call took ${abortedMs}ms, a full walk of the same tree took ${fullMs}ms — cancellation must resolve well short of a full walk`,
+        )
+      })
+
+      // #7356 — THE test for the actual defect: does `walkGlob`'s own promise
+      // stop generating filesystem work once `state.stop` is set, or does it
+      // keep walking in the background regardless of what the caller's race
+      // already decided? Calls `walkGlob` directly (exported for exactly this
+      // purpose — see its export comment) rather than through
+      // `executeBuiltinTool`, and times from the MOMENT `state.stop` is set
+      // (not from call start), so the measurement is of the walk's own
+      // response latency, not of an unrelated setTimeout's scheduling slop.
+      it('walkGlob itself stops within a bounded time of state.stop being set (direct)', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+        const { matchers } = compileCaseCheck('**/*.ts')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        const walkPromise = walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 2_000_000,
+        })
+
+        let stopSetAt = null
+        setTimeout(() => { state.stop = 'interrupted'; stopSetAt = Date.now() }, 2)
+
+        await walkPromise
+        assert.ok(stopSetAt !== null, 'the walk must not have already finished before state.stop was even set')
+        const respondedInMs = Date.now() - stopSetAt
+        assert.ok(
+          respondedInMs < 500,
+          `walkGlob must stop within a bounded time of state.stop being set, took ${respondedInMs}ms (tree: 15,000 files)`,
+        )
+        // The walk really was interrupted mid-flight, not merely finished on
+        // its own at roughly the same moment: far fewer than 15,000 matches
+        // were collected.
+        assert.ok(
+          results.length < 15_000,
+          `an interrupted walk over 15,000 files collected ${results.length} — it should have stopped short, not completed`,
+        )
+      })
+
+      // #7901 — `walkGlob` implements dotfile exclusion itself now (previously
+      // free, handled internally by `fs.glob` before any of chroxy's own code
+      // ran). Without `advanceToken`'s dot guard, a bare `*`/`?`/ordinary
+      // class would match a real segment's leading dot the same as any other
+      // character — nothing in the pre-#7901 test suite pins this, because it
+      // was always `fs.glob`'s behavior to prove, never this file's own.
+      it('a bare wildcard/any/class never matches a real leading dot', async () => {
+        writeFileSync(join(dir, '.env'), 'secret')
+        writeFileSync(join(dir, 'keep.ts'), '1')
+        const star = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*' }, ...ctx() })
+        assert.equal(star.isError, false)
+        assert.equal(star.content.includes('.env'), false, '"*" must not match a dotfile')
+        assert.match(star.content, /keep\.ts/)
+
+        const any = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '????' }, ...ctx() })
+        assert.equal(any.isError, false)
+        assert.equal(any.content.includes('.env'), false, '"?" must not match a dotfile\'s leading dot')
+
+        const klass = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[.e]nv' }, ...ctx() })
+        assert.equal(klass.isError, false)
+        assert.match(klass.content, /No matches/, 'a multi-member class containing "." is not the [.] exception')
+      })
+
+      // #7901 — `**` (globstar) never absorbs a dot-named real segment either,
+      // at any depth, matching `fs.glob`'s own default exactly (verified
+      // directly against Node 22: `.hidden/**` lists `.hidden` itself and its
+      // non-dot descendants, never a nested dotfile). Without this check in
+      // `walkGlob`'s own GLOBSTAR branch, `**` would both list AND descend
+      // into every dotfile/dotdir it finds.
+      it('"**" never lists or descends into a dotfile/dotdir', async () => {
+        mkdirSync(join(dir, '.hidden'), { recursive: true })
+        writeFileSync(join(dir, '.hidden/inside.ts'), '1')
+        writeFileSync(join(dir, '.envtop'), '1')
+        mkdirSync(join(dir, 'visible'), { recursive: true })
+        writeFileSync(join(dir, 'visible/keep.ts'), '1')
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.equal(lines.includes('.hidden'), false, '"**" must not list the hidden directory itself')
+        assert.equal(lines.some((l) => l.includes('.hidden')), false, '"**" must not descend into the hidden directory')
+        assert.equal(lines.includes('.envtop'), false, '"**" must not list a top-level dotfile')
+        assert.ok(lines.includes('visible') && lines.includes('visible/keep.ts'), 'ordinary entries must still be found')
+      })
+
+      // #7901 — `GLOB_MAX_ENTRIES_VISITED`'s guard, proven the same way the
+      // existing wall-clock-timeout test proves `CHROXY_GLOB_TIMEOUT_MS`: a
+      // hardcoded 2,000,000 default cannot be waited out in a test, so it is
+      // read per call via `CHROXY_GLOB_MAX_ENTRIES`, and this test lowers it
+      // to a size the fixture tree comfortably exceeds. Without this guard (or
+      // with the env override wired to nothing), the walk would simply finish
+      // normally against a tree this small — the test only proves anything
+      // because the CONTROL run (unset override) is asserted to succeed on
+      // the identical tree first.
+      it('bounds the walk by total entries visited, and the bound FIRES', async () => {
+        buildBigTree(dir, 5, 200) // 1,000 files
+
+        const control = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        assert.equal(control.isError, false, 'control: the same tree must succeed with the real default')
+
+        const prev = process.env.CHROXY_GLOB_MAX_ENTRIES
+        process.env.CHROXY_GLOB_MAX_ENTRIES = '10'
+        try {
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+          assert.equal(r.isError, true, 'a 10-entry budget must fire on a 1,000-file tree, not succeed')
+          assert.match(r.content, /visited more than 10 filesystem entries/)
+        } finally {
+          if (prev === undefined) delete process.env.CHROXY_GLOB_MAX_ENTRIES
+          else process.env.CHROXY_GLOB_MAX_ENTRIES = prev
+        }
+      })
+
+      it('treats an empty or unparseable CHROXY_GLOB_MAX_ENTRIES as unset', async () => {
+        buildBigTree(dir, 5, 200) // 1,000 files
+        const prev = process.env.CHROXY_GLOB_MAX_ENTRIES
+        try {
+          // CONTROL: a real small budget DOES fire on this tree.
+          process.env.CHROXY_GLOB_MAX_ENTRIES = '10'
+          const control = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+          assert.equal(control.isError, true, 'control: a real 10-entry budget must fire on this tree')
+
+          for (const value of ['', '   ', '0', 'abc', '-1']) {
+            process.env.CHROXY_GLOB_MAX_ENTRIES = value
+            const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+            assert.equal(r.isError, false, `${JSON.stringify(value)} must fall back to the default, not disable Glob`)
+          }
+        } finally {
+          if (prev === undefined) delete process.env.CHROXY_GLOB_MAX_ENTRIES
+          else process.env.CHROXY_GLOB_MAX_ENTRIES = prev
+        }
       })
     })
 
