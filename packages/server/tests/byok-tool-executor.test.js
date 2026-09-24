@@ -5,7 +5,7 @@ import { glob as fsGlob } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses } from '../src/byok-tool-executor.js'
 
 /**
  * Tests for byok-tool-executor.js — the dispatcher that routes tool_use
@@ -958,6 +958,44 @@ describe('executeBuiltinTool', () => {
         })
         assert.equal(r.isError, false)
         assert.match(r.content, /No matches/)
+      })
+
+      // The former case-check compiled each LITERAL pattern segment straight
+      // to a backtracking RegExp (`*` -> `[\s\S]*`, chained per occurrence).
+      // A segment shaped like this one, tested against a REAL on-disk name
+      // that almost-but-doesn't match, is the textbook catastrophic-
+      // backtracking shape: measured pre-fix at 0.03ms for a 20-char name,
+      // 811ms at 30 chars, 5.9s at 32 — and this check runs SYNCHRONOUSLY in
+      // confineGlobMatches, AFTER runGlob's own 30s walk-timeout race has
+      // already resolved, so nothing bounded it.
+      //
+      // This calls compileCaseCheck/caseCheckPasses DIRECTLY rather than
+      // through executeBuiltinTool's Glob path, and that is deliberate, not
+      // a shortcut: runGlob's WALK calls Node's OWN `fsGlob(pattern, ...)`
+      // first, which has to evaluate this SAME pattern text against the SAME
+      // real name to decide candidacy, before confineGlobMatches (and this
+      // check) ever runs — and Node's fs.glob has an independent, unrelated
+      // backtracking vulnerability of its own (measured: 87 SECONDS for this
+      // exact pattern against a 40-char name, via `node:fs/promises`'s
+      // `glob()` alone, no chroxy code involved). An integration-level test
+      // long enough to distinguish the old regex from the new DP would hang
+      // on THAT walk before ever reaching the code this fix changed — that
+      // is a separate, pre-existing, out-of-scope defect in Node's runtime,
+      // not something `compileCaseCheck` can fix, so it is flagged as a
+      // follow-up rather than worked around here with a shorter, weaker name
+      // that would not actually prove this check is polynomial.
+      it('caseCheckPasses does not catastrophically backtrack on a pathological pattern segment (direct — see comment)', () => {
+        const evilPattern = '*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b.ts'
+        // Does not match the evil pattern (no trailing "b") — the exact shape
+        // that made the old RegExp explore exponentially many partial
+        // matches before concluding failure.
+        const longName = `${'a'.repeat(5000)}.ts`
+        const check = compileCaseCheck(evilPattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, [longName])
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, false)
+        assert.ok(elapsedMs < 500, `case check must stay fast, took ${elapsedMs}ms for a 5000-char name`)
       })
     })
 

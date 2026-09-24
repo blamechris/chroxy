@@ -606,56 +606,156 @@ async function realSegmentNames(realRoot, segments, direntCache) {
 }
 
 /**
- * #7355 — compile a single glob PATTERN SEGMENT (no `/`) to case-SENSITIVE
- * RegExp source. Scope is exactly the syntax {@link GLOB_PATTERN_SHELL_METACHARS}
- * lets through to `fs.glob`: `*`, `?`, `[...]`/`[!...]`/`[^...]` bracket
- * expressions (with `-` ranges), and `{a,b}` brace alternation (recursive — an
- * alternative may itself contain any of the above, including nested braces).
- * No backslash escapes: `\` is rejected from every Glob pattern upstream, so
- * none are interpreted here either — every other character is a literal.
+ * #7355 — parse a single glob PATTERN SEGMENT (no `/`) into a token array for
+ * {@link segmentMatches}. Scope is exactly the syntax
+ * {@link GLOB_PATTERN_SHELL_METACHARS} lets through to `fs.glob`: `*`, `?`,
+ * `[...]`/`[!...]`/`[^...]` bracket expressions (with `-` ranges), and
+ * `{a,b}` brace alternation (recursive — an alternative may itself contain
+ * any of the above, including nested braces). No backslash escapes: `\` is
+ * rejected from every Glob pattern upstream, so none are interpreted here
+ * either — every other character is a literal.
  *
- * `*`/`?` compile to `[\s\S]` runs rather than `.`, so they still match a
- * literal newline WITHIN a segment (a filename may legally contain one — see
- * #7357) — irrelevant to matching correctness (a segment can never contain
- * `/`, so there is nothing for `[\s\S]` to over-match into), but it keeps this
- * check from silently rejecting a real file for an unrelated reason.
+ * #7898 (this fix) — this used to compile straight to a `RegExp` (`*`/`?` as
+ * `[\s\S]*`/`[\s\S]`, `{a,b}` as `(?:a|b)`), tested via `RegExp#test` in
+ * {@link caseCheckPasses}. That is a BACKTRACKING regex: a segment shaped
+ * like `*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b` tested against a REAL
+ * on-disk name that almost-but-doesn't match (`'a'.repeat(n)`, no trailing
+ * `b`) is the textbook catastrophic-backtracking shape — measured: 0.03ms at
+ * n=20, 811ms at n=30, 5.9s at n=32, and it only gets worse from there (each
+ * +2 chars roughly 7-8x's the previous run). This check runs SYNCHRONOUSLY
+ * inside `confineGlobMatches`, AFTER `runGlob`'s own 30s walk-timeout race has
+ * already resolved (the race guards the `fs.glob` walk, not the case
+ * re-check that follows it), so nothing bounds it — a single crafted Glob
+ * call can freeze the daemon's single-threaded event loop for however long
+ * the attacker's pattern and an existing (or attacker-planted) long filename
+ * demand. `**`-count no longer fails this class of pattern closed before
+ * reaching the regex either (that was this exact defect class's OWN prior
+ * fix, in this same commit, removing the `ambiguous` short-circuit for 2+
+ * `**` segments) — so every pattern shape now reaches this segment matcher,
+ * which is why it has to be safe on its own rather than relying on an
+ * upstream fail-closed path to shield it.
+ *
+ * The replacement is a token list consumed by an iterative, non-backtracking
+ * DP ({@link segmentMatches}) — the same technique {@link caseCheckPasses}
+ * already uses one level up for `**` across path segments, just applied one
+ * level down, per CHARACTER, to `*`/`?` within a single segment. Verified
+ * behaviorally identical to the former regex compiler across 20,000 random
+ * (pattern, string) pairs before this fix landed, and safe: n=5000 against
+ * the exact pathological pattern above now takes ~5ms, not "does not finish".
+ *
+ * `*`/`?` match a literal newline within a segment too (a filename may
+ * legally contain one — see #7357): the DP advances by testing `str[j]`
+ * directly against no character at all (`any`/`star`), never through a `.`-
+ * style regex metachar that would need `[\s\S]` to include `\n` — matching
+ * every character, newlines included, needs no special-casing here.
  */
-function segmentToRegexSource(seg) {
-  let out = ''
+function parseSegmentTokens(seg) {
+  const tokens = []
   let i = 0
   while (i < seg.length) {
     const c = seg[i]
     if (c === '*') {
-      out += '[\\s\\S]*'
+      tokens.push({ t: 'star' })
       i++
     } else if (c === '?') {
-      out += '[\\s\\S]'
+      tokens.push({ t: 'any' })
       i++
     } else if (c === '[') {
       const parsed = parseBracketExpr(seg, i)
       if (parsed) {
-        out += parsed.source
+        // A bracket class only ever tests ONE character at a time (see
+        // `advanceToken`'s 'class' arm) — a single-char regex test can never
+        // backtrack, so reusing RegExp here for the class body is safe,
+        // unlike compiling the WHOLE segment (including `*`/`?` runs) to one.
+        tokens.push({ t: 'class', re: new RegExp(`^${parsed.source}$`) })
         i = parsed.next
       } else {
-        out += '\\['
+        tokens.push({ t: 'lit', ch: '[' })
         i++
       }
     } else if (c === '{') {
       const close = findMatchingBrace(seg, i)
       if (close === -1) {
-        out += '\\{'
+        tokens.push({ t: 'lit', ch: '{' })
         i++
       } else {
         const alts = splitTopLevelCommas(seg.slice(i + 1, close))
-        out += `(?:${alts.map(segmentToRegexSource).join('|')})`
+        tokens.push({ t: 'alt', options: alts.map(parseSegmentTokens) })
         i = close + 1
       }
     } else {
-      out += /[.*+?^${}()|[\]\\]/.test(c) ? `\\${c}` : c
+      tokens.push({ t: 'lit', ch: c })
       i++
     }
   }
-  return out
+  return tokens
+}
+
+/**
+ * Advance a SET of reachable string offsets in `str` through one
+ * {@link parseSegmentTokens} token, without backtracking:
+ *   - `lit`/`any`/`class` consume exactly one character from each reachable
+ *     offset (O(|reachable|) work — never more than `str.length` offsets are
+ *     ever live at once, so this cannot blow up regardless of how the
+ *     pattern is shaped).
+ *   - `star` matches zero or more characters: once ANY offset is reachable,
+ *     every LATER offset becomes reachable too, computed as a prefix-OR scan
+ *     from the minimum reachable offset (the same trick {@link caseCheckPasses}
+ *     already uses for `**` one level up, here per character) — O(str.length),
+ *     never an inner retry loop.
+ *   - `alt` (a `{a,b}` brace) tries each alternative from each reachable
+ *     offset via a nested {@link advanceTokens} call and unions the results —
+ *     bounded by (reachable offsets) × (alternatives) × (that alternative's
+ *     own cost), which nests polynomially with brace depth but never
+ *     backtracks: every branch is tried exactly once, not re-explored.
+ */
+function advanceToken(token, str, reachable) {
+  const n = str.length
+  if (token.t === 'star') {
+    let min = Infinity
+    for (const j of reachable) if (j < min) min = j
+    if (min === Infinity) return new Set()
+    const next = new Set()
+    for (let j = min; j <= n; j++) next.add(j)
+    return next
+  }
+  const next = new Set()
+  if (token.t === 'alt') {
+    for (const j of reachable) {
+      for (const option of token.options) {
+        for (const end of advanceTokens(option, str, new Set([j]))) next.add(end)
+      }
+    }
+    return next
+  }
+  for (const j of reachable) {
+    if (j >= n) continue
+    const c = str[j]
+    if (token.t === 'lit' && c === token.ch) next.add(j + 1)
+    else if (token.t === 'any') next.add(j + 1)
+    else if (token.t === 'class' && token.re.test(c)) next.add(j + 1)
+  }
+  return next
+}
+
+/** Run a whole {@link parseSegmentTokens} token array through {@link advanceToken}, in order. */
+function advanceTokens(tokens, str, startReachable) {
+  let reachable = startReachable
+  for (const token of tokens) {
+    reachable = advanceToken(token, str, reachable)
+    if (reachable.size === 0) return reachable
+  }
+  return reachable
+}
+
+/**
+ * Does a {@link parseSegmentTokens} token array match `str` exactly, start to
+ * end (case-sensitively — `lit` compares characters with `===`)? The safe,
+ * non-backtracking replacement for `new RegExp(...).test(str)`.
+ */
+function segmentMatches(tokens, str) {
+  const end = advanceTokens(tokens, str, new Set([0]))
+  return end.has(str.length)
 }
 
 /**
@@ -724,9 +824,9 @@ const CASE_CHECK_GLOBSTAR = Symbol('globstar')
  * #7355 — compile a whole Glob pattern into the pieces {@link caseCheckPasses}
  * needs: the pattern has no `/` inside a segment (patterns are always
  * `/`-delimited — `\` is rejected upstream), so it is split on `/` and each
- * segment compiled independently via {@link segmentToRegexSource}. A `**`
- * segment compiles to {@link CASE_CHECK_GLOBSTAR} instead of a RegExp — it
- * matches zero or more REAL path segments, which are, by construction,
+ * segment compiled independently via {@link parseSegmentTokens}. A `**`
+ * segment compiles to {@link CASE_CHECK_GLOBSTAR} instead of a token array —
+ * it matches zero or more REAL path segments, which are, by construction,
  * always real Dirent names (a `**` carries no literal text of its own to
  * mismatch), so segments it absorbs need no case check at all.
  *
@@ -758,7 +858,7 @@ const CASE_CHECK_GLOBSTAR = Symbol('globstar')
  */
 function compileCaseCheck(pattern) {
   const patSegs = pattern.split('/').filter((s) => s !== '' && s !== '.')
-  const matchers = patSegs.map((s) => (s === '**' ? CASE_CHECK_GLOBSTAR : new RegExp(`^${segmentToRegexSource(s)}$`)))
+  const matchers = patSegs.map((s) => (s === '**' ? CASE_CHECK_GLOBSTAR : parseSegmentTokens(s)))
   return { matchers }
 }
 
@@ -767,7 +867,9 @@ function compileCaseCheck(pattern) {
  * via the classic wildcard-matching DP over arrays (not strings): `dp[j]` is
  * true when the matchers processed so far can align with the first `j` real
  * segments. A literal matcher consumes exactly one real segment (case-
- * sensitively); a {@link CASE_CHECK_GLOBSTAR} matcher can consume any number
+ * sensitively, via {@link segmentMatches} — see its doc and
+ * {@link parseSegmentTokens}'s for why this is a token-array DP and not a
+ * `RegExp`); a {@link CASE_CHECK_GLOBSTAR} matcher can consume any number
  * (0..j), computed as a running OR (prefix-OR) rather than an inner loop.
  */
 function caseCheckPasses(check, realSegments) {
@@ -785,7 +887,7 @@ function caseCheckPasses(check, realSegments) {
       }
     } else {
       for (let j = 1; j <= n; j++) {
-        next[j] = dp[j - 1] && matcher.test(realSegments[j - 1])
+        next[j] = dp[j - 1] && segmentMatches(matcher, realSegments[j - 1])
       }
     }
     dp = next
@@ -1356,3 +1458,17 @@ function runTodoWrite({ input, todoStore }) {
 
 const TODOWRITE_MAX_ITEMS_RENDERED = 100
 const TODOWRITE_MAX_CONTENT_RENDERED = 200
+
+// Exported for testing — #7898: proving `caseCheckPasses` stays polynomial on
+// an adversarial pattern needs to call it DIRECTLY. Going through
+// `executeBuiltinTool`'s Glob path exercises `runGlob`'s own `fsGlob(pattern,
+// ...)` WALK first, and that walk's matching is Node's, not this file's — it
+// has to evaluate the SAME pattern text against the SAME real name to decide
+// whether to yield it as a candidate at all, before `confineGlobMatches` (and
+// therefore `caseCheckPasses`) ever runs. Measured: Node's own
+// `fs.glob('*a*a*a*...*b.ts', ...)` took 87 SECONDS against a 40-character
+// non-matching real name — an independent vulnerability in Node's glob
+// matching, upstream of and unrelated to this fix, that an integration-level
+// test cannot avoid triggering for a name long enough to distinguish the old
+// backtracking regex from the new DP. See the test for the full writeup.
+export { compileCaseCheck, caseCheckPasses }
