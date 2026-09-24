@@ -633,6 +633,21 @@ describe('loadOrCreateIngestSecret — #7246 mode re-check on read (fail-closed)
     )
   })
 
+  it('refuses to read an existing secret with a NARROWER (0400) mode too — the boundary is exactly 0600', { skip: process.platform === 'win32' }, () => {
+    // The mode check compares with `!==`, not `>` — narrower is not "safer" by
+    // the letter of the contract (docs/security/bearer-token-authority.md and
+    // the sibling stores all require exactly 0600), and a `perms > 0o600`
+    // mutant silently accepts this case while still refusing every widened
+    // one above, so it must be asserted on its own.
+    writeFileSync(secretPath, 'narrowed-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o400)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 400; refusing to read \(must be 0600\)/,
+      'a 0400 ingest-secret must be refused too — the rule is EXACTLY 0600, not "no wider than 0600"'
+    )
+  })
+
   it('refuses a symlink whose resolved target carries a widened mode', { skip: process.platform === 'win32' }, () => {
     const targetPath = join(dir, 'real-secret')
     writeFileSync(targetPath, 'target-secret\n', { mode: 0o600 })
