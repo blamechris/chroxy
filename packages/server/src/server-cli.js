@@ -399,9 +399,9 @@ export function clientActiveProvider(client, sessionManager) {
  * this one registry, so `overlayBroadcastReachesProvider` correctly decides all
  * three should receive it — but since #7728 the client keys each roster by the
  * EXACT tag it arrived under (`modelsByProvider`,
- * store-core/models-by-provider.ts), so a single `claude-sdk` literal never
- * refreshes a `claude-cli`/`claude-tui` client's OWN bucket even though routing
- * already decided it should. Each recipient is instead served the same roster
+ * store-core/src/models-by-provider.ts), so a single `claude-sdk` literal
+ * never refreshes a `claude-cli`/`claude-tui` client's OWN bucket even though
+ * routing already decided it should. Each recipient is instead served the same roster
  * tagged with the name `resolveRosterProvider` would give IT on a fresh
  * connect (`ws-history.js`'s own resolution), so a reload and a reconnect agree
  * on what a session's roster is called — no reconnect-vs-reload skew.
@@ -409,8 +409,9 @@ export function clientActiveProvider(client, sessionManager) {
  * The concrete tag set is derived from the provider REGISTRY
  * (`getRegisteredProviderNames` + `isClaudeProvider`, #5858's single source of
  * truth), never a hand-maintained name literal — the exact defect class #5855
- * fixed for `isClaudeProvider` itself. `claude-byok` is deliberately dropped
- * from that set: a #7756 DECISION, not an oversight — see the paragraph below.
+ * fixed for `isClaudeProvider` itself. That includes `claude-byok`
+ * (`static claudeFamily = true`, byok-session.js) — see the paragraph below
+ * for why an earlier revision of this fix excluded it and why that was wrong.
  *
  * A residual broadcast (still tagged with the reload's own literal) covers
  * whatever does not resolve to a known tag — an unregistered/custom provider
@@ -422,12 +423,21 @@ export function clientActiveProvider(client, sessionManager) {
  * the KNOWN Claude-family names landing in the wrong bucket, not this edge
  * case.
  *
- * `claude-byok` technically reaches the pre-#7756 broadcast too
- * (`static claudeFamily = true`, byok-session.js), but that delivery never
- * updated its own bucket either — same bug, different provider. Sending it
- * nothing after this fix changes zero OBSERVABLE behaviour for a byok operator
- * and keeps "does byok's picker refresh from an overlay reload" a deliberate
- * follow-up decision rather than a side effect of this one (#7756).
+ * `claude-byok` MUST be in `knownTags`, not the residual: `ws-history.js`'s
+ * post-auth connect path (`resolveRosterProvider(entry.provider, ...)` at
+ * `ws-history.js:928`) tags a byok client's roster `'claude-byok'` exactly,
+ * same registry as claude-sdk/cli/tui. A prior revision of this fix instead
+ * excluded `claude-byok` from `knownTags` and explicitly skipped it in the
+ * residual, reasoning that connect never refreshed a byok client's own
+ * bucket either — but that reasoning rested on a stale reading of #7756
+ * (`static claudeFamily = false`) that does not match this class. Excluding
+ * it here reproduces the EXACT #7756 bug for a fourth provider: the roster is
+ * delivered (via the residual, tagged with the reload's own literal) and
+ * discarded, because a byok client's bucket key is `'claude-byok'`, not
+ * whatever the residual's literal happens to be. Folding it into the same
+ * per-tag treatment as claude-cli/claude-tui is what keeps a reload and a
+ * reconnect agreeing on a byok session's roster tag, exactly as they do for
+ * the other three.
  *
  * A factory rather than an inline closure so the wiring is a single named
  * reference at the call site AND the behaviour is directly executable in a test
@@ -469,16 +479,12 @@ export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logge
 
       // #7756 — the concrete Claude-family names this daemon currently has
       // registered (built-ins + docker-* once registerDockerProvider() has run
-      // + any config-driven endpoint), MINUS claude-byok (decision above) — the
-      // ONLY place that exclusion is applied. A byok client's own resolved tag
-      // (`resolveRosterProvider` always returns 'claude-byok' verbatim for one,
-      // never falling through to `defaultProvider`) then never equals a member
-      // of this Set, so the per-tag loop below needs no separate byok guard —
-      // one would never be reached. Read fresh on every reload rather than
-      // captured once, so a provider registered after this broadcaster was
-      // built (docker-*, hot-registered endpoints) is still covered.
+      // + any config-driven endpoint), INCLUDING claude-byok — see the
+      // docstring above. Read fresh on every reload rather than captured
+      // once, so a provider registered after this broadcaster was built
+      // (docker-*, hot-registered endpoints) is still covered.
       const knownTags = new Set(
-        getRegisteredProviderNames().filter((name) => name !== 'claude-byok' && isClaudeProvider(name)),
+        getRegisteredProviderNames().filter((name) => isClaudeProvider(name)),
       )
       // The tag a client with no active session — or a session reporting no
       // provider — is served. Same resolution `ws-history.js` uses on connect,
@@ -492,15 +498,12 @@ export function createOverlayReloadBroadcaster({ wsServer, sessionManager, logge
         ) === tag)
       }
 
-      // Residual fallback — see the docstring above. `claude-byok` is NOT in
-      // `knownTags` (excluded above), so without the explicit guard below a
-      // byok client would fall through to `overlayBroadcastReachesProvider`,
-      // which returns true for it (claude-byok IS Claude-family) — this guard
-      // is what actually implements the #7756 decision; the Set exclusion
-      // above only keeps a byok client out of the per-tag loop.
+      // Residual fallback — see the docstring above. `claude-byok` IS in
+      // `knownTags` now, so it is excluded from the residual by the same
+      // generic `knownTags.has(...)` check every other known Claude-family
+      // provider is — no separate byok guard needed or wanted.
       wsServer._broadcast(message, (client) => {
         const activeProvider = clientActiveProvider(client, sessionManager)
-        if (activeProvider === 'claude-byok') return false
         if (knownTags.has(resolveRosterProvider(activeProvider, defaultProvider))) return false
         return overlayBroadcastReachesProvider(message, activeProvider, tagIsDefault)
       })
@@ -1623,8 +1626,8 @@ export async function startCliServer(config) {
   // CHANGED — the default (Claude) one plus each provider-tagged slice (#7722)
   // — routed so each client only ever receives the roster for the provider its
   // active session runs on, RE-TAGGED per recipient for the default registry
-  // (#7756) so a claude-cli/claude-tui client's own bucket refreshes too. A
-  // malformed save is ignored (last-good kept).
+  // (#7756) so a claude-cli/claude-tui/claude-byok client's own bucket
+  // refreshes too. A malformed save is ignored (last-good kept).
   //
   // #7756: `defaultProvider` mirrors `billingCanaryMonitor`'s own
   // `getDefaultProvider` below (`config.provider || DEFAULT_PROVIDER`) — the

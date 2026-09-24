@@ -7,13 +7,18 @@ import { fileURLToPath } from 'node:url'
 // Importing providers.js registers the real provider classes so
 // getRegistryForProvider('codex') resolves to the codex registry rather than
 // falling back to the default Claude one (mirrors models-overlay-per-provider).
+// getRegisteredProviderNames is imported from it below (#7756) so the
+// connect/reload parity test iterates the REGISTRY rather than a hand-typed
+// name list.
 import '../src/providers.js'
+import { getRegisteredProviderNames } from '../src/providers.js'
 import {
   reloadModelsOverlay,
   getRegistryForProvider,
   registerProviderRegistry,
   usesDefaultModelsRegistry,
   resolveRosterProvider,
+  isClaudeProvider,
   _resetModelsOverlayForTests,
   _resetProviderRegistryCacheForTests,
   _unregisterProviderRegistryForTests,
@@ -423,10 +428,10 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
         'codex-session': { provider: 'codex' },
         'gemini-session': { provider: 'gemini' },
         'claude-session': { provider: 'claude-sdk' },
-        // #7756 — the three Claude-family sessions the wrong-bucket bug hits.
+        // #7756 — the four Claude-family sessions the wrong-bucket bug hits
+        // (claude-byok included — see the orchestrator correction below).
         'claude-cli-session': { provider: 'claude-cli' },
         'claude-tui-session': { provider: 'claude-tui' },
-        // #7756 decision: claude-byok gets nothing, pinned below.
         'claude-byok-session': { provider: 'claude-byok' },
       })[id],
     }
@@ -484,11 +489,12 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
       assert.equal(codexSends[0].defaultModel, CODEX_ROW)
       assert.ok(wsServer.sent.every((m) => m.type === 'available_models'))
       // The default registry DOES get re-tagged and re-sent — at least once
-      // under 'claude-cli' and once under 'claude-tui' — proving the fan-out
-      // actually happened rather than silently collapsing to the old single
-      // 'claude-sdk' send.
+      // under 'claude-cli', 'claude-tui' and 'claude-byok' — proving the
+      // fan-out actually happened rather than silently collapsing to the old
+      // single 'claude-sdk' send.
       assert.ok(wsServer.sent.some((m) => m.provider === 'claude-cli'), 'a claude-cli-tagged send exists')
       assert.ok(wsServer.sent.some((m) => m.provider === 'claude-tui'), 'a claude-tui-tagged send exists')
+      assert.ok(wsServer.sent.some((m) => m.provider === 'claude-byok'), 'a claude-byok-tagged send exists')
     })
 
     it('the SENT set is driven by the builder, not a hardcoded message', () => {
@@ -503,14 +509,30 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
     })
 
     // #7756 — the headline fix: a codex + gemini + claude reload gives EVERY
-    // client exactly its own roster, including the two that were silently
-    // discarded before this fix (claude-cli, claude-tui), and NOTHING for
-    // claude-byok (the pinned decision). Reverting `buildOverlayReloadBroadcasts`
-    // / the re-tag loop to a single hardcoded `'claude-sdk'` send turns the
-    // claude-cli-client and claude-tui-client assertions below red — they
+    // client exactly its own roster, including all three that were silently
+    // discarded before this fix (claude-cli, claude-tui, claude-byok — see
+    // the orchestrator correction below for why byok is included rather than
+    // excluded). Reverting `buildOverlayReloadBroadcasts` / the re-tag loop to
+    // a single hardcoded `'claude-sdk'` send turns the claude-cli-client,
+    // claude-tui-client and claude-byok-client assertions below red — they
     // would still receive a message, just tagged wrong, which is exactly
     // #7756's bug.
-    it('#7756 — every client gets exactly its own roster (or nothing for claude-byok)', () => {
+    //
+    // #7756 correction: an earlier revision of this fix excluded claude-byok
+    // from delivery entirely, on the premise (stated in #7756's own decision
+    // comment) that `ClaudeByokSession` has `static claudeFamily = false` and
+    // so was never delivered the default roster in the first place. That
+    // premise is false against current code — `byok-session.js:121` sets
+    // `static claudeFamily = true`, and `ws-history.js`'s connect path
+    // (`resolveRosterProvider(entry.provider, ...)` at line 928) sends a
+    // claude-byok client the default registry tagged `'claude-byok'` exactly,
+    // same as claude-cli/claude-tui. Excluding it from the reload path would
+    // have reproduced #7756's own bug for a fourth provider: delivered (via
+    // the residual, tagged with the reload's own literal) and discarded,
+    // because a byok client's bucket key is `'claude-byok'`. The rule this
+    // test (and the parity test below) enforces is: reload tags a client
+    // IDENTICALLY to what a fresh connect would tag it.
+    it('#7756 — every client gets exactly its own roster, including claude-byok', () => {
       const delivered = run({
         models: [{ id: 'sonnet', fullId: 'claude-sonnet' }],
         defaultModelId: 'claude-sonnet',
@@ -519,25 +541,28 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
           { provider: 'gemini', models: [{ id: 'gemini-x', fullId: 'gemini-x' }], defaultModelId: 'gemini-x' },
         ],
       })
-      // Exactly one message each (zero for byok) — the store has one slot per
-      // provider, so a second message to the same client is by definition a
-      // clobber, and #7756's requirement is "no duplicates when several
-      // clients share a provider".
+      // Exactly one message each — the store has one slot per provider, so a
+      // second message to the same client is by definition a clobber, and
+      // #7756's requirement is "no duplicates when several clients share a
+      // provider".
       assert.deepEqual(delivered.get('codex-client').map((m) => m.provider), ['codex'])
       assert.deepEqual(delivered.get('gemini-client').map((m) => m.provider), ['gemini'])
       assert.deepEqual(delivered.get('claude-client').map((m) => m.provider), ['claude-sdk'])
       assert.deepEqual(delivered.get('claude-cli-client').map((m) => m.provider), ['claude-cli'])
       assert.deepEqual(delivered.get('claude-tui-client').map((m) => m.provider), ['claude-tui'])
       assert.deepEqual(delivered.get('idle-client').map((m) => m.provider), ['claude-sdk'])
-      assert.deepEqual(delivered.get('claude-byok-client').map((m) => m.provider), [], 'claude-byok receives nothing (#7756 decision)')
+      assert.deepEqual(delivered.get('claude-byok-client').map((m) => m.provider), ['claude-byok'], 'claude-byok gets its own roster, same as connect')
       // ...and it is the right roster, not just the right tag — the newly
-      // declared model actually reaches the claude-cli/claude-tui buckets.
+      // declared model actually reaches the claude-cli/claude-tui/claude-byok
+      // buckets.
       assert.deepEqual(delivered.get('codex-client')[0].models.map((m) => m.fullId), [CODEX_ROW])
       assert.deepEqual(delivered.get('claude-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
       assert.deepEqual(delivered.get('claude-cli-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
       assert.deepEqual(delivered.get('claude-tui-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
+      assert.deepEqual(delivered.get('claude-byok-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
       assert.equal(delivered.get('claude-cli-client')[0].defaultModel, 'claude-sonnet')
       assert.equal(delivered.get('claude-tui-client')[0].defaultModel, 'claude-sonnet')
+      assert.equal(delivered.get('claude-byok-client')[0].defaultModel, 'claude-sonnet')
     })
 
     // #7756 — "no active session" is resolved from the DAEMON's own configured
@@ -679,11 +704,47 @@ describe('#7722 each overlay-reload roster reaches ONLY that provider\'s clients
       // REAL WsBroadcaster's own filter/authenticated/readyState contract.
       assert.deepEqual(delivered.get('claude-cli-client').map((m) => m.provider), ['claude-cli'])
       assert.deepEqual(delivered.get('claude-tui-client').map((m) => m.provider), ['claude-tui'])
-      assert.deepEqual(delivered.get('claude-byok-client').map((m) => m.provider), [])
+      assert.deepEqual(delivered.get('claude-byok-client').map((m) => m.provider), ['claude-byok'])
       assert.deepEqual(delivered.get('idle-client').map((m) => m.provider), ['claude-sdk'])
       assert.deepEqual(delivered.get('codex-client')[0].models.map((m) => m.fullId), [CODEX_ROW])
       assert.deepEqual(delivered.get('claude-cli-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
+      assert.deepEqual(delivered.get('claude-byok-client')[0].models.map((m) => m.fullId), ['claude-sonnet'])
     })
+
+    // #7756 correction — the two paths (connect and reload) must NEVER be
+    // free to disagree about a session's roster tag. `ws-history.js`'s
+    // post-auth connect path tags a client's roster
+    // `resolveRosterProvider(entry.provider, billingCanary?.defaultProvider)`
+    // (ws-history.js:928); this asserts the reload path tags the SAME client
+    // identically, for EVERY Claude-family provider this daemon has
+    // registered — not a hand-typed subset (claude-cli/claude-tui/claude-byok
+    // above), so a future Claude-family provider is covered the moment it's
+    // added to the registry, the same shape #5855 fixed for `isClaudeProvider`
+    // itself. Excluding a name here (as an earlier revision of this fix did
+    // for claude-byok) would go red the instant that name is added back to
+    // the registry, because its resolved connect-tag and its delivered
+    // reload-tag would then diverge.
+    for (const name of getRegisteredProviderNames().filter((n) => isClaudeProvider(n))) {
+      it(`#7756 — reload tag for a '${name}' session matches what connect (resolveRosterProvider) would send it`, () => {
+        const sm = { getSession: (id) => (id === 'probe-session' ? { provider: name } : undefined) }
+        const { broadcaster, delivered } = realWsBroadcaster([
+          { id: 'probe-client', activeSessionId: 'probe-session' },
+        ])
+        createOverlayReloadBroadcaster({ wsServer: broadcaster, sessionManager: sm, logger: silentLogger, defaultProvider: 'claude-sdk' })({
+          models: [{ id: 'sonnet', fullId: 'claude-sonnet' }],
+          defaultModelId: 'claude-sonnet',
+          providers: [],
+        })
+        // The exact resolution ws-history.js's connect path applies to this
+        // same (sessionProvider, defaultProvider) pair.
+        const connectTag = resolveRosterProvider(name, 'claude-sdk')
+        assert.deepEqual(
+          delivered.get('probe-client').map((m) => m.provider),
+          [connectTag],
+          `a '${name}' session must receive exactly the roster connect would tag '${connectTag}', got ${JSON.stringify(delivered.get('probe-client').map((m) => m.provider))}`,
+        )
+      })
+    }
 
     // #7722 (re-review) — the recipient rule resolves the CLIENT's provider
     // through `usesDefaultModelsRegistry`, i.e. through
