@@ -672,9 +672,20 @@ export function createModelsRegistry(hooks = {}) {
       declaredFullIds.set(entry.fullId, entry)
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
-        // Override the base row's label/window from the overlay when supplied.
+        // Override the base row's label/window/shortId from the overlay when
+        // supplied. #7802 — SPREAD the base row first: `docs/guides/model-
+        // overlay.md` documents the overlay's reach on an existing id as
+        // exactly `label` / `contextWindow` / `shortId`, nothing else, so
+        // every OTHER key the base row carried (`reasoningLevels`,
+        // `defaultReasoningLevel`, `provenance`, and anything future
+        // `MODEL_ENTRY_METADATA_KEYS` growth adds) must survive an override
+        // untouched. A bare 4-key literal here silently dropped all of them —
+        // for `reasoningLevels` specifically, that disabled the
+        // `set_thinking_level` gate for a model the overlay only meant to
+        // relabel.
         if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
           baseByFullId.set(entry.fullId, Object.freeze({
+            ...baseRow,
             id: entry.shortId ?? baseRow.id,
             label: entry.label ?? baseRow.label,
             fullId: baseRow.fullId,
@@ -787,6 +798,41 @@ export function createModelsRegistry(hooks = {}) {
    */
   function isUnpersistableDeclaredRow(fullId) {
     return overlayDeclaredFullIds.has(fullId) && !providerReportedFullIds.has(fullId)
+  }
+
+  /**
+   * The `withModelMetadata` source list for a row `unionableSeedRows()` is
+   * restoring into a roster this registry just learned from the provider
+   * (`updateModels`) or from disk (`loadCache`) — #7806.
+   *
+   * For a row that is genuinely part of this repo's own static seed (a
+   * `baseFallbackModels` entry the operator never named), both `providerMeta`
+   * and the merged fallback row `fb` may legitimately carry
+   * `provenance: 'catalogued'` — that value means "this repo's in-repo
+   * catalogue vouches for this row", which is true.
+   *
+   * For a row that is in the roster ONLY because the operator's overlay
+   * declares its fullId (`isUnpersistableDeclaredRow`), neither source may
+   * make that claim: `providerMeta` is a LOOKUP into the same static table
+   * keyed on an id the provider did not just report, and — since #7802 keeps
+   * a static base row's own metadata alive under an overlay label/window
+   * override — `fb` can carry the identical stamp straight through the merge
+   * (e.g. an overlay-declared override of a retired provider id). Stripping
+   * `provenance` from both leaves it ABSENT rather than mislabeled; every
+   * OTHER metadata key (`reasoningLevels`, …) is unaffected, and so is every
+   * OTHER precedence decision (label/window/id) made above the call site.
+   *
+   * One helper for both union call sites (`updateModels`, `loadCache`) so
+   * they cannot drift the way the union itself did before #7776.
+   */
+  function unionRowMetadataSources(fullId, providerMeta, fb) {
+    if (!isUnpersistableDeclaredRow(fullId)) return [providerMeta, fb]
+    const withoutProvenance = (source) => {
+      if (!source || source.provenance === undefined) return source
+      const { provenance: _provenance, ...rest } = source
+      return rest
+    }
+    return [withoutProvenance(providerMeta), withoutProvenance(fb)]
   }
 
   let activeModels = fallbackModels
@@ -979,23 +1025,39 @@ export function createModelsRegistry(hooks = {}) {
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
       } else if (lastCacheModels) {
-        // Cache-warmed (loadCache) but no SDK refresh yet — apply the new
-        // fallback (base + overlay overrides + overlay-only rows) while
-        // PRESERVING the cache entries it doesn't cover (date-suffixed ids past
-        // the family filter, e.g. `claude-sonnet-4-20250514`). Preserve from the
-        // CACHE list, not `activeModels`, so an overlay-only row the operator
-        // REMOVED still drops (it lives in fallbackModels, never lastCacheModels)
-        // — matched on fullId so an overlay override of a cached/fallback row
-        // still wins (it's in fallbackModels → the cache copy is skipped).
+        // Cache-warmed (loadCache) but no SDK refresh yet. PRESERVE every
+        // cache entry (date-suffixed ids past the family filter, e.g.
+        // `claude-sonnet-4-20250514`, AND — #7808 — any id the cache shares
+        // with the re-folded fallback) and let the new fallback (base +
+        // overlay overrides + overlay-only rows) contribute only the ids the
+        // cache does NOT already carry. Preserve from the CACHE list, not
+        // `activeModels`, so an overlay-only row the operator REMOVED still
+        // drops (it lives in fallbackModels, never lastCacheModels).
+        //
+        // #7808 — the cache row must win outright for a shared fullId, not
+        // merely by presence: `lastCacheModels` is what the provider itself
+        // last reported (`loadCache` stamps `providerReportedFullIds` from
+        // it), so a model the binary still serves must not have its live
+        // label/window overwritten by an overlay decoration just because a
+        // hot reload landed before the next refresh — the same precedence
+        // `updateModels`/`loadCache` already hold, where a reported row is
+        // never touched by the overlay at all (`docs/guides/model-
+        // overlay.md`: "Where the provider does still report the model, its
+        // own values win"). Before this fix the seed (which — #7777 — can
+        // carry the OPERATOR's decoration for an id it overrides) was spread
+        // first, so it won the collision and that decorated copy could reach
+        // `saveCache()`.
         //
         // #7776 — the seed half of that list is the #3075 union's THIRD copy,
         // so it reads `unionableSeedRows()` like the other two: on a non-Claude
         // registry an overlay reload must not put back the statics that
-        // `loadCache`/`updateModels` just declined to.
+        // `loadCache`/`updateModels` just declined to. Its contribution here is
+        // now scoped the same way that union scopes its OWN additions: only ids
+        // the reported roster (the cache, in this window) does not carry.
         const seed = unionableSeedRows()
-        const byFullId = new Set(seed.map((m) => m.fullId))
-        const preserved = lastCacheModels.filter((m) => !byFullId.has(m.fullId))
-        const next = preserved.length > 0 ? Object.freeze([...seed, ...preserved]) : seed
+        const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
+        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
+        const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
         applyModels(next, defaultModelId)
       } else {
         applyModels(fallbackModels, defaultModelId)
@@ -1156,7 +1218,13 @@ export function createModelsRegistry(hooks = {}) {
             ?? providerMeta?.contextWindow
             ?? fb.contextWindow
             ?? resolveContextWindowFn(fb.fullId)
-          converted.push(withModelMetadata({ id, label, fullId: fb.fullId, contextWindow }, providerMeta, fb))
+          // #7806 — a declared-only row (the operator's overlay is its ONLY
+          // justification for being here) must not inherit `provenance` from
+          // either source: see `unionRowMetadataSources`.
+          converted.push(withModelMetadata(
+            { id, label, fullId: fb.fullId, contextWindow },
+            ...unionRowMetadataSources(fb.fullId, providerMeta, fb),
+          ))
           seenFullIds.add(fb.fullId)
         }
       }
@@ -1506,7 +1574,12 @@ export function createModelsRegistry(hooks = {}) {
             const label = declared?.label || providerMeta?.label || humanizeModelId(id)
             const contextWindow = declared?.contextWindow
               ?? providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
-            models.push(withModelMetadata({ id, fullId: fb.fullId, label, contextWindow }, providerMeta, fb))
+            // #7806 — same declared-only provenance rule as the `updateModels`
+            // copy of this union: see `unionRowMetadataSources`.
+            models.push(withModelMetadata(
+              { id, fullId: fb.fullId, label, contextWindow },
+              ...unionRowMetadataSources(fb.fullId, providerMeta, fb),
+            ))
             seenFullIds.add(fb.fullId)
           }
         }

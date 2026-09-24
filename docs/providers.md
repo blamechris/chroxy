@@ -448,10 +448,11 @@ Rules that matter when you are reading a picker and wondering what you are seein
   deepseek), where nothing ever publishes a roster and such a row can never
   acquire provider provenance;
   [#7810](https://github.com/blamechris/chroxy/issues/7810) tracks caching those
-  windows under their own key. (One narrow residue,
-  [#7808](https://github.com/blamechris/chroxy/issues/7808): while the roster is
-  the one `loadCache` read and no refresh has landed yet, a hot overlay reload
-  can override such a row's live label and window with the operator's.)
+  windows under their own key. This holds even while the roster is the one
+  `loadCache` read and no refresh has landed yet: a hot overlay reload cannot
+  override such a row's live label and window with the operator's — the
+  cached, provider-reported copy wins for an id the cache already carries
+  ([#7808](https://github.com/blamechris/chroxy/issues/7808)).
 - **Validation follows the same tri-state.** With a catalog in hand, its ids are
   the allowlist; with none, codex is **unrestricted** and any id passes through to
   the binary. `providers.allowAnyModel: ["codex"]` is therefore no longer needed
