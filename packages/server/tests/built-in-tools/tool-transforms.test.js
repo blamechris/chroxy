@@ -152,7 +152,11 @@ describe('buildConfinedGlobBody (#7354)', () => {
     // ever sees the body — see splitWithheldTrailer.
     const printed = body.split('\n').filter((l) => l.includes('printf')).map((l) => l.trim())
     assert.deepEqual(printed, [
-      `printf '%s\\n' "$f"`,
+      // #7357 — NUL-delimited, not '\n': a filename may legally contain a
+      // newline, and a '\n'-joined stream can't tell "one match with an
+      // embedded newline" apart from "two matches". The trailer line stays
+      // '\n'-terminated — it is fixed host-authored text, never a filename.
+      `printf '%s\\0' "$f"`,
       `printf '%s %s\\n' '${CONTAINER_CONFINE_WITHHELD}' "$__cx_withheld"`,
     ])
   })

@@ -234,6 +234,111 @@ export function globPatternEscapeMessage(reason) {
   return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
 }
 
+/**
+ * SECURITY (#7898 round 4) — hard ceilings on `pattern` BEFORE it reaches
+ * either backend's matcher: the host's hand-written case-check parser
+ * (`compileCaseCheck`/`parseSegmentTokens`/`advanceToken` in
+ * byok-tool-executor.js) and the container's bash brace expansion
+ * (`buildConfinedGlobBody`). Nothing upstream of this point bounds `pattern`
+ * at all — not the tool's JSON-schema `input_schema` (a bare `{ type:
+ * 'string' }`, no `maxLength`), not {@link GLOB_PATTERN_SHELL_METACHARS}, not
+ * {@link globPatternEscapeReason} (both are fixed-cost linear scans that
+ * don't look at length or nesting). This is the first and only place either
+ * is checked, which is why both backends call it.
+ *
+ * Two independent, cheap (each a single linear scan, no recursion) checks:
+ *
+ * - **Length.** Every cost this file's review history has found in the host
+ *   matcher is polynomial in `pattern.length` (P) for a BOUNDED P — see the
+ *   worst-case bound written above {@link compileCaseCheck} — so bounding P
+ *   bounds all of them at once, including constructs no round has found yet.
+ *   2,000 characters is generous: the longest pattern in this file's own test
+ *   suite, deliberately adversarial (`'{*a,*b}'.repeat(30)`), is 210; a real
+ *   pattern is rarely more than a few dozen.
+ *
+ * - **Brace nesting depth.** #7898 round 4 — chain-nested braces
+ *   (`{a,{b,{c,d}}}`, extended: `{x1,{x2,{x3,...}}}`) are the one construct
+ *   round 3's "self-limiting" dismissal ("depth d needs ~2^d characters",
+ *   true only for a BALANCED binary tree of alternatives) got wrong: a
+ *   right-leaning CHAIN needs only ~4 characters per extra level, so nesting
+ *   depth is near-linear in pattern length, not exponential. Two independent
+ *   defects follow, both measured directly against `compileCaseCheck`/
+ *   `caseCheckPasses` on this machine:
+ *     1. `parseSegmentTokens` re-scans the shrinking remainder at every
+ *        nesting level (`findMatchingBrace` + `splitTopLevelCommas`, each
+ *        O(remaining length)), so PARSE time alone is O(depth²): 0.16ms at
+ *        depth 10 (48 chars), 18.72ms at depth 1000 (6,890 chars), 301.88ms
+ *        at depth 4000 (30,890 chars) — quadratic scaling confirmed (~4x
+ *        time per ~2x length). This runs UNCONDITIONALLY per Glob call, in
+ *        `confineGlobMatches`, before a single match is even checked.
+ *     2. Both `parseSegmentTokens` (parse) and `advanceToken`/`advanceTokens`
+ *        (match, the `alt` branch recursing into nested options) are
+ *        RECURSIVE with one JS call frame per nesting level, and neither has
+ *        a depth check — a pattern nested deep enough throws an uncaught
+ *        `RangeError: Maximum call stack size exceeded`. Measured on Node
+ *        22.23.2: parsing survives to ~depth 5,505 (~38,000 chars) before
+ *        overflowing; MATCHING overflows far sooner, at ~depth 2,000 (~14,500
+ *        chars), because `advanceToken`/`advanceTokens` mutually recurse with
+ *        a shallower frame budget than `parseSegmentTokens`'s single
+ *        self-recursion. `executeBuiltinTool`'s outer try/catch turns this
+ *        into a caught `Tool Glob failed: Maximum call stack size exceeded`
+ *        rather than crashing the daemon — but the exact depth that overflows
+ *        depends on how much OTHER stack is already in use by the async call
+ *        chain when a real Glob call runs, which is neither deterministic nor
+ *        portable, so it cannot be treated as an implicit safety bound.
+ *   32 levels is far above anything a legitimate pattern needs (the task's
+ *   own `{a,{b,{c,d}}}` example is depth 3) and leaves a >60x margin below
+ *   the measured match-time overflow point, so the ceiling is reached and
+ *   refused long before either the quadratic parse cost or the recursion
+ *   depth becomes a problem — regardless of how much stack the caller has
+ *   already used.
+ *
+ * FAIL CLOSED: this runs BEFORE `fs.glob`'s own walk starts (host) and before
+ * the container `docker exec` is issued, so an over-budget pattern costs
+ * nothing beyond this scan — no walk, no case-check compile, no container
+ * round-trip.
+ *
+ * @param {string} pattern
+ * @returns {string|null} A reason string when the pattern is too complex.
+ */
+export const GLOB_PATTERN_MAX_LENGTH = 2_000
+export const GLOB_PATTERN_MAX_BRACE_DEPTH = 32
+
+export function globPatternComplexityReason(pattern) {
+  if (typeof pattern !== 'string') return 'not a string'
+  if (pattern.length > GLOB_PATTERN_MAX_LENGTH) {
+    return `longer than ${GLOB_PATTERN_MAX_LENGTH} characters (${pattern.length})`
+  }
+  // A plain linear scan, no recursion — and a SAFE upper bound on the real
+  // parser's recursion depth even though it does not distinguish a bracket
+  // expression's literal '{'/'}' members from real brace syntax: every
+  // recursion `parseSegmentTokens` actually performs happens on a MATCHED
+  // '{'...'}' pair, which this counter always sees too (an unmatched '{' —
+  // what `findMatchingBrace` treats as a literal and never recurses into —
+  // can only make this counter's depth reading HIGHER than the true parse
+  // depth, never lower). Over-rejecting a pattern that merely contains many
+  // literal, unmatched '{' characters is an acceptable false positive for a
+  // guard whose only job is to never under-count real recursion.
+  let depth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '{') {
+      depth++
+      if (depth > GLOB_PATTERN_MAX_BRACE_DEPTH) {
+        return `"{" nesting deeper than ${GLOB_PATTERN_MAX_BRACE_DEPTH} levels`
+      }
+    } else if (c === '}' && depth > 0) {
+      depth--
+    }
+  }
+  return null
+}
+
+/** The tool_result message for a pattern rejected by {@link globPatternComplexityReason}. */
+export function globPatternComplexityMessage(reason) {
+  return `EINVAL: glob pattern is too complex (${reason}). Narrow the search with "path", or split it into more than one simpler Glob call.`
+}
+
 // ---------------------------------------------------------------------------
 // Container path confinement (#7354) — resolve INSIDE the container
 // ---------------------------------------------------------------------------
@@ -272,6 +377,12 @@ export const CONTAINER_CONFINE_ERROR = '__chroxy_confine_error__'
  *
  * The count is a count, never a path: the names and link targets of what was
  * withheld would put the very thing containment refused into the daemon log.
+ *
+ * #7357 — this line is STILL `\n`-terminated (unlike the matches above it,
+ * which are NUL-delimited): it is host-authored fixed text, never a filename,
+ * so it cannot itself contain a stray delimiter, and keeping it human-legible
+ * on its own line is what let {@link splitWithheldTrailer} stay a boundary
+ * split rather than a scan.
  */
 export const CONTAINER_CONFINE_WITHHELD = '__chroxy_confine_withheld__'
 
@@ -498,6 +609,17 @@ export function buildConfinedContainerCommand({ target, body, setup = '', worksp
  * deleted rather than left beside it: an exported "same thing, no resolution"
  * variant is how a guard comes to be wired to only some of its callers
  * (`docs/false-safety-guards.md`, #7262), and it had exactly one caller.
+ *
+ * #7357 — matches are NUL-delimited (`printf '%s\0'`), not `\n`-delimited. A
+ * filename may legally contain a newline; a `\n`-joined stream can't tell "one
+ * match with an embedded newline" apart from "two matches", so the HOST's
+ * parser ({@link splitWithheldTrailer}, then the caller's `split('\0')`) would
+ * silently turn one real match into two lines — one of them a path that does
+ * not exist as spelled. NUL is the one byte a POSIX filename cannot contain,
+ * so it is the only delimiter that is unambiguous for every legal match. The
+ * withheld-count TRAILER stays `\n`-terminated (see {@link CONTAINER_CONFINE_WITHHELD}) —
+ * it is fixed host-authored text, not a filename, so it carries no ambiguity
+ * and is the one line the host can split on safely.
  */
 export function buildConfinedGlobBody(pattern) {
   return [
@@ -530,7 +652,7 @@ export function buildConfinedGlobBody(pattern) {
     '    if ! __cx_r=$(__cx_resolve "$f"); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) __cx_withheld=$((__cx_withheld+1)); continue ;; esac',
     '  fi',
-    '  printf \'%s\\n\' "$f"',
+    '  printf \'%s\\0\' "$f"',
     'done',
     // The operator's trace. Always emitted, including as `... 0`, so the host
     // can tell "nothing was withheld" from "the trailer never arrived" — the
@@ -569,9 +691,18 @@ export function parseConfinedContainerStdout(stdout) {
  *
  * The trailer NEVER reaches the model: stripping it here is what keeps the
  * no-oracle rule while still giving the daemon log a count. It is always the
- * last line, so it is matched positionally rather than by scanning — a file
- * literally named `__chroxy_confine_withheld__ 3` in the middle of the results
- * cannot be mistaken for it.
+ * last thing in the body, so it is matched positionally rather than by
+ * scanning — a file literally named `__chroxy_confine_withheld__ 3` in the
+ * middle of the results cannot be mistaken for it.
+ *
+ * #7357 — matches above the trailer are NUL-delimited (see
+ * {@link buildConfinedGlobBody}), so the trailer is found by locating the
+ * LAST `\0` rather than the last `\n`: everything before and including it is
+ * the (still NUL-delimited) match stream, untouched; everything after it is
+ * the trailer's own `\n`-terminated line. When there are zero matches the
+ * body is just the trailer line with no NUL at all, which the `lastIndexOf`
+ * fallback (`-1` → treat the whole body as the trailer candidate) handles the
+ * same way.
  *
  * `withheld: null` means the trailer was absent, which is reported as "unknown"
  * rather than as zero. The count is observability, not containment (the
@@ -584,13 +715,13 @@ export function parseConfinedContainerStdout(stdout) {
  */
 export function splitWithheldTrailer(body) {
   if (typeof body !== 'string') return { body: '', withheld: null }
-  const trailing = body.endsWith('\n') ? '\n' : ''
-  const lines = body.split('\n')
-  if (trailing) lines.pop()
-  const match = lines.length > 0 ? WITHHELD_TRAILER_RE.exec(lines[lines.length - 1]) : null
+  const lastNul = body.lastIndexOf('\0')
+  const matches = lastNul === -1 ? '' : body.slice(0, lastNul + 1)
+  const trailerPart = lastNul === -1 ? body : body.slice(lastNul + 1)
+  const trailerLine = trailerPart.endsWith('\n') ? trailerPart.slice(0, -1) : trailerPart
+  const match = WITHHELD_TRAILER_RE.exec(trailerLine)
   if (!match) return { body, withheld: null }
-  lines.pop()
-  return { body: lines.length > 0 ? lines.join('\n') + trailing : '', withheld: Number(match[1]) }
+  return { body: matches, withheld: Number(match[1]) }
 }
 
 /**

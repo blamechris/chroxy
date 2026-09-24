@@ -131,6 +131,8 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globPatternComplexityReason,
+  globPatternComplexityMessage,
   globMatchEscapesRoot,
   buildGrepArgs,
   buildGrepCommand,
@@ -2291,6 +2293,17 @@ export class DockerByokSession extends ClaudeByokSession {
     if (escapeReason) {
       return { content: globPatternEscapeMessage(escapeReason), isError: true }
     }
+    // #7898 round 4 — same cap as the host (byok-tool-executor.js's runGlob),
+    // from the same shared check: an over-long or deeply brace-nested pattern
+    // costs nothing beyond this scan on the host, but on the container it
+    // would still be shipped into `buildConfinedGlobBody` and shelled out via
+    // `docker exec` for bash's own brace expansion to chew on. Rejecting it
+    // here, before that round-trip, keeps host and container refusing the
+    // same input for the same reason rather than only one of them.
+    const complexityReason = globPatternComplexityReason(pattern)
+    if (complexityReason) {
+      return { content: globPatternComplexityMessage(complexityReason), isError: true }
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted before docker exec', isError: true }
     }
@@ -2349,9 +2362,28 @@ export class DockerByokSession extends ClaudeByokSession {
     // Anything that distinguishes "matched, but outside" from "matched nothing"
     // is an existence oracle on a tool auto-approved in `acceptEdits`. The
     // operator gets the count instead, in the daemon log (#7354).
-    const emitted = globBody.split('\n').filter(Boolean)
-    const files = emitted.filter((f) => !globMatchEscapesRoot(f))
-    this._logWithheldGlobMatches(withheldInContainer, emitted.length - files.length)
+    //
+    // #7357 — split on NUL, matching `buildConfinedGlobBody`'s delimiter: a
+    // filename may legally contain a newline, and a `\n`-split here would
+    // turn one such match into two entries, one of them a nonexistent path.
+    // `filter(Boolean)` drops the single empty tail element the trailing NUL
+    // produces (and would drop nothing else — an empty match can't exist).
+    const emitted = globBody.split('\0').filter(Boolean)
+    const containmentOk = emitted.filter((f) => !globMatchEscapesRoot(f))
+    // A match that survived containment but still contains a newline is
+    // dropped from what reaches the model — the tool_result itself is
+    // `\n`-joined text, so there is no way to keep it in the OUTPUT without
+    // reintroducing the exact split this fix removes from the TRANSFER. This
+    // is a display-format decision, not a containment one (the host Glob
+    // drops the same shape, for the same reason — byok-tool-executor.js's
+    // `runGlob`), so it gets its own log line rather than being folded into
+    // the security-relevant withheld count below.
+    const files = containmentOk.filter((f) => !f.includes('\n'))
+    const droppedForNewline = containmentOk.length - files.length
+    this._logWithheldGlobMatches(withheldInContainer, emitted.length - containmentOk.length)
+    if (droppedForNewline > 0) {
+      this._logContainment('Glob', `dropped ${droppedForNewline} match(es) containing an embedded newline (unambiguous single-line output only, #7357)`)
+    }
     if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
     return { content: files.join('\n'), isError: false }
   }

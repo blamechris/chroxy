@@ -5,7 +5,8 @@ import { glob as fsGlob } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses } from '../src/byok-tool-executor.js'
+import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
  * Tests for byok-tool-executor.js — the dispatcher that routes tool_use
@@ -799,6 +800,524 @@ describe('executeBuiltinTool', () => {
         assert.equal(r.isError, false, `${pattern} must still work`)
         assert.equal(r.content.includes('No matches'), false, `${pattern} must still match`)
       }
+    })
+
+    // #7355 — host Glob must be case-SENSITIVE, matching the container (bash's
+    // own globbing has no case-folding override) and Claude Code's own Glob.
+    // `fs.glob` hard-codes `nocase: isWindows || isMacOS` (measured on Node
+    // 22.22.3: an explicit `nocase: false` is silently ignored), so these
+    // reproduce on a case-insensitive filesystem (this machine) and are inert
+    // — not red, not proof of anything — on a case-sensitive one (Linux CI),
+    // where the underlying `fs.glob` call was never case-folding in the first
+    // place. That asymmetry is inherent to the bug, not a gap in the test.
+    describe('case sensitivity (#7355)', () => {
+      it('a wildcard pattern does not match a wrong-case extension', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('a wildcard pattern still matches the SAME case (positive control)', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.TS' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'Upper.TS')
+      })
+
+      it('a literal (magic-free) pattern with the wrong case is "No matches", never the pattern\'s own spelling', async () => {
+        // Pre-fix, `fs.glob` verifies existence case-INSENSITIVELY for a fully
+        // literal pattern and then echoes the PATTERN's own text back as the
+        // "match" — `upper.ts` against a real `Upper.TS` returned `upper.ts`,
+        // a path that does not exist as spelled.
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'upper.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality: the standard "No matches for <pattern>" message
+        // legitimately contains the pattern's own text, so only an exact
+        // match rules out a fabricated `upper.ts` being returned as if it
+        // were a real result line alongside that message.
+        assert.equal(r.content, 'No matches for upper.ts')
+      })
+
+      it('a literal pattern with the correct case still matches (positive control)', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'Upper.TS' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'Upper.TS')
+      })
+
+      it('a literal DIRECTORY segment with the wrong case is rejected', async () => {
+        mkdirSync(join(dir, 'dir'), { recursive: true })
+        writeFileSync(join(dir, 'dir/dir.ts'), '1')
+        const wrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'DIR/*.ts' }, ...ctx() })
+        assert.equal(wrong.isError, false)
+        assert.match(wrong.content, /No matches/)
+        // Positive control, same fixture: the correctly-cased directory still works.
+        const right = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'dir/*.ts' }, ...ctx() })
+        assert.equal(right.content, 'dir/dir.ts')
+      })
+
+      it('bracket and brace expressions still work, case-sensitively on their literal parts', async () => {
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const bracketRight = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[Uu]pper.TS' }, ...ctx() })
+        assert.equal(bracketRight.content, 'Upper.TS', '[Uu] must still match the U')
+        const bracketWrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[Uu]pper.ts' }, ...ctx() })
+        assert.match(bracketWrong.content, /No matches/, 'the literal .ts suffix must still reject .TS')
+        const braceRight = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{Upper,Other}.TS' }, ...ctx() })
+        assert.equal(braceRight.content, 'Upper.TS')
+        const braceWrong = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{upper,other}.TS' }, ...ctx() })
+        assert.match(braceWrong.content, /No matches/)
+      })
+
+      // A brace pattern with alternatives that case-fold to the SAME real
+      // file (`abc`/`ABC` both fold to a real `ABC.ts` on this case-
+      // insensitive filesystem) makes `fs.glob` hand back ONE raw candidate
+      // PER matching alternative — `abc.ts` and `ABC.ts` — each echoing its
+      // own branch's text. Both independently pass the case check (the
+      // pattern legitimately accepts either spelling), so pushing the
+      // candidate's own text instead of the verified real name returned BOTH:
+      // the real `ABC.ts` and a phantom `abc.ts` line that does not exist on
+      // disk. This is the exact "pattern's own spelling, not the file's"
+      // defect #7355 was filed to close, reached through a brace pattern
+      // rather than the fully-literal repro the issue used.
+      it('a brace pattern whose alternatives fold to the same real file returns it ONCE, correctly spelled', async () => {
+        writeFileSync(join(dir, 'ABC.ts'), '1') // the only real file on disk
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{abc,ABC}.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality: rules out a phantom `abc.ts` line appearing
+        // alongside the real, correctly-spelled `ABC.ts`.
+        assert.equal(r.content, 'ABC.ts')
+      })
+
+      // Flagged by Copilot review on this PR: `fs.glob` normalizes away a `.`
+      // path segment in every match it returns (`./src/*.ts` yields a Dirent
+      // whose parentPath/name never mention the leading `.`), so compiling the
+      // case check from the PATTERN's own unfiltered segments (`.`, `src`,
+      // `*.ts` — 3 segments) could never align with the real match's segments
+      // (`src`, `x.ts` — 2 segments), failing every `./`-prefixed pattern
+      // closed. `./` prefixes are explicitly legal Glob input
+      // (`globPatternEscapeReason` has no rule against a bare `.` segment).
+      it('a "./"-prefixed pattern still matches (fs.glob drops the "." segment from real matches)', async () => {
+        mkdirSync(join(dir, 'src'), { recursive: true })
+        writeFileSync(join(dir, 'src/x.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: './src/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'src/x.ts')
+      })
+
+      it('a "." segment in the MIDDLE of a pattern still matches', async () => {
+        mkdirSync(join(dir, 'src'), { recursive: true })
+        writeFileSync(join(dir, 'src/x.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'src/./x.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'src/x.ts')
+      })
+
+      it('a recursive ** pattern still finds nested matches after the case filter', async () => {
+        mkdirSync(join(dir, 'sub'), { recursive: true })
+        writeFileSync(join(dir, 'sub/keep.ts'), '1')
+        writeFileSync(join(dir, 'Upper.TS'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /sub\/keep\.ts/)
+        assert.equal(r.content.includes('Upper.TS'), false)
+      })
+
+      // A pattern with TWO (or more) `**` segments used to be marked
+      // `ambiguous` and unconditionally fail-closed the case check, dropping
+      // EVERY match — including ones whose real on-disk segments already
+      // matched the pattern's case exactly. That is silent false-negative
+      // data loss on an ordinary, common pattern shape (a monorepo query like
+      // `packages/**/src/**/*.test.js`), not merely a narrowing: measured
+      // against origin/main pre-#7355, the identical fixture below returned
+      // both correctly-cased matches; post-#7355 it returned "No matches".
+      it('a pattern with two "**" segments still matches correctly-cased real files', async () => {
+        mkdirSync(join(dir, 'packages/server/src/sub'), { recursive: true })
+        writeFileSync(join(dir, 'packages/server/src/sub/foo.test.js'), '1')
+        writeFileSync(join(dir, 'packages/server/src/foo.test.js'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: 'packages/**/src/**/*.test.js' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'packages/server/src/foo.test.js\npackages/server/src/sub/foo.test.js')
+      })
+
+      // Same two-"**" shape, but the fixed literal segment between the two
+      // globstars ("src") is wrong-cased on disk ("Src") — the case check
+      // must still reject it, not just fall back to "**" leniency for having
+      // more than one globstar.
+      it('a pattern with two "**" segments still rejects a wrong-case fixed segment between them', async () => {
+        mkdirSync(join(dir, 'packages/server/Src/sub'), { recursive: true })
+        writeFileSync(join(dir, 'packages/server/Src/sub/foo.test.js'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: 'packages/**/src/**/*.test.js' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      // The former case-check compiled each LITERAL pattern segment straight
+      // to a backtracking RegExp (`*` -> `[\s\S]*`, chained per occurrence).
+      // A segment shaped like this one, tested against a REAL on-disk name
+      // that almost-but-doesn't match, is the textbook catastrophic-
+      // backtracking shape: measured pre-fix at 0.03ms for a 20-char name,
+      // 811ms at 30 chars, 5.9s at 32 — and this check runs SYNCHRONOUSLY in
+      // confineGlobMatches, AFTER runGlob's own 30s walk-timeout race has
+      // already resolved, so nothing bounded it.
+      //
+      // This calls compileCaseCheck/caseCheckPasses DIRECTLY rather than
+      // through executeBuiltinTool's Glob path, and that is deliberate, not
+      // a shortcut: runGlob's WALK calls Node's OWN `fsGlob(pattern, ...)`
+      // first, which has to evaluate this SAME pattern text against the SAME
+      // real name to decide candidacy, before confineGlobMatches (and this
+      // check) ever runs — and Node's fs.glob has an independent, unrelated
+      // backtracking vulnerability of its own (measured: 87 SECONDS for this
+      // exact pattern against a 40-char name, via `node:fs/promises`'s
+      // `glob()` alone, no chroxy code involved). An integration-level test
+      // long enough to distinguish the old regex from the new DP would hang
+      // on THAT walk before ever reaching the code this fix changed — that
+      // is a separate, pre-existing, out-of-scope defect in Node's runtime,
+      // not something `compileCaseCheck` can fix, so it is flagged as a
+      // follow-up rather than worked around here with a shorter, weaker name
+      // that would not actually prove this check is polynomial.
+      it('caseCheckPasses does not catastrophically backtrack on a pathological pattern segment (direct — see comment)', () => {
+        const evilPattern = '*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b.ts'
+        // Does not match the evil pattern (no trailing "b") — the exact shape
+        // that made the old RegExp explore exponentially many partial
+        // matches before concluding failure.
+        const longName = `${'a'.repeat(5000)}.ts`
+        const check = compileCaseCheck(evilPattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, [longName])
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, false)
+        assert.ok(elapsedMs < 500, `case check must stay fast, took ${elapsedMs}ms for a 5000-char name`)
+      })
+
+      // #7898 round 3 — the DP that replaced the backtracking RegExp above
+      // (parseSegmentTokens/segmentMatches, ccd677c4b) reintroduced an
+      // analogous blowup in its OWN `alt` ({a,b}) branch: advanceToken used
+      // to recompute each brace alternative from scratch for every
+      // individually-reachable string offset (`for (const j of reachable) {
+      // for (const option ...) { advanceTokens(option, str, new Set([j])) }
+      // }`), instead of feeding an option the whole reachable set in one
+      // call the way `star` already does one level up. A pattern segment
+      // built from L sequential `{*a,*b}`-shaped groups — an entirely
+      // ordinary glob shape, `{*.ts,*.js}` is no different — paid an extra
+      // O(name.length) at EVERY group, because each group's own `*`
+      // re-expands the reachable set back toward the full name length right
+      // before the next group starts. Measured pre-fix: 20 groups (140
+      // chars) against a 5000-char non-matching real segment took 12.96
+      // SECONDS; even bounded to a filesystem-realistic 255-byte name, 100
+      // groups (a 700-char pattern — nothing upstream caps pattern length)
+      // already exceeded 100ms. Same failure shape as the test above (a
+      // synchronous, per-match, unbounded cost inside confineGlobMatches),
+      // different branch of the same new code.
+      it('caseCheckPasses does not blow up on a chained brace-with-wildcard pattern segment (direct)', () => {
+        const evilPattern = '{*a,*b}'.repeat(30) // 210 chars, an ordinary-looking shape
+        // A homogeneous name of one repeated character legitimately MATCHES
+        // this pattern (it can always be split into 30 nonempty pieces each
+        // ending in 'a'), so this is a pure timing assertion — the fix does
+        // not change the result, only how long it takes to compute it (the
+        // pre-fix code took 12.96s for this exact input at n=5000).
+        const longName = 'a'.repeat(5000)
+        const check = compileCaseCheck(evilPattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, [longName])
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, true)
+        assert.ok(elapsedMs < 500, `case check must stay fast, took ${elapsedMs}ms for a 5000-char name`)
+      })
+
+      // #7898 round 3 — parseBracketExpr accepts any `-`-range TEXT
+      // (`[z-a]`, or `[b-!a!x]` from adjacent special characters colliding)
+      // without checking the range is in order. JS's RegExp constructor
+      // rejects an out-of-order range and THROWS synchronously from inside
+      // compileCaseCheck, which runs unconditionally for every Glob call
+      // whose pattern has a bracket segment — even with zero candidate
+      // files, confineGlobMatches compiles the case check up front. Nothing
+      // between there and executeBuiltinTool's outer catch stops it, so an
+      // ordinary "No matches" (fs.glob itself tolerates `[z-a]bc.ts` and
+      // just matches nothing — verified directly against node:fs/promises's
+      // glob()) turned into a surfaced "Tool Glob failed: Invalid regular
+      // expression..." error instead.
+      it('compileCaseCheck does not throw on an out-of-order bracket range (fails closed instead)', () => {
+        for (const pattern of ['[z-a]x', '[9-0]bc', '[b-!a!x]', '[a[^-[]']) {
+          const check = compileCaseCheck(pattern)
+          assert.equal(caseCheckPasses(check, ['probe']), false, `pattern ${pattern} must fail closed, not throw`)
+        }
+      })
+
+      it('Glob with an out-of-order bracket range pattern returns "No matches", not a tool error', async () => {
+        writeFileSync(join(dir, 'xbc.ts'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '[z-a]bc.ts' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+    })
+
+    // #7898 round 4 — every prior round (1-3) found a NEW super-linear
+    // blow-up in this matcher (silent false negatives, a backtracking-regex
+    // ReDoS, an O(n^2) brace-alternative branch). This suite is the
+    // structural answer: a fail-closed complexity cap (globPatternComplexityReason,
+    // tool-transforms.js) bounding pattern length and brace-nesting depth
+    // BEFORE any of this code runs, plus a performance-guard table proving
+    // every construct the matcher accepts stays fast UNDER that cap. See the
+    // worst-case bound written above compileCaseCheck (byok-tool-executor.js)
+    // for the derivation.
+    //
+    // Every timing test below passes `{ timeout }` (node:test's own option,
+    // well above the 250ms assertion budget). Documented honestly, because
+    // this round's own mutation proof (revert the `alt`-branch batching from
+    // 65831e075, see the PR comment) measured its actual limit: `caseCheckPasses`
+    // is a purely SYNCHRONOUS, CPU-bound call that never yields to the event
+    // loop, so `{ timeout }` cannot PREEMPT it mid-call the way it can an
+    // async wait — a regression that is merely SLOW (not infinite) still runs
+    // to completion and fails via the `elapsedMs` assertion below, just later
+    // than the nominal timeout (the un-batched mutation made the two
+    // largest-N table rows take 76s and 19s respectively before failing that
+    // way, not via the 2000ms timeout firing). `{ timeout }` remains real
+    // protection against a regression that stops TERMINATING altogether
+    // (an actual infinite loop, or an async call that never resolves) —
+    // exactly the shape docs/false-safety-guards.md catalogues as a guard
+    // that hangs instead of failing (entry #7340) — it is just not a hard
+    // real-time bound on synchronous JS, which nothing short of a Worker
+    // thread with `terminate()` can provide.
+    describe('performance guard (#7898 round 4)', () => {
+      // Build a pattern segment with exactly `n` levels of CHAIN-nested
+      // braces: {a,{a,{a,...{a,z}...}}}. Each iteration adds exactly one
+      // '{' (and one matching '}'), so the real nesting depth is exactly n —
+      // unlike a "balanced binary tree" of alternatives, this shape needs
+      // only ~4 characters per extra level of depth, not ~2^depth, which is
+      // what makes it cheap for an attacker to type and is exactly the shape
+      // round 3's "self-limiting" dismissal of deep nesting did not cover.
+      function nestedBraceChain(n) {
+        let s = 'z'
+        for (let i = 0; i < n; i++) s = `{a,${s}}`
+        return s
+      }
+
+      const PERF_BUDGET_MS = 250
+
+      it('globPatternComplexityReason accepts an ordinary pattern', () => {
+        assert.equal(globPatternComplexityReason('packages/**/src/**/*.test.js'), null)
+        assert.equal(globPatternComplexityReason('{a,{b,{c,d}}}'), null, "the task's own nested-brace example")
+      })
+
+      // The cap is inclusive at exactly 32 levels — proves the guard does
+      // not accidentally reject the depth it claims to allow.
+      it('globPatternComplexityReason allows brace nesting up to and including the 32-level cap', () => {
+        assert.equal(globPatternComplexityReason(nestedBraceChain(32)), null)
+      })
+
+      it('globPatternComplexityReason rejects brace nesting one level past the cap', () => {
+        const reason = globPatternComplexityReason(nestedBraceChain(33))
+        assert.match(reason, /nesting deeper than 32/)
+      })
+
+      it('globPatternComplexityReason rejects a pattern longer than 2000 characters', () => {
+        assert.equal(globPatternComplexityReason('a'.repeat(2000)), null, 'exactly at the cap must pass')
+        const reason = globPatternComplexityReason('a'.repeat(2001))
+        assert.match(reason, /longer than 2000 characters/)
+      })
+
+      // Integration-level: the cap is checked in runGlob BEFORE the fs.glob
+      // walk or compileCaseCheck ever run, so an over-cap pattern is refused
+      // near-instantly with a clean tool error — not a hang, not a crash,
+      // and not the generic "Tool Glob failed: <exception message>" a
+      // RangeError would otherwise surface as (see the worst-case-bound
+      // comment's "what the time bound does not cover" section).
+      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 2000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: nestedBraceChain(40) },
+          ...ctx(),
+        })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /nesting deeper than 32/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 2000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '{*a,*b}'.repeat(300) }, // 2100 chars, well-formed but over the length cap
+          ...ctx(),
+        })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /longer than 2000 characters/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      // Nested braces AT the cap (32 levels, 129 chars) — the case this cap
+      // must NOT break: legitimate-if-unusual input stays usable, both when
+      // it matches and when it doesn't. Measured on this machine: compiling
+      // is ~0.1ms and each caseCheckPasses call ~0.02-0.14ms — the O(depth^2)
+      // parse cost this cap exists to bound is negligible at depth 32; it
+      // only becomes a problem once nothing stops depth from growing toward
+      // pattern-length/2 (measured 301.88ms at depth 4000 with no cap, in the
+      // COMPLEXITY BOUND comment above compileCaseCheck).
+      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 2000 }, () => {
+        const check = compileCaseCheck(nestedBraceChain(32))
+        const t0 = Date.now()
+        const noMatch = caseCheckPasses(check, ['nope'])
+        const match = caseCheckPasses(check, ['z'])
+        const elapsedMs = Date.now() - t0
+        assert.equal(noMatch, false)
+        assert.equal(match, true, 'the innermost literal "z" alternative must still match')
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `depth-32 nested braces must stay fast, took ${elapsedMs}ms`)
+      })
+
+      // Round 2's backtracking-regex shape (regression guard, table form) and
+      // three LARGER/different adversarial shapes than any prior round
+      // measured, all within the new length/depth caps: 200 consecutive `*`
+      // tokens, 100 chained (not nested) `{*a,*b}` groups — up from round
+      // 3's 30 — and 30 chained groups that mix a brace with a bracket class
+      // (`{*[a-z],?[0-9]}`), which round 3 did not exercise in combination.
+      // Each row is checked against a 5000-char real segment name, the same
+      // adversarial scale every prior round used. Measured on this machine
+      // (fixed, batched code — see each row's `measuredMs`), all comfortably
+      // under the 250ms budget; this round's mutation proof (revert
+      // 65831e075's batching, see the PR comment) reproduces round 3's
+      // original blowup on the two brace rows — 76.6s and 19.4s respectively
+      // — confirming the table is actually exercising the code the batching
+      // fix changed, not just re-measuring round 3's own existing test.
+      const longName = `${'a'.repeat(5000)}.ts`
+      const homogeneous = 'a'.repeat(5000)
+      const perfTable = [
+        {
+          label: 'round-2 backtracking-regex shape (regression)',
+          pattern: '*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b.ts',
+          name: longName,
+          expect: false,
+          measuredMs: '~0.03 (this branch never used the backtracking RegExp)',
+        },
+        {
+          label: '200 consecutive "*" tokens',
+          pattern: '*'.repeat(200),
+          name: longName,
+          expect: true,
+          measuredMs: '~21',
+        },
+        {
+          label: '100 chained "{*a,*b}" groups (round 3 was 30)',
+          pattern: '{*a,*b}'.repeat(100),
+          name: homogeneous,
+          expect: true,
+          measuredMs: '~41 (pre-batching mutation: ~76,600)',
+        },
+        {
+          label: '30 chained groups mixing a brace with a bracket class',
+          pattern: '{*[a-z],?[0-9]}'.repeat(30),
+          name: homogeneous,
+          expect: true,
+          measuredMs: '~22 (pre-batching mutation: ~19,400)',
+        },
+      ]
+      for (const { label, pattern, name, expect } of perfTable) {
+        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 2000 }, () => {
+          assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
+          const check = compileCaseCheck(pattern)
+          const t0 = Date.now()
+          const result = caseCheckPasses(check, [name])
+          const elapsedMs = Date.now() - t0
+          assert.equal(result, expect)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must stay under ${PERF_BUDGET_MS}ms, took ${elapsedMs}ms`)
+        })
+      }
+
+      // A 50-level path (D=50), alternating "**" with a brace-containing
+      // literal segment — stresses the PATH-level DP (caseCheckPasses' own
+      // dp[] array, aligning `**` against a real match) together with the
+      // per-segment brace matcher, rather than either alone. Synthetic
+      // realSegments (not a real 50-directory fixture) for the same reason
+      // round 2/3 used direct calls: fs.glob's own walk has an independent,
+      // out-of-scope backtracking issue (#7901) that would dominate any
+      // integration-level timing here. Measured on this machine: ~0.2ms.
+      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 2000 }, () => {
+        const patSegs = []
+        for (let i = 0; i < 25; i++) {
+          patSegs.push('**')
+          patSegs.push(`{seg${i}a,seg${i}b}`)
+        }
+        const pattern = patSegs.join('/')
+        assert.equal(globPatternComplexityReason(pattern), null)
+        const realSegs = []
+        for (let i = 0; i < 25; i++) {
+          realSegs.push(`filler${i}`) // absorbed by the preceding "**"
+          realSegs.push(`seg${i}a`) // must match the brace segment, case-sensitively
+        }
+        const check = compileCaseCheck(pattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, realSegs)
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, true)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `50-level path must stay fast, took ${elapsedMs}ms`)
+      })
+    })
+
+    // #7357 — two output-integrity defects the review panel on PR #7349 found.
+    describe('dangling symlinks and embedded newlines (#7357)', () => {
+      // Re-verification (not a new fix): #6923's component-wise resolver
+      // (ws-file-ops/common.js -> utils/componentwise-resolver.js), which
+      // `isWithin` already delegates to, resolves ENOENT on a dangling
+      // symlink's target by applying the remaining tail LEXICALLY rather than
+      // throwing — so the containment decision already lands on where the
+      // target STRING points, in or out of the workspace, never on a plain
+      // `realpath()` throw. These three tests PIN that already-correct
+      // behavior (measured green against origin/main; #6923 landed before
+      // #7357 was filed) rather than fix anything host-side.
+      it('lists a dangling symlink whose target is inside the workspace', { skip: process.platform === 'win32' }, async () => {
+        // symlinkSync needs a privilege the Windows CI runner lacks (#7288).
+        symlinkSync('./nonexistent-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'broken.ts')
+      })
+
+      it('withholds a dangling symlink whose absolute target string points outside the workspace', { skip: process.platform === 'win32' }, async () => {
+        symlinkSync('/definitely-nonexistent-outside-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('withholds a dangling symlink whose relative target escapes the workspace via ..', { skip: process.platform === 'win32' }, async () => {
+        symlinkSync('../../../etc/nonexistent-7357', join(dir, 'broken.ts'))
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('a match whose name contains a newline is dropped, never split into two entries', {
+        // Windows rejects control characters (including \n, 0x0A) in
+        // filenames via the Win32 API — there is nothing to reproduce there.
+        skip: process.platform === 'win32',
+      }, async () => {
+        writeFileSync(join(dir, 'keep.ts'), '1')
+        writeFileSync(join(dir, 'nl\nSECRET.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality, not a substring match: proves the newline-bearing
+        // name is ABSENT, not merely that "SECRET.ts" as a fabricated
+        // second line is absent (which a half-fixed split could still pass).
+        assert.equal(r.content, 'keep.ts')
+      })
     })
   })
 
