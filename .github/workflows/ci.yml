@@ -6,11 +6,72 @@ on:
   pull_request:
 
 # Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
-# commits, rebases) doesn't run the full matrix N times. Keying on the PR's
-# source branch groups a PR's runs together; on push to main `head_ref` is empty
-# so we fall back to the unique `run_id` — every main run gets its own group and
-# is therefore never cancelled OR queued behind another main run (each validates
-# a distinct merged commit and must complete).
+# commits, rebases) doesn't run the full matrix N times: `cancel-in-progress`
+# is scoped to `pull_request` events only, and the group for every other event
+# keys on `github.ref` instead of `github.run_id` (#7905).
+#
+# THE BUG THIS REPLACED: `group: ci-${{ github.head_ref || github.run_id }}`
+# with `cancel-in-progress: true` unconditionally. `github.head_ref` is
+# populated only for `pull_request`/`pull_request_target` (GitHub's contexts
+# reference), so on every push to `main` it fell back to `github.run_id` —
+# which GitHub documents as "a unique number for each workflow run within a
+# repository" (same reference), unique BY DEFINITION. Every push to `main`
+# therefore got its own group, so no queued `main` run could ever supersede an
+# older one. On 2026-09-24 an autonomous wave merged 7 PRs in ~3 hours: 7
+# independent `main` CI runs queued up behind the three long jobs pinned to the
+# single `chroxy-linux-winbox-01` runner (LONG-JOB PINNING, below); one PR's
+# jobs sat QUEUED 4+ hours with every other runner idle, and 6 of the 7 `main`
+# runs had to be cancelled by hand.
+#
+# THE FIX, per GitHub's documented concurrency semantics (Using jobs > Using
+# concurrency): with `cancel-in-progress` false (its default, and what every
+# NON-`pull_request` event — i.e. a `push` to `main` — now resolves to; a
+# `pull_request` event still resolves it to `true`, unchanged from before),
+# "any existing pending job or workflow in the same concurrency group will be
+# canceled and the new queued job or workflow will take its place," and by
+# default "at most one job or
+# workflow run can be pending" per group — a run already IN PROGRESS is left to
+# finish. `github.ref` for a `push` is "the branch or tag ref that was pushed"
+# (`refs/heads/main` here, since `on.push.branches` names only `main`) — the
+# SAME value across every push to that branch, unlike `run_id`. So a burst of
+# `main` pushes now settles to at most one running plus one pending run (the
+# latest), and every commit still gets covered by either the run validating it
+# directly or a later run on top of it — see "WHAT A SKIPPED INTERMEDIATE
+# COMMIT LOSES" below. `pull_request` behaviour is unchanged: `head_ref` (the
+# PR's source branch) is always populated there, so the `|| github.ref`
+# fallback never fires for PR events, and `cancel-in-progress` still cancels a
+# PR's own in-progress run exactly as before.
+#
+# WHAT A SKIPPED INTERMEDIATE COMMIT LOSES, stated so it reads as an accepted
+# cost rather than an unexamined one. A commit whose `main`-push run gets
+# cancelled as PENDING (superseded by a later push in the same burst) gets no
+# dedicated CI run of its own: no per-commit coverage artifact, no chance to
+# bisect a later red build to that exact SHA without a manual re-run. Nothing
+# in this repo currently depends on every `main` commit having run: there is no
+# `workflow_run` consumer anywhere in `.github/workflows/` (grepped at fix
+# time), no coverage badge, and no deploy gated on push-to-main CI (`release.yml`
+# triggers only on a version TAG push or manual dispatch, both untouched by this
+# group). The one thing that DOES need `main`-push CI to run periodically — the
+# `dashboard-smoke` job's hosted npm-cache producer role, see its own comment —
+# still gets it: the run already IN PROGRESS when a burst starts, and the
+# newest PENDING one once it finishes, both execute in full. Only jobs strictly
+# BETWEEN those two SHAs in a fast burst are skipped, and this repo squash-merges
+# (CLAUDE.md), so a "skipped" commit was already `main`'s HEAD for at most the
+# minutes until the next merge landed — the intermediate SHA was never itself
+# the thing anyone needed to bisect from except immediately after that merge.
+#
+# CI.YML'S TRIGGER SET IS EXACTLY {push, pull_request} (checked above at
+# `on:`), and that is load-bearing for the group expression's safety, not
+# incidental: `head_ref` is empty for every event type EXCEPT `pull_request`/
+# `pull_request_target`, so a third trigger — `workflow_dispatch`, `merge_group`,
+# `schedule` — would also fall through to `|| github.ref` and, on `main`, land
+# in the SAME `ci-refs/heads/main` group as an ordinary push. That is not
+# necessarily wrong (a manual re-run of `main` coalescing with a concurrent push
+# is arguably the right behaviour), but this fix never evaluated it — adding a
+# third trigger type needs this comment revisited first.
+# `packages/server/tests/ci-main-push-concurrency.test.js` pins the trigger set
+# and fails loudly the day a third one is added, rather than silently sharing a
+# group.
 #
 # LONG-JOB PINNING (#7471): Server Tests, Dashboard Tests and Scripts Tests
 # run on `runner-target.outputs.longrunner` instead of `outputs.runner`. Jobs
@@ -50,8 +111,8 @@ on:
 # longrunner output + its pin test
 # (packages/server/tests/ci-long-job-runner-pinning.test.js).
 concurrency:
-  group: ci-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
