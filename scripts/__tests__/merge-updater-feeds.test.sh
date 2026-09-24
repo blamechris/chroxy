@@ -44,7 +44,7 @@ MERGE="$REPO_ROOT/scripts/merge-updater-feeds.mjs"
 # one. Every one of them is TRUE — the output really does lack the strings —
 # and the count stays 19 either way, so the floor's message is now always
 # accurate about which thing broke.
-EXPECTED_CASES=19
+EXPECTED_CASES=23
 
 PASS=0
 FAIL=0
@@ -77,11 +77,31 @@ assert_eq() {
   fi
 }
 
+# Both helpers below test membership with a here-string (`<<<`), never a pipe
+# (`producer | grep -q`). This harness runs under `set -uo pipefail` (line
+# 15). grep -q exits the instant it finds a match, without draining the rest
+# of its stdin; if the producer (`printf`) is still writing when that
+# happens, the kernel delivers SIGPIPE to it, and pipefail promotes that
+# broken-pipe write error into the whole PIPELINE's exit status — even though
+# grep itself matched. That is not hypothetical: PR #7892's CI run failed
+# exactly this way —
+#   scripts/__tests__/merge-updater-feeds.test.sh: line 84: printf: write
+#   error: Broken pipe
+#     FAIL: preserves top-level version (expected to find: "version":
+#     "v0.9.13")
+#       in: { "version": "v0.9.13", ... }
+# — the needle WAS in the haystack; assert_contains reported FAIL anyway. The
+# same corruption makes assert_not_contains flake GREEN when the forbidden
+# text IS present (fail-open — success and not-checking become the same
+# observable outcome, docs/false-safety-guards.md's defining shape). A
+# here-string hands grep the data directly with no separate writer process,
+# so there's nothing for a SIGPIPE to land on. See
+# test_grep_helpers_survive_pipefail_sigpipe below for the reproduction.
 assert_contains() {
   local name="$1"
   local haystack="$2"
   local needle="$3"
-  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  if grep -qF -- "$needle" <<<"$haystack"; then
     PASS=$((PASS + 1))
     echo "  PASS: $name"
   else
@@ -96,7 +116,7 @@ assert_not_contains() {
   local name="$1"
   local haystack="$2"
   local needle="$3"
-  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  if grep -qF -- "$needle" <<<"$haystack"; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("$name")
     echo "  FAIL: $name (expected NOT to find: $needle)"
@@ -308,6 +328,75 @@ JSON
   rm -rf "$tmp"
 }
 
+# ----------------------------------------------------------------------------
+# Self-test: assert_contains / assert_not_contains must survive SIGPIPE under
+# `set -o pipefail` (#7892 — see the comment above assert_contains).
+#
+# A single big `printf '%s' "$var" | grep -q` does not reliably reproduce the
+# race on macOS — measured: XNU's pipe write() auto-grows to hold one atomic
+# write whole, clean past 50MB in a single call, on this host. The race needs
+# the producer to still be writing in SEPARATE syscalls when grep -q exits —
+# the same shape real command output takes (built up incrementally) — so the
+# haystack below is built the same way: many small writes, the needle in the
+# very first one, and a total size well past either platform's fixed pipe
+# buffer (16KB macOS / 64KB+ Linux). Measured 10/10 reproductions at ~394KB.
+# ----------------------------------------------------------------------------
+test_grep_helpers_survive_pipefail_sigpipe() {
+  echo "TEST: assert_contains/assert_not_contains survive SIGPIPE under pipefail (#7892)"
+
+  local needle="SIGPIPE-SELFTEST-NEEDLE-AT-START"
+  local pad_line="pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+
+  emit_sigpipe_selftest_haystack() {
+    printf '%s\n' "$needle"
+    local i=0
+    while [ "$i" -lt 2000 ]; do
+      printf '%s\n' "$pad_line"
+      i=$((i + 1))
+    done
+  }
+
+  # --- Prove the OLD (piped) shape really was broken. Kept ONLY here as
+  # evidence — assert_contains/assert_not_contains above no longer pipe a
+  # variable into grep.
+  if emit_sigpipe_selftest_haystack | grep -qF -- "$needle" 2>/dev/null; then
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("grep_helpers_survive_pipefail_sigpipe: old piped form unexpectedly found the needle cleanly — could not reproduce SIGPIPE on this host/size")
+    echo "  FAIL: old piped grep -q form did not reproduce the SIGPIPE corruption"
+  else
+    PASS=$((PASS + 1))
+    echo "  PASS: old piped grep -q form IS corrupted by SIGPIPE under pipefail (needle WAS present; reported as not found) — reproduces PR #7892's failure"
+  fi
+
+  # --- Prove the FIXED helpers get the exact same input right.
+  local haystack
+  haystack="$(emit_sigpipe_selftest_haystack)"
+  assert_contains "grep_helpers_survive_pipefail_sigpipe: fixed assert_contains finds a needle at the start of a >128KB haystack" "$haystack" "$needle"
+  assert_not_contains "grep_helpers_survive_pipefail_sigpipe: fixed assert_not_contains correctly reports a genuinely absent needle" "$haystack" "NEEDLE-THAT-IS-NOT-PRESENT-XYZ"
+}
+
+# ----------------------------------------------------------------------------
+# Static guard: no `producer | grep -q` pattern (the shape this file used to
+# have at assert_contains/assert_not_contains) may remain in this file's CODE.
+# Comment lines (this file quotes the buggy shape as documentation above) are
+# excluded so the guard cannot flag its own prose.
+# ----------------------------------------------------------------------------
+test_no_unsafe_grep_pipe_pattern_remains() {
+  echo "TEST: no unsafe producer-piped-into-grep pattern remains in this file"
+  local self="$REPO_ROOT/scripts/__tests__/merge-updater-feeds.test.sh"
+  local hits
+  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\| grep -q' || true)"
+  if [ -n "$hits" ]; then
+    FAIL=$((FAIL + 1))
+    FAILED_TESTS+=("no_unsafe_grep_pipe_pattern_remains")
+    echo "  FAIL: found unsafe pipe-into-grep pattern(s):"
+    echo "$hits"
+  else
+    PASS=$((PASS + 1))
+    echo "  PASS: no unsafe pipe-into-grep pattern remains"
+  fi
+}
+
 # Run all tests.
 test_merges_macos_and_windows
 test_writes_to_output_file
@@ -315,6 +404,8 @@ test_skips_missing_inputs
 test_fails_without_inputs
 test_fails_when_all_inputs_missing
 test_later_input_overrides_same_platform
+test_grep_helpers_survive_pipefail_sigpipe
+test_no_unsafe_grep_pipe_pattern_remains
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
