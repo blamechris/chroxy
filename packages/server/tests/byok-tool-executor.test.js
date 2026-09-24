@@ -1,11 +1,11 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
-import { glob as fsGlob } from 'node:fs/promises'
+import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -1065,6 +1065,54 @@ describe('executeBuiltinTool', () => {
       })
     })
 
+    // #7899 — Node's `fs.glob` hard-codes case-INSENSITIVE candidate
+    // generation on macOS/Windows, and for a NEGATED bracket class
+    // (`[^X]`/`[!x]`) that folding excludes BOTH cases of the named character
+    // from the candidate set it generates — not just the named one — so
+    // `[^X]*.ts` against a real `xyz.ts` produced no candidates from `fs.glob`
+    // itself, and #7898's case-check post-filter could never recover a match
+    // `fs.glob` never produced in the first place. #7901 removes `fs.glob`
+    // from the host path entirely: `walkGlob` tests every real directory
+    // entry directly against `segmentMatches` (case-sensitive by
+    // construction, no folding of any kind), so there is no separate
+    // candidate-generation step left to disagree with the case check. These
+    // pin the issue's own acceptance criteria — a real file is created on
+    // ONE side of the case distinction at a time because this dev machine's
+    // filesystem (like the CI macOS runner) is case-INSENSITIVE and
+    // case-PRESERVING: `xyz.ts` and `Xyz.ts` cannot coexist as two files, only
+    // as two possible spellings of the same inode.
+    describe('negated bracket class case (#7899)', () => {
+      it('[^X]*.ts matches a real lowercase xyz.ts; [!x]*.ts excludes it', async () => {
+        writeFileSync(join(dir, 'xyz.ts'), '1')
+        const included = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[^X]*.ts' }, ...ctx(),
+        })
+        assert.equal(included.isError, false)
+        assert.equal(included.content, 'xyz.ts', '[^X] must not fold away the real lowercase file')
+
+        const excluded = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[!x]*.ts' }, ...ctx(),
+        })
+        assert.equal(excluded.isError, false)
+        assert.match(excluded.content, /No matches/, '[!x] must exclude the real lowercase-x file')
+      })
+
+      it('[!x]*.ts matches a real uppercase Xyz.ts; [^X]*.ts excludes it', async () => {
+        writeFileSync(join(dir, 'Xyz.ts'), '1')
+        const included = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[!x]*.ts' }, ...ctx(),
+        })
+        assert.equal(included.isError, false)
+        assert.equal(included.content, 'Xyz.ts', '[!x] must not fold away the real uppercase file')
+
+        const excluded = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '[^X]*.ts' }, ...ctx(),
+        })
+        assert.equal(excluded.isError, false)
+        assert.match(excluded.content, /No matches/, '[^X] must exclude the real uppercase-X file')
+      })
+    })
+
     // #7898 round 4 — every prior round (1-3) found a NEW super-linear
     // blow-up in this matcher (silent false negatives, a backtracking-regex
     // ReDoS, an O(n^2) brace-alternative branch). This suite is the
@@ -1076,8 +1124,8 @@ describe('executeBuiltinTool', () => {
     // for the derivation.
     //
     // Every timing test below passes `{ timeout }` (node:test's own option,
-    // well above the 2000ms assertion budget). Documented honestly, because
-    // this round's own mutation proof (revert the `alt`-branch batching from
+    // well above the assertion budget). Documented honestly, because this
+    // round's own mutation proof (revert the `alt`-branch batching from
     // 65831e075, see the PR comment) measured its actual limit: `caseCheckPasses`
     // is a purely SYNCHRONOUS, CPU-bound call that never yields to the event
     // loop, so `{ timeout }` cannot PREEMPT it mid-call the way it can an
@@ -1085,13 +1133,26 @@ describe('executeBuiltinTool', () => {
     // to completion and fails via the `elapsedMs` assertion below, just later
     // than the nominal timeout (the un-batched mutation made the two
     // largest-N table rows take 76s and 19s respectively before failing that
-    // way, not via the 2000ms timeout firing). `{ timeout }` remains real
-    // protection against a regression that stops TERMINATING altogether
-    // (an actual infinite loop, or an async call that never resolves) —
-    // exactly the shape docs/false-safety-guards.md catalogues as a guard
-    // that hangs instead of failing (entry #7340) — it is just not a hard
-    // real-time bound on synchronous JS, which nothing short of a Worker
-    // thread with `terminate()` can provide.
+    // way, not via the timeout firing). `{ timeout }` remains real protection
+    // against a regression that stops TERMINATING altogether (an actual
+    // infinite loop, or an async call that never resolves) — exactly the
+    // shape docs/false-safety-guards.md catalogues as a guard that hangs
+    // instead of failing (entry #7340) — it is just not a hard real-time
+    // bound on synchronous JS, which nothing short of a Worker thread with
+    // `terminate()` can provide.
+    //
+    // #7910 review round 2 — the original 250ms budget FLAKED on a loaded CI
+    // runner: PR #7909's Server Tests run measured 306ms for the "100 chained
+    // groups" row (a shared runner, contended with other jobs) against
+    // batched code that is not regressed — a false failure, not a caught
+    // regression. The regressions this suite exists to catch cost SECONDS
+    // (12.96s / 19.4s / 76.6s — see the rows below and 65831e075's own commit
+    // message), three orders of magnitude above any plausible loaded-runner
+    // reading, so the budget is raised to 2000ms: still tight enough to fail
+    // fast and clearly on an actual regression, wide enough that no realistic
+    // CI contention should ever cross it for genuinely-fast code. `{ timeout
+    // }` is raised in step (to 5000ms) so it stays a backstop behind the
+    // `elapsedMs` assertion, not a race with it.
     describe('performance guard (#7898 round 4)', () => {
       // Build a pattern segment with exactly `n` levels of CHAIN-nested
       // braces: {a,{a,{a,...{a,z}...}}}. Each iteration adds exactly one
@@ -1106,12 +1167,6 @@ describe('executeBuiltinTool', () => {
         return s
       }
 
-      // 2000ms, not 250: on the loaded self-hosted CI runner the fixed code measured
-      // up to 712ms for a row that takes ~41ms locally (a ~17x slowdown), which
-      // made the 250ms budget fail unrelated PRs. Every regression this guard
-      // exists to catch is ~10x ABOVE 2000ms (backtracking ReDoS 5.9s at 32 chars;
-      // un-batched brace branch 19.4s / 76.6s), so the guard still goes red on
-      // all of them.
       const PERF_BUDGET_MS = 2000
 
       it('globPatternComplexityReason accepts an ordinary pattern', () => {
@@ -1142,7 +1197,7 @@ describe('executeBuiltinTool', () => {
       // and not the generic "Tool Glob failed: <exception message>" a
       // RangeError would otherwise surface as (see the worst-case-bound
       // comment's "what the time bound does not cover" section).
-      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 10000 }, async () => {
+      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 5000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1156,7 +1211,7 @@ describe('executeBuiltinTool', () => {
         assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
       })
 
-      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 10000 }, async () => {
+      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 5000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1178,7 +1233,7 @@ describe('executeBuiltinTool', () => {
       // only becomes a problem once nothing stops depth from growing toward
       // pattern-length/2 (measured 301.88ms at depth 4000 with no cap, in the
       // COMPLEXITY BOUND comment above compileCaseCheck).
-      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 10000 }, () => {
+      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 5000 }, () => {
         const check = compileCaseCheck(nestedBraceChain(32))
         const t0 = Date.now()
         const noMatch = caseCheckPasses(check, ['nope'])
@@ -1236,7 +1291,7 @@ describe('executeBuiltinTool', () => {
         },
       ]
       for (const { label, pattern, name, expect } of perfTable) {
-        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 10000 }, () => {
+        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 5000 }, () => {
           assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
           const check = compileCaseCheck(pattern)
           const t0 = Date.now()
@@ -1247,15 +1302,98 @@ describe('executeBuiltinTool', () => {
         })
       }
 
+      // #7910 review round 2 — `caseCheckPasses` is DEAD CODE in production:
+      // `runGlob` stopped calling it entirely when `walkGlob` (#7901) replaced
+      // `fs.glob` on the host path — it survives only as a directly-tested
+      // export (see this file's import and the export comment in
+      // byok-tool-executor.js). Every row above therefore proves the SHARED
+      // per-segment matcher (`segmentMatches`/`advanceToken`) stays fast when
+      // called through `caseCheckPasses`'s path-level wrapper, but nothing
+      // above exercises the function `walkGlob` — the code that actually
+      // ships — calls itself, once per REAL directory entry `opendir` reads.
+      // This table closes that gap DIRECTLY: `segmentMatches` at the SAME
+      // full adversarial scale (5000 chars) the direct-call table above
+      // already uses.
+      //
+      // An earlier version of this test went through `executeBuiltinTool`
+      // against a real on-disk file instead, at a filesystem-safe 250-char
+      // name (a real filename cannot be 5000+ bytes — most filesystems' NAME_MAX
+      // is 255; 65831e075's own commit message independently settled on 255
+      // bytes as "a filesystem-realistic name" for the same reason). That
+      // version did NOT catch the mutation below: reverting the batching made
+      // the 5000-char direct call take 69.5s, but the SAME mutation made the
+      // 250-char on-disk version take only ~120ms — comfortably inside even a
+      // strict budget, and nowhere near the ~2000ms this suite settled on
+      // after the CI-flakiness fix. A guard that cannot fail against the
+      // defect it names is exactly docs/false-safety-guards.md's catalogue —
+      // caught here before landing by running the mutation proof against it,
+      // not after. `segmentMatches` sidesteps the whole problem: it takes a
+      // plain string, not a file, so it is tested at the SAME scale that
+      // actually demonstrates the regression.
+      for (const { label, pattern, name, expect } of perfTable) {
+        it(`the live matcher (segmentMatches) stays fast: ${label} (direct)`, { timeout: 5000 }, () => {
+          assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
+          const [matcher] = compileCaseCheck(pattern).matchers
+          const t0 = Date.now()
+          const result = segmentMatches(matcher, name)
+          const elapsedMs = Date.now() - t0
+          assert.equal(result, expect)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must stay under ${PERF_BUDGET_MS}ms through segmentMatches (the function walkGlob actually calls), took ${elapsedMs}ms`)
+        })
+      }
+
+      // Correctness/sanity companion to the table above, through the REAL
+      // dispatch (`executeBuiltinTool` → `walkGlob` → `opendir`) rather than a
+      // direct call — proves the wiring (root resolution, confinement, the
+      // deadline race) does not somehow break these patterns end to end, and
+      // completes without hanging. NOT a complexity-regression proof (see the
+      // comment above the table): at a filesystem-safe 250-char name the
+      // absolute-time gap between correct and quadratically-regressed code is
+      // too small to assert reliably, so this uses the same generous budget
+      // purely as a non-hang sanity check, not the primary guard.
+      for (const { label, pattern, name, expect } of perfTable) {
+        if (label.startsWith('round-2 ')) continue // already has a dedicated integration test below
+        it(`the real Glob dispatch matches correctly and does not hang: ${label} (integration, correctness only)`, { timeout: 5000 }, async () => {
+          // Scale the SAME adversarial name down to 250 chars (see above),
+          // preserving whether it carries the `.ts` extension: the
+          // brace-chain rows only match a string that itself ENDS in 'a'/'b'
+          // (`name: homogeneous`, no extension); the star-repeat row matches
+          // anything (`name: longName`, `.ts` extension) since a bare `*`
+          // chain is extension-agnostic. Getting this wrong silently flips
+          // `expect` for the affected rows rather than erroring — verified
+          // directly against the pattern's own semantics before relying on it.
+          const realName = name.endsWith('.ts') ? `${'a'.repeat(247)}.ts` : 'a'.repeat(250)
+          writeFileSync(join(dir, realName), '1')
+          const t0 = Date.now()
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+          const elapsedMs = Date.now() - t0
+          assert.equal(r.isError, false)
+          assert.equal(r.content.includes(realName), expect, `"${label}" must ${expect ? '' : 'not '}match the real file through the live walk`)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must not hang through the real Glob dispatch, took ${elapsedMs}ms`)
+        })
+      }
+
       // A 50-level path (D=50), alternating "**" with a brace-containing
-      // literal segment — stresses the PATH-level DP (caseCheckPasses' own
-      // dp[] array, aligning `**` against a real match) together with the
+      // literal segment — stresses the PATH-level DP (`caseCheckPasses`'s own
+      // `dp[]` array, aligning `**` against a real match) together with the
       // per-segment brace matcher, rather than either alone. Synthetic
-      // realSegments (not a real 50-directory fixture) for the same reason
-      // round 2/3 used direct calls: fs.glob's own walk has an independent,
-      // out-of-scope backtracking issue (#7901) that would dominate any
-      // integration-level timing here. Measured on this machine: ~0.2ms.
-      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 10000 }, () => {
+      // realSegments, not a real 50-directory fixture — building and walking
+      // one adds real filesystem I/O this unit-level test does not need to
+      // pin the DP's own complexity bound. Measured on this machine: ~0.2ms.
+      //
+      // #7910 review round 2 — like the rest of this describe block,
+      // `caseCheckPasses`'s path-level `dp[]` array is dead code in
+      // production (see the export comment in byok-tool-executor.js);
+      // `walkGlob`'s OWN incremental version of the same `**`-alignment
+      // (`active`/`next`/`closeGlobstars`) runs once per REAL directory
+      // level as it descends, not once per synthetic call — a live-path
+      // equivalent of THIS specific test would need an actual 25-level-deep
+      // directory tree, which the per-segment `segmentMatches` guard above
+      // did not (a plain string is not filesystem-bound the way a directory
+      // depth is). Not built here — out of scope for this round's fix, which
+      // is the per-segment complexity CI flaked on — but the same gap in
+      // principle, noted rather than silently left implicit.
+      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 5000 }, () => {
         const patSegs = []
         for (let i = 0; i < 25; i++) {
           patSegs.push('**')
@@ -1274,6 +1412,683 @@ describe('executeBuiltinTool', () => {
         const elapsedMs = Date.now() - t0
         assert.equal(result, true)
         assert.ok(elapsedMs < PERF_BUDGET_MS, `50-level path must stay fast, took ${elapsedMs}ms`)
+      })
+    })
+
+    // #7901 / #7356 — the self-implemented `walkGlob` (byok-tool-executor.js)
+    // that replaced `fs.glob` on the host path entirely. Build helpers shared
+    // by the tests below.
+    describe('self-implemented walk (#7901 / #7356)', () => {
+      function buildBigTree(base, dirs, filesPerDir) {
+        for (let d = 0; d < dirs; d++) {
+          const sub = join(base, `d${String(d).padStart(3, '0')}`)
+          mkdirSync(sub, { recursive: true })
+          for (let i = 0; i < filesPerDir; i++) {
+            writeFileSync(join(sub, `f${String(i).padStart(4, '0')}.ts`), '')
+          }
+        }
+      }
+
+      // #7901's own repro, run through the FULL executeBuiltinTool dispatch —
+      // not possible before this fix (see the comment on the `export` at the
+      // bottom of byok-tool-executor.js): `runGlob`'s walk used to call
+      // Node's OWN `fs.glob`, whose internal matcher backtracks
+      // catastrophically on this pattern shape independently of
+      // `compileCaseCheck`'s DP (#7898 already made THAT side safe) —
+      // measured directly against `node:fs/promises`'s `glob()` alone, no
+      // chroxy code involved: ~8.7s for this exact (pattern, 40-char
+      // near-miss name) pair on this machine, and the issue's own repro
+      // measured 87s. `walkGlob` never calls `fs.glob` at all, so this
+      // pathological pattern now costs exactly what `compileCaseCheck`'s own
+      // direct-call perf-guard tests already proved it costs: milliseconds.
+      it('the fs.glob-backtracking pattern returns fast through the real Glob dispatch', { timeout: 15_000 }, async () => {
+        const evilPattern = '*a*a*a*a*a*a*a*a*a*a*b.ts'
+        const nearMiss = 'a'.repeat(37) + '.ts' // 40 chars, no trailing "b" -- the issue's own repro shape
+        writeFileSync(join(dir, nearMiss), '1')
+
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: evilPattern }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+        assert.ok(elapsedMs < 3000, `must return fast, took ${elapsedMs}ms (pre-#7901 this took ~8.7s on this machine)`)
+      })
+
+      // #7901's second acceptance bullet: the event loop must keep turning
+      // WHILE a large walk is in flight — a concurrent timer probe firing on
+      // schedule is the direct, daemon-relevant observable (`fs.glob`'s
+      // synchronous internal matching is what froze every session, every WS
+      // client and the tunnel health checks for the duration). A moderately
+      // adversarial-but-ordinary pattern shape gives it several probe ticks
+      // to observe without needing an unrealistically huge fixture.
+      it('the event loop keeps turning during a large walk (concurrent timer probe)', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+
+        const gaps = []
+        let last = Date.now()
+        const probe = setInterval(() => {
+          const now = Date.now()
+          gaps.push(now - last)
+          last = now
+        }, 5)
+
+        let r
+        try {
+          r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        } finally {
+          clearInterval(probe)
+        }
+
+        assert.equal(r.isError, false)
+        assert.ok(
+          gaps.length >= 4,
+          `probe must have fired several times during the walk (fired ${gaps.length}) — the walk finished too fast to prove anything; enlarge the fixture`,
+        )
+        const maxGap = Math.max(...gaps)
+        assert.ok(
+          maxGap < 200,
+          `event loop must keep turning throughout the walk, max observed gap between probe ticks was ${maxGap}ms (probe fired ${gaps.length} times, nominal interval 5ms)`,
+        )
+      })
+
+      // #7356 — the TOOL CALL returns promptly on abort, proven on a large
+      // tree, by comparing the ABORTED call's duration against an UNABORTED
+      // control over the identical tree. NOTE what this test does and does
+      // NOT prove: `runGlob`'s deadline/abort race
+      // (`Promise.race([collect, deadlineReached])`) resolves via
+      // `deadlineReached` — a timer/abort callback independent of whether the
+      // WALK itself ever notices `state.stop` — so this proves the CALLER
+      // gets its answer back quickly, but not that the walk stops generating
+      // filesystem work afterward. That second property — the actual #7356
+      // defect (a 200,000-file/9,111-dir tree left orphans running up to 15s
+      // after the tool returned pre-fix, wasting up to 2.3GB RSS and 63x
+      // request-latency inflation) — is proven by the next test, which calls
+      // `walkGlob` directly and times its OWN promise.
+      it('an aborted walk stops promptly on a large tree, far short of a full walk', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+
+        // POSITIVE CONTROL first: how long does an uninterrupted walk of this
+        // exact tree take? Without this, "the aborted call was fast" could
+        // just mean the whole tree walks fast anyway, proving nothing about
+        // cancellation.
+        const t0 = Date.now()
+        const full = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        const fullMs = Date.now() - t0
+        assert.equal(full.isError, false)
+
+        const controller = new AbortController()
+        setTimeout(() => controller.abort(), 2)
+        const t1 = Date.now()
+        const aborted = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '**/*.ts' }, signal: controller.signal, ...ctx(),
+        })
+        const abortedMs = Date.now() - t1
+
+        assert.equal(aborted.isError, true, 'an aborted walk must not report success')
+        assert.match(aborted.content, /interrupted/i)
+        assert.ok(
+          abortedMs < Math.max(500, fullMs / 2),
+          `aborted call took ${abortedMs}ms, a full walk of the same tree took ${fullMs}ms — cancellation must resolve well short of a full walk`,
+        )
+      })
+
+      // #7356 — THE test for the actual defect: does `walkGlob`'s own promise
+      // stop generating filesystem work once `state.stop` is set, or does it
+      // keep walking in the background regardless of what the caller's race
+      // already decided? Calls `walkGlob` directly (exported for exactly this
+      // purpose — see its export comment) rather than through
+      // `executeBuiltinTool`, and times from the MOMENT `state.stop` is set
+      // (not from call start), so the measurement is of the walk's own
+      // response latency, not of an unrelated setTimeout's scheduling slop.
+      it('walkGlob itself stops within a bounded time of state.stop being set (direct)', { timeout: 15_000 }, async () => {
+        buildBigTree(dir, 15, 1000) // 15,000 files
+        const { matchers } = compileCaseCheck('**/*.ts')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        const walkPromise = walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 2_000_000,
+        })
+
+        let stopSetAt = null
+        setTimeout(() => { state.stop = 'interrupted'; stopSetAt = Date.now() }, 2)
+
+        await walkPromise
+        assert.ok(stopSetAt !== null, 'the walk must not have already finished before state.stop was even set')
+        const respondedInMs = Date.now() - stopSetAt
+        assert.ok(
+          respondedInMs < 500,
+          `walkGlob must stop within a bounded time of state.stop being set, took ${respondedInMs}ms (tree: 15,000 files)`,
+        )
+        // The walk really was interrupted mid-flight, not merely finished on
+        // its own at roughly the same moment: far fewer than 15,000 matches
+        // were collected.
+        assert.ok(
+          results.length < 15_000,
+          `an interrupted walk over 15,000 files collected ${results.length} — it should have stopped short, not completed`,
+        )
+      })
+
+      // #7910 review (security, TOCTOU) — `dirent.isDirectory()`/
+      // `isSymbolicLink()` reflect the type Node captured when this entry's
+      // underlying readdir(2) BATCH was read, which can be stale by the time
+      // the walk actually opens it: this walk is strictly sequential within
+      // a directory, so a sibling late in a large listing is reached only
+      // after every earlier one has been processed. Chroxy dispatches every
+      // tool block a model approves in ONE turn CONCURRENTLY
+      // (byok-session.js's Promise.all fan-out, #7356), so a Bash call
+      // approved in the SAME turn as this Glob call can delete a plain
+      // directory and recreate it as a symlink to outside the workspace
+      // WHILE the walk is still busy elsewhere in the tree. Proven directly
+      // against the unpatched walk: an unpatched `walkGlob` followed exactly
+      // this swap straight into the attacker's target and returned matches
+      // from OUTSIDE the workspace, reported under a workspace-looking path.
+      it('re-verifies a plain-directory entry immediately before opening it, closing a symlink-swap race (security #7910 review)', { timeout: 15_000 }, async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          // Enough siblings that the walk needs real time to reach the swap
+          // target, giving the concurrent racer room to land before the walk
+          // gets there — independent of Node's exact opendir() batch size.
+          for (let i = 0; i < 60; i++) mkdirSync(join(dir, 'subtree', `sib_${i}`))
+          const targetAbs = join(dir, 'subtree', 'zzz_target')
+          mkdirSync(targetAbs)
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          const walkPromise = walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+          })
+          const racer = (async () => {
+            while (state.visited === 0) await new Promise((r) => setImmediate(r))
+            await rmAsync(targetAbs, { recursive: true, force: true })
+            await symlinkAsync(outer, targetAbs)
+          })()
+          await Promise.all([walkPromise, racer])
+
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a directory swapped for an out-of-workspace symlink mid-walk must never be traversed',
+          )
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review round 2 — the test above is a REAL concurrent race: the
+      // 60 siblings buy the racer time, but nothing PROVES the swap landed in
+      // the specific window this fix targets (between the pre-open check and
+      // the `opendir` call) rather than earlier, where even the round-1 fix
+      // already caught it. A race that happens to pass is not evidence the
+      // narrow window is closed — it is evidence SOME window is. `walkGlob`'s
+      // `__testDescendSeam` hook is awaited at that EXACT point (see
+      // `openVerifiedDirForDescend`'s doc), so this test performs the swap
+      // deterministically inside the window itself rather than hoping to win
+      // a real race — the honest way to test a fix whose whole point is a
+      // window measured in microseconds.
+      it('closes the swap even when it lands in the EXACT window between the pre-open check and opendir (security #7910 review round 2, deterministic)', async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-seam-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          const targetAbs = join(dir, 'subtree', 'target')
+          mkdirSync(targetAbs)
+          writeFileSync(join(targetAbs, 'innocent.ts'), '1') // would be a match if not swapped
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          let seamFired = false
+          await walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+            __testDescendSeam: async (target) => {
+              if (target !== targetAbs) return // only the one directory under test
+              seamFired = true
+              await rmAsync(targetAbs, { recursive: true, force: true })
+              await symlinkAsync(outer, targetAbs)
+            },
+          })
+
+          assert.ok(seamFired, 'the seam must have fired for the swap to have been attempted at all')
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a swap landing in the exact check-to-open window must still never be traversed',
+          )
+          assert.equal(
+            results.some((r) => r.includes('innocent.ts')),
+            false,
+            'the directory was withheld entirely (swapped-away before opendir even ran) — its original contents are gone from disk, not merely filtered',
+          )
+          // Positive control: the walk did not just silently stop dead —
+          // "subtree" itself (which the swap never touched) is still a match.
+          assert.ok(results.includes('subtree'), 'the walk must still find unrelated matches, not fail closed on everything')
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review round 3 — round 2's own fix (the test above) verified
+      // the PATH twice (a pre-open lstat, then a post-open lstat) but never
+      // the object `opendir` actually opened. That is an ABA, not a
+      // check-then-use: swap `target` to a symlink pointing OUTSIDE the
+      // workspace before the open (so `opendir` follows it), then swap the
+      // real directory BACK before the post-open lstat runs — both lstats
+      // see the legitimate directory, so round 2's dev/ino comparison
+      // reports a match despite the `Dir` it is vouching for being bound to
+      // the outside target the whole time. `openVerifiedDirForDescend` now
+      // opens via `openNoFollow` (O_NOFOLLOW enforced atomically by the
+      // kernel on POSIX) and verifies identity via `fstat` on the OPENED
+      // HANDLE itself, never a fresh path lookup — this drives exactly the
+      // swap-then-restore timing above via the seam's two phases.
+      it('closes the ABA where a swap-then-restore straddles the open, not just check-then-use (security #7910 review round 3)', async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-aba-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          const targetAbs = join(dir, 'subtree', 'target')
+          mkdirSync(targetAbs)
+          writeFileSync(join(targetAbs, 'innocent.ts'), '1')
+
+          // The real directory is moved ASIDE (never deleted) so it can be
+          // moved BACK with its inode intact — an identity check comparing
+          // dev/ino (as both the mutant below and the fix's own pre-open
+          // `lstat` do) must see the literal SAME object restored, not a
+          // freshly created directory that merely looks the same but holds
+          // a different inode.
+          const realAside = join(dir, 'subtree', 'target-real-aside')
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          let beforeOpenFired = false
+          let afterOpenFired = false
+          await walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+            __testDescendSeam: async (target, phase) => {
+              if (target !== targetAbs) return
+              if (phase === 'before-open') {
+                beforeOpenFired = true
+                // Half 1 of the ABA: move the real directory aside (its
+                // inode is untouched) and plant a symlink to the outside
+                // directory at the original path, right before the open.
+                await renameAsync(targetAbs, realAside)
+                await symlinkAsync(outer, targetAbs)
+              } else if (phase === 'after-open') {
+                afterOpenFired = true
+                // Half 2 of the ABA: remove the symlink (this unlinks the
+                // symlink itself, never `outer`'s contents — `fs.rm` never
+                // follows a symlink to recurse into its target) and move
+                // the SAME real directory back into place before whatever
+                // the fix's post-open verification re-checks by PATH would
+                // run — this reproduces the exact identity round 2's
+                // dev/ino comparison would see as "unchanged".
+                await rmAsync(targetAbs, { force: true })
+                await renameAsync(realAside, targetAbs)
+              }
+            },
+          })
+
+          assert.ok(beforeOpenFired, 'the before-open seam must have fired for the swap to have been attempted at all')
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a swap-then-restore straddling the open must never disclose the outside directory\'s entries',
+          )
+          // `openNoFollow`'s O_NOFOLLOW makes the open itself fail while the
+          // symlink is in place — there is no point afterward at which
+          // "restoring" the real directory can retroactively legitimize an
+          // open that never happened, so `after-open` is never reached for
+          // THIS entry. That is the expected, correct outcome (see the
+          // mutation proof in the PR description/report — reverting to the
+          // round-2 `opendir()`-based open makes this same assertion fail
+          // while `afterOpenFired` flips true), not a weaker test: the
+          // leading assertion above is on the WALK'S OUTPUT.
+          assert.equal(
+            afterOpenFired,
+            false,
+            'openNoFollow must refuse the open outright while the symlink is in place — the swap-back must never be reached',
+          )
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review round 2 — the mirror image of the test above: the seam
+      // fires but does NOT swap anything, proving the new pre-open/post-open
+      // identity check does not reject a legitimate, un-tampered directory
+      // (a check that withholds everything would also make the test above
+      // pass, for the wrong reason — docs/false-safety-guards.md).
+      it('still descends normally when the seam fires but nothing is swapped (positive control, #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'subtree'))
+        const targetAbs = join(dir, 'subtree', 'target')
+        mkdirSync(targetAbs)
+        writeFileSync(join(targetAbs, 'innocent.ts'), '1')
+
+        const { matchers } = compileCaseCheck('subtree/**')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        let seamFired = false
+        await walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 10_000_000,
+          __testDescendSeam: async (target) => { if (target === targetAbs) seamFired = true },
+        })
+
+        assert.ok(seamFired, 'the seam must have been reached for this to be a meaningful control')
+        assert.ok(
+          results.some((r) => r.includes('innocent.ts')),
+          'an untampered directory must still be descended into and its contents matched',
+        )
+      })
+
+      // #7910 review round 2 (parity re-review) — the round-2 fix's
+      // `detHandoff`/`canDescendSymlink` gate answers "was this entry named
+      // by a determinate segment THIS step" — which a SELF-REFERENTIAL
+      // symlink's repeating name satisfies at every depth it recurs to,
+      // forever. `**/selfloop/**` against `selfloop -> .` measured 200+
+      // matches (unbounded growth with sibling count) on the round-2 code,
+      // bounded only by the componentwise resolver's own symlink-depth
+      // ceiling — a real DoS shape, not merely a parity gap. `visitedDirs`
+      // (real directories on the current descent path, by dev:ino) closes
+      // it: entering a real directory that is already an ancestor on THIS
+      // path is refused before any of its entries are read.
+      it('does not grow unbounded on a self-referential symlink loop reached via a determinate segment inside \'**\' (DoS #7910 review round 2)', { timeout: 10_000 }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+        for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
+
+        const { matchers } = compileCaseCheck('**/selfloop/**')
+        const state = { stop: null, visited: 0 }
+        const results = []
+        const t0 = Date.now()
+        await walkGlob({
+          realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          state, results, maxEntries: 50_000_000,
+        })
+        const ms = Date.now() - t0
+
+        assert.ok(ms < 2000, `a self-loop through a determinate segment must not blow up the walk time, took ${ms}ms`)
+        // Bounded LINEARLY in the number of siblings (visiting each real
+        // entry a small constant number of times), never exponentially —
+        // the unpatched shape grew past 1,600 matches on an equivalent
+        // 40-sibling fixture.
+        assert.ok(
+          results.length < 100,
+          `a self-loop must not produce unbounded matches, got ${results.length} (unpatched: 1,640+ on this fixture shape)`,
+        )
+        assert.ok(
+          state.visited < 200,
+          `a self-loop must not visit an unbounded number of filesystem entries, visited ${state.visited}`,
+        )
+      })
+
+      // #7910 review round 2 — the mirror image: two SEPARATE, non-
+      // overlapping symlinks that happen to point at the SAME real directory
+      // (a diamond, not a cycle) must still each be followed independently —
+      // `visitedDirs` is path-scoped (pushed on descent, popped on
+      // backtracking in `walk`'s `finally`), not a global "seen once, never
+      // again" set, precisely so this does not regress.
+      it('still follows two independent symlinks to the SAME real directory (not a cycle) — positive control (#7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'real'))
+        writeFileSync(join(dir, 'real', 'shared.ts'), '1')
+        mkdirSync(join(dir, 'branchA'))
+        mkdirSync(join(dir, 'branchB'))
+        symlinkSync(join(dir, 'real'), join(dir, 'branchA', 'lnk'))
+        symlinkSync(join(dir, 'real'), join(dir, 'branchB', 'lnk'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/lnk/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /branchA\/lnk\/shared\.ts/, 'the first independent symlink to the shared real directory must still be followed')
+        assert.match(r.content, /branchB\/lnk\/shared\.ts/, 'the second independent symlink to the SAME real directory must ALSO still be followed — it is not an ancestor of the first')
+      })
+
+      // #7910 review round 2 (parity re-review) — round 2's zero-width `**`
+      // closure gate used `isDirLike = dirent.isDirectory() ||
+      // dirent.isSymbolicLink()`, which is true for EVERY symlink regardless
+      // of how it was discovered — exempting every symlink from the
+      // determinate-segment requirement `canDescendSymlink` (just below)
+      // already enforces for descending. Verified directly against Node 22's
+      // `glob()`: a NON-determinate segment naming a symlinked directory
+      // (`*/**`) produces ZERO matches for that symlink, only a determinate
+      // one (`[s]rc-link/**`) does.
+      it('a trailing ** does not close with zero width onto a symlinked directory named by a non-determinate segment (parity #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'src'))
+        writeFileSync(join(dir, 'src', 'index.ts'), '1')
+        symlinkSync(join(dir, 'src'), join(dir, 'src-link'))
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/**' }, ...ctx() })
+        assert.equal(wild.isError, false)
+        assert.equal(wild.content.includes('src-link'), false, '"*/**" (non-determinate) must not close zero-width onto the symlinked directory itself')
+
+        const bracket = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[s]rc-link/**' }, ...ctx() })
+        assert.equal(bracket.isError, false)
+        assert.match(bracket.content, /^src-link$/m, '"[s]rc-link/**" (determinate) still closes zero-width onto the symlink itself (matches fs.glob)')
+      })
+
+      // Same gate, for a symlink to a FILE rather than a directory — verified
+      // directly against Node 22's `glob()`: `*.txt/**` (non-determinate)
+      // produces no match for a symlinked `.txt` file; a determinate literal
+      // does, exactly like an ordinary (non-symlink) file (`plainfile.txt/**`,
+      // tested elsewhere in this file).
+      it('a trailing ** does not close with zero width onto a symlinked FILE named by a non-determinate segment (parity #7910 review round 2)', async () => {
+        writeFileSync(join(dir, 'real-file.txt'), '1')
+        symlinkSync(join(dir, 'real-file.txt'), join(dir, 'file-link.txt'))
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.txt/**' }, ...ctx() })
+        assert.equal(wild.isError, false)
+        assert.equal(wild.content.includes('file-link.txt'), false, '"*.txt/**" (non-determinate) must not close zero-width onto the symlinked file')
+
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'file-link.txt/**' }, ...ctx() })
+        assert.equal(lit.isError, false)
+        assert.match(lit.content, /^file-link\.txt$/m, 'a determinate literal still closes zero-width onto a symlinked file (matches a plain file, and matches fs.glob)')
+      })
+
+      // #7910 review round 2 (parity re-review) — a pattern ending in `/`
+      // means directories only, matching `fs.glob` exactly (verified
+      // directly): `sub/*/` excludes a plain file AND a symlink pointing at
+      // a directory, keeping only a real (non-symlink) directory entry.
+      // `compileCaseCheck` already drops the trailing empty segment a
+      // trailing slash produces, so without this the flag was silently lost
+      // and `sub/*/` behaved identically to `sub/*`.
+      it('a pattern ending in / matches directories only, excluding files and symlinks-to-directories (parity #7910 review round 2)', async () => {
+        mkdirSync(join(dir, 'sub'))
+        mkdirSync(join(dir, 'sub', 'realdir'))
+        writeFileSync(join(dir, 'sub', 'plainfile.txt'), '1')
+        symlinkSync(join(dir, 'sub', 'realdir'), join(dir, 'sub', 'dirlink'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/*/' }, ...ctx() })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('sub/realdir'), 'a real directory must still match a trailing-slash pattern')
+        assert.equal(lines.includes('sub/plainfile.txt'), false, 'a plain file must be excluded by a trailing-slash (directory-only) pattern')
+        assert.equal(lines.includes('sub/dirlink'), false, 'a symlink pointing at a directory must ALSO be excluded — fs.glob requires a REAL directory, not merely "dir-like"')
+
+        // Positive control: without the trailing slash, the same pattern
+        // finds all three (proving the exclusion is the `/`, not something
+        // else about this fixture).
+        const noSlash = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/*' }, ...ctx() })
+        const noSlashLines = noSlash.content.split('\n')
+        assert.ok(noSlashLines.includes('sub/plainfile.txt') && noSlashLines.includes('sub/dirlink'), 'without the trailing slash, the file and the symlink must both be listed (positive control)')
+      })
+
+      // #7910 review (security/DoS) — a symlinked directory is only descended
+      // into when a DETERMINATE segment (literal, bracket class, or brace
+      // alternation — no bare `*`/`?`) explicitly named it, matching Node
+      // 22's `glob()` exactly (verified directly): `link/*`, `[l]ink/*`
+      // follow; `*/*`, `?ink/*` do not (they still LIST the symlink's own
+      // name, just never open it). Without this, `walkGlob` followed every
+      // symlinked directory it found regardless of how it was discovered —
+      // duplicating real subtrees under every alias `**` swept up, and, for
+      // a self-referential symlink, being re-discovered (and re-descended
+      // into) at every recursion depth.
+      it('descends a symlinked directory only via a determinate segment, never via a bare wildcard or ** absorption (security/DoS #7910 review)', async () => {
+        mkdirSync(join(dir, 'real'))
+        writeFileSync(join(dir, 'real/index.ts'), '1')
+        symlinkSync(join(dir, 'real'), join(dir, 'real-link'))
+
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'real-link/*.ts' }, ...ctx() })
+        assert.match(lit.content, /real-link\/index\.ts/, 'a literal segment still follows (matches fs.glob)')
+
+        const bracket = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[r]eal-link/*.ts' }, ...ctx() })
+        assert.match(bracket.content, /real-link\/index\.ts/, 'a bracket-class segment still follows (matches fs.glob)')
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/*.ts' }, ...ctx() })
+        assert.equal(wild.content.includes('real-link'), false, '"*/*" must not descend through a wildcard-discovered symlink')
+        assert.match(wild.content, /real\/index\.ts/, 'the real directory is still found through the same pattern (positive control)')
+
+        const globstar = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        const lines = globstar.content.split('\n')
+        assert.ok(lines.includes('real-link'), '"**" must still list the symlink itself')
+        assert.equal(lines.some((l) => l.startsWith('real-link/')), false, '"**" must never descend through a symlink it merely absorbed')
+      })
+
+      it('terminates a symlink self-loop discovered only via ** absorption, cheaply (DoS #7910 review)', async () => {
+        mkdirSync(join(dir, 'loopdir'))
+        symlinkSync('.', join(dir, 'loopdir/selfloop'))
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        const ms = Date.now() - t0
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a bare-**-discovered symlink self-loop must terminate quickly, took ${ms}ms`)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
+        assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
+      })
+
+      // #7910 review (parity) — a trailing `**` closing with ZERO width onto a
+      // non-directory entry requires the segment that named the entry to be
+      // DETERMINATE (verified directly against Node 22's `glob()`:
+      // `plainfile.txt/**` matches the plain FILE `plainfile.txt`;
+      // `*.txt/**` does not). `walkGlob`'s `closeGlobstars` propagation had no
+      // such gate, so a non-determinate segment handing straight into a
+      // trailing `**` finalized on files it should never have matched.
+      it('a trailing ** does not close with zero width onto a non-directory entry named by a non-determinate segment (#7910 review)', async () => {
+        writeFileSync(join(dir, 'plainfile.txt'), '1')
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'plainfile.txt/**' }, ...ctx() })
+        assert.equal(lit.isError, false)
+        assert.match(lit.content, /^plainfile\.txt$/m, 'a literal segment still closes ** onto a file (matches fs.glob)')
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.txt/**' }, ...ctx() })
+        assert.match(wild.content, /No matches/, 'a bare-wildcard segment must not close ** onto a file')
+      })
+
+      // #7901 — `walkGlob` implements dotfile exclusion itself now (previously
+      // free, handled internally by `fs.glob` before any of chroxy's own code
+      // ran). Without `advanceToken`'s dot guard, a bare `*`/`?`/ordinary
+      // class would match a real segment's leading dot the same as any other
+      // character — nothing in the pre-#7901 test suite pins this, because it
+      // was always `fs.glob`'s behavior to prove, never this file's own.
+      it('a bare wildcard/any/class never matches a real leading dot', async () => {
+        writeFileSync(join(dir, '.env'), 'secret')
+        writeFileSync(join(dir, 'keep.ts'), '1')
+        const star = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*' }, ...ctx() })
+        assert.equal(star.isError, false)
+        assert.equal(star.content.includes('.env'), false, '"*" must not match a dotfile')
+        assert.match(star.content, /keep\.ts/)
+
+        const any = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '????' }, ...ctx() })
+        assert.equal(any.isError, false)
+        assert.equal(any.content.includes('.env'), false, '"?" must not match a dotfile\'s leading dot')
+
+        const klass = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[.e]nv' }, ...ctx() })
+        assert.equal(klass.isError, false)
+        assert.match(klass.content, /No matches/, 'a multi-member class containing "." is not the [.] exception')
+      })
+
+      // #7910 review — a `*` immediately followed by a literal `.` in the SAME
+      // segment (`*.env`) must not match a real leading dot either: the star's
+      // own dot guard used to keep offset 0 reachable with ZERO width so a
+      // LATER dot-entitled literal token could consume it, letting the star
+      // "pass through" the dot untouched. Verified directly against Node 22's
+      // `glob()`: `*.env` returns no matches for a real `.env`. The existing
+      // "bare wildcard" test above only covers a `*` with nothing after it in
+      // the segment, which cannot exercise this path.
+      it('a leading * cannot cross a real leading dot even with a literal dot immediately after it (#7910 review)', async () => {
+        writeFileSync(join(dir, '.env'), 'secret')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.env' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/, '"*.env" must not match ".env"')
+
+        const positive = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '.env*' }, ...ctx() })
+        assert.equal(positive.isError, false)
+        assert.match(positive.content, /\.env/, 'a literal-dot-first pattern is unaffected (positive control)')
+      })
+
+      // #7901 — `**` (globstar) never absorbs a dot-named real segment either,
+      // at any depth, matching `fs.glob`'s own default exactly (verified
+      // directly against Node 22: `.hidden/**` lists `.hidden` itself and its
+      // non-dot descendants, never a nested dotfile). Without this check in
+      // `walkGlob`'s own GLOBSTAR branch, `**` would both list AND descend
+      // into every dotfile/dotdir it finds.
+      it('"**" never lists or descends into a dotfile/dotdir', async () => {
+        mkdirSync(join(dir, '.hidden'), { recursive: true })
+        writeFileSync(join(dir, '.hidden/inside.ts'), '1')
+        writeFileSync(join(dir, '.envtop'), '1')
+        mkdirSync(join(dir, 'visible'), { recursive: true })
+        writeFileSync(join(dir, 'visible/keep.ts'), '1')
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.equal(lines.includes('.hidden'), false, '"**" must not list the hidden directory itself')
+        assert.equal(lines.some((l) => l.includes('.hidden')), false, '"**" must not descend into the hidden directory')
+        assert.equal(lines.includes('.envtop'), false, '"**" must not list a top-level dotfile')
+        assert.ok(lines.includes('visible') && lines.includes('visible/keep.ts'), 'ordinary entries must still be found')
+      })
+
+      // #7901 — `GLOB_MAX_ENTRIES_VISITED`'s guard, proven the same way the
+      // existing wall-clock-timeout test proves `CHROXY_GLOB_TIMEOUT_MS`: a
+      // hardcoded 2,000,000 default cannot be waited out in a test, so it is
+      // read per call via `CHROXY_GLOB_MAX_ENTRIES`, and this test lowers it
+      // to a size the fixture tree comfortably exceeds. Without this guard (or
+      // with the env override wired to nothing), the walk would simply finish
+      // normally against a tree this small — the test only proves anything
+      // because the CONTROL run (unset override) is asserted to succeed on
+      // the identical tree first.
+      it('bounds the walk by total entries visited, and the bound FIRES', async () => {
+        buildBigTree(dir, 5, 200) // 1,000 files
+
+        const control = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+        assert.equal(control.isError, false, 'control: the same tree must succeed with the real default')
+
+        const prev = process.env.CHROXY_GLOB_MAX_ENTRIES
+        process.env.CHROXY_GLOB_MAX_ENTRIES = '10'
+        try {
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+          assert.equal(r.isError, true, 'a 10-entry budget must fire on a 1,000-file tree, not succeed')
+          assert.match(r.content, /visited more than 10 filesystem entries/)
+        } finally {
+          if (prev === undefined) delete process.env.CHROXY_GLOB_MAX_ENTRIES
+          else process.env.CHROXY_GLOB_MAX_ENTRIES = prev
+        }
+      })
+
+      it('treats an empty or unparseable CHROXY_GLOB_MAX_ENTRIES as unset', async () => {
+        buildBigTree(dir, 5, 200) // 1,000 files
+        const prev = process.env.CHROXY_GLOB_MAX_ENTRIES
+        try {
+          // CONTROL: a real small budget DOES fire on this tree.
+          process.env.CHROXY_GLOB_MAX_ENTRIES = '10'
+          const control = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+          assert.equal(control.isError, true, 'control: a real 10-entry budget must fire on this tree')
+
+          for (const value of ['', '   ', '0', 'abc', '-1']) {
+            process.env.CHROXY_GLOB_MAX_ENTRIES = value
+            const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+            assert.equal(r.isError, false, `${JSON.stringify(value)} must fall back to the default, not disable Glob`)
+          }
+        } finally {
+          if (prev === undefined) delete process.env.CHROXY_GLOB_MAX_ENTRIES
+          else process.env.CHROXY_GLOB_MAX_ENTRIES = prev
+        }
       })
     })
 

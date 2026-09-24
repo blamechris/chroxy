@@ -18,11 +18,13 @@
  * audit).
  */
 
-import { dirname, join, relative } from 'node:path'
-import { glob as fsGlob, readdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { opendir, lstat } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
+import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
 import {
@@ -63,6 +65,33 @@ const BASH_TIMEOUT_CEILING_MS = 600_000
  */
 const GLOB_COLLECT_CEILING = 50_000
 const GLOB_MAX_MATCHES = 10_000
+
+/**
+ * #7901 — a second, independent bound on the self-implemented walk, distinct
+ * from `GLOB_COLLECT_CEILING` (which bounds MATCHES) and from the wall-clock
+ * deadline below (the primary defense — see `walkGlob`'s doc). This bounds
+ * total filesystem ENTRIES visited regardless of how many matched, closing
+ * the gap where a pattern matches almost nothing across an enormous tree (the
+ * exact shape #7356 measured: 200,000 files, near-zero matches) — the collect
+ * ceiling never engages there, and on a fast disk the walk could visit many
+ * millions of entries before the 30s deadline fires. 2,000,000 is far above
+ * any tree this test suite or a real workspace plausibly has (the largest
+ * fixture in this file is 15,000 files); it exists as a backstop, not the
+ * primary bound.
+ *
+ * Read per call and overridable via `CHROXY_GLOB_MAX_ENTRIES`, the same shape
+ * as `globTimeoutMs`/`CHROXY_GLOB_TIMEOUT_MS` just below — for the same
+ * reason: a guard nothing can lower to a testable size is a guard nobody
+ * proved fires (docs/false-safety-guards.md). An empty or unparseable value
+ * falls back to the 2,000,000 default rather than disabling the bound.
+ */
+const GLOB_MAX_ENTRIES_VISITED_DEFAULT = 2_000_000
+function globMaxEntriesVisited() {
+  const raw = (process.env.CHROXY_GLOB_MAX_ENTRIES || '').trim()
+  if (!/^\d+$/.test(raw)) return GLOB_MAX_ENTRIES_VISITED_DEFAULT
+  const n = Number(raw)
+  return n > 0 ? n : GLOB_MAX_ENTRIES_VISITED_DEFAULT
+}
 
 /**
  * Wall-clock bound on a Glob walk. Matches the 30s `executeBash` timeout the
@@ -315,10 +344,11 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   }
   // #7898 round 4 — neither check above bounds `pattern`'s length or brace
   // nesting, and every round of this PR's review has found a new way an
-  // unbounded pattern makes compileCaseCheck/caseCheckPasses (below, via
-  // confineGlobMatches) slow or crash. See the worst-case bound written above
-  // compileCaseCheck and globPatternComplexityReason's own doc for the specific
-  // measured failures this closes.
+  // unbounded pattern makes the segment matcher (parseSegmentTokens/
+  // segmentMatches, driving both compileCaseCheck's callers and walkGlob's
+  // own per-entry matching below) slow or crash. See the worst-case bound
+  // written above compileCaseCheck and globPatternComplexityReason's own doc
+  // for the specific measured failures this closes.
   const complexityReason = globPatternComplexityReason(pattern)
   if (complexityReason) {
     return { content: globPatternComplexityMessage(complexityReason), isError: true }
@@ -328,28 +358,6 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // weak "no ..." check that let absolute paths to /etc through.
   const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
-  // #7341 — the host does NOT shell out for Glob any more. `for f in
-  // <pattern>` needed the pattern interpolated UNQUOTED to expand at all, and
-  // two review rounds found six ways to make that expansion leave the
-  // workspace (quote removal, whitespace word-splitting, a brace body with no
-  // top-level comma, `.*` matching the `..` entry, POSIX bracket
-  // sub-expressions, nested braces) — none of them visible in the source text.
-  // `node:fs/promises`'s glob has none of those layers: no tilde expansion, no
-  // word splitting, no quote removal. The question "what will bash do with
-  // this string" simply stops being asked. (The container still shells out —
-  // it cannot run JS inside itself — and confines its RESULTS instead.)
-  //
-  // `withFileTypes` is not cosmetic: the Dirent carries `isSymbolicLink()`,
-  // which the traversal already knows, so the confinement below can single out
-  // symlink entries for a realpath WITHOUT paying a syscall on every ordinary
-  // file.
-  //
-  // `fs.glob` IGNORES an AbortSignal (measured on Node 22 — passing an
-  // already-aborted one completes normally), and dropping `executeBash` also
-  // dropped its 30s kill. So the bound is rebuilt here: a flag the loop checks
-  // at each yield, plus a race so the TOOL CALL returns on time even when the
-  // walk is between yields. The walk itself can only stop at a yield, which is
-  // stated rather than papered over.
   // #7341 — if the pattern NAMES a directory outright and that directory
   // resolves outside the workspace, say so instead of returning "No matches".
   //
@@ -369,38 +377,71 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   }
 
   // Check the signal BEFORE the walk: the in-loop check is only reached when
-  // the glob yields, so an already-aborted call on a pattern that matches
+  // the walk yields, so an already-aborted call on a pattern that matches
   // nothing used to run the whole tree and then report a cheerful "No matches".
   // The container Glob has always had this pre-check; the host lacked it, which
   // made the two backends answer differently for identical input.
   if (signal?.aborted) return { content: 'Glob interrupted', isError: true }
 
+  // #7901 — the host no longer calls `fs.glob` (`node:fs/promises`'s `glob()`)
+  // at all. Its own segment matcher backtracks catastrophically on the exact
+  // pattern shapes `compileCaseCheck`'s DP was rewritten to handle safely
+  // (#7898) — measured 87 SECONDS for `*a*a*a*a*a*a*a*a*a*a*b.ts` against one
+  // 40-character near-miss real name, synchronously, no chroxy code involved,
+  // which froze the WHOLE DAEMON's event loop (every session, every WS
+  // client, the tunnel health checks) for the duration and which the 30s
+  // walk-timeout race below cannot interrupt (the timer cannot fire while the
+  // event loop it depends on is the thing blocked). `fs.glob` also honours no
+  // AbortSignal (#7356 — an aborted or timed-out call left the walk running,
+  // unbounded, after the tool result was already sent) and hard-codes
+  // case-INSENSITIVE candidate generation on macOS/Windows with a
+  // candidate-generation bug for negated bracket classes (#7899) that a
+  // post-hoc case re-check over its candidates could never recover, because
+  // the candidate fs.glob needed to produce in the first place was never
+  // generated.
+  //
+  // `walkGlob` below replaces it with a self-implemented `fs.promises.opendir`
+  // walk: at each real directory, it tracks which pattern-segment positions
+  // ("matchers", from `compileCaseCheck` — the SAME non-backtracking DP #7898
+  // added) are still reachable, and tests every real directory entry against
+  // them via `segmentMatches` — case-sensitively BY CONSTRUCTION, since it
+  // compares pattern text to the REAL on-disk name at the moment `opendir`
+  // reads it, never a candidate `fs.glob` echoed back. Confinement
+  // (`validateRawPathWithinCwd`, #6923's shared componentwise resolver) is
+  // checked before the walk either descends into, or reports a match for, any
+  // symlinked entry — so an out-of-bounds symlinked directory is never even
+  // opened, which is strictly stronger than the old post-hoc filter that
+  // enumerated it via `fs.glob` first and discarded the result afterward. The
+  // deadline/abort race below checks in with the walk at every directory
+  // entry (an `opendir` read is a real, yielding async operation), so the
+  // event loop keeps turning throughout, and stopping the walk is a matter of
+  // setting a flag the walk's own loop observes on its very next iteration —
+  // not, as with `fs.glob`, hoping a signal it ignores gets noticed.
+  const { matchers } = compileCaseCheck(pattern)
+  // #7910 review round 2 (parity) — a pattern ending in `/` (any number of
+  // trailing slashes; `compileCaseCheck` already drops the empty segment(s)
+  // they produce, so the compiled `matchers` are identical either way) means
+  // DIRECTORIES ONLY, matching `fs.glob`'s own observed behavior exactly:
+  // verified directly, `sub/*/` matches a real subdirectory but not a plain
+  // file NOR a symlink pointing at a directory (`sub/dirlink -> inner` is
+  // excluded from `sub/*/`'s results) — so this is `dirent.isDirectory()`
+  // specifically, never "dir-like".
+  const directoryOnly = pattern.endsWith('/')
   const files = []
   // ONE timer sets the flag and releases the race, so the two cannot resolve
   // in either order — a second, independent timer would let the race finish
-  // before `stop` was assigned and report success on a timed-out walk. The
-  // abort listener shares that single release for the same reason.
-  let stop = null
+  // before `state.stop` was assigned and report success on a timed-out walk.
+  // The abort listener shares that single release for the same reason.
+  const state = { stop: null, visited: 0 }
   let releaseDeadline
   const deadlineReached = new Promise((resolve) => { releaseDeadline = resolve })
   const timeoutMs = globTimeoutMs()
-  const deadline = setTimeout(() => { stop = 'timed out'; releaseDeadline() }, timeoutMs)
+  const maxEntries = globMaxEntriesVisited()
+  const deadline = setTimeout(() => { state.stop = 'timed out'; releaseDeadline() }, timeoutMs)
   deadline.unref?.()
-  const onAbort = () => { stop = 'interrupted'; releaseDeadline() }
+  const onAbort = () => { state.stop = 'interrupted'; releaseDeadline() }
   signal?.addEventListener?.('abort', onAbort, { once: true })
-  const collect = (async () => {
-    for await (const entry of fsGlob(pattern, { cwd: realRoot, withFileTypes: true })) {
-      if (stop) break
-      const rel = relative(realRoot, join(entry.parentPath, entry.name))
-      // `**` yields the search root itself, which `relative()` renders as ''.
-      // The root is not a match; emitting it produced a blank first line (and
-      // a bare '' on an empty workspace) that the shell implementation never
-      // did.
-      if (rel === '') continue
-      files.push({ path: rel, isSymlink: entry.isSymbolicLink() })
-      if (files.length >= GLOB_COLLECT_CEILING) break
-    }
-  })()
+  const collect = walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
   // Attach a catch BEFORE the race: if the walk rejects after the deadline has
   // already settled it, the rejection would otherwise be unhandled.
   let walkError = null
@@ -415,11 +456,16 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   if (walkError) {
     return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
   }
-  if (stop === 'timed out') {
+  if (state.stop === 'timed out') {
     return { content: `Glob timed out after ${timeoutMs}ms`, isError: true }
   }
-  if (stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
-  let kept = await confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl, pattern)
+  if (state.stop === 'interrupted') return { content: 'Glob interrupted', isError: true }
+  if (state.stop === 'too many entries') {
+    return {
+      content: `Glob visited more than ${maxEntries} filesystem entries without finishing — narrow the pattern or use "path"`,
+      isError: true,
+    }
+  }
   // #7357 — a match containing an embedded newline cannot be told apart, in a
   // '\n'-joined text result, from two separate matches: `sub/deep/nl\nSECRET`
   // reads back as `sub/deep/nl` and `SECRET` on two lines, and the second of
@@ -434,7 +480,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // what "the same input" means. This is a display-format decision, not a
   // containment one — the match is not a security-relevant withholding, so it
   // gets no daemon-log line the way an escaping match does.
-  kept = kept.filter((f) => !f.includes('\n'))
+  let kept = files.filter((f) => !f.includes('\n'))
   // A withheld match is reported as no match, with no count and no marker.
   // Anything that distinguishes "matched, but outside" from "matched nothing"
   // is an existence ORACLE: a workspace that contains `esc -> /` turns one bit
@@ -442,10 +488,11 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // `acceptEdits`. The confinement is proven by tests, not by a runtime marker.
   if (kept.length === 0) return { content: `No matches for ${pattern}`, isError: false }
 
-  // Sort. Every shell glob does, on both the old host and the container;
-  // `fs.glob` yields in traversal order. Deterministic-but-different reshuffles
-  // the whole listing for a one-file change and destroys the alphabetical
-  // grouping that makes a long result readable.
+  // Sort. Every shell glob does, and `walkGlob` yields in filesystem
+  // traversal order (deterministic-but-different from a shell's, same as the
+  // old `fs.glob`-based walk was), which would reshuffle the whole listing for
+  // a one-file change and destroy the alphabetical grouping that makes a long
+  // result readable.
   kept.sort()
 
   // TRUNCATION IS ANNOUNCED. The oracle argument that justifies silence for
@@ -462,159 +509,600 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
 }
 
 /**
- * SECURITY (#7341) — second containment layer for Glob, after the syntactic
- * `globPatternEscapeReason` check. Drops any expanded match whose real
- * location is outside the workspace.
+ * #7901 — the self-implemented replacement for `fs.glob`'s own walk+match.
+ * Walks `realRoot` one real directory at a time via `fs.promises.opendir`,
+ * tracking which positions in `matchers` (from `compileCaseCheck`) are still
+ * reachable — the same array-wildcard DP `caseCheckPasses` already runs
+ * post-hoc over a KNOWN full path, here computed INCREMENTALLY, one real
+ * directory level at a time, so it can decide which subdirectories are worth
+ * opening at all instead of enumerating everything and filtering afterward.
  *
- * Why a second layer at all: no inspection of the pattern can see a symlinked
- * DIRECTORY sitting inside the workspace. With `esc -> /etc` present, the
- * pattern `esc/pass*` contains no `~`, no `/` prefix and no `..` — every
- * character is legal — and it lists `/etc`. Only resolving the RESULTS catches
- * that, which is why the syntactic guard is not treated as sufficient here.
+ * `active`/`next` are boolean arrays of length `matchers.length + 1`; index
+ * `k` means "matchers[0..k) have successfully aligned with every real
+ * segment consumed so far". `closeGlobstars` propagates a `**` matcher's
+ * "matches zero segments" case (so `k` reachable via a `**` at position `k`
+ * makes `k+1` reachable too, with no directory read needed) — the same
+ * prefix-OR trick `caseCheckPasses` uses for `**`, just applied as the walk
+ * descends instead of after the fact.
  *
- * The property it establishes is the strong one, stated without caveats:
- * EVERY path Glob returns resolves inside the workspace. An earlier cut
- * checked only each match's parent directory, which let a symlink whose NAME
- * is in the workspace but whose TARGET is outside be listed. That is arguably
- * defensible — the entry really is in the directory, and `Read` would refuse
- * to follow it — but it makes the tool's contract a sentence with an
- * exception in it, and the property test caught it precisely because the
- * exception could not be stated cleanly. Withholding it costs a listing
- * nobody can act on.
+ * MATCH: whenever `next[matchers.length]` is true for an entry, the pattern
+ * is fully satisfied — that entry (file or directory, matching `fs.glob`'s
+ * own behavior of returning either) is a result. DESCEND: whenever `next` has
+ * any true bit at an index below `matchers.length`, there is a still-
+ * incomplete (or still-`**`-absorbing) alignment that a deeper real segment
+ * could complete, so a directory (or a symlink that might resolve to one) is
+ * opened; an ordinary file never is, at zero extra cost.
  *
- * Two checks, split so the common case is free:
- *   - the match's PARENT, cached per directory. Catches traversal and any
- *     descent through a symlinked directory. Matches cluster into few
- *     directories, so this is one `open(2)`-faithful walk per directory, not
- *     one per file.
- *   - the ENTRY itself, but only when the glob's own Dirent already said it is
- *     a symlink. Ordinary files — nearly all of them — cost nothing extra.
+ * SECURITY (#7341/#6923, carrying forward into #7901) — a symlinked entry is
+ * realpath-validated against `realRoot` via the shared componentwise resolver
+ * BEFORE it is either reported as a match or descended into. An entry whose
+ * real target resolves outside the workspace is withheld silently (never
+ * matched, never opened) — stronger than the predecessor's post-hoc filter,
+ * which let `fs.glob` enumerate an out-of-bounds symlinked directory's
+ * contents first and discarded the result afterward; this walk never opens
+ * it. FAIL-CLOSED: a symlink that cannot be resolved (ELOOP, EACCES, a depth
+ * bomb) is withheld the same way.
  *
- * FAIL-CLOSED: a match that cannot be resolved (EACCES, ELOOP, depth bomb) is
- * withheld, never emitted.
+ * SECURITY (review of #7901, TOCTOU — closed properly in round 2) — an
+ * ordinary (non-symlink-AT-LISTING-TIME) directory is NOT trusted on
+ * `dirent`'s type alone before being opened: `fs.promises.opendir` batches
+ * several dirents per underlying `readdir(2)` call, and this walk is
+ * strictly sequential within a directory, so an entry late in a large
+ * listing is reached only after every earlier one (including a deep
+ * subtree) has been fully processed — the type Node captured for it can be
+ * stale by then. Chroxy fans every tool block a model approves in one turn
+ * out CONCURRENTLY (`byok-session.js`'s `Promise.all`, #7356), so a Bash
+ * call approved in the SAME turn as a Glob call can replace a plain
+ * directory with a symlink to anywhere while this walk is still busy
+ * elsewhere in the tree. Measured directly (byok-tool-executor.test.js): an
+ * unpatched walk over a 60-sibling directory followed exactly such a swap
+ * straight into the attacker's target and returned matches from OUTSIDE the
+ * workspace, reported under a workspace-looking `relPath`. A first attempt
+ * at closing this (round 2's `resolveNonSymlinkDescend`) re-`lstat`ed
+ * immediately before returning a path string for `walk` to `opendir` — but
+ * that is STILL check-then-use: the two calls are independent, so a swap
+ * landing in the gap between them is exactly as invisible as one landing
+ * before the check. A round-2 REFINEMENT (`resolveNonSymlinkDescend` folded
+ * into an early version of `openVerifiedDirForDescend`) collapsed that into
+ * one `opendir` immediately re-verified by a second `lstat` on the same
+ * path — narrower, but still an ABA: a swap-to-symlink before the `opendir`
+ * and a swap-BACK before the second `lstat` both went undetected, because
+ * neither `lstat` ever inspected the object `opendir` had actually opened.
+ * `walk`'s call site now routes every directory-shaped descent —
+ * symlink-flagged or not — through {@link openVerifiedDirForDescend}, which
+ * opens with `O_NOFOLLOW` and verifies identity via `fstat` on the opened
+ * handle itself (never a fresh path lookup), then reads entries from that
+ * SAME verified object where the platform allows it, and hands `walk` the
+ * already-open, already-verified `Dir` directly — no path is ever handed
+ * back for a second, disconnected open to (not) re-check. See that
+ * function's doc for exactly what this closes, how, and the residual risk
+ * that remains on platforms without a way to bind directory listing to an
+ * already-open fd.
  *
- * SECURITY (#7355) — also enforces CASE-SENSITIVE matching. `fs.glob` hard-codes
- * `nocase: isWindows || isMacOS` internally (measured on Node 22.22.3: an
- * explicit `nocase: false` is silently ignored), so on those two platforms a
- * literal segment like `Config.ts` matches an on-disk `config.ts`, and — worse —
- * for a fully-literal pattern the returned "match" is the PATTERN's own
- * spelling, not a real path (`Glob ABC.TS` against a real `ABC.ts` returns
- * `ABC.TS`, which does not exist as written). The container shells out to bash,
- * whose globbing has no such override and is case-sensitive by construction, so
- * an unfixed host silently disagrees with both the container and with Claude
- * Code's own Glob. {@link caseCheckPasses} re-decides case-sensitively, using
- * the REAL on-disk name at every path segment ({@link realSegmentNames}) rather
- * than trusting the candidate's own text — the pattern-echo bug above means the
- * candidate's text cannot be trusted for a literal segment in the first place.
+ * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
+ * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
+ * just read, never a pattern-echoed candidate, so there is no case-folding
+ * layer left to disagree with (host and container Glob, and Claude Code's own
+ * Glob, now agree on every pattern shape a fuzz found disagreement on,
+ * negated bracket classes included — `segmentMatches`/`advanceToken` never
+ * had a nocase mode to begin with).
  *
- * @param {{path: string, isSymlink: boolean}[]} files
- * @param {string} pattern The original Glob pattern, for the case re-check.
- * @returns {Promise<string[]>} The matches that are inside the workspace.
+ * DOT HANDLING — `**` and a bare wildcard/class token never stand for a real
+ * segment's leading dot (`advanceToken`'s dot guard, `parseSegmentTokens`'s
+ * doc), matching `fs.glob`'s own observed default exactly (verified directly
+ * against Node 22's `glob()`): `.env*` and `.[a-z]*` still find `.envrc`,
+ * `*.ts`/`?env`/most bracket classes do not, and `**`/`*` never descend into
+ * or list a dotfile/dotdir at any depth unless a pattern segment explicitly
+ * spells a leading literal dot for that level.
+ *
+ * BOUNDS — the caller's deadline/abort race is checked (`state.stop`) at the
+ * top of every directory and before every entry, so an `opendir` read (a
+ * real, yielding async op) is never more than one entry away from noticing a
+ * stop. `GLOB_COLLECT_CEILING` bounds MATCHES the same way the old walk did;
+ * `maxEntries` (`globMaxEntriesVisited()`) additionally bounds total entries
+ * VISITED regardless of match count, for the #7356 shape (an enormous tree, almost no
+ * matches) where the collect ceiling never engages.
+ *
+ * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number, directoryOnly?: boolean}} args
  */
-async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl, pattern) {
-  const dirVerdicts = new Map()
-  const direntCache = new Map()
-  const caseCheck = compileCaseCheck(pattern)
-  const kept = []
-  for (const { path: f, isSymlink } of files) {
-    // Relative to realRoot — that is the directory the glob ran in. Pass the
-    // RAW relative path (#6923: never pre-`resolve()`, a lexical `..` collapse
-    // hides a symlink escape).
-    const rawDir = dirname(f)
-    let ok = dirVerdicts.get(rawDir)
-    if (ok === undefined) {
-      ok = await isWithin(rawDir, realRoot, cwdRealCache, cwdCacheTtl)
-      dirVerdicts.set(rawDir, ok)
+async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries, directoryOnly, __testDescendSeam }) {
+  const m = matchers.length
+  // SECURITY/DoS (#7910 review round 2) — real directories on the CURRENT
+  // descent path (root down to here), keyed by `dev:ino`. A plain filesystem
+  // tree can never revisit an ancestor directory — that would require an
+  // actual cycle — so tracking every descent unconditionally costs nothing
+  // there and only ever REFUSES when a symlink's resolved target is already
+  // an ancestor of the entry naming it, which is exactly the shape measured
+  // directly here: `**/selfloop/**` against `selfloop -> .` (self-referential)
+  // grew UNBOUNDED on the round-2 code (200+ matches, no cap but `maxEntries`/
+  // the componentwise resolver's own symlink-depth ceiling) because the
+  // existing `detHandoff`/`canDescendSymlink` gate answers "was this entry
+  // named determinately", not "have we already been here" — a determinate
+  // literal segment re-matching the SAME repeating name at every depth of its
+  // own self-loop sails through that gate every time. Stack discipline (added
+  // in `walk`, removed in its `finally`) means a real DIAMOND — the same real
+  // directory reached via two separate, non-overlapping symlinks elsewhere in
+  // the tree — is not spuriously refused; only an actual ancestor-revisit is.
+  const visitedDirs = new Set()
+  // `{ bigint: true }` stats (see `openVerifiedDirForDescend`) — a plain
+  // Number would lose precision for a large volume's inode, and this key
+  // needs exact equality: a false COLLISION (two different directories
+  // hashing the same key) would wrongly refuse a legitimate descent — safe
+  // (fail-closed), but not correct — while precision here is free.
+  function dirKey(stat) { return `${stat.dev}:${stat.ino}` }
+  // #7910 review (parity/DoS) — precomputed ONCE per Glob call: which matcher
+  // positions are DETERMINATE segments (no bare `*`/`?` anywhere in the
+  // segment — a fully-literal segment, a bracket class, or a brace whose every
+  // alternative is itself determinate; `**` is never determinate). Verified
+  // directly against Node 22's `glob()`: it follows a symlinked directory, and
+  // lets a trailing `**` close with zero width onto a non-directory entry,
+  // when the segment that named that entry is determinate (`src-link/*`,
+  // `[s]rc-link/*`, `{src-link,x}/*`, `plainfile.txt/**`, `[p]lainfile.txt/**`
+  // all do) but refuses when it is not (`?rc-link/*`, `*/*`, `*.txt/**`,
+  // `pl?infile.txt/**` do not) — see `walk`'s two call sites below.
+  const determinateSegment = matchers.map((tok) => tok !== CASE_CHECK_GLOBSTAR && isDeterminateSegmentTokens(tok))
+
+  function closeGlobstars(active) {
+    for (let k = 0; k < m; k++) {
+      if (active[k] && matchers[k] === CASE_CHECK_GLOBSTAR) active[k + 1] = true
     }
-    if (ok && isSymlink) ok = await isWithin(f, realRoot, cwdRealCache, cwdCacheTtl)
-    // #7355 — emit the REAL on-disk spelling, never the candidate text `f`.
-    // For a fully-literal pattern segment the two are provably identical
-    // whenever `ok` ends up true (the case-sensitive regex only accepts a
-    // real segment equal to the pattern's own literal text), so this is a
-    // no-op there. But for a pattern segment with more than one textual form
-    // that can fold to the SAME real name under `fs.glob`'s nocase matching
-    // — a brace alternative being the clearest case, `{abc,ABC}.ts` against a
-    // real `ABC.ts` — `fs.glob` hands back ONE raw candidate PER matching
-    // alternative (`abc.ts` and `ABC.ts`, both echoing their own branch's
-    // text), and both independently pass the case check because the pattern
-    // legitimately accepts either spelling. Pushing `f` there kept BOTH: the
-    // real `ABC.ts` and a phantom `abc.ts` that does not exist on disk —
-    // exactly the "pattern's own spelling, not the file's" defect #7355 was
-    // filed to close, just reached through a different pattern shape than the
-    // fully-literal one the issue's repro used. Substituting the verified
-    // real segments (and deduping below) closes it for every pattern shape,
-    // not only the literal one.
-    let out = f
-    if (ok) {
-      const realSegments = await realSegmentNames(realRoot, splitRelPath(f), direntCache)
-      ok = realSegments !== null && caseCheckPasses(caseCheck, realSegments)
-      if (ok) out = join(...realSegments)
-    }
-    if (ok) kept.push(out)
+    return active
   }
-  // Dedupe: two raw candidates that both resolve to the same real path (the
-  // brace-alternative case above) must surface as one match, not two.
-  return [...new Set(kept)]
-}
 
-/**
- * #7355 — split a Glob match's relative path into segments, separating on
- * BOTH `/` and `\` (the match came from `node:path`'s `relative()`, which is
- * platform-native — see #6928 for why a single-separator split is unsafe).
- * The pattern itself never needs this: `\` is one of the characters
- * {@link GLOB_PATTERN_SHELL_METACHARS} rejects outright, so a pattern is
- * always plain `/`-delimited.
- */
-function splitRelPath(f) {
-  return f.split(/[/\\]+/).filter(Boolean)
-}
+  function shouldStop() {
+    return state.stop !== null || results.length >= GLOB_COLLECT_CEILING
+  }
 
-/**
- * #7355 — reconstruct the REAL on-disk name of every segment of a match path,
- * via a cached `readdir` at each level.
- *
- * Why this cannot just trust the segment text `fs.glob` handed back: for a
- * segment that contains NO glob metacharacter, `fs.glob` verifies existence
- * case-INSENSITIVELY and then echoes the PATTERN's own text for that segment —
- * not the real Dirent name (measured: pattern `upper.ts` against a real
- * `Upper.TS` returns the match spelled `upper.ts`). Only a segment containing a
- * metacharacter is guaranteed real (it came from an actual directory listing).
- * Re-deriving every segment from `readdir` — cheap here since it is cached per
- * directory, the same shape as `confineGlobMatches`' own `dirVerdicts` — sidesteps
- * needing to know, path by path, which case applied.
- *
- * The case-insensitive `toLowerCase()` lookup only RELOCATES an entry `fs.glob`
- * already proved exists (by matching it, insensitively); it does not itself
- * decide anything security-relevant. {@link caseCheckPasses} is what enforces
- * case-sensitivity, by testing the pattern against the name this returns.
- *
- * FAIL-CLOSED: an unreadable directory, or a segment with no case-insensitive
- * match in a real listing (should not happen — `fs.glob` already found one),
- * returns `null`, and the caller withholds the match.
- *
- * @returns {Promise<string[]|null>}
- */
-async function realSegmentNames(realRoot, segments, direntCache) {
-  const real = []
-  let dirAbs = realRoot
-  for (const seg of segments) {
-    let names = direntCache.get(dirAbs)
-    if (names === undefined) {
-      try {
-        names = await readdir(dirAbs)
-      } catch {
-        names = null
+  async function walk(dirAbs, relPrefix, active, preOpened) {
+    // `preOpened` (`{dh, key, fh}`) — #7910 review round 2 (TOCTOU) — every
+    // recursive call below already went through `openVerifiedDirForDescend`,
+    // which opened AND identity-verified this exact directory itself;
+    // opening it a SECOND time here, by path, would throw that verification
+    // away and reintroduce the very race it exists to close (see that
+    // function's doc). Only the top-level call (the walk's `realRoot`,
+    // resolved once by the caller before any concurrent tool call could
+    // interfere with it) opens fresh. A pre-opened handle must still be
+    // closed on the early-stop path below — it is already-open regardless of
+    // whether `walk` goes on to use it. `fh` (#7910 review round 3) — present
+    // only on the platforms where `dh` was reopened from an already-verified
+    // fd (see `openVerifiedDirForDescend`'s "ABA" doc) — must stay open for
+    // exactly as long as `dh` is in use, since `dh`'s entries are read
+    // through it, and is closed alongside `dh` everywhere `dh` is closed.
+    if (shouldStop()) {
+      if (preOpened) {
+        await preOpened.dh.close().catch(() => {})
+        if (preOpened.fh) await preOpened.fh.close().catch(() => {})
       }
-      direntCache.set(dirAbs, names)
+      return
     }
-    if (!names) return null
-    const lower = seg.toLowerCase()
-    const realName = names.find((n) => n.toLowerCase() === lower)
-    if (realName === undefined) return null
-    real.push(realName)
-    dirAbs = join(dirAbs, realName)
+    let dh = preOpened?.dh
+    let key = preOpened?.key
+    let fh = preOpened?.fh
+    if (!dh) {
+      try {
+        dh = await opendir(dirAbs)
+      } catch {
+        return // unreadable or gone — FAIL CLOSED: no children found, never a crash
+      }
+      // SECURITY/DoS (#7910 review round 2) — only the TOP-LEVEL (root) call
+      // reaches here without a `preOpened.key` already computed by
+      // `openVerifiedDirForDescend`; register the root itself so a symlink
+      // ANYWHERE in the tree that resolves back to it is also caught as a
+      // cycle, not just a loop among its descendants.
+      try {
+        key = dirKey(await lstat(dirAbs, { bigint: true }))
+      } catch {
+        await dh.close().catch(() => {})
+        return
+      }
+    }
+    visitedDirs.add(key)
+    try {
+      for await (const dirent of dh) {
+        if (shouldStop()) return
+        state.visited++
+        if (state.visited > maxEntries) { state.stop = 'too many entries'; return }
+
+        const name = dirent.name
+        const next = new Array(m + 1).fill(false)
+        // `detHandoff[k+1]` — #7910 review — true when `next[k+1]` was set
+        // THIS STEP by a determinate, non-globstar segment explicitly
+        // matching `name` (as opposed to a `**`'s own absorption, or a
+        // non-determinate `*`/`?` match). Drives both call sites below.
+        const detHandoff = new Array(m + 1).fill(false)
+        // Did the TRAILING globstar (if any) legitimately absorb THIS entry's
+        // own name via its dot-guarded absorption test? If so, it consumed
+        // the entry itself and needs no determinate source to close on it —
+        // see the closure-gate doc below.
+        let globstarAbsorbedLast = false
+        for (let k = 0; k < m; k++) {
+          if (!active[k]) continue
+          if (matchers[k] === CASE_CHECK_GLOBSTAR) {
+            // `**` never absorbs a hidden entry — see parseSegmentTokens's DOT
+            // HANDLING doc; matches fs.glob's own default (a bare `**` never
+            // lists a dotfile/dotdir at any depth).
+            if (name[0] !== '.') {
+              next[k] = true
+              if (k === m - 1) globstarAbsorbedLast = true
+            }
+          } else if (segmentMatches(matchers[k], name)) {
+            next[k + 1] = true
+            if (determinateSegment[k]) detHandoff[k + 1] = true
+          }
+        }
+        closeGlobstars(next)
+
+        // #7901 round 2 (Windows parity) — `join()`, not a hardcoded `/`, so
+        // the result carries the PLATFORM-native separator (`\` on Windows),
+        // matching what the pre-#7901 walk returned via `path.relative()`
+        // (also platform-native) rather than silently switching Windows Glob
+        // results from `sub\file.ts` to `sub/file.ts`. `join('', name)`
+        // collapses to plain `name` (verified: no leading separator), so this
+        // needs no separate empty-prefix branch.
+        const relPath = join(relPrefix, name)
+        const isSymlink = dirent.isSymbolicLink()
+        let childAbs
+        if (isSymlink) {
+          let resolved
+          try {
+            resolved = await validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl)
+          } catch {
+            resolved = null // FAIL CLOSED — ELOOP, EACCES, etc. withhold, never trust
+          }
+          if (!resolved || !resolved.valid) continue
+          childAbs = resolved.realPath
+        } else {
+          childAbs = join(dirAbs, name)
+        }
+
+        // SECURITY/DoS (#7910 review, item 3 — corrected in round 2) — a
+        // TRAILING `**` closing with ZERO width (matching no real segment of
+        // its own) onto a NON-directory entry is only valid when the entry
+        // that immediately precedes the close was named by a DETERMINATE
+        // segment (verified directly: `plainfile.txt/**`/`[p]lainfile.txt/**`
+        // match a plain FILE `plainfile.txt`; `pl?infile.txt/**`/`*.txt/**`
+        // do not — same rule for a symlink: `[f]ile-link.txt/**` matches a
+        // symlink to a FILE exactly like a plain file does, verified
+        // directly) — or when the globstar legitimately ABSORBED this
+        // entry's own name via its own dot-guarded test
+        // (`globstarAbsorbedLast`; that case needs no gate at all, since the
+        // entry was genuinely consumed as a real segment, file or directory,
+        // same as any ordinary `**` leaf match — `sub/**` finding a plain
+        // file `sub/file.ts` is completely ordinary). A PLAIN directory
+        // entry never needs the determinate check at all: `**` matching
+        // zero of a real directory's contents is always well-formed,
+        // determinate or not. A SYMLINK entry is NOT automatically
+        // "dir-like" the way round 2's original `isDirLike =
+        // dirent.isDirectory() || dirent.isSymbolicLink()` treated it — that
+        // unconditionally exempted EVERY symlink from this gate regardless
+        // of what named it, letting `*/**`/`?rc-link/**`/`[s]*-link/**` (all
+        // NON-determinate — `[s]*-link` contains a bare `*` token, so
+        // `isDeterminateSegmentTokens` correctly still calls the whole
+        // segment non-determinate) spuriously close zero-width onto a
+        // symlinked directory, and `*.txt/**` onto a symlinked FILE, none of
+        // which real `fs.glob` does (verified directly: all four give zero
+        // matches). Unlike the DESCEND decision below, target type (file vs
+        // directory) does NOT gate this closure — `detHandoff[m-1]` alone
+        // is the exact line `fs.glob` draws here, same as a plain file.
+        if (next[m] && m >= 1 && matchers[m - 1] === CASE_CHECK_GLOBSTAR && !globstarAbsorbedLast) {
+          const closesWithZeroWidth = isSymlink ? detHandoff[m - 1] : (dirent.isDirectory() || detHandoff[m - 1])
+          if (!closesWithZeroWidth) next[m] = false
+        }
+
+        // SECURITY/parity (#7910 review round 2) — a pattern ending in `/`
+        // (`directoryOnly`, from `runGlob`) means directories only, matching
+        // `fs.glob` exactly: verified directly, a symlink pointing AT a
+        // directory is still excluded (`dirent.isDirectory()`, never
+        // "dir-like") — same as a plain file.
+        if (next[m] && (!directoryOnly || dirent.isDirectory())) results.push(relPath)
+        if (shouldStop()) return
+
+        let canContinuePattern = false
+        for (let k = 0; k < m; k++) { if (next[k]) { canContinuePattern = true; break } }
+        // SECURITY/DoS (#7910 review, item 1) — a SYMLINKED directory is only
+        // descended into when SOME active, non-globstar, DETERMINATE segment
+        // explicitly matched this entry's name this step (`detHandoff`).
+        // Verified directly against Node 22's `glob()`: `src-link/*`,
+        // `src-link/**`, `[s]rc-link/*`, `{src-link,x}/*` all follow a
+        // symlinked `src-link`; `?rc-link/*`, `*/*` do not. A symlinked
+        // directory reached ONLY via `**` absorption (bare `**`, never
+        // descends past a symlink — the standard reason `**` needs symlink
+        // protection at all, to bound recursion) or ONLY via a
+        // non-determinate wildcard is listed as a match above but never
+        // opened — this is also what makes a symlink self-loop (`a -> .`)
+        // terminate after exactly the literal-segment chain the PATTERN
+        // itself spells out, rather than being re-discovered at every `**`
+        // depth. A plain (non-symlink) directory is unaffected — recursing
+        // into an ordinary directory carries no symlink risk regardless of
+        // how it was reached.
+        const canDescendSymlink = !isSymlink || detHandoff.slice(0, m).some(Boolean)
+        if (canContinuePattern && canDescendSymlink && (dirent.isDirectory() || isSymlink)) {
+          // SECURITY (review of #7901 round 2, TOCTOU) — `childAbs` (for a
+          // symlink-flagged entry, `resolved.realPath` from the
+          // `validateRawPathWithinCwd` call above; for a plain-directory-
+          // flagged one, a plain `join`) is a DECISION, not a proof that
+          // survives to the `opendir` about to happen — some real time still
+          // elapses between deciding "this is what we'd open" and actually
+          // opening it (at minimum, the `await` boundary below; `dirent`'s
+          // own type can already be stale before this line even runs, see
+          // `openVerifiedDirForDescend`'s doc). Route through it rather than
+          // opening `childAbs` directly, so the open and the LAST identity
+          // check that vouches for it are inseparable — no path is ever
+          // handed back for a caller to re-resolve blind.
+          const descend = await openVerifiedDirForDescend(
+            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam,
+          )
+          if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key, fh: descend.fh })
+        }
+      }
+    } finally {
+      visitedDirs.delete(key)
+      await dh.close().catch(() => {})
+      if (fh) await fh.close().catch(() => {})
+    }
   }
-  return real
+
+  const initial = new Array(m + 1).fill(false)
+  initial[0] = true
+  closeGlobstars(initial)
+  await walk(realRoot, '', initial)
+}
+
+/**
+ * SECURITY (review of #7901 round 3, the ABA hole in round 2's identity
+ * check) — open AND identity-verify a directory for `walk` to descend into,
+ * for EITHER a symlink-flagged entry or a plain-directory-flagged one.
+ *
+ * ── The hole round 2 left open ──────────────────────────────────────────
+ *
+ * Round 2 (`lstat(target)` → `opendir(target)` → `lstat(target)` again →
+ * compare dev/ino of the two `lstat`s) verified the PATH, twice, but never
+ * inspected the object `opendir` actually opened. That is an ABA gap, not a
+ * check-then-use gap: an attacker who (1) swaps `target` for a symlink to
+ * `/etc` between the pre-open `lstat` and `opendir` — so `opendir` follows
+ * it and returns a `Dir` for `/etc` — and then (2) swaps the real directory
+ * BACK before the post-open `lstat` runs, sails through both comparisons:
+ * both `lstat`s see the legitimate directory, dev/ino match, and the
+ * already-`/etc`-bound `Dir` is handed to `walk` and iterated, disclosing
+ * `/etc`'s entries under a workspace-looking `relPath`. Chroxy's concurrent
+ * per-turn tool dispatch (`byok-session.js`'s `Promise.all`, #7356) gives an
+ * attacker-controlled Bash call approved in the same turn the real time to
+ * land both swaps while a Glob walk is busy elsewhere in the tree.
+ *
+ * ── The fix: verify the OPENED object, not the path ─────────────────────
+ *
+ * `openNoFollow` (`ws-file-ops/open-nofollow.js`, #7280 — the one
+ * symlink-refusing `open()` for this codebase) opens `target` with
+ * `O_DIRECTORY` and, on every platform it can, `O_NOFOLLOW` enforced
+ * ATOMICALLY by the kernel: if a symlink sits at `target` at the instant of
+ * this call — including the ABA's first swap — the open fails outright,
+ * `ELOOP`, before anything is read. There is no window afterward in which
+ * "swapping back" can retroactively legitimize an open that never happened.
+ * The returned `FileHandle` is then `fstat`ed (`{ bigint: true }`, on the fd
+ * itself — not a fresh `lstat` by path) and compared to the PRE-open
+ * `lstat`: this is the identity of what was actually opened, not of
+ * whatever currently sits at the path, which is exactly what round 2's
+ * two-`lstat` comparison was missing. This closes the described attack
+ * fully — no "swap back" step is ever reachable, because step 1 alone
+ * already fails closed.
+ *
+ * ── Listing: reusing the verified fd where the platform allows it ───────
+ *
+ * `fs.promises.opendir` accepts only a path, never an fd (verified
+ * directly: passing one throws `ERR_INVALID_ARG_TYPE`), so getting `Dir`
+ * entries FROM the already-verified handle — rather than a second, path-based
+ * open that reintroduces a (smaller) version of the same race — needs an
+ * OS-level trick. On **Linux**, `opendir('/proc/self/fd/' + fh.fd)` reopens
+ * through the SAME open file description via the kernel's magic-symlink
+ * `/proc` entries — verified directly (Docker `node:22-alpine`): entries
+ * read this way match the directory at open time even after the original
+ * path is renamed aside and replaced with a symlink to an attacker
+ * directory afterward, i.e. it is bound to the fd, not re-resolved by path.
+ * `fh` is kept open for as long as `dh` is (see `walk`'s `preOpened.fh`) —
+ * closing it early would invalidate the magic-symlink target.
+ *
+ * **macOS has no equivalent** — verified empirically on this exact host,
+ * both via Node (`fs.promises.opendir('/dev/fd/' + fh.fd)`) and via a plain
+ * shell (`ls -la /dev/fd/N` on an fd opened by `exec N< dir`): both fail
+ * `ENOTDIR`, even though `stat()` of that same `/dev/fd/N` path correctly
+ * reports it as a directory. This is a devfs limitation (macOS's `/dev/fd`
+ * dup-on-open only supports regular files), not a Node bug, and `fs.Dir`
+ * exposes no fd a caller could `fstat`/rebind through any other public API.
+ * **Windows has no `/proc`-like construct at all.** On both, listing falls
+ * back to a second, path-based `opendir(target)`, immediately followed by
+ * round 2's original post-open `lstat`-compare (kept, not removed — same
+ * fail-closed-on-any-mismatch shape as before).
+ *
+ * RESIDUAL RISK, stated rather than implied, for macOS/non-Linux platforms
+ * ONLY: the `openNoFollow` check above closes the SPECIFIC attack this
+ * function's doc leads with (swap-to-symlink, then swap back) universally,
+ * on every platform, because that attack needs step 1's open to SUCCEED
+ * despite the symlink, and it does not. What remains possible on
+ * non-Linux, and is NOT closed, is a *narrower, single-swap* variant: the
+ * directory is genuinely real and unswapped through the `openNoFollow`
+ * verification (no ABA needed to pass it), and the attacker plants a
+ * symlink for the FIRST time in the short gap between that verification
+ * succeeding and the fallback's own `opendir(target)` call. That call has
+ * no `O_NOFOLLOW` equivalent (Node's `opendir` accepts no flags), so it
+ * would follow the symlink — caught, as before, by the immediate
+ * `lstat`-compare that follows it, UNLESS the attacker also restores the
+ * real directory before that specific `lstat` runs, which is the same
+ * inode-identity requirement — and the same accepted residual — already
+ * documented for `openNoFollow`'s own win32 emulation branch (#7874/#7280).
+ * This residual window is real but categorically smaller than round 2's:
+ * it requires a fresh, precisely-timed swap landing in a few-microsecond
+ * gap between two back-to-back `await`s with no attacker-observable signal
+ * in between, not a swap-then-restore spanning this whole function.
+ *
+ * `isKnownSymlink` — true when `dirent` was ALREADY flagged as a symlink at
+ * listing time and `candidateAbs` is therefore already the confinement-
+ * validated `resolved.realPath` from the `validateRawPathWithinCwd` call in
+ * `walk` (skips the redundant re-lstat-and-resolve below; the pre-open
+ * identity check still runs against the resolved target). False for a
+ * plain-directory-flagged entry, where `candidateAbs` has not been
+ * re-checked since `dirent` was read and may itself now BE a symlink — that
+ * case is routed through the same `validateRawPathWithinCwd` confinement
+ * check the originally-flagged-symlink branch already has, rather than
+ * trusted on `dirent`'s stale word. Either way, both branches funnel into
+ * the SAME `openNoFollow`-based verified-open below — there is exactly one
+ * implementation of "open and verify", not two.
+ *
+ * `__testSeam(target, phase)`, if given, is awaited at THREE points — the
+ * ONLY way to hit any of these windows deterministically in a test; a real
+ * concurrent race is flaky by construction (see the test file): `'before-open'`
+ * immediately before the `openNoFollow` call (the pre-open check-to-open
+ * window); `'after-open'` (new, #7910 review round 3) immediately after
+ * `openNoFollow` + the fstat-identity check have PASSED and before entries
+ * are read — proving a swap landing AFTER a successful, verified open does
+ * not retroactively corrupt what was already opened; and `'after-verify'`
+ * immediately before the already-open `Dir` is returned to `walk`.
+ *
+ * SECURITY/DoS (#7910 review round 2) — `visitedDirs`/`dirKey` add a SECOND,
+ * independent check alongside the identity one above: once the open is
+ * verified, its `dev:ino` is checked against the set of real directories
+ * already on the CURRENT descent path (root down to the caller). A hit
+ * means this entry's real target is its OWN ancestor — an actual symlink
+ * cycle (`selfloop -> .`), not merely a diamond (the same real directory
+ * reached twice via two separate, non-overlapping symlinks, which is NOT
+ * refused, since `visitedDirs` is path-scoped by `walk`'s own push/pop, not
+ * global to the whole walk). Refusing here, BEFORE `walk` ever touches this
+ * `Dir`'s entries, is what closes the DoS `walkGlob`'s existing
+ * `detHandoff`/`canDescendSymlink` gate does not: that gate answers "was
+ * this entry named by a determinate segment", which a self-loop's REPEATING
+ * name satisfies at every depth it is encountered, forever — see `walkGlob`'s
+ * `visitedDirs` doc for the measured blowup this replaces.
+ *
+ * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
+ */
+const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
+
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam) {
+  let target = candidateAbs
+  let preStat = null
+  if (!isKnownSymlink) {
+    try {
+      preStat = await lstat(candidateAbs, { bigint: true })
+    } catch {
+      return null // gone since it was listed — nothing to descend into
+    }
+    if (preStat.isSymbolicLink()) {
+      // Became a symlink since `dirent` was read — resolve+confine it exactly
+      // like the originally-flagged-symlink branch in `walk` does, instead of
+      // trusting `candidateAbs` as a plain directory.
+      let resolved
+      try {
+        resolved = await validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl)
+      } catch {
+        resolved = null // FAIL CLOSED — ELOOP, EACCES, etc.
+      }
+      if (!resolved || !resolved.valid) return null
+      target = resolved.realPath
+      preStat = null // that lstat was for the OLD path — the resolved target needs its own
+    } else if (!preStat.isDirectory()) {
+      return null // no longer a directory (e.g. swapped for a plain file) — nothing to open
+    }
+  }
+
+  if (!preStat) {
+    try {
+      preStat = await lstat(target, { bigint: true })
+    } catch {
+      return null
+    }
+    if (preStat.isSymbolicLink() || !preStat.isDirectory()) return null
+  }
+
+  if (__testSeam) await __testSeam(target, 'before-open')
+
+  // The ABA fix: open with O_NOFOLLOW|O_DIRECTORY (atomic on every platform
+  // `openNoFollow` supports — real kernel enforcement on POSIX, a
+  // check-open-recheck emulation on win32) and verify identity against the
+  // pre-open `lstat` via `fstat` ON THE OPENED HANDLE, never a fresh `lstat`
+  // by path. See the doc above for exactly why this closes the round-2 gap.
+  let fh
+  try {
+    fh = await openNoFollow(target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
+  } catch {
+    return null // symlink, gone, or otherwise unopenable at this instant — FAIL CLOSED
+  }
+  let openedStat
+  try {
+    openedStat = await fh.stat({ bigint: true })
+  } catch {
+    await fh.close().catch(() => {})
+    return null
+  }
+  const sameObject =
+    openedStat.isDirectory() &&
+    openedStat.ino !== 0n &&
+    openedStat.dev === preStat.dev &&
+    openedStat.ino === preStat.ino
+  if (!sameObject) {
+    // The object actually opened is not the one we checked — withhold
+    // rather than trust it. Nothing has been read from it yet.
+    await fh.close().catch(() => {})
+    return null
+  }
+
+  if (__testSeam) await __testSeam(target, 'after-open')
+
+  const key = dirKey(openedStat)
+  if (visitedDirs.has(key)) {
+    // Cycle: this real directory is already an ancestor on the CURRENT
+    // descent path (#7910 review round 2, DoS). Not a diamond — a diamond's
+    // target is not yet in `visitedDirs` because `walk` only holds a key
+    // while it is actively inside that directory (or one of its
+    // descendants), never after backtracking out of it.
+    await fh.close().catch(() => {})
+    return null
+  }
+
+  if (DIR_FD_REOPEN_SUPPORTED) {
+    // Linux: read entries from the SAME open file description — no further
+    // path lookup, no further race, ever. See the doc above for the direct
+    // verification that this survives the original path being swapped away.
+    let dh
+    try {
+      dh = await opendir(`/proc/self/fd/${fh.fd}`)
+    } catch {
+      await fh.close().catch(() => {})
+      return null
+    }
+    if (__testSeam) await __testSeam(target, 'after-verify')
+    return { dh, path: target, key, fh }
+  }
+
+  // Fallback (macOS/win32/other — no fd-bound reopen available): a second,
+  // path-based `opendir`, immediately re-verified with round 2's original
+  // lstat-compare. See the RESIDUAL RISK paragraph above for exactly what
+  // narrow window this does — and does not — close on these platforms.
+  let dh
+  try {
+    dh = await opendir(target)
+  } catch {
+    await fh.close().catch(() => {})
+    return null
+  }
+  let postStat
+  try {
+    postStat = await lstat(target, { bigint: true })
+  } catch {
+    await dh.close().catch(() => {})
+    await fh.close().catch(() => {})
+    return null
+  }
+  const stillSameObject =
+    !postStat.isSymbolicLink() &&
+    postStat.ino !== 0n &&
+    postStat.dev === preStat.dev &&
+    postStat.ino === preStat.ino
+  await fh.close().catch(() => {}) // not used for listing on this path — release it now
+  if (!stillSameObject) {
+    await dh.close().catch(() => {})
+    return null
+  }
+  if (__testSeam) await __testSeam(target, 'after-verify')
+  return { dh, path: target, key, fh: null }
 }
 
 /**
@@ -634,18 +1122,17 @@ async function realSegmentNames(realRoot, segments, direntCache) {
  * on-disk name that almost-but-doesn't match (`'a'.repeat(n)`, no trailing
  * `b`) is the textbook catastrophic-backtracking shape — measured: 0.03ms at
  * n=20, 811ms at n=30, 5.9s at n=32, and it only gets worse from there (each
- * +2 chars roughly 7-8x's the previous run). This check runs SYNCHRONOUSLY
- * inside `confineGlobMatches`, AFTER `runGlob`'s own 30s walk-timeout race has
- * already resolved (the race guards the `fs.glob` walk, not the case
- * re-check that follows it), so nothing bounds it — a single crafted Glob
- * call can freeze the daemon's single-threaded event loop for however long
- * the attacker's pattern and an existing (or attacker-planted) long filename
- * demand. `**`-count no longer fails this class of pattern closed before
- * reaching the regex either (that was this exact defect class's OWN prior
- * fix, in this same commit, removing the `ambiguous` short-circuit for 2+
- * `**` segments) — so every pattern shape now reaches this segment matcher,
- * which is why it has to be safe on its own rather than relying on an
- * upstream fail-closed path to shield it.
+ * +2 chars roughly 7-8x's the previous run). This check runs SYNCHRONOUSLY,
+ * once per real directory entry `walkGlob` (#7901) reads, interleaved with
+ * `runGlob`'s own 30s walk-timeout race rather than after it — but a single
+ * over-budget call would still block the event loop for its own duration
+ * regardless of the race around it, so nothing upstream of the complexity cap
+ * below may assume this check is cheap. `**`-count no longer fails this class
+ * of pattern closed before reaching the regex either (that was this exact
+ * defect class's OWN prior fix, in this same commit, removing the `ambiguous`
+ * short-circuit for 2+ `**` segments) — so every pattern shape now reaches
+ * this segment matcher, which is why it has to be safe on its own rather than
+ * relying on an upstream fail-closed path to shield it.
  *
  * The replacement is a token list consumed by an iterative, non-backtracking
  * DP ({@link segmentMatches}) — the same technique {@link caseCheckPasses}
@@ -660,6 +1147,24 @@ async function realSegmentNames(realRoot, segments, direntCache) {
  * directly against no character at all (`any`/`star`), never through a `.`-
  * style regex metachar that would need `[\s\S]` to include `\n` — matching
  * every character, newlines included, needs no special-casing here.
+ *
+ * DOT HANDLING (#7901) — added when `walkGlob` became this matcher's OWN
+ * candidate source rather than a post-hoc re-check over candidates `fs.glob`
+ * already filtered. `fs.glob`'s default (verified directly against Node 22's
+ * `glob()`) never lets a bare `*`, `?`, or an ordinary bracket class stand for
+ * a REAL segment's leading dot: `*.ts` does not match `.env`, `?env` does
+ * not, `[.a]env`/`[a.]env` (a class with more than one member, even when `.`
+ * is one of them) does not, `[^a]env`/`[!a]env` (a negated class that would
+ * incidentally accept `.` under ordinary regex semantics) does not — only a
+ * LITERAL leading `.` (`.env*`, `.[a-z]*`) reaches a dotfile, with exactly one
+ * observed exception: `[.]` — a non-negated class whose SOLE member is a
+ * literal dot — is privileged the same as a literal `.` (`[.]env` matches
+ * `.env`); a class with any other member alongside the dot is not. This is
+ * encoded as `soleDot` on a `class` token ({@link parseBracketExpr}) and
+ * enforced by {@link advanceToken}'s dot guard, which triggers ONLY at real
+ * offset 0 — everywhere else a `.` is an ordinary character, matched like any
+ * other. `**` gets no such exception ever (it carries no literal text of its
+ * own to be "explicit" with): see {@link walkGlob}'s own dot check.
  */
 function parseSegmentTokens(seg) {
   const tokens = []
@@ -686,16 +1191,16 @@ function parseSegmentTokens(seg) {
         // constructor rejects an out-of-order range (`Range out of order in
         // character class`) and THROWS, synchronously, from inside
         // `compileCaseCheck` — which runs unconditionally, for every Glob
-        // call whose pattern has a bracket segment, before a single match is
-        // even checked (`confineGlobMatches` calls it up front, even with
-        // zero candidate files). Nothing between here and `executeBuiltinTool`
-        // catches it, so an ordinary "No matches" (confirmed empirically:
-        // `fs.glob` itself tolerates `[z-a]bc.ts` and simply matches nothing,
-        // it does not throw) turns into a surfaced `Tool Glob failed:
-        // Invalid regular expression...` error instead. Fail closed the same
-        // way an unclosed `[` or a malformed segment already does elsewhere
-        // in this parser: a bracket expression JS cannot compile becomes a
-        // token that matches no character, ever — never a crash.
+        // call whose pattern has a bracket segment, before a single directory
+        // entry is even read (`runGlob` calls it up front). Nothing between
+        // here and `executeBuiltinTool` catches it, so an ordinary "No
+        // matches" (confirmed empirically: `fs.glob` itself tolerates
+        // `[z-a]bc.ts` and simply matches nothing, it does not throw) turns
+        // into a surfaced `Tool Glob failed: Invalid regular expression...`
+        // error instead. Fail closed the same way an unclosed `[` or a
+        // malformed segment already does elsewhere in this parser: a bracket
+        // expression JS cannot compile becomes a token that matches no
+        // character, ever — never a crash.
         let re
         try {
           re = new RegExp(`^${parsed.source}$`)
@@ -704,7 +1209,7 @@ function parseSegmentTokens(seg) {
           i = parsed.next
           continue
         }
-        tokens.push({ t: 'class', re })
+        tokens.push({ t: 'class', re, soleDot: parsed.soleDot })
         i = parsed.next
       } else {
         tokens.push({ t: 'lit', ch: '[' })
@@ -774,15 +1279,40 @@ function parseSegmentTokens(seg) {
  *     reintroduced here through the one branch that still had an
  *     |reachable|-proportional term. Batching removes it: this function is
  *     now O(str.length) worst case for every token type, `alt` included.
+ *
+ * DOT GUARD (#7901) — see parseSegmentTokens's DOT HANDLING doc. `dotGuarded`
+ * is true exactly when `str` (the REAL segment name being tested) starts with
+ * a literal dot; the guard only ever changes behavior at offset 0, since
+ * offset 0 becoming reachable at any LATER token means an earlier token
+ * already legitimately consumed the leading dot, and every following
+ * character is ordinary. It does not disturb the commutes-with-union property
+ * the `alt` batching above relies on: whether 0 stays in a token's output
+ * depends only on whether 0 was in its input, independent of anything else in
+ * the set, so `f(A ∪ B) = f(A) ∪ f(B)` still holds token-type by token-type.
  */
 function advanceToken(token, str, reachable) {
   const n = str.length
+  const dotGuarded = n > 0 && str[0] === '.'
   if (token.t === 'star') {
-    let min = Infinity
-    for (const j of reachable) if (j < min) min = j
-    if (min === Infinity) return new Set()
     const next = new Set()
-    for (let j = min; j <= n; j++) next.add(j)
+    let min = Infinity
+    for (const j of reachable) {
+      // #7910 review (item 4) — `*` is NEVER dot-entitled, not even with
+      // zero width: dropping offset 0 outright (rather than keeping it
+      // reachable via a zero-width self-loop, as an earlier cut did) is what
+      // `parseSegmentTokens`'s own doc already promises ("only a LITERAL
+      // leading `.` ... reaches a dotfile"). The zero-width carve-out this
+      // replaces let a LATER dot-entitled literal consume the leading dot
+      // AFTER the star had "passed through" it doing nothing — which made
+      // `*.env` match a real `.env` (verified: Node 22's `glob()` returns no
+      // matches for `*.env` against `.env`). Offset 0 becoming reachable via
+      // a LATER token (one that legitimately consumed the dot itself) is
+      // unaffected — this only ever drops offset 0 from THIS token's own
+      // output.
+      if (dotGuarded && j === 0) continue
+      if (j < min) min = j
+    }
+    if (min !== Infinity) { for (let j = min; j <= n; j++) next.add(j) }
     return next
   }
   const next = new Set()
@@ -792,8 +1322,15 @@ function advanceToken(token, str, reachable) {
     }
     return next
   }
+  // A `lit` token whose own character is '.' is always entitled to consume
+  // offset 0; a `class` token is entitled only when parseBracketExpr flagged
+  // it `soleDot` (the `[.]` exception — see its doc). Every other token type
+  // (`any`, an ordinary `class`) is never entitled, matching `fs.glob`'s own
+  // default of never letting a bare wildcard stand for a leading dot.
+  const dotEntitled = token.t === 'lit' ? token.ch === '.' : token.t === 'class' && token.soleDot === true
   for (const j of reachable) {
     if (j >= n) continue
+    if (j === 0 && dotGuarded && !dotEntitled) continue
     const c = str[j]
     if (token.t === 'lit' && c === token.ch) next.add(j + 1)
     else if (token.t === 'any') next.add(j + 1)
@@ -831,6 +1368,15 @@ function segmentMatches(tokens, str) {
  * Returns `null` (caller treats `[` as a literal) when there is no closing
  * `]` — the same "unmatched metachar is literal" rule glob implementations
  * use. A `]` immediately after `[` or `[!`/`[^` is a literal `]`, per POSIX.
+ *
+ * `soleDot` (#7901) — true exactly when this class is `[.]`: non-negated,
+ * one member, that member a literal dot. Node's `fs.glob` gives this one
+ * shape of bracket class the same "explicit dot" privilege as a bare literal
+ * `.` (verified directly: `[.]env` matches a real `.env`), while every other
+ * class — `[.a]`, `[a.]`, any negated class, `.` on a `-` end of a range —
+ * does not, even when `.` is technically among the characters it accepts. See
+ * parseSegmentTokens's DOT HANDLING doc and advanceToken's dot guard, which
+ * is the only place this flag is read.
  */
 function parseBracketExpr(seg, openIdx) {
   let j = openIdx + 1
@@ -849,7 +1395,7 @@ function parseBracketExpr(seg, openIdx) {
   // are escaped so an unlucky position (leading '^', an already-consumed
   // leading ']') can't be misread as class syntax.
   const classBody = body.replace(/\^/g, '\\^').replace(/\]/g, '\\]')
-  return { source: `[${negate ? '^' : ''}${classBody}]`, next: j + 1 }
+  return { source: `[${negate ? '^' : ''}${classBody}]`, next: j + 1, soleDot: !negate && body === '.' }
 }
 
 /** Index of the `}` matching `seg[openIdx] === '{'`, or -1 if unmatched. */
@@ -889,27 +1435,61 @@ function splitTopLevelCommas(s) {
 const CASE_CHECK_GLOBSTAR = Symbol('globstar')
 
 /**
+ * #7910 review — true when a {@link parseSegmentTokens} token array contains
+ * no `star` (`*`) or `any` (`?`) token anywhere, including recursively inside
+ * every alternative of an `alt` (`{a,b}`) token. `lit`, `class` (a bracket
+ * expression — `[s]`, `[a-z]`) and `none` (an unparseable class, matches
+ * nothing) all count as determinate on their own. Verified directly against
+ * Node 22's `glob()` as the exact line it draws for two behaviors `walkGlob`
+ * has to replicate (see its two call sites): following a symlinked directory,
+ * and letting a trailing `**` close with zero width onto something that
+ * isn't a directory. Both apply for a literal, bracket-class, or brace
+ * segment naming the entry; neither applies when a bare `*`/`?` is what
+ * matched it — a bracket class is syntactically a "wildcard" too, but Node's
+ * own matcher treats it as determinate enough to follow/close on, same as a
+ * literal.
+ */
+function isDeterminateSegmentTokens(tokens) {
+  return tokens.every((t) => {
+    if (t.t === 'star' || t.t === 'any') return false
+    if (t.t === 'alt') return t.options.every(isDeterminateSegmentTokens)
+    return true // 'lit', 'class', 'none'
+  })
+}
+
+/**
  * COMPLEXITY BOUND (#7898 round 4) — the worst-case cost of the whole
- * case-check matcher (`compileCaseCheck` + `caseCheckPasses`, everything
- * below this comment), stated once here rather than re-derived per round.
- * Every prior round of this PR's review (1 through 3) found a NEW super-linear
- * blow-up in this code; this is the bound that is supposed to end that
- * pattern, by covering every construct the matcher accepts, not just the one
- * a given round happened to fuzz.
+ * segment matcher (`compileCaseCheck` + the per-name matching it drives,
+ * everything below this comment), stated once here rather than re-derived
+ * per round. Every prior round of this PR's review (1 through 3) found a NEW
+ * super-linear blow-up in this code; this is the bound that is supposed to
+ * end that pattern, by covering every construct the matcher accepts, not
+ * just the one a given round happened to fuzz.
+ *
+ * #7901 — this bound covers BOTH callers of the matcher: `caseCheckPasses`
+ * (a full path's real segments, known up front — still exercised directly by
+ * this file's own test suite) and `walkGlob`'s own per-directory-entry use of
+ * `segmentMatches`, which is the SAME per-segment token-array DP, just
+ * invoked incrementally as the walk discovers each real name instead of
+ * post-hoc over an already-known path. The cost accounting below is
+ * unchanged either way — it was always per-segment-matched, not tied to
+ * which function happens to call it.
  *
  * Notation:
  *   P = `pattern.length` (the whole Glob pattern, all `/`-segments combined).
  *   N = length of one real on-disk path SEGMENT name (a single filename or
  *       directory name, not the whole path).
  *   D = number of path segments in one candidate match (path depth).
- *   M = number of candidates `confineGlobMatches` calls `caseCheckPasses` on
- *       for one Glob call — bounded above by `GLOB_COLLECT_CEILING` (50,000).
+ *   M = number of real directory entries the matcher is invoked on for one
+ *       Glob call — bounded above by `globMaxEntriesVisited()` (2,000,000 default)
+ *       in `walkGlob`, or by `GLOB_COLLECT_CEILING` (50,000) for the matches
+ *       `caseCheckPasses` is called on directly.
  *
  * Split into a one-time PARSE and a per-match MATCH phase:
  *
- * PARSE — `compileCaseCheck`, called exactly once per Glob call (even with
- * zero candidate files: `confineGlobMatches` compiles it up front), splits on
- * `/` and parses each segment via `parseSegmentTokens`. For every construct
+ * PARSE — `compileCaseCheck`, called exactly once per Glob call, by `runGlob`
+ * before the walk starts, splits on `/` and parses each segment via
+ * `parseSegmentTokens`. For every construct
  * except nested braces, parsing a segment is O(segment length) — brackets,
  * chained (non-nested) `{...}` groups, and runs of `*`/`?` all consume their
  * own text once, so summed across all segments this is O(P). Chain-nested
@@ -925,10 +1505,14 @@ const CASE_CHECK_GLOBSTAR = Symbol('globstar')
  * separate stack-overflow hazard below. Under that cap, PARSE is O(P)
  * (32 is a constant multiplier).
  *
- * MATCH — `caseCheckPasses`, called once per candidate (≤ M times). The
- * path-level DP that aligns pattern segments (including any number of `**`,
- * at any position) against a match's D real segments is O(S × D), where S is
- * the pattern's segment count (S ≤ P). Within one aligned non-`**` segment,
+ * MATCH — the per-segment `segmentMatches` DP, invoked once per real
+ * directory entry (≤ M times), whether via `caseCheckPasses`'s own path-level
+ * DP that aligns pattern segments (including any number of `**`, at any
+ * position) against a match's D real segments — O(S × D), where S is the
+ * pattern's segment count (S ≤ P) — or via `walkGlob`'s equivalent
+ * incremental frontier update, one real segment at a time, which does the
+ * same S-segments-of-work per entry without ever materializing a full D-long
+ * real-segments array. Within one aligned non-`**` segment,
  * `segmentMatches` walks that segment's token tree: `*`/`?`/bracket-class
  * tokens are O(N) each; a `{a,b}` token is O(N) PER OPTION, batched over the
  * whole reachable-offset set rather than per-offset (the round-3 fix,
@@ -944,13 +1528,18 @@ const CASE_CHECK_GLOBSTAR = Symbol('globstar')
  * alternatives inside a `**`-adjacent segment, or a segment sitting between
  * two `**`s, are ordinary segments to this accounting — `**` itself costs no
  * per-character work at all (`CASE_CHECK_GLOBSTAR` accepts any already-real
- * segment unconditionally). Across all M candidates: O(M × P × N).
- * `realSegmentNames`'s `readdir` is cached per directory, adding O(M × D)
- * amortized to O(1) per repeat directory.
+ * segment unconditionally). Across all M candidates: O(M × P × N). #7901 —
+ * `walkGlob`'s own I/O is cheaper than this bound needs: each real directory
+ * is `opendir`'d exactly ONCE regardless of how many entries it contains
+ * (unlike the pre-#7901 `realSegmentNames`, deleted by this fix, which
+ * `readdir`'d per PATH SEGMENT of every candidate — cached, but still
+ * O(M × D) amortized); the walk's directory-open cost is O(number of real
+ * directories under `realRoot` that are actually visited), which this
+ * accounting does not need to charge against the matcher's own bound at all.
  *
- * TOTAL, under the complexity cap: O(P) one-time parse + O(M × P × N) match +
- * O(M × D) readdir — polynomial in every one of P, N, D, M, with no term left
- * unbounded by an attacker-controlled input.
+ * TOTAL, under the complexity cap: O(P) one-time parse + O(M × P × N) match —
+ * polynomial in every one of P, N, D, M, with no term left unbounded by an
+ * attacker-controlled input.
  *
  * WHAT THE TIME BOUND DOES NOT COVER: `parseSegmentTokens` (parse) and
  * `advanceToken`/`advanceTokens` (match, the `alt` branch) are RECURSIVE, one
@@ -1058,16 +1647,6 @@ function literalDirPrefix(pattern) {
     literal.push(segments[i])
   }
   return literal.join('/')
-}
-
-/** {@link validateRawPathWithinCwd}, fail-closed on any resolution error. */
-async function isWithin(rawPath, realRoot, cwdRealCache, cwdCacheTtl) {
-  try {
-    const { valid } = await validateRawPathWithinCwd(rawPath, realRoot, cwdRealCache, cwdCacheTtl)
-    return valid
-  } catch {
-    return false
-  }
 }
 
 async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
@@ -1607,15 +2186,40 @@ const TODOWRITE_MAX_ITEMS_RENDERED = 100
 const TODOWRITE_MAX_CONTENT_RENDERED = 200
 
 // Exported for testing — #7898: proving `caseCheckPasses` stays polynomial on
-// an adversarial pattern needs to call it DIRECTLY. Going through
-// `executeBuiltinTool`'s Glob path exercises `runGlob`'s own `fsGlob(pattern,
-// ...)` WALK first, and that walk's matching is Node's, not this file's — it
-// has to evaluate the SAME pattern text against the SAME real name to decide
-// whether to yield it as a candidate at all, before `confineGlobMatches` (and
-// therefore `caseCheckPasses`) ever runs. Measured: Node's own
-// `fs.glob('*a*a*a*...*b.ts', ...)` took 87 SECONDS against a 40-character
-// non-matching real name — an independent vulnerability in Node's glob
-// matching, upstream of and unrelated to this fix, that an integration-level
-// test cannot avoid triggering for a name long enough to distinguish the old
-// backtracking regex from the new DP. See the test for the full writeup.
-export { compileCaseCheck, caseCheckPasses }
+// an adversarial pattern is cheapest called DIRECTLY, without the filesystem
+// I/O a full `executeBuiltinTool` Glob call carries.
+//
+// `caseCheckPasses` is itself DEAD CODE in production since #7901/#7910
+// replaced `fs.glob` with `walkGlob` on the host path — `runGlob` never calls
+// it — so a direct-call test of `caseCheckPasses` alone proves the SHARED
+// per-segment matcher (`segmentMatches`/`advanceToken`) is fast when called
+// through `caseCheckPasses`'s path-level wrapper, but says nothing about the
+// function that actually ships: `walkGlob`, which calls `segmentMatches`
+// itself, once per real directory entry `opendir` reads. `segmentMatches` is
+// exported alongside it for exactly this reason (#7910 review round 2) — a
+// direct call proves the LIVE matcher stays fast at the SAME full adversarial
+// scale (a 5000-char synthetic string) `caseCheckPasses`'s own tests use,
+// which an integration-level `executeBuiltinTool` call cannot: a real
+// filename cannot be 5000+ bytes (most filesystems cap a single path
+// component around 255), and at a filesystem-safe scale the absolute-time
+// gap between O(n) and a REGRESSED O(n²) is too small relative to
+// `executeBuiltinTool`'s own overhead (root resolution, the deadline race,
+// confinement) to assert reliably — measured directly: the exact mutation
+// that makes the 5000-char direct-call test take 69.5s made a 250-char
+// on-disk equivalent take only 120ms, comfortably under ANY CI-safe budget.
+// The integration-level tests this suite keeps therefore assert CORRECTNESS
+// (matched/not-matched) and basic non-hang sanity through the real dispatch,
+// not a tight complexity bound — that proof lives in the direct calls, at
+// full scale, where the gap is actually measurable.
+//
+// `walkGlob` (#7901) is exported for a different reason: `runGlob`'s own
+// deadline/abort RACE (`Promise.race([collect, deadlineReached])`) resolves
+// via `deadlineReached` — a timer/abort callback independent of whether the
+// walk itself ever notices `state.stop` — so a `executeBuiltinTool`-level
+// test proves the TOOL CALL returns promptly on abort, but NOT that the walk
+// stops generating filesystem work in the background afterward, which is the
+// actual #7356 defect (an orphaned walk left running, and running CPU/RSS,
+// after the tool result was already sent). Calling `walkGlob` directly and
+// timing how long its OWN promise takes to settle after `state.stop` is set
+// proves that property precisely.
+export { compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob }
