@@ -702,6 +702,183 @@ describe('ClaudeByokSession', () => {
       assert.ok(elapsed <= 2500, `destroy took ${elapsed}ms, expected <= 2500ms (FLEET_KILL_GRACE_MS + safety)`)
       assert.equal(session._mcpFleet, null, 'fleet reference cleared after destroy')
     })
+
+    // #7012: a session that starts with ZERO configured MCP servers has no
+    // fleet — `addMcpServer` used to only attach to an EXISTING fleet
+    // (`if (this._mcpFleet)`), so the session's first-ever server was
+    // persisted but never connected until a restart.
+    describe('addMcpServer first-connect (#7012)', () => {
+      function writeEmptyMcpConfig() {
+        const path = join(tmpHome, '.claude.json')
+        writeFileSync(path, JSON.stringify({ mcpServers: {} }))
+        return path
+      }
+
+      it('connects the first added server without a restart (no fleet existed at start)', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        session._permissions.on('permission_request', (data) => {
+          session._permissions.respondToPermission(data.requestId, 'allow')
+        })
+        await session.start()
+        assert.equal(session._mcpFleet, null, 'precondition: nothing configured at start, so no fleet yet')
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.ok(session._mcpFleet, 'the first add must build the fleet instead of waiting for a restart')
+        assert.equal(session._mcpFleet.clients.length, 1)
+        assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+        assert.notEqual(res.status, 'configured', 'status must reflect the live connection, not the static fallback')
+        assert.equal(res.status, 'connected')
+        assert.deepEqual(session._mcpFleet.getServerStatuses(), [
+          { name: 'stub', status: 'connected', enabled: true, canToggle: true },
+        ])
+        await session.destroy()
+      })
+
+      it('prompts for trust exactly once — the fleet construction must not double-prompt', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        const prompts = []
+        session._permissions.on('permission_request', (data) => {
+          prompts.push(data)
+          session._permissions.respondToPermission(data.requestId, 'allow')
+        })
+        await session.start()
+
+        await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(prompts.length, 1, 'the pre-write trust decision must be the ONLY prompt — the fleet gate must see it already trusted')
+        assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+        await session.destroy()
+      })
+
+      it('a denied first add creates no fleet and persists nothing', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        session._permissions.on('permission_request', (data) => {
+          session._permissions.respondToPermission(data.requestId, 'deny')
+        })
+        await session.start()
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, false)
+        assert.equal(res.code, 'TRUST_DENIED')
+        assert.equal(session._mcpFleet, null, 'a denied add must not build a fleet')
+        assert.deepEqual(JSON.parse(readFileSync(mcpConfigPath, 'utf8')).mcpServers, {})
+        await session.destroy()
+      })
+
+      it('a second add to an already-live fleet still uses fleet.addServer and does not disturb the first client', async () => {
+        preTrustStub()
+        recordTrust(
+          { name: 'stub2', command: process.execPath, args: [MCP_STUB], env: {} },
+          process.env.CHROXY_MCP_TRUST_PATH,
+        )
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+
+        await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+        const fleetAfterFirst = session._mcpFleet
+        const firstClient = fleetAfterFirst.clients[0]
+
+        const res = await session.addMcpServer('stub2', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(session._mcpFleet, fleetAfterFirst, 'the SAME fleet instance — no rebuild')
+        assert.equal(session._mcpFleet.clients[0], firstClient, 'the first client is untouched')
+        assert.equal(session._mcpFleet.clients.length, 2)
+        await session.destroy()
+      })
+
+      it('two concurrent adds to a fleet-less session create exactly one fleet', async () => {
+        recordTrust({ name: 'a', command: process.execPath, args: [MCP_STUB], env: {} }, process.env.CHROXY_MCP_TRUST_PATH)
+        recordTrust({ name: 'b', command: process.execPath, args: [MCP_STUB], env: {} }, process.env.CHROXY_MCP_TRUST_PATH)
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        assert.equal(session._mcpFleet, null)
+
+        const [resA, resB] = await Promise.all([
+          session.addMcpServer('a', { command: process.execPath, args: [MCP_STUB], env: {} }),
+          session.addMcpServer('b', { command: process.execPath, args: [MCP_STUB], env: {} }),
+        ])
+
+        assert.equal(resA.ok, true, resA.error)
+        assert.equal(resB.ok, true, resB.error)
+        assert.ok(session._mcpFleet, 'exactly one fleet must exist')
+        assert.equal(session._mcpFleet.clients.length, 2, 'both servers landed in the SAME fleet')
+        assert.deepEqual(session._mcpFleet.clients.map((c) => c.name).sort(), ['a', 'b'])
+        await session.destroy()
+      })
+
+      it('_ensureMcpFleet is idempotent — a second call returns the SAME fleet without rebuilding', async () => {
+        preTrustStub()
+        const configPath = join(tmpHome, '.claude.json')
+        writeFileSync(configPath, JSON.stringify({
+          mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+        }))
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        const fleetAfterStart = session._mcpFleet
+        assert.ok(fleetAfterStart)
+
+        const fleetAgain = await session._ensureMcpFleet()
+
+        assert.equal(fleetAgain, fleetAfterStart, 'a second call must return the SAME instance, not rebuild')
+        assert.equal(session._mcpFleet, fleetAfterStart, 'session._mcpFleet must not have been replaced')
+        assert.equal(session._mcpFleet.clients.length, 1, 'no duplicate client — the original was not re-spawned')
+        await session.destroy()
+      })
+
+      it('addMcpServer called before start() persists the config but builds no fleet', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._permissions = { async requestMcpTrust() { return true } }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(res.status, 'configured', 'no live status — nothing was spawned before start()')
+        assert.equal(session._mcpFleet, null, 'a pre-start add must not spawn a child ahead of _processReady')
+
+        // start() now picks the persisted entry up normally.
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        assert.ok(session._mcpFleet)
+        assert.equal(session._mcpFleet.clients.length, 1)
+        await session.destroy()
+      })
+
+      it('a session destroyed mid-add creates no fleet', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        // Simulate destroy() racing the in-flight add: the trust decision only
+        // resolves after destroy() has already run and set `_destroying`.
+        session._permissions = {
+          async requestMcpTrust() {
+            await session.destroy()
+            return true
+          },
+        }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(session._mcpFleet, null, 'a session torn down mid-add must not spawn a new MCP child')
+      })
+    })
   })
 
   describe('sendMessage()', () => {

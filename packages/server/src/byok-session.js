@@ -543,6 +543,57 @@ export class ClaudeByokSession extends BaseSession {
     return getModelPricing(model)
   }
 
+  /**
+   * #7012: lazily construct + start the MCP fleet from whatever is currently in
+   * `_mcpServerConfigs`, exactly once. Extracted out of `start()` (which was the
+   * ONLY caller pre-#7012) so `addMcpServer` can reach the same construction path:
+   * a session that started with zero configured MCP servers never created a
+   * fleet, so `addMcpServer`'s old `if (this._mcpFleet)` gate skipped the
+   * fleet-attach step entirely — the server was persisted but stayed
+   * unconnected until a restart. `addMcpServer` appends the new entry to
+   * `_mcpServerConfigs` BEFORE calling this, so the fleet's constructor (which
+   * spawns one client per config) picks the new server up directly; no separate
+   * `fleet.addServer()` call is needed on that path.
+   *
+   * Single-flight without extra bookkeeping: `this._mcpFleet` is assigned
+   * SYNCHRONOUSLY, before the `await fleet.start()` below — the same
+   * synchronous stretch that reads `_mcpServerConfigs` and decides whether to
+   * call this method (see `addMcpServer`). JS never preempts mid-synchronous-
+   * stretch, so two concurrent `addMcpServer` calls can never both observe
+   * `_mcpFleet` as null: whichever runs first sets it before yielding on the
+   * `await`, and the other sees it already set and falls through to the
+   * existing-fleet `fleet.addServer()` branch instead of racing a second
+   * `new MCPFleet(...)`.
+   *
+   * Guards:
+   *  - zero configured servers → no fleet (mirrors the pre-#7012 `start()`
+   *    guard — nothing to spawn).
+   *  - `_destroying` → no fleet (a session torn down mid-add must not spawn a
+   *    new MCP child that `destroy()` has already finished looking for).
+   */
+  async _ensureMcpFleet() {
+    if (this._mcpFleet) return this._mcpFleet
+    if (this._destroying || this._mcpServerConfigs.length === 0) return null
+    // #4457: pass the session's PermissionManager so the fleet can
+    // emit a trust prompt for a not-yet-trusted spawn config (#7001: name +
+    // command + the full args + env).
+    // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
+    // with no prompt; denied tuples set state=DEAD without spawning.
+    // #4456: forward startCapMs override so operators can tune the
+    // session-start wall-clock cap. Passing undefined lets the fleet's
+    // constructor default (DEFAULT_FLEET_START_CAP_MS) win — exactly
+    // what we want when no override is in play.
+    const fleetOpts = { log, permissionManager: this._permissions }
+    if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
+    // #6824: seed the fleet with the persisted parked set so a respawn skips
+    // starting servers the operator disabled before the restart.
+    fleetOpts.disabledServers = [...this._disabledMcpServers]
+    const fleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
+    this._mcpFleet = fleet
+    await fleet.start()
+    return fleet
+  }
+
   async start() {
     if (this._client === null) {
       // Spike (BYOK direct) confirmed the SDK's standard constructor
@@ -573,24 +624,10 @@ export class ClaudeByokSession extends BaseSession {
     // tools, identical to a server missing from config. We deliberately
     // wait for fleet.start() so this.mcpServers + tools list are stable
     // by the time we emit 'ready'.
-    if (this._mcpServerConfigs.length > 0 && this._mcpFleet === null) {
-      // #4457: pass the session's PermissionManager so the fleet can
-      // emit a trust prompt for a not-yet-trusted spawn config (#7001: name +
-      // command + the full args + env).
-      // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
-      // with no prompt; denied tuples set state=DEAD without spawning.
-      // #4456: forward startCapMs override so operators can tune the
-      // session-start wall-clock cap. Passing undefined lets the fleet's
-      // constructor default (DEFAULT_FLEET_START_CAP_MS) win — exactly
-      // what we want when no override is in play.
-      const fleetOpts = { log, permissionManager: this._permissions }
-      if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
-      // #6824: seed the fleet with the persisted parked set so a respawn skips
-      // starting servers the operator disabled before the restart.
-      fleetOpts.disabledServers = [...this._disabledMcpServers]
-      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
-      await this._mcpFleet.start()
-    }
+    // #7012: extracted into _ensureMcpFleet so addMcpServer can reach the
+    // SAME construction path for a session that started with zero MCP
+    // servers configured (previously only start() ever created a fleet).
+    await this._ensureMcpFleet()
 
     this._processReady = true
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
@@ -864,10 +901,23 @@ export class ClaudeByokSession extends BaseSession {
     if (this._mcpFleet) {
       const result = await this._mcpFleet.addServer(persistedCfg)
       if (result.status) status = result.status
+    } else if (this._processReady) {
+      // #7012: no fleet exists yet — either this is the session's first-ever
+      // MCP server, or start() never spun one up because zero servers were
+      // configured at start. `_mcpServerConfigs` already carries this server
+      // (appended above), so `_ensureMcpFleet`'s constructor picks it up
+      // directly; `fleet.addServer()` is not called on this path — see that
+      // method's docstring for why.
+      const fleet = await this._ensureMcpFleet()
+      if (fleet) {
+        const entry = fleet.getServerStatuses().find((s) => s.name === persistedCfg.name)
+        if (entry?.status) status = entry.status
+      }
     }
-    // No fleet yet (nothing was configured at start, so it was never created):
-    // the entry is persisted and `start()` will pick it up. Spinning a fleet up
-    // here would duplicate start()'s wiring for no gain.
+    // else: addMcpServer was called before start() (production only ever
+    // reaches a started session — the WS handler requires one). Leave status
+    // 'configured' and let start() pick the persisted entry up normally,
+    // rather than spawning an MCP child ahead of `_processReady`.
     this._emitMcpServers()
     const result = { ok: true, status }
     if (written.warning) result.warning = written.warning
