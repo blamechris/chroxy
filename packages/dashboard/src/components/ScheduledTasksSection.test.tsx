@@ -718,9 +718,16 @@ describe('ScheduledTasksSection — an unrenderable `once` cadence degrades inst
  * round-trips correctly only when the runner's own offset is zero — which is
  * exactly how this bug shipped: CI can run in UTC, and the property below is
  * trivially true there regardless of which formatter is used. So every case
- * here pins a non-UTC `process.env.TZ` and PROVES the zone took effect
- * (`getTimezoneOffset() !== 0`) before trusting the round-trip assertion —
- * a TZ pin vitest's worker silently ignores would otherwise pass vacuously.
+ * here pins a `process.env.TZ` and PROVES the SPECIFIC zone took effect
+ * (`getTimezoneOffset()` equals that zone's own known standard-time offset,
+ * not merely "isn't 0") before trusting the round-trip assertion. A weaker
+ * `!== 0` check would pass vacuously not just under `TZ=UTC` but on ANY
+ * machine whose ambient zone already happens to be non-UTC — e.g. a
+ * developer laptop already running `America/Los_Angeles`, where a
+ * completely no-op'd `process.env.TZ` assignment would silently fall back
+ * to that ambient zone and the round trip (being symmetric under any single
+ * consistent zone) would still hold, hiding the exact failure this guard
+ * exists to catch.
  */
 describe('toDatetimeLocalValue — round-trips the local wall clock (#7135)', () => {
   let originalTz: string | undefined
@@ -736,32 +743,41 @@ describe('toDatetimeLocalValue — round-trips the local wall clock (#7135)', ()
     else process.env.TZ = originalTz
   })
 
-  function setNonUtcTz(tz: string) {
+  // `expectedStdOffsetMinutes` is each zone's OWN standard-time (non-DST)
+  // `getTimezoneOffset()` value, checked at the epoch (1970-01-01, winter in
+  // the northern hemisphere — standard time for both zones below). Asserting
+  // against this fixed, zone-specific number (rather than merely `!== 0`) is
+  // what makes the guard catch a TZ pin that silently no-ops on a machine
+  // whose ambient zone is already some OTHER non-UTC offset — including the
+  // dangerous case where ambient already happens to match the zone under
+  // test, which a `!== 0` check cannot distinguish from a real pin.
+  function setNonUtcTz(tz: string, expectedStdOffsetMinutes: number) {
     process.env.TZ = tz
-    if (new Date(0).getTimezoneOffset() === 0) {
+    const actual = new Date(0).getTimezoneOffset()
+    if (actual !== expectedStdOffsetMinutes) {
       throw new Error(
-        `process.env.TZ = '${tz}' did not change Date's timezone offset (still UTC) — ` +
-          'the round-trip assertion below would pass vacuously, the same way this bug hid on a UTC CI runner',
+        `process.env.TZ = '${tz}' did not produce that zone's offset (wanted ${expectedStdOffsetMinutes}, got ${actual}) — ` +
+          'the round-trip assertion below would silently exercise the wrong zone (ambient or otherwise) rather than failing loudly',
       )
     }
   }
 
   it('round-trips under a negative-offset zone (America/Los_Angeles)', () => {
-    setNonUtcTz('America/Los_Angeles')
+    setNonUtcTz('America/Los_Angeles', 480)
     const ms = Date.UTC(2026, 3, 15, 18, 45) // 2026-04-15T18:45:00Z
     const truncatedToMinute = Math.floor(ms / 60000) * 60000
     expect(Date.parse(toDatetimeLocalValue(ms))).toBe(truncatedToMinute)
   })
 
   it('round-trips under a positive, half-hour-offset zone (Asia/Kolkata)', () => {
-    setNonUtcTz('Asia/Kolkata')
+    setNonUtcTz('Asia/Kolkata', -330)
     const ms = Date.UTC(2026, 10, 3, 4, 5) // 2026-11-03T04:05:00Z
     const truncatedToMinute = Math.floor(ms / 60000) * 60000
     expect(Date.parse(toDatetimeLocalValue(ms))).toBe(truncatedToMinute)
   })
 
   it('round-trips across a DST spring-forward boundary (America/Los_Angeles, 2026-03-08)', () => {
-    setNonUtcTz('America/Los_Angeles')
+    setNonUtcTz('America/Los_Angeles', 480)
     // 2026-03-08 02:00 local does not exist there (clocks jump straight to
     // 03:00). Pick instants either side of the transition and first confirm
     // the offset actually differs between them, so this is not just another
