@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
-import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync } from 'node:fs/promises'
+import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
@@ -1669,6 +1669,93 @@ describe('executeBuiltinTool', () => {
           // Positive control: the walk did not just silently stop dead —
           // "subtree" itself (which the swap never touched) is still a match.
           assert.ok(results.includes('subtree'), 'the walk must still find unrelated matches, not fail closed on everything')
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review round 3 — round 2's own fix (the test above) verified
+      // the PATH twice (a pre-open lstat, then a post-open lstat) but never
+      // the object `opendir` actually opened. That is an ABA, not a
+      // check-then-use: swap `target` to a symlink pointing OUTSIDE the
+      // workspace before the open (so `opendir` follows it), then swap the
+      // real directory BACK before the post-open lstat runs — both lstats
+      // see the legitimate directory, so round 2's dev/ino comparison
+      // reports a match despite the `Dir` it is vouching for being bound to
+      // the outside target the whole time. `openVerifiedDirForDescend` now
+      // opens via `openNoFollow` (O_NOFOLLOW enforced atomically by the
+      // kernel on POSIX) and verifies identity via `fstat` on the OPENED
+      // HANDLE itself, never a fresh path lookup — this drives exactly the
+      // swap-then-restore timing above via the seam's two phases.
+      it('closes the ABA where a swap-then-restore straddles the open, not just check-then-use (security #7910 review round 3)', async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-aba-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          const targetAbs = join(dir, 'subtree', 'target')
+          mkdirSync(targetAbs)
+          writeFileSync(join(targetAbs, 'innocent.ts'), '1')
+
+          // The real directory is moved ASIDE (never deleted) so it can be
+          // moved BACK with its inode intact — an identity check comparing
+          // dev/ino (as both the mutant below and the fix's own pre-open
+          // `lstat` do) must see the literal SAME object restored, not a
+          // freshly created directory that merely looks the same but holds
+          // a different inode.
+          const realAside = join(dir, 'subtree', 'target-real-aside')
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          let beforeOpenFired = false
+          let afterOpenFired = false
+          await walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+            __testDescendSeam: async (target, phase) => {
+              if (target !== targetAbs) return
+              if (phase === 'before-open') {
+                beforeOpenFired = true
+                // Half 1 of the ABA: move the real directory aside (its
+                // inode is untouched) and plant a symlink to the outside
+                // directory at the original path, right before the open.
+                await renameAsync(targetAbs, realAside)
+                await symlinkAsync(outer, targetAbs)
+              } else if (phase === 'after-open') {
+                afterOpenFired = true
+                // Half 2 of the ABA: remove the symlink (this unlinks the
+                // symlink itself, never `outer`'s contents — `fs.rm` never
+                // follows a symlink to recurse into its target) and move
+                // the SAME real directory back into place before whatever
+                // the fix's post-open verification re-checks by PATH would
+                // run — this reproduces the exact identity round 2's
+                // dev/ino comparison would see as "unchanged".
+                await rmAsync(targetAbs, { force: true })
+                await renameAsync(realAside, targetAbs)
+              }
+            },
+          })
+
+          assert.ok(beforeOpenFired, 'the before-open seam must have fired for the swap to have been attempted at all')
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a swap-then-restore straddling the open must never disclose the outside directory\'s entries',
+          )
+          // `openNoFollow`'s O_NOFOLLOW makes the open itself fail while the
+          // symlink is in place — there is no point afterward at which
+          // "restoring" the real directory can retroactively legitimize an
+          // open that never happened, so `after-open` is never reached for
+          // THIS entry. That is the expected, correct outcome (see the
+          // mutation proof in the PR description/report — reverting to the
+          // round-2 `opendir()`-based open makes this same assertion fail
+          // while `afterOpenFired` flips true), not a weaker test: the
+          // leading assertion above is on the WALK'S OUTPUT.
+          assert.equal(
+            afterOpenFired,
+            false,
+            'openNoFollow must refuse the open outright while the symlink is in place — the swap-back must never be reached',
+          )
         } finally {
           rmSync(outer, { recursive: true, force: true })
         }

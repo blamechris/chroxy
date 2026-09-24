@@ -20,9 +20,11 @@
 
 import { join } from 'node:path'
 import { opendir, lstat } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
+import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
 import {
@@ -560,14 +562,22 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * immediately before returning a path string for `walk` to `opendir` — but
  * that is STILL check-then-use: the two calls are independent, so a swap
  * landing in the gap between them is exactly as invisible as one landing
- * before the check. `walk`'s call site now routes every directory-shaped
- * descent — symlink-flagged or not — through
- * {@link openVerifiedDirForDescend}, which performs the `opendir` ITSELF,
- * immediately re-verifies device+inode identity against the pre-open check
- * before returning, and hands `walk` the already-open, already-verified
- * `Dir` directly — no path is ever handed back for a second, disconnected
- * open to (not) re-check. See that function's doc for exactly what this
- * closes and the residual risk that remains.
+ * before the check. A round-2 REFINEMENT (`resolveNonSymlinkDescend` folded
+ * into an early version of `openVerifiedDirForDescend`) collapsed that into
+ * one `opendir` immediately re-verified by a second `lstat` on the same
+ * path — narrower, but still an ABA: a swap-to-symlink before the `opendir`
+ * and a swap-BACK before the second `lstat` both went undetected, because
+ * neither `lstat` ever inspected the object `opendir` had actually opened.
+ * `walk`'s call site now routes every directory-shaped descent —
+ * symlink-flagged or not — through {@link openVerifiedDirForDescend}, which
+ * opens with `O_NOFOLLOW` and verifies identity via `fstat` on the opened
+ * handle itself (never a fresh path lookup), then reads entries from that
+ * SAME verified object where the platform allows it, and hands `walk` the
+ * already-open, already-verified `Dir` directly — no path is ever handed
+ * back for a second, disconnected open to (not) re-check. See that
+ * function's doc for exactly what this closes, how, and the residual risk
+ * that remains on platforms without a way to bind directory listing to an
+ * already-open fd.
  *
  * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
  * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
@@ -644,7 +654,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
   }
 
   async function walk(dirAbs, relPrefix, active, preOpened) {
-    // `preOpened` (`{dh, key}`) — #7910 review round 2 (TOCTOU) — every
+    // `preOpened` (`{dh, key, fh}`) — #7910 review round 2 (TOCTOU) — every
     // recursive call below already went through `openVerifiedDirForDescend`,
     // which opened AND identity-verified this exact directory itself;
     // opening it a SECOND time here, by path, would throw that verification
@@ -653,13 +663,21 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
     // resolved once by the caller before any concurrent tool call could
     // interfere with it) opens fresh. A pre-opened handle must still be
     // closed on the early-stop path below — it is already-open regardless of
-    // whether `walk` goes on to use it.
+    // whether `walk` goes on to use it. `fh` (#7910 review round 3) — present
+    // only on the platforms where `dh` was reopened from an already-verified
+    // fd (see `openVerifiedDirForDescend`'s "ABA" doc) — must stay open for
+    // exactly as long as `dh` is in use, since `dh`'s entries are read
+    // through it, and is closed alongside `dh` everywhere `dh` is closed.
     if (shouldStop()) {
-      if (preOpened) await preOpened.dh.close().catch(() => {})
+      if (preOpened) {
+        await preOpened.dh.close().catch(() => {})
+        if (preOpened.fh) await preOpened.fh.close().catch(() => {})
+      }
       return
     }
     let dh = preOpened?.dh
     let key = preOpened?.key
+    let fh = preOpened?.fh
     if (!dh) {
       try {
         dh = await opendir(dirAbs)
@@ -814,12 +832,13 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           const descend = await openVerifiedDirForDescend(
             childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam,
           )
-          if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key })
+          if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key, fh: descend.fh })
         }
       }
     } finally {
       visitedDirs.delete(key)
       await dh.close().catch(() => {})
+      if (fh) await fh.close().catch(() => {})
     }
   }
 
@@ -830,31 +849,90 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
 }
 
 /**
- * SECURITY (review of #7901 round 2, TOCTOU) — open AND identity-verify a
- * directory for `walk` to descend into, for EITHER a symlink-flagged entry
- * or a plain-directory-flagged one. This replaces a round-2 version
- * (`resolveNonSymlinkDescend`) that only re-`lstat`ed a plain-directory
- * candidate and then handed the caller back a PATH STRING for `walk` to
- * `opendir` a second time, independently — which is still check-then-use:
- * the swap this exists to catch can land in the gap between THIS function's
- * lstat and `walk`'s later, disconnected `opendir` just as easily as it
- * could land before the lstat. There is no way with Node's public `fs` API
- * to bind `opendir` to an already-open, already-`O_NOFOLLOW`-verified file
- * descriptor (`fs.promises.opendir` takes only a path, never an fd — verified
- * directly: it throws `ERR_INVALID_ARG_TYPE` given one), so two syscalls
- * (open, then a later use) can never be fully collapsed into one atomic
- * operation here. What CAN be done, and is: this function performs the
- * `opendir` itself, immediately re-`lstat`s the SAME path right after, and
- * compares device+inode (via `{ bigint: true }` — a 32-bit Number would lose
- * precision on a large volume's inode) against the pre-open `lstat`. A
- * mismatch, a symlink now sitting at the path, or a zero inode (no usable
- * file index — the comparison would be vacuous) all mean the object at this
- * path was NOT the one just opened, and the `Dir` is closed and withheld,
- * BEFORE the caller ever iterates it — so no entry a swapped-in directory
- * could produce is ever consumed. `walk` then receives this already-open,
- * already-verified `Dir` directly (see its `preOpenedDh` parameter) instead
- * of a path to re-resolve — handing back a path here would throw this
- * verification away exactly the way the round-2 version did.
+ * SECURITY (review of #7901 round 3, the ABA hole in round 2's identity
+ * check) — open AND identity-verify a directory for `walk` to descend into,
+ * for EITHER a symlink-flagged entry or a plain-directory-flagged one.
+ *
+ * ── The hole round 2 left open ──────────────────────────────────────────
+ *
+ * Round 2 (`lstat(target)` → `opendir(target)` → `lstat(target)` again →
+ * compare dev/ino of the two `lstat`s) verified the PATH, twice, but never
+ * inspected the object `opendir` actually opened. That is an ABA gap, not a
+ * check-then-use gap: an attacker who (1) swaps `target` for a symlink to
+ * `/etc` between the pre-open `lstat` and `opendir` — so `opendir` follows
+ * it and returns a `Dir` for `/etc` — and then (2) swaps the real directory
+ * BACK before the post-open `lstat` runs, sails through both comparisons:
+ * both `lstat`s see the legitimate directory, dev/ino match, and the
+ * already-`/etc`-bound `Dir` is handed to `walk` and iterated, disclosing
+ * `/etc`'s entries under a workspace-looking `relPath`. Chroxy's concurrent
+ * per-turn tool dispatch (`byok-session.js`'s `Promise.all`, #7356) gives an
+ * attacker-controlled Bash call approved in the same turn the real time to
+ * land both swaps while a Glob walk is busy elsewhere in the tree.
+ *
+ * ── The fix: verify the OPENED object, not the path ─────────────────────
+ *
+ * `openNoFollow` (`ws-file-ops/open-nofollow.js`, #7280 — the one
+ * symlink-refusing `open()` for this codebase) opens `target` with
+ * `O_DIRECTORY` and, on every platform it can, `O_NOFOLLOW` enforced
+ * ATOMICALLY by the kernel: if a symlink sits at `target` at the instant of
+ * this call — including the ABA's first swap — the open fails outright,
+ * `ELOOP`, before anything is read. There is no window afterward in which
+ * "swapping back" can retroactively legitimize an open that never happened.
+ * The returned `FileHandle` is then `fstat`ed (`{ bigint: true }`, on the fd
+ * itself — not a fresh `lstat` by path) and compared to the PRE-open
+ * `lstat`: this is the identity of what was actually opened, not of
+ * whatever currently sits at the path, which is exactly what round 2's
+ * two-`lstat` comparison was missing. This closes the described attack
+ * fully — no "swap back" step is ever reachable, because step 1 alone
+ * already fails closed.
+ *
+ * ── Listing: reusing the verified fd where the platform allows it ───────
+ *
+ * `fs.promises.opendir` accepts only a path, never an fd (verified
+ * directly: passing one throws `ERR_INVALID_ARG_TYPE`), so getting `Dir`
+ * entries FROM the already-verified handle — rather than a second, path-based
+ * open that reintroduces a (smaller) version of the same race — needs an
+ * OS-level trick. On **Linux**, `opendir('/proc/self/fd/' + fh.fd)` reopens
+ * through the SAME open file description via the kernel's magic-symlink
+ * `/proc` entries — verified directly (Docker `node:22-alpine`): entries
+ * read this way match the directory at open time even after the original
+ * path is renamed aside and replaced with a symlink to an attacker
+ * directory afterward, i.e. it is bound to the fd, not re-resolved by path.
+ * `fh` is kept open for as long as `dh` is (see `walk`'s `preOpened.fh`) —
+ * closing it early would invalidate the magic-symlink target.
+ *
+ * **macOS has no equivalent** — verified empirically on this exact host,
+ * both via Node (`fs.promises.opendir('/dev/fd/' + fh.fd)`) and via a plain
+ * shell (`ls -la /dev/fd/N` on an fd opened by `exec N< dir`): both fail
+ * `ENOTDIR`, even though `stat()` of that same `/dev/fd/N` path correctly
+ * reports it as a directory. This is a devfs limitation (macOS's `/dev/fd`
+ * dup-on-open only supports regular files), not a Node bug, and `fs.Dir`
+ * exposes no fd a caller could `fstat`/rebind through any other public API.
+ * **Windows has no `/proc`-like construct at all.** On both, listing falls
+ * back to a second, path-based `opendir(target)`, immediately followed by
+ * round 2's original post-open `lstat`-compare (kept, not removed — same
+ * fail-closed-on-any-mismatch shape as before).
+ *
+ * RESIDUAL RISK, stated rather than implied, for macOS/non-Linux platforms
+ * ONLY: the `openNoFollow` check above closes the SPECIFIC attack this
+ * function's doc leads with (swap-to-symlink, then swap back) universally,
+ * on every platform, because that attack needs step 1's open to SUCCEED
+ * despite the symlink, and it does not. What remains possible on
+ * non-Linux, and is NOT closed, is a *narrower, single-swap* variant: the
+ * directory is genuinely real and unswapped through the `openNoFollow`
+ * verification (no ABA needed to pass it), and the attacker plants a
+ * symlink for the FIRST time in the short gap between that verification
+ * succeeding and the fallback's own `opendir(target)` call. That call has
+ * no `O_NOFOLLOW` equivalent (Node's `opendir` accepts no flags), so it
+ * would follow the symlink — caught, as before, by the immediate
+ * `lstat`-compare that follows it, UNLESS the attacker also restores the
+ * real directory before that specific `lstat` runs, which is the same
+ * inode-identity requirement — and the same accepted residual — already
+ * documented for `openNoFollow`'s own win32 emulation branch (#7874/#7280).
+ * This residual window is real but categorically smaller than round 2's:
+ * it requires a fresh, precisely-timed swap landing in a few-microsecond
+ * gap between two back-to-back `await`s with no attacker-observable signal
+ * in between, not a swap-then-restore spanning this whole function.
  *
  * `isKnownSymlink` — true when `dirent` was ALREADY flagged as a symlink at
  * listing time and `candidateAbs` is therefore already the confinement-
@@ -865,50 +943,39 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * re-checked since `dirent` was read and may itself now BE a symlink — that
  * case is routed through the same `validateRawPathWithinCwd` confinement
  * check the originally-flagged-symlink branch already has, rather than
- * trusted on `dirent`'s stale word.
+ * trusted on `dirent`'s stale word. Either way, both branches funnel into
+ * the SAME `openNoFollow`-based verified-open below — there is exactly one
+ * implementation of "open and verify", not two.
  *
- * RESIDUAL RISK, stated rather than implied: two syscalls (the pre-open
- * check and the `opendir`) still cannot be fully atomic through this API, so
- * an attacker who could win BOTH races — swap in the gap, then swap back to
- * an object with the IDENTICAL device+inode before the post-open check runs
- * — would not be caught. That requires recreating a specific already-freed
- * inode number, which is not something an unprivileged attacker can target
- * (inode reuse is an implementation detail of the filesystem's free-list, not
- * an attacker-controlled value) — the same residual this codebase already
- * accepts and documents for the win32 branch of `openNoFollow`
- * (`ws-file-ops/open-nofollow.js`). What this DOES close is the actual
- * measured exploit (#7910 review): an attacker-controlled swap to a symlink
- * pointing anywhere, landing in the (now minimal, and — unlike before —
- * DETECTED) window between the check and the open.
- *
- * `__testSeam(target, phase)`, if given, is awaited at two points — the ONLY
- * way to hit either window deterministically in a test; a real concurrent
- * race is flaky by construction (see the test file for a real-race test and
- * two seam-driven ones): `phase: 'before-open'` immediately after the
- * pre-open lstat and before the `opendir` call (the check-to-open window this
- * function's doc is about), and `phase: 'after-verify'` immediately after the
- * post-open identity check has PASSED and before the already-open `Dir` is
- * returned to `walk` — proving a path-level swap happening AFTER that point
- * does not corrupt what gets listed, because `walk` uses the already-open
- * `Dir` directly and never re-resolves `target` by path again.
+ * `__testSeam(target, phase)`, if given, is awaited at THREE points — the
+ * ONLY way to hit any of these windows deterministically in a test; a real
+ * concurrent race is flaky by construction (see the test file): `'before-open'`
+ * immediately before the `openNoFollow` call (the pre-open check-to-open
+ * window); `'after-open'` (new, #7910 review round 3) immediately after
+ * `openNoFollow` + the fstat-identity check have PASSED and before entries
+ * are read — proving a swap landing AFTER a successful, verified open does
+ * not retroactively corrupt what was already opened; and `'after-verify'`
+ * immediately before the already-open `Dir` is returned to `walk`.
  *
  * SECURITY/DoS (#7910 review round 2) — `visitedDirs`/`dirKey` add a SECOND,
- * independent check alongside the identity one above: once `sameObject` is
- * confirmed, the verified `postStat`'s `dev:ino` is checked against the set
- * of real directories already on the CURRENT descent path (root down to the
- * caller). A hit means this entry's real target is its OWN ancestor — an
- * actual symlink cycle (`selfloop -> .`), not merely a diamond (the same
- * real directory reached twice via two separate, non-overlapping symlinks,
- * which is NOT refused, since `visitedDirs` is path-scoped by `walk`'s own
- * push/pop, not global to the whole walk). Refusing here, BEFORE `walk` ever
- * touches this `Dir`'s entries, is what closes the DoS `walkGlob`'s existing
+ * independent check alongside the identity one above: once the open is
+ * verified, its `dev:ino` is checked against the set of real directories
+ * already on the CURRENT descent path (root down to the caller). A hit
+ * means this entry's real target is its OWN ancestor — an actual symlink
+ * cycle (`selfloop -> .`), not merely a diamond (the same real directory
+ * reached twice via two separate, non-overlapping symlinks, which is NOT
+ * refused, since `visitedDirs` is path-scoped by `walk`'s own push/pop, not
+ * global to the whole walk). Refusing here, BEFORE `walk` ever touches this
+ * `Dir`'s entries, is what closes the DoS `walkGlob`'s existing
  * `detHandoff`/`canDescendSymlink` gate does not: that gate answers "was
  * this entry named by a determinate segment", which a self-loop's REPEATING
  * name satisfies at every depth it is encountered, forever — see `walkGlob`'s
  * `visitedDirs` doc for the measured blowup this replaces.
  *
- * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string}|null>}
+ * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
  */
+const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
+
 async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam) {
   let target = candidateAbs
   let preStat = null
@@ -947,44 +1014,95 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
 
   if (__testSeam) await __testSeam(target, 'before-open')
 
-  let dh
+  // The ABA fix: open with O_NOFOLLOW|O_DIRECTORY (atomic on every platform
+  // `openNoFollow` supports — real kernel enforcement on POSIX, a
+  // check-open-recheck emulation on win32) and verify identity against the
+  // pre-open `lstat` via `fstat` ON THE OPENED HANDLE, never a fresh `lstat`
+  // by path. See the doc above for exactly why this closes the round-2 gap.
+  let fh
   try {
-    dh = await opendir(target)
+    fh = await openNoFollow(target, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY)
   } catch {
-    return null
+    return null // symlink, gone, or otherwise unopenable at this instant — FAIL CLOSED
   }
-
-  let postStat
+  let openedStat
   try {
-    postStat = await lstat(target, { bigint: true })
+    openedStat = await fh.stat({ bigint: true })
   } catch {
-    await dh.close().catch(() => {})
+    await fh.close().catch(() => {})
     return null
   }
   const sameObject =
-    !postStat.isSymbolicLink() &&
-    postStat.ino !== 0n &&
-    postStat.dev === preStat.dev &&
-    postStat.ino === preStat.ino
+    openedStat.isDirectory() &&
+    openedStat.ino !== 0n &&
+    openedStat.dev === preStat.dev &&
+    openedStat.ino === preStat.ino
   if (!sameObject) {
-    // Swapped between the check and the open — withhold rather than trust an
-    // object we never verified. Nothing has been read from `dh` yet, so a
-    // swapped-in directory's entries are never consumed.
-    await dh.close().catch(() => {})
+    // The object actually opened is not the one we checked — withhold
+    // rather than trust it. Nothing has been read from it yet.
+    await fh.close().catch(() => {})
     return null
   }
-  const key = dirKey(postStat)
+
+  if (__testSeam) await __testSeam(target, 'after-open')
+
+  const key = dirKey(openedStat)
   if (visitedDirs.has(key)) {
     // Cycle: this real directory is already an ancestor on the CURRENT
     // descent path (#7910 review round 2, DoS). Not a diamond — a diamond's
     // target is not yet in `visitedDirs` because `walk` only holds a key
     // while it is actively inside that directory (or one of its
     // descendants), never after backtracking out of it.
+    await fh.close().catch(() => {})
+    return null
+  }
+
+  if (DIR_FD_REOPEN_SUPPORTED) {
+    // Linux: read entries from the SAME open file description — no further
+    // path lookup, no further race, ever. See the doc above for the direct
+    // verification that this survives the original path being swapped away.
+    let dh
+    try {
+      dh = await opendir(`/proc/self/fd/${fh.fd}`)
+    } catch {
+      await fh.close().catch(() => {})
+      return null
+    }
+    if (__testSeam) await __testSeam(target, 'after-verify')
+    return { dh, path: target, key, fh }
+  }
+
+  // Fallback (macOS/win32/other — no fd-bound reopen available): a second,
+  // path-based `opendir`, immediately re-verified with round 2's original
+  // lstat-compare. See the RESIDUAL RISK paragraph above for exactly what
+  // narrow window this does — and does not — close on these platforms.
+  let dh
+  try {
+    dh = await opendir(target)
+  } catch {
+    await fh.close().catch(() => {})
+    return null
+  }
+  let postStat
+  try {
+    postStat = await lstat(target, { bigint: true })
+  } catch {
+    await dh.close().catch(() => {})
+    await fh.close().catch(() => {})
+    return null
+  }
+  const stillSameObject =
+    !postStat.isSymbolicLink() &&
+    postStat.ino !== 0n &&
+    postStat.dev === preStat.dev &&
+    postStat.ino === preStat.ino
+  await fh.close().catch(() => {}) // not used for listing on this path — release it now
+  if (!stillSameObject) {
     await dh.close().catch(() => {})
     return null
   }
   if (__testSeam) await __testSeam(target, 'after-verify')
-  return { dh, path: target, key }
+  return { dh, path: target, key, fh: null }
 }
 
 /**
