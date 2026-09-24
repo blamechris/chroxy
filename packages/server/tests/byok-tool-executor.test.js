@@ -6,6 +6,7 @@ import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
 import { executeBuiltinTool, compileCaseCheck, caseCheckPasses } from '../src/byok-tool-executor.js'
+import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
  * Tests for byok-tool-executor.js — the dispatcher that routes tool_use
@@ -1061,6 +1062,212 @@ describe('executeBuiltinTool', () => {
         })
         assert.equal(r.isError, false)
         assert.match(r.content, /No matches/)
+      })
+    })
+
+    // #7898 round 4 — every prior round (1-3) found a NEW super-linear
+    // blow-up in this matcher (silent false negatives, a backtracking-regex
+    // ReDoS, an O(n^2) brace-alternative branch). This suite is the
+    // structural answer: a fail-closed complexity cap (globPatternComplexityReason,
+    // tool-transforms.js) bounding pattern length and brace-nesting depth
+    // BEFORE any of this code runs, plus a performance-guard table proving
+    // every construct the matcher accepts stays fast UNDER that cap. See the
+    // worst-case bound written above compileCaseCheck (byok-tool-executor.js)
+    // for the derivation.
+    //
+    // Every timing test below passes `{ timeout }` (node:test's own option,
+    // well above the 250ms assertion budget). Documented honestly, because
+    // this round's own mutation proof (revert the `alt`-branch batching from
+    // 65831e075, see the PR comment) measured its actual limit: `caseCheckPasses`
+    // is a purely SYNCHRONOUS, CPU-bound call that never yields to the event
+    // loop, so `{ timeout }` cannot PREEMPT it mid-call the way it can an
+    // async wait — a regression that is merely SLOW (not infinite) still runs
+    // to completion and fails via the `elapsedMs` assertion below, just later
+    // than the nominal timeout (the un-batched mutation made the two
+    // largest-N table rows take 76s and 19s respectively before failing that
+    // way, not via the 2000ms timeout firing). `{ timeout }` remains real
+    // protection against a regression that stops TERMINATING altogether
+    // (an actual infinite loop, or an async call that never resolves) —
+    // exactly the shape docs/false-safety-guards.md catalogues as a guard
+    // that hangs instead of failing (entry #7340) — it is just not a hard
+    // real-time bound on synchronous JS, which nothing short of a Worker
+    // thread with `terminate()` can provide.
+    describe('performance guard (#7898 round 4)', () => {
+      // Build a pattern segment with exactly `n` levels of CHAIN-nested
+      // braces: {a,{a,{a,...{a,z}...}}}. Each iteration adds exactly one
+      // '{' (and one matching '}'), so the real nesting depth is exactly n —
+      // unlike a "balanced binary tree" of alternatives, this shape needs
+      // only ~4 characters per extra level of depth, not ~2^depth, which is
+      // what makes it cheap for an attacker to type and is exactly the shape
+      // round 3's "self-limiting" dismissal of deep nesting did not cover.
+      function nestedBraceChain(n) {
+        let s = 'z'
+        for (let i = 0; i < n; i++) s = `{a,${s}}`
+        return s
+      }
+
+      const PERF_BUDGET_MS = 250
+
+      it('globPatternComplexityReason accepts an ordinary pattern', () => {
+        assert.equal(globPatternComplexityReason('packages/**/src/**/*.test.js'), null)
+        assert.equal(globPatternComplexityReason('{a,{b,{c,d}}}'), null, "the task's own nested-brace example")
+      })
+
+      // The cap is inclusive at exactly 32 levels — proves the guard does
+      // not accidentally reject the depth it claims to allow.
+      it('globPatternComplexityReason allows brace nesting up to and including the 32-level cap', () => {
+        assert.equal(globPatternComplexityReason(nestedBraceChain(32)), null)
+      })
+
+      it('globPatternComplexityReason rejects brace nesting one level past the cap', () => {
+        const reason = globPatternComplexityReason(nestedBraceChain(33))
+        assert.match(reason, /nesting deeper than 32/)
+      })
+
+      it('globPatternComplexityReason rejects a pattern longer than 2000 characters', () => {
+        assert.equal(globPatternComplexityReason('a'.repeat(2000)), null, 'exactly at the cap must pass')
+        const reason = globPatternComplexityReason('a'.repeat(2001))
+        assert.match(reason, /longer than 2000 characters/)
+      })
+
+      // Integration-level: the cap is checked in runGlob BEFORE the fs.glob
+      // walk or compileCaseCheck ever run, so an over-cap pattern is refused
+      // near-instantly with a clean tool error — not a hang, not a crash,
+      // and not the generic "Tool Glob failed: <exception message>" a
+      // RangeError would otherwise surface as (see the worst-case-bound
+      // comment's "what the time bound does not cover" section).
+      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 2000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: nestedBraceChain(40) },
+          ...ctx(),
+        })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /nesting deeper than 32/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 2000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '{*a,*b}'.repeat(300) }, // 2100 chars, well-formed but over the length cap
+          ...ctx(),
+        })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /longer than 2000 characters/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      // Nested braces AT the cap (32 levels, 129 chars) — the case this cap
+      // must NOT break: legitimate-if-unusual input stays usable, both when
+      // it matches and when it doesn't. Measured on this machine: compiling
+      // is ~0.1ms and each caseCheckPasses call ~0.02-0.14ms — the O(depth^2)
+      // parse cost this cap exists to bound is negligible at depth 32; it
+      // only becomes a problem once nothing stops depth from growing toward
+      // pattern-length/2 (measured 301.88ms at depth 4000 with no cap, in the
+      // COMPLEXITY BOUND comment above compileCaseCheck).
+      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 2000 }, () => {
+        const check = compileCaseCheck(nestedBraceChain(32))
+        const t0 = Date.now()
+        const noMatch = caseCheckPasses(check, ['nope'])
+        const match = caseCheckPasses(check, ['z'])
+        const elapsedMs = Date.now() - t0
+        assert.equal(noMatch, false)
+        assert.equal(match, true, 'the innermost literal "z" alternative must still match')
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `depth-32 nested braces must stay fast, took ${elapsedMs}ms`)
+      })
+
+      // Round 2's backtracking-regex shape (regression guard, table form) and
+      // three LARGER/different adversarial shapes than any prior round
+      // measured, all within the new length/depth caps: 200 consecutive `*`
+      // tokens, 100 chained (not nested) `{*a,*b}` groups — up from round
+      // 3's 30 — and 30 chained groups that mix a brace with a bracket class
+      // (`{*[a-z],?[0-9]}`), which round 3 did not exercise in combination.
+      // Each row is checked against a 5000-char real segment name, the same
+      // adversarial scale every prior round used. Measured on this machine
+      // (fixed, batched code — see each row's `measuredMs`), all comfortably
+      // under the 250ms budget; this round's mutation proof (revert
+      // 65831e075's batching, see the PR comment) reproduces round 3's
+      // original blowup on the two brace rows — 76.6s and 19.4s respectively
+      // — confirming the table is actually exercising the code the batching
+      // fix changed, not just re-measuring round 3's own existing test.
+      const longName = `${'a'.repeat(5000)}.ts`
+      const homogeneous = 'a'.repeat(5000)
+      const perfTable = [
+        {
+          label: 'round-2 backtracking-regex shape (regression)',
+          pattern: '*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b.ts',
+          name: longName,
+          expect: false,
+          measuredMs: '~0.03 (this branch never used the backtracking RegExp)',
+        },
+        {
+          label: '200 consecutive "*" tokens',
+          pattern: '*'.repeat(200),
+          name: longName,
+          expect: true,
+          measuredMs: '~21',
+        },
+        {
+          label: '100 chained "{*a,*b}" groups (round 3 was 30)',
+          pattern: '{*a,*b}'.repeat(100),
+          name: homogeneous,
+          expect: true,
+          measuredMs: '~41 (pre-batching mutation: ~76,600)',
+        },
+        {
+          label: '30 chained groups mixing a brace with a bracket class',
+          pattern: '{*[a-z],?[0-9]}'.repeat(30),
+          name: homogeneous,
+          expect: true,
+          measuredMs: '~22 (pre-batching mutation: ~19,400)',
+        },
+      ]
+      for (const { label, pattern, name, expect } of perfTable) {
+        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 2000 }, () => {
+          assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
+          const check = compileCaseCheck(pattern)
+          const t0 = Date.now()
+          const result = caseCheckPasses(check, [name])
+          const elapsedMs = Date.now() - t0
+          assert.equal(result, expect)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must stay under ${PERF_BUDGET_MS}ms, took ${elapsedMs}ms`)
+        })
+      }
+
+      // A 50-level path (D=50), alternating "**" with a brace-containing
+      // literal segment — stresses the PATH-level DP (caseCheckPasses' own
+      // dp[] array, aligning `**` against a real match) together with the
+      // per-segment brace matcher, rather than either alone. Synthetic
+      // realSegments (not a real 50-directory fixture) for the same reason
+      // round 2/3 used direct calls: fs.glob's own walk has an independent,
+      // out-of-scope backtracking issue (#7901) that would dominate any
+      // integration-level timing here. Measured on this machine: ~0.2ms.
+      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 2000 }, () => {
+        const patSegs = []
+        for (let i = 0; i < 25; i++) {
+          patSegs.push('**')
+          patSegs.push(`{seg${i}a,seg${i}b}`)
+        }
+        const pattern = patSegs.join('/')
+        assert.equal(globPatternComplexityReason(pattern), null)
+        const realSegs = []
+        for (let i = 0; i < 25; i++) {
+          realSegs.push(`filler${i}`) // absorbed by the preceding "**"
+          realSegs.push(`seg${i}a`) // must match the brace segment, case-sensitively
+        }
+        const check = compileCaseCheck(pattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, realSegs)
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, true)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `50-level path must stay fast, took ${elapsedMs}ms`)
       })
     })
 

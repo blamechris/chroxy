@@ -29,6 +29,8 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globPatternComplexityReason,
+  globPatternComplexityMessage,
   buildGrepArgs,
   buildGrepCommand,
 } from './built-in-tools/tool-transforms.js'
@@ -310,6 +312,16 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   const escapeReason = globPatternEscapeReason(pattern)
   if (escapeReason) {
     return { content: globPatternEscapeMessage(escapeReason), isError: true }
+  }
+  // #7898 round 4 — neither check above bounds `pattern`'s length or brace
+  // nesting, and every round of this PR's review has found a new way an
+  // unbounded pattern makes compileCaseCheck/caseCheckPasses (below, via
+  // confineGlobMatches) slow or crash. See the worst-case bound written above
+  // compileCaseCheck and globPatternComplexityReason's own doc for the specific
+  // measured failures this closes.
+  const complexityReason = globPatternComplexityReason(pattern)
+  if (complexityReason) {
+    return { content: globPatternComplexityMessage(complexityReason), isError: true }
   }
 
   // Realpath-validate the search ROOT against cwd. Pre-fix this was a
@@ -875,6 +887,85 @@ function splitTopLevelCommas(s) {
  * rather than the string `'**'` so it can never collide with a RegExp value.
  */
 const CASE_CHECK_GLOBSTAR = Symbol('globstar')
+
+/**
+ * COMPLEXITY BOUND (#7898 round 4) — the worst-case cost of the whole
+ * case-check matcher (`compileCaseCheck` + `caseCheckPasses`, everything
+ * below this comment), stated once here rather than re-derived per round.
+ * Every prior round of this PR's review (1 through 3) found a NEW super-linear
+ * blow-up in this code; this is the bound that is supposed to end that
+ * pattern, by covering every construct the matcher accepts, not just the one
+ * a given round happened to fuzz.
+ *
+ * Notation:
+ *   P = `pattern.length` (the whole Glob pattern, all `/`-segments combined).
+ *   N = length of one real on-disk path SEGMENT name (a single filename or
+ *       directory name, not the whole path).
+ *   D = number of path segments in one candidate match (path depth).
+ *   M = number of candidates `confineGlobMatches` calls `caseCheckPasses` on
+ *       for one Glob call — bounded above by `GLOB_COLLECT_CEILING` (50,000).
+ *
+ * Split into a one-time PARSE and a per-match MATCH phase:
+ *
+ * PARSE — `compileCaseCheck`, called exactly once per Glob call (even with
+ * zero candidate files: `confineGlobMatches` compiles it up front), splits on
+ * `/` and parses each segment via `parseSegmentTokens`. For every construct
+ * except nested braces, parsing a segment is O(segment length) — brackets,
+ * chained (non-nested) `{...}` groups, and runs of `*`/`?` all consume their
+ * own text once, so summed across all segments this is O(P). Chain-nested
+ * braces (`{a,{b,{c,d}}}`, extended to depth d) are the exception:
+ * `findMatchingBrace` + `splitTopLevelCommas` re-scan the shrinking remainder
+ * at EVERY nesting level, so parse cost for one chain is O(d × average
+ * remaining length) = O(d²) when d is left unbounded (measured: 0.16ms at
+ * d=10, 301.88ms at d=4000/30,890 chars — quadratic scaling confirmed). Since
+ * d ≤ P/2 for any nesting shape, this is O(P²) unbounded, which is why
+ * `globPatternComplexityReason` (tool-transforms.js) now caps BOTH P (2,000
+ * chars) and nesting depth (32 levels) before any of this runs — bounding
+ * either alone would work; both are cheap and the depth cap also closes the
+ * separate stack-overflow hazard below. Under that cap, PARSE is O(P)
+ * (32 is a constant multiplier).
+ *
+ * MATCH — `caseCheckPasses`, called once per candidate (≤ M times). The
+ * path-level DP that aligns pattern segments (including any number of `**`,
+ * at any position) against a match's D real segments is O(S × D), where S is
+ * the pattern's segment count (S ≤ P). Within one aligned non-`**` segment,
+ * `segmentMatches` walks that segment's token tree: `*`/`?`/bracket-class
+ * tokens are O(N) each; a `{a,b}` token is O(N) PER OPTION, batched over the
+ * whole reachable-offset set rather than per-offset (the round-3 fix,
+ * `65831e075`) — without that batching, an `alt` token costs O(N ×
+ * |reachable|) = O(N²) worst case, which is exactly what `65831e075` closed
+ * (12.96s for 20×`{*a,*b}` against a 5000-char name, down to 9.41ms after).
+ * Because `advanceToken` commutes with set union for every token type (see
+ * its own doc), this batched cost is paid ONCE per token regardless of brace
+ * nesting shape, and total token count across a whole segment (leaves plus
+ * `alt` nodes, nested or chained) is bounded by that segment's own length —
+ * so one `segmentMatches` call is O(segment length × N), and summed across a
+ * pattern's segments, one `caseCheckPasses` call is O(P × N). Brace
+ * alternatives inside a `**`-adjacent segment, or a segment sitting between
+ * two `**`s, are ordinary segments to this accounting — `**` itself costs no
+ * per-character work at all (`CASE_CHECK_GLOBSTAR` accepts any already-real
+ * segment unconditionally). Across all M candidates: O(M × P × N).
+ * `realSegmentNames`'s `readdir` is cached per directory, adding O(M × D)
+ * amortized to O(1) per repeat directory.
+ *
+ * TOTAL, under the complexity cap: O(P) one-time parse + O(M × P × N) match +
+ * O(M × D) readdir — polynomial in every one of P, N, D, M, with no term left
+ * unbounded by an attacker-controlled input.
+ *
+ * WHAT THE TIME BOUND DOES NOT COVER: `parseSegmentTokens` (parse) and
+ * `advanceToken`/`advanceTokens` (match, the `alt` branch) are RECURSIVE, one
+ * JS call frame per brace-nesting level, with no depth check of their own —
+ * a CPU-cheap but deep enough pattern overflows the call stack
+ * (`RangeError: Maximum call stack size exceeded`) before it overflows any
+ * time budget. Measured on Node 22.23.2: parse survives to ~depth 5,505,
+ * match only to ~depth 2,000 (fewer, shallower frames per level in the
+ * mutually-recursive `advanceToken`/`advanceTokens` pair) — both far below
+ * what P ≤ 2,000-with-no-depth-cap could otherwise reach, and both
+ * environment-dependent (however much stack the caller already used before
+ * reaching here), which is exactly why `globPatternComplexityReason`'s 32-
+ * level depth cap exists as a SEPARATE check from the length cap rather than
+ * relying on length alone to keep depth incidentally low.
+ */
 
 /**
  * #7355 — compile a whole Glob pattern into the pieces {@link caseCheckPasses}

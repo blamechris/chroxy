@@ -131,6 +131,8 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globPatternComplexityReason,
+  globPatternComplexityMessage,
   globMatchEscapesRoot,
   buildGrepArgs,
   buildGrepCommand,
@@ -2290,6 +2292,17 @@ export class DockerByokSession extends ClaudeByokSession {
     const escapeReason = globPatternEscapeReason(pattern)
     if (escapeReason) {
       return { content: globPatternEscapeMessage(escapeReason), isError: true }
+    }
+    // #7898 round 4 — same cap as the host (byok-tool-executor.js's runGlob),
+    // from the same shared check: an over-long or deeply brace-nested pattern
+    // costs nothing beyond this scan on the host, but on the container it
+    // would still be shipped into `buildConfinedGlobBody` and shelled out via
+    // `docker exec` for bash's own brace expansion to chew on. Rejecting it
+    // here, before that round-trip, keeps host and container refusing the
+    // same input for the same reason rather than only one of them.
+    const complexityReason = globPatternComplexityReason(pattern)
+    if (complexityReason) {
+      return { content: globPatternComplexityMessage(complexityReason), isError: true }
     }
     if (signal?.aborted) {
       return { content: 'Interrupted before docker exec', isError: true }

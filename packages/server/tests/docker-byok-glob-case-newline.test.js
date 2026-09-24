@@ -120,6 +120,36 @@ describe('container Glob case-sensitivity + dangling-symlink parity, and embedde
     assert.equal(right.content, 'Upper.TS')
   })
 
+  // #7898 round 4 — globPatternComplexityReason (tool-transforms.js) is
+  // shared between the host (byok-tool-executor.js's runGlob) and the
+  // container (_containerGlob), so an over-cap pattern is refused here too,
+  // BEFORE _execAsContainerUser / docker exec ever runs — proven by the
+  // absence of any backend call, not just the error text.
+  it('container Glob refuses an over-depth pattern before ever reaching docker exec', async () => {
+    const backend = bashBackend()
+    const session = buildSession(backend)
+    let pattern = 'z'
+    for (let i = 0; i < 40; i++) pattern = `{a,${pattern}}`
+    const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern } })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /EINVAL: glob pattern is too complex/)
+    assert.match(result.content, /nesting deeper than 32/)
+    assert.equal(backend.calls.length, 0, 'must be refused before any container exec call')
+  })
+
+  it('container Glob refuses an over-length pattern before ever reaching docker exec', async () => {
+    const backend = bashBackend()
+    const session = buildSession(backend)
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '{*a,*b}'.repeat(300) }, // 2100 chars
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /EINVAL: glob pattern is too complex/)
+    assert.match(result.content, /longer than 2000 characters/)
+    assert.equal(backend.calls.length, 0, 'must be refused before any container exec call')
+  })
+
   it('container Glob ALREADY lists a dangling symlink whose target is inside the workspace (parity pin)', async () => {
     symlinkSync('./nonexistent-7357', join(workspaceDir, 'broken.ts'))
     const session = buildSession(bashBackend())

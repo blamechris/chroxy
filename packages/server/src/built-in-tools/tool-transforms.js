@@ -234,6 +234,111 @@ export function globPatternEscapeMessage(reason) {
   return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
 }
 
+/**
+ * SECURITY (#7898 round 4) — hard ceilings on `pattern` BEFORE it reaches
+ * either backend's matcher: the host's hand-written case-check parser
+ * (`compileCaseCheck`/`parseSegmentTokens`/`advanceToken` in
+ * byok-tool-executor.js) and the container's bash brace expansion
+ * (`buildConfinedGlobBody`). Nothing upstream of this point bounds `pattern`
+ * at all — not the tool's JSON-schema `input_schema` (a bare `{ type:
+ * 'string' }`, no `maxLength`), not {@link GLOB_PATTERN_SHELL_METACHARS}, not
+ * {@link globPatternEscapeReason} (both are fixed-cost linear scans that
+ * don't look at length or nesting). This is the first and only place either
+ * is checked, which is why both backends call it.
+ *
+ * Two independent, cheap (each a single linear scan, no recursion) checks:
+ *
+ * - **Length.** Every cost this file's review history has found in the host
+ *   matcher is polynomial in `pattern.length` (P) for a BOUNDED P — see the
+ *   worst-case bound written above {@link compileCaseCheck} — so bounding P
+ *   bounds all of them at once, including constructs no round has found yet.
+ *   2,000 characters is generous: the longest pattern in this file's own test
+ *   suite, deliberately adversarial (`'{*a,*b}'.repeat(30)`), is 210; a real
+ *   pattern is rarely more than a few dozen.
+ *
+ * - **Brace nesting depth.** #7898 round 4 — chain-nested braces
+ *   (`{a,{b,{c,d}}}`, extended: `{x1,{x2,{x3,...}}}`) are the one construct
+ *   round 3's "self-limiting" dismissal ("depth d needs ~2^d characters",
+ *   true only for a BALANCED binary tree of alternatives) got wrong: a
+ *   right-leaning CHAIN needs only ~4 characters per extra level, so nesting
+ *   depth is near-linear in pattern length, not exponential. Two independent
+ *   defects follow, both measured directly against `compileCaseCheck`/
+ *   `caseCheckPasses` on this machine:
+ *     1. `parseSegmentTokens` re-scans the shrinking remainder at every
+ *        nesting level (`findMatchingBrace` + `splitTopLevelCommas`, each
+ *        O(remaining length)), so PARSE time alone is O(depth²): 0.16ms at
+ *        depth 10 (48 chars), 18.72ms at depth 1000 (6,890 chars), 301.88ms
+ *        at depth 4000 (30,890 chars) — quadratic scaling confirmed (~4x
+ *        time per ~2x length). This runs UNCONDITIONALLY per Glob call, in
+ *        `confineGlobMatches`, before a single match is even checked.
+ *     2. Both `parseSegmentTokens` (parse) and `advanceToken`/`advanceTokens`
+ *        (match, the `alt` branch recursing into nested options) are
+ *        RECURSIVE with one JS call frame per nesting level, and neither has
+ *        a depth check — a pattern nested deep enough throws an uncaught
+ *        `RangeError: Maximum call stack size exceeded`. Measured on Node
+ *        22.23.2: parsing survives to ~depth 5,505 (~38,000 chars) before
+ *        overflowing; MATCHING overflows far sooner, at ~depth 2,000 (~14,500
+ *        chars), because `advanceToken`/`advanceTokens` mutually recurse with
+ *        a shallower frame budget than `parseSegmentTokens`'s single
+ *        self-recursion. `executeBuiltinTool`'s outer try/catch turns this
+ *        into a caught `Tool Glob failed: Maximum call stack size exceeded`
+ *        rather than crashing the daemon — but the exact depth that overflows
+ *        depends on how much OTHER stack is already in use by the async call
+ *        chain when a real Glob call runs, which is neither deterministic nor
+ *        portable, so it cannot be treated as an implicit safety bound.
+ *   32 levels is far above anything a legitimate pattern needs (the task's
+ *   own `{a,{b,{c,d}}}` example is depth 3) and leaves a >60x margin below
+ *   the measured match-time overflow point, so the ceiling is reached and
+ *   refused long before either the quadratic parse cost or the recursion
+ *   depth becomes a problem — regardless of how much stack the caller has
+ *   already used.
+ *
+ * FAIL CLOSED: this runs BEFORE `fs.glob`'s own walk starts (host) and before
+ * the container `docker exec` is issued, so an over-budget pattern costs
+ * nothing beyond this scan — no walk, no case-check compile, no container
+ * round-trip.
+ *
+ * @param {string} pattern
+ * @returns {string|null} A reason string when the pattern is too complex.
+ */
+export const GLOB_PATTERN_MAX_LENGTH = 2_000
+export const GLOB_PATTERN_MAX_BRACE_DEPTH = 32
+
+export function globPatternComplexityReason(pattern) {
+  if (typeof pattern !== 'string') return 'not a string'
+  if (pattern.length > GLOB_PATTERN_MAX_LENGTH) {
+    return `longer than ${GLOB_PATTERN_MAX_LENGTH} characters (${pattern.length})`
+  }
+  // A plain linear scan, no recursion — and a SAFE upper bound on the real
+  // parser's recursion depth even though it does not distinguish a bracket
+  // expression's literal '{'/'}' members from real brace syntax: every
+  // recursion `parseSegmentTokens` actually performs happens on a MATCHED
+  // '{'...'}' pair, which this counter always sees too (an unmatched '{' —
+  // what `findMatchingBrace` treats as a literal and never recurses into —
+  // can only make this counter's depth reading HIGHER than the true parse
+  // depth, never lower). Over-rejecting a pattern that merely contains many
+  // literal, unmatched '{' characters is an acceptable false positive for a
+  // guard whose only job is to never under-count real recursion.
+  let depth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '{') {
+      depth++
+      if (depth > GLOB_PATTERN_MAX_BRACE_DEPTH) {
+        return `"{" nesting deeper than ${GLOB_PATTERN_MAX_BRACE_DEPTH} levels`
+      }
+    } else if (c === '}' && depth > 0) {
+      depth--
+    }
+  }
+  return null
+}
+
+/** The tool_result message for a pattern rejected by {@link globPatternComplexityReason}. */
+export function globPatternComplexityMessage(reason) {
+  return `EINVAL: glob pattern is too complex (${reason}). Narrow the search with "path", or split it into more than one simpler Glob call.`
+}
+
 // ---------------------------------------------------------------------------
 // Container path confinement (#7354) — resolve INSIDE the container
 // ---------------------------------------------------------------------------
