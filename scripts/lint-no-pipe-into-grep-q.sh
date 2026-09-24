@@ -97,7 +97,16 @@ while IFS= read -r f; do
   # Scope to scripts that enable pipefail SOMEWHERE (a `set` line mentioning
   # it) — matches `set -o pipefail`, `set -eo pipefail`, `set -euo pipefail`,
   # etc., wherever in the file it appears (top-level or inside a function).
-  grep -qE '^[[:space:]]*set[[:space:]]+.*\bpipefail\b' "$f" || continue
+  #
+  # Boundary is spelled with POSIX character classes, not `\b`: `\b` is a
+  # GNU/BSD extension, not POSIX ERE, so it risks silently no-matching (or
+  # matching a literal backspace) under a stricter grep — which would widen
+  # this guard's blind spot to EVERY pipefail-enabled script on that platform
+  # (flagged in review). `(^|[^[:alnum:]_])pipefail([^[:alnum:]_]|$)` is
+  # equivalent here in practice (`pipefail` can never be the first token on a
+  # `set ...` line, so the `^` branch is dead weight, not a behavior change)
+  # and portable.
+  grep -qE '^[[:space:]]*set[[:space:]]+.*(^|[^[:alnum:]_])pipefail([^[:alnum:]_]|$)' "$f" || continue
 
   line_no=0
   prev_line=""

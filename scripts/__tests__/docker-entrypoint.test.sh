@@ -191,7 +191,13 @@ rm -rf "$tmp"
 # (`grep -q "^${prefix}/" <<<"$resolved_path"`) hands grep the data directly,
 # so there is no separate writer process for SIGPIPE to land on.
 tmp="$(mktemp -d)"
-pad="$(printf 'p%.0s' $(seq 1 400000))"
+# Generated via python3 (matches the sibling >390KB-padding cases in
+# bump-version.test.sh / require-review-before-merge.test.sh /
+# lint-no-raw-color-literals.test.sh / verify-entitlements.test.sh) rather
+# than `printf 'p%.0s' $(seq 1 400000)`: the latter word-splits `seq`'s
+# 400,000-line output into 400,000 unquoted shell words, which is needless
+# arg-count blowup for a single padding string (flagged in review).
+pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
 workspace_path="/etc/x
 $pad"
 out=$(
