@@ -2069,18 +2069,32 @@ const TODOWRITE_MAX_CONTENT_RENDERED = 200
 
 // Exported for testing — #7898: proving `caseCheckPasses` stays polynomial on
 // an adversarial pattern is cheapest called DIRECTLY, without the filesystem
-// I/O a full `executeBuiltinTool` Glob call carries. #7901 removed the
-// original reason this had to be a direct call rather than an integration
-// one (`runGlob`'s walk went through Node's own `fs.glob`, whose matcher had
-// an independent, unrelated 87-second backtracking bug on the same pattern
-// shapes — see git history on this comment) — `walkGlob` now calls
-// `segmentMatches` itself, so the byok-tool-executor.test.js suite ALSO has
-// integration-level tests of the same adversarial patterns through the real
-// Glob dispatch. Both levels are kept: the direct calls pin the matcher's own
-// complexity bound cheaply and precisely; the integration tests prove the
-// full tool (root resolution, the deadline race, confinement) stays fast too.
+// I/O a full `executeBuiltinTool` Glob call carries.
 //
-// `walkGlob` (#7901) is exported for the same reason: `runGlob`'s own
+// `caseCheckPasses` is itself DEAD CODE in production since #7901/#7910
+// replaced `fs.glob` with `walkGlob` on the host path — `runGlob` never calls
+// it — so a direct-call test of `caseCheckPasses` alone proves the SHARED
+// per-segment matcher (`segmentMatches`/`advanceToken`) is fast when called
+// through `caseCheckPasses`'s path-level wrapper, but says nothing about the
+// function that actually ships: `walkGlob`, which calls `segmentMatches`
+// itself, once per real directory entry `opendir` reads. `segmentMatches` is
+// exported alongside it for exactly this reason (#7910 review round 2) — a
+// direct call proves the LIVE matcher stays fast at the SAME full adversarial
+// scale (a 5000-char synthetic string) `caseCheckPasses`'s own tests use,
+// which an integration-level `executeBuiltinTool` call cannot: a real
+// filename cannot be 5000+ bytes (most filesystems cap a single path
+// component around 255), and at a filesystem-safe scale the absolute-time
+// gap between O(n) and a REGRESSED O(n²) is too small relative to
+// `executeBuiltinTool`'s own overhead (root resolution, the deadline race,
+// confinement) to assert reliably — measured directly: the exact mutation
+// that makes the 5000-char direct-call test take 69.5s made a 250-char
+// on-disk equivalent take only 120ms, comfortably under ANY CI-safe budget.
+// The integration-level tests this suite keeps therefore assert CORRECTNESS
+// (matched/not-matched) and basic non-hang sanity through the real dispatch,
+// not a tight complexity bound — that proof lives in the direct calls, at
+// full scale, where the gap is actually measurable.
+//
+// `walkGlob` (#7901) is exported for a different reason: `runGlob`'s own
 // deadline/abort RACE (`Promise.race([collect, deadlineReached])`) resolves
 // via `deadlineReached` — a timer/abort callback independent of whether the
 // walk itself ever notices `state.stop` — so a `executeBuiltinTool`-level
@@ -2090,4 +2104,4 @@ const TODOWRITE_MAX_CONTENT_RENDERED = 200
 // after the tool result was already sent). Calling `walkGlob` directly and
 // timing how long its OWN promise takes to settle after `state.stop` is set
 // proves that property precisely.
-export { compileCaseCheck, caseCheckPasses, walkGlob }
+export { compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob }

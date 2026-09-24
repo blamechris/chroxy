@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync } from 'node:fs/
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, walkGlob } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -1124,8 +1124,8 @@ describe('executeBuiltinTool', () => {
     // for the derivation.
     //
     // Every timing test below passes `{ timeout }` (node:test's own option,
-    // well above the 250ms assertion budget). Documented honestly, because
-    // this round's own mutation proof (revert the `alt`-branch batching from
+    // well above the assertion budget). Documented honestly, because this
+    // round's own mutation proof (revert the `alt`-branch batching from
     // 65831e075, see the PR comment) measured its actual limit: `caseCheckPasses`
     // is a purely SYNCHRONOUS, CPU-bound call that never yields to the event
     // loop, so `{ timeout }` cannot PREEMPT it mid-call the way it can an
@@ -1133,13 +1133,26 @@ describe('executeBuiltinTool', () => {
     // to completion and fails via the `elapsedMs` assertion below, just later
     // than the nominal timeout (the un-batched mutation made the two
     // largest-N table rows take 76s and 19s respectively before failing that
-    // way, not via the 2000ms timeout firing). `{ timeout }` remains real
-    // protection against a regression that stops TERMINATING altogether
-    // (an actual infinite loop, or an async call that never resolves) —
-    // exactly the shape docs/false-safety-guards.md catalogues as a guard
-    // that hangs instead of failing (entry #7340) — it is just not a hard
-    // real-time bound on synchronous JS, which nothing short of a Worker
-    // thread with `terminate()` can provide.
+    // way, not via the timeout firing). `{ timeout }` remains real protection
+    // against a regression that stops TERMINATING altogether (an actual
+    // infinite loop, or an async call that never resolves) — exactly the
+    // shape docs/false-safety-guards.md catalogues as a guard that hangs
+    // instead of failing (entry #7340) — it is just not a hard real-time
+    // bound on synchronous JS, which nothing short of a Worker thread with
+    // `terminate()` can provide.
+    //
+    // #7910 review round 2 — the original 250ms budget FLAKED on a loaded CI
+    // runner: PR #7909's Server Tests run measured 306ms for the "100 chained
+    // groups" row (a shared runner, contended with other jobs) against
+    // batched code that is not regressed — a false failure, not a caught
+    // regression. The regressions this suite exists to catch cost SECONDS
+    // (12.96s / 19.4s / 76.6s — see the rows below and 65831e075's own commit
+    // message), three orders of magnitude above any plausible loaded-runner
+    // reading, so the budget is raised to 2000ms: still tight enough to fail
+    // fast and clearly on an actual regression, wide enough that no realistic
+    // CI contention should ever cross it for genuinely-fast code. `{ timeout
+    // }` is raised in step (to 5000ms) so it stays a backstop behind the
+    // `elapsedMs` assertion, not a race with it.
     describe('performance guard (#7898 round 4)', () => {
       // Build a pattern segment with exactly `n` levels of CHAIN-nested
       // braces: {a,{a,{a,...{a,z}...}}}. Each iteration adds exactly one
@@ -1154,7 +1167,7 @@ describe('executeBuiltinTool', () => {
         return s
       }
 
-      const PERF_BUDGET_MS = 250
+      const PERF_BUDGET_MS = 2000
 
       it('globPatternComplexityReason accepts an ordinary pattern', () => {
         assert.equal(globPatternComplexityReason('packages/**/src/**/*.test.js'), null)
@@ -1184,7 +1197,7 @@ describe('executeBuiltinTool', () => {
       // and not the generic "Tool Glob failed: <exception message>" a
       // RangeError would otherwise surface as (see the worst-case-bound
       // comment's "what the time bound does not cover" section).
-      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 2000 }, async () => {
+      it('Glob with an over-depth pattern returns a clean EINVAL fast, not a tool crash', { timeout: 5000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1198,7 +1211,7 @@ describe('executeBuiltinTool', () => {
         assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
       })
 
-      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 2000 }, async () => {
+      it('Glob with an over-length pattern returns a clean EINVAL fast', { timeout: 5000 }, async () => {
         const t0 = Date.now()
         const r = await executeBuiltinTool({
           toolName: 'Glob',
@@ -1220,7 +1233,7 @@ describe('executeBuiltinTool', () => {
       // only becomes a problem once nothing stops depth from growing toward
       // pattern-length/2 (measured 301.88ms at depth 4000 with no cap, in the
       // COMPLEXITY BOUND comment above compileCaseCheck).
-      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 2000 }, () => {
+      it('caseCheckPasses stays fast for brace nesting AT the 32-level cap (direct)', { timeout: 5000 }, () => {
         const check = compileCaseCheck(nestedBraceChain(32))
         const t0 = Date.now()
         const noMatch = caseCheckPasses(check, ['nope'])
@@ -1240,7 +1253,7 @@ describe('executeBuiltinTool', () => {
       // Each row is checked against a 5000-char real segment name, the same
       // adversarial scale every prior round used. Measured on this machine
       // (fixed, batched code — see each row's `measuredMs`), all comfortably
-      // under the 250ms budget; this round's mutation proof (revert
+      // under the 2000ms budget; this round's mutation proof (revert
       // 65831e075's batching, see the PR comment) reproduces round 3's
       // original blowup on the two brace rows — 76.6s and 19.4s respectively
       // — confirming the table is actually exercising the code the batching
@@ -1278,7 +1291,7 @@ describe('executeBuiltinTool', () => {
         },
       ]
       for (const { label, pattern, name, expect } of perfTable) {
-        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 2000 }, () => {
+        it(`caseCheckPasses stays fast: ${label} (direct)`, { timeout: 5000 }, () => {
           assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
           const check = compileCaseCheck(pattern)
           const t0 = Date.now()
@@ -1289,15 +1302,98 @@ describe('executeBuiltinTool', () => {
         })
       }
 
+      // #7910 review round 2 — `caseCheckPasses` is DEAD CODE in production:
+      // `runGlob` stopped calling it entirely when `walkGlob` (#7901) replaced
+      // `fs.glob` on the host path — it survives only as a directly-tested
+      // export (see this file's import and the export comment in
+      // byok-tool-executor.js). Every row above therefore proves the SHARED
+      // per-segment matcher (`segmentMatches`/`advanceToken`) stays fast when
+      // called through `caseCheckPasses`'s path-level wrapper, but nothing
+      // above exercises the function `walkGlob` — the code that actually
+      // ships — calls itself, once per REAL directory entry `opendir` reads.
+      // This table closes that gap DIRECTLY: `segmentMatches` at the SAME
+      // full adversarial scale (5000 chars) the direct-call table above
+      // already uses.
+      //
+      // An earlier version of this test went through `executeBuiltinTool`
+      // against a real on-disk file instead, at a filesystem-safe 250-char
+      // name (a real filename cannot be 5000+ bytes — most filesystems' NAME_MAX
+      // is 255; 65831e075's own commit message independently settled on 255
+      // bytes as "a filesystem-realistic name" for the same reason). That
+      // version did NOT catch the mutation below: reverting the batching made
+      // the 5000-char direct call take 69.5s, but the SAME mutation made the
+      // 250-char on-disk version take only ~120ms — comfortably inside even a
+      // strict budget, and nowhere near the ~2000ms this suite settled on
+      // after the CI-flakiness fix. A guard that cannot fail against the
+      // defect it names is exactly docs/false-safety-guards.md's catalogue —
+      // caught here before landing by running the mutation proof against it,
+      // not after. `segmentMatches` sidesteps the whole problem: it takes a
+      // plain string, not a file, so it is tested at the SAME scale that
+      // actually demonstrates the regression.
+      for (const { label, pattern, name, expect } of perfTable) {
+        it(`the live matcher (segmentMatches) stays fast: ${label} (direct)`, { timeout: 5000 }, () => {
+          assert.equal(globPatternComplexityReason(pattern), null, 'table entries must stay under the complexity cap')
+          const [matcher] = compileCaseCheck(pattern).matchers
+          const t0 = Date.now()
+          const result = segmentMatches(matcher, name)
+          const elapsedMs = Date.now() - t0
+          assert.equal(result, expect)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must stay under ${PERF_BUDGET_MS}ms through segmentMatches (the function walkGlob actually calls), took ${elapsedMs}ms`)
+        })
+      }
+
+      // Correctness/sanity companion to the table above, through the REAL
+      // dispatch (`executeBuiltinTool` → `walkGlob` → `opendir`) rather than a
+      // direct call — proves the wiring (root resolution, confinement, the
+      // deadline race) does not somehow break these patterns end to end, and
+      // completes without hanging. NOT a complexity-regression proof (see the
+      // comment above the table): at a filesystem-safe 250-char name the
+      // absolute-time gap between correct and quadratically-regressed code is
+      // too small to assert reliably, so this uses the same generous budget
+      // purely as a non-hang sanity check, not the primary guard.
+      for (const { label, pattern, name, expect } of perfTable) {
+        if (label.startsWith('round-2 ')) continue // already has a dedicated integration test below
+        it(`the real Glob dispatch matches correctly and does not hang: ${label} (integration, correctness only)`, { timeout: 5000 }, async () => {
+          // Scale the SAME adversarial name down to 250 chars (see above),
+          // preserving whether it carries the `.ts` extension: the
+          // brace-chain rows only match a string that itself ENDS in 'a'/'b'
+          // (`name: homogeneous`, no extension); the star-repeat row matches
+          // anything (`name: longName`, `.ts` extension) since a bare `*`
+          // chain is extension-agnostic. Getting this wrong silently flips
+          // `expect` for the affected rows rather than erroring — verified
+          // directly against the pattern's own semantics before relying on it.
+          const realName = name.endsWith('.ts') ? `${'a'.repeat(247)}.ts` : 'a'.repeat(250)
+          writeFileSync(join(dir, realName), '1')
+          const t0 = Date.now()
+          const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+          const elapsedMs = Date.now() - t0
+          assert.equal(r.isError, false)
+          assert.equal(r.content.includes(realName), expect, `"${label}" must ${expect ? '' : 'not '}match the real file through the live walk`)
+          assert.ok(elapsedMs < PERF_BUDGET_MS, `"${label}" must not hang through the real Glob dispatch, took ${elapsedMs}ms`)
+        })
+      }
+
       // A 50-level path (D=50), alternating "**" with a brace-containing
-      // literal segment — stresses the PATH-level DP (caseCheckPasses' own
-      // dp[] array, aligning `**` against a real match) together with the
+      // literal segment — stresses the PATH-level DP (`caseCheckPasses`'s own
+      // `dp[]` array, aligning `**` against a real match) together with the
       // per-segment brace matcher, rather than either alone. Synthetic
-      // realSegments (not a real 50-directory fixture) for the same reason
-      // round 2/3 used direct calls: fs.glob's own walk has an independent,
-      // out-of-scope backtracking issue (#7901) that would dominate any
-      // integration-level timing here. Measured on this machine: ~0.2ms.
-      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 2000 }, () => {
+      // realSegments, not a real 50-directory fixture — building and walking
+      // one adds real filesystem I/O this unit-level test does not need to
+      // pin the DP's own complexity bound. Measured on this machine: ~0.2ms.
+      //
+      // #7910 review round 2 — like the rest of this describe block,
+      // `caseCheckPasses`'s path-level `dp[]` array is dead code in
+      // production (see the export comment in byok-tool-executor.js);
+      // `walkGlob`'s OWN incremental version of the same `**`-alignment
+      // (`active`/`next`/`closeGlobstars`) runs once per REAL directory
+      // level as it descends, not once per synthetic call — a live-path
+      // equivalent of THIS specific test would need an actual 25-level-deep
+      // directory tree, which the per-segment `segmentMatches` guard above
+      // did not (a plain string is not filesystem-bound the way a directory
+      // depth is). Not built here — out of scope for this round's fix, which
+      // is the per-segment complexity CI flaked on — but the same gap in
+      // principle, noted rather than silently left implicit.
+      it('caseCheckPasses stays fast for a 50-level path alternating ** and brace segments (direct)', { timeout: 5000 }, () => {
         const patSegs = []
         for (let i = 0; i < 25; i++) {
           patSegs.push('**')
