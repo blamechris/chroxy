@@ -404,7 +404,7 @@ test_no_unsafe_grep_pipe_pattern_remains() {
   echo "TEST: no unsafe producer-piped-into-grep pattern remains in this file"
   local self="$REPO_ROOT/scripts/__tests__/merge-updater-feeds.test.sh"
   local hits
-  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
+  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
   if [ -n "$hits" ]; then
     FAIL=$((FAIL + 1))
     FAILED_TESTS+=("no_unsafe_grep_pipe_pattern_remains")

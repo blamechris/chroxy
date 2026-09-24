@@ -1077,7 +1077,7 @@ test_pipefail_sigpipe_self_test() {
 test_no_unsafe_grep_pipe_pattern_remains() {
   local self="$REPO_ROOT/scripts/__tests__/bump-version.test.sh"
   local hits
-  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
+  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
   if [ -n "$hits" ]; then
     echo "    found unsafe pipe-into-grep pattern(s) in $self:" >&2
     echo "$hits" >&2
