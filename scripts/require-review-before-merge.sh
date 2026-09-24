@@ -22,7 +22,7 @@ COMMAND=$(echo "$TOOL_INPUT" | python3 -c "import sys,json; print(json.load(sys.
 #   - Python subprocess: subprocess.run(['gh', 'pr', 'merge', ...])
 #   - Shell heredoc: run(f"gh pr merge {pr} --squash")
 #   - Quoted: 'gh pr merge'
-if ! echo "$COMMAND" | grep -q 'pr merge'; then
+if ! grep -q 'pr merge' <<<"$COMMAND"; then
   exit 0
 fi
 

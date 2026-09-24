@@ -27,10 +27,10 @@ LINT="$REPO_ROOT/scripts/lint-no-raw-color-literals.sh"
 # removing a case is as loud as skipping one.
 #
 # SKIP is part of the sum, and that is not cosmetic: cases 5-7 run only on a
-# host with a case-folding UTF-8 locale, so PASS+FAIL alone is 8 on macOS and 5
+# host with a case-folding UTF-8 locale, so PASS+FAIL alone is 9 on macOS and 6
 # on the Linux runner this suite actually runs on. Measured — a PASS+FAIL floor
-# of 8 here would have been red in CI and green for whoever wrote it.
-EXPECTED_CASES=8
+# of 9 here would have been red in CI and green for whoever wrote it.
+EXPECTED_CASES=9
 
 PASS=0
 FAIL=0
@@ -93,6 +93,33 @@ check "baselined real-literal file passes" 0 "$(run_lint "$SCAN" "$BASE")"
 # behaviour (the lint cd's to repo root from its own location).
 bash "$LINT" >/dev/null 2>&1
 check "default invocation (committed baseline) green" 0 "$?"
+
+# Case 4b — #7907: the comment-strip recheck survives pipefail+SIGPIPE on a
+# large file. collect() used to be `perl -0777 -pe 's{...}{}g' "$f" | grep -Eq
+# "$PAT"`. This script runs under `set -euo pipefail` (line 25). grep -q
+# exits the instant it finds a match without draining the rest of its stdin;
+# if the producer (perl) is still writing when that happens, SIGPIPE hits it
+# and pipefail promotes that broken-pipe write error into the whole
+# pipeline's (the `if`'s) exit status — flipping a genuinely-present,
+# non-comment hex literal into "not found" and silently letting the file
+# through the ratchet. An ordinary small component file (like case 2 above)
+# can't trigger this — the whole perl output fits in one write() syscall —
+# but a real hex literal on line 1 followed by a large amount of trailing,
+# uncommented content reproduces it. Reproduced 5/5 against the pre-fix
+# script: the offender was never written to the baseline despite a genuine,
+# uncommented `#ff0000` on line 1. The fix (capturing perl's output into a
+# variable, then `grep -Eq "$PAT" <<<"$stripped"`) hands grep the data
+# directly, so there is no separate writer process for SIGPIPE to land on.
+LARGE_DIR="$TMP/large"; mkdir -p "$LARGE_DIR/comp"
+LARGE_BASE="$TMP/large-baseline.txt"; : > "$LARGE_BASE"
+python3 -c "
+pad = 'p' * 400000
+with open('$LARGE_DIR/comp/Widget.tsx', 'w') as f:
+    f.write('const c = \"#ff0000\";\n')
+    f.write(pad + '\n')
+"
+check "#7907 — a real, uncommented hex literal on line 1 of a >390KB file still FAILS" \
+  1 "$(run_lint "$LARGE_DIR" "$LARGE_BASE")"
 
 # ---------------------------------------------------------------------------
 # #7493 — collation. `comm` requires its inputs sorted in ITS OWN collation.
