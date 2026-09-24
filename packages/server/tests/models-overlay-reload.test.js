@@ -358,6 +358,121 @@ describe('registry.applyOverlay (#5932)', () => {
   })
 })
 
+// #7888 round 3 — the six tests above each pin ONE call site that #7888's
+// first two review rounds found by hand, one at a time (construction, the
+// two applyOverlay branches, updateModels, loadCache, resetModels). That is
+// the whack-a-mole shape this round exists to end: `models.js` now routes
+// EVERY assignment to `activeModels` through a single `setActiveModels()`
+// chokepoint (see its doc comment), so the six sites above are no longer six
+// independent places that can drift — they are six callers of one function.
+//
+// This suite is the structural guard that shape earns: ONE shared
+// declared-only-override fixture (a static fallback row carrying its own
+// `provenance: 'catalogued'`, a `getModelMetadata` hook that ALSO stamps it,
+// and an overlay override with no matching provider report — the same
+// combination #7802×#7806 needed to catch the base-row-provenance
+// interaction) driven through every public entry point that can change the
+// roster, each on its own fresh registry. A future call site this list does
+// not name would still slip past it — enumeration cannot cover the
+// unwritten — but a REGRESSION at the chokepoint itself, or at any site
+// still routing around it, fails here regardless of which entry point a
+// caller happens to exercise, which is what "structural" buys over the
+// six per-site tests above: reverting `setActiveModels`'s own body (rather
+// than any one caller) fails every `it` below at once, not just one.
+describe('#7888 round 3 — every roster entry point holds the provenance invariant (structural guard)', () => {
+  const declaredOnlyFallback = [
+    { id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' },
+  ]
+  const stampingMetadata = (fullId) => (fullId === 'base-1'
+    ? { fullId, id: 'vendor-short', label: 'Vendor Label', contextWindow: 128000, provenance: 'catalogued' }
+    : null)
+  const declareOverride = overlayMap({ 'base-1': { label: 'Renamed' } })
+
+  function freshRegistry(extraHooks = {}) {
+    return createModelsRegistry({
+      fallbackModels: declaredOnlyFallback,
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      getModelMetadata: stampingMetadata,
+      ...extraHooks,
+    })
+  }
+
+  function writeMinimalCache(cachePath) {
+    writeFileSync(cachePath, JSON.stringify({
+      v: MODELS_CACHE_SCHEMA_VERSION,
+      models: [{ id: 'sdk-7', fullId: 'sdk-7', label: 'SDK 7', contextWindow: 4242 }],
+      defaultModelId: 'sdk-7',
+    }))
+  }
+
+  function assertDeclaredOnlyRowIsClean(models, entryPoint) {
+    const row = models.find((m) => m.fullId === 'base-1')
+    assert.ok(row, `${entryPoint}: the declared-only override must still be in the roster`)
+    assert.equal(row.label, 'Renamed', `${entryPoint}: the operator label must still apply`)
+    assert.equal(row.provenance, undefined, `${entryPoint}: must not masquerade as provider-catalogued truth`)
+  }
+
+  it('construction (hooks.overlay applied before any loadCache/updateModels)', () => {
+    const reg = freshRegistry({ overlay: declareOverride })
+    assertDeclaredOnlyRowIsClean(reg.getModels(), 'construction')
+  })
+
+  it('applyOverlay — fully-cold branch (no SDK data, no cache warmed)', () => {
+    const reg = freshRegistry()
+    reg.applyOverlay(declareOverride)
+    assertDeclaredOnlyRowIsClean(reg.getModels(), 'applyOverlay (cold)')
+  })
+
+  it('applyOverlay — cache-warmed branch (loadCache ran, no updateModels refresh yet)', () => {
+    const reg = freshRegistry()
+    const dir = mkdtempSync(join(tmpdir(), 'guard-applyoverlay-warm-'))
+    try {
+      const cachePath = join(dir, 'cache.json')
+      writeMinimalCache(cachePath)
+      assert.equal(reg.loadCache(cachePath), true)
+      assert.equal(reg.getModels().find((m) => m.fullId === 'base-1'), undefined, 'not yet declared before the reload')
+      reg.applyOverlay(declareOverride)
+      assertDeclaredOnlyRowIsClean(reg.getModels(), 'applyOverlay (cache-warmed)')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('updateModels — union restores the row the refresh omitted', () => {
+    const reg = freshRegistry()
+    reg.applyOverlay(declareOverride)
+    reg.updateModels([{ value: 'sdk-7', displayName: 'SDK 7' }])
+    assertDeclaredOnlyRowIsClean(reg.getModels(), 'updateModels')
+  })
+
+  it('loadCache — union restores the row the cache file omits', () => {
+    const reg = freshRegistry({ overlay: declareOverride })
+    const dir = mkdtempSync(join(tmpdir(), 'guard-loadcache-'))
+    try {
+      const cachePath = join(dir, 'cache.json')
+      writeMinimalCache(cachePath)
+      assert.equal(reg.loadCache(cachePath), true)
+      assertDeclaredOnlyRowIsClean(reg.getModels(), 'loadCache')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('resetModels — re-applies fallbackModels after clearing providerReportedFullIds', () => {
+    const reg = freshRegistry({ overlay: declareOverride })
+    reg.resetModels()
+    assertDeclaredOnlyRowIsClean(reg.getModels(), 'resetModels')
+  })
+
+  it('updateContextWindow — in-place update does not resurrect provenance on an already-clean row', () => {
+    const reg = freshRegistry({ overlay: declareOverride })
+    assert.equal(reg.getModels().find((m) => m.fullId === 'base-1')?.provenance, undefined, 'starts clean')
+    reg.updateContextWindow('base-1', 55555)
+    assertDeclaredOnlyRowIsClean(reg.getModels(), 'updateContextWindow')
+  })
+})
+
 // #7777 — the #7761 union gate is scoped to the STATIC seed so operator overlay
 // rows keep riding the union (#5932 AC2). `computeFallbackModels` merges an
 // overlay row that OVERRIDES a static id IN PLACE, under the base row's own

@@ -801,67 +801,35 @@ export function createModelsRegistry(hooks = {}) {
   }
 
   /**
-   * The `withModelMetadata` source list for a row `unionableSeedRows()` is
-   * restoring into a roster this registry just learned from the provider
-   * (`updateModels`) or from disk (`loadCache`) — #7806.
+   * True for a row that must never be broadcast carrying `provenance`, and
+   * the one place that strips it back off when a producer stamped it anyway.
    *
    * For a row that is genuinely part of this repo's own static seed (a
-   * `baseFallbackModels` entry the operator never named), both `providerMeta`
-   * and the merged fallback row `fb` may legitimately carry
-   * `provenance: 'catalogued'` — that value means "this repo's in-repo
-   * catalogue vouches for this row", which is true.
+   * `baseFallbackModels` entry the operator never named), `provenance:
+   * 'catalogued'` means "this repo's in-repo catalogue vouches for this
+   * row", which is true, and stays. For a row that is in the roster ONLY
+   * because the operator's overlay declares its fullId
+   * (`isUnpersistableDeclaredRow`), no source may make that claim — since
+   * #7802 keeps a static base row's own metadata alive under an overlay
+   * label/window override, a declared-only row can carry that base row's
+   * `provenance` stamp straight through (e.g. an overlay-declared override
+   * of a retired provider id). Stripping leaves it ABSENT rather than
+   * mislabeled; every OTHER metadata key (`reasoningLevels`, …) is
+   * unaffected.
    *
-   * For a row that is in the roster ONLY because the operator's overlay
-   * declares its fullId (`isUnpersistableDeclaredRow`), neither source may
-   * make that claim: `providerMeta` is a LOOKUP into the same static table
-   * keyed on an id the provider did not just report, and — since #7802 keeps
-   * a static base row's own metadata alive under an overlay label/window
-   * override — `fb` can carry the identical stamp straight through the merge
-   * (e.g. an overlay-declared override of a retired provider id). Stripping
-   * `provenance` from both leaves it ABSENT rather than mislabeled; every
-   * OTHER metadata key (`reasoningLevels`, …) is unaffected, and so is every
-   * OTHER precedence decision (label/window/id) made above the call site.
-   *
-   * One helper for both union call sites (`updateModels`, `loadCache`) so
-   * they cannot drift the way the union itself did before #7776.
-   */
-  function unionRowMetadataSources(fullId, providerMeta, fb) {
-    if (!isUnpersistableDeclaredRow(fullId)) return [providerMeta, fb]
-    const withoutProvenance = (source) => {
-      if (!source || source.provenance === undefined) return source
-      const { provenance: _provenance, ...rest } = source
-      return rest
-    }
-    return [withoutProvenance(providerMeta), withoutProvenance(fb)]
-  }
-
-  /**
-   * The THIRD union site #7806 missed: `applyOverlay`'s cache-warmed branch
-   * (below) pushes `unionableSeedRows()` rows straight into the active list —
-   * it never calls `withModelMetadata`, so `unionRowMetadataSources` above is
-   * never consulted for it. A row that reaches that branch only because the
-   * operator's overlay declares its fullId (`isUnpersistableDeclaredRow`) can
-   * still carry a `provenance: 'catalogued'` stamp straight from its
-   * `baseFallbackModels` entry — #7802's fix spreads that base row through an
-   * overlay override, so the stamp survives onto the merged `fb` row exactly
-   * as `unionRowMetadataSources`'s own doc comment describes for the other two
-   * sites. Applied to an already-built, frozen row (there is no separate
-   * `providerMeta`/`fb` pair here to route through `withModelMetadata`).
-   *
-   * Re-review (#7888) — the same taint is reachable through THREE more sites
-   * that assign `fallbackModels` (or a row built from it) straight to
-   * `activeModels` with no union at all, because there is no learned roster
-   * yet for anything to union AGAINST: the `activeModels` initializer below
-   * (construction, before any `loadCache`/`updateModels` has run —
-   * `providerReportedFullIds` is still empty so every declared override
-   * qualifies), `applyOverlay`'s own fully-cold `else` branch (neither
-   * `lastSdkModels` nor `lastCacheModels` set — first boot with no cache file
-   * yet, or an overlay hot-reload racing the first refresh), and
-   * `resetModels()` (which explicitly clears `providerReportedFullIds` back
-   * to empty and then re-applies `fallbackModels` raw). All three are mapped
-   * through this same helper for the same reason: the predicate
-   * (`isUnpersistableDeclaredRow`) is already correct for each of these
-   * states, only the routing was missing.
+   * #7888 round 3 — this used to be re-implemented (or forgotten) at each of
+   * SIX places that could put a row into `activeModels`: the construction
+   * initializer, `updateModels`'s and `loadCache`'s union loops (each via a
+   * now-removed `unionRowMetadataSources` wrapper that stripped `provenance`
+   * from the `withModelMetadata` SOURCES instead of the built row — same
+   * outcome, different shape), `applyOverlay`'s cache-warmed and fully-cold
+   * branches, and `resetModels()`. Three rounds of review fixed those one at
+   * a time (#7806, then the cache-warmed branch, then the last three) — the
+   * whack-a-mole shape the round-3 task exists to end. Every one of those
+   * call sites now builds its array and hands it to `setActiveModels()`
+   * below, which maps every row through this function before it is ever
+   * assigned to `activeModels`; no call site maps through it directly
+   * anymore, so a future one cannot forget to.
    */
   function stripUnpersistableProvenance(row) {
     if (row.provenance === undefined) return row
@@ -870,15 +838,23 @@ export function createModelsRegistry(hooks = {}) {
     return Object.freeze(rest)
   }
 
-  // #7888 re-review — bare construction has no learned roster to union
-  // against (`providerReportedFullIds` is still empty here), so an overlay
-  // override supplied at construction time (`hooks.overlay`) of a base row
-  // that carries its own `provenance` can reach `getModels()` unstripped the
-  // moment a caller obtains the registry and never calls `loadCache()`, or
-  // calls it into a cache miss (first boot, no cache file yet — see
-  // `getRegistryForProvider`). Same helper, same predicate, as the three
-  // union sites above and the two siblings below.
-  let activeModels = fallbackModels.map(stripUnpersistableProvenance)
+  /**
+   * The ONLY assignment to `activeModels` (`updateContextWindow` included —
+   * see below). Every row that becomes part of the active roster passes
+   * through `stripUnpersistableProvenance` here, once, so the provenance
+   * invariant cannot be bypassed by a call site that builds a models array
+   * correctly in every other respect but forgets this one step — the defect
+   * shape all three rounds of #7888 review found. Idempotent on a row that
+   * doesn't need stripping, so callers may pass an array that is already a
+   * mix of previously-active rows (`updateContextWindow`) and freshly-built
+   * ones (`applyOverlay`'s cache-warmed seed) without sorting them first.
+   */
+  function setActiveModels(models) {
+    activeModels = models.map(stripUnpersistableProvenance)
+  }
+
+  let activeModels
+  setActiveModels(fallbackModels)
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
@@ -943,7 +919,10 @@ export function createModelsRegistry(hooks = {}) {
     const filtered = models.some((m) => isDisallowedModelId(m.id) || isDisallowedModelId(m.fullId))
       ? models.filter((m) => !isDisallowedModelId(m.id) && !isDisallowedModelId(m.fullId))
       : models
-    activeModels = filtered
+    // #7888 round 3 — the chokepoint: every write to `activeModels` this
+    // registry makes (except `updateContextWindow`'s in-place window update,
+    // which routes through the same function) funnels through here.
+    setActiveModels(filtered)
     // #6219 review (#6232): never leave defaultModelId pointing at a model that
     // isn't in the active list — e.g. the SDK marked the now-filtered disallowed
     // model (fable) as "Default", so nextDefault is its short id which isn't in
@@ -952,6 +931,9 @@ export function createModelsRegistry(hooks = {}) {
     // (opus → sonnet) else the first model (mirrors updateModels' fallback). Only
     // fires when filtering actually dropped the chosen default — a present
     // nextDefault (the common case + loadCache's own discard result) is kept.
+    // Reads `filtered`, not `activeModels` — stripping `provenance` never
+    // touches `id`/`fullId`, so the two are equivalent for this lookup, and
+    // `filtered` is already in hand.
     const defaultPresent =
       nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
     if (nextDefault != null && !defaultPresent) {
@@ -960,7 +942,10 @@ export function createModelsRegistry(hooks = {}) {
     } else {
       defaultModelId = nextDefault
     }
-    rebuildLookups(filtered)
+    // Rebuilds from `activeModels` (the post-strip list) rather than
+    // `filtered` so the lookup tables always mirror exactly what
+    // `getModels()` serves, not a pre-chokepoint snapshot of it.
+    rebuildLookups(activeModels)
   }
 
   /**
@@ -1098,25 +1083,30 @@ export function createModelsRegistry(hooks = {}) {
         // now scoped the same way that union scopes its OWN additions: only ids
         // the reported roster (the cache, in this window) does not carry.
         //
-        // #7806 (missed site) — and, for the SAME reason those ids do not carry
-        // provider provenance, `stripUnpersistableProvenance` runs over the
-        // result: an id only here because the operator declared it must not go
-        // out `provenance: 'catalogued'` just because this union pushes the
-        // built `fallbackModels` row straight through instead of routing it via
-        // `withModelMetadata`/`unionRowMetadataSources` like the other two sites.
+        // #7806 (missed site) — an id only here because the operator declared
+        // it must not go out `provenance: 'catalogued'` just because this
+        // union pushes the built `fallbackModels` row straight through
+        // instead of routing it via `withModelMetadata`. #7888 round 3 — no
+        // longer stripped here: `applyModels` → `setActiveModels` strips
+        // `provenance` from every row in `next` (cache-preserved rows
+        // included — a no-op for them, since they're provider-reported)
+        // before it is ever assigned to `activeModels`, so this array can be
+        // built without worrying about which half needs it.
         const seed = unionableSeedRows()
         const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
-        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId)).map(stripUnpersistableProvenance)
+        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
         const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
         applyModels(next, defaultModelId)
       } else {
         // #7888 re-review — the fully-cold reload (no SDK data, no cache
         // warmed yet: first boot before `loadCache()` ever succeeds, or a
         // hot-reload racing the first refresh). Same construction-time gap as
-        // the `activeModels` initializer above: `fallbackModels` can carry a
+        // the `activeModels` initializer: `fallbackModels` can carry a
         // declared-only override's stray `provenance` straight from the base
-        // row it overrides, and this branch has no union to route it through.
-        applyModels(fallbackModels.map(stripUnpersistableProvenance), defaultModelId)
+        // row it overrides, and this branch has no union to route it
+        // through. #7888 round 3 — `applyModels` strips it now; no per-site
+        // map needed here either.
+        applyModels(fallbackModels, defaultModelId)
       }
       return activeModels
     },
@@ -1276,10 +1266,14 @@ export function createModelsRegistry(hooks = {}) {
             ?? resolveContextWindowFn(fb.fullId)
           // #7806 — a declared-only row (the operator's overlay is its ONLY
           // justification for being here) must not inherit `provenance` from
-          // either source: see `unionRowMetadataSources`.
+          // either source. #7888 round 3 — no longer stripped inline here:
+          // `providerMeta`/`fb` pass through `withModelMetadata` as-is, and
+          // `applyModels` → `setActiveModels` strips `provenance` off the
+          // built row below, once, for every row this function returns.
           converted.push(withModelMetadata(
             { id, label, fullId: fb.fullId, contextWindow },
-            ...unionRowMetadataSources(fb.fullId, providerMeta, fb),
+            providerMeta,
+            fb,
           ))
           seenFullIds.add(fb.fullId)
         }
@@ -1403,7 +1397,14 @@ export function createModelsRegistry(hooks = {}) {
         return false
       }
       let changed = false
-      activeModels = activeModels.map(m => {
+      // #7888 round 3 — routed through `setActiveModels` (the chokepoint)
+      // rather than assigning `activeModels` directly, so this is not a
+      // seventh place that could reintroduce the whack-a-mole bug if it were
+      // ever rewritten to build rows a different way. A no-op in practice
+      // today: every row already came from `setActiveModels`, so none of
+      // them carry unpersistable `provenance` to begin with, and
+      // `{ ...m, contextWindow }` doesn't add any.
+      const updated = activeModels.map(m => {
         if ((m.id === modelId || m.fullId === modelId) && m.contextWindow !== contextWindow) {
           changed = true
           // Persist the authoritative value so a later updateModels()
@@ -1413,6 +1414,7 @@ export function createModelsRegistry(hooks = {}) {
         }
         return m
       })
+      setActiveModels(updated)
       return changed
     },
 
@@ -1429,13 +1431,16 @@ export function createModelsRegistry(hooks = {}) {
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
       // #7888 re-review — the line above is exactly what makes an overlay
-      // override of a base row declaration-only again, so `fallbackModels`
-      // must be routed through the same strip the other bare-fallback sites
-      // use: without it a row that HAD lost `provenance` (stripped by an
-      // earlier construction/applyOverlay/union pass) reacquires the base
-      // row's stamp straight from `fallbackModels`, which never had it
-      // stripped in the first place.
-      applyModels(fallbackModels.map(stripUnpersistableProvenance), null)
+      // override of a base row declaration-only again: without a strip
+      // between here and `activeModels`, a row that HAD lost `provenance`
+      // (an earlier construction/applyOverlay/union pass stripped it)
+      // reacquires the base row's stamp straight from `fallbackModels`,
+      // which never had it stripped in the first place. #7888 round 3 —
+      // `applyModels` now strips unconditionally (`setActiveModels`), so
+      // this call can pass `fallbackModels` straight through; the ordering
+      // that makes it correct is that `providerReportedFullIds` was already
+      // cleared above, before `applyModels` runs.
+      applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
 
@@ -1638,10 +1643,13 @@ export function createModelsRegistry(hooks = {}) {
             const contextWindow = declared?.contextWindow
               ?? providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
             // #7806 — same declared-only provenance rule as the `updateModels`
-            // copy of this union: see `unionRowMetadataSources`.
+            // copy of this union. #7888 round 3 — same removal too: the
+            // strip happens once, in `applyModels` → `setActiveModels`, over
+            // whatever this function returns.
             models.push(withModelMetadata(
               { id, fullId: fb.fullId, label, contextWindow },
-              ...unionRowMetadataSources(fb.fullId, providerMeta, fb),
+              providerMeta,
+              fb,
             ))
             seenFullIds.add(fb.fullId)
           }
