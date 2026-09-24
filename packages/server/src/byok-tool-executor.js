@@ -19,7 +19,7 @@
  */
 
 import { join } from 'node:path'
-import { opendir } from 'node:fs/promises'
+import { opendir, lstat } from 'node:fs/promises'
 import { isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { validateRawPathWithinCwd } from './ws-file-ops/common.js'
@@ -530,10 +530,26 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * which let `fs.glob` enumerate an out-of-bounds symlinked directory's
  * contents first and discarded the result afterward; this walk never opens
  * it. FAIL-CLOSED: a symlink that cannot be resolved (ELOOP, EACCES, a depth
- * bomb) is withheld the same way. An ordinary (non-symlink) directory reached
- * by descending from an already-validated point needs no re-check — its real
- * path is trivially `join(parent, name)`, since nothing in the chain from
- * `realRoot` down to it was ever a symlink.
+ * bomb) is withheld the same way.
+ *
+ * SECURITY (review of #7901, TOCTOU) — an ordinary (non-symlink-AT-LISTING-
+ * TIME) directory is NOT trusted on `dirent`'s type alone before being
+ * opened: `fs.promises.opendir` batches several dirents per underlying
+ * `readdir(2)` call, and this walk is strictly sequential within a directory,
+ * so an entry late in a large listing is reached only after every earlier one
+ * (including a deep subtree) has been fully processed — the type Node
+ * captured for it can be stale by then. Chroxy fans every tool block a model
+ * approves in one turn out CONCURRENTLY (`byok-session.js`'s `Promise.all`,
+ * #7356), so a Bash call approved in the SAME turn as a Glob call can replace
+ * a plain directory with a symlink to anywhere while this walk is still busy
+ * elsewhere in the tree. Measured directly (byok-tool-executor.test.js): an
+ * unpatched walk over a 60-sibling directory followed exactly such a swap
+ * straight into the attacker's target and returned matches from OUTSIDE the
+ * workspace, reported under a workspace-looking `relPath`. `walk`'s call site
+ * routes every directory-shaped descent — symlink-flagged or not — through
+ * {@link resolveNonSymlinkDescend} (a no-op for the already-validated symlink
+ * case) so the OPEN decision is always made on a freshly-`lstat`ed path, never
+ * a possibly-stale dirent.
  *
  * SECURITY (#7355/#7899) — case-sensitive by construction: every comparison
  * is `segmentMatches(matcher, dirent.name)` against the REAL name `opendir`
@@ -563,6 +579,17 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  */
 async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries }) {
   const m = matchers.length
+  // #7910 review (parity/DoS) — precomputed ONCE per Glob call: which matcher
+  // positions are DETERMINATE segments (no bare `*`/`?` anywhere in the
+  // segment — a fully-literal segment, a bracket class, or a brace whose every
+  // alternative is itself determinate; `**` is never determinate). Verified
+  // directly against Node 22's `glob()`: it follows a symlinked directory, and
+  // lets a trailing `**` close with zero width onto a non-directory entry,
+  // when the segment that named that entry is determinate (`src-link/*`,
+  // `[s]rc-link/*`, `{src-link,x}/*`, `plainfile.txt/**`, `[p]lainfile.txt/**`
+  // all do) but refuses when it is not (`?rc-link/*`, `*/*`, `*.txt/**`,
+  // `pl?infile.txt/**` do not) — see `walk`'s two call sites below.
+  const determinateSegment = matchers.map((tok) => tok !== CASE_CHECK_GLOBSTAR && isDeterminateSegmentTokens(tok))
 
   function closeGlobstars(active) {
     for (let k = 0; k < m; k++) {
@@ -591,18 +618,50 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
 
         const name = dirent.name
         const next = new Array(m + 1).fill(false)
+        // `detHandoff[k+1]` — #7910 review — true when `next[k+1]` was set
+        // THIS STEP by a determinate, non-globstar segment explicitly
+        // matching `name` (as opposed to a `**`'s own absorption, or a
+        // non-determinate `*`/`?` match). Drives both call sites below.
+        const detHandoff = new Array(m + 1).fill(false)
+        // Did the TRAILING globstar (if any) legitimately absorb THIS entry's
+        // own name via its dot-guarded absorption test? If so, it consumed
+        // the entry itself and needs no determinate source to close on it —
+        // see the closure-gate doc below.
+        let globstarAbsorbedLast = false
         for (let k = 0; k < m; k++) {
           if (!active[k]) continue
           if (matchers[k] === CASE_CHECK_GLOBSTAR) {
             // `**` never absorbs a hidden entry — see parseSegmentTokens's DOT
             // HANDLING doc; matches fs.glob's own default (a bare `**` never
             // lists a dotfile/dotdir at any depth).
-            if (name[0] !== '.') next[k] = true
+            if (name[0] !== '.') {
+              next[k] = true
+              if (k === m - 1) globstarAbsorbedLast = true
+            }
           } else if (segmentMatches(matchers[k], name)) {
             next[k + 1] = true
+            if (determinateSegment[k]) detHandoff[k + 1] = true
           }
         }
         closeGlobstars(next)
+
+        // SECURITY/DoS (#7910 review, item 3) — a TRAILING `**` closing with
+        // ZERO width (matching no real segment of its own) onto a
+        // NON-directory entry is only valid when the entry that immediately
+        // precedes the close was named by a DETERMINATE segment (verified
+        // directly: `plainfile.txt/**`/`[p]lainfile.txt/**` match a plain
+        // FILE `plainfile.txt`; `pl?infile.txt/**`/`*.txt/**` do not) — or
+        // when the globstar legitimately ABSORBED this entry's own name via
+        // its own dot-guarded test (`globstarAbsorbedLast`; that case needs
+        // no gate at all, since the entry was genuinely consumed as a real
+        // segment, file or directory, same as any ordinary `**` leaf match —
+        // `sub/**` finding a plain file `sub/file.ts` is completely ordinary).
+        // A directory entry never needs this gate: `**` matching zero of a
+        // real directory's contents is always well-formed.
+        if (next[m] && m >= 1 && matchers[m - 1] === CASE_CHECK_GLOBSTAR && !globstarAbsorbedLast) {
+          const isDirLike = dirent.isDirectory() || dirent.isSymbolicLink()
+          if (!isDirLike && !detHandoff[m - 1]) next[m] = false
+        }
 
         // #7901 round 2 (Windows parity) — `join()`, not a hardcoded `/`, so
         // the result carries the PLATFORM-native separator (`\` on Windows),
@@ -632,8 +691,34 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
 
         let canContinuePattern = false
         for (let k = 0; k < m; k++) { if (next[k]) { canContinuePattern = true; break } }
-        if (canContinuePattern && (dirent.isDirectory() || isSymlink)) {
-          await walk(childAbs, relPath, next)
+        // SECURITY/DoS (#7910 review, item 1) — a SYMLINKED directory is only
+        // descended into when SOME active, non-globstar, DETERMINATE segment
+        // explicitly matched this entry's name this step (`detHandoff`).
+        // Verified directly against Node 22's `glob()`: `src-link/*`,
+        // `src-link/**`, `[s]rc-link/*`, `{src-link,x}/*` all follow a
+        // symlinked `src-link`; `?rc-link/*`, `*/*` do not. A symlinked
+        // directory reached ONLY via `**` absorption (bare `**`, never
+        // descends past a symlink — the standard reason `**` needs symlink
+        // protection at all, to bound recursion) or ONLY via a
+        // non-determinate wildcard is listed as a match above but never
+        // opened — this is also what makes a symlink self-loop (`a -> .`)
+        // terminate after exactly the literal-segment chain the PATTERN
+        // itself spells out, rather than being re-discovered at every `**`
+        // depth. A plain (non-symlink) directory is unaffected — recursing
+        // into an ordinary directory carries no symlink risk regardless of
+        // how it was reached.
+        const canDescendSymlink = !isSymlink || detHandoff.slice(0, m).some(Boolean)
+        if (canContinuePattern && canDescendSymlink && (dirent.isDirectory() || isSymlink)) {
+          // SECURITY (review of #7901, TOCTOU) — a symlink-flagged entry's
+          // `childAbs` above already comes from a validation done immediately
+          // before use; a plain-directory-flagged one has NOT been re-checked
+          // since `dirent` was read, and `dirent`'s type can be stale by the
+          // time we get here (see `resolveNonSymlinkDescend`'s doc). Route it
+          // through the same freshness check before opening.
+          const openAbs = isSymlink
+            ? childAbs
+            : await resolveNonSymlinkDescend(childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl)
+          if (openAbs) await walk(openAbs, relPath, next)
         }
       }
     } finally {
@@ -645,6 +730,41 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
   initial[0] = true
   closeGlobstars(initial)
   await walk(realRoot, '', initial)
+}
+
+/**
+ * SECURITY (review of #7901, TOCTOU) — decide whether, and where, to descend
+ * for a directory-shaped entry `walkGlob`'s `dirent` did NOT flag as a
+ * symlink. See the SECURITY doc on `walkGlob` for the exploit this closes:
+ * `dirent`'s type can be stale (opendir batches several dirents per
+ * underlying readdir(2) call, and this walk is strictly sequential within a
+ * directory), and chroxy dispatches every tool block a model approves in one
+ * turn concurrently, so a plain directory `dirent` claims exists can already
+ * be a symlink to anywhere by the time this runs. A fresh `lstat`, taken
+ * immediately before `opendir` would otherwise run, is authoritative: if the
+ * entry is now a symlink, it is routed through the SAME
+ * `validateRawPathWithinCwd` confinement check the originally-flagged-symlink
+ * branch in `walk` already has, rather than trusted on `dirent`'s word.
+ *
+ * @returns {Promise<string|null>} absolute path to open, or `null` to withhold.
+ */
+async function resolveNonSymlinkDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl) {
+  let freshStat
+  try {
+    freshStat = await lstat(candidateAbs)
+  } catch {
+    return null // gone since it was listed — nothing to descend into
+  }
+  if (freshStat.isSymbolicLink()) {
+    let resolved
+    try {
+      resolved = await validateRawPathWithinCwd(relPath, realRoot, cwdRealCache, cwdCacheTtl)
+    } catch {
+      resolved = null // FAIL CLOSED — ELOOP, EACCES, etc.
+    }
+    return resolved && resolved.valid ? resolved.realPath : null
+  }
+  return freshStat.isDirectory() ? candidateAbs : null
 }
 
 /**
@@ -839,10 +959,19 @@ function advanceToken(token, str, reachable) {
     const next = new Set()
     let min = Infinity
     for (const j of reachable) {
-      if (dotGuarded && j === 0) {
-        next.add(0) // zero-width only — `*` may not cross the leading dot
-        continue
-      }
+      // #7910 review (item 4) — `*` is NEVER dot-entitled, not even with
+      // zero width: dropping offset 0 outright (rather than keeping it
+      // reachable via a zero-width self-loop, as an earlier cut did) is what
+      // `parseSegmentTokens`'s own doc already promises ("only a LITERAL
+      // leading `.` ... reaches a dotfile"). The zero-width carve-out this
+      // replaces let a LATER dot-entitled literal consume the leading dot
+      // AFTER the star had "passed through" it doing nothing — which made
+      // `*.env` match a real `.env` (verified: Node 22's `glob()` returns no
+      // matches for `*.env` against `.env`). Offset 0 becoming reachable via
+      // a LATER token (one that legitimately consumed the dot itself) is
+      // unaffected — this only ever drops offset 0 from THIS token's own
+      // output.
+      if (dotGuarded && j === 0) continue
       if (j < min) min = j
     }
     if (min !== Infinity) { for (let j = min; j <= n; j++) next.add(j) }
@@ -966,6 +1095,29 @@ function splitTopLevelCommas(s) {
  * rather than the string `'**'` so it can never collide with a RegExp value.
  */
 const CASE_CHECK_GLOBSTAR = Symbol('globstar')
+
+/**
+ * #7910 review — true when a {@link parseSegmentTokens} token array contains
+ * no `star` (`*`) or `any` (`?`) token anywhere, including recursively inside
+ * every alternative of an `alt` (`{a,b}`) token. `lit`, `class` (a bracket
+ * expression — `[s]`, `[a-z]`) and `none` (an unparseable class, matches
+ * nothing) all count as determinate on their own. Verified directly against
+ * Node 22's `glob()` as the exact line it draws for two behaviors `walkGlob`
+ * has to replicate (see its two call sites): following a symlinked directory,
+ * and letting a trailing `**` close with zero width onto something that
+ * isn't a directory. Both apply for a literal, bracket-class, or brace
+ * segment naming the entry; neither applies when a bare `*`/`?` is what
+ * matched it — a bracket class is syntactically a "wildcard" too, but Node's
+ * own matcher treats it as determinate enough to follow/close on, same as a
+ * literal.
+ */
+function isDeterminateSegmentTokens(tokens) {
+  return tokens.every((t) => {
+    if (t.t === 'star' || t.t === 'any') return false
+    if (t.t === 'alt') return t.options.every(isDeterminateSegmentTokens)
+    return true // 'lit', 'class', 'none'
+  })
+}
 
 /**
  * COMPLEXITY BOUND (#7898 round 4) — the worst-case cost of the whole

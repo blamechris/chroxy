@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
-import { glob as fsGlob } from 'node:fs/promises'
+import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
@@ -1474,6 +1474,117 @@ describe('executeBuiltinTool', () => {
         )
       })
 
+      // #7910 review (security, TOCTOU) — `dirent.isDirectory()`/
+      // `isSymbolicLink()` reflect the type Node captured when this entry's
+      // underlying readdir(2) BATCH was read, which can be stale by the time
+      // the walk actually opens it: this walk is strictly sequential within
+      // a directory, so a sibling late in a large listing is reached only
+      // after every earlier one has been processed. Chroxy dispatches every
+      // tool block a model approves in ONE turn CONCURRENTLY
+      // (byok-session.js's Promise.all fan-out, #7356), so a Bash call
+      // approved in the SAME turn as this Glob call can delete a plain
+      // directory and recreate it as a symlink to outside the workspace
+      // WHILE the walk is still busy elsewhere in the tree. Proven directly
+      // against the unpatched walk: an unpatched `walkGlob` followed exactly
+      // this swap straight into the attacker's target and returned matches
+      // from OUTSIDE the workspace, reported under a workspace-looking path.
+      it('re-verifies a plain-directory entry immediately before opening it, closing a symlink-swap race (security #7910 review)', { timeout: 15_000 }, async () => {
+        const outer = mkdtempSync(join(tmpdir(), 'chroxy-toctou-outer-'))
+        try {
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          // Enough siblings that the walk needs real time to reach the swap
+          // target, giving the concurrent racer room to land before the walk
+          // gets there — independent of Node's exact opendir() batch size.
+          for (let i = 0; i < 60; i++) mkdirSync(join(dir, 'subtree', `sib_${i}`))
+          const targetAbs = join(dir, 'subtree', 'zzz_target')
+          mkdirSync(targetAbs)
+
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          const walkPromise = walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+          })
+          const racer = (async () => {
+            while (state.visited === 0) await new Promise((r) => setImmediate(r))
+            await rmAsync(targetAbs, { recursive: true, force: true })
+            await symlinkAsync(outer, targetAbs)
+          })()
+          await Promise.all([walkPromise, racer])
+
+          assert.equal(
+            results.some((r) => r.includes('SECRETMARKER')),
+            false,
+            'a directory swapped for an out-of-workspace symlink mid-walk must never be traversed',
+          )
+        } finally {
+          rmSync(outer, { recursive: true, force: true })
+        }
+      })
+
+      // #7910 review (security/DoS) — a symlinked directory is only descended
+      // into when a DETERMINATE segment (literal, bracket class, or brace
+      // alternation — no bare `*`/`?`) explicitly named it, matching Node
+      // 22's `glob()` exactly (verified directly): `link/*`, `[l]ink/*`
+      // follow; `*/*`, `?ink/*` do not (they still LIST the symlink's own
+      // name, just never open it). Without this, `walkGlob` followed every
+      // symlinked directory it found regardless of how it was discovered —
+      // duplicating real subtrees under every alias `**` swept up, and, for
+      // a self-referential symlink, being re-discovered (and re-descended
+      // into) at every recursion depth.
+      it('descends a symlinked directory only via a determinate segment, never via a bare wildcard or ** absorption (security/DoS #7910 review)', async () => {
+        mkdirSync(join(dir, 'real'))
+        writeFileSync(join(dir, 'real/index.ts'), '1')
+        symlinkSync(join(dir, 'real'), join(dir, 'real-link'))
+
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'real-link/*.ts' }, ...ctx() })
+        assert.match(lit.content, /real-link\/index\.ts/, 'a literal segment still follows (matches fs.glob)')
+
+        const bracket = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[r]eal-link/*.ts' }, ...ctx() })
+        assert.match(bracket.content, /real-link\/index\.ts/, 'a bracket-class segment still follows (matches fs.glob)')
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*/*.ts' }, ...ctx() })
+        assert.equal(wild.content.includes('real-link'), false, '"*/*" must not descend through a wildcard-discovered symlink')
+        assert.match(wild.content, /real\/index\.ts/, 'the real directory is still found through the same pattern (positive control)')
+
+        const globstar = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        const lines = globstar.content.split('\n')
+        assert.ok(lines.includes('real-link'), '"**" must still list the symlink itself')
+        assert.equal(lines.some((l) => l.startsWith('real-link/')), false, '"**" must never descend through a symlink it merely absorbed')
+      })
+
+      it('terminates a symlink self-loop discovered only via ** absorption, cheaply (DoS #7910 review)', async () => {
+        mkdirSync(join(dir, 'loopdir'))
+        symlinkSync('.', join(dir, 'loopdir/selfloop'))
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**' }, ...ctx() })
+        const ms = Date.now() - t0
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a bare-**-discovered symlink self-loop must terminate quickly, took ${ms}ms`)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
+        assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
+      })
+
+      // #7910 review (parity) — a trailing `**` closing with ZERO width onto a
+      // non-directory entry requires the segment that named the entry to be
+      // DETERMINATE (verified directly against Node 22's `glob()`:
+      // `plainfile.txt/**` matches the plain FILE `plainfile.txt`;
+      // `*.txt/**` does not). `walkGlob`'s `closeGlobstars` propagation had no
+      // such gate, so a non-determinate segment handing straight into a
+      // trailing `**` finalized on files it should never have matched.
+      it('a trailing ** does not close with zero width onto a non-directory entry named by a non-determinate segment (#7910 review)', async () => {
+        writeFileSync(join(dir, 'plainfile.txt'), '1')
+        const lit = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'plainfile.txt/**' }, ...ctx() })
+        assert.equal(lit.isError, false)
+        assert.match(lit.content, /^plainfile\.txt$/m, 'a literal segment still closes ** onto a file (matches fs.glob)')
+
+        const wild = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.txt/**' }, ...ctx() })
+        assert.match(wild.content, /No matches/, 'a bare-wildcard segment must not close ** onto a file')
+      })
+
       // #7901 — `walkGlob` implements dotfile exclusion itself now (previously
       // free, handled internally by `fs.glob` before any of chroxy's own code
       // ran). Without `advanceToken`'s dot guard, a bare `*`/`?`/ordinary
@@ -1495,6 +1606,25 @@ describe('executeBuiltinTool', () => {
         const klass = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '[.e]nv' }, ...ctx() })
         assert.equal(klass.isError, false)
         assert.match(klass.content, /No matches/, 'a multi-member class containing "." is not the [.] exception')
+      })
+
+      // #7910 review — a `*` immediately followed by a literal `.` in the SAME
+      // segment (`*.env`) must not match a real leading dot either: the star's
+      // own dot guard used to keep offset 0 reachable with ZERO width so a
+      // LATER dot-entitled literal token could consume it, letting the star
+      // "pass through" the dot untouched. Verified directly against Node 22's
+      // `glob()`: `*.env` returns no matches for a real `.env`. The existing
+      // "bare wildcard" test above only covers a `*` with nothing after it in
+      // the segment, which cannot exercise this path.
+      it('a leading * cannot cross a real leading dot even with a literal dot immediately after it (#7910 review)', async () => {
+        writeFileSync(join(dir, '.env'), 'secret')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '*.env' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/, '"*.env" must not match ".env"')
+
+        const positive = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '.env*' }, ...ctx() })
+        assert.equal(positive.isError, false)
+        assert.match(positive.content, /\.env/, 'a literal-dot-first pattern is unaffected (positive control)')
       })
 
       // #7901 — `**` (globstar) never absorbs a dot-named real segment either,
