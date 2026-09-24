@@ -869,6 +869,50 @@ describe('executeBuiltinTool', () => {
         assert.match(braceWrong.content, /No matches/)
       })
 
+      // A brace pattern with alternatives that case-fold to the SAME real
+      // file (`abc`/`ABC` both fold to a real `ABC.ts` on this case-
+      // insensitive filesystem) makes `fs.glob` hand back ONE raw candidate
+      // PER matching alternative — `abc.ts` and `ABC.ts` — each echoing its
+      // own branch's text. Both independently pass the case check (the
+      // pattern legitimately accepts either spelling), so pushing the
+      // candidate's own text instead of the verified real name returned BOTH:
+      // the real `ABC.ts` and a phantom `abc.ts` line that does not exist on
+      // disk. This is the exact "pattern's own spelling, not the file's"
+      // defect #7355 was filed to close, reached through a brace pattern
+      // rather than the fully-literal repro the issue used.
+      it('a brace pattern whose alternatives fold to the same real file returns it ONCE, correctly spelled', async () => {
+        writeFileSync(join(dir, 'ABC.ts'), '1') // the only real file on disk
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{abc,ABC}.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        // Exact equality: rules out a phantom `abc.ts` line appearing
+        // alongside the real, correctly-spelled `ABC.ts`.
+        assert.equal(r.content, 'ABC.ts')
+      })
+
+      // Flagged by Copilot review on this PR: `fs.glob` normalizes away a `.`
+      // path segment in every match it returns (`./src/*.ts` yields a Dirent
+      // whose parentPath/name never mention the leading `.`), so compiling the
+      // case check from the PATTERN's own unfiltered segments (`.`, `src`,
+      // `*.ts` — 3 segments) could never align with the real match's segments
+      // (`src`, `x.ts` — 2 segments), failing every `./`-prefixed pattern
+      // closed. `./` prefixes are explicitly legal Glob input
+      // (`globPatternEscapeReason` has no rule against a bare `.` segment).
+      it('a "./"-prefixed pattern still matches (fs.glob drops the "." segment from real matches)', async () => {
+        mkdirSync(join(dir, 'src'), { recursive: true })
+        writeFileSync(join(dir, 'src/x.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: './src/*.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'src/x.ts')
+      })
+
+      it('a "." segment in the MIDDLE of a pattern still matches', async () => {
+        mkdirSync(join(dir, 'src'), { recursive: true })
+        writeFileSync(join(dir, 'src/x.ts'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'src/./x.ts' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'src/x.ts')
+      })
+
       it('a recursive ** pattern still finds nested matches after the case filter', async () => {
         mkdirSync(join(dir, 'sub'), { recursive: true })
         writeFileSync(join(dir, 'sub/keep.ts'), '1')
@@ -877,6 +921,43 @@ describe('executeBuiltinTool', () => {
         assert.equal(r.isError, false)
         assert.match(r.content, /sub\/keep\.ts/)
         assert.equal(r.content.includes('Upper.TS'), false)
+      })
+
+      // A pattern with TWO (or more) `**` segments used to be marked
+      // `ambiguous` and unconditionally fail-closed the case check, dropping
+      // EVERY match — including ones whose real on-disk segments already
+      // matched the pattern's case exactly. That is silent false-negative
+      // data loss on an ordinary, common pattern shape (a monorepo query like
+      // `packages/**/src/**/*.test.js`), not merely a narrowing: measured
+      // against origin/main pre-#7355, the identical fixture below returned
+      // both correctly-cased matches; post-#7355 it returned "No matches".
+      it('a pattern with two "**" segments still matches correctly-cased real files', async () => {
+        mkdirSync(join(dir, 'packages/server/src/sub'), { recursive: true })
+        writeFileSync(join(dir, 'packages/server/src/sub/foo.test.js'), '1')
+        writeFileSync(join(dir, 'packages/server/src/foo.test.js'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: 'packages/**/src/**/*.test.js' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'packages/server/src/foo.test.js\npackages/server/src/sub/foo.test.js')
+      })
+
+      // Same two-"**" shape, but the fixed literal segment between the two
+      // globstars ("src") is wrong-cased on disk ("Src") — the case check
+      // must still reject it, not just fall back to "**" leniency for having
+      // more than one globstar.
+      it('a pattern with two "**" segments still rejects a wrong-case fixed segment between them', async () => {
+        mkdirSync(join(dir, 'packages/server/Src/sub'), { recursive: true })
+        writeFileSync(join(dir, 'packages/server/Src/sub/foo.test.js'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: 'packages/**/src/**/*.test.js' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
       })
     })
 

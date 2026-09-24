@@ -515,13 +515,34 @@ async function confineGlobMatches(files, realRoot, cwdRealCache, cwdCacheTtl, pa
       dirVerdicts.set(rawDir, ok)
     }
     if (ok && isSymlink) ok = await isWithin(f, realRoot, cwdRealCache, cwdCacheTtl)
+    // #7355 — emit the REAL on-disk spelling, never the candidate text `f`.
+    // For a fully-literal pattern segment the two are provably identical
+    // whenever `ok` ends up true (the case-sensitive regex only accepts a
+    // real segment equal to the pattern's own literal text), so this is a
+    // no-op there. But for a pattern segment with more than one textual form
+    // that can fold to the SAME real name under `fs.glob`'s nocase matching
+    // — a brace alternative being the clearest case, `{abc,ABC}.ts` against a
+    // real `ABC.ts` — `fs.glob` hands back ONE raw candidate PER matching
+    // alternative (`abc.ts` and `ABC.ts`, both echoing their own branch's
+    // text), and both independently pass the case check because the pattern
+    // legitimately accepts either spelling. Pushing `f` there kept BOTH: the
+    // real `ABC.ts` and a phantom `abc.ts` that does not exist on disk —
+    // exactly the "pattern's own spelling, not the file's" defect #7355 was
+    // filed to close, just reached through a different pattern shape than the
+    // fully-literal one the issue's repro used. Substituting the verified
+    // real segments (and deduping below) closes it for every pattern shape,
+    // not only the literal one.
+    let out = f
     if (ok) {
       const realSegments = await realSegmentNames(realRoot, splitRelPath(f), direntCache)
       ok = realSegments !== null && caseCheckPasses(caseCheck, realSegments)
+      if (ok) out = join(...realSegments)
     }
-    if (ok) kept.push(f)
+    if (ok) kept.push(out)
   }
-  return kept
+  // Dedupe: two raw candidates that both resolve to the same real path (the
+  // brace-alternative case above) must surface as one match, not two.
+  return [...new Set(kept)]
 }
 
 /**
@@ -693,56 +714,83 @@ function splitTopLevelCommas(s) {
 }
 
 /**
+ * Sentinel distinguishing a `**` (globstar) pattern segment from a compiled
+ * per-segment RegExp in {@link compileCaseCheck}'s `matchers` array. A Symbol
+ * rather than the string `'**'` so it can never collide with a RegExp value.
+ */
+const CASE_CHECK_GLOBSTAR = Symbol('globstar')
+
+/**
  * #7355 — compile a whole Glob pattern into the pieces {@link caseCheckPasses}
  * needs: the pattern has no `/` inside a segment (patterns are always
  * `/`-delimited — `\` is rejected upstream), so it is split on `/` and each
- * segment compiled independently via {@link segmentToRegexSource}.
+ * segment compiled independently via {@link segmentToRegexSource}. A `**`
+ * segment compiles to {@link CASE_CHECK_GLOBSTAR} instead of a RegExp — it
+ * matches zero or more REAL path segments, which are, by construction,
+ * always real Dirent names (a `**` carries no literal text of its own to
+ * mismatch), so segments it absorbs need no case check at all.
  *
- * `**` alignment: a standalone `**` segment matches zero or more REAL path
- * segments, which are — by construction — always real Dirent names (a `**`
- * carries no literal text of its own to mismatch), so segments it absorbs need
- * no case check at all. With AT MOST ONE `**`, the segments before it align
- * with the match's leading segments and the segments after it align with the
- * match's trailing segments, leaving the (possibly empty) middle unchecked.
+ * Any number of `**` segments is supported: {@link caseCheckPasses} aligns
+ * `matchers` against a match's real segments with the standard array
+ * wildcard-matching DP (the same shape as string wildcard matching, just one
+ * path segment at a time instead of one character at a time), so it is never
+ * ambiguous which real segments a `**` absorbed in the sense that matters
+ * here — the DP considers every split and accepts if ANY of them makes the
+ * whole pattern match. An earlier version special-cased "at most one `**`"
+ * and failed closed (rejected every match) for two or more, which silently
+ * dropped every match — including already-correctly-cased ones — for an
+ * ordinary pattern shape like `packages/**\/src/**\/*.test.js`; verified
+ * against origin/main pre-#7355 that the identical fixture returned both
+ * matches there, so this was a regression #7355 introduced, not a pre-existing
+ * limitation worth keeping.
  *
- * A pattern with TWO OR MORE `**` segments is marked `ambiguous`: figuring out
- * which match segments each one consumed needs real backtracking, which this
- * intentionally does not implement (the existing security-relevant containment
- * checks stay unaffected either way — this only feeds the case re-check).
- * `caseCheckPasses` fails closed on `ambiguous`, which can only ever REJECT a
- * match that might have been a legitimate case-correct one; it can never let a
- * case-mismatched one through. Real Glob usage overwhelmingly uses zero or one
- * `**`, so this is a documented, safe-by-construction narrowing, not a gap.
+ * Empty and `.` segments are dropped before compiling: `fs.glob` normalizes
+ * both away in what it actually returns (measured: `./src/*.ts` yields a
+ * Dirent whose name/parentPath never mention the leading `.`; same for a
+ * `.` in the middle, e.g. `src/./x.ts`, or an empty segment from `src//x.ts`)
+ * — it echoes neither a `.` component nor an empty one in any match. Compiling
+ * the pattern's OWN segment list unfiltered made `./src/*.ts` (3 segments:
+ * `.`, `src`, `*.ts`) impossible to align with the real match's 2 segments
+ * (`src`, `x.ts`), failing every match closed. `./`-prefixed patterns are
+ * explicitly allowed (`globPatternEscapeReason` has no rule against a bare
+ * `.` segment), so this was a real regression, not a theoretical one —
+ * verified against origin/main pre-#7355 that `./src/*.ts` matched there.
  */
 function compileCaseCheck(pattern) {
-  const patSegs = pattern.split('/')
-  const globstarIdxs = []
-  patSegs.forEach((s, i) => { if (s === '**') globstarIdxs.push(i) })
-  if (globstarIdxs.length > 1) return { ambiguous: true }
-  if (globstarIdxs.length === 0) {
-    return { ambiguous: false, exact: true, head: patSegs.map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)), tail: [] }
-  }
-  const k = globstarIdxs[0]
-  return {
-    ambiguous: false,
-    exact: false,
-    head: patSegs.slice(0, k).map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)),
-    tail: patSegs.slice(k + 1).map((s) => new RegExp(`^${segmentToRegexSource(s)}$`)),
-  }
+  const patSegs = pattern.split('/').filter((s) => s !== '' && s !== '.')
+  const matchers = patSegs.map((s) => (s === '**' ? CASE_CHECK_GLOBSTAR : new RegExp(`^${segmentToRegexSource(s)}$`)))
+  return { matchers }
 }
 
-/** Test a {@link compileCaseCheck} result against a match's REAL segment names. */
+/**
+ * Test a {@link compileCaseCheck} result against a match's REAL segment names,
+ * via the classic wildcard-matching DP over arrays (not strings): `dp[j]` is
+ * true when the matchers processed so far can align with the first `j` real
+ * segments. A literal matcher consumes exactly one real segment (case-
+ * sensitively); a {@link CASE_CHECK_GLOBSTAR} matcher can consume any number
+ * (0..j), computed as a running OR (prefix-OR) rather than an inner loop.
+ */
 function caseCheckPasses(check, realSegments) {
-  if (check.ambiguous) return false
-  const { head, tail, exact } = check
-  if (exact) {
-    if (realSegments.length !== head.length) return false
-    return head.every((re, i) => re.test(realSegments[i]))
+  const { matchers } = check
+  const n = realSegments.length
+  let dp = new Array(n + 1).fill(false)
+  dp[0] = true
+  for (const matcher of matchers) {
+    const next = new Array(n + 1).fill(false)
+    if (matcher === CASE_CHECK_GLOBSTAR) {
+      let seenTrue = false
+      for (let j = 0; j <= n; j++) {
+        seenTrue = seenTrue || dp[j]
+        next[j] = seenTrue
+      }
+    } else {
+      for (let j = 1; j <= n; j++) {
+        next[j] = dp[j - 1] && matcher.test(realSegments[j - 1])
+      }
+    }
+    dp = next
   }
-  if (realSegments.length < head.length + tail.length) return false
-  if (!head.every((re, i) => re.test(realSegments[i]))) return false
-  const tailStart = realSegments.length - tail.length
-  return tail.every((re, i) => re.test(realSegments[tailStart + i]))
+  return dp[n]
 }
 
 /**
