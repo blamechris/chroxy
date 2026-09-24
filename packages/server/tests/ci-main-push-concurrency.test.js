@@ -63,7 +63,27 @@ import { readWorkflows, assertReaderSane } from './helpers/workflow-reader.js'
  * `stale.yml` declare no `concurrency:` block at all). The regression guard
  * below is scoped to the DEFECT so a future push-triggered workflow that copies
  * the old ci.yml pattern is caught without anyone updating a roster here.
+ *
+ * WHY THE SCAN ALSO READS `jobs.*.concurrency`, NOT JUST THE WORKFLOW-LEVEL
+ * BLOCK. GitHub Actions accepts `concurrency:` at the job level too, as either
+ * a bare string or the same `{group, cancel-in-progress}` shape, and a job-level
+ * group hits the identical #7905 pile-up if it falls back to `run_id` on a
+ * push-triggered workflow — the workflow-level block being clean says nothing
+ * about a job's own group. A first version of this scan checked only
+ * `doc.concurrency` and passed green over a job-level `run_id` fallback
+ * (confirmed by adding one to a scratch workflow) — the "guard wired to only
+ * some of its callers" shape in docs/false-safety-guards.md. `concurrencyGroup`
+ * normalizes both the bare-string and object forms so job- and workflow-level
+ * blocks are read the same way.
  */
+
+/** A job's or workflow's `concurrency:` value in either its bare-string or object shape. */
+const concurrencyGroup = c => {
+  if (typeof c === 'string') return c
+  if (c && typeof c === 'object') return String(c.group ?? '')
+  return ''
+}
+
 describe('ci.yml main-push concurrency supersedes rather than piling up (#7905)', () => {
   let workflows
   /** @type {Map<string, any>} workflow file name -> parsed top-level YAML document */
@@ -96,10 +116,19 @@ describe('ci.yml main-push concurrency supersedes rather than piling up (#7905)'
     const ci = docs.get('ci.yml')
     assert.equal(typeof ci, 'object', 'ci.yml did not parse to an object')
     assert.equal(typeof ci.concurrency, 'object', 'ci.yml has no top-level concurrency: block')
+    // A job COUNT threshold is brittle against a legitimate job-count refactor;
+    // a stable sentinel job id is not. `runner-target` computes the self-hosted
+    // vs. hosted runner routing every other job depends on (see the
+    // SELF_HOSTED_OR_HOSTED comment below) and is exactly the kind of job whose
+    // disappearance from the parsed document means the reader broke, not that
+    // ci.yml was refactored.
     assert.ok(
-      Object.keys(ci.jobs ?? {}).length >= 15,
-      `expected >=15 jobs in ci.yml, found ${Object.keys(ci.jobs ?? {}).length} — the parser may ` +
-        'have stopped understanding this file'
+      Object.keys(ci.jobs ?? {}).length > 0,
+      'expected at least one job in ci.yml — the parser may have stopped understanding this file'
+    )
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(ci.jobs ?? {}, 'runner-target'),
+      `expected ci.yml's "runner-target" job among the parsed jobs, found: ${Object.keys(ci.jobs ?? {}).join(', ')}`
     )
   })
 
@@ -169,24 +198,30 @@ describe('ci.yml main-push concurrency supersedes rather than piling up (#7905)'
     )
   })
 
-  it('no push-triggered workflow anywhere in the repo falls back to github.run_id in its concurrency group', () => {
+  it('no push-triggered workflow anywhere in the repo falls back to github.run_id in its concurrency group, at either workflow or job level', () => {
     // Scoped to the DEFECT (#7386's lesson): any workflow that gains a `push`
     // trigger and a `concurrency.group` keyed on `head_ref || run_id` hits the
-    // exact #7905 pile-up, whether or not it is named ci.yml.
-    const offenders = workflows
-      .filter(w => {
-        const doc = docs.get(w.name)
-        return doc && doc.on && Object.prototype.hasOwnProperty.call(doc.on, 'push') && doc.concurrency
-      })
-      .map(w => ({ file: w.name, group: String(docs.get(w.name).concurrency.group ?? '') }))
-      .filter(({ group }) => /run_id/.test(group))
-      .map(({ file, group }) => `${file}: ${group}`)
+    // exact #7905 pile-up, whether or not it is named ci.yml, and whether the
+    // block sits at the workflow level or inside one of its jobs.
+    const offenders = []
+    for (const w of workflows) {
+      const doc = docs.get(w.name)
+      if (!doc || !doc.on || !Object.prototype.hasOwnProperty.call(doc.on, 'push')) continue
+
+      const workflowGroup = concurrencyGroup(doc.concurrency)
+      if (/run_id/.test(workflowGroup)) offenders.push(`${w.name}: ${workflowGroup}`)
+
+      for (const [jobId, job] of Object.entries(doc.jobs ?? {})) {
+        const jobGroup = concurrencyGroup(job?.concurrency)
+        if (/run_id/.test(jobGroup)) offenders.push(`${w.name} job "${jobId}": ${jobGroup}`)
+      }
+    }
 
     assert.deepEqual(
       offenders,
       [],
-      'a push-triggered workflow keys its concurrency group on github.run_id, which is unique per ' +
-        `run and can never coalesce a burst of pushes (#7905):\n  ${offenders.join('\n  ')}`
+      'a push-triggered workflow keys a concurrency group (workflow- or job-level) on github.run_id, ' +
+        `which is unique per run and can never coalesce a burst of pushes (#7905):\n  ${offenders.join('\n  ')}`
     )
   })
 })
