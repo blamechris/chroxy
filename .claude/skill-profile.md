@@ -39,12 +39,23 @@ one, which is why it no longer does. After editing a skill's generic source by h
 
 ## Cost Circuit Breaker (marathon skills: prime-directive, tackle-issues, autonomous-dev-flow)
 
-- **Cost source:** the harness statusline — it computes running session cost live.
-- **Per-session budget:** $150 eq. — set 2026-07, per the 2026-07 cost audit's recommendation.
-- Over budget at a wave/queue boundary → write the handoff, update the STATE header where
-  applicable, and **stop and notify** instead of starting the next wave/item. This is the
-  documented value the marathon skills' cost-circuit-breaker sections defer to; update it here
-  first if the budget changes, then re-run `/skill update` on the marathon skills to propagate.
+- **Per-session budget:** **none — PAUSED 2026-09-24** by the user. The previous $150 eq. figure
+  (set 2026-07, per the 2026-07 cost audit's recommendation) is suspended while the restriction
+  policy itself is re-evaluated; that evaluation needs data a capped run cannot produce. While
+  paused, a wave/queue boundary **never stops the run on spend**.
+- **Tracking is not paused.** At every wave/queue boundary, record the session's spend in the
+  STATE header and the wave's log entry, from the existing scripts (the agent cannot read the
+  harness statusline): `python3 ~/.claude/scripts/usage-benchmark-row.py` — this session's eff
+  units, subagent share and work credited; it only prints, and the row is appended once, at
+  session end, per the session-boundaries protocol — and `python3 ~/.claude/scripts/usage-pace.py --oneline`
+  for the live weekly meter. The closing benchmark row is the durable record.
+- **If a budget is reinstated here:** over budget at a wave/queue boundary → write the handoff,
+  update the STATE header where applicable, and **stop and notify** instead of starting the next
+  wave/item. This is the documented value the marathon skills' cost-circuit-breaker sections
+  defer to; change it here first, then update the breaker line in each of the three skills'
+  `.claude/commands/<name>.md` and recompile with
+  `node scripts/compile-skill-targets.mjs --name <name>` (`skills.lock` pins the template hash,
+  not the customized text, so this is not drift).
 
 ## Repo-memory exploration protocol (cross-cutting)
 This repo has the `repo-memory` MCP (~1,500 files pre-indexed, AST summaries, warm cache via a `post-merge` hook). It is heavily underused. Any skill that **spawns code-exploring subagents or reads source heavily** must carry the exploration protocol so spawned agents (fresh context, don't inherit CLAUDE.md) actually use it:
