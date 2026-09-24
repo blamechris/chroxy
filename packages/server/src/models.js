@@ -672,9 +672,20 @@ export function createModelsRegistry(hooks = {}) {
       declaredFullIds.set(entry.fullId, entry)
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
-        // Override the base row's label/window from the overlay when supplied.
+        // Override the base row's label/window/shortId from the overlay when
+        // supplied. #7802 — SPREAD the base row first: `docs/guides/model-
+        // overlay.md` documents the overlay's reach on an existing id as
+        // exactly `label` / `contextWindow` / `shortId`, nothing else, so
+        // every OTHER key the base row carried (`reasoningLevels`,
+        // `defaultReasoningLevel`, `provenance`, and anything future
+        // `MODEL_ENTRY_METADATA_KEYS` growth adds) must survive an override
+        // untouched. A bare 4-key literal here silently dropped all of them —
+        // for `reasoningLevels` specifically, that disabled the
+        // `set_thinking_level` gate for a model the overlay only meant to
+        // relabel.
         if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
           baseByFullId.set(entry.fullId, Object.freeze({
+            ...baseRow,
             id: entry.shortId ?? baseRow.id,
             label: entry.label ?? baseRow.label,
             fullId: baseRow.fullId,
@@ -789,7 +800,61 @@ export function createModelsRegistry(hooks = {}) {
     return overlayDeclaredFullIds.has(fullId) && !providerReportedFullIds.has(fullId)
   }
 
-  let activeModels = fallbackModels
+  /**
+   * True for a row that must never be broadcast carrying `provenance`, and
+   * the one place that strips it back off when a producer stamped it anyway.
+   *
+   * For a row that is genuinely part of this repo's own static seed (a
+   * `baseFallbackModels` entry the operator never named), `provenance:
+   * 'catalogued'` means "this repo's in-repo catalogue vouches for this
+   * row", which is true, and stays. For a row that is in the roster ONLY
+   * because the operator's overlay declares its fullId
+   * (`isUnpersistableDeclaredRow`), no source may make that claim — since
+   * #7802 keeps a static base row's own metadata alive under an overlay
+   * label/window override, a declared-only row can carry that base row's
+   * `provenance` stamp straight through (e.g. an overlay-declared override
+   * of a retired provider id). Stripping leaves it ABSENT rather than
+   * mislabeled; every OTHER metadata key (`reasoningLevels`, …) is
+   * unaffected.
+   *
+   * #7888 round 3 — this used to be re-implemented (or forgotten) at each of
+   * SIX places that could put a row into `activeModels`: the construction
+   * initializer, `updateModels`'s and `loadCache`'s union loops (each via a
+   * now-removed `unionRowMetadataSources` wrapper that stripped `provenance`
+   * from the `withModelMetadata` SOURCES instead of the built row — same
+   * outcome, different shape), `applyOverlay`'s cache-warmed and fully-cold
+   * branches, and `resetModels()`. Three rounds of review fixed those one at
+   * a time (#7806, then the cache-warmed branch, then the last three) — the
+   * whack-a-mole shape the round-3 task exists to end. Every one of those
+   * call sites now builds its array and hands it to `setActiveModels()`
+   * below, which maps every row through this function before it is ever
+   * assigned to `activeModels`; no call site maps through it directly
+   * anymore, so a future one cannot forget to.
+   */
+  function stripUnpersistableProvenance(row) {
+    if (row.provenance === undefined) return row
+    if (!isUnpersistableDeclaredRow(row.fullId)) return row
+    const { provenance: _provenance, ...rest } = row
+    return Object.freeze(rest)
+  }
+
+  /**
+   * The ONLY assignment to `activeModels` (`updateContextWindow` included —
+   * see below). Every row that becomes part of the active roster passes
+   * through `stripUnpersistableProvenance` here, once, so the provenance
+   * invariant cannot be bypassed by a call site that builds a models array
+   * correctly in every other respect but forgets this one step — the defect
+   * shape all three rounds of #7888 review found. Idempotent on a row that
+   * doesn't need stripping, so callers may pass an array that is already a
+   * mix of previously-active rows (`updateContextWindow`) and freshly-built
+   * ones (`applyOverlay`'s cache-warmed seed) without sorting them first.
+   */
+  function setActiveModels(models) {
+    activeModels = models.map(stripUnpersistableProvenance)
+  }
+
+  let activeModels
+  setActiveModels(fallbackModels)
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
@@ -854,7 +919,10 @@ export function createModelsRegistry(hooks = {}) {
     const filtered = models.some((m) => isDisallowedModelId(m.id) || isDisallowedModelId(m.fullId))
       ? models.filter((m) => !isDisallowedModelId(m.id) && !isDisallowedModelId(m.fullId))
       : models
-    activeModels = filtered
+    // #7888 round 3 — the chokepoint: every write to `activeModels` this
+    // registry makes (except `updateContextWindow`'s in-place window update,
+    // which routes through the same function) funnels through here.
+    setActiveModels(filtered)
     // #6219 review (#6232): never leave defaultModelId pointing at a model that
     // isn't in the active list — e.g. the SDK marked the now-filtered disallowed
     // model (fable) as "Default", so nextDefault is its short id which isn't in
@@ -863,6 +931,9 @@ export function createModelsRegistry(hooks = {}) {
     // (opus → sonnet) else the first model (mirrors updateModels' fallback). Only
     // fires when filtering actually dropped the chosen default — a present
     // nextDefault (the common case + loadCache's own discard result) is kept.
+    // Reads `filtered`, not `activeModels` — stripping `provenance` never
+    // touches `id`/`fullId`, so the two are equivalent for this lookup, and
+    // `filtered` is already in hand.
     const defaultPresent =
       nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
     if (nextDefault != null && !defaultPresent) {
@@ -871,7 +942,10 @@ export function createModelsRegistry(hooks = {}) {
     } else {
       defaultModelId = nextDefault
     }
-    rebuildLookups(filtered)
+    // Rebuilds from `activeModels` (the post-strip list) rather than
+    // `filtered` so the lookup tables always mirror exactly what
+    // `getModels()` serves, not a pre-chokepoint snapshot of it.
+    rebuildLookups(activeModels)
   }
 
   /**
@@ -979,25 +1053,59 @@ export function createModelsRegistry(hooks = {}) {
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
       } else if (lastCacheModels) {
-        // Cache-warmed (loadCache) but no SDK refresh yet — apply the new
-        // fallback (base + overlay overrides + overlay-only rows) while
-        // PRESERVING the cache entries it doesn't cover (date-suffixed ids past
-        // the family filter, e.g. `claude-sonnet-4-20250514`). Preserve from the
-        // CACHE list, not `activeModels`, so an overlay-only row the operator
-        // REMOVED still drops (it lives in fallbackModels, never lastCacheModels)
-        // — matched on fullId so an overlay override of a cached/fallback row
-        // still wins (it's in fallbackModels → the cache copy is skipped).
+        // Cache-warmed (loadCache) but no SDK refresh yet. PRESERVE every
+        // cache entry (date-suffixed ids past the family filter, e.g.
+        // `claude-sonnet-4-20250514`, AND — #7808 — any id the cache shares
+        // with the re-folded fallback) and let the new fallback (base +
+        // overlay overrides + overlay-only rows) contribute only the ids the
+        // cache does NOT already carry. Preserve from the CACHE list, not
+        // `activeModels`, so an overlay-only row the operator REMOVED still
+        // drops (it lives in fallbackModels, never lastCacheModels).
+        //
+        // #7808 — the cache row must win outright for a shared fullId, not
+        // merely by presence: `lastCacheModels` is what the provider itself
+        // last reported (`loadCache` stamps `providerReportedFullIds` from
+        // it), so a model the binary still serves must not have its live
+        // label/window overwritten by an overlay decoration just because a
+        // hot reload landed before the next refresh — the same precedence
+        // `updateModels`/`loadCache` already hold, where a reported row is
+        // never touched by the overlay at all (`docs/guides/model-
+        // overlay.md`: "Where the provider does still report the model, its
+        // own values win"). Before this fix the seed (which — #7777 — can
+        // carry the OPERATOR's decoration for an id it overrides) was spread
+        // first, so it won the collision and that decorated copy could reach
+        // `saveCache()`.
         //
         // #7776 — the seed half of that list is the #3075 union's THIRD copy,
         // so it reads `unionableSeedRows()` like the other two: on a non-Claude
         // registry an overlay reload must not put back the statics that
-        // `loadCache`/`updateModels` just declined to.
+        // `loadCache`/`updateModels` just declined to. Its contribution here is
+        // now scoped the same way that union scopes its OWN additions: only ids
+        // the reported roster (the cache, in this window) does not carry.
+        //
+        // #7806 (missed site) — an id only here because the operator declared
+        // it must not go out `provenance: 'catalogued'` just because this
+        // union pushes the built `fallbackModels` row straight through
+        // instead of routing it via `withModelMetadata`. #7888 round 3 — no
+        // longer stripped here: `applyModels` → `setActiveModels` strips
+        // `provenance` from every row in `next` (cache-preserved rows
+        // included — a no-op for them, since they're provider-reported)
+        // before it is ever assigned to `activeModels`, so this array can be
+        // built without worrying about which half needs it.
         const seed = unionableSeedRows()
-        const byFullId = new Set(seed.map((m) => m.fullId))
-        const preserved = lastCacheModels.filter((m) => !byFullId.has(m.fullId))
-        const next = preserved.length > 0 ? Object.freeze([...seed, ...preserved]) : seed
+        const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
+        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
+        const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
         applyModels(next, defaultModelId)
       } else {
+        // #7888 re-review — the fully-cold reload (no SDK data, no cache
+        // warmed yet: first boot before `loadCache()` ever succeeds, or a
+        // hot-reload racing the first refresh). Same construction-time gap as
+        // the `activeModels` initializer: `fallbackModels` can carry a
+        // declared-only override's stray `provenance` straight from the base
+        // row it overrides, and this branch has no union to route it
+        // through. #7888 round 3 — `applyModels` strips it now; no per-site
+        // map needed here either.
         applyModels(fallbackModels, defaultModelId)
       }
       return activeModels
@@ -1156,7 +1264,17 @@ export function createModelsRegistry(hooks = {}) {
             ?? providerMeta?.contextWindow
             ?? fb.contextWindow
             ?? resolveContextWindowFn(fb.fullId)
-          converted.push(withModelMetadata({ id, label, fullId: fb.fullId, contextWindow }, providerMeta, fb))
+          // #7806 — a declared-only row (the operator's overlay is its ONLY
+          // justification for being here) must not inherit `provenance` from
+          // either source. #7888 round 3 — no longer stripped inline here:
+          // `providerMeta`/`fb` pass through `withModelMetadata` as-is, and
+          // `applyModels` → `setActiveModels` strips `provenance` off the
+          // built row below, once, for every row this function returns.
+          converted.push(withModelMetadata(
+            { id, label, fullId: fb.fullId, contextWindow },
+            providerMeta,
+            fb,
+          ))
           seenFullIds.add(fb.fullId)
         }
       }
@@ -1279,7 +1397,14 @@ export function createModelsRegistry(hooks = {}) {
         return false
       }
       let changed = false
-      activeModels = activeModels.map(m => {
+      // #7888 round 3 — routed through `setActiveModels` (the chokepoint)
+      // rather than assigning `activeModels` directly, so this is not a
+      // seventh place that could reintroduce the whack-a-mole bug if it were
+      // ever rewritten to build rows a different way. A no-op in practice
+      // today: every row already came from `setActiveModels`, so none of
+      // them carry unpersistable `provenance` to begin with, and
+      // `{ ...m, contextWindow }` doesn't add any.
+      const updated = activeModels.map(m => {
         if ((m.id === modelId || m.fullId === modelId) && m.contextWindow !== contextWindow) {
           changed = true
           // Persist the authoritative value so a later updateModels()
@@ -1289,6 +1414,7 @@ export function createModelsRegistry(hooks = {}) {
         }
         return m
       })
+      setActiveModels(updated)
       return changed
     },
 
@@ -1304,6 +1430,16 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
+      // #7888 re-review — the line above is exactly what makes an overlay
+      // override of a base row declaration-only again: without a strip
+      // between here and `activeModels`, a row that HAD lost `provenance`
+      // (an earlier construction/applyOverlay/union pass stripped it)
+      // reacquires the base row's stamp straight from `fallbackModels`,
+      // which never had it stripped in the first place. #7888 round 3 —
+      // `applyModels` now strips unconditionally (`setActiveModels`), so
+      // this call can pass `fallbackModels` straight through; the ordering
+      // that makes it correct is that `providerReportedFullIds` was already
+      // cleared above, before `applyModels` runs.
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
@@ -1506,7 +1642,15 @@ export function createModelsRegistry(hooks = {}) {
             const label = declared?.label || providerMeta?.label || humanizeModelId(id)
             const contextWindow = declared?.contextWindow
               ?? providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
-            models.push(withModelMetadata({ id, fullId: fb.fullId, label, contextWindow }, providerMeta, fb))
+            // #7806 — same declared-only provenance rule as the `updateModels`
+            // copy of this union. #7888 round 3 — same removal too: the
+            // strip happens once, in `applyModels` → `setActiveModels`, over
+            // whatever this function returns.
+            models.push(withModelMetadata(
+              { id, fullId: fb.fullId, label, contextWindow },
+              providerMeta,
+              fb,
+            ))
             seenFullIds.add(fb.fullId)
           }
         }
