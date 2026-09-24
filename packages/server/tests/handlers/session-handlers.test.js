@@ -176,6 +176,31 @@ describe('session-handlers', () => {
       assert.match(acceptEdits.description, /apply_patch/, 'switch to codex → codex-tuned mode copy')
     })
 
+    // #7811 — the permission-mode re-send derived its copy from
+    // `entry.provider` directly (`switchProvider`), unlike the `available_models`
+    // roster sent moments earlier in the SAME switch, which already falls
+    // through to the daemon default when the entry records no provider
+    // (#7759, "tags the daemon default when the entry reports no provider"
+    // above). A provider-less entry on a codex-default daemon therefore paired
+    // a codex `available_models` roster with the CLAUDE mode-picker copy.
+    // Assert on the DESCRIPTIONS, not the ids — every provider exposes the
+    // same `approve`/`acceptEdits`/… ids, so an id-only comparison passes
+    // whether or not the fix is applied and proves nothing.
+    it('re-sends the DAEMON DEFAULT permission-mode copy when the entry reports no provider (#7811)', () => {
+      const ctx = makeCtx({ config: { provider: 'codex' } })
+      ctx._sessions.set('sess-np', { session: createMockSession(), name: 'NoProvider', cwd: '/tmp' })
+
+      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-np' }, ctx)
+
+      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
+      assert.ok(modesMsg, 'available_permission_modes not sent on switch')
+      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
+      assert.match(acceptEdits.description, /apply_patch/,
+        "a provider-less entry on a codex-default daemon must get codex's copy")
+      const auto = modesMsg.modes.find(m => m.id === 'auto')
+      assert.doesNotMatch(auto.description, /dangerously-skip-permissions/, 'must not fall back to the Claude copy')
+    })
+
     it('sends session_error when session not found', () => {
       const ctx = makeCtx()
       sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'missing' }, ctx)
