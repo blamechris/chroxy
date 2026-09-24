@@ -30,11 +30,30 @@ function envExampleText() {
   return readFileSync(path, 'utf8')
 }
 
-/** The single line documenting `CHROXY_PROVIDER`. */
+/**
+ * The single line documenting `CHROXY_PROVIDER`. Throws unless there is
+ * EXACTLY ONE — a second `CHROXY_PROVIDER=` line (an edit or a merge) must
+ * fail, not be resolved by silently taking the first match.
+ */
 function providerLine(text) {
-  const line = text.split('\n').find((l) => l.includes('CHROXY_PROVIDER='))
-  assert.ok(line, '.env.example should document CHROXY_PROVIDER')
-  return line
+  const lines = text.split('\n').filter((l) => l.includes('CHROXY_PROVIDER='))
+  if (lines.length !== 1) {
+    throw new Error(`expected exactly one CHROXY_PROVIDER= line in .env.example, found ${lines.length}`)
+  }
+  return lines[0]
+}
+
+/**
+ * The provider ASSIGNED on the line — the part an operator uncomments
+ * verbatim, which is what #7125 was actually about. Throws rather than
+ * returning `undefined` when no value can be read.
+ */
+function assignedProvider(line) {
+  const match = /CHROXY_PROVIDER=([a-z][a-z0-9-]*)/.exec(line)
+  if (!match) {
+    throw new Error(`could not read the value assigned on the CHROXY_PROVIDER line: ${line}`)
+  }
+  return match[1]
 }
 
 /**
@@ -75,6 +94,26 @@ describe('.env.example default provider (#7125)', () => {
       DEFAULT_PROVIDER,
       `.env.example names "${named}" as the default provider but DEFAULT_PROVIDER is "${DEFAULT_PROVIDER}": ${line}`,
     )
+  })
+
+  it('the assigned example value equals DEFAULT_PROVIDER (it is uncommented verbatim)', () => {
+    // The "(default)" marker lives in a trailing comment; the VALUE is what an
+    // operator actually gets. Pin both, so a stale value behind a correct
+    // comment still fails.
+    const line = providerLine(envExampleText())
+    assert.equal(
+      assignedProvider(line),
+      DEFAULT_PROVIDER,
+      `.env.example assigns "${assignedProvider(line)}" but DEFAULT_PROVIDER is "${DEFAULT_PROVIDER}": ${line}`,
+    )
+  })
+
+  it('line lookup fails loudly on two CHROXY_PROVIDER= lines, not by taking the first', () => {
+    assert.throws(
+      () => providerLine('# CHROXY_PROVIDER=claude-tui  # claude-tui (default)\n# CHROXY_PROVIDER=claude-sdk\n'),
+      /found 2/,
+    )
+    assert.throws(() => providerLine('# nothing here\n'), /found 0/)
   })
 
   it('extraction fails loudly on zero "(default)" markers, not silently', () => {
