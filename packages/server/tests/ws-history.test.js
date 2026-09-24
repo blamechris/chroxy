@@ -1468,6 +1468,16 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
       assert.doesNotMatch(modes.find(m => m.id === 'auto').description, /dangerously-skip-permissions/,
         'must not fall back to the Claude copy')
     }
+    // auth_ok's fold (authOkRosterProvider) and the discrete frame
+    // (rosterProvider) are computed independently, from separately hoisted
+    // `entry` lookups earlier and later in the same function, through the
+    // same resolveRosterProvider(_, billingCanary?.defaultProvider) call. The
+    // two must never disagree within one handshake — that would be worse
+    // than the original bug, since a client can no longer tell which field
+    // to trust. Pin the exact equality rather than relying on the
+    // per-property checks above to have covered every field.
+    assert.deepEqual(authOk.availablePermissionModes, frame.modes,
+      'auth_ok and the discrete available_permission_modes frame must carry identical mode copy')
   })
 
   it('multi-session: emits an auth_bootstrap burst with providers + slashCommands + agents', async () => {
