@@ -14,11 +14,11 @@
 //
 // All state paths are temp dirs (#4633 sandbox guard applies).
 
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, chmodSync, symlinkSync, chownSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { createHttpHandler } from '../src/http-routes.js'
@@ -580,13 +580,19 @@ describe('loadOrCreateIngestSecret', () => {
 
   it('reads an existing secret (trimmed) instead of regenerating', () => {
     const secretPath = join(dir, 'ingest-secret')
-    writeFileSync(secretPath, 'pre-seeded-secret\n')
+    // #7246: mode 0600 explicitly — loadOrCreateIngestSecret now re-checks the
+    // mode on every existing-file read, so a "pre-seeded" fixture must be
+    // written the way a legitimate secret actually lands on disk.
+    writeFileSync(secretPath, 'pre-seeded-secret\n', { mode: 0o600 })
     assert.equal(loadOrCreateIngestSecret(secretPath), 'pre-seeded-secret')
   })
 
   it('regenerates over an empty file', () => {
     const secretPath = join(dir, 'ingest-secret')
-    writeFileSync(secretPath, '')
+    // #7246: same as above — 0600 so the empty-file recovery path is reached
+    // (an empty file with the WRONG mode should refuse, not recover; that
+    // boundary is covered below).
+    writeFileSync(secretPath, '', { mode: 0o600 })
     const secret = loadOrCreateIngestSecret(secretPath)
     assert.ok(secret.length >= 40)
   })
@@ -599,6 +605,156 @@ describe('loadOrCreateIngestSecret', () => {
     } finally {
       if (prev === undefined) delete process.env.CHROXY_CONFIG_DIR
       else process.env.CHROXY_CONFIG_DIR = prev
+    }
+  })
+})
+
+// #7246: ingest-secret set 0600 at exclusive create but never re-checked the
+// mode on an existing-file read — a pre-existing or later-widened file was
+// trusted regardless of its permissions. This mirrors the read-path boundary
+// session-token-store.js (session-tokens.json) and credential-store.js
+// (credentials.json) already enforce: refuse rather than warn-and-repair.
+describe('loadOrCreateIngestSecret — #7246 mode re-check on read (fail-closed)', () => {
+  let dir
+  let secretPath
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ingest-secret-mode-'))
+    secretPath = join(dir, 'ingest-secret')
+  })
+
+  it('refuses to read an existing secret with a widened (0644) mode', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'widened-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o644)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 644; refusing to read \(must be 0600\)/,
+      'a 0644 ingest-secret must be refused, not silently trusted'
+    )
+  })
+
+  it('refuses to read an existing secret with a NARROWER (0400) mode too — the boundary is exactly 0600', { skip: process.platform === 'win32' }, () => {
+    // The mode check compares with `!==`, not `>` — narrower is not "safer" by
+    // the letter of the contract (docs/security/bearer-token-authority.md and
+    // the sibling stores all require exactly 0600), and a `perms > 0o600`
+    // mutant silently accepts this case while still refusing every widened
+    // one above, so it must be asserted on its own.
+    writeFileSync(secretPath, 'narrowed-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o400)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 400; refusing to read \(must be 0600\)/,
+      'a 0400 ingest-secret must be refused too — the rule is EXACTLY 0600, not "no wider than 0600"'
+    )
+  })
+
+  it('refuses a symlink whose resolved target carries a widened mode', { skip: process.platform === 'win32' }, () => {
+    const targetPath = join(dir, 'real-secret')
+    writeFileSync(targetPath, 'target-secret\n', { mode: 0o600 })
+    chmodSync(targetPath, 0o640) // group-readable — still wrong, not just world-readable
+    symlinkSync(targetPath, secretPath)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 640; refusing to read \(must be 0600\)/,
+      'statSync follows the link, so the TARGET mode is what gets enforced'
+    )
+  })
+
+  it('refuses an existing secret owned by another uid', { skip: typeof process.getuid !== 'function' }, () => {
+    // A foreign-owned file can't be built as a normal user (no chown), so this
+    // exercises the comparison from the other side, matching
+    // stale-session-dirs.test.js's "refuses a base owned by another uid":
+    // a file we own looks foreign to a process claiming a different uid.
+    writeFileSync(secretPath, 'owned-by-someone-else\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    process.getuid = () => realUid + 1
+    try {
+      assert.throws(
+        () => loadOrCreateIngestSecret(secretPath),
+        new RegExp(`is owned by uid ${realUid} rather than uid ${realUid + 1}; refusing to read`),
+        'a same-mode file owned by a different uid must still be refused'
+      )
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  // Regression guard for the specific `if (uid)` footgun the implementation
+  // comment calls out: uid 0 (root) is a valid but FALSY value, so a truthy
+  // check (`if (uid) …`) would silently disable the comparison for exactly
+  // the daemon whose reach a foreign file matters most for. Claiming uid 0
+  // while the file is owned by our real (non-zero, off-CI-root) uid must
+  // still be a mismatch — mirrors stale-session-dirs.test.js's "refuses a
+  // foreign base when the daemon runs as root (uid 0)".
+  it('refuses when the CALLER claims uid 0 (root) and the file is owned by a different uid', { skip: typeof process.getuid !== 'function' }, () => {
+    writeFileSync(secretPath, 'root-check\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    if (realUid === 0) {
+      // Actually running as root (e.g. a Linux CI runner) — chown the file
+      // itself to a different uid so the mismatch is real, not simulated.
+      chownSync(secretPath, 1, 1)
+      assert.throws(() => loadOrCreateIngestSecret(secretPath), /refusing to read/)
+      return
+    }
+    process.getuid = () => 0
+    try {
+      assert.throws(
+        () => loadOrCreateIngestSecret(secretPath),
+        new RegExp(`is owned by uid ${realUid} rather than uid 0; refusing to read`),
+        'uid 0 must not be treated as "no uid to compare" via a truthy check'
+      )
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  it('fails closed (throws) when statSync fails for a reason other than the file being absent', async (t) => {
+    if (typeof mock.module !== 'function') {
+      t.skip('re-run with --experimental-test-module-mocks to exercise this test')
+      return
+    }
+    writeFileSync(secretPath, 'unreachable\n', { mode: 0o600 })
+    const realFs = await import('node:fs')
+    const statError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+    const mockFs = { ...realFs, statSync: () => { throw statError } }
+    mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+    try {
+      const { loadOrCreateIngestSecret: loadWithMock } = await import(`../src/event-ingest.js?cacheBust=7246-stat-${Date.now()}`)
+      assert.throws(
+        () => loadWithMock(secretPath),
+        /unable to stat .*: EACCES/,
+        'a non-ENOENT stat failure must throw, never fall through to reading or recreating the secret'
+      )
+    } finally {
+      mock.restoreAll()
+    }
+  })
+
+  it('an ENOENT stat failure (create/delete race) is NOT a refusal — falls through to create-new-secret', async (t) => {
+    if (typeof mock.module !== 'function') {
+      t.skip('re-run with --experimental-test-module-mocks to exercise this test')
+      return
+    }
+    // existsSync says present, but statSync races to ENOENT (the file vanished
+    // between the two calls) — this must be treated as "absent", not refused,
+    // so the create path can proceed. Distinguishes the ENOENT special-case
+    // from the general stat-failure refusal above.
+    const realFs = await import('node:fs')
+    const enoent = Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+    const mockFs = {
+      ...realFs,
+      existsSync: (p) => (p === secretPath ? true : realFs.existsSync(p)),
+      statSync: (p) => { if (p === secretPath) throw enoent; return realFs.statSync(p) },
+    }
+    mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+    try {
+      const { loadOrCreateIngestSecret: loadWithMock } = await import(`../src/event-ingest.js?cacheBust=7246-enoent-${Date.now()}`)
+      const secret = loadWithMock(secretPath)
+      assert.ok(secret.length >= 40, 'a fresh secret was minted rather than throwing')
+    } finally {
+      mock.restoreAll()
     }
   })
 })
