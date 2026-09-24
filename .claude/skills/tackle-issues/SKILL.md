@@ -425,7 +425,7 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 1. **NO attribution** — No Co-Authored-By, no "Generated with Claude", no AI mentions. Zero Attribution Policy.
 2. **TDD is mandatory** — RED → GREEN → REFACTOR for every issue, every wave. No skipping tests.
 3. **Branch from main every time** — Never stack branches. Fresh branch for every attempt, including retries.
-4. **One confirmation point** — The initial marathon queue approval. Everything after — including all waves and retries — is fully autonomous; the sole sanctioned stop besides convergence is the per-wave cost circuit breaker (see Session Boundaries and the Session Ledger).
+4. **One confirmation point** — The initial marathon queue approval. Everything after — including all waves and retries — is fully autonomous; the sole sanctioned stop besides convergence is the per-wave cost circuit breaker, which is **currently paused** (track-only — see Session Boundaries and the Session Ledger).
 5. **Self-merge authority for this repo** — Merge only through the Unattended Merge Gate — `/full-review` clean + ALL checks green on the final commit + ALL review threads resolved. No `gh pr merge --auto`, no protection overrides. `merge:off` disables self-merging for a single run (PRs accumulate for `/batch-merge`). Every self-merged PR MUST appear as an entry in the Morning Summary.
 6. **Clean up failed attempts** — Close old PRs and delete old branches before retrying. Don't leave orphaned PRs.
 7. **Escalate strategy across waves** — Wave 1: standard approach. Wave 2: fresh context + address failures. Wave 3: alternative approach + scope reduction. Don't repeat the same failing approach.

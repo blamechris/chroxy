@@ -449,7 +449,7 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 1. **NO attribution** — No Co-Authored-By, no "Generated with Claude", no AI mentions anywhere. Zero Attribution Policy.
 2. **TDD is mandatory** — RED → GREEN → REFACTOR for every issue. No skipping tests. If pure docs/config, note why tests are N/A.
 3. **Branch from main every time** — Never stack branches. Each PR is independently mergeable in any order.
-4. **One confirmation point** — The initial queue approval. Everything after is fully autonomous; the sole sanctioned stop is the cost circuit breaker (see Session Boundaries).
+4. **One confirmation point** — The initial queue approval. Everything after is fully autonomous; the sole sanctioned stop is the cost circuit breaker, which is **currently paused** (track-only — see Session Boundaries).
 5. **Self-merge authority for this repo** — Merge only through the Unattended Merge Gate — /full-review clean + ALL checks green on the final commit + ALL review threads resolved. No `gh pr merge --auto`, no GitHub auto-merge, no protection overrides. A failed gate means flag, don't merge. Every self-merged PR MUST appear as an entry in the final session report.
 6. **Never block on review findings** — Flag and move on. The user handles flagged PRs during check-ins.
 7. **Two fix attempts max** — If /full-review finds critical issues, fix them. If a second attempt still fails, flag and move on.

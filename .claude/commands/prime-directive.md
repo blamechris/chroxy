@@ -69,7 +69,7 @@ This matches CLAUDE.md's Unattended Merge Authority section as written — full 
   issues existed and how many were taken; a wave that takes 0 because 0 were eligible is the
   quota succeeding at its purpose, and must be distinguished in the log from a wave that took 0
   because nobody looked. The quota is **not** a convergence condition: missing it never stops a
-  marathon, and never overrides the Mission's no-stop rule or the cost circuit breaker.
+  marathon, and never overrides the Mission's no-stop rule or the cost circuit breaker (when a budget is set).
 - **Converge:** if a wave produces zero new completions on the remaining set, stop and summarize. (For the full wave/retry/convergence machinery, this composes `/tackle-issues` — call it; do not re-implement it here.)
 
 ## Session boundaries (context + cost discipline)
