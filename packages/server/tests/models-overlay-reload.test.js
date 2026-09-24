@@ -217,6 +217,53 @@ describe('registry.applyOverlay (#5932)', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('applyOverlay\'s cache-warmed branch does not restore provenance: catalogued for a newly-declared row (#7806, third union site)', () => {
+    // #7806 fixed `unionRowMetadataSources` at the `updateModels`/`loadCache`
+    // union sites, but `applyOverlay`'s cache-warmed branch is a THIRD site
+    // that unions `unionableSeedRows()` back into the active list (the #7776
+    // comment above it says so explicitly) — and it pushes the built
+    // `fallbackModels` row straight through, never via `withModelMetadata`, so
+    // `unionRowMetadataSources` is never consulted for it. The realistic codex
+    // shape: a static base row stamped `provenance: 'catalogued'`
+    // (`CODEX_FALLBACK_MODELS`'s convention), retired from the cache, then
+    // named by a HOT-RELOADED overlay while no `updateModels()` refresh has
+    // run yet — the exact window #7808 is about.
+    const reg = createModelsRegistry({
+      fallbackModels: [{ id: 'base', label: 'Base', fullId: 'base-1', contextWindow: 1000, provenance: 'catalogued' }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 4242,
+      getModelMetadata: (fullId) => (fullId === 'base-1'
+        ? { fullId, id: 'vendor-short', label: 'Vendor Label', contextWindow: 128000, provenance: 'catalogued' }
+        : null),
+    })
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-cache-warmed-provenance-7806-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      // The cache predates the overlay declaration: base-1 is NOT on disk, so
+      // loadCache's own union pass has nothing to declare it from yet.
+      writeFileSync(cachePath, JSON.stringify({
+        v: MODELS_CACHE_SCHEMA_VERSION,
+        models: [{ id: 'sdk-7', fullId: 'sdk-7', label: 'SDK 7', contextWindow: 4242 }],
+        defaultModelId: 'sdk-7',
+      }))
+      assert.equal(reg.loadCache(cachePath), true)
+      assert.equal(reg.getModels().find((m) => m.fullId === 'base-1'), undefined, 'not yet declared, not yet in the roster')
+
+      // Operator hot-reloads an overlay naming base-1 — cache-warmed branch
+      // (no updateModels() refresh has run), so unionableSeedRows() restores
+      // it via the seedOnly path, not loadCache's own union.
+      reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed' } }))
+
+      const row = reg.getModels().find((m) => m.fullId === 'base-1')
+      assert.ok(row, 'the declared row is restored')
+      assert.equal(row.label, 'Renamed', 'the operator label still applies')
+      assert.notEqual(row.provenance, 'catalogued', 'must not masquerade as provider-catalogued truth')
+      assert.equal(row.provenance, undefined, 'left absent — nothing here vouches for it but the operator')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // #7777 — the #7761 union gate is scoped to the STATIC seed so operator overlay

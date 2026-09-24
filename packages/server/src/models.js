@@ -835,6 +835,26 @@ export function createModelsRegistry(hooks = {}) {
     return [withoutProvenance(providerMeta), withoutProvenance(fb)]
   }
 
+  /**
+   * The THIRD union site #7806 missed: `applyOverlay`'s cache-warmed branch
+   * (below) pushes `unionableSeedRows()` rows straight into the active list —
+   * it never calls `withModelMetadata`, so `unionRowMetadataSources` above is
+   * never consulted for it. A row that reaches that branch only because the
+   * operator's overlay declares its fullId (`isUnpersistableDeclaredRow`) can
+   * still carry a `provenance: 'catalogued'` stamp straight from its
+   * `baseFallbackModels` entry — #7802's fix spreads that base row through an
+   * overlay override, so the stamp survives onto the merged `fb` row exactly
+   * as `unionRowMetadataSources`'s own doc comment describes for the other two
+   * sites. Applied to an already-built, frozen row (there is no separate
+   * `providerMeta`/`fb` pair here to route through `withModelMetadata`).
+   */
+  function stripUnpersistableProvenance(row) {
+    if (row.provenance === undefined) return row
+    if (!isUnpersistableDeclaredRow(row.fullId)) return row
+    const { provenance: _provenance, ...rest } = row
+    return Object.freeze(rest)
+  }
+
   let activeModels = fallbackModels
   let defaultModelId = null
   let allowedModelIds = new Set()
@@ -1054,9 +1074,16 @@ export function createModelsRegistry(hooks = {}) {
         // `loadCache`/`updateModels` just declined to. Its contribution here is
         // now scoped the same way that union scopes its OWN additions: only ids
         // the reported roster (the cache, in this window) does not carry.
+        //
+        // #7806 (missed site) — and, for the SAME reason those ids do not carry
+        // provider provenance, `stripUnpersistableProvenance` runs over the
+        // result: an id only here because the operator declared it must not go
+        // out `provenance: 'catalogued'` just because this union pushes the
+        // built `fallbackModels` row straight through instead of routing it via
+        // `withModelMetadata`/`unionRowMetadataSources` like the other two sites.
         const seed = unionableSeedRows()
         const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
-        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
+        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId)).map(stripUnpersistableProvenance)
         const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
         applyModels(next, defaultModelId)
       } else {
