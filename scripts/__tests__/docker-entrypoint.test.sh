@@ -25,6 +25,15 @@
 #
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENTRYPOINT="$REPO_ROOT/scripts/docker-entrypoint.sh"
 
@@ -197,7 +206,7 @@ tmp="$(mktemp -d)"
 # than `printf 'p%.0s' $(seq 1 400000)`: the latter word-splits `seq`'s
 # 400,000-line output into 400,000 unquoted shell words, which is needless
 # arg-count blowup for a single padding string (flagged in review).
-pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
+pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
 workspace_path="/etc/x
 $pad"
 out=$(
@@ -208,9 +217,9 @@ out=$(
   bash "$ENTRYPOINT" start 2>&1
 )
 if grep -qF "resolves to a system directory" <<<"$out"; then
-  pass "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >128KB value"
+  pass "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >64KB value"
 else
-  fail "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >128KB value" \
+  fail "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >64KB value" \
        "the system-directory path was NOT blocked — guard silently skipped"
 fi
 rm -rf "$tmp"

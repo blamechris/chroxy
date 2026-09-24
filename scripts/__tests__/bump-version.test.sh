@@ -13,6 +13,15 @@
 #
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUMP="$REPO_ROOT/scripts/bump-version.sh"
 
@@ -507,7 +516,7 @@ test_version_format_check_survives_pipefail_sigpipe() {
 - Something"
 
   local pad
-  pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
+  pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
   local new_version="1.2.3
 $pad"
 

@@ -29,6 +29,15 @@
 
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HOOK="$REPO_ROOT/scripts/require-review-before-merge.sh"
 
@@ -117,10 +126,10 @@ check "'pr merge' referencing a reviewed open PR exits 0" \
 # calls and BLOCK, not silently exit 0 via the pre-fix SIGPIPE race.
 # Reproduced 5/5 against the pre-fix script (see the PR body for the
 # transcript): the gate was bypassed every time.
-pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
+pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
 large_command="gh pr merge 12345 --squash
 $pad"
-check "#7907 — gate survives pipefail+SIGPIPE on a >128KB COMMAND (still BLOCKS)" \
+check "#7907 — gate survives pipefail+SIGPIPE on a >64KB COMMAND (still BLOCKS)" \
   2 "$(run_hook "Bash" "$large_command" "0")"
 
 # --- Case 6 — same large COMMAND, but the PR IS reviewed: must NOT over-block
