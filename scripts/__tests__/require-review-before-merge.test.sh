@@ -50,7 +50,7 @@ HOOK="$REPO_ROOT/scripts/require-review-before-merge.sh"
 # "no case executed" are the same observable outcome, the second recurring
 # cause in docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so
 # removing a case is as loud as skipping one.
-EXPECTED_CASES=16
+EXPECTED_CASES=20
 
 PASS=0
 FAIL=0
@@ -296,22 +296,60 @@ else
 fi
 check_bool "the BLOCKED message is on stderr, and stdout carries none of it" "$CASE14_OK"
 
-# --- Case 16 — STRUCTURAL: every echo'd message in the script is on stderr -
+# --- Case 16 — STRUCTURAL: every LINE-INITIAL echo'd message in the script
+# is on stderr -----------------------------------------------------------
 # Case 15 proves stderr-routing end-to-end for ONE path (the missing-review
 # block). The hook has several distinct block-message sites (malformed JSON,
 # no command field, no PR numbers extracted, each gh-failure branch, the
 # internal-error trap, the missing-review list) and every one of them got the
 # same mechanical `echo "..."` -> `echo "..." >&2` edit — adding an E2E
 # stdin/stdout/stderr harness case per site would just re-prove the identical
-# property six more times. A static sweep over the SOURCE instead: no line in
-# the script is a plain, unredirected `echo "..."` — catches a regression at
-# ANY site (including ones added later) in one assertion, without an E2E
-# fixture per branch. This does not replace case 15 (which is the only case
-# that proves the redirection actually reaches the real stderr stream when
-# Claude Code invokes the script), it complements it.
+# property six more times. A static sweep over the SOURCE instead, scoped to
+# every LINE-INITIAL `echo "..."` — the shape every diagnostic message in
+# this script takes (one echo, one message, its own line): none of them may
+# be unredirected. Catches a regression at that shape in one assertion,
+# without an E2E fixture per branch. This does NOT sweep an `echo "..."` that
+# occurs mid-line (joined with `;` after other code, or a data-producing
+# `echo` feeding a pipe/`||` fallback, e.g. `COMMAND=$(... || echo "")` and
+# `echo "$COMMAND" | grep ...` above) — those are not user-facing diagnostic
+# messages and a pattern that also caught them would need to positively
+# exclude non-message echoes rather than just widen the anchor. A future
+# block message written mid-line (`if ...; then echo "BLOCKED: ..."; fi` on
+# one line) would slip past this sweep undetected; case 15 is still the only
+# case that proves the redirection reaches the real stderr stream when
+# Claude Code invokes the script, and this complements it for the
+# line-initial shape every current message site actually uses.
 UNREDIRECTED_ECHOES=$(grep -n '^[[:space:]]*echo "' "$HOOK" | grep -v '>&2' || true)
-check_bool "no unredirected (stdout) 'echo \"...\"' message exists anywhere in the script" \
+check_bool "no unredirected (stdout) LINE-INITIAL 'echo \"...\"' message exists in the script" \
   "$([ -z "$UNREDIRECTED_ECHOES" ] && echo 0 || echo 1)"
+
+# --- Case 17 — #7921 bypass hunting: `gh api ... pulls/<n>/merge` (the raw
+# GitHub REST call `gh pr merge` wraps) is BLOCKED exactly like `gh pr merge`
+# itself — it never contains the literal text "pr merge", so the pre-#7921
+# `grep -q 'pr merge'` pattern let it straight through. Red against that
+# pattern: verified manually (piping this payload through a copy of the hook
+# reverted to `grep -q 'pr merge'` exits 0, not 2).
+check "#7921 — 'gh api ... pulls/<n>/merge' referencing an unreviewed PR (stdin) is BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh api -X PUT repos/test-owner/test-repo/pulls/12345/merge")" "0")"
+
+# --- Case 18 — negative control for case 17: a reviewed PR via the same
+# `gh api .../merge` form is allowed through, not blocked unconditionally.
+check "#7921 — the same 'gh api ... pulls/<n>/merge' is allowed through when the PR IS reviewed" \
+  0 "$(run_hook_stdin "$(build_payload Bash "gh api -X PUT repos/test-owner/test-repo/pulls/12345/merge")" "1")"
+
+# --- Case 19 — #7921 bypass hunting: repeated whitespace between 'pr' and
+# 'merge' (`gh  pr   merge`, multiple spaces) is BLOCKED. The pre-#7921
+# literal substring `grep -q 'pr merge'` required exactly one space, so any
+# other run of whitespace slipped through as "no 'pr merge' found" and the
+# gate never even reached the gh calls.
+check "#7921 — 'gh  pr   merge' (repeated spaces) referencing an unreviewed PR is BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh  pr   merge 12345 --squash")" "0")"
+
+# --- Case 20 — #7921 bypass hunting: a TAB between 'pr' and 'merge' is
+# BLOCKED for the same reason as case 19 — a real, if unusual, shape a
+# generated or hand-edited command could take.
+check "#7921 — a TAB between 'pr' and 'merge' referencing an unreviewed PR is BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "$(printf 'gh pr\tmerge 12345 --squash')")" "0")"
 
 echo "----"
 BROKEN=0

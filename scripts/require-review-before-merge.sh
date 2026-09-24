@@ -137,12 +137,29 @@ if [ "$TOOL_NAME" != "Bash" ]; then
   exit 0
 fi
 
-# Does the command contain `gh pr merge` ANYWHERE? A here-string, not a pipe
-# from echo/printf/cat — #7907: a producer piped into an early-exiting
-# `grep -q` can get SIGPIPE'd under `pipefail`, which flips a genuine match
-# into "not found" and skips the whole gate. A here-string has no separate
-# producer process for grep to SIGPIPE.
-if ! grep -q 'pr merge' <<<"$COMMAND"; then
+# Does the command contain `gh pr merge` ANYWHERE, or the equivalent GitHub
+# REST call (`gh api ... pulls/<n>/merge`, the same operation `gh pr merge`
+# performs under the hood)? A here-string, not a pipe from echo/printf/cat —
+# #7907: a producer piped into an early-exiting `grep -q` can get SIGPIPE'd
+# under `pipefail`, which flips a genuine match into "not found" and skips
+# the whole gate. A here-string has no separate producer process for grep to
+# SIGPIPE.
+#
+# #7921 bypass hunting:
+#   - `pr[[:blank:]]+merge` (not a literal 'pr merge') so repeated spaces or
+#     a tab between the words — `gh  pr   merge`, `gh pr<TAB>merge` — still
+#     match. [[:blank:]] (space/tab only, not newline) keeps this to the
+#     same physical line the #7907 large-command case already relies on;
+#     grep matches per line by default regardless, so widening to
+#     [[:space:]] would not additionally catch a `pr merge` split across a
+#     backslash-newline continuation anyway — that shape is recorded as a
+#     FOLLOW-UP, not fixed here (matches this repo's own precedent that
+#     predicting arbitrary shell composition against a substring/regex match
+#     is unwinnable; see docs/false-safety-guards.md and #7341).
+#   - `pulls/[0-9]+/merge` catches `gh api -X PUT repos/OWNER/REPO/pulls/N/merge`
+#     — the direct REST call that merges a PR without ever containing the
+#     text "pr merge" — verified as a silent bypass of the pre-fix pattern.
+if ! grep -qE 'pr[[:blank:]]+merge|pulls/[0-9]+/merge' <<<"$COMMAND"; then
   exit 0
 fi
 
