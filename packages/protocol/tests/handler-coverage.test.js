@@ -51,7 +51,10 @@ const SYNTHETIC_TYPES = new Set([
   'budget_resume_ack',     // #5752 resume_budget positive ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the shared store-core dispatch table
   'cancel_activity_ack',   // #5277 cancel correlation ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard
   'billing_canary',        // #5821 live billing canary — broadcast from billing-canary-monitor.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard; also seeded into auth_ok
-  'thinking_level_changed', // thinking level change ack (server-internal)
+  // 'thinking_level_changed' removed (#7803) — it IS a real ServerMessageType
+  // (ServerThinkingLevelChangedSchema, #7795) and is now in the ws-server.js
+  // roster, so it belongs in the main coverage checks, not here. Both clients
+  // cover it via the shared store-core dispatch table (#7807).
   'permission_timeout',     // handled by both clients for the future permission timeout event (not yet in protocol; dashboard gained parity in #5454)
 ])
 

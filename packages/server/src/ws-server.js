@@ -374,6 +374,7 @@ function _isSecureRequest(req) {
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
  *   { type: 'model_changed', model: '...' }          — active model updated
+ *   { type: 'thinking_level_changed', level: '...', sessionId? } — #7803 active thinking/reasoning level updated (three senders: ws-history.js's reconnect/tab-switch replay, settings-handlers.js after an accepted set_thinking_level, event-normalizer.js's `ready` burst for the level a fresh codex session booted at)
  *   { type: 'available_models', models: [...], provider?, defaultModel? } — models the active provider accepts
  *   { type: 'permission_input', requestId, found, tool?, input?, error? } — #6543 (IDE P3 feature B) reply to a `get_permission_input` pull: the FULL secret-redacted tool input for a pending permission (the `permission_request` broadcast truncates `input` at ~10K), so a client can build a per-hunk pre-write diff. `found:false` (+ `error`) when the request is unknown / already resolved / owned by another session — the handler is session-bound (a client only gets input for a permission its session owns).
  *   { type: 'permission_audit_result', entries } — #6772 reply to a `query_permission_audit` pull: recent permission audit entries (mode changes / session-rule changes / allow-deny decisions) matching the query's optional sessionId/auditType/since/limit. Consumed by the dashboard's per-session "Permission history" view.

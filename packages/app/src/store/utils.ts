@@ -24,6 +24,8 @@ export function createEmptySessionState(): SessionState {
   return {
     ...createEmptyBaseSessionState(),
     activityState: { state: 'idle', startedAt: Date.now() },
+    // #7807: matches the dashboard's default (utils.ts createEmptySessionState).
+    thinkingLevel: 'default',
   };
 }
 
