@@ -1335,6 +1335,57 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     const row = restarted.getModels().find((m) => m.fullId === 'my-model')
     assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
   })
+
+  // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
+  // declaration-only row (`docs/false-safety-guards.md`'s "guard wired to only
+  // some of its callers" shape, #7888's exact lesson for this same registry):
+  // its fully-cold branch (`applyModels(fallbackModels, …)`) and its
+  // cache-warmed branch's `seedOnly` rows both come straight from
+  // `computeFallbackModels`, which has no visibility into
+  // `contextWindowOverrides` or `learnedContextWindows`. An overlay hot-reload
+  // (`reloadModelsOverlay`, e.g. an unrelated edit to `~/.chroxy/models.json`)
+  // therefore reverts a live-learned window back to the heuristic MID-SESSION
+  // — no restart involved — even though `updateModels()`/`loadCache()` would
+  // both still return the learned value if asked.
+  it('an overlay hot-reload does not revert a live-ratcheted window (applyOverlay fully-cold branch)', () => {
+    const declaration = overlayMap({ 'my-model': {} })
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    // No loadCache()/updateModels() has ever succeeded on this registry
+    // instance (lastSdkModels and lastCacheModels are both still null) — an
+    // unrelated overlay hot-reload takes the FULLY-COLD branch.
+    reg.applyOverlay(declaration)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 272000,
+      'the ratcheted window must survive an overlay hot-reload with no restart in between')
+  })
+
+  it('an overlay hot-reload does not revert a live-ratcheted window (applyOverlay cache-warmed branch)', () => {
+    writeFileSync(cachePath, JSON.stringify({
+      v: MODELS_CACHE_SCHEMA_VERSION,
+      models: [{ id: 'base', fullId: 'base-1', label: 'Base', contextWindow: 1000 }],
+      defaultModelId: 'base-1',
+      savedAt: Date.now(),
+    }))
+    const reg = makeNoSeamRegistry(cachePath)
+    assert.equal(reg.loadCache(cachePath), true, 'cache-warmed: sets lastCacheModels')
+
+    const declaration = overlayMap({ 'my-model': {} })
+    // First declaration of 'my-model' — added via the cache-warmed branch's
+    // `seedOnly`, since it was not part of the cache file loadCache() just read.
+    reg.applyOverlay(declaration)
+    assert.equal(reg.updateContextWindow('my-model', 272000), true, 'a live turn ratchets it')
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model').contextWindow, 272000)
+
+    // A second, unrelated overlay hot-reload — still cache-warmed (no
+    // loadCache() call happened in between, so `lastCacheModels` still does
+    // not carry 'my-model').
+    reg.applyOverlay(declaration)
+    assert.equal(reg.getModels().find((m) => m.fullId === 'my-model')?.contextWindow, 272000,
+      'the ratcheted window must survive a second overlay hot-reload with no restart in between')
+  })
 })
 
 describe('reloadModelsOverlay (#5932)', () => {

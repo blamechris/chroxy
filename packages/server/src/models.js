@@ -1030,6 +1030,41 @@ export function createModelsRegistry(hooks = {}) {
     return learnedContextWindows
   }
 
+  /**
+   * #7810 review — `applyOverlay()` is a THIRD place (beyond `updateModels()`'s
+   * and `loadCache()`'s own union loops) that can rebuild a declaration-only
+   * row from scratch: its fully-cold branch applies `fallbackModels` directly,
+   * and its cache-warmed branch's `seedOnly` rows come from the same place.
+   * Both are built by `computeFallbackModels()`, which has no visibility into
+   * `contextWindowOverrides` (a live SDK-observed ratchet from THIS session)
+   * or `learnedContextWindows` (a ratchet learned on an earlier boot) — so an
+   * overlay hot-reload (`reloadModelsOverlay()`, e.g. an unrelated edit to
+   * `~/.chroxy/models.json`) silently reverted a measured window back to the
+   * operator's/heuristic's value for the rest of the process, no restart
+   * required. That is the exact defect #7810 was filed to fix, reached
+   * through a different entry point — the "guard wired to only some of its
+   * callers" shape (#7888 is the same lesson for this same registry).
+   *
+   * Applied to whatever `applyOverlay` is about to hand to `applyModels()`,
+   * right before that call. Only touches a row that is declaration-only
+   * (`isUnpersistableDeclaredRow` — a provider-reported row's window is never
+   * second-guessed here) AND that the operator did not pin an explicit
+   * `contextWindow` for (an explicit `models.json` value always wins, the
+   * same precedence `updateModels()`/`loadCache()` already hold). Precedence
+   * among the two remaining sources matches `updateContextWindow()`'s own
+   * write side: a live override is the more recent measurement, so it
+   * outranks a value merely restored from disk.
+   */
+  function withLiveOrLearnedWindow(models) {
+    return models.map((m) => {
+      if (!isUnpersistableDeclaredRow(m.fullId)) return m
+      if (overlayDeclaredFullIds.get(m.fullId)?.contextWindow !== undefined) return m
+      const restored = contextWindowOverrides.get(m.fullId) ?? learnedContextWindows.get(m.fullId)
+      if (restored === undefined || restored === m.contextWindow) return m
+      return { ...m, contextWindow: restored }
+    })
+  }
+
   // Takes the lists so `saveCacheImpl` can hash the exact payload it writes.
   // #7810 — `learned` is part of the hash, not an afterthought: a ratchet on
   // a declaration-only row never changes `persistableModels()` (the row is
@@ -1170,7 +1205,13 @@ export function createModelsRegistry(hooks = {}) {
         const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
         const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
         const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
-        applyModels(next, defaultModelId)
+        // #7810 review — restore a live-or-learned window for any
+        // declaration-only row this branch is about to (re)apply, whether it
+        // came from `lastCacheModels` (unlikely to need it — `loadCache()`'s
+        // own union loop already applied the same precedence) or from
+        // `seedOnly` (a row just declared this session, which has not yet
+        // been through that loop). See `withLiveOrLearnedWindow` for why.
+        applyModels(withLiveOrLearnedWindow(next), defaultModelId)
       } else {
         // #7888 re-review — the fully-cold reload (no SDK data, no cache
         // warmed yet: first boot before `loadCache()` ever succeeds, or a
@@ -1180,7 +1221,9 @@ export function createModelsRegistry(hooks = {}) {
         // row it overrides, and this branch has no union to route it
         // through. #7888 round 3 — `applyModels` strips it now; no per-site
         // map needed here either.
-        applyModels(fallbackModels, defaultModelId)
+        // #7810 review — same live-or-learned restoration as the cache-warmed
+        // branch above: `fallbackModels` alone carries neither.
+        applyModels(withLiveOrLearnedWindow(fallbackModels), defaultModelId)
       }
       return activeModels
     },
