@@ -667,7 +667,32 @@ function parseSegmentTokens(seg) {
         // `advanceToken`'s 'class' arm) — a single-char regex test can never
         // backtrack, so reusing RegExp here for the class body is safe,
         // unlike compiling the WHOLE segment (including `*`/`?` runs) to one.
-        tokens.push({ t: 'class', re: new RegExp(`^${parsed.source}$`) })
+        //
+        // #7898 round 3 — `parseBracketExpr` accepts any `-`-range TEXT
+        // (`[z-a]`, `[9-0]`, `[b-!a!x]` from combining adjacent special
+        // characters) without checking the range is in order; JS's `RegExp`
+        // constructor rejects an out-of-order range (`Range out of order in
+        // character class`) and THROWS, synchronously, from inside
+        // `compileCaseCheck` — which runs unconditionally, for every Glob
+        // call whose pattern has a bracket segment, before a single match is
+        // even checked (`confineGlobMatches` calls it up front, even with
+        // zero candidate files). Nothing between here and `executeBuiltinTool`
+        // catches it, so an ordinary "No matches" (confirmed empirically:
+        // `fs.glob` itself tolerates `[z-a]bc.ts` and simply matches nothing,
+        // it does not throw) turns into a surfaced `Tool Glob failed:
+        // Invalid regular expression...` error instead. Fail closed the same
+        // way an unclosed `[` or a malformed segment already does elsewhere
+        // in this parser: a bracket expression JS cannot compile becomes a
+        // token that matches no character, ever — never a crash.
+        let re
+        try {
+          re = new RegExp(`^${parsed.source}$`)
+        } catch {
+          tokens.push({ t: 'none' })
+          i = parsed.next
+          continue
+        }
+        tokens.push({ t: 'class', re })
         i = parsed.next
       } else {
         tokens.push({ t: 'lit', ch: '[' })
@@ -703,11 +728,40 @@ function parseSegmentTokens(seg) {
  *     from the minimum reachable offset (the same trick {@link caseCheckPasses}
  *     already uses for `**` one level up, here per character) — O(str.length),
  *     never an inner retry loop.
- *   - `alt` (a `{a,b}` brace) tries each alternative from each reachable
- *     offset via a nested {@link advanceTokens} call and unions the results —
- *     bounded by (reachable offsets) × (alternatives) × (that alternative's
- *     own cost), which nests polynomially with brace depth but never
- *     backtracks: every branch is tried exactly once, not re-explored.
+ *   - `alt` (a `{a,b}` brace) tries each alternative from the WHOLE reachable
+ *     set at once via a single nested {@link advanceTokens} call per option,
+ *     and unions the results — bounded by (alternatives) × (that
+ *     alternative's own cost), which is O(str.length) per option regardless
+ *     of |reachable|, for the same reason `star` above is: `advanceToken` is
+ *     a function that COMMUTES with set union (`f(A ∪ B) = f(A) ∪ f(B)` for
+ *     every token type, `star` included — its output only depends on
+ *     `min(reachable)`, and `min(A ∪ B) = min(min(A), min(B))`), so feeding
+ *     an option the FULL reachable set in one call is provably identical to
+ *     feeding it each singleton `{j}` separately and unioning — just without
+ *     redoing the option's own O(str.length) work once per `j`.
+ *
+ *     #7898 round 3 — this used to loop `for (const j of reachable) { for
+ *     (const option ...) { advanceTokens(option, str, new Set([j])) } }`,
+ *     recomputing each option from scratch for every individual reachable
+ *     offset. That is the same shape of accidental quadratic blowup the
+ *     `star` fix above exists to avoid, just one level up: a segment built
+ *     from L sequential `{*a,*b}`-shaped groups (an ordinary, unremarkable
+ *     glob shape — `{*.ts,*.js}` is a completely normal pattern) pays
+ *     O(|reachable|) = O(str.length) extra work at EVERY such group, because
+ *     each group's own `*` re-expands reachable back to near-`str.length`
+ *     before the next group starts. Measured on the un-batched version: a
+ *     20×`{*a,*b}` pattern (140 chars) against a 5000-char non-matching real
+ *     segment took 12.96 SECONDS; even bounded to a filesystem-realistic
+ *     255-byte name, 100 sequential groups (a 700-char pattern, well within
+ *     what an attacker can type — nothing upstream caps `pattern` length)
+ *     already exceeded 100ms. `compileCaseCheck`/`caseCheckPasses` run
+ *     SYNCHRONOUSLY per Glob match (up to `GLOB_COLLECT_CEILING` = 50,000 of
+ *     them), after `runGlob`'s own walk-timeout race has already resolved —
+ *     the exact single-threaded-event-loop-freeze shape `ccd677c4b` (this
+ *     same PR, one commit up) replaced a backtracking RegExp to eliminate,
+ *     reintroduced here through the one branch that still had an
+ *     |reachable|-proportional term. Batching removes it: this function is
+ *     now O(str.length) worst case for every token type, `alt` included.
  */
 function advanceToken(token, str, reachable) {
   const n = str.length
@@ -721,10 +775,8 @@ function advanceToken(token, str, reachable) {
   }
   const next = new Set()
   if (token.t === 'alt') {
-    for (const j of reachable) {
-      for (const option of token.options) {
-        for (const end of advanceTokens(option, str, new Set([j]))) next.add(end)
-      }
+    for (const option of token.options) {
+      for (const end of advanceTokens(option, str, reachable)) next.add(end)
     }
     return next
   }
@@ -734,6 +786,10 @@ function advanceToken(token, str, reachable) {
     if (token.t === 'lit' && c === token.ch) next.add(j + 1)
     else if (token.t === 'any') next.add(j + 1)
     else if (token.t === 'class' && token.re.test(c)) next.add(j + 1)
+    // `t: 'none'` (a bracket expression `parseSegmentTokens` could not
+    // compile to a RegExp — see its try/catch) intentionally matches no
+    // branch above: it consumes nothing, ever, for any character. Fail
+    // closed, on purpose, not an omission.
   }
   return next
 }

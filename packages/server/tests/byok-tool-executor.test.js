@@ -997,6 +997,71 @@ describe('executeBuiltinTool', () => {
         assert.equal(result, false)
         assert.ok(elapsedMs < 500, `case check must stay fast, took ${elapsedMs}ms for a 5000-char name`)
       })
+
+      // #7898 round 3 — the DP that replaced the backtracking RegExp above
+      // (parseSegmentTokens/segmentMatches, ccd677c4b) reintroduced an
+      // analogous blowup in its OWN `alt` ({a,b}) branch: advanceToken used
+      // to recompute each brace alternative from scratch for every
+      // individually-reachable string offset (`for (const j of reachable) {
+      // for (const option ...) { advanceTokens(option, str, new Set([j])) }
+      // }`), instead of feeding an option the whole reachable set in one
+      // call the way `star` already does one level up. A pattern segment
+      // built from L sequential `{*a,*b}`-shaped groups — an entirely
+      // ordinary glob shape, `{*.ts,*.js}` is no different — paid an extra
+      // O(name.length) at EVERY group, because each group's own `*`
+      // re-expands the reachable set back toward the full name length right
+      // before the next group starts. Measured pre-fix: 20 groups (140
+      // chars) against a 5000-char non-matching real segment took 12.96
+      // SECONDS; even bounded to a filesystem-realistic 255-byte name, 100
+      // groups (a 700-char pattern — nothing upstream caps pattern length)
+      // already exceeded 100ms. Same failure shape as the test above (a
+      // synchronous, per-match, unbounded cost inside confineGlobMatches),
+      // different branch of the same new code.
+      it('caseCheckPasses does not blow up on a chained brace-with-wildcard pattern segment (direct)', () => {
+        const evilPattern = '{*a,*b}'.repeat(30) // 210 chars, an ordinary-looking shape
+        // A homogeneous name of one repeated character legitimately MATCHES
+        // this pattern (it can always be split into 30 nonempty pieces each
+        // ending in 'a'), so this is a pure timing assertion — the fix does
+        // not change the result, only how long it takes to compute it (the
+        // pre-fix code took 12.96s for this exact input at n=5000).
+        const longName = 'a'.repeat(5000)
+        const check = compileCaseCheck(evilPattern)
+        const t0 = Date.now()
+        const result = caseCheckPasses(check, [longName])
+        const elapsedMs = Date.now() - t0
+        assert.equal(result, true)
+        assert.ok(elapsedMs < 500, `case check must stay fast, took ${elapsedMs}ms for a 5000-char name`)
+      })
+
+      // #7898 round 3 — parseBracketExpr accepts any `-`-range TEXT
+      // (`[z-a]`, or `[b-!a!x]` from adjacent special characters colliding)
+      // without checking the range is in order. JS's RegExp constructor
+      // rejects an out-of-order range and THROWS synchronously from inside
+      // compileCaseCheck, which runs unconditionally for every Glob call
+      // whose pattern has a bracket segment — even with zero candidate
+      // files, confineGlobMatches compiles the case check up front. Nothing
+      // between there and executeBuiltinTool's outer catch stops it, so an
+      // ordinary "No matches" (fs.glob itself tolerates `[z-a]bc.ts` and
+      // just matches nothing — verified directly against node:fs/promises's
+      // glob()) turned into a surfaced "Tool Glob failed: Invalid regular
+      // expression..." error instead.
+      it('compileCaseCheck does not throw on an out-of-order bracket range (fails closed instead)', () => {
+        for (const pattern of ['[z-a]x', '[9-0]bc', '[b-!a!x]', '[a[^-[]']) {
+          const check = compileCaseCheck(pattern)
+          assert.equal(caseCheckPasses(check, ['probe']), false, `pattern ${pattern} must fail closed, not throw`)
+        }
+      })
+
+      it('Glob with an out-of-order bracket range pattern returns "No matches", not a tool error', async () => {
+        writeFileSync(join(dir, 'xbc.ts'), '1')
+        const r = await executeBuiltinTool({
+          toolName: 'Glob',
+          input: { pattern: '[z-a]bc.ts' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
     })
 
     // #7357 — two output-integrity defects the review panel on PR #7349 found.
