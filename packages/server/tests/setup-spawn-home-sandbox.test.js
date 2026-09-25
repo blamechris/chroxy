@@ -333,7 +333,11 @@ describe('spawn-home sandbox: a spawned child does not see the real home (#7269)
       )
     } finally {
       rmSync(otherFakeHome, { recursive: true, force: true })
-      process.env.HOME = prevHome
+      // An unset HOME (the norm on win32) must be restored by DELETING it:
+      // assigning undefined to process.env stores the string 'undefined',
+      // which then reads as a caller-isolated HOME for every later spawn.
+      if (prevHome === undefined) delete process.env.HOME
+      else process.env.HOME = prevHome
       if (prevUserProfile === undefined) delete process.env.USERPROFILE
       else process.env.USERPROFILE = prevUserProfile
     }
