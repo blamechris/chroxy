@@ -1117,6 +1117,19 @@ jobs:
     # Self-hosted (#6046): the jest-expo "failed to run" suites were transform
     # OOM under the 7.7GB VM, not arch — with the runner at 24GB all 147 suites
     # (1973 tests) pass on ARM64. Fork PRs still route to ubuntu-24.04.
+    #
+    # #7947: the `chroxy-linux-*` containers carry no per-container memory
+    # limit (the shared Docker VM is the only bound — see
+    # ~/actions-runner-linux/docker-compose.yml), and jest's default worker
+    # count is nproc-1 = 7 on this 8-CPU host. Measured in a matching
+    # node:22-bookworm container: 7 workers + --coverage peaks around 9GB
+    # RSS; two App Tests jobs landing on the pool's two replicas at once (as
+    # happened on #7932/#7933, minutes apart) sums to ~18GB against a 16GB
+    # host and the kernel OOM-killer SIGKILLs a jest worker mid-suite — every
+    # test had already passed, only the worker died. --maxWorkers=2 below
+    # measured ~4-6.5GB peak per run (confirmed under an 8g cgroup cap, the
+    # worst-case per-container share with two replicas busy), so two
+    # concurrent runs stay under the 16GB host with headroom to spare.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
@@ -1144,7 +1157,10 @@ jobs:
         run: npm run bundle-xterm
 
       - name: Run tests with coverage
-        run: npm test
+        # --maxWorkers=2 (#7947): caps concurrent jest workers so two App
+        # Tests jobs on the pool's two replicas can't jointly OOM the shared
+        # 16GB Docker VM. Local `npm test` is untouched — the cap is CI-only.
+        run: npm test -- --maxWorkers=2
 
       - name: Upload app coverage
         if: always()

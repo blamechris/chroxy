@@ -427,15 +427,46 @@ const CONTAINER_RESOLVE_MAX_HOPS = 40
  * reporting the tool's own "No such file", not a containment error. A missing
  * or unreadable PARENT is a failure, which is correct for these three tools:
  * Read/Glob/Grep only ever name a path that must already exist.
+ *
+ * OPTIONAL SECOND ARG (#7897) — `$2`, non-empty to opt in, empty/absent (every
+ * pre-#7897 caller) to keep the contract above byte-for-byte. It widens
+ * exactly one case: a missing PARENT hit while resolving a FOLLOWED SYMLINK's
+ * TARGET (`$__n -gt 0` — at least one `readlink` hop already happened), never
+ * the original `$1`'s own first-hop parent, which stays a hard failure
+ * regardless of this flag. The host's component-wise resolver
+ * (`resolveTargetComponentwiseAsync`, utils/componentwise-resolver.js) hits
+ * ENOENT and switches to a purely lexical tail-append with no further
+ * filesystem access; `__cx_resolve` had no equivalent, so a dangling symlink
+ * whose target's own parent is ALSO missing (`sub/target.ts -> ./gone/x.ts`,
+ * `gone` not just `x.ts` absent) failed the `cd -P` on that missing parent and
+ * the whole match was withheld — a real undermatch against the host for a
+ * shape #7355/#7357's single-level fixture never exercised. `__cx_resolve_new`
+ * (below) already implements exactly this "peel trailing components until one
+ * exists, resolve that prefix physically, re-append the rest lexically"
+ * walk for CREATE-mode paths, so the fallback reuses it rather than growing a
+ * second copy (`__cx_resolve_new`'s own doc: "reused, not reimplemented — a
+ * second resolution loop is a second thing to drift") — at the point of
+ * failure `$__p` is always already absolute (built from a prior hop's
+ * `pwd -P`), which is exactly what `__cx_resolve_new` requires. Gated to
+ * `$__n -gt 0` rather than applied unconditionally so the original path's own
+ * missing-parent case — Read/Grep naming a path with no such directory at
+ * all — keeps failing exactly as before; only Glob's per-match symlink
+ * resolution ({@link buildConfinedGlobBody}) passes the flag.
  */
 const CONTAINER_RESOLVE_FN = [
   '__cx_resolve() {',
-  '  local __p=$1 __d __b __t __n=0',
+  '  local __p=$1 __cx_lenient=${2:-} __d __b __t __cd __n=0',
   `  while [ "$__n" -lt ${CONTAINER_RESOLVE_MAX_HOPS} ]; do`,
   '    if [ -d "$__p" ]; then ( unset CDPATH; cd -P -- "$__p" 2>/dev/null && pwd -P ) || return 1; return 0; fi',
   '    case $__p in */*) __d=${__p%/*}; __b=${__p##*/} ;; *) __d=.; __b=$__p ;; esac',
   '    [ -n "$__d" ] || __d=/',
-  '    __d=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ) || return 1',
+  '    if ! __cd=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ); then',
+  // #7897 — only past the first hop (already inside a followed symlink's
+  // target, never the original `$1`) and only when the caller opted in.
+  '      if [ "$__n" -gt 0 ] && [ -n "$__cx_lenient" ]; then __cx_resolve_new "$__p" && return 0; fi',
+  '      return 1',
+  '    fi',
+  '    __d=$__cd',
   '    __p=$__d/$__b',
   '    if [ -L "$__p" ]; then',
   // The `--` first, then WITHOUT it (Copilot, PR #7867): the image is a user
@@ -514,9 +545,19 @@ const CONTAINER_RESOLVE_NEW_FN = [
   '}',
 ].join('\n')
 
-/** Resolver per confinement mode — see {@link buildConfinedContainerCommand}. */
+/**
+ * Resolver per confinement mode — see {@link buildConfinedContainerCommand}.
+ *
+ * `'read'` now carries `CONTAINER_RESOLVE_NEW_FN` too (#7897): `__cx_resolve`'s
+ * optional lenient fallback calls `__cx_resolve_new`, and Glob
+ * ({@link buildConfinedGlobBody}) — the only caller that opts in — runs in
+ * 'read' mode. The top-level `__cx_ws`/`__cx_target` resolution in `'read'`
+ * mode is unaffected: neither call passes the lenient flag, so `__cx_resolve`
+ * behaves exactly as before for them, and `__cx_resolve_new` being merely
+ * DEFINED (not called) costs nothing.
+ */
 const CONFINE_MODES = new Map([
-  ['read', { fns: [CONTAINER_RESOLVE_FN], resolver: '__cx_resolve' }],
+  ['read', { fns: [CONTAINER_RESOLVE_FN, CONTAINER_RESOLVE_NEW_FN], resolver: '__cx_resolve' }],
   ['create', { fns: [CONTAINER_RESOLVE_FN, CONTAINER_RESOLVE_NEW_FN], resolver: '__cx_resolve_new' }],
 ])
 
@@ -620,6 +661,28 @@ export function buildConfinedContainerCommand({ target, body, setup = '', worksp
  * withheld-count TRAILER stays `\n`-terminated (see {@link CONTAINER_CONFINE_WITHHELD}) —
  * it is fixed host-authored text, not a filename, so it carries no ambiguity
  * and is the one line the host can split on safely.
+ *
+ * #7896 — a purely LITERAL match (no `*`/`?`/`[`/`{`) must be existence-checked
+ * too. `nullglob` only suppresses a pattern that CONTAINS a wildcard
+ * metacharacter and fails to expand; a fully literal `pattern` is never
+ * subject to pathname expansion at all, so bash hands the `for` loop the
+ * literal word verbatim whether or not anything on disk matches it. The host
+ * (`fs.glob`, via `byok-tool-executor.js`'s `runGlob`) always verifies
+ * existence, so a literal pattern with no real match must be withheld here the
+ * same way — `[ -e "$f" ]`, skipped for a symlink entry since the `-L` branch
+ * below already existence-checks (and resolves) it, including the dangling
+ * case that legitimately has no target.
+ *
+ * #7897 — resolving a symlink MATCH now passes `__cx_resolve`'s lenient flag
+ * (`"$f" 1`), so a dangling symlink whose target's own parent is also missing
+ * (`deep/x.ts -> ./gone/y.ts`, `gone` absent, not just `y.ts`) resolves
+ * lexically past that point instead of failing outright — the same "ENOENT
+ * stops filesystem access, lexically append the rest" rule the host's
+ * `resolveTargetComponentwiseAsync` already applies (see `__cx_resolve`'s doc).
+ * The containment check on the next line is UNCHANGED and still the only
+ * thing that decides keep-vs-withhold: a lenient resolution that lands outside
+ * `$__cx_target` is withheld exactly like any other escaping symlink target,
+ * so this only closes an undermatch, never opens an escape.
  */
 export function buildConfinedGlobBody(pattern) {
   return [
@@ -649,8 +712,15 @@ export function buildConfinedGlobBody(pattern) {
     '  fi',
     '  if [ "$__cx_lastv" != y ]; then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '  if [ -L "$f" ]; then',
-    '    if ! __cx_r=$(__cx_resolve "$f"); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
+    '    if ! __cx_r=$(__cx_resolve "$f" 1); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) __cx_withheld=$((__cx_withheld+1)); continue ;; esac',
+    // #7896 — nullglob only suppresses a WILDCARD pattern that fails to
+    // expand; a purely literal `pattern` reaches this loop verbatim even when
+    // nothing on disk matches it. A symlink entry (handled above, including
+    // dangling) is excluded here since it is not `-e`-testable by definition
+    // when dangling and was already existence-checked (via resolution) above.
+    '  elif [ ! -e "$f" ]; then',
+    '    __cx_withheld=$((__cx_withheld+1)); continue',
     '  fi',
     '  printf \'%s\\0\' "$f"',
     'done',
