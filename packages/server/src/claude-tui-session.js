@@ -914,9 +914,30 @@ export class ClaudeTuiSession extends BaseSession {
    * socket planted at the same name, which `O_NOFOLLOW` alone would still
    * open. `O_NOFOLLOW` is undefined on Windows, where the bitwise OR is a
    * no-op (same idiom as `_captureSinkBaseIdentity`'s fd open).
+   *
+   * #7926 (re-review) — `O_NONBLOCK` is required for that isFile() refusal to
+   * ever be REACHED for a FIFO. POSIX open(2) on a FIFO opened O_RDONLY
+   * without O_NONBLOCK blocks the calling thread until a writer opens the
+   * other end — confirmed empirically: a FIFO planted at a hook-file name
+   * left `open()` (and the real libuv-threadpool op behind it) permanently
+   * unsettled, surviving even `process.exit()` in the reproduction. The
+   * bounded `_boundedHookFs` wrapper makes the RACE resolve on schedule (the
+   * caller sees a timely HOOK_FS_TIMEOUT), but the underlying real op stays
+   * queued in the shared 4-thread libuv pool forever — one attacker-planted
+   * FIFO per distinct hook-file name permanently consumes one thread, and the
+   * pool is shared process-wide across every `fs` call in every session, not
+   * just this one (the same class of cross-session exhaustion #6132/#6178
+   * built this file's whole async-fs pattern to prevent, one layer lower).
+   * `O_NONBLOCK` makes `open()` return immediately regardless of whether a
+   * writer exists; the subsequent `fstat` still reports `isFIFO()`, so the
+   * `isFile()` check below refuses it exactly as the comment above already
+   * claimed it would — same idiom as `O_NOFOLLOW`, undefined on Windows,
+   * `|| 0` no-op there (Windows has no FIFO-open-blocks semantics to guard).
+   * POSIX defines `O_NONBLOCK` as a no-op for a regular file, so legitimate
+   * hook-file reads are unaffected.
    */
   async _hookReadFile(path) {
-    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0)
     const handle = await open(path, flags)
     try {
       const st = await handle.stat()

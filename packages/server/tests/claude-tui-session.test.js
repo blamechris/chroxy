@@ -8378,6 +8378,132 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     // #6178 (review): coalesced, not re-issued per pass.
     assert.equal(lstatCalls, 1, 'frozen lstat issued once, not once-per-poll-pass')
   })
+
+  // #7926 (re-review) — a FIFO planted at a hook-file name must be refused
+  // WITHOUT blocking. POSIX open(2) of a FIFO for O_RDONLY blocks the
+  // calling thread until a writer opens the other end UNLESS O_NONBLOCK is
+  // set. _hookReadFile routes through fs/promises `open()`, so that block
+  // lands in the shared libuv threadpool rather than the main event loop —
+  // but the promise it returns still never settles, and _boundedHookFs's
+  // race only hides that from the CALLER: the real op stays queued in the
+  // shared 4-thread pool forever, one thread per distinct attacker-planted
+  // FIFO name, exhausting a resource every fs.promises call in every session
+  // shares (the same class of cross-session freeze #6132/#6178 built this
+  // file's whole async-fs pattern to prevent, one layer lower than readdir).
+  // Confirmed empirically pre-fix, outside this suite: the underlying node
+  // process survived even `process.exit()` with the real open() still
+  // blocked on a planted FIFO. O_NONBLOCK makes open() return immediately
+  // for a FIFO regardless of whether a writer exists, so the isFile() check
+  // already in _hookReadFile can actually run (its comment claimed this
+  // refusal before the fix, but the code never reached it).
+  //
+  // Bounded with a manual race (not via _boundedHookFs, which this direct
+  // unit call bypasses) so a regression here goes RED FAST instead of
+  // hanging the test runner itself — docs/false-safety-guards.md catalogues
+  // "a guard that HANGS instead of failing" as its own false-safety shape.
+  it('_hookReadFile does not block when a FIFO is planted at a hook-file name (O_NONBLOCK) (#7926 re-review)', { skip: process.platform === 'win32' }, async () => {
+    session = makeStartedSession('s-fifo-hang')
+    const fifoPath = join(session._sinkDir, 'stop-evil.json')
+    execFileSync('mkfifo', [fifoPath])
+    const HANG_GUARD_MS = 2000
+    const start = Date.now()
+    const result = await Promise.race([
+      session._hookReadFile(fifoPath).then(
+        (v) => ({ outcome: 'resolved', value: v }),
+        (err) => ({ outcome: 'rejected', err }),
+      ),
+      new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+    ])
+    const elapsed = Date.now() - start
+    assert.notEqual(result.outcome, 'hung', `_hookReadFile blocked for >= ${HANG_GUARD_MS}ms on a planted FIFO — open() needs O_NONBLOCK`)
+    assert.equal(result.outcome, 'rejected', 'a FIFO planted at a hook-file name must be refused, not read as a payload')
+    assert.match(result.err.message, /is not a regular file/, 'refused via the isFile() check, not some other failure')
+    assert.ok(elapsed < 1000, `_hookReadFile must return promptly for a FIFO (O_NONBLOCK), not block waiting for a writer (elapsed=${elapsed}ms)`)
+  })
+
+  // #7926 (re-review) — timeout semantics must fail CLOSED for delivery, not
+  // open. A slow/stuck lstat during the POST-read re-validation is exactly
+  // what an attacker who can make the filesystem slow (a FUSE mount, a huge
+  // directory, a hung NFS mount at the swapped-in base) would want: if
+  // "inconclusive" were ever treated as "assume innocent, deliver anyway",
+  // making the post-check time out would be a bypass for the read-side
+  // TOCTOU fix itself. This combines a REAL base swap — the same swap the
+  // sibling TOCTOU test above proves is caught when the post-check
+  // completes — with a post-check lstat that never resolves, proving the
+  // batch is still discarded when the check can't complete at all, not only
+  // when it completes and says "not ok".
+  it('a slow post-check lstat during an ACTUAL base swap must not deliver the batch — timeout fails closed, not open (#7926 re-review)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const sinkName = 's-toctou-timeout-fail-closed'
+    const sinkDir = join(baseDir, sinkName)
+    mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      resultTimeoutMs: 5000, hardTimeoutMs: 400,
+    })
+    session._processReady = true
+    session._sessionId = `test-${sinkName}`
+    session._sinkDir = sinkDir
+    session._waitForPrompt = async () => true
+    const fd = openSync(baseDir, 'r')
+    session._sinkBaseFd = fd
+    const st = fstatSync(fd)
+    session._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
+    session._hookFsTimeoutMs = 40
+
+    const errors = []
+    const events = []
+    session.on('error', (e) => errors.push(e))
+    session.on('stream_delta', (e) => events.push(e.delta))
+
+    // Call #1 (the TOP-of-pass check) resolves normally so readdir and the
+    // legitimate readFile proceed; every call after that (the POST-read
+    // re-validation, and every later pass) hangs forever — the attacker's
+    // injected slow filesystem, arriving right when the swap needs checking.
+    const realLstat = session._hookLstat.bind(session)
+    let lstatCalls = 0
+    session._hookLstat = (path) => {
+      lstatCalls++
+      if (lstatCalls === 1) return realLstat(path)
+      return new Promise(() => {})
+    }
+
+    const realReadFile = session._hookReadFile.bind(session)
+    let swapped = false
+    session._hookReadFile = async (path) => {
+      const raw = await realReadFile(path)
+      if (!swapped) {
+        swapped = true
+        // ATTACKER ACTION: swap the base for real, immediately after the
+        // legitimate content was read — the exact window the read-side
+        // TOCTOU fix exists to close.
+        rmSync(baseDir, { recursive: true, force: true })
+        const attackerDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-timeout-attacker-'))
+        attackerDirsToClean.push(attackerDir)
+        mkdirSync(join(attackerDir, sinkName), { recursive: true })
+        symlinkSync(attackerDir, baseDir)
+      }
+      return raw
+    }
+
+    session._term = {
+      write: () => {
+        writeFileSync(join(sinkDir, 'stop-ok.json'), JSON.stringify({
+          last_assistant_message: 'read legitimately, but the post-check that would confirm it never resolves',
+        }))
+      },
+      kill: () => {},
+    }
+
+    const start = Date.now()
+    await session.sendMessage('hi')
+    const elapsed = Date.now() - start
+
+    assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms) via the hard-timeout watchdog, not wedged forever on the frozen post-check lstat`)
+    assert.equal(session._isBusy, false, 'turn ended — the next turn is not wedged')
+    assert.equal(events.length, 0, 'nothing delivered while the base swap could not be confirmed — a stuck check must fail CLOSED for delivery, not open')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 0, 'a timeout is an availability signal, not a confirmed compromise — must not itself surface SINK_BASE_UNTRUSTED')
+  })
 })
 
 // #5332 — turn-duration logging and watchdog poll-loop deadlines used to read

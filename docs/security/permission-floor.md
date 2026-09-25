@@ -162,7 +162,14 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   that DID validate: `_hookReadFile` previously followed a symlink unconditionally.
   It now opens each hook file with `O_NOFOLLOW` and requires a regular file, so a
   symlink planted at a hook-file name is skipped (logged) rather than parsed as a
-  genuine payload.
+  genuine payload. That `open()` also sets `O_NONBLOCK` (re-review fix, same #7926):
+  without it, a FIFO planted at a hook-file name would block the `open()` call
+  itself until a writer connects — confirmed to leave the underlying libuv-threadpool
+  op permanently unsettled, one occupied thread per distinct planted FIFO name,
+  shared process-wide across every session's `fs` calls. `O_NONBLOCK` makes `open()`
+  return immediately regardless of a writer, so the `isFile()` check can still refuse
+  it; POSIX defines `O_NONBLOCK` as a no-op for a regular file, so legitimate reads
+  are unaffected.
 - **SDK Auto uses the SDK's native `PreToolUse` callback.** `bypassPermissions`
   suppresses `canUseTool`, but the callback still runs before every tool. It sends
   the tool name and input through the same `PermissionManager`: benign operations
