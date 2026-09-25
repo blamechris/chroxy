@@ -359,6 +359,102 @@ describe('lint-windows-test-exemptions: the manifest cannot rot silently (#7270)
   })
 })
 
+// #7343: WINDOWS_EXEMPT's `// ── <label> (<N>)` group headings carried a
+// hardcoded count nothing checked. `fixture()` above builds its manifest body
+// with JSON.stringify, which can never emit a comment, so these tests need a
+// hand-written manifest source with a REAL heading line in it.
+describe('WINDOWS_EXEMPT group heading counts stay honest (#7343)', () => {
+  function headingFixture(manifestBody, { files = TEN, mustRunFile = 'tests/f9.test.js' } = {}) {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-win-heading-'))
+    tmpRoots.push(root)
+    for (const f of [...files, mustRunFile]) {
+      const abs = join(root, f)
+      mkdirSync(dirname(abs), { recursive: true })
+      writeFileSync(abs, "import { test } from 'node:test'\ntest('x', () => {})\n")
+    }
+    const manifestPath = join(root, 'manifest.mjs')
+    writeFileSync(manifestPath, manifestBody)
+    return { root, testsRoot: join(root, 'tests'), manifestPath }
+  }
+
+  const row = (file) => `  {
+    file: ${JSON.stringify(file)},
+    reason: 'node-pty',
+    symptom: 'fail',
+    note: 'spawns a real PTY and asserts POSIX exit semantics',
+  },`
+
+  // `mustRunFile` is written to disk but deliberately never referenced by
+  // WINDOWS_EXEMPT, so it satisfies MUST_RUN_ON_WINDOWS without becoming a row
+  // this test has to account for.
+  function manifestSource(headingLabel, declaredCount, rowFiles, mustRunFile = 'tests/f9.test.js') {
+    return [
+      `export { EXEMPT_REASONS } from ${JSON.stringify(pathToFileURL(LIB).href)}`,
+      'export const WINDOWS_EXEMPT = [',
+      `  // ── ${headingLabel} (${declaredCount})`,
+      ...rowFiles.map(row),
+      ']',
+      `export const MUST_RUN_ON_WINDOWS = ${JSON.stringify([mustRunFile])}`,
+      'export const MIN_MUST_RUN_ON_WINDOWS = 1',
+      '',
+    ].join('\n')
+  }
+
+  test('a heading whose count matches the rows beneath it passes', () => {
+    const f = headingFixture(manifestSource('spawns a real PTY', 1, ['tests/f0.test.js']))
+    const r = runGate(f)
+    assert.equal(r.status, 0, `expected clean exit, got ${r.status}\n${r.stdout}\n${r.stderr}`)
+  })
+
+  // The exact shape #7343 filed: bump one heading's number by one with no row
+  // added, and the gate used to stay green.
+  test('a heading claiming one MORE row than actually follows it fails', () => {
+    const f = headingFixture(manifestSource('spawns a real PTY', 2, ['tests/f0.test.js']))
+    const r = runGate(f)
+    assert.equal(r.status, 1, `expected FAIL, got ${r.status}\n${r.stdout}\n${r.stderr}`)
+    assert.match(r.stderr, /says \(2\) but 1 row/)
+  })
+
+  test('a heading claiming one FEWER row than actually follows it fails', () => {
+    const f = headingFixture(manifestSource('spawns a real PTY', 1, ['tests/f0.test.js', 'tests/f1.test.js']))
+    const r = runGate(f)
+    assert.equal(r.status, 1, `expected FAIL, got ${r.status}\n${r.stdout}\n${r.stderr}`)
+    assert.match(r.stderr, /says \(1\) but 2 row/)
+  })
+
+  // POSITIVE CONTROL for the second heading in a multi-heading manifest: only
+  // the SECOND heading's count is wrong, proving the scan does not stop after
+  // (or misattribute rows across) the first heading.
+  test('a mismatch in a SECOND heading is caught independently of the first', () => {
+    const body = [
+      `export { EXEMPT_REASONS } from ${JSON.stringify(pathToFileURL(LIB).href)}`,
+      'export const WINDOWS_EXEMPT = [',
+      '  // ── spawns a real PTY (1)',
+      row('tests/f0.test.js'),
+      '  // ── needs a second thing (5)',
+      row('tests/f1.test.js'),
+      ']',
+      `export const MUST_RUN_ON_WINDOWS = ${JSON.stringify(['tests/f9.test.js'])}`,
+      'export const MIN_MUST_RUN_ON_WINDOWS = 1',
+      '',
+    ].join('\n')
+    const r = runGate(headingFixture(body))
+    assert.equal(r.status, 1)
+    assert.doesNotMatch(r.stderr, /"spawns a real PTY" says/)
+    assert.match(r.stderr, /"needs a second thing" says \(5\) but 1 row/)
+  })
+
+  // The implicit control every OTHER test in this file already exercises —
+  // every fixture built by fixture() above has no heading comments at all
+  // (JSON.stringify cannot emit one), and all of them pass. Named explicitly
+  // here so the invariant has a place to be asserted on purpose: no headings
+  // is "nothing to verify", not a violation.
+  test('a manifest with no headings at all is unaffected by this check', () => {
+    const f = fixture({ files: TEN, manifest: [goodRow('tests/f0.test.js')] })
+    assert.equal(runGate(f).status, 0)
+  })
+})
+
 describe('lint-windows-test-exemptions: the real manifest and the wrapper', () => {
   test('the repo\'s own manifest is clean', () => {
     const r = spawnSync(process.execPath, [GATE], { encoding: 'utf8' })
