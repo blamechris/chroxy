@@ -36,10 +36,14 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SETUP_PATH = resolve(__dirname, '_setup.mjs')
+// `--import` takes a module SPECIFIER: on Windows an absolute path like
+// A:\...\_setup.mjs is rejected by the ESM loader (ERR_UNSUPPORTED_ESM_URL_SCHEME),
+// so pass it as a file:// URL, which is valid on every platform.
+const SETUP_URL = pathToFileURL(SETUP_PATH).href
 
 const PROBE_SCRIPT = `
 import { existsSync } from 'node:fs'
@@ -62,7 +66,7 @@ function runProbeChild(env, script = PROBE_SCRIPT) {
   const scriptPath = join(harnessDir, 'probe.mjs')
   writeFileSync(scriptPath, script)
   try {
-    const result = spawnSync(process.execPath, ['--import', SETUP_PATH, scriptPath], {
+    const result = spawnSync(process.execPath, ['--import', SETUP_URL, scriptPath], {
       encoding: 'utf-8',
       timeout: 15_000,
       env,
