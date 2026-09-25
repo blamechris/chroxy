@@ -151,6 +151,18 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   outright, matching how the other mid-turn backstops (`_handleHardTimeout`,
   `_handleStreamStall`) already behave — a base still compromised on the next turn
   is caught again on that turn's very first poll.
+- **Two narrower gaps in the #7875 fix, closed in review (#7926).** (1) Read-side
+  TOCTOU: the base is checked once at the top of a `drainHookFiles` pass, but
+  `readdir`/`readFile` are real async fs calls that yield the event loop — a base
+  swap landing after a file was already read, but before the pass finished, was
+  never re-checked. `drainHookFiles` now collects a pass's reads into a pending
+  batch without emitting or unlinking anything, re-validates the base exactly once
+  more, and discards the ENTIRE batch (not just files read after the swap) on a
+  mismatch. (2) The base check says nothing about an individual file inside a base
+  that DID validate: `_hookReadFile` previously followed a symlink unconditionally.
+  It now opens each hook file with `O_NOFOLLOW` and requires a regular file, so a
+  symlink planted at a hook-file name is skipped (logged) rather than parsed as a
+  genuine payload.
 - **SDK Auto uses the SDK's native `PreToolUse` callback.** `bypassPermissions`
   suppresses `canUseTool`, but the callback still runs before every tool. It sends
   the tool name and input through the same `PermissionManager`: benign operations

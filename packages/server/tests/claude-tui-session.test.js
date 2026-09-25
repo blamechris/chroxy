@@ -8036,7 +8036,7 @@ describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
 // synchronous side effect) rather than the full mocked-PTY start() flow, which
 // is unnecessary machinery for exercising drainHookFiles.
 describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7875)', () => {
-  let baseDir, skillsDir, session, warnLines, errorLines
+  let baseDir, skillsDir, session, warnLines, errorLines, attackerDirsToClean
   const logSpy = (entry) => {
     if (entry.component !== 'claude-tui-session') return
     if (entry.level === 'warn') warnLines.push(entry.message)
@@ -8047,6 +8047,14 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     chmodSync(baseDir, 0o700)
     skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-readpath-skills-'))
     warnLines = []; errorLines = []
+    // #7926 (review, Copilot) — a test that swaps `baseDir` for a symlink
+    // to a separate mkdtemp'd attacker dir leaks that dir: rmSync on a
+    // symlink removes the link itself, never the target it points at
+    // (confirmed: `rmSync(link, {recursive:true})` leaves the target
+    // directory on disk). Tests that plant such a dir push its path here;
+    // afterEach sweeps them after baseDir, regardless of what baseDir
+    // currently resolves to.
+    attackerDirsToClean = []
     addLogListener(logSpy)
   })
   afterEach(async () => {
@@ -8054,6 +8062,9 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
     try { rmSync(baseDir, { recursive: true, force: true }) } catch { /* may already be gone */ }
     rmSync(skillsDir, { recursive: true, force: true })
+    for (const dir of attackerDirsToClean) {
+      try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
   })
 
   // Build a session as if start() had already run: a real sink dir under
@@ -8111,6 +8122,7 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
         // the issue.
         rmSync(baseDir, { recursive: true, force: true })
         const attackerDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-attacker-'))
+        attackerDirsToClean.push(attackerDir)
         mkdirSync(join(attackerDir, sinkName), { recursive: true })
         writeFileSync(join(attackerDir, sinkName, 'stop-evil.json'),
           JSON.stringify({ last_assistant_message: 'ATTACKER CONTROLLED TEXT' }))
@@ -8178,6 +8190,193 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     assert.equal(session._isBusy, false, 'turn ended')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
     assert.equal(untrusted.length, 1, 'a widened base is refused even with no symlink and no inode change')
+  })
+
+  // #7926 (review) — read-side TOCTOU. _validateSinkBase() at the TOP of
+  // drainHookFiles only proves the base was trustworthy at the START of the
+  // pass; readFile is a real async fs call that yields the event loop, so a
+  // swap landing AFTER a file is successfully read but BEFORE the pass
+  // finishes was, before this fix, never caught — the old code emitted each
+  // file immediately as it was read, with no re-check afterward. This test
+  // swaps the base from inside _hookReadFile itself, i.e. strictly AFTER the
+  // legitimate content was already read off disk, to isolate that exact
+  // window from the "swap before the top check" case the tests above cover.
+  it('discards the whole pass if the base is swapped after a file is read but before the pass is trusted (#7926 review — read-side TOCTOU)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const sinkName = 's-toctou-post-read'
+    session = makeStartedSession(sinkName)
+    const errors = []
+    const events = []
+    session.on('error', (e) => errors.push(e))
+    session.on('stream_delta', (e) => events.push(e.delta))
+    const realReadFile = session._hookReadFile.bind(session)
+    let swapped = false
+    session._hookReadFile = async (path) => {
+      const raw = await realReadFile(path)
+      if (!swapped) {
+        swapped = true
+        // ATTACKER ACTION: swap the base only AFTER the read above already
+        // succeeded against the legitimate directory — the window a single
+        // check at the top of the pass cannot see.
+        rmSync(baseDir, { recursive: true, force: true })
+        const attackerDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-toctou-attacker-'))
+        attackerDirsToClean.push(attackerDir)
+        mkdirSync(join(attackerDir, sinkName), { recursive: true })
+        symlinkSync(attackerDir, baseDir)
+      }
+      return raw
+    }
+    session._term = {
+      write: () => {
+        writeFileSync(join(session._sinkDir, 'stop-ok.json'), JSON.stringify({ last_assistant_message: 'read legitimately, but during a pass that gets compromised before it finishes' }))
+      },
+      kill: () => {},
+    }
+    await session.sendMessage('hi')
+
+    assert.equal(session._isBusy, false, 'turn ended')
+    assert.equal(events.length, 0, 'content read before the swap must still be discarded — reading it is not the same as trusting it')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 1, 'a specific coded error was surfaced for the mid-pass swap')
+  })
+
+  // #7926 (review) — individual hook FILES were never checked for being a
+  // symlink (only the base was). A symlink planted at a hook-file name
+  // inside an otherwise-legitimate, validated base would previously be
+  // followed by a plain readFile() and parsed as a genuine payload. Proves
+  // _hookReadFile's O_NOFOLLOW directly, without going through the full poll
+  // loop.
+  it('_hookReadFile refuses to follow a symlink planted at a hook-file name (#7926 review)', { skip: SKIP_NO_SYMLINK }, async () => {
+    session = makeStartedSession('s-file-symlink-unit')
+    const secretDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-secret-'))
+    const secretFile = join(secretDir, 'secret.json')
+    writeFileSync(secretFile, JSON.stringify({ last_assistant_message: 'ATTACKER VIA SYMLINK' }))
+    const linkPath = join(session._sinkDir, 'stop-evil.json')
+    symlinkSync(secretFile, linkPath)
+    await assert.rejects(
+      () => session._hookReadFile(linkPath),
+      (err) => err.code === 'ELOOP',
+      'a symlinked hook file must be refused (O_NOFOLLOW), not silently followed',
+    )
+    rmSync(secretDir, { recursive: true, force: true })
+  })
+
+  // #7926 (review) — end-to-end: a symlinked hook file sitting alongside a
+  // LEGITIMATE one in the same drain pass must be skipped without disrupting
+  // the legitimate file's normal delivery (fail-closed on the one bad entry,
+  // not fail-closed on the whole turn — the base itself is never touched
+  // here, only one file inside it).
+  //
+  // Uses a PRE- (tool_start) file for the symlinked payload rather than a
+  // second stop- file: two stop-*.json files in the same pass both get
+  // parsed, but only the LAST one processed (alphabetically) survives into
+  // `stopPayload` — with the attacker file named to sort first, the
+  // legitimate file's content wins REGARDLESS of whether the symlink was
+  // followed, so that shape can't tell the two cases apart (caught by
+  // mutation testing: removing the O_NOFOLLOW guard alone left this
+  // assertion green). tool_start events are not overwritten this way —
+  // every one that fires is individually observable — so an attacker
+  // tool_start proves the symlink WAS followed.
+  it('a symlinked hook file is skipped; a legitimate file in the same pass still delivers normally (#7926 review)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const sinkName = 's-file-symlink-mixed'
+    session = makeStartedSession(sinkName)
+    const secretDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-secret-'))
+    const secretFile = join(secretDir, 'secret.json')
+    writeFileSync(secretFile, JSON.stringify({
+      tool_name: 'AttackerTool', tool_use_id: 'evil-1', tool_input: { marker: 'ATTACKER VIA SYMLINK' },
+    }))
+    const events = []
+    const toolStarts = []
+    session.on('stream_delta', (e) => events.push(e.delta))
+    session.on('tool_start', (e) => toolStarts.push(e))
+    session.on('error', () => {})
+    // #7926 (review) — _term.write() is called several times per turn (the
+    // bracketed-paste disable/enable toggles plus once per character), not
+    // once. symlinkSync is not idempotent (EEXIST on a repeat call), so the
+    // plant must happen exactly once or the second write() throws and aborts
+    // the prompt write entirely, before the poll loop ever starts — a bug in
+    // the mock, not in the code under test.
+    let planted = false
+    session._term = {
+      write: () => {
+        if (planted) return
+        planted = true
+        symlinkSync(secretFile, join(session._sinkDir, 'pre-evil.json'))
+        writeFileSync(join(session._sinkDir, 'stop-ok.json'), JSON.stringify({ last_assistant_message: 'all good' }))
+      },
+      kill: () => {},
+    }
+    await session.sendMessage('hi')
+    assert.deepEqual(events, ['all good'], 'the legitimate stop payload was still delivered normally')
+    assert.equal(toolStarts.length, 0, 'the symlinked pre- (tool_start) file must never be parsed/emitted — a single event proves the symlink was followed, unlike a second stop- file which a legit one can silently overwrite')
+    rmSync(secretDir, { recursive: true, force: true })
+  })
+
+  // #7926 (review) — fd lifetime. _captureSinkBaseIdentity closes any
+  // previously-held fd before opening a new one (both on a legitimate
+  // _recoverSinkDir recreate and here, called directly). If that close were
+  // ever dropped, each capture would leak one fd, and the OS would keep
+  // handing out new, monotonically increasing fd numbers rather than
+  // reusing the one that was just closed.
+  it('capturing the sink base identity repeatedly does not leak file descriptors (#7926 review)', () => {
+    session = makeStartedSession('s-fd-leak')
+    const fdBase = mkdtempSync(join(tmpdir(), 'chroxy-tui-fd-leak-'))
+    session._captureSinkBaseIdentity(fdBase)
+    const firstFd = session._sinkBaseFd
+    for (let i = 0; i < 50; i++) {
+      session._captureSinkBaseIdentity(fdBase)
+    }
+    const lastFd = session._sinkBaseFd
+    assert.ok(
+      lastFd - firstFd < 10,
+      `fd grew by ${lastFd - firstFd} across 50 recreates (first=${firstFd} last=${lastFd}) — looks like a leak`,
+    )
+    rmSync(fdBase, { recursive: true, force: true })
+  })
+
+  // #7926 (review) — a hung base lstat must not be mistaken for a compromised
+  // base. `_validateSinkBaseAsync()` (the hot-path form used by drainHookFiles)
+  // routes its lstat through the same bounded+coalesced _boundedHookFs
+  // machinery readdir/readFile/unlink already use, specifically so a frozen
+  // FUSE/NFS mount at the base can't block the shared event loop the way a
+  // synchronous lstatSync would (#6132/#6178 built that pattern for exactly
+  // this failure mode). A timeout is an AVAILABILITY signal, not a security
+  // verdict: this proves it does NOT fire SINK_BASE_UNTRUSTED and tear the
+  // turn down — the poll loop keeps iterating (mirroring the existing #6178
+  // hung-readdir self-recovery test) rather than misreporting a slow mount as
+  // an attack.
+  it('a hung base lstat times out and skips the pass — it is not reported as a compromised base (#7926 review)', async () => {
+    // A short hardTimeoutMs (mirroring the #6178 hung-readdir test) so this
+    // proves the turn self-terminates via the EXISTING hard-timeout watchdog
+    // rather than sitting through makeStartedSession's default 5000ms.
+    const sinkDir = join(baseDir, 's-lstat-hang')
+    mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
+    session = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      resultTimeoutMs: 5000, hardTimeoutMs: 400,
+    })
+    session._processReady = true
+    session._sessionId = 'test-s-lstat-hang'
+    session._sinkDir = sinkDir
+    session._waitForPrompt = async () => true
+    const fd = openSync(baseDir, 'r')
+    session._sinkBaseFd = fd
+    const st = fstatSync(fd)
+    session._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
+    session._hookFsTimeoutMs = 40
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    let lstatCalls = 0
+    session._hookLstat = () => { lstatCalls++; return new Promise(() => {}) } // never resolves
+    session._term = { write: () => {}, kill: () => {} }
+    const start = Date.now()
+    await session.sendMessage('hi')
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms) via the hard-timeout watchdog, not wedged on the frozen lstat`)
+    assert.equal(session._isBusy, false, 'busy cleared — the next turn is not wedged')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 0, 'a hung lstat must never be reported as SINK_BASE_UNTRUSTED — that is a security verdict, this is a stuck filesystem')
+    // #6178 (review): coalesced, not re-issued per pass.
+    assert.equal(lstatCalls, 1, 'frozen lstat issued once, not once-per-poll-pass')
   })
 })
 

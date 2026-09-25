@@ -17,7 +17,7 @@ import {
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
 // event loop — which would freeze EVERY claude-tui session (the default provider).
-import { readdir, readFile, unlink } from 'fs/promises'
+import { lstat, open, readdir, unlink } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
@@ -900,8 +900,38 @@ export class ClaudeTuiSession extends BaseSession {
   // test can override them to simulate a hung mount; production just forwards.
   // The drain calls them via _boundedHookFs (bound + coalesced), never directly.
   _hookReaddir(dir) { return readdir(dir) }
-  _hookReadFile(path) { return readFile(path, 'utf8') }
+  /**
+   * #7926 (review) — O_NOFOLLOW + regular-file check before a hook payload is
+   * parsed. `_validateSinkBase()` proves the sink BASE hasn't been swapped;
+   * it says nothing about an individual entry inside a base that DID
+   * validate. A plain `readFile(path)` follows a symlink unconditionally, so
+   * a symlink planted at a hook-file NAME — inside a base that is otherwise
+   * legitimate, e.g. during the narrow window `ensureOwnedBaseDir` leaves
+   * between adopting an existing dir and re-chmod-ing it back to 0700 — would
+   * be read and parsed as a genuine hook event with no base-level check ever
+   * catching it. `O_NOFOLLOW` makes `open()` reject (`ELOOP`) rather than
+   * follow; the `isFile()` check on top additionally refuses a FIFO/device/
+   * socket planted at the same name, which `O_NOFOLLOW` alone would still
+   * open. `O_NOFOLLOW` is undefined on Windows, where the bitwise OR is a
+   * no-op (same idiom as `_captureSinkBaseIdentity`'s fd open).
+   */
+  async _hookReadFile(path) {
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
+    const handle = await open(path, flags)
+    try {
+      const st = await handle.stat()
+      if (!st.isFile()) throw new Error(`${path} is not a regular file`)
+      return await handle.readFile('utf8')
+    } finally {
+      try { await handle.close() } catch { /* best effort */ }
+    }
+  }
   _hookUnlink(path) { return unlink(path) }
+  // #7926 (review) — bounded async lstat for _validateSinkBaseAsync(), so the
+  // per-poll base re-check (~7/s during an active turn) can't block the
+  // shared event loop the same way readdir/readFile/unlink already can't.
+  // See _boundedHookFs's kind switch and _validateSinkBaseAsync().
+  _hookLstat(path) { return lstat(path) }
 
   /**
    * #7875 — bind an fd to the validated sink BASE dir and record its identity
@@ -958,12 +988,21 @@ export class ClaudeTuiSession extends BaseSession {
    * skipped and only the static checks apply, matching what
    * `ensureOwnedBaseDir` itself would enforce.
    *
-   * Cost: one `lstatSync` per call, no readdir/readFile. Called once per
-   * `drainHookFiles` pass (~every 150ms while a turn is active — see the
-   * poll loop in sendMessage) and once from `_recoverSinkDir`'s `isDir`
-   * branch. A single extra stat syscall on the hot turn path is
-   * sub-millisecond and does not change turn latency for a healthy
-   * ~2-5s tool turn.
+   * Cost: one `lstat` per call, no readdir/readFile. Two callers, two
+   * transports (#7926 review): `_recoverSinkDir`'s `isDir` branch only runs
+   * after a readdir FAILURE (rare, already fully synchronous — it also has
+   * a `statSync` immediately above this check), so it uses the SYNC form
+   * below. `drainHookFiles`'s per-pass calls (~every 150ms while a turn is
+   * active, i.e. the actual hot path) use `_validateSinkBaseAsync()`
+   * instead, which routes the `lstat` through `_boundedHookFs` — the same
+   * bounded+coalesced machinery readdir/readFile/unlink already use. A
+   * synchronous `lstatSync` on THAT path would reintroduce exactly the
+   * cross-session freeze #6132/#6178 built this class's async-fs pattern to
+   * prevent: a hung FUSE/NFS mount at the base (not just the session
+   * sub-dir) would block the single-threaded event loop on every poll of
+   * EVERY claude-tui session, with no timeout, for as long as the mount
+   * stays wedged. Both forms share `_evaluateSinkBaseStat` so the actual
+   * verdict logic has exactly one implementation.
    *
    * @returns {{ok: true} | {ok: false, reason: string}}
    */
@@ -976,6 +1015,63 @@ export class ClaudeTuiSession extends BaseSession {
     } catch (err) {
       return { ok: false, reason: `${base} is missing or unstat-able (${err.code || err.message})` }
     }
+    return this._evaluateSinkBaseStat(base, st)
+  }
+
+  /**
+   * #7926 (review) — the async, bounded-timeout twin of `_validateSinkBase()`
+   * for the hot poll-loop path. See that method's doc for why the two forms
+   * exist. A timeout is NOT the same verdict as a failed check: `!ok` means
+   * "the base looked wrong" (a security verdict — treat as compromised),
+   * while `timedOut` means "could not tell, the fs didn't answer in time"
+   * (an availability problem, same as a stuck readdir) — conflating them
+   * would turn a slow NFS mount into a false SINK_BASE_UNTRUSTED that ends
+   * every turn on a session whose base was never actually touched.
+   *
+   * @returns {{ok: true} | {ok: false, reason: string, timedOut?: boolean}}
+   */
+  async _validateSinkBaseAsync() {
+    if (!this._sinkDir) return { ok: false, reason: 'no sink dir is set' }
+    const base = dirname(this._sinkDir)
+    let st
+    try {
+      st = await this._boundedHookFs('lstat', base)
+    } catch (err) {
+      if (err && err.code === 'HOOK_FS_TIMEOUT') {
+        return { ok: false, timedOut: true, reason: `${base} lstat timed out after ${this._hookFsTimeoutMs}ms — sink fs may be stuck` }
+      }
+      return { ok: false, reason: `${base} is missing or unstat-able (${err.code || err.message})` }
+    }
+    return this._evaluateSinkBaseStat(base, st)
+  }
+
+  /**
+   * #7926 (review) — the actual verdict logic shared by `_validateSinkBase()`
+   * and `_validateSinkBaseAsync()`, given an already-obtained `lstat` result
+   * for `base`. Kept as pure logic over a stat object (no fs access of its
+   * own) so the sync and async callers can share exactly one implementation
+   * of the checks rather than two hand-copies drifting apart.
+   *
+   * Re-applies the same static checks `ensureOwnedBaseDir` enforces at
+   * create (symlink / not-a-directory / foreign uid / group-or-other-
+   * accessible), PLUS the fd-bound identity comparison _captureSinkBaseIdentity
+   * recorded. The mode check deliberately does NOT self-heal the way
+   * `ensureOwnedBaseDir` does for an adopted dir (chmod back to 0700): a mode
+   * WIDENING discovered mid-session, after the base was already validated
+   * once, is itself the signal of tampering the read path exists to catch —
+   * silently re-tightening it and continuing would be exactly the
+   * false-safety shape `docs/false-safety-guards.md` catalogues.
+   *
+   * When `_sinkBaseIdentity` was never captured (no start() has run — e.g.
+   * a unit test poking `_sinkDir` directly), the identity comparison is
+   * skipped and only the static checks apply, matching what
+   * `ensureOwnedBaseDir` itself would enforce.
+   *
+   * @param {string} base
+   * @param {import('fs').Stats} st
+   * @returns {{ok: true} | {ok: false, reason: string}}
+   */
+  _evaluateSinkBaseStat(base, st) {
     if (st.isSymbolicLink()) return { ok: false, reason: `${base} is now a symlink` }
     if (!st.isDirectory()) return { ok: false, reason: `${base} is no longer a directory` }
     // POSIX only, mirroring ensureOwnedBaseDir: Windows has no uid, and its
@@ -1052,7 +1148,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (!inflight) {
       inflight = kind === 'readdir' ? this._hookReaddir(path)
         : kind === 'readFile' ? this._hookReadFile(path)
-          : this._hookUnlink(path)
+          : kind === 'lstat' ? this._hookLstat(path)
+            : this._hookUnlink(path)
       // Free the slot when the real op finally settles (even long after our race
       // gave up), so a recovered mount can issue a fresh op. The then(noop,noop)
       // marks the underlying promise handled so a late rejection is never an
@@ -3249,8 +3346,21 @@ export class ClaudeTuiSession extends BaseSession {
       // sink path makes readdir below succeed, so without this check the
       // happy path never re-checked the base at all — this is the primary
       // gap the class doc on _validateSinkBase() describes. Cheap: one
-      // lstatSync, no readdir/readFile.
-      const baseCheck = this._validateSinkBase()
+      // bounded async lstat, no readdir/readFile. Uses the ASYNC form
+      // (#7926 review) — this call happens on every pass (~7/s during an
+      // active turn), so a blocking lstatSync here would reintroduce the
+      // exact cross-session event-loop freeze the async readdir/readFile
+      // pattern above exists to prevent, on a hung FUSE/NFS base.
+      const baseCheck = await this._validateSinkBaseAsync()
+      if (baseCheck.timedOut) {
+        // Same shape as the readdir HOOK_FS_TIMEOUT branch below: a slow fs
+        // is an availability problem, not a security verdict — skip this
+        // pass and let the poll loop's hard-timeout watchdog own a truly
+        // wedged turn, rather than surfacing SINK_BASE_UNTRUSTED for a base
+        // that was never actually tampered with.
+        log.warn(`hook sink base lstat timed out (${this._hookFsTimeoutMs}ms) — sink fs may be stuck; skipping pass`)
+        return
+      }
       if (!baseCheck.ok) {
         this._handleSinkBaseCompromised(baseCheck.reason)
         return
@@ -3293,6 +3403,21 @@ export class ClaudeTuiSession extends BaseSession {
           if (name.startsWith(prefix)) ordered.push(name)
         }
       }
+      // #7926 (review) — read-side TOCTOU: the top-of-pass _validateSinkBase()
+      // above proves the base was trustworthy at the START of this pass, but
+      // each `readFile` below is a real async fs call that yields the event
+      // loop, so a swap could land AFTER that check and BEFORE (or between)
+      // these reads without ever being seen. Collect this pass's reads into
+      // `pending` WITHOUT emitting anything or unlinking anything, then
+      // re-validate the base exactly once more before any of it is trusted —
+      // if the identity changed mid-pass, the whole batch is discarded
+      // (nothing partially delivered), not just the file(s) read after the
+      // swap. Residual: a swap that lands, gets read, and swaps BACK to the
+      // bit-identical original dev+ino before the check below runs would
+      // survive it — indistinguishable from "nothing happened", and not
+      // achievable by recreating a lookalike (a fresh mkdir/rm allocates a
+      // fresh inode).
+      const pending = []
       for (const name of ordered) {
         if (this._consumedFiles.has(name)) continue
         const full = join(this._sinkDir, name)
@@ -3304,7 +3429,35 @@ export class ClaudeTuiSession extends BaseSession {
           const raw = await this._boundedHookFs('readFile', full)
           if (raw.length === 0) continue  // partial write — poll again
           parsed = JSON.parse(raw)
-        } catch { continue }
+        } catch (err) {
+          // #7926 (review) — ELOOP means _hookReadFile's O_NOFOLLOW refused a
+          // symlink planted at a hook-file name. That should never happen
+          // during normal operation (hook writes are plain `cat > file`), so
+          // it's worth a loud, specific log rather than folding silently into
+          // the generic partial-write/parse-failure retry below.
+          if (err && err.code === 'ELOOP') {
+            log.warn(`hook file ${full} is a symlink — refusing to read it`)
+          }
+          continue
+        }
+        pending.push({ name, full, parsed })
+      }
+      if (pending.length === 0) return
+      const postCheck = await this._validateSinkBaseAsync()
+      if (postCheck.timedOut) {
+        // Same availability-vs-security distinction as the top-of-pass check:
+        // skip this pass (nothing in `pending` was consumed/unlinked, so the
+        // next successful pass re-reads the same files) rather than treating
+        // a slow fs as a compromise.
+        log.warn(`hook sink base lstat timed out (${this._hookFsTimeoutMs}ms) re-validating after reading ${pending.length} file(s) this pass — sink fs may be stuck; skipping pass`)
+        return
+      }
+      if (!postCheck.ok) {
+        log.warn(`hook sink base failed re-validation after reading ${pending.length} file(s) this pass (${postCheck.reason}) — discarding the batch`)
+        this._handleSinkBaseCompromised(postCheck.reason)
+        return
+      }
+      for (const { name, full, parsed } of pending) {
         this._consumedFiles.add(name)
         drainedThisPass++
         totalConsumed++
