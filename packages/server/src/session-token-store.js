@@ -10,9 +10,10 @@
 //
 // PairingManager stays filesystem-agnostic: it takes this as an injected
 // { load, save } adapter, so tests can drive it with an in-memory fake.
-import { readFileSync, statSync, existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { writeFileRestricted } from './platform.js'
+import { readTrustedSecretFile } from './trusted-file-read.js'
 import { getOrCreateMasterKey, encryptJson, decryptEnvelope, isEncryptedEnvelope } from './credential-cipher.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
@@ -43,19 +44,27 @@ export function createSessionTokenStore({ dir, keychain = realKeychain } = {}) {
   // The daemon's `load()` fail-softs all of these to `[]` (a re-pair is harmless);
   // the tokens CLI uses `loadResult()` so it never overwrites a store it couldn't
   // read, nor reports "0 tokens" for one it simply failed to decrypt.
+  //
+  // #7893: the mode check and the read go through `readTrustedSecretFile` — ONE
+  // `open(O_NOFOLLOW)` + `fstat(fd)` + read from that same fd, so a rename or
+  // symlink-swap of `session-tokens.json` between the mode check and the read
+  // (the old `statSync(path)` then `readFileSync(path)` shape) is refused
+  // outright rather than followed.
   function read() {
     try {
-      if (!existsSync(file)) return { status: 'absent', entries: [] }
       // Enforce owner-only 0600 (POSIX) — same boundary as the credential store.
       // A world/group-readable token file is refused rather than trusted.
-      if (process.platform !== 'win32') {
-        const perms = statSync(file).mode & 0o777
-        if (perms !== 0o600) {
-          log.warn(`${file} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600) — devices will re-pair`)
-          return { status: 'unreadable', entries: [] }
+      const result = readTrustedSecretFile(file, { mode: 0o600 })
+      if (result.status === 'absent') return { status: 'absent', entries: [] }
+      if (result.status === 'refused') {
+        if (result.code === 'EMODE') {
+          log.warn(`${file} has mode ${result.mode.toString(8).padStart(3, '0')}; refusing to read (must be 0600) — devices will re-pair`)
+        } else {
+          log.warn(`could not load persisted session tokens (${result.cause ? result.cause.message : result.code}) — devices will re-pair`)
         }
+        return { status: 'unreadable', entries: [] }
       }
-      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const parsed = JSON.parse(result.content)
       if (isEncryptedEnvelope(parsed)) {
         const key = getOrCreateMasterKey(keychain)
         if (!key) {
