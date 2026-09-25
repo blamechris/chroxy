@@ -32,6 +32,19 @@
  * `buildCodexArgs` as the thing this lint must catch — it does not call
  * `spawn` itself.
  *
+ * `node-pty`'s own `<namespace>.spawn(file, args, opts)` is ALSO scanned
+ * (#7935): it takes the exact same `(file, args, opts)` shape as
+ * `child_process.spawn` and the same argv gets option-parsed by whatever the
+ * spawned program does with it, so it is the same injection class, not a
+ * different one. The binding is tracked however this codebase actually reaches
+ * it — a static default/namespace/named import, a destructured
+ * `const { spawn } = await import('node-pty')`, a `const ptyMod = await
+ * import('node-pty')`, or (the dominant shape here — see
+ * `claude-tui-session.js`'s `_spawnPty` and `user-shell-session.js`) a later
+ * REASSIGNMENT of an already-`let`-declared binding inside a try/catch. Once
+ * recognised, the argv-resolution/guard-detection logic below applies
+ * unchanged — this was purely an import/binding-tracking gap.
+ *
  * `exec` / `execSync` (the shell-STRING form) are deliberately NOT scanned:
  * that is shell-metacharacter injection, a different class with a different
  * fix (quoting, or avoiding a shell entirely), not argv-option injection.
@@ -130,6 +143,11 @@ const DEFAULT_SRC_DIR = join(REPO_ROOT, 'packages', 'server', 'src')
 const DEFAULT_CATALOGUE = join(DEFAULT_SRC_DIR, 'utils', 'argv-safety.js')
 
 const CHILD_PROCESS_SOURCES = new Set(['child_process', 'node:child_process'])
+// node-pty's `<namespace>.spawn(file, args, opts)` shares child_process's exact
+// argv-injection shape (#7935) — a separate module source, tracked into the
+// SAME spawnApiLocals/spawnNamespaces maps below since the downstream
+// resolution/guard logic is shape-based, not module-based.
+const PTY_MODULE_SOURCES = new Set(['node-pty'])
 // `fork(modulePath, args, opts)` shares spawn's exact argv-injection shape —
 // `args` becomes the child's `process.argv.slice(2)`, option-parsed by
 // whatever the target module does with it — so it needs the same gate.
@@ -254,9 +272,27 @@ function lineOf(node, sourceFile) {
   return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
 }
 
-/** Dotted identifier path for an Identifier / non-computed PropertyAccessExpression chain, else null. */
+/**
+ * Dotted identifier path for an Identifier / `this` / non-computed
+ * PropertyAccessExpression chain, else null.
+ *
+ * #7935 review: `this` was not recognised as a valid path BASE at all (only
+ * `ts.isIdentifier` was), so `this._sessionId` resolved to `null` — silently
+ * invisible to shape-1 guard matching on BOTH sides (a guard call on
+ * `this._sessionId` never registered a key, and a sink element reading
+ * `this._sessionId` could never look one up) regardless of an
+ * `assertSafeArgvValue(this._sessionId, ...)` call sitting right next to it.
+ * Confirmed live: `claude-tui-session.js`'s `_spawnPty` guards
+ * `this._sessionId` this way, immediately before building the `--resume`/
+ * `--session-id` argv — invisible to this lint until node-pty spawns became a
+ * scanned sink surfaced it. `this` alone (bare, with no property access) is
+ * never itself a legal path key — `pathKeyOf` is only ever called on the
+ * FULL guard-argument / sink-element expression, and `this` as a whole
+ * expression is not a valid argv value in this codebase.
+ */
 function pathKeyOf(node) {
   if (ts.isIdentifier(node)) return node.text
+  if (node.kind === ts.SyntaxKind.ThisKeyword) return 'this'
   if (ts.isPropertyAccessExpression(node) && !node.questionDotToken) {
     const base = pathKeyOf(node.expression)
     return base === null ? null : `${base}.${node.name.text}`
@@ -276,19 +312,24 @@ function collectImports(sourceFile) {
   const guardLocals = new Set()
 
   const fromChildProcess = (moduleText) => CHILD_PROCESS_SOURCES.has(moduleText)
+  // #7935: node-pty is tracked into the SAME maps as child_process — its
+  // `<namespace>.spawn(file, args, opts)` is the identical argv-injection
+  // shape, so once the binding is recognised the downstream resolution/guard
+  // logic needs no module-specific branch at all.
+  const fromSpawnSource = (moduleText) => fromChildProcess(moduleText) || PTY_MODULE_SOURCES.has(moduleText)
   const fromArgvSafety = (moduleText) => moduleText.replace(/\\/g, '/').endsWith(GUARD_MODULE_SUFFIX)
 
   const handleNamedBindings = (namedBindings, moduleText) => {
     if (!namedBindings) return
     if (ts.isNamespaceImport(namedBindings)) {
-      if (fromChildProcess(moduleText)) spawnNamespaces.add(namedBindings.name.text)
+      if (fromSpawnSource(moduleText)) spawnNamespaces.add(namedBindings.name.text)
       return
     }
     if (ts.isNamedImports(namedBindings)) {
       for (const spec of namedBindings.elements) {
         const imported = (spec.propertyName ?? spec.name).text
         const local = spec.name.text
-        if (fromChildProcess(moduleText) && SPAWN_APIS.has(imported)) spawnApiLocals.set(local, imported)
+        if (fromSpawnSource(moduleText) && SPAWN_APIS.has(imported)) spawnApiLocals.set(local, imported)
         if (fromArgvSafety(moduleText) && GUARD_NAMES.has(imported)) guardLocals.add(local)
       }
     }
@@ -303,8 +344,9 @@ function collectImports(sourceFile) {
       // whole child_process module object under Node's CJS/ESM interop, so
       // `cp.spawn(...)` is exactly as live a sink as the namespace-import
       // form. Only the clause's default `name`, never `namedBindings`, so
-      // this was invisible to handleNamedBindings above.
-      if (fromChildProcess(moduleText) && stmt.importClause?.name && !stmt.importClause.isTypeOnly) {
+      // this was invisible to handleNamedBindings above. #7935: `import
+      // ptyMod from 'node-pty'` resolves the same way.
+      if (fromSpawnSource(moduleText) && stmt.importClause?.name && !stmt.importClause.isTypeOnly) {
         spawnNamespaces.add(stmt.importClause.name.text)
       }
     }
@@ -315,7 +357,8 @@ function collectImports(sourceFile) {
   // — this repo is ESM-only by convention (CLAUDE.md), but the lint's job is
   // to gate what the parser can see, not what the style guide permits; a
   // `require()` slipping past code review must still be gated, not silently
-  // invisible to the one check that would have caught its argv.
+  // invisible to the one check that would have caught its argv. #7935:
+  // `const { spawn } = await import('node-pty')` is the same shape.
   forEachDescendant(sourceFile, (node) => {
     if (!ts.isVariableDeclaration(node) || !node.initializer || !node.name) return
     if (!ts.isObjectBindingPattern(node.name)) return
@@ -325,12 +368,41 @@ function collectImports(sourceFile) {
     const isRequire = ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'require'
     if (!isDynamicImport && !isRequire) return
     const arg = call.arguments[0]
-    if (!arg || !ts.isStringLiteral(arg) || !CHILD_PROCESS_SOURCES.has(arg.text)) return
+    if (!arg || !ts.isStringLiteral(arg) || !fromSpawnSource(arg.text)) return
     for (const el of node.name.elements) {
       if (!ts.isIdentifier(el.propertyName ?? el.name) || !ts.isIdentifier(el.name)) continue
       const imported = (el.propertyName ?? el.name).text
       const local = el.name.text
       if (SPAWN_APIS.has(imported)) spawnApiLocals.set(local, imported)
+    }
+  })
+
+  // #7935: node-pty is accessed as a NAMESPACE (`ptyMod.spawn(...)`), not
+  // destructured, in both real call sites this repo has today
+  // (claude-tui-session.js's `_spawnPty`, user-shell-session.js's `start`).
+  // `const ptyMod = await import('node-pty')` binds it directly; the
+  // DOMINANT shape here is a later REASSIGNMENT of an already-`let`-declared
+  // binding inside a try/catch (so a rejected import can be handled without
+  // an uncaught throw) — a plain assignment EXPRESSION, not a
+  // VariableDeclaration with the import as its own initializer, which is a
+  // different AST shape the destructure handling above does not reach.
+  // Scoped to node-pty only (not child_process): this repo has no
+  // analogous child_process usage today, and widening namespace-reassignment
+  // tracking there is out of scope for this fix.
+  const isPtyDynamicImportCall = (expr) => {
+    let call = expr
+    if (ts.isAwaitExpression(call)) call = call.expression
+    if (!ts.isCallExpression(call) || call.expression.kind !== ts.SyntaxKind.ImportKeyword) return false
+    const arg = call.arguments[0]
+    return !!arg && ts.isStringLiteral(arg) && PTY_MODULE_SOURCES.has(arg.text)
+  }
+  forEachDescendant(sourceFile, (node) => {
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
+      if (isPtyDynamicImportCall(node.initializer)) spawnNamespaces.add(node.name.text)
+      return
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(node.left)) {
+      if (isPtyDynamicImportCall(node.right)) spawnNamespaces.add(node.left.text)
     }
   })
 
@@ -739,6 +811,46 @@ function isIgnoreMarkerAbove(node, sourceFile, rawLines) {
 }
 
 /**
+ * catalogueKey for an ELEMENT-level finding (#7936).
+ *
+ * Before this, an element's catalogueKey was ONLY its own normalised source
+ * text — e.g. a bare parameter named `value` produced the catalogueKey
+ * `"value"` no matter which function, which call, or which argv position it
+ * came from. Two unrelated sinks in the same file that both happen to flag
+ * an identically-named element therefore produced the IDENTICAL key, so a
+ * catalogue entry audited for one silently covered the other too — the
+ * entry's author never saw the second site, and the lint could not have told
+ * them it existed. Confirmed real (not hypothetical) while fixing #7929: new
+ * `AUDITED_SINKS` entries needed for service.js's aliased-local-variable
+ * findings had to rely on the coarse `match: 'domain'`-style substring
+ * because there was no more specific text available to match against.
+ *
+ * The fix appends distinguishing call-site context — the enclosing function
+ * (or `<module>` at module scope), the sink's own callee label, and the
+ * element's position within its resolved argv array — AFTER the unchanged
+ * element text, never replacing or reordering it. That is what keeps every
+ * existing catalogue entry's `match` (written against the old bare-text
+ * key) still finding its real finding: the OLD substring is still a literal
+ * substring of the NEW, longer key, at the same position, so `.includes()`
+ * matches exactly as before. What changes is that an author can NOW also
+ * write a match specific enough to include that suffix, which makes the two
+ * previously-identical keys for the two sinks above genuinely different —
+ * the aliasing bug was that no such text existed to write, not that authors
+ * always wrote unspecific matches.
+ *
+ * Deliberately NOT a line number (`docs/false-safety-guards.md`'s "roster
+ * checked in only one direction" catalogue, and the doc comment on
+ * `AUDITED_SINKS` itself): a function name / callee / argv position only
+ * changes when the FLAGGED SITE's own shape changes, not on every unrelated
+ * edit elsewhere in the file.
+ */
+function elementCatalogueKey(elem, index, scopeFn, calleeLabel, source) {
+  const text = normText(elem, source).slice(0, 200)
+  const site = `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}#${index}`
+  return `${text} [[${site}]]`
+}
+
+/**
  * @typedef {{ file: string, line: number, text: string, catalogueKey: string }} Finding
  */
 
@@ -783,7 +895,7 @@ function analyzeFile(filePath, keyRoot) {
           file: rel,
           line: lineOf(elem, sourceFile),
           text: `${calleeLabel}(...) argv element \`${normText(elem, source)}\` is not provably constant and is not gated`,
-          catalogueKey: normText(elem, source).slice(0, 200),
+          catalogueKey: elementCatalogueKey(elem, idx, scopeFn, calleeLabel, source),
         })
       })
     }

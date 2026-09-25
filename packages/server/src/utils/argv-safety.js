@@ -157,12 +157,25 @@ function escapeForRegExp(flag) {
  *
  * Each entry is `{ file, match, reason }`:
  *   - `file` — the sink's path, relative to `packages/server/src`.
- *   - `match` — a distinguishing substring of the flagged element's (or, for
- *     an unresolvable argv, the whole call's) normalised source text. Not a
- *     line number on purpose: a line number drifts on every unrelated edit
- *     above it, which would force a churn-only update on every such edit. A
- *     source-text match only goes stale when the FLAGGED CODE ITSELF changes
- *     — which is exactly when re-auditing is wanted.
+ *   - `match` — a distinguishing substring of the finding's catalogueKey. For
+ *     an unresolvable argv, that key is the whole call's normalised source
+ *     text. For a single flagged ELEMENT (#7936), it is that element's own
+ *     normalised text — UNCHANGED and always first — followed by the
+ *     enclosing function (or `<module>`), the sink's callee, and the
+ *     element's position within its resolved argv array, e.g. `` `value
+ *     [[runA#execFile#1]]` ``. A match written as just the bare element text
+ *     (the pre-#7936 convention — most of the entries below) still matches,
+ *     since that text is still a literal, unmoved prefix of the key, and may
+ *     legitimately span several call sites that share one safety argument
+ *     (the `domain`-style entries below). A match that also includes the
+ *     bracketed suffix pins to exactly the one call site it was written
+ *     against — use that shape when two sinks in this file could otherwise
+ *     share an identically-named flagged element (`lint-argv-sinks.mjs`'s
+ *     `elementCatalogueKey`). Not a line number on purpose: a line number
+ *     drifts on every unrelated edit above it, which would force a churn-only
+ *     update on every such edit. A source-text match only goes stale when the
+ *     FLAGGED CODE ITSELF changes — which is exactly when re-auditing is
+ *     wanted.
  *   - `reason` — one line: why this value cannot be attacker-controlled, or
  *     why the CLI it reaches cannot option-parse it.
  *
@@ -215,6 +228,30 @@ export const AUDITED_SINKS = [
     file: 'claude-tui-session.js',
     match: "execFile(binary, args",
     reason: "runClaudeAuthStatus's one call site passes a literal ['auth','status','--json','--settings', this._settingsPath] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
+  },
+  // #7935 — `_spawnPty`'s node-pty `ptyMod.spawn(attemptedBinary, args, {...})`
+  // became a scanned sink once the lint learned to recognise node-pty
+  // bindings; `this._sessionId` needs no entry (recognised structurally —
+  // guarded by the `assertSafeArgvValue(this._sessionId, 'sessionId')` call
+  // right above, now that `pathKeyOf` resolves a `this.` base). The three
+  // entries below use the new call-site-scoped catalogueKey shape (#7936:
+  // element text + enclosing function + sink callee) so a future SECOND
+  // sink in this file reusing one of these identifiers cannot silently
+  // alias onto these — see elementCatalogueKey in lint-argv-sinks.mjs.
+  {
+    file: 'claude-tui-session.js',
+    match: 'this._settingsPath [[_spawnPty#spawn',
+    reason: "this._settingsPath is set by writeHookSettings(this._sinkDir, ...) to join(this._sinkDir, 'settings.json'); this._sinkDir is always join(<server-config base>, `s-${randomUUID()}`) — a daemon-generated absolute path, same reasoning as this file's execFile(binary, args) entry above (runClaudeAuthStatus's own --settings argument).",
+  },
+  {
+    file: 'claude-tui-session.js',
+    match: 'this.model [[_spawnPty#spawn',
+    reason: 'this.model is gated BEFORE ClaudeTuiSession is constructed by SessionManager against ClaudeTuiSession.getAllowedModels() (models.js ALLOWED_MODEL_IDS, none starting with "-") — the same allowlist and preflight gate cli-session.js\'s own "model" entry documents — unless an operator opted the provider into config.providers.allowAnyModel (not client-reachable).',
+  },
+  {
+    file: 'claude-tui-session.js',
+    match: 'skillsPrefix [[_spawnPty#spawn',
+    reason: 'bound via args.push("--append-system-prompt", skillsPrefix) — the same required-arg two-token flag on the same claude CLI that cli-session.js\'s "skillsText" entry already measured (2.1.282: a bogus flag-shaped value here starts the process normally, swallowed as the flag\'s own value); skillsPrefix carries client-settable skills/preamble text (_buildCombinedSkillsPrefix), but the argv SHAPE cannot be reinterpreted regardless of its content — same reasoning as skillsText.',
   },
 
   // ── cli-session.js ──

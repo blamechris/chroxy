@@ -98,6 +98,33 @@ export function run(spec) {
 }
 `
 
+// #7935 review: \`pathKeyOf\` did not recognise \`this\` as a valid path BASE at
+// all, so a guard call on \`this.branch\` never registered a key and a sink
+// element reading \`this.branch\` could never look one up — a class-based
+// \`this.xxx\` guard was silently invisible to shape-1 matching regardless of
+// an assertSafeArgvValue call sitting right next to it. Surfaced by the
+// node-pty fix: claude-tui-session.js's \`_spawnPty\` guards
+// \`this._sessionId\` exactly this way.
+const GUARDED_VIA_THIS_PROPERTY = `
+import { execFile } from 'node:child_process'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
+class Runner {
+  run() {
+    assertSafeArgvValue(this.branch, 'branch')
+    execFile('/usr/bin/git', ['checkout', this.branch], () => {})
+  }
+}
+`
+
+const UNGUARDED_THIS_PROPERTY = `
+import { execFile } from 'node:child_process'
+class Runner {
+  run() {
+    execFile('/usr/bin/git', ['checkout', this.branch], () => {})
+  }
+}
+`
+
 const GUARDED_VIA_TERMINATOR = `
 import { execFile } from 'node:child_process'
 export function run(text) {
@@ -205,6 +232,21 @@ export function run(text) {
 }
 `
 
+// #7936 — two UNRELATED sinks in different functions that both flag an
+// identically-named bare-identifier element (`value`). Under the OLD
+// catalogueKey (just the element's own text), both findings produced the
+// IDENTICAL key `"value"`, so a catalogue entry audited for one silently
+// covered the other too.
+const ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS = `
+import { execFile } from 'node:child_process'
+export function runA(value) {
+  execFile('/usr/bin/git', ['diff', value], () => {})
+}
+export function runB(value) {
+  execFile('/usr/bin/git', ['log', value], () => {})
+}
+`
+
 const IGNORE_MARKER_ABOVE = `
 import { execFile } from 'node:child_process'
 export function run(userValue) {
@@ -284,10 +326,60 @@ export function launch(userValue) {
 }
 `
 
-const DYNAMIC_IMPORT_NON_CHILD_PROCESS_SPAWN_NOT_SCANNED = `
+// #7935 — node-pty's own `<namespace>.spawn(file, args, opts)` is now
+// scanned: same (file, args, opts) shape as child_process.spawn, same argv-
+// injection class. Bound here via `const ptyMod = await import('node-pty')`.
+const DYNAMIC_IMPORT_PTY_SPAWN_UNGUARDED = `
 export async function launch(userValue) {
   const ptyMod = await import('node-pty')
   return ptyMod.spawn('/usr/bin/claude', ['--resume', userValue], {})
+}
+`
+
+const DYNAMIC_IMPORT_PTY_SPAWN_GUARDED = `
+import { assertSafeArgvValue } from './utils/argv-safety.js'
+export async function launch(userValue) {
+  assertSafeArgvValue(userValue, 'value')
+  const ptyMod = await import('node-pty')
+  return ptyMod.spawn('/usr/bin/claude', ['--resume', userValue], {})
+}
+`
+
+// The DOMINANT real shape (claude-tui-session.js's `_spawnPty`, user-shell-
+// session.js's `start`): a `let`-declared binding REASSIGNED inside a
+// try/catch (so a rejected import can be handled without an uncaught
+// throw), not a `const` with the import as its own initializer — a
+// different AST shape the const-declaration handling does not reach.
+const DYNAMIC_IMPORT_PTY_SPAWN_VIA_REASSIGNMENT_UNGUARDED = `
+export async function launch(userValue) {
+  let ptyMod
+  try {
+    ptyMod = await import('node-pty')
+  } catch (err) {
+    throw new Error('node-pty unavailable: ' + err.message)
+  }
+  return ptyMod.spawn('/usr/bin/claude', ['--resume', userValue], {})
+}
+`
+
+// user-shell-session.js's own real shape: a literal empty argv array needs
+// no guard at all — zero elements to flag, even though the binding shape
+// (let-reassignment) is identical to the unguarded case above.
+const DYNAMIC_IMPORT_PTY_SPAWN_VIA_REASSIGNMENT_LITERAL_EMPTY_ARGS = `
+export async function launch(shellPath) {
+  let ptyMod
+  ptyMod = await import('node-pty')
+  return ptyMod.spawn(shellPath, [], {})
+}
+`
+
+// A destructured \`{ spawn }\` import from node-pty is tracked the same way a
+// destructured child_process import already is (review guidance: "however
+// the module is bound").
+const DYNAMIC_IMPORT_PTY_SPAWN_DESTRUCTURED_UNGUARDED = `
+export async function launch(userValue) {
+  const { spawn } = await import('node-pty')
+  return spawn('/usr/bin/claude', ['--resume', userValue], {})
 }
 `
 
@@ -363,6 +455,19 @@ describe('lint-argv-sinks', () => {
     test('one-hop local wrapper function is recognised', () => {
       const r = runLint({ 'clean.js': GUARDED_VIA_WRAPPER }, { catalogue: EMPTY_CATALOGUE })
       assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('a guard call on a `this.` property is recognised (#7935 review)', () => {
+      const guarded = runLint({ 'clean.js': GUARDED_VIA_THIS_PROPERTY }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(guarded.status, 0, guarded.stderr)
+
+      // POSITIVE CONTROL: the identical `this.branch` sink with no guard call
+      // anywhere — must fail, proving the pass above comes from pathKeyOf
+      // resolving `this.branch`, not from the lint failing to see `this.`
+      // sinks at all.
+      const unguarded = runLint({ 'offender.js': UNGUARDED_THIS_PROPERTY }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(unguarded.status, 1)
+      assert.match(unguarded.stderr, /argv element `this\.branch`/)
     })
 
     test('a template literal joining two identifiers requires BOTH to be guarded', () => {
@@ -493,6 +598,57 @@ describe('lint-argv-sinks', () => {
     })
   })
 
+  // #7936 — an element-level catalogueKey must carry enough call-site
+  // context that two unrelated sinks sharing an identically-named element do
+  // NOT collapse onto the same key (and so the same catalogue entry).
+  describe('catalogueKey specificity for element-level findings (#7936)', () => {
+    test('RED: two unrelated sinks in different functions, same-named element, both fail uncatalogued', () => {
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /offender\.js:4\s+execFile\(\.\.\.\) argv element `value`/)
+      assert.match(r.stderr, /offender\.js:7\s+execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('an entry scoped to runA\'s call site silences ONLY runA\'s finding, not runB\'s (non-aliasing)', () => {
+      // `match` includes the new call-site context (enclosing function +
+      // sink callee) the fix adds to the key — this is text that simply did
+      // not exist to write against before #7936, since both sinks' keys
+      // were the bare string "value".
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[runA#execFile', reason: 'test: runA only, deliberately narrow' },
+      ]\n`
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      // runA's finding (line 4) is silenced...
+      assert.doesNotMatch(r.stderr, /offender\.js:4/)
+      // ...but runB's identically-named finding (line 7) still fails. Under
+      // the OLD catalogueKey this single entry would have silenced BOTH,
+      // since the keys were identical — that is the #7936 bug.
+      assert.match(r.stderr, /offender\.js:7\s+execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('GREEN: giving EACH site its own entry silences both — proves both are independently addressable', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[runA#execFile', reason: 'test: runA' },
+        { file: 'offender.js', match: 'value [[runB#execFile', reason: 'test: runB' },
+      ]\n`
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS }, { catalogue })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('a fully generic bare-identifier match (no call-site context) still spans both — backward compatible with pre-#7936 entries', () => {
+      // The OLD element text is still a literal, unmoved substring of the
+      // NEW key (the call-site context is APPENDED, never inserted before
+      // or interleaved) — so none of the 58 pre-existing catalogue entries
+      // written against the old bare-text key go stale from this change.
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value', reason: 'test: intentionally broad, matches the pre-#7936 convention' },
+      ]\n`
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS }, { catalogue })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
   describe('inline `// argv-safety-ignore:` marker', () => {
     test('a marker with a reason on the line above silences that one finding', () => {
       const r = runLint({ 'marked.js': IGNORE_MARKER_ABOVE }, { catalogue: EMPTY_CATALOGUE })
@@ -620,18 +776,39 @@ describe('lint-argv-sinks', () => {
       assert.match(r.stderr, /spawn\(\.\.\.\) — argv could not be statically resolved/)
     })
 
-    // Confirmed FOLLOW-UP, not fixed here: a spawn-like call on a namespace
-    // bound from a dynamic, non-child_process import (node-pty's own
-    // `pty.spawn(file, args)`) is invisible to the whole import-tracking
-    // model, which only recognises `node:child_process`/`child_process`
-    // sources. This is the exact shape of the live gap fixed directly in
-    // claude-tui-session.js's `_spawnPty` (see the assertSafeArgvValue call
-    // added there) — the lint cannot see that call site at all, before or
-    // after that fix, which is why the fix had to land as a source guard
-    // rather than a catalogue entry.
-    test('CONFIRMED GAP (tracked as follow-up, not fixed here): a dynamically-imported non-child_process spawn (node-pty) is not scanned', () => {
-      const r = runLint({ 'offender.js': DYNAMIC_IMPORT_NON_CHILD_PROCESS_SPAWN_NOT_SCANNED }, { catalogue: EMPTY_CATALOGUE })
-      assert.equal(r.status, 0, r.stderr)
+    // #7935 — FIXED: a spawn-like call on a namespace bound from a dynamic,
+    // non-child_process import (node-pty's own `pty.spawn(file, args)`) was
+    // invisible to the whole import-tracking model, which only recognised
+    // `node:child_process`/`child_process` sources. This was the exact shape
+    // of the live gap fixed directly in claude-tui-session.js's `_spawnPty`
+    // (the assertSafeArgvValue call added there predates this fix) — the
+    // lint could not see that call site at all before this. Now scanned like
+    // any other sink, across the binding shapes this codebase actually uses.
+    test('RED->GREEN: a dynamically-imported non-child_process spawn (node-pty), bound via `const`, is scanned', () => {
+      const red = runLint({ 'offender.js': DYNAMIC_IMPORT_PTY_SPAWN_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(red.status, 1, red.stderr)
+      assert.match(red.stderr, /spawn\(\.\.\.\) argv element `userValue`/)
+
+      const green = runLint({ 'clean.js': DYNAMIC_IMPORT_PTY_SPAWN_GUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(green.status, 0, green.stderr)
+    })
+
+    test('RED->GREEN: the dominant real shape — a `let`-declared binding REASSIGNED inside a try/catch — is also scanned', () => {
+      const red = runLint({ 'offender.js': DYNAMIC_IMPORT_PTY_SPAWN_VIA_REASSIGNMENT_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(red.status, 1, red.stderr)
+      assert.match(red.stderr, /spawn\(\.\.\.\) argv element `userValue`/)
+
+      // POSITIVE CONTROL: the identical binding shape with a literal empty
+      // argv array (user-shell-session.js's real shape) passes with zero
+      // findings — proving the pass isn't from failing to see the call.
+      const clean = runLint({ 'clean.js': DYNAMIC_IMPORT_PTY_SPAWN_VIA_REASSIGNMENT_LITERAL_EMPTY_ARGS }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(clean.status, 0, clean.stderr)
+    })
+
+    test('RED: a destructured `{ spawn }` import from node-pty is also scanned', () => {
+      const r = runLint({ 'offender.js': DYNAMIC_IMPORT_PTY_SPAWN_DESTRUCTURED_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /spawn\(\.\.\.\) argv element `userValue`/)
     })
   })
 

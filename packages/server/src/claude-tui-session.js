@@ -2468,11 +2468,18 @@ export class ClaudeTuiSession extends BaseSession {
       this.emit('error', { message: `Refusing to spawn claude TUI: ${err.message}` })
       return
     }
-    const idArgs = this._resumedFromPersisted
+    // #7935 review: built as a ternary-of-two-array-literals plus `.push()`
+    // (not `[...idArgs, ...]` spread into a fresh array) so
+    // `scripts/lint-argv-sinks.mjs` can statically resolve `args` at all —
+    // its array resolution traces a `const name = <literal | ternary-of-two-
+    // literals>` plus same-function `.push()` calls, but a spread of another
+    // local array is opaque to it (same as any dynamic/spread argv), which
+    // made this whole call unresolvable and untraceable at an ELEMENT level.
+    // Same final array contents either way; this is a shape change only.
+    const args = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
-    const args = [
-      ...idArgs,
+    args.push(
       '--settings', this._settingsPath,
       // Claude Code 2.1.186 added a "Claude in Chrome extension detected"
       // first-run prompt that interactively blocks the TUI (1/2/Enter/Esc) when
@@ -2481,7 +2488,7 @@ export class ClaudeTuiSession extends BaseSession {
       // (code=1). A headless chroxy TUI session never drives the browser
       // integration, so disable it at spawn — no prompt, no wedge.
       '--no-chrome',
-    ]
+    )
     if (this.skipPermissions) {
       // #4044: bypass chroxy's hook + claude's per-tool prompt entirely.
       // Caller is expected to opt in explicitly via the session option.
