@@ -12,17 +12,17 @@
 //
 // All paths are temp dirs; env is passed explicitly (never process.env).
 
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { IngestEventSchema, INGEST_EVENT_TYPES } from '@chroxy/protocol'
 import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
-import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT } from '../src/config.js'
+import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT, INGEST_SECRET_REQUIRED_MODE } from '../src/config.js'
 import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/project.js'
 
 const SECRET = 'test-hooks-secret'
@@ -486,7 +486,10 @@ describe('config resolution', () => {
   it('reads port from config.json and secret from ingest-secret under CHROXY_CONFIG_DIR', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ port: 4242 }))
-    writeFileSync(join(dir, 'ingest-secret'), 'file-secret\n')
+    // #7894: resolveIngestSecret now enforces the daemon's 0600 boundary, so
+    // this fixture must be written at the trusted mode to keep exercising the
+    // happy path — the mode/owner boundary itself is covered below.
+    writeFileSync(join(dir, 'ingest-secret'), 'file-secret\n', { mode: 0o600 })
     const env = { CHROXY_CONFIG_DIR: dir }
     assert.equal(resolveIngestUrl(env), 'http://127.0.0.1:4242/api/events')
     assert.equal(resolveIngestSecret(env), 'file-secret')
@@ -530,6 +533,135 @@ describe('config resolution', () => {
     const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ host: 'fd00::1', port: 4242 }))
     assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir }), 'http://[fd00::1]:4242/api/events')
+  })
+})
+
+// #7894: packages/server/src/event-ingest.js `assertIngestSecretFileTrusted`
+// (#7246/#7889) refuses an on-disk ingest-secret whose mode isn't exactly
+// 0600 or whose owner isn't the daemon's uid. `resolveIngestSecret` here is
+// the ONLY OTHER reader of that same file (docs/false-safety-guards.md's
+// "guard wired to only some callers" shape) — until now it read with a bare
+// readFileSync and enforced nothing.
+//
+// Unlike the daemon (which THROWS — it must not trust an INCOMING
+// credential), this reader is fetching its OWN outbound credential: a bad
+// file means "treat the secret as absent" (return null, never throw) —
+// hooks must never block Claude Code, and sending a secret the daemon will
+// 401 anyway would just leak it onto the wire for nothing.
+describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-SILENT)', () => {
+  let dir
+  let secretPath
+
+  const withEnv = () => ({ CHROXY_CONFIG_DIR: dir })
+
+  // Captures process.stderr.write synchronously around `fn`. Every check
+  // under test here is synchronous (no fetch, no await), so there is no
+  // window for a concurrent test in this file to observe the patched stream.
+  function captureStderr(fn) {
+    const chunks = []
+    const real = process.stderr.write
+    process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true }
+    try {
+      return { result: fn(), lines: chunks }
+    } finally {
+      process.stderr.write = real
+    }
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'hooks-ingest-secret-mode-'))
+    secretPath = join(dir, 'ingest-secret')
+  })
+
+  it('a missing secret file resolves to null silently (normal pre-daemon-start case)', () => {
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, null)
+    assert.deepEqual(lines, [])
+  })
+
+  it('trusts and returns a 0600, self-owned secret (unchanged happy path)', () => {
+    writeFileSync(secretPath, 'own-secret\n', { mode: 0o600 })
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, 'own-secret')
+    assert.deepEqual(lines, [])
+  })
+
+  it('a widened (0644) secret is treated as absent, with exactly one stderr line naming the path and the fix', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'widened\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o644)
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, null)
+    assert.equal(lines.length, 1)
+    assert.ok(lines[0].includes(secretPath), 'stderr line must name the path')
+    assert.ok(lines[0].includes('chmod 600'), 'stderr line must name the fix')
+  })
+
+  it('a NARROWED (0400) secret is refused too — the boundary is exactly 0600, not "no wider than 0600"', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'narrowed\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o400)
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, null)
+    assert.equal(lines.length, 1)
+    assert.ok(lines[0].includes(secretPath))
+  })
+
+  it('a foreign-owned secret is refused even at the correct mode', { skip: typeof process.getuid !== 'function' }, () => {
+    writeFileSync(secretPath, 'own-secret\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    process.getuid = () => realUid + 1
+    try {
+      const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+      assert.equal(result, null)
+      assert.equal(lines.length, 1)
+      assert.ok(lines[0].includes(secretPath))
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  // Regression guard for the specific `if (uid)` footgun the implementation
+  // comment calls out (mirrors event-ingest.test.js's identical case): uid 0
+  // (root) is a valid but FALSY value, so a truthy check would silently
+  // disable the comparison for exactly the case a root-run hook process
+  // matters most for. Claiming uid 0 while the file is owned by our real
+  // (non-zero, off-CI-root) uid must still be treated as a mismatch.
+  it('refuses when the CALLER claims uid 0 (root) and the file is owned by a different uid', { skip: typeof process.getuid !== 'function' }, () => {
+    writeFileSync(secretPath, 'root-check\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    if (realUid === 0) {
+      // Actually running as root — nothing to simulate; the mismatch would
+      // need a real chown, which this suite's sandbox does not attempt.
+      process.getuid = realGetuid
+      return
+    }
+    process.getuid = () => 0
+    try {
+      const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+      assert.equal(result, null, 'uid 0 must not be treated as "no uid to compare" via a truthy check')
+      assert.equal(lines.length, 1)
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  it('refuses a symlink pointed at a 0600 file (O_NOFOLLOW on the final component)', { skip: process.platform === 'win32' }, () => {
+    const target = join(dir, 'real-secret')
+    writeFileSync(target, 'target-secret\n', { mode: 0o600 })
+    symlinkSync(target, secretPath)
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, null)
+    assert.equal(lines.length, 1)
+  })
+
+  // Parity pin: this package has zero runtime deps and no dependency on
+  // @chroxy/server, so it cannot import the daemon's (unexported)
+  // `assertIngestSecretFileTrusted`. The literal is pinned here instead —
+  // see packages/server/src/event-ingest.js's `perms !== 0o600` check, the
+  // exact boundary this constant mirrors.
+  it('pins the required mode at exactly 0o600, matching the daemon check', () => {
+    assert.equal(INGEST_SECRET_REQUIRED_MODE, 0o600)
   })
 })
 
@@ -614,6 +746,24 @@ describe('runEmit', () => {
       hookEventArg: 'session_end',
       stdinText: '{}',
       env: { CHROXY_INGEST_URL: baseUrl, CHROXY_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'hooks-nosecret-')) },
+      now: () => NOW,
+    })
+    assert.deepEqual(result, { sent: false, reason: 'no_secret' })
+    assert.equal(received.length, countBefore)
+  })
+
+  // #7894 end-to-end: a wrong-mode on-disk secret must resolve through
+  // runEmit exactly like a missing one — no network call, no throw.
+  it('is a silent no-op when the on-disk ingest secret has the wrong mode', { skip: process.platform === 'win32' }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hooks-nosecret-mode-'))
+    const secretPath = join(dir, 'ingest-secret')
+    writeFileSync(secretPath, 'wrong-mode-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o644)
+    const countBefore = received.length
+    const result = await runEmit({
+      hookEventArg: 'session_end',
+      stdinText: '{}',
+      env: { CHROXY_INGEST_URL: baseUrl, CHROXY_CONFIG_DIR: dir },
       now: () => NOW,
     })
     assert.deepEqual(result, { sent: false, reason: 'no_secret' })
