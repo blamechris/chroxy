@@ -473,10 +473,12 @@ export class ClaudeByokSession extends BaseSession {
     // `_executeTaskTool`) explicitly SKIPS discovery — the child does not
     // parse a second copy of ~/.claude.json / <cwd>/.mcp.json and does not
     // spawn its own fleet. `this.cwd` is set by the BaseSession super() call
-    // above, so it is available here. Resolves user root, project scope
-    // (`projects[<realpath(cwd)>].mcpServers`), and repo-local `.mcp.json`
-    // — the same three sources `discoverConfiguredMcpServers` documents —
-    // instead of only ever reading the config's root `mcpServers` block.
+    // above, so it is available here. Resolves project scope
+    // (`projects[<realpath(cwd)>].mcpServers`), repo-local `.mcp.json`, and
+    // user root — the same three sources, in the same precedence order,
+    // `discoverConfiguredMcpServers` reads via the shared
+    // `readMcpSourcesInPrecedenceOrder` helper — instead of only ever
+    // reading the config's root `mcpServers` block.
     const mcpConfig = opts.mcpConfigPath === null
       ? { servers: [], warnings: [] }
       : discoverMcpServerSpecs(this.cwd, { configPath: this._mcpConfigPath })

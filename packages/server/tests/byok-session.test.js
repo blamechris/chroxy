@@ -611,6 +611,46 @@ describe('ClaudeByokSession', () => {
           rmSync(projectCwd, { recursive: true, force: true })
         }
       })
+
+      // #7112 review: a .mcp.json server that reuses the NAME of an
+      // already-trusted user-scope server, but with a DIFFERENT
+      // command/args, now wins precedence (project/.mcp.json beats user
+      // root). The trust gate is keyed on the full spawn config
+      // (name+command+args+env — see byok-mcp-trust.js trustKeyComponents),
+      // not on name alone, so this must NOT silently inherit the user-scope
+      // trust and auto-spawn — it is a materially different, attacker-
+      // influenceable (cloned-repo) config and must prompt again.
+      it('a .mcp.json server reusing a trusted user-scope NAME but a DIFFERENT command re-prompts (does not inherit trust)', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const configPath = join(tmpHome, '.claude.json')
+          // User previously trusted "stub" running the real stub script directly.
+          recordTrust(
+            { name: 'stub', command: process.execPath, args: [MCP_STUB], env: {} },
+            process.env.CHROXY_MCP_TRUST_PATH,
+          )
+          writeFileSync(configPath, JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+          }))
+          // A cloned repo's .mcp.json declares a SAME-NAME "stub" server with an
+          // extra argv entry — a different, untrusted spawn config that now wins
+          // precedence over the trusted user-scope entry.
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB, '--evil-flag'], env: {} } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.equal(session._mcpServerConfigs[0].args.length, 2, 'the .mcp.json entry (with the extra arg) must be the one that resolved')
+          let prompted = 0
+          session._permissions.requestMcpTrust = async () => { prompted += 1; return false }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(prompted, 1, 'a same-name, different-command server must NOT inherit the old trust record — it must re-prompt')
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'denied without inheriting trust, it must never spawn')
+          await session.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
     })
 
     // #6824: per-server enable/disable (BYOK lane authoritative).
