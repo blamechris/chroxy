@@ -86,7 +86,7 @@ When you compile, `compile-skill-targets.mjs` prints a one-line hint if it detec
 | **What it is** | Instruction snippets injected into the model's prompt | Slash-command playbooks (`/full-review`, `/check-pr`, …) |
 | **Where it lives** | `~/.chroxy/skills/*.md` + `<repo>/.chroxy/skills/*.md` | `.claude/commands/*.md` → compiled to native targets |
 | **Needs a running Chroxy?** | **Yes** — injected at session start | **No** — a build-time authoring tool |
-| **Provider-agnostic?** | **Yes** — injected for any provider (with optional `providers:` scoping) | Compiled per coding agent (claude / gemini / codex) |
+| **Provider-agnostic?** | **Yes** — injected for any provider (with optional `providers:` scoping) | Compiled per coding agent (claude / gemini / codex / pi) |
 | **How invoked** | Auto-injected; listed via `list_skills` | `/full-review` etc. in your coding agent |
 | **Source of truth** | Your files | The `blamechris/skill-templates` registry via `/skill` |
 

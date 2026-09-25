@@ -921,14 +921,27 @@ was checked against `--help` on the pinned version for exactly this reason.
   their own suite — `packages/server/tests/is-entry-point.test.js` and
   `scripts/__tests__/is-entry-point.test.mjs`; the sidecar's inline third copy
   is held only by the drift gate, since it cannot be imported to be tested.
-  ③ **Call-site coverage** is a separate gate: the guard is called from five
-  sites. Two have tests asserting both directions (the guard gating execution
-  when false, and permitting it when true): `scripts/gen-agents-md.mjs:79` and
-  `scripts/compile-skill-targets.mjs:636` (`#7251`). The other three — `packages/server/src/server-cli-child.js:179`,
-  `packages/server/src/channels/chroxy-channel-server.js:241`, and
-  `packages/server/sidecar/agent.js:1320` — have no call-site tests (`#7254`).
-  A guard that reads `false` at a call site means the entry point never runs,
-  the process exits 0, and nothing distinguishes that from a successful no-op.
+  ③ **Call-site coverage** is a separate gate, and the set of call sites is
+  not enumerated anywhere in the repo — `git grep -n "isEntryPoint("` is how
+  to find the current one, since a hardcoded count here would go stale the
+  next time a site is added or removed. As of this writing, most have a test
+  asserting both directions (the guard gating execution when false, and
+  permitting it when true): `scripts/gen-agents-md.mjs:79`,
+  `scripts/compile-skill-targets.mjs:636` (`#7236`, closed by `#7251`),
+  `scripts/lint-workflow-npm-env.mjs:367` and
+  `scripts/lint-write-only-ctx-fields.mjs:2553` (both `#7236`), and the two
+  server call sites, `packages/server/src/server-cli-child.js:179` and
+  `packages/server/src/channels/chroxy-channel-server.js:241`
+  (`#7254`, closed by `#7264`). Two remain uncovered: `scripts/lib/contributing-roster.mjs:126`
+  (no tracking issue filed — every test that touches that module imports
+  `parseRoster`/`parseExemptions` directly and never runs the script itself,
+  even though `scripts/check-required-contexts.sh` does exactly that in CI),
+  and the sidecar's own inlined guard in `packages/server/sidecar/agent.js` —
+  the harder of the two, since the module cannot import the shared
+  `isEntryPoint` function to begin with, so it has no exported guard to
+  reuse a call-site helper against. A guard that reads `false` at any of
+  these means the entry point never runs, the process exits 0, and nothing
+  distinguishes that from a successful no-op.
 
 ### 15. The denylist for the neighbouring threat, mistaken for containment — `#7341`
 
