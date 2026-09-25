@@ -161,21 +161,24 @@ function escapeForRegExp(flag) {
  *     an unresolvable argv, that key is the whole call's normalised source
  *     text. For a single flagged ELEMENT (#7936), it is that element's own
  *     normalised text — UNCHANGED and always first — followed by the
- *     enclosing function (or `<module>`), the sink's callee, and the
- *     element's position within its resolved argv array, e.g. `` `value
- *     [[runA#execFile#1]]` ``. A match written as just the bare element text
- *     (the pre-#7936 convention — most of the entries below) still matches,
- *     since that text is still a literal, unmoved prefix of the key, and may
- *     legitimately span several call sites that share one safety argument
- *     (the `domain`-style entries below). A match that also includes the
- *     bracketed suffix pins to exactly the one call site it was written
- *     against — use that shape when two sinks in this file could otherwise
- *     share an identically-named flagged element (`lint-argv-sinks.mjs`'s
- *     `elementCatalogueKey`). Not a line number on purpose: a line number
- *     drifts on every unrelated edit above it, which would force a churn-only
- *     update on every such edit. A source-text match only goes stale when the
- *     FLAGGED CODE ITSELF changes — which is exactly when re-auditing is
- *     wanted.
+ *     enclosing function (or `<module>`), the sink's callee, a per-
+ *     (function, callee) call-site ORDINAL (review follow-through: two
+ *     separate calls to the same callee within the same function still
+ *     shared a key without this — see the `elementCatalogueKey` doc comment
+ *     in `lint-argv-sinks.mjs`), and the element's position within its
+ *     resolved argv array, e.g. `` `value [[runA#execFile#0#1]]` ``. A match
+ *     written as just the bare element text (the pre-#7936 convention — most
+ *     of the entries below) still matches, since that text is still a
+ *     literal, unmoved prefix of the key, and may legitimately span several
+ *     call sites that share one safety argument (the `domain`-style entries
+ *     below). A match that also includes the bracketed suffix pins to
+ *     exactly the one call site it was written against — use that shape
+ *     when two sinks in this file could otherwise share an identically-named
+ *     flagged element (`lint-argv-sinks.mjs`'s `elementCatalogueKey`). Not a
+ *     line number on purpose: a line number drifts on every unrelated edit
+ *     above it, which would force a churn-only update on every such edit. A
+ *     source-text match only goes stale when the FLAGGED CODE ITSELF
+ *     changes — which is exactly when re-auditing is wanted.
  *   - `reason` — one line: why this value cannot be attacker-controlled, or
  *     why the CLI it reaches cannot option-parse it.
  *

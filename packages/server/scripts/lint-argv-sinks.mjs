@@ -826,27 +826,43 @@ function isIgnoreMarkerAbove(node, sourceFile, rawLines) {
  * because there was no more specific text available to match against.
  *
  * The fix appends distinguishing call-site context — the enclosing function
- * (or `<module>` at module scope), the sink's own callee label, and the
- * element's position within its resolved argv array — AFTER the unchanged
- * element text, never replacing or reordering it. That is what keeps every
- * existing catalogue entry's `match` (written against the old bare-text
- * key) still finding its real finding: the OLD substring is still a literal
- * substring of the NEW, longer key, at the same position, so `.includes()`
- * matches exactly as before. What changes is that an author can NOW also
- * write a match specific enough to include that suffix, which makes the two
- * previously-identical keys for the two sinks above genuinely different —
- * the aliasing bug was that no such text existed to write, not that authors
- * always wrote unspecific matches.
+ * (or `<module>` at module scope), the sink's own callee label, a per-
+ * (function, callee) call-site ORDINAL, and the element's position within
+ * its resolved argv array — AFTER the unchanged element text, never
+ * replacing or reordering it. That is what keeps every existing catalogue
+ * entry's `match` (written against the old bare-text key) still finding its
+ * real finding: the OLD substring is still a literal substring of the NEW,
+ * longer key, at the same position, so `.includes()` matches exactly as
+ * before. What changes is that an author can NOW also write a match
+ * specific enough to include that suffix, which makes the two previously-
+ * identical keys for the two sinks above genuinely different — the aliasing
+ * bug was that no such text existed to write, not that authors always wrote
+ * unspecific matches.
+ *
+ * The call-site ORDINAL (review: without it, two DIFFERENT calls to the
+ * same callee within the SAME function — e.g. two `execFile(...)` calls in
+ * one function, each flagging an identically-named element at the same argv
+ * position — still produced identical keys; a catalogue entry scoped to the
+ * first call's key silently covered the second call too, the exact #7936
+ * bug one level down. Confirmed via `runBoth(value) { execFile(bin, ['diff',
+ * value]); execFile(bin, ['log', value]) }`: both `value` elements sit at
+ * argv index 1 in the same function calling the same callee, so function +
+ * callee + index alone still collide). It counts encountered call sites for
+ * a given (function, callee) pair in source order, reset per file — it only
+ * changes when a spawn-like call to that SAME callee is added, removed, or
+ * reordered ahead of this one within the SAME function, not on an unrelated
+ * edit anywhere else in the file, matching the "not a line number" rationale
+ * below for the same reason the argv index already does.
  *
  * Deliberately NOT a line number (`docs/false-safety-guards.md`'s "roster
  * checked in only one direction" catalogue, and the doc comment on
- * `AUDITED_SINKS` itself): a function name / callee / argv position only
- * changes when the FLAGGED SITE's own shape changes, not on every unrelated
- * edit elsewhere in the file.
+ * `AUDITED_SINKS` itself): a function name / callee / call ordinal / argv
+ * position only changes when the FLAGGED SITE's own shape changes, not on
+ * every unrelated edit elsewhere in the file.
  */
-function elementCatalogueKey(elem, index, scopeFn, calleeLabel, source) {
+function elementCatalogueKey(elem, index, scopeFn, calleeLabel, source, callOrdinal = 0) {
   const text = normText(elem, source).slice(0, 200)
-  const site = `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}#${index}`
+  const site = `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}#${callOrdinal}#${index}`
   return `${text} [[${site}]]`
 }
 
@@ -871,8 +887,17 @@ function analyzeFile(filePath, keyRoot) {
 
   const findings = []
   let sinksScanned = 0
+  // Review (#7936 follow-through): per-(function, callee) call-site ordinal,
+  // counted in source-traversal order and reset for every file. Distinguishes
+  // two separate calls to the same callee within the same function — see the
+  // elementCatalogueKey doc comment above for why function+callee+argv-index
+  // alone still collides in that case.
+  const callSiteOrdinals = new Map()
 
   const evaluateBranches = (branches, siteNode, calleeLabel, scopeFn) => {
+    const siteKey = `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}`
+    const callOrdinal = callSiteOrdinals.get(siteKey) ?? 0
+    callSiteOrdinals.set(siteKey, callOrdinal + 1)
     if (branches === null) {
       sinksScanned++
       const line = lineOf(siteNode, sourceFile)
@@ -895,7 +920,7 @@ function analyzeFile(filePath, keyRoot) {
           file: rel,
           line: lineOf(elem, sourceFile),
           text: `${calleeLabel}(...) argv element \`${normText(elem, source)}\` is not provably constant and is not gated`,
-          catalogueKey: elementCatalogueKey(elem, idx, scopeFn, calleeLabel, source),
+          catalogueKey: elementCatalogueKey(elem, idx, scopeFn, calleeLabel, source, callOrdinal),
         })
       })
     }

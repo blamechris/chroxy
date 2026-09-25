@@ -247,6 +247,20 @@ export function runB(value) {
 }
 `
 
+// Review (#7936 follow-through): the SAME collision one level down — two
+// UNRELATED calls to the same callee (`execFile`) inside the SAME function,
+// each flagging an identically-named element at the SAME argv index (`value`
+// at index 1 in both). Function name + callee + argv index alone (the
+// original #7936 fix) still collide here, since neither of those three
+// changes between the two calls — only a call-site ordinal disambiguates.
+const ALIASED_BARE_IDENTIFIER_SAME_FUNCTION_TWO_CALLS = `
+import { execFile } from 'node:child_process'
+export function runBoth(value) {
+  execFile('/usr/bin/git', ['diff', value], () => {})
+  execFile('/usr/bin/git', ['log', value], () => {})
+}
+`
+
 const IGNORE_MARKER_ABOVE = `
 import { execFile } from 'node:child_process'
 export function run(userValue) {
@@ -645,6 +659,43 @@ describe('lint-argv-sinks', () => {
         { file: 'offender.js', match: 'value', reason: 'test: intentionally broad, matches the pre-#7936 convention' },
       ]\n`
       const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_TWO_FUNCTIONS }, { catalogue })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    // Review (#7936 follow-through): the same collision one level down — TWO
+    // calls to the SAME callee inside the SAME function. Function name +
+    // callee + argv index alone (the #7936 fix as originally landed) does
+    // NOT distinguish these: both `value` elements sit at argv index 1 in
+    // `runBoth`, calling `execFile`, so without a call-site ordinal both
+    // findings would still collapse onto the identical key
+    // `value [[runBoth#execFile#1]]`.
+    test('RED: two calls to the SAME callee in the SAME function, same-named element at the same argv index, both fail uncatalogued', () => {
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_SAME_FUNCTION_TWO_CALLS }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /offender\.js:4\s+execFile\(\.\.\.\) argv element `value`/)
+      assert.match(r.stderr, /offender\.js:5\s+execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('an entry scoped to the FIRST call (ordinal 0) silences ONLY that call, not the second (non-aliasing across calls in one function)', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[runBoth#execFile#0#1]]', reason: 'test: first execFile call only, deliberately narrow' },
+      ]\n`
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_SAME_FUNCTION_TWO_CALLS }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      // The first call's finding (line 4) is silenced...
+      assert.doesNotMatch(r.stderr, /offender\.js:4/)
+      // ...but the second call's identically-shaped finding (line 5) still
+      // fails — proving the call-site ordinal, not just function+callee+
+      // index, is load-bearing here.
+      assert.match(r.stderr, /offender\.js:5\s+execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('GREEN: giving EACH call its own ordinal-scoped entry silences both', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[runBoth#execFile#0#1]]', reason: 'test: first call' },
+        { file: 'offender.js', match: 'value [[runBoth#execFile#1#1]]', reason: 'test: second call' },
+      ]\n`
+      const r = runLint({ 'offender.js': ALIASED_BARE_IDENTIFIER_SAME_FUNCTION_TWO_CALLS }, { catalogue })
       assert.equal(r.status, 0, r.stderr)
     })
   })
