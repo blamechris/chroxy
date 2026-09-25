@@ -16,13 +16,14 @@ import { describe, it, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, unlinkSync, closeSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { IngestEventSchema, INGEST_EVENT_TYPES } from '@chroxy/protocol'
 import { buildEnvelope, resolveHookEvent, runEmit, sanitizeData, SOURCE } from '../src/emit.js'
 import { EMITTERS } from '../src/emitters.js'
-import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT, INGEST_SECRET_REQUIRED_MODE } from '../src/config.js'
+import { resolveIngestUrl, resolveIngestSecret, DEFAULT_PORT, INGEST_SECRET_REQUIRED_MODE, readTrustedIngestSecretFile } from '../src/config.js'
 import { classifyNonProjectCwd, deriveProject, worktreeParent } from '../src/project.js'
 
 const SECRET = 'test-hooks-secret'
@@ -605,7 +606,7 @@ describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-
     assert.ok(lines[0].includes(secretPath))
   })
 
-  it('a foreign-owned secret is refused even at the correct mode', { skip: typeof process.getuid !== 'function' }, () => {
+  it('a foreign-owned secret is refused even at the correct mode, and the hint does NOT say chmod', { skip: typeof process.getuid !== 'function' }, () => {
     writeFileSync(secretPath, 'own-secret\n', { mode: 0o600 })
     const realGetuid = process.getuid
     const realUid = realGetuid.call(process)
@@ -615,6 +616,11 @@ describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-
       assert.equal(result, null)
       assert.equal(lines.length, 1)
       assert.ok(lines[0].includes(secretPath))
+      // The file's mode is already 0600 — telling an operator to `chmod
+      // 600` a file that is already 0600 sends them in circles instead of
+      // toward the actual fix (chown, or delete-and-let-the-daemon-recreate).
+      assert.ok(!lines[0].includes('chmod 600'), `wrong-owner hint must not suggest chmod: ${lines[0]}`)
+      assert.ok(lines[0].includes('chown') || lines[0].includes('recreate'), `wrong-owner hint must name an actual fix: ${lines[0]}`)
     } finally {
       process.getuid = realGetuid
     }
@@ -655,6 +661,41 @@ describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-
     assert.equal(lines.length, 1)
   })
 
+  // Regression guard: a bare `openSync(path, O_RDONLY)` (no O_NONBLOCK) on a
+  // FIFO with no writer connected blocks the calling process INDEFINITELY —
+  // confirmed by direct repro against this exact function before the
+  // O_NONBLOCK fix (the synchronous open never returns, so there is no
+  // event-loop turn left for any caller-side timeout to fire; every future
+  // hook invocation would wedge). "hooks must never block Claude Code" (see
+  // the module doc) makes a hang strictly worse than every other outcome
+  // here, which all resolve to null. A same-uid, mode-0600 FIFO is not a
+  // hypothetical: anything that can write into $CHROXY_CONFIG_DIR (a
+  // malicious postinstall script, a compromised dependency) can `mkfifo -m
+  // 600` there, which would otherwise pass BOTH the mode and uid checks.
+  it('does not hang on a FIFO planted at the secret path, even at the trusted mode/uid', { skip: process.platform === 'win32' }, () => {
+    execFileSync('mkfifo', ['-m', '600', secretPath])
+    const start = Date.now()
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    const elapsedMs = Date.now() - start
+    assert.equal(result, null)
+    assert.equal(lines.length, 1)
+    assert.ok(lines[0].includes('not a regular file'), `stderr line must say why: ${lines[0]}`)
+    // Generous headroom over the near-instant real cost (single-digit ms):
+    // a regression here would otherwise make THIS test hang until node
+    // --test's own per-test timeout instead of failing with a legible
+    // assertion.
+    assert.ok(elapsedMs < 2000, `resolveIngestSecret took ${elapsedMs}ms against a FIFO — must return promptly, never block`)
+  })
+
+  it('refuses a directory planted at the secret path, even at the trusted mode/uid', { skip: process.platform === 'win32' }, () => {
+    mkdirSync(secretPath)
+    chmodSync(secretPath, 0o600)
+    const { result, lines } = captureStderr(() => resolveIngestSecret(withEnv()))
+    assert.equal(result, null)
+    assert.equal(lines.length, 1)
+    assert.ok(lines[0].includes('not a regular file'), `stderr line must say why: ${lines[0]}`)
+  })
+
   // Parity pin: this package has zero runtime deps and no dependency on
   // @chroxy/server, so it cannot import the daemon's (unexported)
   // `assertIngestSecretFileTrusted`. The literal is pinned here instead —
@@ -662,6 +703,53 @@ describe('resolveIngestSecret — #7894 mode/owner parity with the daemon (fail-
   // exact boundary this constant mirrors.
   it('pins the required mode at exactly 0o600, matching the daemon check', () => {
     assert.equal(INGEST_SECRET_REQUIRED_MODE, 0o600)
+  })
+
+  // TOCTOU closure proof (the one mutation the implementer flagged as
+  // NOT CAUGHT by any test: `readFileSync(fd, …)` → `readFileSync(path, …)`
+  // — reopening by path instead of reading the already-verified handle).
+  // `readTrustedIngestSecretFile`'s test-only 3rd… 2nd arg
+  // (`__testBetweenCheckAndReadSeam`) fires AFTER the fstat mode/owner
+  // check has already passed but BEFORE the read — the exact window a
+  // check/read TOCTOU lives in. The seam swaps the file at `secretPath` for
+  // a DIFFERENT one (same trusted mode/owner, different content) while `fd`
+  // — opened and verified against the ORIGINAL file — is still open. On
+  // POSIX, unlinking/replacing a PATH does not affect an already-open file
+  // descriptor's underlying inode, so a read FROM THE FD must still return
+  // the original content; a mutant that reopens by path instead would
+  // return the swapped content. Only reachable here because
+  // `readTrustedIngestSecretFile` is called directly with a 2nd argument —
+  // `resolveIngestSecret`'s one production call site never supplies one.
+  it('reads from the VERIFIED FD, not a fresh open of the path — a file swapped in between check and read is ignored', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'original-secret\n', { mode: 0o600 })
+
+    const result = readTrustedIngestSecretFile(secretPath, (path) => {
+      // Between the fstat check (already passed, against 'original-secret')
+      // and the read below: replace the path with a different, equally
+      // trusted file. A path-based re-read would pick this up; an fd-based
+      // read cannot, because the fd was opened (and verified) before this
+      // callback ever ran.
+      unlinkSync(path)
+      writeFileSync(path, 'swapped-secret\n', { mode: 0o600 })
+    })
+
+    assert.equal(result, 'original-secret', 'must read the fd-verified ORIGINAL content, not the path-swapped replacement')
+  })
+
+  // A throwing `finally { closeSync(fd) }` would REPLACE whatever the
+  // try/catch above already decided to return, turning a clean `null` into
+  // an uncaught throw out of `resolveIngestSecret` — violating this
+  // function's own "never throw" contract (Copilot review, #7923). Reuses
+  // the test-only seam to close `fd` a step early: the read that follows
+  // then fails with EBADF (caught, returns null with a warning), and the
+  // function's own `finally` closeSync hits the SAME already-closed fd —
+  // proving that second close is swallowed rather than escaping.
+  it('does not throw when closing the fd fails (finally-block close is best-effort)', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'own-secret\n', { mode: 0o600 })
+    assert.doesNotThrow(() => {
+      const result = readTrustedIngestSecretFile(secretPath, (_path, fd) => { closeSync(fd) })
+      assert.equal(result, null, 'the read-after-premature-close must fail closed, not resurrect old content')
+    })
   })
 })
 
