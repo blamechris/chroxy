@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -444,7 +445,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     assert.equal(res.servers[0].command, 'local-cmd')
   })
 
-  it('a symlinked cwd resolves the project block via realpath', () => {
+  it('a symlinked cwd resolves the project block via realpath', { skip: SKIP_NO_SYMLINK }, () => {
     const realCwd = realpathSync(cwd)
     const symlinkDir = join(cfgDir, 'symlinked-cwd')
     symlinkSync(realCwd, symlinkDir)
@@ -532,7 +533,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     assert.deepEqual(res.warnings, [])
   })
 
-  it('a .mcp.json that is a symlink to a REGULAR file is followed, consistent with every other read in this file', () => {
+  it('a .mcp.json that is a symlink to a REGULAR file is followed, consistent with every other read in this file', { skip: SKIP_NO_SYMLINK }, () => {
     // writeClaudeConfigAtomic (the WRITE path) refuses to write through a
     // symlink; every READ path in this file (this one, resolveProjectBlock's
     // realpath resolution, the user-config read above) follows symlinks to a
@@ -552,7 +553,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     }
   })
 
-  it('a .mcp.json symlink to a NON-regular target (e.g. a directory) is skipped with a warning, never read', () => {
+  it('a .mcp.json symlink to a NON-regular target (e.g. a directory) is skipped with a warning, never read', { skip: SKIP_NO_SYMLINK }, () => {
     // Copilot review (#7931): .mcp.json is repo-controlled, attacker-
     // influenceable content. A symlink to a FIFO (no writer) hangs
     // readFileSync indefinitely — before the trust gate ever runs — and a
