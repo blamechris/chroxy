@@ -43,42 +43,68 @@
 //
 // SKIP-LIST: the task that commissioned this harness named exactly one
 // pre-known shape as exempt from strict equality, #7912. Running the full
-// >=120-pattern table against the branch head (as instructed) surfaced
-// THREE more, previously-undiscovered `fs.glob` parity gaps beyond it — the
-// whole reason this harness exists is to catch exactly this, and it did.
-// Each is filed as its own scoped, OPEN follow-up issue (matching #7912's
-// own precedent) rather than patched here, because every one of them lives
+// >=120-pattern table against that branch head surfaced THREE more,
+// previously-undiscovered `fs.glob` parity gaps beyond it — the whole reason
+// this harness exists is to catch exactly this, and it did. Each was filed
+// as its own scoped, OPEN follow-up issue (matching #7912's own precedent)
+// rather than patched in that same PR, because every one of them lives
 // inside `walkGlob`'s symlink-descend/cycle logic or its pattern compiler —
 // the exact surface three prior #7910 review rounds spent hardening against
-// real, measured DoS and disclosure bugs. A same-PR fix to that logic
-// without its own adversarial round is a worse outcome than a well-scoped,
-// documented gap: every one of these is a pure UNDER-match (walkGlob is
-// always a SUBSET of fs.glob's confinement-filtered result below, never a
-// superset — a superset would be a real regression, not a filed gap), so
-// there is no confinement or DoS exposure from leaving it open.
+// real, measured DoS and disclosure bugs. Every one of them was (and, for
+// the one still open, still is) a pure UNDER-match (walkGlob is always a
+// SUBSET of fs.glob's confinement-filtered result below, never a superset —
+// a superset would be a real regression, not a filed gap), so there was no
+// confinement or DoS exposure from any of them being open.
 //
-//   - #7912 (pre-known): `**` refuses to absorb ANY dot-prefixed entry while
-//     crossing toward a deeper match, so a pattern that needs `**` to CROSS
-//     a dot-directory (not just name one literally) under-matches.
+// CLOSED since, each with its own adversarial-round-equivalent (a fix
+// derived from reading Node's actual `internal/fs/glob.js` GLOBSTAR
+// algorithm directly, not guessed from probes, for #7912; a change proven
+// not to weaken the round-2 DoS guard for #7916's partial fix; #7917 only
+// WIDENS what already-passing patterns keep passing; #7918 was meant to, but
+// its first expander also stripped a comma-less `{...}` that spans `/` and
+// walked an absolute alternative as a workspace path — both caught in review
+// and pinned by rows below, `{curly/dup}` and `{,x}/src/...`) — their
+// patterns are in the main table above now:
+//   - #7912: `**` refused to absorb ANY dot-prefixed entry while crossing
+//     toward a deeper match. FIXED: `**` now absorbs a dot-named entry
+//     exactly when the pattern segment immediately after it (skipping
+//     further `**`s) explicitly matches that entry's name — see
+//     `walkGlob`'s `nextNonGlobstar` doc.
+//   - #7917: a directory-only (`pattern/`) match against a symlink checked
+//     `dirent.isDirectory()` (always false for a symlink) even when the
+//     entry was named by a fully determinate/literal segment, where
+//     `fs.glob` applies no type check at all in that case. FIXED: reuses
+//     the existing `detHandoff[m]` signal.
+//   - #7918: a brace alternative could not span a path separator
+//     (`{dup,nested/dup}`) — `walkGlob`'s pattern compiler split on `/`
+//     BEFORE parsing braces, so a slash-crossing alternative had no
+//     representation in the compiled matcher at all, a genuine CAPABILITY
+//     LOSS versus pre-#7910 `main` (which called `fs.glob` directly and got
+//     its native, slash-spanning brace expansion for free). FIXED: braces
+//     are now expanded globally, across the whole raw pattern, before any
+//     `/`-split — see `expandBraces`'s doc — ONLY when a brace group
+//     actually spans a `/` (`hasSlashSpanningBrace`), so the far more common
+//     non-spanning brace keeps the existing single-walk, per-segment `alt`
+//     token path unchanged.
+//
+// STILL OPEN, PARTIALLY FIXED:
 //   - #7916: `**` does not follow a symlinked directory reached via a
 //     non-determinate trailing segment (`**/*` misses `src-link/index.ts`
 //     even though `src-link -> src` is a real, in-workspace directory), and
 //     the `visitedDirs` ancestor-cycle guard (added in round 2 for a real,
-//     measured DoS) also refuses a fully-determinate/literal re-entry
-//     through a self-referencing symlink that `fs.glob` allows
-//     (`sub/selfloop/file.txt`, an all-literal pattern with no wildcards at
-//     all, resolves to nothing here).
-//   - #7917: a directory-only (`pattern/`) match against a symlink checks
-//     `dirent.isDirectory()` (always false for a symlink), where `fs.glob`
-//     appears to look at the resolved target for at least some pattern
-//     shapes (`src-link/` matches `src-link`, a symlink to a real dir).
-//   - #7918: a brace alternative cannot span a path separator
-//     (`{dup,nested/dup}`) — `walkGlob`'s pattern compiler splits on `/`
-//     BEFORE parsing braces, so a slash-crossing alternative has no
-//     representation in the compiled matcher at all. This one is a genuine
-//     CAPABILITY LOSS versus pre-#7910 `main` (which called `fs.glob`
-//     directly and got its native, slash-spanning brace expansion for free),
-//     not merely an always-missing feature — see #7918 for detail.
+//     measured DoS) also refused a re-entry through a self-referencing
+//     symlink that `fs.glob` allows. FIXED for the sub-case that is provably
+//     safe without a new DoS-bounding mechanism: a fully `**`-free pattern
+//     (`sub/selfloop/file.txt`, all-literal, no wildcards at all) can never
+//     recurse deeper than its own segment count regardless of symlink
+//     structure, so `visitedDirs`'s refusal is now skipped for such patterns
+//     entirely (`openVerifiedDirForDescend`'s `enforceCycleGuard`). NOT
+//     fixed: a `**` immediately followed by more pattern still refuses to
+//     cross a symlink reached non-determinately, and a `**`-terminated
+//     re-entry (`sub/selfloop/selfloop/**`) still refuses too — both need
+//     the "bounded implicit-crossing budget" the issue itself calls out as
+//     its own adversarial-review-worthy redesign, which this PR does not
+//     attempt.
 //
 // Each skipped pattern below is asserted to under-match in EXACTLY its
 // documented shape, not just "somehow differ" — a bare skip would let an
@@ -169,6 +195,12 @@ async function buildFixture() {
   await file(join(ROOT, 'dup', 'inner.txt'))
   await mk(join(ROOT, 'nested'))
   await file(join(ROOT, 'nested', 'dup'), 'file named dup')
+  // #7918 review — a real path spelled like a comma-less brace group that
+  // spans a `/` (`{curly/dup}`): fs.glob does not treat `{...}` without a
+  // top-level comma as alternation, so the pattern `{curly/dup}` names
+  // exactly this path.
+  await mk(join(ROOT, '{curly'))
+  await file(join(ROOT, '{curly', 'dup}'), 'literal braces')
 
   // names with spaces / unicode / brackets / braces
   await mk(join(ROOT, 'spaces and unicode'))
@@ -268,25 +300,32 @@ const PATTERNS = [
   '{src-link,x}/*', '{src-link,zzz}/**', 'src-lin?/*', 'src-link/utils/*.ts',
   'src-link/utils/deep/*.ts', '*-link/*', '*/utils/*.ts',
 
-  // self-loop symlink: sub/selfloop -> . (crossing INTO selfloop is #7916,
-  // see the skip buckets below — 'sub/*/file.txt' does not cross it, since
-  // 'selfloop' is only reached by the second bare '*', non-determinately)
-  'sub/**', 'sub/*', 'sub/*/file.txt',
+  // self-loop symlink: sub/selfloop -> . (crossing INTO selfloop via a `**`
+  // is still #7916, see the skip buckets below — 'sub/*/file.txt' does not
+  // cross it, since 'selfloop' is only reached by the second bare '*',
+  // non-determinately). 'sub/selfloop/*' and 'sub/selfloop/file.txt' are
+  // fully `**`-free (a literal segment chain re-entering the ancestor 'sub'
+  // via 'selfloop'), which #7916's partial fix now allows — see that fix's
+  // doc on `openVerifiedDirForDescend`'s `enforceCycleGuard`.
+  'sub/**', 'sub/*', 'sub/*/file.txt', 'sub/selfloop/*', 'sub/selfloop/file.txt',
 
   // symlinks escaping the workspace — reached only via a WILDCARD, so no
   // `literalDirPrefix` early-error (see file header); both pipelines
   // silently discover-and-withhold, so parity holds.
   '?utside-link/*', '*-link/*.txt', 'outside*', '**/outside*', 'outside-file-link', '*-file-link',
 
-  // dot handling (excluding the #7912 dot-CROSSING shapes, listed separately below)
+  // dot handling, including the #7912 dot-CROSSING shapes ('**/.*',
+  // '**/[.]*' — `**` crossing a dot-directory to reach a dot-named entry
+  // below it, now fixed; see `walkGlob`'s `nextNonGlobstar` doc)
   '.env*', '.[a-z]*', '.env', '?env', '[.a]env', '[a.]env', '[.]env', '.gitignore',
   '.hidden/*', '.hidden/**', '.hidden/.*', '.hidden/.deepdot', '.hidden/inner/*.ts',
-  '.hidden/*.txt', '**/.hidden/**', '**/.hidden/*',
+  '.hidden/*.txt', '**/.hidden/**', '**/.hidden/*', '**/.*', '**/[.]*',
   // NOT #7912-shaped despite appearances: fs.glob itself returns nothing for
   // these (a bare-literal or plain-extension trailing segment does not make
   // fs.glob cross .hidden either — including '**/*.ts' above) — verified
-  // directly, see the #7912 bucket comment below for why only '.*'/'[.]*'
-  // -style trailing segments differ.
+  // directly: `**` only crosses a dot-directory when the segment right after
+  // it explicitly matches that dot name, which a plain literal tail like
+  // '.deepdot' never does for a DIFFERENTLY-named dot directory ('.hidden').
   '**/.deepdot', '**/secret.txt',
 
   // *.env / trailing dot edge cases
@@ -297,14 +336,36 @@ const PATTERNS = [
   'plaindir/**', '[p]laindir/**', 'pl?indir/**', '*dir/**',
   'sub/file.txt/**', 'file-link.txt/**', '[f]ile-link.txt/**',
 
-  // trailing slash / dir-only ('src-link/' itself is #7917, see below)
+  // trailing slash / dir-only, including #7917's 'src-link/' (a symlinked
+  // directory named by a DETERMINATE segment now follows fs.glob's own
+  // "no type check for a literal segment" rule — see `detHandoff[m]`'s use
+  // in the directoryOnly result-push gate)
   'src/', 'sub/', 'dup/', '**/', '*/', 'empty-dir/', 'empty-dir/*', 'empty-dir/**', 'plaindir/',
+  'src-link/',
+  // #7918 review — #7917's rule reaches a symlink to a FILE too: fs.glob's
+  // trailing-slash filter applies no type check to a determinately-named
+  // entry, so `file-link.txt/` matches the file symlink. (#7917's acceptance
+  // offered "follow the target's real type" as one option; parity with
+  // fs.glob is what this PR chose, and these rows pin that choice against
+  // the oracle rather than leaving it to one comment.)
+  'file-link.txt/', '[f]ile-link.txt/', '*-link.txt/',
 
   // ./x and normalization
   './src/*.ts', './src-link/*.ts', 'src/./*.ts', 'src//*.ts', './*.env', './**',
 
-  // files vs dirs sharing names ('{dup,nested/dup}' itself is #7918, see below)
-  '**/dup', '**/dup/*', 'dup', 'nested/dup', '*/dup', '{dup,dup2}',
+  // files vs dirs sharing names, including #7918's slash-spanning brace
+  // alternative '{dup,nested/dup}' (now expanded globally before /-split —
+  // see `expandBraces`'s doc)
+  '**/dup', '**/dup/*', 'dup', 'nested/dup', '*/dup', '{dup,dup2}', '{dup,nested/dup}',
+  // #7918 review — more slash-spanning shapes, each checked against fs.glob:
+  // a comma-less group spanning `/` is LITERAL (`{curly/dup}` is a real path
+  // in the fixture; the first #7918 expander stripped the braces and walked
+  // `curly/dup` instead), an alternative that concatenates into an absolute
+  // path contributes nothing (`{,x}/src/...` → `/src/index.ts`; the first
+  // expander walked it as the workspace's `src/index.ts`), and the
+  // expansion composes with directory-only (#7917), `**`, and siblings.
+  '{curly/dup}', '{,x}/src/{index.ts,utils/helper.ts}', '{dup,nested/dup}/', '{src-link/,x/y}',
+  '{src,x/y}/**', '{a,b}/{dup,nested/dup}', '{sub/selfloop,x/y}/file.txt', '{**/.*,x/y}',
 
   // spaces / unicode / brackets / braces in real names (space matched via `?`)
   'spaces?and?unicode/*', 'spaces?and?unicode/*.txt', 'spaces?and?unicode/my*.txt',
@@ -325,72 +386,45 @@ const PATTERNS = [
 // unrelated regression hide behind the issue number, so every bucket proves
 // its SPECIFIC documented shape, not just "differs".
 
-// #7912: `**` refuses to cross a dot-directory even when a later segment
-// explicitly asks for dots — missing entries are reached only by crossing a
-// dot-named directory segment. NOTE: `**/.deepdot` and `**/secret.txt` are
-// NOT in this bucket even though they look like the same shape — verified
-// directly, `fs.glob` ITSELF returns nothing for either (it does not cross
-// `.hidden` for a bare-literal trailing segment, only for `.*`/`[.]*`-style
-// ones), so both sides agree there is nothing to find and those two belong
-// in the main strict-equality table instead.
-const KNOWN_UNDERMATCH_7912 = {
-  issue: '#7912',
-  patterns: ['**/.*', '**/[.]*'],
-  missingShape: (p) => p.split('/').some((seg) => seg.startsWith('.')),
-  missingShapeDesc: 'reached by crossing a dot-directory',
-}
+// #7912, #7917, #7918 are FIXED (see byok-tool-executor.js's `walkGlob`
+// dot-crossing/`nextNonGlobstar` doc, its directoryOnly `detHandoff[m]` gate,
+// and `expandBraces` respectively) — their patterns moved to the main
+// strict-equality table above and their buckets are gone from here.
 
-// #7916: `**` does not follow a symlinked directory reached via a
-// non-determinate trailing segment, and `visitedDirs` also refuses a
-// fully-determinate re-entry through a self-referencing symlink — missing
-// entries are always beneath `src-link` (the in-workspace symlinked dir) or
-// `sub/selfloop` (the self-referencing one). `allowExtra` (unlike every
-// other bucket here): `**/selfloop/**` is the one pattern in this set where
-// `walkGlob` reports MORE than `fs.glob`, not less — the trailing `**`'s
-// zero-width closure lists the bare `sub/selfloop` match (a determinate
-// literal segment named it, same rule that correctly closes `src-link/**`
-// onto bare `src-link`), but `fs.glob` omits it specifically because the
-// symlink is self-referential, a distinction `walkGlob`'s closure rule does
-// not draw. Still the same root cause and the same filed issue — bounding
-// BOTH directions to the documented shape (never something unrelated) is
-// what matters, not which direction happens to be wrong for a given pattern.
+// #7916 (PARTIAL fix): `**` still does not follow a symlinked directory
+// reached via a non-determinate trailing segment, and `visitedDirs` still
+// refuses a `**`-involving re-entry through a self-referencing symlink — see
+// `openVerifiedDirForDescend`'s `enforceCycleGuard` doc for exactly what WAS
+// fixed (a fully `**`-free literal-segment chain re-entering an ancestor,
+// bounded by the pattern's own length — `sub/selfloop/*` and
+// `sub/selfloop/file.txt` moved to the main table above) and why the
+// remaining shapes below are deferred (both still involve `**`'s own
+// open-ended absorption, the exact mechanism the round-2 DoS fix exists
+// for). Missing entries are always beneath `src-link` (the in-workspace
+// symlinked dir) or `sub/selfloop` (the self-referencing one). `allowExtra`
+// (unlike every other bucket here): `**/selfloop/**` is the one pattern in
+// this set where `walkGlob` reports MORE than `fs.glob`, not less — the
+// trailing `**`'s zero-width closure lists the bare `sub/selfloop` match (a
+// determinate literal segment named it, same rule that correctly closes
+// `src-link/**` onto bare `src-link`), but `fs.glob` omits it specifically
+// because the symlink is self-referential, a distinction `walkGlob`'s
+// closure rule does not draw. Still the same root cause and the same filed
+// issue — bounding BOTH directions to the documented shape (never something
+// unrelated) is what matters, not which direction happens to be wrong for a
+// given pattern.
 const KNOWN_UNDERMATCH_7916 = {
   issue: '#7916',
   patterns: [
-    '**/*', 'sub/selfloop/**', 'sub/selfloop/*', 'sub/selfloop/selfloop/**',
-    'sub/selfloop/file.txt', '**/selfloop/**', '**/selfloop/*',
+    '**/*', 'sub/selfloop/**', 'sub/selfloop/selfloop/**',
+    '**/selfloop/**', '**/selfloop/*',
   ],
   missingShape: (p) => p.startsWith('src-link/') || p.startsWith('sub/selfloop'),
   missingShapeDesc: 'reached only beneath src-link or sub/selfloop',
   allowExtra: true,
 }
 
-// #7917: a directory-only (`pattern/`) match against a symlink uses
-// `dirent.isDirectory()` (always false for a symlink) rather than the
-// resolved target's type — missing entry is always the symlink's own name.
-const KNOWN_UNDERMATCH_7917 = {
-  issue: '#7917',
-  patterns: ['src-link/'],
-  missingShape: (p) => p === 'src-link',
-  missingShapeDesc: 'exactly the symlinked directory itself',
-}
-
-// #7918: a brace alternative cannot span a path separator — the compiler
-// splits the pattern on `/` before parsing braces at all, so a
-// slash-crossing alternative is invisible to the matcher and the pattern
-// under-matches EVERYTHING fs.glob's native brace expansion would find.
-const KNOWN_UNDERMATCH_7918 = {
-  issue: '#7918',
-  patterns: ['{dup,nested/dup}'],
-  missingShape: () => true, // every expected entry is missing, by construction
-  missingShapeDesc: 'the pattern has no compiled representation at all',
-}
-
 const KNOWN_UNDERMATCH_BUCKETS = [
-  KNOWN_UNDERMATCH_7912,
   KNOWN_UNDERMATCH_7916,
-  KNOWN_UNDERMATCH_7917,
-  KNOWN_UNDERMATCH_7918,
 ]
 
 describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#7910 review round 3)', { skip: SYMLINK_SKIP_REASON || false }, () => {

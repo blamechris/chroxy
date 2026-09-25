@@ -358,6 +358,40 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // weak "no ..." check that let absolute paths to /etc through.
   const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
+  // #7918 — a brace alternative spanning a '/' (`{dup,nested/dup}`) has no
+  // representation in the per-segment compiled matcher below, which splits
+  // the pattern on '/' before parsing braces at all — see `expandBraces`'s
+  // doc for the full history. `hasSlashSpanningBrace` is a cheap gate: the
+  // ordinary, far more common non-spanning brace (`*.{ts,js}`) keeps the
+  // existing single-compile, single-walk path completely unchanged below
+  // (`patterns.length === 1`, `patterns[0] === pattern`); only a
+  // genuinely-spanning pattern pays for the multi-pattern expand-and-union
+  // path.
+  let patterns
+  if (hasSlashSpanningBrace(pattern)) {
+    const expanded = expandBraces(pattern)
+    if (expanded === null) {
+      return {
+        content: globPatternComplexityMessage(`more than ${GLOB_BRACE_EXPANSION_CAP} brace alternatives`),
+        isError: true,
+      }
+    }
+    // #7918 review — an alternative that expands to an ABSOLUTE path is
+    // dropped, not walked. `globPatternEscapeReason` refuses a pattern that
+    // STARTS with `/` or has one right after `{`/`,`, but concatenation can
+    // still produce one: `{,x}/etc/{p,q/r}` passes that check and expands to
+    // `/etc/p`. `compileCaseCheck` drops the empty leading segment, so
+    // walking it would search `etc/p` under the WORKSPACE — never an escape
+    // (the walk is rooted at `realRoot`), but a match `fs.glob` never makes:
+    // it looks for the real `/etc/p`, which confinement then withholds. A
+    // dropped alternative contributes nothing, which is exactly `fs.glob`'s
+    // confined answer for it. Duplicates are dropped too: two alternatives
+    // that expand to the same string would only walk the tree twice.
+    patterns = [...new Set(expanded.filter((p) => !p.startsWith('/')))]
+  } else {
+    patterns = [pattern]
+  }
+
   // #7341 — if the pattern NAMES a directory outright and that directory
   // resolves outside the workspace, say so instead of returning "No matches".
   //
@@ -371,9 +405,18 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // because passing the very same path as `input.path` ALREADY returns exactly
   // this error. It also makes `pattern` and `path` consistent rather than
   // mysteriously different for the same directory.
-  const literalPrefix = literalDirPrefix(pattern)
-  if (literalPrefix) {
-    await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
+  //
+  // #7918 — scoped to a call that walks exactly ONE pattern (the unexpanded
+  // one, or the sole distinct result of an expansion): a brace-expanded
+  // multi-pattern call silently discovers-and-withholds an out-of-bounds
+  // alternative the same way a wildcard-reached symlink already does
+  // elsewhere in this function, rather than early-erroring on whichever
+  // alternative happens to resolve outside the workspace first.
+  if (patterns.length === 1) {
+    const literalPrefix = literalDirPrefix(patterns[0])
+    if (literalPrefix) {
+      await safeResolveRoot(literalPrefix, realRoot, cwdRealCache, cwdCacheTtl)
+    }
   }
 
   // Check the signal BEFORE the walk: the in-loop check is only reached when
@@ -417,7 +460,6 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // event loop keeps turning throughout, and stopping the walk is a matter of
   // setting a flag the walk's own loop observes on its very next iteration —
   // not, as with `fs.glob`, hoping a signal it ignores gets noticed.
-  const { matchers } = compileCaseCheck(pattern)
   // #7910 review round 2 (parity) — a pattern ending in `/` (any number of
   // trailing slashes; `compileCaseCheck` already drops the empty segment(s)
   // they produce, so the compiled `matchers` are identical either way) means
@@ -425,8 +467,10 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // verified directly, `sub/*/` matches a real subdirectory but not a plain
   // file NOR a symlink pointing at a directory (`sub/dirlink -> inner` is
   // excluded from `sub/*/`'s results) — so this is `dirent.isDirectory()`
-  // specifically, never "dir-like".
-  const directoryOnly = pattern.endsWith('/')
+  // specifically, never "dir-like". #7918 — computed per EXPANDED pattern
+  // (`patterns`, `[pattern]` in the un-expanded common case), since a
+  // brace alternative can itself end in `/` independently of its siblings
+  // (`{a/,b}` — one directory-only, the other not).
   const files = []
   // ONE timer sets the flag and releases the race, so the two cannot resolve
   // in either order — a second, independent timer would let the race finish
@@ -441,7 +485,22 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   deadline.unref?.()
   const onAbort = () => { state.stop = 'interrupted'; releaseDeadline() }
   signal?.addEventListener?.('abort', onAbort, { once: true })
-  const collect = walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+  // #7918 — one walk per expanded pattern, SHARING `state`/`files`/`maxEntries`
+  // across all of them: the deadline/abort/entries-visited budgets are for
+  // the WHOLE Glob call, not reset per alternative (a brace pattern with N
+  // alternatives must not get N times the time or entry budget). Each walk
+  // still checks `state.stop`/the collect ceiling before starting, so a
+  // deadline or abort hit partway through stops the REMAINING alternatives
+  // too, not just the one in flight.
+  async function collectAll() {
+    for (const p of patterns) {
+      if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
+      const { matchers } = compileCaseCheck(p)
+      const directoryOnly = p.endsWith('/')
+      await walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+    }
+  }
+  const collect = collectAll()
   // Attach a catch BEFORE the race: if the walk rejects after the deadline has
   // already settled it, the rejection would otherwise be unhandled.
   let walkError = null
@@ -481,6 +540,15 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // containment one — the match is not a security-relevant withholding, so it
   // gets no daemon-log line the way an escaping match does.
   let kept = files.filter((f) => !f.includes('\n'))
+  // #7918 — two DIFFERENT brace alternatives can match the SAME real path
+  // (`{*/dup,nested/*}` — both alternatives match `nested/dup`), and each
+  // alternative's `walkGlob` call pushes into the SAME shared `files` array,
+  // so a multi-pattern call can push the same relPath twice where a single
+  // pattern's own walk never could (one walk visits each real directory at
+  // most once, per `visitedDirs`). Scoped to `patterns.length > 1` so the
+  // overwhelmingly common single-pattern path pays no Set-construction cost
+  // for a case that cannot occur there.
+  if (patterns.length > 1) kept = Array.from(new Set(kept))
   // A withheld match is reported as no match, with no count and no marker.
   // Anything that distinguishes "matched, but outside" from "matched nothing"
   // is an existence ORACLE: a workspace that contains `esc -> /` turns one bit
@@ -587,13 +655,26 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * negated bracket classes included — `segmentMatches`/`advanceToken` never
  * had a nocase mode to begin with).
  *
- * DOT HANDLING — `**` and a bare wildcard/class token never stand for a real
+ * DOT HANDLING — a bare wildcard/class token never stands for a real
  * segment's leading dot (`advanceToken`'s dot guard, `parseSegmentTokens`'s
  * doc), matching `fs.glob`'s own observed default exactly (verified directly
  * against Node 22's `glob()`): `.env*` and `.[a-z]*` still find `.envrc`,
- * `*.ts`/`?env`/most bracket classes do not, and `**`/`*` never descend into
- * or list a dotfile/dotdir at any depth unless a pattern segment explicitly
- * spells a leading literal dot for that level.
+ * `*.ts`/`?env`/most bracket classes do not, and `*` never lists a
+ * dotfile/dotdir unless a pattern segment explicitly spells a leading
+ * literal dot for that level. `**` follows the SAME rule for its own zero-
+ * width closure (a bare trailing `**` never lists a dotfile/dotdir either),
+ * but #7912 — verified directly against Node's own `internal/fs/glob.js`
+ * GLOBSTAR algorithm, not merely observed — its CROSSING behavior (whether
+ * it absorbs a dot-named directory on the way to a deeper match) is a
+ * narrower exception: a dot-named entry is absorbed exactly when the
+ * pattern segment immediately after this run of `**`s explicitly matches
+ * that entry's own name (`nextNonGlobstar`, below) — so `**\/.*` crosses
+ * `.hidden` to reach `.hidden/.deepdot` (the wildcard `.*` matches
+ * `.hidden`'s own name too), while `**\/*` never crosses any dot directory
+ * at all (a bare `*` matches no dot name, ever) and `**\/.deepdot` (a
+ * DIFFERENTLY-named literal tail) does not cross `.hidden` either, because
+ * `.deepdot` does not match `.hidden`'s name — see `walkGlob`'s per-entry
+ * globstar handling for the exact mechanism.
  *
  * BOUNDS — the caller's deadline/abort race is checked (`state.stop`) at the
  * top of every directory and before every entry, so an `opendir` read (a
@@ -641,6 +722,39 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
   // all do) but refuses when it is not (`?rc-link/*`, `*/*`, `*.txt/**`,
   // `pl?infile.txt/**` do not) — see `walk`'s two call sites below.
   const determinateSegment = matchers.map((tok) => tok !== CASE_CHECK_GLOBSTAR && isDeterminateSegmentTokens(tok))
+
+  // #7912 — precomputed ONCE per Glob call, alongside `determinateSegment`:
+  // for each `**` position `k`, the index of the first REAL (non-`**`)
+  // matcher after it, skipping over any further consecutive `**`s, or `m`
+  // when none remains (a trailing `**`, or a run of `**`s with nothing after
+  // it). Drives the dot-crossing rule just below — see its doc.
+  const nextNonGlobstar = matchers.map((tok, k) => {
+    if (tok !== CASE_CHECK_GLOBSTAR) return -1
+    let j = k + 1
+    while (j < m && matchers[j] === CASE_CHECK_GLOBSTAR) j++
+    return j
+  })
+
+  // #7916 — precomputed ONCE per Glob call: does this pattern contain a `**`
+  // anywhere? Gates whether `openVerifiedDirForDescend`'s ancestor-cycle
+  // refusal (`visitedDirs`, added in #7910 review round 2 for a real,
+  // measured DoS) applies at all — see that function's `enforceCycleGuard`
+  // doc for why a pattern with NO `**` can never need it: every non-`**`
+  // matcher consumes exactly one real path segment, so a walk driven purely
+  // by such matchers can never recurse deeper than `m` (the pattern's own
+  // segment count) REGARDLESS of how many times a symlink resolves back to
+  // an ancestor directory — the recursion DEPTH is bounded by pattern
+  // length, not by directory structure. Its BREADTH is not (#7918 review):
+  // K self-loops in one directory under a determinate `{l1,...,lK}/`
+  // alternation repeated D times open K^D directories — measured K=8, D=6:
+  // the 30s deadline, event loop never blocked more than ~7ms. That is the
+  // same fan-out an ACYCLIC lattice of D directories with K symlinks each
+  // already produced (measured identically: 30s deadline), which this guard
+  // never refused because nothing in it is an ancestor; `maxEntries` and the
+  // deadline bound both. A pattern with even one `**` keeps the existing,
+  // unchanged, fully-enforced guard (round 2's own DoS regression test below
+  // uses `**/selfloop/**`, which still hits this branch every time).
+  const hasGlobstar = matchers.includes(CASE_CHECK_GLOBSTAR)
 
   function closeGlobstars(active) {
     for (let k = 0; k < m; k++) {
@@ -718,10 +832,30 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
         for (let k = 0; k < m; k++) {
           if (!active[k]) continue
           if (matchers[k] === CASE_CHECK_GLOBSTAR) {
-            // `**` never absorbs a hidden entry — see parseSegmentTokens's DOT
-            // HANDLING doc; matches fs.glob's own default (a bare `**` never
-            // lists a dotfile/dotdir at any depth).
-            if (name[0] !== '.') {
+            // #7912 — `**` does not, in general, absorb a hidden entry (see
+            // parseSegmentTokens's DOT HANDLING doc; matches fs.glob's own
+            // default of never listing a dotfile/dotdir at any depth for a
+            // BARE `**`). The one exception, verified directly against Node
+            // 22's `glob()` (`internal/fs/glob.js`'s own GLOBSTAR handling —
+            // `isDot`/`matchesDot`/`nextNonGlobIndex`): a dot-named entry IS
+            // visible to `**` when the pattern segment immediately following
+            // this run of `**`s (skipping over any further `**`s —
+            // `nextNonGlobstar[k]`, precomputed above) EXPLICITLY matches
+            // that entry's own name. This is why `**/.*` finds
+            // `.hidden/.deepdot` (`.*` matches both `.hidden`, letting `**`
+            // cross it, and then `.deepdot` two levels down) while
+            // `**/.deepdot` (a plain literal tail) finds nothing (`.deepdot`
+            // the literal does not equal `.hidden`, so `**` never even
+            // crosses into it to look) and `**/*` never crosses any dot
+            // directory at all (a bare `*` never matches a dot name — see
+            // the acceptance note on `walkGlob`'s doc). A trailing `**` (no
+            // segment after it, `nextNonGlobstar[k] === m`) always keeps the
+            // original, unconditional refusal — there is no "next segment"
+            // to grant the exception.
+            const dotOk = name[0] !== '.' || (
+              nextNonGlobstar[k] < m && segmentMatches(matchers[nextNonGlobstar[k]], name)
+            )
+            if (dotOk) {
               next[k] = true
               if (k === m - 1) globstarAbsorbedLast = true
             }
@@ -789,12 +923,24 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           if (!closesWithZeroWidth) next[m] = false
         }
 
-        // SECURITY/parity (#7910 review round 2) — a pattern ending in `/`
-        // (`directoryOnly`, from `runGlob`) means directories only, matching
-        // `fs.glob` exactly: verified directly, a symlink pointing AT a
-        // directory is still excluded (`dirent.isDirectory()`, never
-        // "dir-like") — same as a plain file.
-        if (next[m] && (!directoryOnly || dirent.isDirectory())) results.push(relPath)
+        // SECURITY/parity (#7910 review round 2; refined #7917) — a pattern
+        // ending in `/` (`directoryOnly`, from `runGlob`) means directories
+        // only. For an ORDINARY entry this is `dirent.isDirectory()`,
+        // matching `fs.glob` exactly: verified directly, a symlink pointing
+        // AT a directory reached only by a NON-determinate segment (`*/`,
+        // `?irlink/`) is still excluded — same as a plain file. #7917 — but
+        // verified directly, `fs.glob`'s own trailing-slash filter draws a
+        // SECOND distinction its own source (`internal/fs/glob.js`'s
+        // `Pattern#isLast`/the literal-string result branch) does not apply
+        // any directory check to at all: a symlink named by a DETERMINATE
+        // segment (`src-link/`, `[d]irlink/`, even `filelink.txt/` — a
+        // symlink to a plain FILE) is matched with NO type check whatsoever,
+        // not even "does the target resolve to a directory". `detHandoff[m]`
+        // (already computed above, per entry, for the zero-width-closure
+        // gate) is exactly "was this entry's own name matched THIS step by a
+        // determinate, non-globstar segment", so it is reused here rather
+        // than re-derived.
+        if (next[m] && (!directoryOnly || dirent.isDirectory() || (isSymlink && detHandoff[m]))) results.push(relPath)
         if (shouldStop()) return
 
         let canContinuePattern = false
@@ -830,7 +976,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           // check that vouches for it are inseparable — no path is ever
           // handed back for a caller to re-resolve blind.
           const descend = await openVerifiedDirForDescend(
-            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, __testDescendSeam,
+            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, hasGlobstar, __testDescendSeam,
           )
           if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key, fh: descend.fh })
         }
@@ -972,11 +1118,39 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * name satisfies at every depth it is encountered, forever — see `walkGlob`'s
  * `visitedDirs` doc for the measured blowup this replaces.
  *
+ * `enforceCycleGuard` (#7916 — parity gap, partial fix) — `walkGlob`'s own
+ * `hasGlobstar` (see its doc): when the WHOLE pattern contains no `**` at
+ * all, the ancestor-cycle refusal above is skipped for this call. A
+ * `**`-free pattern's `m` non-globstar matchers each consume exactly one
+ * real path segment to advance, so `walk`'s own recursion can never go
+ * deeper than `m` real levels — a hard bound from the pattern's own,
+ * already-length-capped segment count (`globPatternComplexityReason`),
+ * independent of anything the filesystem's symlink structure does. A
+ * `sub/selfloop/file.txt`-shaped pattern (three literal segments, no
+ * wildcard) can therefore re-enter `sub` via `selfloop` at most as many
+ * times as the pattern spells it out — never unboundedly — which is exactly
+ * the fs.glob-parity gap #7916 files: `visitedDirs` was refusing this
+ * fully-determinate, finite re-entry. The bound is on DEPTH only: a
+ * determinate alternation over several self-loops still fans out
+ * exponentially in the pattern's length, exactly as an acyclic symlink
+ * lattice always could (see `walkGlob`'s `hasGlobstar` comment for the
+ * measurement) — `maxEntries` and the deadline bound that, not this check.
+ * A pattern containing even one `**` anywhere keeps the FULL, unchanged
+ * check — `**`'s own open-ended absorption is precisely the mechanism the
+ * round-2 fix exists for, and nothing here weakens it (the round-2
+ * regression test below, `**\/selfloop\/**`, has a `**` and so always takes
+ * `hasGlobstar === true`). This is a PARTIAL fix for #7916: it does not
+ * address the issue's other half (a `**` immediately followed by more
+ * pattern following a symlink reached via a non-determinate segment,
+ * `**\/*` missing `src-link/index.ts`) or the globstar-terminated variant of
+ * this same re-entry (`sub/selfloop/selfloop/**`) — both stay refused,
+ * unchanged, and #7916 stays open for them.
+ *
  * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 
-async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, __testSeam) {
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, enforceCycleGuard, __testSeam) {
   let target = candidateAbs
   let preStat = null
   if (!isKnownSymlink) {
@@ -1047,12 +1221,14 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
   if (__testSeam) await __testSeam(target, 'after-open')
 
   const key = dirKey(openedStat)
-  if (visitedDirs.has(key)) {
+  if (enforceCycleGuard && visitedDirs.has(key)) {
     // Cycle: this real directory is already an ancestor on the CURRENT
     // descent path (#7910 review round 2, DoS). Not a diamond — a diamond's
     // target is not yet in `visitedDirs` because `walk` only holds a key
     // while it is actively inside that directory (or one of its
-    // descendants), never after backtracking out of it.
+    // descendants), never after backtracking out of it. #7916 — this check
+    // is skipped entirely (`enforceCycleGuard === false`) for a `**`-free
+    // pattern; see this function's own doc for why that is bounded.
     await fh.close().catch(() => {})
     return null
   }
@@ -1387,8 +1563,13 @@ function parseBracketExpr(seg, openIdx) {
   }
   const start = j
   if (seg[j] === ']') j++
-  while (j < seg.length && seg[j] !== ']') j++
-  if (j >= seg.length) return null
+  // #7918 review — the native `indexOf` rather than a JS loop: same answer
+  // (the first `]` at or after `j`, or none), but a run of unclosed `[` costs
+  // one full scan per `[` either way, and #7918's brace expansion can hand
+  // up to GLOB_BRACE_EXPANSION_CAP patterns to `compileCaseCheck` per call,
+  // so the constant factor of that quadratic is no longer paid once.
+  j = seg.indexOf(']', j)
+  if (j === -1) return null
   const body = seg.slice(start, j)
   if (body.length === 0) return null
   // '-' is left alone (ranges mean the same thing in a JS class); '^' and ']'
@@ -1425,6 +1606,204 @@ function splitTopLevelCommas(s) {
   }
   parts.push(s.slice(start))
   return parts
+}
+
+/**
+ * #7918 — cheap pre-check: does `pattern` contain a `/` character inside ANY
+ * `{...}` group, at any nesting depth? When it does not, whole-pattern brace
+ * expansion has nothing to offer over the existing per-segment `alt`-token
+ * compiler — which is the common case (`*.{ts,js}`, `{a,b,c}/**`) and already
+ * handles it in ONE walk with batched O(N) cost per option (see
+ * `advanceToken`'s `alt` doc), a walk the general expand-then-union path below
+ * cannot match: expanding an ordinary NON-spanning brace into separate
+ * top-to-bottom tree walks would turn an ordinary chained-braces pattern into
+ * a combinatorial fan-out of full walks, for a capability it never needed.
+ * This gate keeps every such pattern on the fast, existing, already-tested
+ * path — {@link expandBraces} only runs when this returns `true`.
+ */
+function hasSlashSpanningBrace(pattern) {
+  let i = 0
+  let braceDepth = 0
+  while (i < pattern.length) {
+    const c = pattern[i]
+    if (c === '[') {
+      const parsed = parseBracketExpr(pattern, i)
+      if (parsed) { i = parsed.next; continue }
+    }
+    if (c === '{') braceDepth++
+    else if (c === '}') { if (braceDepth > 0) braceDepth-- }
+    else if (c === '/' && braceDepth > 0) return true
+    i++
+  }
+  return false
+}
+
+/**
+ * #7918 — BOUND on the whole-pattern brace expansion {@link hasSlashSpanningBrace}
+ * gates: the pattern's own length and brace-nesting-depth caps
+ * (`globPatternComplexityReason`, 2,000 chars / 32 levels) do not, by
+ * themselves, bound the number of alternative STRINGS a chain of sibling
+ * brace groups can expand to (`{a,b}{c,d}{e,f}...` — each additional group
+ * multiplies the count, so a ~30-group chain well within the length cap
+ * would already exceed a million). {@link expandBraces} computes the exact
+ * expansion count FIRST, in one linear pass that saturates at
+ * `GLOB_BRACE_EXPANSION_CAP + 1`, and refuses (returns `null`) before a single
+ * alternative string is built when the count is over — never a partial
+ * expansion, never a silent truncation.
+ */
+const GLOB_BRACE_EXPANSION_CAP = 1000
+
+/**
+ * #7918 — expand every brace GROUP in the raw `pattern`, globally (before any
+ * `/`-split), into its alternative combinations. `compileCaseCheck` splits on
+ * `/` before parsing braces at all, so `{a,b/c}` (a brace alternative whose
+ * OPTIONS themselves contain `/`) has no representation in the compiled
+ * per-segment matcher — a real capability loss versus pre-#7910 `main`, which
+ * called `fs.glob` directly and got its native, slash-spanning brace expansion
+ * for free. Each returned string is compiled and walked independently by
+ * {@link runGlob}, results unioned.
+ *
+ * WHAT IS A GROUP: a `{` paired with its `}` by one left-to-right scan that
+ * skips bracket expressions exactly as {@link parseBracketExpr} delimits them
+ * (a `{`, `}` or `,` inside `[...]` is a class member, not brace syntax) and
+ * whose body has at least one TOP-LEVEL comma. Its alternatives are the
+ * top-level-comma-separated pieces of the body, each expanded recursively;
+ * sibling groups multiply. An unmatched `{` is a literal. A matched `{...}`
+ * with NO top-level comma (`{x}`, `{nested/dup}`) is NOT expanded here — its
+ * braces stay in the output verbatim (anything expandable nested inside it
+ * still expands) — which is `fs.glob`'s own rule (its brace expansion leaves
+ * `{nested/dup}` alone, so it names a literal `{nested`/`dup}` path) and
+ * exactly what pre-#7918 code did with such a pattern: the per-segment
+ * compiler still sees the same text it always saw.
+ *
+ * COST (review of #7918) — this runs synchronously on the daemon's event
+ * loop, where the walk's deadline race cannot interrupt it, so it must be
+ * bounded by the pattern's LENGTH, not by what the pattern expands to. The
+ * first implementation re-scanned every candidate string from its start once
+ * per brace group, calling `parseBracketExpr` (an O(n) scan to the next `]`)
+ * at every `[` it passed: O(groups × strings × n²). Measured on a 1,998-char
+ * pattern well inside every existing cap (a run of unclosed `[`, eight
+ * two-way groups plus one slash-spanning one, then ~330 one-option `{q}`
+ * groups), that was 292 SECONDS of blocked event loop — every session, every
+ * WebSocket client, the tunnel health checks, frozen. Now: one O(n) pass
+ * pairs braces and records each group's top-level commas (a bracket
+ * expression's end is an O(1) lookup in a precomputed next-`]` table instead
+ * of a scan), one O(n) pass computes the exact count (saturating — a
+ * multiplication chain never grows past `GLOB_BRACE_EXPANSION_CAP + 1`), and
+ * only an under-cap pattern is materialized, at O(count × n) — at most 1,000
+ * strings of at most 2,000 characters.
+ *
+ * @param {string} pattern
+ * @returns {string[]|null} The expanded patterns (`[pattern]` when nothing
+ *   expands), or `null` when there would be more than
+ *   {@link GLOB_BRACE_EXPANSION_CAP}.
+ */
+function expandBraces(pattern) {
+  const n = pattern.length
+  // nextClose[j] — index of the first ']' at or after j, or -1.
+  const nextClose = new Int32Array(n + 1)
+  nextClose[n] = -1
+  for (let j = n - 1; j >= 0; j--) nextClose[j] = pattern[j] === ']' ? j : nextClose[j + 1]
+  // Exactly `parseBracketExpr(pattern, i)?.next ?? -1`, in O(1): same
+  // optional `!`/`^`, same leading-`]`-is-a-member rule, same "no closing
+  // `]`" and "empty body" nulls.
+  const bracketEnd = (i) => {
+    let j = i + 1
+    if (pattern[j] === '!' || pattern[j] === '^') j++
+    const start = j
+    if (pattern[j] === ']') j++
+    if (j >= n) return -1
+    const close = nextClose[j]
+    return close === -1 || close === start ? -1 : close + 1
+  }
+
+  // Pass 1 — pair every '{' with its '}' and record each group's top-level
+  // commas (the commas seen while that group is innermost).
+  const closeOf = new Int32Array(n).fill(-1)
+  const commasOf = new Map()
+  const stack = []
+  for (let i = 0; i < n;) {
+    const c = pattern[i]
+    if (c === '[') {
+      const end = bracketEnd(i)
+      if (end !== -1) { i = end; continue }
+    }
+    if (c === '{') {
+      stack.push(i)
+      commasOf.set(i, [])
+    } else if (c === '}') {
+      if (stack.length > 0) closeOf[stack.pop()] = i
+    } else if (c === ',' && stack.length > 0) {
+      commasOf.get(stack[stack.length - 1]).push(i)
+    }
+    i++
+  }
+  const expands = (i) => pattern[i] === '{' && closeOf[i] !== -1 && commasOf.get(i).length > 0
+  function alternatives(i) {
+    const ranges = []
+    let start = i + 1
+    for (const comma of commasOf.get(i)) { ranges.push([start, comma]); start = comma + 1 }
+    ranges.push([start, closeOf[i]])
+    return ranges
+  }
+
+  // Pass 2 — the exact count, saturating at CAP + 1. Every position is
+  // visited by exactly one call (an expanding group hands each of its
+  // alternatives to one recursive call and is then jumped over), so this is
+  // O(n) no matter what the pattern expands to.
+  const OVER = GLOB_BRACE_EXPANSION_CAP + 1
+  function count(lo, hi) {
+    let total = 1
+    for (let i = lo; i < hi;) {
+      if (pattern[i] === '[') {
+        const end = bracketEnd(i)
+        if (end !== -1) { i = end; continue }
+      }
+      if (expands(i)) {
+        let sum = 0
+        for (const [s, e] of alternatives(i)) {
+          sum += count(s, e)
+          if (sum >= OVER) return OVER
+        }
+        total *= sum
+        if (total >= OVER) return OVER
+        i = closeOf[i] + 1
+        continue
+      }
+      i++
+    }
+    return total
+  }
+  const total = count(0, n)
+  if (total >= OVER) return null
+  if (total === 1) return [pattern]
+
+  // Pass 3 — materialize (only reached with total <= CAP).
+  function build(lo, hi) {
+    let outs = ['']
+    let literalFrom = lo
+    for (let i = lo; i < hi;) {
+      if (pattern[i] === '[') {
+        const end = bracketEnd(i)
+        if (end !== -1) { i = end; continue }
+      }
+      if (expands(i)) {
+        const literal = pattern.slice(literalFrom, i)
+        const alts = []
+        for (const [s, e] of alternatives(i)) for (const a of build(s, e)) alts.push(a)
+        const next = []
+        for (const o of outs) for (const a of alts) next.push(o + literal + a)
+        outs = next
+        i = closeOf[i] + 1
+        literalFrom = i
+        continue
+      }
+      i++
+    }
+    const tail = pattern.slice(literalFrom, hi)
+    return tail ? outs.map((o) => o + tail) : outs
+  }
+  return build(0, n)
 }
 
 /**
@@ -2221,5 +2600,7 @@ const TODOWRITE_MAX_CONTENT_RENDERED = 200
 // actual #7356 defect (an orphaned walk left running, and running CPU/RSS,
 // after the tool result was already sent). Calling `walkGlob` directly and
 // timing how long its OWN promise takes to settle after `state.stop` is set
-// proves that property precisely.
-export { compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob }
+// proves that property precisely. `expandBraces` (#7918 review) is exported
+// for the same reason: its cost bound is a property of the function itself,
+// and timing it through a whole Glob call would fold in the walk.
+export { compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, GLOB_BRACE_EXPANSION_CAP }

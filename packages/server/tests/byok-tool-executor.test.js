@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renam
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -726,6 +726,69 @@ describe('executeBuiltinTool', () => {
       }
     })
 
+    // #7918 review (containment) — the whole-pattern brace expansion runs
+    // AFTER `globPatternEscapeReason`, which sees only the unexpanded text, so
+    // concatenation can build what it would have refused: `{.,x}{.,y/z}`
+    // expands to `..`, and `{,x}/abs/...` to an absolute path. Each pattern
+    // here is one raw `fs.glob` really does answer with an ESCAPING match (the
+    // precondition below proves it — without it, "the tool returned nothing
+    // outside" would pass for a corpus that never reached outside at all), and
+    // the tool must return none. It also routes the escape through the other
+    // two changes in this PR: a determinate directory-only symlink (#7917,
+    // `{up/,x/y}`) and a `**`-free chain through a self-loop, which now skips
+    // the ancestor-cycle refusal (#7916, `sub/selfloop/out`).
+    it('never returns a path outside the workspace for a brace-expanded pattern (#7918/#7917/#7916)', {
+      // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+      skip: process.platform === 'win32',
+    }, async () => {
+      const outer = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-glob-expand-outer-')))
+      try {
+        writeFileSync(join(outer, 'TOPSECRET.txt'), 'pw')
+        const ws = join(outer, 'ws')
+        mkdirSync(join(ws, 'sub'), { recursive: true })
+        writeFileSync(join(ws, 'sub', 'b.ts'), '1')
+        symlinkSync(outer, join(ws, 'up'))
+        symlinkSync('.', join(ws, 'sub', 'selfloop'))
+        symlinkSync(outer, join(ws, 'sub', 'out'))
+
+        const escapes = (rel) => {
+          let real
+          try { real = realpathSync(resolve(ws, rel)) } catch { return false }
+          return !(real === ws || real.startsWith(ws + '/'))
+        }
+        // [pattern, the in-workspace match it must STILL return] — the second
+        // column proves the expansion and the walk really ran, so an empty
+        // answer cannot pass for a withheld one.
+        const corpus = [
+          ['{{.,x}{.,y/z}/TOP*,sub/b.ts}', 'sub/b.ts'],
+          ['{up,x/y,sub}/{TOP*,b.ts}', 'sub/b.ts'],
+          ['{up/,sub/}', 'sub'],
+          ['{sub/selfloop/out,x/y,sub/selfloop}/{TOP*,b.ts}', 'sub/selfloop/b.ts'],
+          ['{sub/selfloop/selfloop/out/,sub/selfloop/selfloop/}', 'sub/selfloop/selfloop'],
+          [`{{,x}${outer}/TOPSECRET.txt,sub/b.ts}`, 'sub/b.ts'],
+        ]
+        for (const [pattern, mustReturn] of corpus) {
+          const raw = []
+          for await (const e of fsGlob(pattern, { cwd: ws })) raw.push(e)
+          assert.ok(raw.some(escapes), `precondition: raw fs.glob must reach outside for ${JSON.stringify(pattern)} (got ${JSON.stringify(raw)})`)
+
+          const r = await executeBuiltinTool({
+            toolName: 'Glob', input: { pattern },
+            cwd: ws, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+          })
+          assert.equal(r.isError, false, `${JSON.stringify(pattern)}: ${r.content}`)
+          const lines = r.content.split('\n')
+          assert.ok(lines.includes(mustReturn), `${JSON.stringify(pattern)} must still return ${mustReturn}, got ${JSON.stringify(r.content)}`)
+          for (const line of lines) {
+            assert.ok(!line.includes('TOPSECRET'), `${JSON.stringify(pattern)} leaked ${line}`)
+            assert.ok(!escapes(line), `${JSON.stringify(pattern)} returned ${line}, which resolves outside ${ws}`)
+          }
+        }
+      } finally {
+        rmSync(outer, { recursive: true, force: true })
+      }
+    })
+
     it('returns the in-workspace match and withholds the escaping one, in ONE call', async () => {
       // This test was written as a positive control against the #7273 shape and
       // WAS ITSELF that shape. It globbed `*/pass*` and asserted `esc/passwd`
@@ -1223,6 +1286,116 @@ describe('executeBuiltinTool', () => {
         assert.match(r.content, /EINVAL: glob pattern is too complex/)
         assert.match(r.content, /longer than 2000 characters/)
         assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      // #7918 — `hasSlashSpanningBrace`/`expandBraces`'s OWN bound
+      // (`GLOB_BRACE_EXPANSION_CAP`, 1,000), independent of the pre-existing
+      // length/depth caps above: 11 SIBLING (not nested) two-way brace
+      // groups multiply to 2^11 = 2,048 alternatives while the pattern
+      // itself stays ~60 characters and 1 level deep — well under both of
+      // `globPatternComplexityReason`'s bounds, so this pattern would sail
+      // through unrejected without its own cap. The first group spans a
+      // `/` (`{a/x,b}`) so the pattern actually takes the whole-pattern
+      // expansion path at all; the other ten are ordinary `{c,d}`-shaped
+      // multipliers.
+      it('Glob rejects a slash-spanning brace pattern whose alternatives exceed the expansion cap, fast', { timeout: 5000 }, async () => {
+        const groups = ['{a/x,b}', ...Array.from({ length: 10 }, (_, i) => `{${String.fromCharCode(99 + i * 2)},${String.fromCharCode(100 + i * 2)}}`)]
+        const pattern = groups.join('')
+        assert.ok(pattern.length < 200, 'sanity: this pattern must stay far under the 2000-char length cap')
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /brace alternatives/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant (the count is computed before any alternative is built), took ${elapsedMs}ms`)
+      })
+
+      // Positive control for the cap above: the SAME shape (a slash-spanning
+      // brace mixed with ordinary sibling groups) but with few enough total
+      // alternatives to stay under the cap must still expand and match
+      // normally — proves the cap rejects on COUNT, not merely on the
+      // presence of multiple sibling groups.
+      it('Glob still expands a slash-spanning brace pattern with several (under-cap) sibling groups', async () => {
+        mkdirSync(join(dir, 'nested'))
+        writeFileSync(join(dir, 'nested', 'dup'), 'file named dup')
+        mkdirSync(join(dir, 'dup'))
+        writeFileSync(join(dir, 'dup', 'inner.txt'), '1')
+
+        const r = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '{dup,nested/dup}{,x}' }, ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('dup'), 'the first alternative, expanded with the empty second-group option, must match')
+        assert.ok(lines.includes('nested/dup'), 'the slash-spanning alternative, expanded with the empty second-group option, must match')
+      })
+
+      // #7918 review (DoS, critical) — the expansion runs SYNCHRONOUSLY on the
+      // daemon's event loop, where the walk's deadline race cannot interrupt
+      // it, so its cost must be bounded by pattern LENGTH. The first
+      // implementation re-scanned every candidate string from its start once
+      // per brace group, running `parseBracketExpr`'s scan-to-the-next-`]` at
+      // every `[` it passed — O(groups × strings × n²). This pattern (1,107
+      // chars, far inside every cap: one slash-spanning group and eight
+      // two-way groups → 512 strings, preceded by 1,000 unclosed `[` and
+      // followed by 20 one-option `{q}` groups) took 12.3 SECONDS inside that
+      // expander on this machine; a 1,998-char variant took 292 seconds of
+      // frozen daemon. The linear rewrite does it in about a millisecond.
+      // Timed directly so the budget measures the expander, not the walk.
+      it('expandBraces stays linear-time on a pattern built to make a rescanning expander quadratic', { timeout: 5000 }, () => {
+        const pattern = '['.repeat(1000) + '{x/y,z}' + '{a,b}'.repeat(8) + '{q}'.repeat(20)
+        assert.equal(globPatternComplexityReason(pattern), null, 'sanity: must be inside the pre-existing length/depth caps')
+        const t0 = Date.now()
+        const out = expandBraces(pattern)
+        const elapsedMs = Date.now() - t0
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `expansion must be linear in pattern length, took ${elapsedMs}ms`)
+        // Not vacuous: the expansion really happened, in full.
+        assert.ok(Array.isArray(out), 'an under-cap pattern must expand, not be refused')
+        assert.equal(out.length, 512)
+        assert.equal(new Set(out).size, 512, 'every combination is distinct')
+        assert.ok(out.every((p) => p.startsWith('['.repeat(1000)) && p.endsWith('{q}'.repeat(20))), 'one-option groups stay literal, prefix untouched')
+      })
+
+      // #7918 review (parity) — a brace group with no top-level comma is not
+      // an alternation to `fs.glob` (`{nested/dup}` names a literal
+      // `{nested`/`dup}` path there), and before #7918 this code never
+      // expanded it either: the per-segment compiler saw the same text. The
+      // first #7918 expander stripped the braces, which walked `nested/dup`
+      // instead. A group nested inside a comma-less one still expands; the
+      // enclosing braces stay (`fs.glob` gives `{dup}` and `{nested/dup}` for
+      // `{{dup,nested/dup}}`). The byok-glob-fs-glob-parity table proves the
+      // end-to-end answer against `fs.glob` itself (`{curly/dup}`).
+      it('expandBraces leaves a comma-less group literal and still expands a group nested inside it', () => {
+        assert.deepEqual(expandBraces('{nested/dup}'), ['{nested/dup}'])
+        assert.deepEqual(expandBraces('{a}/{b,c/d}').sort(), ['{a}/b', '{a}/c/d'])
+        assert.deepEqual(expandBraces('{{dup,nested/dup}}').sort(), ['{dup}', '{nested/dup}'])
+        // An unmatched '{' is a literal, and scanning continues past it.
+        assert.deepEqual(expandBraces('{x/{a,b}').sort(), ['{x/a', '{x/b'])
+        // Brace syntax inside a bracket expression is a class member: a `}`
+        // there does not close the group and a `,` there does not split it.
+        // (This bracket-awareness is #7918's own choice — `fs.glob`'s brace
+        // expansion is bracket-unaware and splits `{a[,]b,c/d}` three ways;
+        // filed as a follow-up. Pinned here because the linear rewrite
+        // re-implements it, and a pairing pass that ignored brackets
+        // otherwise survived every other test in this file.)
+        assert.deepEqual(expandBraces('[{,]{a,b/c}').sort(), ['[{,]a', '[{,]b/c'])
+        assert.deepEqual(expandBraces('{a,[}]b/c}').sort(), ['[}]b/c', 'a'])
+        assert.deepEqual(expandBraces('{a[,]b,c/d}').sort(), ['a[,]b', 'c/d'])
+      })
+
+      it('expandBraces refuses an over-cap pattern without materializing it', { timeout: 5000 }, () => {
+        const t0 = Date.now()
+        // 2^16 alternatives: counting must saturate, never multiply out.
+        // (Small enough that an expander which DID materialize it would
+        // still return — and fail the null assertion legibly — rather than
+        // exhaust the heap and take the whole file down with it.)
+        assert.equal(expandBraces('{x/y,z}' + '{a,b}'.repeat(15)), null)
+        assert.ok(Date.now() - t0 < PERF_BUDGET_MS)
+        // Exactly at the cap is allowed; one past it is not.
+        const ten = '{a,b,c,d,e,f,g,h,i,j}'
+        assert.equal(expandBraces(`${ten}${ten}${ten}/x`).length, 1000)
+        assert.equal(expandBraces(`${ten}${ten}${ten}{/x,/y}`), null)
       })
 
       // Nested braces AT the cap (32 levels, 129 chars) — the case this cap
@@ -1961,6 +2134,98 @@ describe('executeBuiltinTool', () => {
         const lines = r.content.split('\n')
         assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
         assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
+      })
+
+      // #7916 (partial fix) — `visitedDirs`'s ancestor-cycle refusal used to
+      // apply unconditionally, refusing even a fully `**`-free, all-literal
+      // pattern's own explicit re-entry through a self-loop
+      // (`sub/selfloop/file.txt`, verified directly against Node 22's
+      // `glob()` to actually match there). `openVerifiedDirForDescend`'s new
+      // `enforceCycleGuard` parameter (derived from `walkGlob`'s
+      // `hasGlobstar`) skips the refusal specifically when the WHOLE pattern
+      // contains no `**` at all — see that parameter's doc for why this is
+      // safe: a `**`-free pattern's recursion depth is hard-bounded by its
+      // own segment count, independent of the filesystem's symlink
+      // structure, so there is nothing here for the DoS guard to protect
+      // against.
+      it('a fully **-free literal chain re-entering an ancestor through a self-loop now matches (parity #7916 partial fix)', {
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'sub', 'file.txt'), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/selfloop/file.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'sub/selfloop/file.txt', 'a single, fully-literal re-entry through the self-loop must be found, matching fs.glob')
+      })
+
+      // #7916 (partial fix, termination proof) — the relaxation above is only
+      // safe because a `**`-free pattern's OWN LENGTH bounds how many times
+      // it can re-enter the self-loop, never the filesystem's cycle. This
+      // test is the adversarial case that claim has to survive: a pattern
+      // that spells the self-loop segment out MANY times in a row (proving
+      // the bound really is the pattern's length, not some smaller constant
+      // that happened to work for one hop) still terminates quickly and
+      // still matches — verified directly against Node 22's `glob()` on the
+      // identical fixture and pattern (`took 6ms` for 20 hops on this
+      // machine), so this is a real parity claim, not merely "does not
+      // hang".
+      it('terminates quickly on a **-free pattern with many repeated self-loop hops, matching fs.glob (DoS/termination #7916 partial fix)', {
+        timeout: 10_000,
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'sub', 'file.txt'), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const hops = 20
+        const pattern = `sub/${'selfloop/'.repeat(hops)}file.txt`
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        const ms = Date.now() - t0
+
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a ${hops}-hop **-free self-loop chain must terminate quickly, took ${ms}ms`)
+        assert.equal(r.content, `sub/${'selfloop/'.repeat(hops)}file.txt`, 'must match fs.glob exactly for this exact chain length')
+      })
+
+      // #7916 (partial fix, control) — the relaxation is scoped to `**`-free
+      // patterns ONLY. A pattern that combines an explicit self-loop chain
+      // WITH `**` must still be governed by the full, unchanged `visitedDirs`
+      // guard — proving the `hasGlobstar` gate actually reads the WHOLE
+      // compiled pattern, not just its first segment or whichever segment is
+      // being matched right now.
+      //
+      // #7918 review — the pattern must be one the guard's ABSENCE would
+      // blow up. The first version of this test used
+      // `sub/selfloop/selfloop/**`, which stays at 42 lines with the guard
+      // deleted outright (a trailing `**` never descends a symlink it merely
+      // absorbed), so it could not fail. `sub/selfloop/**/selfloop/**` is
+      // the round-2 DoS shape behind two literal hops: measured 1,599 lines
+      // with the guard forced off, 0 with it on — and unlike the round-2
+      // test's `**/selfloop/**`, its FIRST segment is not `**`, so a gate
+      // that only looked at `matchers[0]` would also go red here.
+      it('still enforces the full ancestor-cycle guard when the pattern contains ** anywhere, even after literal selfloop hops (DoS control #7916 partial fix)', {
+        timeout: 5_000,
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: 'sub/selfloop/**/selfloop/**' }, ...ctx(),
+        })
+        const ms = Date.now() - t0
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a **-containing pattern through a self-loop must still be bounded, took ${ms}ms`)
+        const lines = r.content.startsWith('No matches') ? [] : r.content.split('\n')
+        assert.ok(lines.length < 200, `a **-containing pattern through a self-loop must still be bounded in match count, got ${lines.length}`)
       })
 
       // #7910 review (parity) — a trailing `**` closing with ZERO width onto a

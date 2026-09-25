@@ -30,7 +30,7 @@ BUMP="$REPO_ROOT/scripts/bump-version.sh"
 # case executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=29
+EXPECTED_CASES=30
 
 PASS=0
 FAIL=0
@@ -198,15 +198,25 @@ STUB
 # only gen-agents-md.mjs dies with ERR_MODULE_NOT_FOUND the moment the generator
 # gains a sibling import — which is exactly what happened when that extraction
 # landed. Copying the directory means the NEXT sibling helper is staged
-# automatically; the `[ -d ]` guard keeps it working against a tree that has no
-# scripts/lib at all.
+# automatically.
+#
+# Fails closed when scripts/lib is missing (#7256), matching
+# scripts/__tests__/helpers/stage-script.mjs's stageScript(), which does the
+# identical job for the .mjs test files and THROWS rather than staging less
+# than asked. "Could not stage it" is not "there was nothing to stage" — a
+# fixture staged without lib/ would leave the child dying downstream with a
+# bare ERR_MODULE_NOT_FOUND naming a temp path instead of this cause. The lib
+# check runs BEFORE the script is copied, so a failure never leaves a partial,
+# silently-broken fixture behind.
 install_agents_generator() {
   local dir="$1"
   mkdir -p "$dir/scripts"
-  cp "$REPO_ROOT/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
-  if [ -d "$REPO_ROOT/scripts/lib" ]; then
-    cp -R "$REPO_ROOT/scripts/lib" "$dir/scripts/lib"
+  if [ ! -d "$REPO_ROOT/scripts/lib" ]; then
+    echo "install_agents_generator: no $REPO_ROOT/scripts/lib — gen-agents-md.mjs imports from it; staging without it would leave the child dying with a bare ERR_MODULE_NOT_FOUND naming a temp path instead of this cause." >&2
+    return 1
   fi
+  cp "$REPO_ROOT/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
+  cp -R "$REPO_ROOT/scripts/lib" "$dir/scripts/lib"
 }
 
 # A CLAUDE.md carrying both version markers the bump rewrites. Without them the
@@ -943,7 +953,7 @@ test_agents_md_regenerated_and_verified_in_root_frame() {
   trap "rm -rf '$dir'" RETURN
   build_fake_repo "$dir" "0.5.7"
   install_bump_script "$dir"
-  install_agents_generator "$dir"
+  install_agents_generator "$dir" || return 1
   write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
 
 - A real fix (#42)"
@@ -981,7 +991,7 @@ test_agents_md_fails_when_generator_writes_to_another_tree() {
 
   # The other tree is a complete, self-consistent repo root: it has its own
   # CLAUDE.md, so the generator running in ITS frame succeeds and exits 0.
-  install_agents_generator "$other"
+  install_agents_generator "$other" || return 1
   write_claude_md "$other/CLAUDE.md" "9.9.9"
   mkdir -p "$dir/scripts"
   ln -sf "$other/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
@@ -1361,6 +1371,47 @@ test_agents_md_stale_after_regeneration_fails_the_bump() {
   ! grep -q 'AGENTS.md regenerated from CLAUDE.md' <<<"$out" || return 1
 }
 
+# --- install_agents_generator fails closed when scripts/lib is missing (#7256) --
+#
+# scripts/__tests__/helpers/stage-script.mjs does the identical staging job for
+# the .mjs test files and THROWS when the sibling lib/ is absent, naming the
+# cause. This shell copy used to silently skip the lib/ copy instead when
+# scripts/lib was missing — "cannot check this" read as "nothing to check",
+# the #2 recurring cause in docs/false-safety-guards.md — leaving a fixture
+# whose child process would die downstream with a bare ERR_MODULE_NOT_FOUND
+# naming a temp path instead of the real cause.
+#
+# Calls the REAL install_agents_generator (not a re-implementation) against a
+# scratch REPO_ROOT that has the generator script but no scripts/lib, by
+# overriding REPO_ROOT for a subshell — the override never escapes to the
+# parent shell or to the other test cases, which rely on the real REPO_ROOT.
+test_install_agents_generator_fails_closed_when_lib_missing() {
+  local fake_root dest
+  fake_root=$(mktemp -d)
+  dest=$(mktemp -d)
+  trap "rm -rf '$fake_root' '$dest'" RETURN
+
+  mkdir -p "$fake_root/scripts"
+  printf '// stub generator, deliberately no sibling lib/\n' \
+    > "$fake_root/scripts/gen-agents-md.mjs"
+
+  local out status
+  out=$( ( REPO_ROOT="$fake_root"; install_agents_generator "$dest" ) 2>&1 )
+  status=$?
+
+  # Must fail rather than silently stage a partial fixture...
+  [ "$status" -ne 0 ] || return 1
+  # ...and name the cause, the way stage-script.mjs's thrown message does.
+  grep -qi "lib" <<<"$out" || return 1
+  # ...and must NOT have staged the script without its sibling lib/ — that
+  # partial state is exactly what used to die downstream with an opaque
+  # ERR_MODULE_NOT_FOUND instead of a diagnosable message here.
+  [ ! -e "$dest/scripts/gen-agents-md.mjs" ] || return 1
+  return 0
+}
+
+run_test "install_agents_generator fails closed when scripts/lib is missing (#7256)" \
+  test_install_agents_generator_fails_closed_when_lib_missing
 run_test "AGENTS.md regeneration reports success when it really regenerated" \
   test_agents_md_regeneration_succeeds
 run_test "a generator that silently no-ops fails the bump (#7198 shape)" \
