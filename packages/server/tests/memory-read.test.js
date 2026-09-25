@@ -1,6 +1,7 @@
 import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'fs/promises'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -278,6 +279,41 @@ describe('memory_read (readMemory) handler', () => {
 
     await rm(outsideDir, { recursive: true, force: true })
     await rm(dir, { recursive: true, force: true })
+  })
+
+  // #7938 — a FIFO planted at CLAUDE.md's path, instead of a symlink or a
+  // regular file, must be refused promptly rather than hanging the read.
+  // Before O_NONBLOCK was added to openNoFollow (the one helper every
+  // ws-file-ops read goes through), `open(path, O_RDONLY)` on a FIFO with no
+  // writer connected blocks the calling thread forever — the exact defect
+  // class that hit claude-hooks resolveIngestSecret (#7923),
+  // trusted-file-read.js's credential-store read (#7924), and claude-tui's
+  // _hookReadFile (#7926), each caught only by adversarial review.
+  it('does not hang when CLAUDE.md is a FIFO instead of a regular file', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-fifo-'))
+    const fifoPath = join(dir, 'CLAUDE.md')
+    execFileSync('mkfifo', [fifoPath])
+    try {
+      const HANG_GUARD_MS = 3000
+      const start = Date.now()
+      const result = await Promise.race([
+        fileOps.readMemory(mockWs, dir).then(() => ({ outcome: 'resolved' })),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      ])
+      const elapsed = Date.now() - start
+      assert.notEqual(result.outcome, 'hung',
+        `readMemory blocked for >= ${HANG_GUARD_MS}ms on a FIFO planted at CLAUDE.md — the open needs O_NONBLOCK (#7938)`)
+      assert.ok(elapsed < 2000, `readMemory must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
+
+      const { entries } = responses[0]
+      const projectEntry = entries.find((e) => e.scope === 'project')
+      assert.equal(projectEntry.content, null, 'a FIFO must never be read as file content')
+      assert.equal(projectEntry.exists, true)
+      assert.match(projectEntry.error || '', /not a regular file|not readable/i,
+        'a FIFO must be refused with a clear reason, not silently treated as missing')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('skips an @import of ~/.claude/.credentials.json (non-markdown target under an allowed root) without reading it', async () => {

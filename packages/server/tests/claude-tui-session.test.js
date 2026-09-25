@@ -8562,6 +8562,36 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     assert.ok(elapsed < 1000, `_hookReadFile must return promptly for a FIFO (O_NONBLOCK), not block waiting for a writer (elapsed=${elapsed}ms)`)
   })
 
+  // #7938 — the SAME hang class, found in `_captureSinkBaseIdentity`
+  // (audited alongside `_hookReadFile` above, which #7926 already fixed):
+  // `openSync(base, O_RDONLY | O_NOFOLLOW)` had no O_NONBLOCK, so a FIFO
+  // planted at the sink BASE path (between `ensureOwnedBaseDir`'s check and
+  // this open) would block this SYNCHRONOUS call forever — worse than the
+  // async `_hookReadFile` case, since a sync open blocks the whole event
+  // loop with no timer left to even fire a HOOK_FS_TIMEOUT. Also proves the
+  // NEW post-open `isDirectory()` check: once O_NONBLOCK lets the open
+  // against a FIFO succeed instead of hanging, something must still refuse
+  // it as a sink base, or a FIFO's dev+ino would be captured as if it were
+  // the validated directory.
+  it('_captureSinkBaseIdentity refuses a FIFO planted at the base path instead of hanging (#7938)', { skip: process.platform === 'win32' }, () => {
+    session = makeStartedSession('s-fifo-base')
+    const fifoPath = join(baseDir, 'evil-base.fifo')
+    execFileSync('mkfifo', [fifoPath])
+    const HANG_GUARD_MS = 2000
+    const start = Date.now()
+    let thrown = null
+    try {
+      session._captureSinkBaseIdentity(fifoPath)
+    } catch (err) {
+      thrown = err
+    }
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < HANG_GUARD_MS,
+      `_captureSinkBaseIdentity blocked for ${elapsed}ms opening a planted FIFO — the open needs O_NONBLOCK (#7938)`)
+    assert.ok(thrown, 'a FIFO planted at the sink base path must be refused, not silently captured as the base identity')
+    assert.match(thrown.message, /not a directory/i, 'refused via the post-open isDirectory() check, not some other failure')
+  })
+
   // #7926 (re-review) — timeout semantics must fail CLOSED for delivery, not
   // open. A slow/stuck lstat during the POST-read re-validation is exactly
   // what an attacker who can make the filesystem slow (a FUSE mount, a huge

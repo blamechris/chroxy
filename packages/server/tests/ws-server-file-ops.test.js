@@ -1038,6 +1038,35 @@ describe('file browser symlink security', () => {
     ws.close()
   })
 
+  // #7938 — a FIFO planted at the requested path, instead of a regular file,
+  // must be refused promptly rather than hanging the read forever. Before
+  // O_NONBLOCK was added to openNoFollow (the one helper every ws-file-ops
+  // read goes through), `open(path, O_RDONLY)` on a FIFO with no writer
+  // connected blocks the calling thread indefinitely.
+  it('read_file: does not hang when the target is a FIFO instead of a regular file', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const fifoPath = join(tempDir, 'evil.fifo')
+    execFileSync('mkfifo', [fifoPath])
+    const { ws, messages } = await createFileBrowserTestServer()
+
+    const HANG_GUARD_MS = 3000
+    const start = Date.now()
+    send(ws, { type: 'read_file', path: 'evil.fifo' })
+    const content = await Promise.race([
+      waitForMessage(messages, 'file_content', HANG_GUARD_MS),
+      new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+    ])
+    const elapsed = Date.now() - start
+
+    assert.notEqual(content?.outcome, 'hung',
+      `read_file blocked for >= ${HANG_GUARD_MS}ms on a planted FIFO — the open needs O_NONBLOCK (#7938)`)
+    assert.ok(elapsed < 2500, `read_file must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
+    assert.equal(content.content, null, 'a FIFO must never be read as file content')
+    assert.match(content.error || '', /not a regular file/i,
+      'a FIFO must be refused via the post-open isFile() check, not a different/incidental error (#7938)')
+
+    ws.close()
+  })
+
   it('read_file: rejects null bytes in path', async () => {
     const { ws, messages } = await createFileBrowserTestServer()
 

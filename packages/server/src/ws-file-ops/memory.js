@@ -189,6 +189,16 @@ async function readResolvedMemoryFile(resolvedPath) {
   let fh
   try {
     fh = await openNoFollow(resolvedPath, fsConstants.O_RDONLY)
+    // #7938 — the `fileStat.isFile()` check above ran BEFORE this open, so it
+    // cannot see a non-regular file (a FIFO/device) swapped in during the
+    // TOCTOU window between that stat and this open. openNoFollow's O_NONBLOCK
+    // keeps the open itself from hanging on a planted FIFO with no writer, but
+    // reading its content is still the wrong thing to do — re-check isFile()
+    // on the OPENED fd, which cannot be raced the same way, before reading.
+    const fhStat = await fh.stat()
+    if (!fhStat.isFile()) {
+      throw new Error(`${resolvedPath} is not a regular file`)
+    }
     buf = await fh.readFile()
   } catch (err) {
     if (err.code === 'ELOOP') {

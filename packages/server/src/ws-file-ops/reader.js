@@ -213,6 +213,16 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         let fh
         try {
           fh = await openNoFollow(resolvedAbsPath, fsConstants.O_RDONLY)
+          // #7938 — `fileStat` above was taken BEFORE this open, so it can't
+          // see a FIFO/device swapped in during the TOCTOU window between
+          // that stat and this open. openNoFollow's O_NONBLOCK keeps the
+          // open from hanging on a planted FIFO with no writer, but the
+          // content must still not be read from anything but a regular file
+          // — re-check on the OPENED fd, which can't be raced the same way.
+          const fhStat = await fh.stat()
+          if (!fhStat.isFile()) {
+            throw new Error(`${resolvedAbsPath} is not a regular file`)
+          }
           buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -530,6 +540,14 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             let rfh
             try {
               rfh = await openNoFollow(absPath, fsConstants.O_RDONLY)
+              // #7938 — `st` above was taken BEFORE this open; re-check on the
+              // OPENED fd (can't be raced) before reading from it. openNoFollow's
+              // O_NONBLOCK stops a planted FIFO from hanging this open forever,
+              // but its content must still never be read.
+              const rfhStat = await rfh.stat()
+              if (!rfhStat.isFile()) {
+                throw new Error(`${absPath} is not a regular file`)
+              }
               const tail = Buffer.alloc(1)
               await rfh.read(tail, 0, 1, st.size - 1)
               needsLeadingNewline = tail[0] !== 0x0a
