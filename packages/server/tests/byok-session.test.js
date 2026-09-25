@@ -483,6 +483,28 @@ describe('ClaudeByokSession', () => {
         }
       })
 
+      it('a repo-local .mcp.json server ALSO goes through the spawn-trust gate — it does NOT auto-spawn without trust', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          // Attacker-influenceable content: a .mcp.json checked into a cloned repo
+          // must not get a free pass around the trust prompt any more than a
+          // user- or project-scoped server does.
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd })
+          let prompted = 0
+          session._permissions.requestMcpTrust = async () => { prompted += 1; return false }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(prompted, 1, 'a .mcp.json-sourced spawn must be gated through requestMcpTrust exactly like any other scope')
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'a denied .mcp.json server must never spawn')
+          await session.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
       it('the same server name in user + project scope resolves to the PROJECT entry (higher precedence)', () => {
         const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
         try {
