@@ -1,9 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, writeFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
   serverKeyForUrl,
   getStoredToken,
@@ -110,6 +111,21 @@ describe('token store (plaintext fallback — no keychain)', () => {
 
   it('rejects a record with no access token', () => {
     assert.throws(() => setStoredToken('https://a.example/mcp', { refreshToken: 'x' }), /accessToken/)
+  })
+
+  // #7893: readStore() used to statSync(path) (mode check) and then
+  // separately readFileSync(path) — a rename/symlink-swap window between the
+  // two. This is the deterministic proxy for that race: the swap happens
+  // once, before the read, rather than mid-syscall.
+  it('#7893: refuses a symlink swapped in for the tokens file, even to a well-formed 0600 file elsewhere (today it is followed)', { skip: process.platform === 'win32' ? 'covered by trusted-file-read win32 tests' : SKIP_NO_SYMLINK }, () => {
+    setStoredToken('https://host.example/mcp', RECORD)
+    const elsewhere = join(dir, 'elsewhere.json')
+    writeFileSync(elsewhere, JSON.stringify({ 'https://host.example/mcp': { ...RECORD, accessToken: 'evil-swapped-token' } }), { mode: 0o600 })
+    // Swap: the tokens file now points at a DIFFERENT 0600 file we own.
+    rmSync(tokensPath)
+    symlinkSync(elsewhere, tokensPath)
+
+    assert.equal(getStoredToken('https://host.example/mcp'), null, 'a symlink swap must be refused, never followed to the swapped-in token')
   })
 })
 

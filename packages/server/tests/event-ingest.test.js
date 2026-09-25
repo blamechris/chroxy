@@ -14,13 +14,14 @@
 //
 // All state paths are temp dirs (#4633 sandbox guard applies).
 
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, chmodSync, symlinkSync, chownSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, chmodSync, symlinkSync, chownSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { createHttpHandler } from '../src/http-routes.js'
 import {
   loadOrCreateIngestSecret,
@@ -655,9 +656,32 @@ describe('loadOrCreateIngestSecret — #7246 mode re-check on read (fail-closed)
     symlinkSync(targetPath, secretPath)
     assert.throws(
       () => loadOrCreateIngestSecret(secretPath),
-      /has mode 640; refusing to read \(must be 0600\)/,
-      'statSync follows the link, so the TARGET mode is what gets enforced'
+      /refusing to read/,
+      'a symlink at the secret path must be refused outright (#7893 — O_NOFOLLOW), never followed to check the TARGET\'s mode',
     )
+  })
+
+  // #7893: a rename/symlink-swap window used to sit between statSync(path)
+  // (the trust check) and readFileSync(path) (the read) — a process with
+  // write access to the containing directory could swap in a DIFFERENT file
+  // between the two. This is the deterministic proxy for that race: the
+  // swap happens once, before the read, rather than mid-syscall (which
+  // cannot be won or lost deterministically in a test).
+  it('#7893: refuses a symlink swapped in AFTER the secret is created, even to a well-formed 0600 file elsewhere (today it is followed)', { skip: process.platform === 'win32' ? 'covered by the trusted-file-read win32 helper tests' : SKIP_NO_SYMLINK }, () => {
+    const realSecret = loadOrCreateIngestSecret(secretPath) // a real, trusted 0600 secret
+    const elsewhere = join(dir, 'elsewhere-secret')
+    writeFileSync(elsewhere, 'attacker-controlled-but-well-formed\n', { mode: 0o600 })
+    // Swap: the path now points at a DIFFERENT 0600 file we own.
+    unlinkSync(secretPath)
+    symlinkSync(elsewhere, secretPath)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /refusing to read/,
+      'a symlink swapped in after the trusted create must be refused, not followed — the mode of the file it points at is irrelevant',
+    )
+    // Sanity: the swap really would have changed what got read, proving this
+    // is not a vacuous assertion.
+    assert.notEqual(realSecret, readFileSync(elsewhere, 'utf8').trim())
   })
 
   it('refuses an existing secret owned by another uid', { skip: typeof process.getuid !== 'function' }, () => {
@@ -710,52 +734,40 @@ describe('loadOrCreateIngestSecret — #7246 mode re-check on read (fail-closed)
     }
   })
 
-  it('fails closed (throws) when statSync fails for a reason other than the file being absent', async (t) => {
-    if (typeof mock.module !== 'function') {
-      t.skip('re-run with --experimental-test-module-mocks to exercise this test')
-      return
-    }
+  // #7893: the mode/owner trust check moved from statSync(path) to
+  // fstatSync(the OPENED fd) (via trusted-file-read.js's readTrustedSecretFile),
+  // so a stat-failure mock on node:fs's `statSync` no longer intercepts
+  // anything the read path calls. Exercised instead with a REAL non-ENOENT
+  // open failure: an unreadable containing directory, mirroring
+  // credential-store-durable.test.js's "unreadable store" tests.
+  it('fails closed (throws) when the secret cannot be opened for a reason other than being absent', () => {
+    if (process.platform === 'win32') return // POSIX dir-permission semantics
+    if (process.getuid && process.getuid() === 0) return // root ignores mode bits
     writeFileSync(secretPath, 'unreachable\n', { mode: 0o600 })
-    const realFs = await import('node:fs')
-    const statError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
-    const mockFs = { ...realFs, statSync: () => { throw statError } }
-    mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
+    chmodSync(dir, 0o000)
     try {
-      const { loadOrCreateIngestSecret: loadWithMock } = await import(`../src/event-ingest.js?cacheBust=7246-stat-${Date.now()}`)
       assert.throws(
-        () => loadWithMock(secretPath),
-        /unable to stat .*: EACCES/,
-        'a non-ENOENT stat failure must throw, never fall through to reading or recreating the secret'
+        () => loadOrCreateIngestSecret(secretPath),
+        /unable to stat/,
+        'a non-ENOENT open failure must throw, never fall through to reading or recreating the secret',
       )
     } finally {
-      mock.restoreAll()
+      chmodSync(dir, 0o700)
     }
   })
 
-  it('an ENOENT stat failure (create/delete race) is NOT a refusal — falls through to create-new-secret', async (t) => {
-    if (typeof mock.module !== 'function') {
-      t.skip('re-run with --experimental-test-module-mocks to exercise this test')
-      return
-    }
-    // existsSync says present, but statSync races to ENOENT (the file vanished
-    // between the two calls) — this must be treated as "absent", not refused,
-    // so the create path can proceed. Distinguishes the ENOENT special-case
-    // from the general stat-failure refusal above.
-    const realFs = await import('node:fs')
-    const enoent = Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
-    const mockFs = {
-      ...realFs,
-      existsSync: (p) => (p === secretPath ? true : realFs.existsSync(p)),
-      statSync: (p) => { if (p === secretPath) throw enoent; return realFs.statSync(p) },
-    }
-    mock.module('node:fs', { defaultExport: mockFs, namedExports: mockFs })
-    try {
-      const { loadOrCreateIngestSecret: loadWithMock } = await import(`../src/event-ingest.js?cacheBust=7246-enoent-${Date.now()}`)
-      const secret = loadWithMock(secretPath)
-      assert.ok(secret.length >= 40, 'a fresh secret was minted rather than throwing')
-    } finally {
-      mock.restoreAll()
-    }
+  // #7893: the old two-step existsSync(path) + statSync(path) shape had a
+  // real window for a create/delete race to land ENOENT on the SECOND call
+  // after the FIRST said "present". Collapsing the presence check and the
+  // trust check into one open() call (the whole point of this fix) makes
+  // that specific race structurally impossible — there is no longer a
+  // second syscall to race against the first. What remains observable is
+  // the base case this specialized into: a genuinely absent file falls
+  // through to create-new-secret rather than refusing.
+  it('a genuinely absent secret falls through to create-new-secret (not a refusal)', () => {
+    assert.ok(!existsSync(secretPath))
+    const secret = loadOrCreateIngestSecret(secretPath)
+    assert.ok(secret.length >= 40, 'a fresh secret was minted rather than throwing')
   })
 })
 
