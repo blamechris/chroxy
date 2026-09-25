@@ -112,6 +112,11 @@
 // in-workspace file `fs.glob`'s own bug hides is strictly more correct to
 // return, not a regression). See `KNOWN_DIFFERENCE_7899` below.
 //
+// A THIRD, added in #7951's review: brace-expansion shapes where `fs.glob`'s
+// `brace-expansion` and this tool's expander still differ in BOTH
+// directions. Those rows assert their exact missing and extra lists rather
+// than a shape predicate. See `KNOWN_DIFFERENCE_7951` below.
+//
 // Each bucketed pattern below is asserted to diverge in EXACTLY its
 // documented shape and direction (under-match OR over-match, per the
 // bucket), not just "somehow differ" — a bare skip would let an
@@ -165,12 +170,19 @@ const SYMLINK_SKIP_REASON = (() => {
 // the `KNOWN_DIFFERENCE_7899` bucket when it's `true` (fs.glob's
 // candidate-generation bug for a negated class only manifests under its
 // own nocase folding — see that bucket's own comment).
+//
+// The probe pattern carries a `?` on purpose (#7951 review): a fully
+// literal pattern can be answered by a plain `lstat`, which measures the
+// FILESYSTEM's case sensitivity (a case-insensitive Linux directory would
+// read `true` here while `fs.glob` does no folding at all), whereas a
+// wildcard forces `fs.glob` to read the directory and run its own matcher —
+// the thing the #7899 bucket actually depends on.
 const FS_GLOB_NOCASE = (() => {
   let probeDir
   try {
     probeDir = mkdtempSync(join(tmpdir(), 'chroxy-glob-parity-nocase-probe-'))
     writeFileSync(join(probeDir, 'NoCaseProbe.tmp'), 'x')
-    return globSync('nocaseprobe.tmp', { cwd: probeDir }).length > 0
+    return globSync('nocaseprob?.tmp', { cwd: probeDir }).length > 0
   } finally {
     if (probeDir) rmSync(probeDir, { recursive: true, force: true })
   }
@@ -278,6 +290,10 @@ async function buildFixture() {
   for (const n of ['1', '2', '3', '01', '02', '03', 'a', 'b', 'c', '-1', '-2', '0']) {
     await file(join(ROOT, 'range', `${n}.txt`))
   }
+  // #7951 review — `range/q{Z..a}q`: the mixed-case letter range steps over
+  // the backslash code point, which `brace-expansion` emits as an EMPTY
+  // member, so `fs.glob` matches this real `qq`.
+  await file(join(ROOT, 'range', 'qq'))
 
   // #7951 — bracket-in-brace comma splitting: real files named to match
   // fs.glob's OWN measured bracket-oblivious comma split of `{a[,]b,other}`
@@ -288,6 +304,18 @@ async function buildFixture() {
   await file(join(ROOT, 'bracecomma', 'p['))
   await file(join(ROOT, 'bracecomma', 'q]r'))
   await file(join(ROOT, 'bracecomma', 's'))
+  // #7951 review — the positive control `bracecomma/{a[}]b,s}` lacked: its
+  // first alternative `a[}]b` (a class matching a literal `}`) names this.
+  await file(join(ROOT, 'bracecomma', 'a}b'))
+
+  // #7951 review — shapes where `fs.glob`'s brace expansion and this tool's
+  // still differ (see KNOWN_DIFFERENCE_7951). Every file either side can
+  // return for those patterns exists, so each divergence is visible in BOTH
+  // directions instead of being hidden by an absent file.
+  await mk(join(ROOT, 'bracequirk'))
+  for (const n of ['a', 'b', 'b}c', 'a]c}', 'b[]c}', 'a}', '{a},b}', '{x}1', '{x}2', '{x}{1..2}', '1', '2', '3', '{', '}']) {
+    await file(join(ROOT, 'bracequirk', n))
+  }
 }
 
 before(buildFixture, { timeout: 30_000 })
@@ -459,12 +487,18 @@ const PATTERNS = [
   'range/{1..3}.txt', 'range/{3..1}.txt', 'range/{01..03}.txt',
   'range/{a..c}.txt', 'range/{c..a}.txt', 'range/{-2..0}.txt',
   'range/{1..3..2}.txt',
+  // #7951 review — a ONE-member range still expands (`{2..2}` → `2`; the
+  // shipped code returned the pattern unexpanded whenever the whole count
+  // was 1), a zero-padded STEP turns padding on (`{1..10..01}` → 01..10),
+  // and the backslash inside a mixed-case letter range is an empty member.
+  'range/{2..2}.txt', 'range/{1..3..5}.txt', 'range/{1..10..01}.txt', 'range/q{Z..a}q',
 
   // #7951 — bracket-in-brace comma splitting: `fs.glob`'s own measured
   // behavior splits `{p[,q]r,s}` into 3 alternatives ('p[', 'q]r', 's'),
   // bracket-OBLIVIOUS, not the 2 a bracket-aware split would give — see
-  // `expandBraces`'s doc and `findMatchingBrace`'s doc for the two
-  // DIFFERENT (and both deliberate) awarenesses this now matches.
+  // `splitTopLevelCommas`'s doc. `{a[}]b,s}` agrees too, but NOT because
+  // `fs.glob` pairs braces around brackets (it does not — see
+  // `braceCloseTable`'s doc and KNOWN_DIFFERENCE_7951 below).
   'bracecomma/{p[,q]r,s}', 'bracecomma/{a[}]b,s}',
 
   // #7899 — negated bracket class shapes that agree with `fs.glob` on
@@ -549,9 +583,59 @@ const KNOWN_DIFFERENCE_7899 = {
   allowExtra: true,
 }
 
+// #7951 review — the brace-expansion shapes that still differ, recorded as
+// #7951's documented known differences (its acceptance allows exactly this:
+// "at parity, or explicitly documented as a known difference"). `fs.glob`
+// expands braces with `brace-expansion` (Node 22 bundles it; read directly),
+// which differs from this tool's expander in three ways, all rooted in its
+// algorithm rather than in anything a Glob caller would write on purpose:
+//   - it pairs braces with NO knowledge of bracket expressions, so in
+//     `{a,b[}]c}` the `}` inside `[}]` closes the group (alternatives `a`,
+//     `b[`, then the text `]c}`); this tool pairs bracket-aware (see
+//     `braceCloseTable`'s doc) and reads `a`, `b[}]c`;
+//   - a comma-less group followed by `,…}` has its `}` re-read as literal
+//     and its `{` re-paired further on, so `{a},b}` becomes `a}`, `b`; this
+//     tool keeps `{a}` literal and the rest literal too;
+//   - a comma-less, non-range group with no `,…}` after it stops expansion
+//     of EVERYTHING to its right, so `{x}{1..2}` stays one literal string;
+//     this tool still expands the range;
+//   - it expands a brace group INSIDE a bracket expression (`[{1..3}]` →
+//     `[1]`,`[2]`,`[3]`); this tool reads `[{1..3}]` as one class.
+// Exact emulation of that algorithm, bounded the way #7945 bounds this
+// expander, is its own change. Every row asserts the EXACT missing/extra
+// lists, not a shape predicate, so any other change to these patterns'
+// results fails here instead of hiding behind the issue number.
+const KNOWN_DIFFERENCE_7951 = {
+  issue: '#7951',
+  exact: {
+    'bracequirk/{a,b[}]c}': {
+      missing: ['bracequirk/a]c}', 'bracequirk/b[]c}'],
+      extra: ['bracequirk/a', 'bracequirk/b}c'],
+    },
+    'bracequirk/{a},b}': {
+      missing: ['bracequirk/a}', 'bracequirk/b'],
+      extra: ['bracequirk/{a},b}'],
+    },
+    'bracequirk/{x}{1..2}': {
+      missing: ['bracequirk/{x}{1..2}'],
+      extra: ['bracequirk/{x}1', 'bracequirk/{x}2'],
+    },
+    'bracequirk/[{1..3}]': {
+      missing: ['bracequirk/2'],
+      extra: ['bracequirk/{', 'bracequirk/}'],
+    },
+  },
+  allowExtra: true,
+}
+KNOWN_DIFFERENCE_7951.patterns = Object.keys(KNOWN_DIFFERENCE_7951.exact)
+KNOWN_DIFFERENCE_7951.missingShape = (p) => Object.values(KNOWN_DIFFERENCE_7951.exact)
+  .some(({ missing, extra }) => missing.includes(p) || extra.includes(p))
+KNOWN_DIFFERENCE_7951.missingShapeDesc = 'one of the exact rows listed in KNOWN_DIFFERENCE_7951'
+
 const KNOWN_DIFFERENCE_BUCKETS = [
   KNOWN_UNDERMATCH_7916,
   ...(FS_GLOB_NOCASE ? [KNOWN_DIFFERENCE_7899] : []),
+  KNOWN_DIFFERENCE_7951,
 ]
 // When `fs.glob` does not nocase-fold on this host, the #7899 shapes above
 // already agree with it exactly — promote them into the strict-equality
@@ -572,7 +656,7 @@ describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#79
     })
   }
 
-  for (const { issue, patterns, missingShape, missingShapeDesc, allowExtra } of KNOWN_DIFFERENCE_BUCKETS) {
+  for (const { issue, patterns, missingShape, missingShapeDesc, allowExtra, exact } of KNOWN_DIFFERENCE_BUCKETS) {
     for (const pattern of patterns) {
       it(`diverges from fs.glob EXACTLY per the filed ${issue} gap for ${JSON.stringify(pattern)}`, async () => {
         const actual = await toolGlobList(pattern)
@@ -582,6 +666,16 @@ describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#79
         const expectedSet = new Set(expected)
         const missing = expected.filter((p) => !actualSet.has(p))
         const extra = actual.list.filter((p) => !expectedSet.has(p))
+        if (exact) {
+          // A bucket that knows its rows exactly asserts them exactly — in
+          // both directions, sorted, so neither a new divergence nor a
+          // partly-fixed one can pass as "still the documented gap".
+          assert.deepEqual(
+            { missing: [...missing].sort(), extra: [...extra].sort() },
+            { missing: [...exact[pattern].missing].sort(), extra: [...exact[pattern].extra].sort() },
+            `${issue} shape ${JSON.stringify(pattern)} diverged differently than recorded\n  tool:     ${JSON.stringify(actual.list)}\n  fs.glob:  ${JSON.stringify(expected)}`,
+          )
+        }
         if (!allowExtra) {
           assert.deepEqual(
             extra,

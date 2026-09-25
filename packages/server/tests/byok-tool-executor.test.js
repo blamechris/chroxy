@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renam
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -1223,7 +1223,7 @@ describe('executeBuiltinTool', () => {
         assert.equal(r.content, '{dup}\n{nested}')
       })
 
-      // #7951 — findMatchingBrace's PAIRING bracket-awareness, exercised
+      // #7951 — braceCloseTable's PAIRING bracket-awareness, exercised
       // through the PER-SEGMENT path directly (no '/' inside the braces, so
       // this never takes expandBraces's whole-pattern route — the parity
       // harness's equivalent row for this shape (`bracecomma/{a[}]b,s}`)
@@ -1401,9 +1401,11 @@ describe('executeBuiltinTool', () => {
       })
 
       // #7951 acceptance — workspace containment: a range's own generated
-      // members are always pure digit or single-letter text (never a `.`
-      // character), so a range alone can never generate a `..` or absolute
-      // path segment. What DOES need proving is that the pre-existing
+      // members never contain a `.` or a `/`. A MIXED-CASE letter range
+      // does produce one EMPTY member (the backslash code point, as
+      // `fs.glob` does — see parseRangeGroup's doc), so `.{Z..a}.` can spell
+      // a `..` segment; the containment test below the next two covers that.
+      // What these two prove is that the pre-existing
       // `globPatternEscapeReason` check (unchanged by this fix) still
       // rejects a literal `..` segment WRITTEN NEXT TO a range group,
       // before the new `hasRangeBrace` gate ever runs.
@@ -1413,7 +1415,7 @@ describe('executeBuiltinTool', () => {
         assert.match(r.content, /parent-directory/)
       })
 
-      it('a range can never itself generate an empty path component or a literal ".." (direct proof over every generated member)', () => {
+      it('a numeric or single-case letter range never generates an empty member, "." or ".." (direct proof over every generated member)', () => {
         for (const body of ['1..1000', '-500..500', 'a..z', 'z..a', '001..500']) {
           const info = parseRangeGroup(body)
           for (let k = 0; k < Math.min(info.count, 2000); k++) {
@@ -1424,6 +1426,160 @@ describe('executeBuiltinTool', () => {
             assert.ok(!member.includes('/'), `${body}#${k} must never contain "/"`)
           }
         }
+      })
+    })
+
+    // #7951 review — defects found in the range/brace changes after they
+    // were written, each measured against real `fs.glob` (Node 22) and, for
+    // the arithmetic, against the `brace-expansion` source Node bundles.
+    describe('range/brace review fixes (#7951 review)', () => {
+      it('a ONE-member range still expands: a total of 1 is not "nothing expands"', async () => {
+        // expandBraces returned `[pattern]` whenever the whole count was 1,
+        // which was only ever true of "no group expands" before ranges
+        // existed; `{5..5}` and `{1..3..5}` have exactly one member each.
+        assert.deepEqual(expandBraces('file{5..5}.txt'), ['file5.txt'])
+        assert.deepEqual(expandBraces('{1..3..5}'), ['1'])
+        assert.deepEqual(expandBraces('{00..0}'), ['00'])
+        assert.deepEqual(expandBraces('{x}'), ['{x}'], 'a group that does not expand still hands the pattern back verbatim')
+        writeFileSync(join(dir, 'file2.txt'), '1')
+        writeFileSync(join(dir, 'file{2..2}.txt'), '1') // negative control: the braces are syntax, not text
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'file{2..2}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'file2.txt')
+      })
+
+      it('a zero-padded STEP turns padding on, with the width still taken from the endpoints', () => {
+        // brace-expansion: `pad = n.some(isPadded)` over start, end AND step;
+        // `width = Math.max(n[0].length, n[1].length)`.
+        const r = parseRangeGroup('1..10..01')
+        assert.equal(r.count, 10)
+        assert.deepEqual([0, 1, 8, 9].map((k) => r.nth(k)), ['01', '02', '09', '10'])
+        const narrow = parseRangeGroup('1..3..01')
+        assert.deepEqual([0, 1, 2].map((k) => narrow.nth(k)), ['1', '2', '3'], 'width 1: padding on, nothing to pad')
+      })
+
+      it('a mixed-case letter range emits the backslash code point as an EMPTY member, never "\\\\"', async () => {
+        const r = parseRangeGroup('Z..a')
+        const members = Array.from({ length: r.count }, (_, k) => r.nth(k))
+        assert.deepEqual(members, ['Z', '[', '', ']', '^', '_', '`', 'a'])
+        writeFileSync(join(dir, 'qq'), '1')
+        const g = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'q{Z..a}q' }, ...ctx() })
+        assert.equal(g.isError, false)
+        assert.equal(g.content, 'qq')
+      })
+
+      it('numeric ranges are exact past 2^53 and at any length — never NaN, never rounded, never 1e+21', () => {
+        const big = parseRangeGroup('9007199254740993..9007199254740995')
+        assert.equal(big.count, 3)
+        assert.deepEqual([0, 1, 2].map((k) => big.nth(k)), ['9007199254740993', '9007199254740994', '9007199254740995'])
+        // Two equal 400-digit endpoints: as floats both are Infinity, so the
+        // count was NaN, every `>= cap` test was false, and the group
+        // silently expanded to NOTHING.
+        const nines = '9'.repeat(400)
+        const same = parseRangeGroup(`${nines}..${nines}`)
+        assert.equal(same.count, 1)
+        assert.equal(same.nth(0), nines)
+        assert.deepEqual(expandBraces(`x{${nines}..${nines}}`), [`x${nines}`])
+        assert.ok(parseRangeGroup(`1..${nines}`).count > 1000)
+        assert.equal(expandBraces(`{1..${nines}}`), null, 'over the cap fails closed, even when the count is astronomically large')
+        const e21 = parseRangeGroup('1000000000000000000000..1000000000000000000001')
+        assert.deepEqual([e21.nth(0), e21.nth(1)], ['1000000000000000000000', '1000000000000000000001'])
+      })
+
+      it('a letter range with an enormous step yields its start letter, not a NUL', () => {
+        // `Math.abs(Number(step))` is Infinity for 400 digits and
+        // `Infinity * 0` is NaN, which `String.fromCharCode` turns into U+0000.
+        const r = parseRangeGroup(`a..z..${'9'.repeat(400)}`)
+        assert.equal(r.count, 1)
+        assert.equal(r.nth(0), 'a')
+        const numeric = parseRangeGroup(`1..10..${'9'.repeat(400)}`)
+        assert.equal(numeric.count, 1)
+        assert.equal(numeric.nth(0), '1')
+      })
+
+      it('an empty range member that spells ".." cannot walk out of the search root', async () => {
+        // `.{Z..a}.` expands to `.Z.`, `.[.`, `..`, `.].`, ... — the empty
+        // member makes a real `..` segment. Positive control: `fs.glob`
+        // itself expands the same pattern to a match OUTSIDE the root, so
+        // the pattern really does reach `..` — the tool must not follow it.
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'outside.txt'), '1')
+        writeFileSync(join(dir, 'sub', 'inside.txt'), '1')
+        const raw = await Array.fromAsync(fsGlob('.{Z..a}./*', { cwd: join(dir, 'sub') }))
+        assert.ok(raw.some((p) => p.includes('outside.txt')), `control: fs.glob must reach the parent through the empty member, got ${JSON.stringify(raw)}`)
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '.{Z..a}./*', path: 'sub' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.ok(!r.content.includes('outside'), `must not escape the root: ${r.content}`)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('hasRangeBrace skips a bracket expression exactly as expandBraces does (the gate is exact, not a superset)', () => {
+        // The implementer's mutation 10 ("not independently observable"):
+        // a range INSIDE a bracket expression is a class to both functions.
+        // Through Glob the skip is invisible (expandBraces would hand the
+        // pattern back unchanged), so it is pinned here, directly.
+        assert.equal(hasRangeBrace('x[{1..3}]'), false)
+        assert.deepEqual(expandBraces('x[{1..3}]'), ['x[{1..3}]'])
+        assert.equal(hasRangeBrace('x[{1..3}]{1..2}'), true, 'control: a range outside the class is still seen')
+      })
+
+      it('brace nesting the host parser sees is capped even when the bracket-oblivious counter reads it as shallow', async () => {
+        // `{,` x30, then a class `[}}}…]` whose 30 `}` walk the shared
+        // counter back down, repeated: the host parser pairs bracket-aware,
+        // so every `{,` really nests. 480 levels in 1,953 characters.
+        const dense = (levels) => {
+          let s = ''
+          for (let open = 0; open < levels;) {
+            const n = Math.min(30, levels - open)
+            s += '{,'.repeat(n) + '[' + '}'.repeat(n) + ']'
+            open += n
+          }
+          return s + 'y' + '}'.repeat(levels)
+        }
+        const deep = dense(480)
+        assert.equal(globPatternComplexityReason(deep), null, 'control: the shared, bracket-oblivious counter passes this pattern')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: deep }, ...ctx() })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /nesting deeper than 32 levels/)
+        // Boundary: exactly 32 real levels is allowed, 33 is not.
+        const at = (levels) => '{,'.repeat(30) + '[' + '}'.repeat(30) + ']' + '{,'.repeat(levels - 30) + 'y' + '}'.repeat(levels)
+        assert.equal(globPatternComplexityReason(at(33)), null)
+        const ok = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: at(32) }, ...ctx() })
+        assert.equal(ok.isError, false, ok.content)
+        const over = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: at(33) }, ...ctx() })
+        assert.equal(over.isError, true)
+        assert.match(over.content, /nesting deeper than 32 levels/)
+      })
+
+      it('the host depth check over every expansion stays inside the event-loop budget', { timeout: 30_000 }, () => {
+        // runGlob runs hostBraceDepthExceeded over all (up to 1,000)
+        // expanded patterns synchronously before the walk. Measured ~4ms
+        // here; ~70ms when an unclosed `[` re-scans to the end each time.
+        // Best of three, so one scheduler hiccup cannot fail it.
+        const expanded = expandBraces('{1..999}' + '['.repeat(1990))
+        assert.equal(expanded.length, 999)
+        let best = Infinity
+        for (let run = 0; run < 3; run++) {
+          const t0 = performance.now()
+          for (const p of expanded) assert.equal(hostBraceDepthExceeded(p), false)
+          best = Math.min(best, performance.now() - t0)
+        }
+        assert.ok(best < 40, `depth check over 999 expansions must stay well under 50ms, best of 3 took ${best.toFixed(1)}ms`)
+      })
+
+      it('per-segment brace pairing is one pass: bracket-heavy segments behind a range compile in bounded total time', { timeout: 60_000 }, () => {
+        // Each `{[}]` is a `{` bracket-aware pairing leaves unmatched; the
+        // shipped per-`{` scan re-parsed every unclosed `[` after it with a
+        // full `indexOf`, and `{1..999}` makes runGlob compile 999 such
+        // patterns. Measured on the dev Mac: 2,146ms per Glob call before
+        // (main: ~0ms, it paired bracket-oblivious), ~90ms after.
+        const pattern = '{1..999}' + '{[}]'.repeat(30) + '['.repeat(1870)
+        const expanded = expandBraces(pattern)
+        assert.equal(expanded.length, 999)
+        const t0 = Date.now()
+        for (const p of expanded) compileCaseCheck(p)
+        const elapsedMs = Date.now() - t0
+        assert.ok(elapsedMs < 1000, `compiling 999 expansions must stay well under a second, took ${elapsedMs}ms`)
       })
     })
 
