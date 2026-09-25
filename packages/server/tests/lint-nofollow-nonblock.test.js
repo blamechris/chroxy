@@ -563,6 +563,43 @@ describe('#7938 lint-nofollow-nonblock — roster: no unscanned file may use O_N
   })
 })
 
+// A directory being scanned does not mean every file in it was scanned:
+// SOURCE_EXT_RE only matches .js/.mjs/.cjs, so a .ts/.tsx/.jsx file dropped
+// into an already-scanned tree (e.g. packages/server/src) is invisible to
+// the primary pass by extension. The roster's whole purpose is to catch a
+// new O_NOFOLLOW site outside the sweep — so it must not also exempt this
+// file just because it shares a directory with files that WERE scanned
+// (review of #7955: this silently exited 0 before the fix).
+describe('#7938 lint-nofollow-nonblock — roster: a mismatched-extension file inside a scanned tree is not exempt', () => {
+  const UNGUARDED_TS = "import { openSync, constants as c } from 'node:fs'\nexport function readIt(p) {\n  return openSync(p, c.O_RDONLY | c.O_NOFOLLOW)\n}\n"
+
+  test('red: a .ts file sitting inside the scanned src/ tree is caught when the roster covers that same tree', () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-nofollow-roster-ext-'))
+    tmpRoots.push(root)
+    const srcDir = join(root, 'src')
+    mkdirSync(srcDir, { recursive: true })
+    writeFileSync(join(srcDir, 'zz-control.js'), CONTROL)
+    writeFileSync(join(srcDir, 'reader.ts'), UNGUARDED_TS)
+
+    const res = spawnSync(process.execPath, [LINT_SCRIPT, '--src-dir', srcDir, '--roster-dir', srcDir], { encoding: 'utf8' })
+    assert.equal(res.status, 2, res.stdout + res.stderr)
+    assert.ok(/reader\.ts.*references O_NOFOLLOW/.test(res.stderr), res.stderr)
+    assert.ok(/outside the scanned trees reference O_NOFOLLOW/.test(res.stderr), res.stderr)
+  })
+
+  test('green: same tree, but the .ts file has no O_NOFOLLOW reference at all (positive control)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-lint-nofollow-roster-ext-'))
+    tmpRoots.push(root)
+    const srcDir = join(root, 'src')
+    mkdirSync(srcDir, { recursive: true })
+    writeFileSync(join(srcDir, 'zz-control.js'), CONTROL)
+    writeFileSync(join(srcDir, 'reader.ts'), "import { openSync, constants as c } from 'node:fs'\nexport function readIt(p) {\n  return openSync(p, c.O_RDONLY)\n}\n")
+
+    const res = spawnSync(process.execPath, [LINT_SCRIPT, '--src-dir', srcDir, '--roster-dir', srcDir], { encoding: 'utf8' })
+    assert.equal(res.status, 0, res.stdout + res.stderr)
+  })
+})
+
 describe('#7938 lint-nofollow-nonblock — the real repo (what CI runs)', () => {
   test('default mode is green and checks every known O_NOFOLLOW open, including the DI-renamed one', () => {
     const res = spawnSync(process.execPath, [LINT_SCRIPT, '--list-checked'], { encoding: 'utf8' })

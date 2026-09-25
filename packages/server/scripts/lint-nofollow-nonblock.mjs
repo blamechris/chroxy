@@ -879,8 +879,16 @@ function analyzeFile(filePath, keyRoot) {
 
 // ─── Roster: nothing outside the scanned trees may use O_NOFOLLOW ────────────
 
-function rosterOffenders(files, srcDirs) {
-  const inScanned = (f) => srcDirs.some((d) => f === d || f.startsWith(d + pathSep))
+function rosterOffenders(files, scannedFiles) {
+  // A file's directory being one of the scanned trees does NOT mean the file
+  // itself was scanned — SOURCE_EXT_RE only matches .js/.mjs/.cjs, so a .ts/
+  // .tsx/.jsx file sitting inside packages/server/src or
+  // packages/claude-hooks/src is invisible to the primary pass. Exempting it
+  // here too (by directory prefix, as before) would make it invisible to the
+  // roster as well — the one file type change the roster exists to catch.
+  // Membership is therefore checked against the exact set of files the
+  // primary pass actually opened, not the directory they live in.
+  const inScanned = (f) => scannedFiles.has(f)
   const offenders = []
   for (const file of files) {
     if (file === SELF || inScanned(file)) continue
@@ -920,6 +928,7 @@ for (const dir of rosterDirs) {
 const keyRoot = usingDefaultSrcDirs ? REPO_ROOT : srcDirs[0]
 const allFindings = []
 const allChecked = []
+const scannedFiles = new Set()
 let scanned = 0
 let totalRefs = 0
 
@@ -928,6 +937,7 @@ try {
     const files = usingDefaultSrcDirs ? listSourceFilesByGit(srcDir) : walk(srcDir, SOURCE_EXT_RE)
     for (const file of files) {
       scanned++
+      scannedFiles.add(file)
       const { findings, checked, refs } = analyzeFile(file, keyRoot)
       allFindings.push(...findings)
       allChecked.push(...checked)
@@ -963,7 +973,7 @@ if (rosterDirs.length) {
   rosterFiles = gitLsFiles(['packages', 'scripts']).filter((l) => ROSTER_EXT_RE.test(l)).map((l) => join(REPO_ROOT, l))
   if (rosterFiles.length === 0) usageError('the roster enumerated 0 files under packages/ and scripts/ — refusing to report it clean')
 }
-const outside = rosterOffenders(rosterFiles, srcDirs)
+const outside = rosterOffenders(rosterFiles, scannedFiles)
 if (outside.length) {
   for (const o of outside) console.error(`${o}  references O_NOFOLLOW but is outside every scanned tree`)
   usageError(`${outside.length} file(s) outside the scanned trees reference O_NOFOLLOW — add their tree to DEFAULT_SRC_DIRS (or --src-dir) so the lint actually checks them`)
