@@ -2460,19 +2460,34 @@ export class ClaudeTuiSession extends BaseSession {
     // cli-session.js's `buildClaudeCliArgs`: the two-token form of an
     // optional-arg flag INJECTS a dash-leading value as a separate option
     // rather than swallowing it. This spawn goes through node-pty
-    // (`ptyMod.spawn`), not `child_process`, so `scripts/lint-argv-sinks.mjs`
-    // cannot see this call site at all — the guard here is the only gate.
+    // (`ptyMod.spawn`), not `child_process` — at the time this guard was
+    // added, that made the call site invisible to `scripts/lint-argv-sinks.mjs`
+    // entirely, so the guard below was the ONLY gate. #7935 closed that gap:
+    // the lint now scans node-pty spawns too, and (with the accompanying
+    // `pathKeyOf` `this.`-support fix) structurally recognises this exact
+    // `assertSafeArgvValue(this._sessionId, ...)` call as guarding the sink
+    // below — no catalogue entry needed (see `utils/argv-safety.js`'s
+    // `claude-tui-session.js` section). The guard call itself still has to
+    // stay right here regardless: it is what makes the runtime value safe,
+    // not merely what satisfies the lint.
     try {
       assertSafeArgvValue(this._sessionId, 'sessionId')
     } catch (err) {
       this.emit('error', { message: `Refusing to spawn claude TUI: ${err.message}` })
       return
     }
-    const idArgs = this._resumedFromPersisted
+    // #7935 review: built as a ternary-of-two-array-literals plus `.push()`
+    // (not `[...idArgs, ...]` spread into a fresh array) so
+    // `scripts/lint-argv-sinks.mjs` can statically resolve `args` at all —
+    // its array resolution traces a `const name = <literal | ternary-of-two-
+    // literals>` plus same-function `.push()` calls, but a spread of another
+    // local array is opaque to it (same as any dynamic/spread argv), which
+    // made this whole call unresolvable and untraceable at an ELEMENT level.
+    // Same final array contents either way; this is a shape change only.
+    const args = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
-    const args = [
-      ...idArgs,
+    args.push(
       '--settings', this._settingsPath,
       // Claude Code 2.1.186 added a "Claude in Chrome extension detected"
       // first-run prompt that interactively blocks the TUI (1/2/Enter/Esc) when
@@ -2481,7 +2496,7 @@ export class ClaudeTuiSession extends BaseSession {
       // (code=1). A headless chroxy TUI session never drives the browser
       // integration, so disable it at spawn — no prompt, no wedge.
       '--no-chrome',
-    ]
+    )
     if (this.skipPermissions) {
       // #4044: bypass chroxy's hook + claude's per-tool prompt entirely.
       // Caller is expected to opt in explicitly via the session option.
