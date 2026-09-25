@@ -366,9 +366,12 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // existing single-compile, single-walk path completely unchanged below
   // (`patterns.length === 1`, `patterns[0] === pattern`); only a
   // genuinely-spanning pattern pays for the multi-pattern expand-and-union
-  // path.
+  // path. #7951 — a `{X..Y}` range (`file{1..3}.txt`) has the SAME gap: it
+  // has no representation in the per-segment compiler either (which never
+  // expands `..`), and very often does not span a '/' at all, so
+  // `hasRangeBrace` is a second, independent gate alongside the first.
   let patterns
-  if (hasSlashSpanningBrace(pattern)) {
+  if (hasSlashSpanningBrace(pattern) || hasRangeBrace(pattern)) {
     const expanded = expandBraces(pattern)
     if (expanded === null) {
       return {
@@ -1398,8 +1401,35 @@ function parseSegmentTokens(seg) {
         i++
       } else {
         const alts = splitTopLevelCommas(seg.slice(i + 1, close))
-        tokens.push({ t: 'alt', options: alts.map(parseSegmentTokens) })
-        i = close + 1
+        // #7951 — a matched `{...}` with NO top-level comma is NOT
+        // alternation to `fs.glob` (verified directly: `{dup}` against a
+        // real file named `dup` returns no matches, while a real file
+        // literally named `{braces}.txt` IS matched by the pattern
+        // `{braces}.txt` — same rule `expandBraces` already documents for
+        // the slash-spanning path). Before this fix, EVERY matched brace
+        // pair became an `alt` token regardless of comma count, so
+        // `{dup}` wrongly matched `dup` and `brackets/{braces}.txt` missed
+        // the real file entirely.
+        //
+        // Fix: only compile to `alt` when there is more than one
+        // alternative. Otherwise treat the '{' as an ordinary literal
+        // token and let THIS SAME loop keep scanning its interior
+        // normally — a wildcard/bracket-class inside still functions
+        // (`{a*}` still lets `*` match), and a NESTED brace group that
+        // DOES have its own top-level comma still expands when the loop
+        // reaches it (only the braces immediately enclosing a comma-less
+        // body are literal, not everything inside them) — matching
+        // `expandBraces`'s "anything expandable nested inside it still
+        // expands" rule exactly. The matching '}' is reached later by
+        // this same loop's `else` branch, which already treats a bare
+        // '}' as a literal character.
+        if (alts.length > 1) {
+          tokens.push({ t: 'alt', options: alts.map(parseSegmentTokens) })
+          i = close + 1
+        } else {
+          tokens.push({ t: 'lit', ch: '{' })
+          i++
+        }
       }
     } else {
       tokens.push({ t: 'lit', ch: c })
@@ -1579,11 +1609,26 @@ function parseBracketExpr(seg, openIdx) {
   return { source: `[${negate ? '^' : ''}${classBody}]`, next: j + 1, soleDot: !negate && body === '.' }
 }
 
-/** Index of the `}` matching `seg[openIdx] === '{'`, or -1 if unmatched. */
+/**
+ * Index of the `}` matching `seg[openIdx] === '{'`, or -1 if unmatched.
+ *
+ * #7951 — bracket-expression AWARE, matching {@link expandBraces}'s own
+ * group-boundary scan: a `{`/`}` inside a `[...]` class is a class member,
+ * not brace syntax, so `{[}]a,b}`'s embedded `}` (a class matching a literal
+ * `}`) does not end the group early — verified directly against `fs.glob`
+ * (`{a[}]b,fc}` only matches the real file named `fc`, never one shaped like
+ * the truncated `{a[` group a bracket-oblivious scan would find). Before this
+ * fix, this per-segment scanner and `expandBraces`'s slash-spanning one
+ * disagreed on where such a group even ends.
+ */
 function findMatchingBrace(seg, openIdx) {
   let depth = 1
   let j = openIdx + 1
   while (j < seg.length) {
+    if (seg[j] === '[') {
+      const parsed = parseBracketExpr(seg, j)
+      if (parsed) { j = parsed.next; continue }
+    }
     if (seg[j] === '{') depth++
     else if (seg[j] === '}') { depth--; if (depth === 0) return j }
     j++
@@ -1591,18 +1636,47 @@ function findMatchingBrace(seg, openIdx) {
   return -1
 }
 
-/** Split a `{a,b,c}` body on top-level commas (commas inside nested `{}` don't count). */
+/**
+ * Split a `{a,b,c}` body on top-level commas (commas inside nested `{}` don't
+ * count). Two DIFFERENT bracket-awarenesses on purpose, matching
+ * {@link findMatchingBrace}/{@link expandBraces}'s own pass-1 exactly:
+ *   - bracket-AWARE for nested-`{`/`}` DEPTH — a `{` or `}` inside a `[...]`
+ *     class is a class member, never nested-brace syntax, so it must not
+ *     perturb `depth` (an embedded `}`, e.g. the one inside `[}]`, would
+ *     otherwise look like it closes a nested group that was never opened).
+ *   - bracket-OBLIVIOUS for COMMAS — a comma inside a `[...]` class still
+ *     splits, matching `fs.glob`'s own measured behavior exactly (`{a[,]b,c}`
+ *     against real files named `a[`, `]b`, `c` matches all three; `{p[,q]r,s}`
+ *     similarly splits 3 ways, not the 2 a bracket-aware split would give).
+ * So a bracket span is scanned character-by-character for a comma (never
+ * jumped over outright) while still being skipped for depth purposes.
+ */
 function splitTopLevelCommas(s) {
   const parts = []
   let depth = 0
   let start = 0
-  for (let i = 0; i < s.length; i++) {
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === '[') {
+      const parsed = parseBracketExpr(s, i)
+      if (parsed) {
+        for (let k = i; k < parsed.next; k++) {
+          if (s[k] === ',' && depth === 0) {
+            parts.push(s.slice(start, k))
+            start = k + 1
+          }
+        }
+        i = parsed.next
+        continue
+      }
+    }
     if (s[i] === '{') depth++
     else if (s[i] === '}') depth--
     else if (s[i] === ',' && depth === 0) {
       parts.push(s.slice(start, i))
       start = i + 1
     }
+    i++
   }
   parts.push(s.slice(start))
   return parts
@@ -1654,6 +1728,148 @@ function hasSlashSpanningBrace(pattern) {
 const GLOB_BRACE_EXPANSION_CAP = 1000
 
 /**
+ * #7951 — matches a `{X..Y}` / `{X..Y..S}` "sequence expression" group body
+ * (the text strictly between `{` and its matching `}`) the same shape
+ * `fs.glob` recognizes — verified directly: `{1..3}` → 1,2,3; `{01..03}` →
+ * zero-padded; `{a..c}` → a,b,c; `{3..1}`/`{c..a}` → descending; `{1..10..2}`
+ * → stepped. `$`-anchored on both alternatives: a stray extra character,
+ * including a comma, fails both and falls through to ordinary comma-group /
+ * literal handling — a range and a comma-alternation are mutually exclusive
+ * by construction, never a precedence question.
+ *
+ * Two shapes only: an optionally-signed decimal integer on both sides
+ * (optionally-signed decimal step), or a single ASCII letter on both sides
+ * (same optional step). A NON-letter, non-digit single-character endpoint
+ * (`{^..a}`) is deliberately NOT recognized as a range here — a narrower
+ * scope than a hypothetical arbitrary-code-point walk, chosen because no
+ * real Glob call needs a punctuation-to-punctuation range and because the
+ * one shape that would matter most (`[` as an endpoint, `{[..]}`) is already
+ * consumed by bracket-expression parsing before it could ever reach here —
+ * both this scanner and `fs.glob`'s own (bracket-aware, see
+ * {@link findMatchingBrace}'s doc) treat a `[` right after `{` as the START
+ * of a class, not a literal range endpoint, so the two never actually
+ * diverge on that specific shape either.
+ */
+const GLOB_BRACE_RANGE_RE = /^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$|^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?$/
+
+/**
+ * Parse a range GROUP BODY against {@link GLOB_BRACE_RANGE_RE}. Returns
+ * `null` when the body does not match, OR when it matches but the step is
+ * zero (`{1..10..0}`) — which `fs.glob` itself does not fail gracefully for
+ * (measured directly: it THROWS `RangeError: Invalid array length`,
+ * synchronously, from inside its own iterator, not a "no matches" result).
+ * Refusing to treat a zero step as a range at all — falling back to ordinary
+ * literal `{...}` handling, the same as any other non-range body — is a
+ * deliberate divergence: this module never throws synchronously out of
+ * pattern compilation for attacker-controlled input. The permanent parity
+ * harness (byok-glob-fs-glob-parity.test.js) deliberately excludes a
+ * zero-step pattern from its oracle-based table for the same reason ITS
+ * oracle call would crash outright — see that file's comment on the `range/`
+ * pattern block; byok-tool-executor.test.js's "range expansion (#7951)"
+ * describe block pins the fail-closed behavior directly instead.
+ *
+ * Returns `{ count, nth(k) }` on success. `count` is computed ARITHMETICALLY
+ * — no iteration, so it stays cheap for a range far too large to ever
+ * materialize (`{1..999999999999}`) — and `nth(k)` (0-indexed) lazily
+ * formats the k-th member. `nth` is only ever called by {@link expandBraces}'s
+ * `build` pass, itself only reached once the WHOLE pattern's total expansion
+ * count has already been proven `<= GLOB_BRACE_EXPANSION_CAP` — the same
+ * count-before-materialize discipline #7945 established for comma groups.
+ *
+ * PADDING (verified directly against `fs.glob`): when either endpoint's own
+ * text has a leading zero after its optional sign (`/^-?0\d/` — a lone `"0"`
+ * does not count, it has no second digit to pad), every generated member is
+ * zero-padded so its own printed length (sign included) equals the WIDER of
+ * the two endpoints' own printed lengths: `{001..10}` and `{1..010}` both
+ * produce `001, 002, ... 010` (width 3, from whichever side is wider), and
+ * `{-01..1}` produces `-01, 000, 001` (width 3 — the `-` counts toward the
+ * width, so a positive member gets one more zero than the padded positive
+ * endpoint's own digit count).
+ *
+ * LETTER RANGES: both endpoints must independently be a single ASCII letter
+ * — mixed case is legal (verified: `{a..C}` and `{Z..a}` both expand). The
+ * walk is a raw UTF-16 code-unit step between the two endpoints inclusive,
+ * matching `fs.glob`'s own observed behavior even when it steps through
+ * non-letter code points in between a mixed-case pair (`{a..C}` includes
+ * `[`, `\`, `]`, `^`, `_`, `` ` `` — verified directly).
+ */
+function parseRangeGroup(body) {
+  const m = GLOB_BRACE_RANGE_RE.exec(body)
+  if (!m) return null
+  if (m[1] !== undefined) {
+    const startRaw = m[1]
+    const endRaw = m[2]
+    const stepRaw = m[3]
+    const startN = Number(startRaw)
+    const endN = Number(endRaw)
+    const step = stepRaw === undefined ? 1 : Math.abs(Number(stepRaw))
+    if (!(step > 0)) return null // zero, NaN, or non-finite — refuse, never divide by zero
+    const padded = /^-?0\d/.test(startRaw) || /^-?0\d/.test(endRaw)
+    const width = padded ? Math.max(startRaw.length, endRaw.length) : 0
+    const count = Math.floor(Math.abs(endN - startN) / step) + 1
+    const dir = endN >= startN ? 1 : -1
+    return {
+      count,
+      nth(k) {
+        const val = startN + dir * step * k
+        if (!padded) return String(val)
+        const sign = val < 0 ? '-' : ''
+        const digits = Math.abs(val).toString().padStart(Math.max(0, width - sign.length), '0')
+        return sign + digits
+      },
+    }
+  }
+  const startCh = m[4]
+  const endCh = m[5]
+  const stepRaw = m[6]
+  const step = stepRaw === undefined ? 1 : Math.abs(Number(stepRaw))
+  if (!(step > 0)) return null
+  const startCode = startCh.charCodeAt(0)
+  const endCode = endCh.charCodeAt(0)
+  const dir = endCode >= startCode ? 1 : -1
+  const count = Math.floor(Math.abs(endCode - startCode) / step) + 1
+  return {
+    count,
+    nth(k) { return String.fromCharCode(startCode + dir * step * k) },
+  }
+}
+
+/**
+ * #7951 — cheap pre-check, the same shape as {@link hasSlashSpanningBrace}:
+ * does `pattern` contain a brace GROUP (bracket-expression-aware, matching
+ * {@link expandBraces}'s own group-boundary scan) whose body is shaped like a
+ * `{X..Y}` / `{X..Y..S}` range? A range has no representation in the
+ * per-segment `alt`-token compiler (`parseSegmentTokens` never expands
+ * `..`), so — like a slash-spanning brace — it needs the whole-pattern
+ * expand-then-union path {@link expandBraces} provides. This tests only the
+ * SHAPE via {@link GLOB_BRACE_RANGE_RE}; a shape {@link parseRangeGroup}
+ * later refuses for its own reasons (a zero step) is still routed to
+ * `expandBraces` and simply falls back to literal `{...}` text there — a
+ * wasted gate trigger, never a correctness gap.
+ */
+function hasRangeBrace(pattern) {
+  let i = 0
+  const starts = []
+  while (i < pattern.length) {
+    const c = pattern[i]
+    if (c === '[') {
+      const parsed = parseBracketExpr(pattern, i)
+      if (parsed) { i = parsed.next; continue }
+    }
+    if (c === '{') {
+      starts.push(i + 1)
+    } else if (c === '}') {
+      if (starts.length > 0) {
+        const start = starts.pop()
+        if (GLOB_BRACE_RANGE_RE.test(pattern.slice(start, i))) return true
+      }
+    }
+    i++
+  }
+  return false
+}
+
+/**
  * #7918 — expand every brace GROUP in the raw `pattern`, globally (before any
  * `/`-split), into its alternative combinations. `compileCaseCheck` splits on
  * `/` before parsing braces at all, so `{a,b/c}` (a brace alternative whose
@@ -1665,33 +1881,48 @@ const GLOB_BRACE_EXPANSION_CAP = 1000
  *
  * WHAT IS A GROUP: a `{` paired with its `}` by one left-to-right scan that
  * skips bracket expressions exactly as {@link parseBracketExpr} delimits them
- * (a `{`, `}` or `,` inside `[...]` is a class member, not brace syntax) and
- * whose body has at least one TOP-LEVEL comma. Its alternatives are the
- * top-level-comma-separated pieces of the body, each expanded recursively;
- * sibling groups multiply. An unmatched `{` is a literal. A matched `{...}`
- * with NO top-level comma (`{x}`, `{nested/dup}`) is NOT expanded here — its
- * braces stay in the output verbatim (anything expandable nested inside it
- * still expands) — which is `fs.glob`'s own rule (its brace expansion leaves
- * `{nested/dup}` alone, so it names a literal `{nested`/`dup}` path) and
- * exactly what pre-#7918 code did with such a pattern: the per-segment
- * compiler still sees the same text it always saw.
+ * for the PAIRING itself (a `{` or `}` inside `[...]` is a class member, not
+ * brace syntax — verified directly against `fs.glob`: `{a[}]b,fc}` only
+ * matches a real file named `fc`, never one shaped like the truncated group a
+ * bracket-oblivious pairing scan would find). Its alternatives are either:
+ *   - the top-level-comma-separated pieces of the body, each expanded
+ *     recursively — #7951: comma-splitting is deliberately bracket-OBLIVIOUS
+ *     (the opposite awareness from pairing), matching `fs.glob`'s own
+ *     measured behavior exactly (`{a[,]b,c}` against real files named `a[`,
+ *     `]b`, `c` matches all three — a bracket-aware split would only ever
+ *     see 2 alternatives, not 3); or
+ *   - the members of a `{X..Y}` / `{X..Y..S}` range (#7951, when the body has
+ *     no top-level comma and matches {@link GLOB_BRACE_RANGE_RE} — see
+ *     {@link parseRangeGroup}).
+ * Sibling groups multiply. An unmatched `{` is a literal. A matched `{...}`
+ * with neither a top-level comma nor a valid range body (`{x}`,
+ * `{nested/dup}`) is NOT expanded here — its braces stay in the output
+ * verbatim (anything expandable nested inside it still expands) — which is
+ * `fs.glob`'s own rule (its brace expansion leaves `{nested/dup}` alone, so
+ * it names a literal `{nested`/`dup}` path) and exactly what pre-#7918 code
+ * did with such a pattern: the per-segment compiler still sees the same text
+ * it always saw (see that compiler's own #7951 fix for the same rule).
  *
- * COST (review of #7918) — this runs synchronously on the daemon's event
- * loop, where the walk's deadline race cannot interrupt it, so it must be
- * bounded by the pattern's LENGTH, not by what the pattern expands to. The
- * first implementation re-scanned every candidate string from its start once
- * per brace group, calling `parseBracketExpr` (an O(n) scan to the next `]`)
- * at every `[` it passed: O(groups × strings × n²). Measured on a 1,998-char
- * pattern well inside every existing cap (a run of unclosed `[`, eight
- * two-way groups plus one slash-spanning one, then ~330 one-option `{q}`
- * groups), that was 292 SECONDS of blocked event loop — every session, every
- * WebSocket client, the tunnel health checks, frozen. Now: one O(n) pass
- * pairs braces and records each group's top-level commas (a bracket
- * expression's end is an O(1) lookup in a precomputed next-`]` table instead
- * of a scan), one O(n) pass computes the exact count (saturating — a
- * multiplication chain never grows past `GLOB_BRACE_EXPANSION_CAP + 1`), and
- * only an under-cap pattern is materialized, at O(count × n) — at most 1,000
- * strings of at most 2,000 characters.
+ * COST (review of #7918, extended by #7951's range support) — this runs
+ * synchronously on the daemon's event loop, where the walk's deadline race
+ * cannot interrupt it, so it must be bounded by the pattern's LENGTH, not by
+ * what the pattern expands to. The first implementation re-scanned every
+ * candidate string from its start once per brace group, calling
+ * `parseBracketExpr` (an O(n) scan to the next `]`) at every `[` it passed:
+ * O(groups × strings × n²). Measured on a 1,998-char pattern well inside
+ * every existing cap (a run of unclosed `[`, eight two-way groups plus one
+ * slash-spanning one, then ~330 one-option `{q}` groups), that was 292
+ * SECONDS of blocked event loop — every session, every WebSocket client, the
+ * tunnel health checks, frozen. Now: one O(n) pass pairs braces and records
+ * each group's top-level commas (a bracket expression's end is an O(1)
+ * lookup in a precomputed next-`]` table instead of a scan), one O(n) pass
+ * computes the exact count — for a range group this is one O(1) arithmetic
+ * division, NEVER a loop over the range's own members, so `{1..100000}` and
+ * `{a..z}{a..z}{a..z}` cost the same handful of operations as `{1..2}` — and
+ * that pass saturates at `GLOB_BRACE_EXPANSION_CAP + 1` no matter how the
+ * cap is approached (comma multiplication or range arithmetic), and only an
+ * under-cap pattern is materialized, at O(count × n) — at most 1,000 strings
+ * of at most 2,000 characters.
  *
  * @param {string} pattern
  * @returns {string[]|null} The expanded patterns (`[pattern]` when nothing
@@ -1717,8 +1948,14 @@ function expandBraces(pattern) {
     return close === -1 || close === start ? -1 : close + 1
   }
 
-  // Pass 1 — pair every '{' with its '}' and record each group's top-level
-  // commas (the commas seen while that group is innermost).
+  // Pass 1 — pair every '{' with its '}' (BRACKET-AWARE: a `[...]` span is
+  // skipped so any `{`/`}` inside it never affects pairing/depth — #7951)
+  // and record each group's top-level commas (BRACKET-OBLIVIOUS: a comma
+  // inside a `[...]` span still counts, matching `fs.glob` — #7951, see
+  // `expandBraces`'s own doc above). The two awarenesses are opposite on
+  // purpose, so a `[...]` span is scanned character-by-character for a `,`
+  // instead of being jumped over outright, even though it IS still jumped
+  // over for the purpose of `{`/`}` structural matching.
   const closeOf = new Int32Array(n).fill(-1)
   const commasOf = new Map()
   const stack = []
@@ -1726,7 +1963,16 @@ function expandBraces(pattern) {
     const c = pattern[i]
     if (c === '[') {
       const end = bracketEnd(i)
-      if (end !== -1) { i = end; continue }
+      if (end !== -1) {
+        if (stack.length > 0) {
+          const top = stack[stack.length - 1]
+          for (let k = i; k < end; k++) {
+            if (pattern[k] === ',') commasOf.get(top).push(k)
+          }
+        }
+        i = end
+        continue
+      }
     }
     if (c === '{') {
       stack.push(i)
@@ -1738,7 +1984,17 @@ function expandBraces(pattern) {
     }
     i++
   }
-  const expands = (i) => pattern[i] === '{' && closeOf[i] !== -1 && commasOf.get(i).length > 0
+  // #7951 — a group with no top-level comma may still be a RANGE
+  // (`parseRangeGroup`, cached per group index since both `count` and
+  // `build` need it). `groupKind` is the single source of truth for whether
+  // a group expands at all, and how.
+  const rangeOf = new Map()
+  function groupKind(i) {
+    if (commasOf.get(i).length > 0) return 'comma'
+    if (!rangeOf.has(i)) rangeOf.set(i, parseRangeGroup(pattern.slice(i + 1, closeOf[i])))
+    return rangeOf.get(i) ? 'range' : null
+  }
+  const expands = (i) => pattern[i] === '{' && closeOf[i] !== -1 && groupKind(i) !== null
   function alternatives(i) {
     const ranges = []
     let start = i + 1
@@ -1750,7 +2006,9 @@ function expandBraces(pattern) {
   // Pass 2 — the exact count, saturating at CAP + 1. Every position is
   // visited by exactly one call (an expanding group hands each of its
   // alternatives to one recursive call and is then jumped over), so this is
-  // O(n) no matter what the pattern expands to.
+  // O(n) no matter what the pattern expands to — a range group's own count
+  // is one O(1) arithmetic division (`rangeOf.get(i).count`), never a loop
+  // over its members.
   const OVER = GLOB_BRACE_EXPANSION_CAP + 1
   function count(lo, hi) {
     let total = 1
@@ -1760,10 +2018,16 @@ function expandBraces(pattern) {
         if (end !== -1) { i = end; continue }
       }
       if (expands(i)) {
-        let sum = 0
-        for (const [s, e] of alternatives(i)) {
-          sum += count(s, e)
+        let sum
+        if (groupKind(i) === 'range') {
+          sum = rangeOf.get(i).count
           if (sum >= OVER) return OVER
+        } else {
+          sum = 0
+          for (const [s, e] of alternatives(i)) {
+            sum += count(s, e)
+            if (sum >= OVER) return OVER
+          }
         }
         total *= sum
         if (total >= OVER) return OVER
@@ -1778,7 +2042,10 @@ function expandBraces(pattern) {
   if (total >= OVER) return null
   if (total === 1) return [pattern]
 
-  // Pass 3 — materialize (only reached with total <= CAP).
+  // Pass 3 — materialize (only reached with total <= CAP). A range group's
+  // members are formatted lazily here, one `nth(k)` call per member — never
+  // before this point, and never for a group whose count alone already
+  // proved the whole pattern over cap.
   function build(lo, hi) {
     let outs = ['']
     let literalFrom = lo
@@ -1789,8 +2056,15 @@ function expandBraces(pattern) {
       }
       if (expands(i)) {
         const literal = pattern.slice(literalFrom, i)
-        const alts = []
-        for (const [s, e] of alternatives(i)) for (const a of build(s, e)) alts.push(a)
+        let alts
+        if (groupKind(i) === 'range') {
+          const info = rangeOf.get(i)
+          alts = []
+          for (let k = 0; k < info.count; k++) alts.push(info.nth(k))
+        } else {
+          alts = []
+          for (const [s, e] of alternatives(i)) for (const a of build(s, e)) alts.push(a)
+        }
         const next = []
         for (const o of outs) for (const a of alts) next.push(o + literal + a)
         outs = next
@@ -2603,4 +2877,19 @@ const TODOWRITE_MAX_CONTENT_RENDERED = 200
 // proves that property precisely. `expandBraces` (#7918 review) is exported
 // for the same reason: its cost bound is a property of the function itself,
 // and timing it through a whole Glob call would fold in the walk.
-export { compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, GLOB_BRACE_EXPANSION_CAP }
+//
+// `parseRangeGroup`/`hasRangeBrace` (#7951) are exported for the same
+// direct-call, full-scale reason as `expandBraces`: the range arithmetic
+// (padding width, step direction, the zero-step refusal) is a property of
+// `parseRangeGroup` alone, and `hasRangeBrace`'s gate shape needs its own
+// proof independent of `expandBraces` ever running.
+export {
+  compileCaseCheck,
+  caseCheckPasses,
+  segmentMatches,
+  walkGlob,
+  expandBraces,
+  GLOB_BRACE_EXPANSION_CAP,
+  parseRangeGroup,
+  hasRangeBrace,
+}

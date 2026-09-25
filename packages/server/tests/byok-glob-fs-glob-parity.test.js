@@ -27,11 +27,6 @@
 //     `fs.glob` is case-INSENSITIVE on macOS/Windows by its own internal
 //     candidate generation; `walkGlob` is case-sensitive BY CONSTRUCTION
 //     everywhere (#7355/#7899) — see the case-sensitivity tests above.
-//   - negated bracket classes (`[^X]`, `[!x]`): `fs.glob` has its own,
-//     independently-verified candidate-generation bug for these (#7899) that
-//     a post-hoc case check could never recover from; `walkGlob` fixes it,
-//     so it deliberately does NOT match `fs.glob`'s (wrong) output here — see
-//     the #7899 tests above.
 //   - a literal, non-wildcarded leading directory segment that resolves
 //     OUTSIDE the workspace via a symlink (`outside-link/**`): `runGlob`'s
 //     `literalDirPrefix` check (#7341) deliberately ERRORS for these instead
@@ -106,15 +101,27 @@
 //     its own adversarial-review-worthy redesign, which this PR does not
 //     attempt.
 //
-// Each skipped pattern below is asserted to under-match in EXACTLY its
-// documented shape, not just "somehow differ" — a bare skip would let an
+// A SECOND kind of known-difference bucket, added for #7899: `fs.glob`
+// itself has a candidate-generation bug for a negated bracket class
+// (`[^X]`, `[!x]`) that only manifests when it nocase-folds (a REAL runtime
+// probe, `FS_GLOB_NOCASE`, near the top of this file — never a
+// `process.platform` guess). `walkGlob` is case-sensitive by construction
+// and does not share the bug, so on a folding host it returns a real file
+// `fs.glob` wrongly excludes — the OPPOSITE direction from #7916 above (an
+// OVER-match, never an under-match, and never a confinement concern: a real
+// in-workspace file `fs.glob`'s own bug hides is strictly more correct to
+// return, not a regression). See `KNOWN_DIFFERENCE_7899` below.
+//
+// Each bucketed pattern below is asserted to diverge in EXACTLY its
+// documented shape and direction (under-match OR over-match, per the
+// bucket), not just "somehow differ" — a bare skip would let an
 // unrelated regression hide behind one of these issue numbers.
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises'
 import { glob as fsGlob } from 'node:fs/promises'
-import { mkdtempSync, symlinkSync, rmSync } from 'node:fs'
+import { mkdtempSync, symlinkSync, rmSync, writeFileSync, globSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
@@ -139,6 +146,31 @@ const SYMLINK_SKIP_REASON = (() => {
     return null
   } catch (err) {
     return `symlink creation unavailable on this host (${err?.code || err?.message}) — #7288`
+  } finally {
+    if (probeDir) rmSync(probeDir, { recursive: true, force: true })
+  }
+})()
+
+// #7899 — does `fs.glob` case-fold on THIS host? Measured directly (a
+// REAL probe, not a `process.platform === 'darwin'` guess — the same
+// "cannot check must never read as nothing to check" discipline as the
+// symlink probe just above): create a mixed-case file and glob it with an
+// all-lowercase pattern. `fs.glob` hard-codes `nocase: isWindows ||
+// isMacOS` internally, which usually tracks `process.platform`, but a
+// probe is what actually PROVES it on the machine the suite is running on
+// (a case-sensitive APFS volume, an unanticipated future platform, ...).
+// Negated-bracket-class rows below are registered into the strict
+// main table when this is `false` (fs.glob behaves like an ordinary
+// case-sensitive glob there, and already agrees with `walkGlob`) or into
+// the `KNOWN_DIFFERENCE_7899` bucket when it's `true` (fs.glob's
+// candidate-generation bug for a negated class only manifests under its
+// own nocase folding — see that bucket's own comment).
+const FS_GLOB_NOCASE = (() => {
+  let probeDir
+  try {
+    probeDir = mkdtempSync(join(tmpdir(), 'chroxy-glob-parity-nocase-probe-'))
+    writeFileSync(join(probeDir, 'NoCaseProbe.tmp'), 'x')
+    return globSync('nocaseprobe.tmp', { cwd: probeDir }).length > 0
   } finally {
     if (probeDir) rmSync(probeDir, { recursive: true, force: true })
   }
@@ -228,6 +260,34 @@ async function buildFixture() {
   await file(join(ROOT, 'a', 'deep', 'b', 'y.ts'))
   await mk(join(ROOT, 'x', 'y', 'deep'))
   await file(join(ROOT, 'x', 'y', 'deep', 'z.ts'))
+
+  // #7899 — negated bracket class, one real file per case so the two never
+  // collide on a case-insensitive filesystem (this Mac): `negcase-lo/xyz.ts`
+  // (lowercase only) and `negcase-up/Xyz.ts` (uppercase only), in SEPARATE
+  // directories so the choice needs no runtime FS-case-sensitivity probe of
+  // its own — two different directory names can never collide regardless of
+  // how the host folds case.
+  await mk(join(ROOT, 'negcase-lo'))
+  await file(join(ROOT, 'negcase-lo', 'xyz.ts'))
+  await mk(join(ROOT, 'negcase-up'))
+  await file(join(ROOT, 'negcase-up', 'Xyz.ts'))
+
+  // #7951 — range expansion (`{1..3}`, `{a..c}`, descending, zero-padded,
+  // negative, stepped) and comma-less-brace-with-nested-wildcard fixtures.
+  await mk(join(ROOT, 'range'))
+  for (const n of ['1', '2', '3', '01', '02', '03', 'a', 'b', 'c', '-1', '-2', '0']) {
+    await file(join(ROOT, 'range', `${n}.txt`))
+  }
+
+  // #7951 — bracket-in-brace comma splitting: real files named to match
+  // fs.glob's OWN measured bracket-oblivious comma split of `{a[,]b,other}`
+  // (three alternatives — `a[`, `]b`, `other` — not the two a bracket-aware
+  // split would give). Slashes can't appear in a filename, so `/` stands in
+  // for the run of ordinary characters split location doesn't depend on.
+  await mk(join(ROOT, 'bracecomma'))
+  await file(join(ROOT, 'bracecomma', 'p['))
+  await file(join(ROOT, 'bracecomma', 'q]r'))
+  await file(join(ROOT, 'bracecomma', 's'))
 }
 
 before(buildFixture, { timeout: 30_000 })
@@ -379,6 +439,38 @@ const PATTERNS = [
   '*-for-link.txt', '**/*for*', '**/*deep*/**', '{,}src/*.ts', '**/**', '**/**/**',
   '*.[t][s]', 'src/*.[jt]s', '.*.local', '.env.*', '.env.local',
   'sub/file.tx?', '?????????.txt',
+
+  // #7951 — a comma-less `{...}` is literal, never alternation: `{dup}`
+  // does NOT match the real `dup` file/dir (both agree: no matches), and
+  // `brackets/{braces}.txt` DOES match the real file whose name is spelled
+  // with literal braces.
+  '{dup}', 'brackets/{braces}.txt',
+
+  // #7951 — range expansion: ascending/descending, zero-padded, negative,
+  // stepped, and a non-slash-spanning range mixed with an ordinary
+  // extension segment. A ZERO-step range (`{1..10..0}`) is deliberately NOT
+  // in this table: real `fs.glob` THROWS a synchronous `RangeError: Invalid
+  // array length` for it (measured directly — `confinedRawGlobList`'s own
+  // oracle call would crash the harness itself, not merely disagree), so
+  // there is no "confinement-filtered fs.glob" answer to compare against.
+  // See byok-tool-executor.test.js's dedicated zero-step test instead,
+  // which pins the documented divergence: this tool fails closed (treats
+  // the group as literal) rather than reproducing the crash.
+  'range/{1..3}.txt', 'range/{3..1}.txt', 'range/{01..03}.txt',
+  'range/{a..c}.txt', 'range/{c..a}.txt', 'range/{-2..0}.txt',
+  'range/{1..3..2}.txt',
+
+  // #7951 — bracket-in-brace comma splitting: `fs.glob`'s own measured
+  // behavior splits `{p[,q]r,s}` into 3 alternatives ('p[', 'q]r', 's'),
+  // bracket-OBLIVIOUS, not the 2 a bracket-aware split would give — see
+  // `expandBraces`'s doc and `findMatchingBrace`'s doc for the two
+  // DIFFERENT (and both deliberate) awarenesses this now matches.
+  'bracecomma/{p[,q]r,s}', 'bracecomma/{a[}]b,s}',
+
+  // #7899 — negated bracket class shapes that agree with `fs.glob` on
+  // EVERY platform regardless of its own nocase folding (see
+  // `KNOWN_DIFFERENCE_7899` below for the two that do NOT).
+  'negcase-lo/[!x]*.ts', 'negcase-up/[^X]*.ts',
 ]
 
 // Each bucket below names a FILED, OPEN issue and a predicate the missing
@@ -423,9 +515,48 @@ const KNOWN_UNDERMATCH_7916 = {
   allowExtra: true,
 }
 
-const KNOWN_UNDERMATCH_BUCKETS = [
+// #7899 — the OPPOSITE direction from #7916: `walkGlob` returns MORE than
+// `fs.glob`, never less, and only when `fs.glob` itself nocase-folds on this
+// host (`FS_GLOB_NOCASE`, a REAL runtime probe — see its own comment near
+// the top of this file — not a `process.platform === 'darwin'` guess).
+// `fs.glob` hard-codes its own candidate-generation folding for a negated
+// bracket class (`[^X]`, `[!x]`): measured directly, it produces ZERO
+// candidates for `[^X]*.ts` OR `[!x]*.ts` against EITHER a real lowercase
+// `xyz.ts` or a real uppercase `Xyz.ts`, regardless of which one is on disk
+// — its own folding excludes BOTH cases of the named character from the
+// candidate set it generates, not just the named one. `walkGlob` is
+// case-sensitive BY CONSTRUCTION everywhere (#7355/#7901 — it compares
+// pattern text to the real on-disk name directly, with no case-folding
+// candidate-generation step to disagree with in the first place), so it
+// correctly returns the real file `fs.glob` wrongly excludes. This is a
+// pure OVER-match (never a confinement or DoS concern — `walkGlob` finding
+// a REAL, in-workspace file that `fs.glob`'s own bug hides is strictly
+// MORE correct, not a regression) — `allowExtra: true`, `missingShape`
+// vacuously satisfied since `missing` is always empty here. When
+// `FS_GLOB_NOCASE` is false (a case-sensitive host, or `fs.glob`'s own
+// nocase folding not engaging), these two patterns already agree with
+// `fs.glob` outright and are registered into the main strict-equality
+// table above instead (see the block right after this bucket definition).
+const KNOWN_DIFFERENCE_7899 = {
+  issue: '#7899',
+  patterns: ['negcase-lo/[^X]*.ts', 'negcase-up/[!x]*.ts'],
+  // `missing` must always be empty for this bucket (checked below by the
+  // SAME predicate the describe block applies to it — an empty array is
+  // vacuously fine); `extra` must be EXACTLY the one real file each pattern
+  // names, never something unrelated hiding behind the issue number.
+  missingShape: (p) => p === 'negcase-lo/xyz.ts' || p === 'negcase-up/Xyz.ts',
+  missingShapeDesc: 'exactly negcase-lo/xyz.ts or negcase-up/Xyz.ts',
+  allowExtra: true,
+}
+
+const KNOWN_DIFFERENCE_BUCKETS = [
   KNOWN_UNDERMATCH_7916,
+  ...(FS_GLOB_NOCASE ? [KNOWN_DIFFERENCE_7899] : []),
 ]
+// When `fs.glob` does not nocase-fold on this host, the #7899 shapes above
+// already agree with it exactly — promote them into the strict-equality
+// table so they still get exercised (never silently dropped).
+if (!FS_GLOB_NOCASE) PATTERNS.push(...KNOWN_DIFFERENCE_7899.patterns)
 
 describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#7910 review round 3)', { skip: SYMLINK_SKIP_REASON || false }, () => {
   for (const pattern of PATTERNS) {
@@ -441,7 +572,7 @@ describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#79
     })
   }
 
-  for (const { issue, patterns, missingShape, missingShapeDesc, allowExtra } of KNOWN_UNDERMATCH_BUCKETS) {
+  for (const { issue, patterns, missingShape, missingShapeDesc, allowExtra } of KNOWN_DIFFERENCE_BUCKETS) {
     for (const pattern of patterns) {
       it(`diverges from fs.glob EXACTLY per the filed ${issue} gap for ${JSON.stringify(pattern)}`, async () => {
         const actual = await toolGlobList(pattern)
