@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { MCPFleet, FLEET_KILL_GRACE_MS, DEFAULT_FLEET_START_CAP_MS, parseMcpToolName } from '../src/byok-mcp-fleet.js'
+import { MCPFleet, FLEET_KILL_GRACE_MS, DEFAULT_FLEET_START_CAP_MS, parseMcpToolName, mcpStateToStatus } from '../src/byok-mcp-fleet.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -512,6 +512,60 @@ describe('MCPFleet', () => {
       assert.equal(res.found, true)
       assert.equal(res.ok, false)
       assert.match(res.error, /does not use OAuth/)
+    })
+  })
+
+  describe('mcpStateToStatus DESTROYED mapping (#7930)', () => {
+    // #7930: a destroyed-but-not-parked client is reachable in practice — e.g.
+    // a Task subagent holds a raw reference to the parent's shared fleet
+    // (#5019, byok-session.js's `_ownsMcpFleet: false` path) and can still
+    // call getServerStatuses()/mcpStateToStatus() after the OWNING session's
+    // destroy() has torn every client down to MCP_STATES.DESTROYED. Before
+    // this fix, DESTROYED had no explicit case in the switch and fell
+    // through to the IDLE/STARTING/RESTARTING default, so a gone client
+    // reported 'connecting' forever.
+    it('maps MCP_STATES.DESTROYED to a non-connecting status', () => {
+      assert.notEqual(mcpStateToStatus(MCP_STATES.DESTROYED), 'connecting')
+      assert.equal(mcpStateToStatus(MCP_STATES.DESTROYED), 'failed')
+    })
+
+    it('getServerStatuses reports the DESTROYED mapping for an enabled-but-destroyed client', () => {
+      // Not parked via setEnabled — `_disabled` is empty — so getServerStatuses()
+      // must fall through to mcpStateToStatus(client.state) for this entry,
+      // exactly the path the shared-fleet-after-teardown scenario exercises.
+      const fleet = new MCPFleet([{ name: 'gone', command: process.execPath, args: [STUB] }], { log: silentLog() })
+      fleet._clients = [{ name: 'gone', state: MCP_STATES.DESTROYED, needsAuthorization: false }]
+      const [s] = fleet.getServerStatuses()
+      assert.equal(s.status, 'failed')
+      assert.equal(s.enabled, true, 'a destroyed-but-not-toggled-off server must not silently look parked')
+    })
+
+    it('every current MCP_STATES member maps to a member of the known wire-status vocabulary', () => {
+      // The expectation set below is NOT derived from mcpStateToStatus's own
+      // switch (that would be circular — catalogue #7424, a parity test
+      // whose expectation is derived from its own subject can never go red).
+      // It is independently audited from every literal status string this
+      // producer (byok-mcp-fleet.js) actually emits on the wire: 'connected'
+      // and 'failed' (mcpStateToStatus), 'connecting' (mcpStateToStatus
+      // default), 'disabled' (getServerStatuses' parked-server branch,
+      // line ~189) and 'oauth-required' (getServerStatuses' OAuth branch,
+      // line ~196). The protocol schema itself (packages/protocol/src/
+      // schemas/server/session.ts, ServerMcpServersSchema.servers[].status)
+      // does not constrain this with a z.enum — it is a bare z.string() — so
+      // there is no schema-level roster to import; this hand-audited list is
+      // the closest available "protocol's allowed status set."
+      const knownWireStatuses = ['connected', 'connecting', 'failed', 'disabled', 'oauth-required']
+      for (const state of Object.values(MCP_STATES)) {
+        const status = mcpStateToStatus(state)
+        assert.ok(
+          knownWireStatuses.includes(status),
+          `MCP_STATES value ${JSON.stringify(state)} mapped to unrecognized status ${JSON.stringify(status)}`,
+        )
+      }
+    })
+
+    it('throws on an unrecognized state instead of silently returning connecting', () => {
+      assert.throws(() => mcpStateToStatus('some-future-state'), /unhandled/i)
     })
   })
 })

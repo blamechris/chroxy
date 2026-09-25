@@ -57,15 +57,41 @@ const mcpPromptName = mcpToolName
 // everything else renders muted). A parked (disabled) server has NO client, so
 // this is only ever called for enabled ones — the disabled status is applied
 // by `getServerStatuses()` directly.
+//
+// #7930: DESTROYED is a reachable, expected terminal state, not just a
+// synthetic one — a Task subagent that borrowed the parent's fleet
+// (byok-session.js's #5019 `_ownsMcpFleet: false` path) keeps a raw
+// reference to the SAME MCPFleet object, so it can still call
+// getServerStatuses() after the owning session's destroy() has torn every
+// live client down to DESTROYED. It maps to 'failed' rather than 'disabled':
+// this path is reached only for servers NOT parked via setEnabled (a parked
+// server short-circuits to 'disabled' with enabled:false before ever
+// consulting the client — see getServerStatuses() below), so the entry
+// still carries `enabled: true`. Pairing status:'disabled' with
+// enabled:true would be a self-contradictory payload (dashboard/app read
+// `enabled` first and would show the toggle ON while the label says
+// "disabled"); 'failed' keeps toggle-state and status-text coherent: "on,
+// but not live."
+//
+// Every MCP_STATES member gets an explicit case (no catch-all default for
+// the known set) so a future state addition here fails loudly in this
+// switch instead of silently reusing whatever the default happened to
+// return — see the exhaustiveness test in byok-mcp-fleet.test.js.
 export function mcpStateToStatus(state) {
   switch (state) {
     case MCP_STATES.READY:
       return 'connected'
     case MCP_STATES.DEAD:
       return 'failed'
-    default:
-      // IDLE / STARTING / RESTARTING — spawned but not yet handshaken.
+    case MCP_STATES.DESTROYED:
+      return 'failed'
+    case MCP_STATES.IDLE:
+    case MCP_STATES.STARTING:
+    case MCP_STATES.RESTARTING:
+      // Spawned but not yet handshaken (or mid-restart backoff).
       return 'connecting'
+    default:
+      throw new Error(`mcpStateToStatus: unhandled MCP client state ${JSON.stringify(state)}`)
   }
 }
 
