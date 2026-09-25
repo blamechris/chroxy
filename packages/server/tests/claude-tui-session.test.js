@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
+import { chmodSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
@@ -1022,6 +1022,31 @@ describe('ClaudeTuiSession', () => {
 
         assert.equal(statSync(loose).mode & 0o777, 0o700,
           'an ADOPTED base keeps whatever mode it had — re-assert rather than trust the create')
+      })
+
+      // #7875 — start() must capture the base's fd-bound identity, not just
+      // validate the path once. This is what lets the poll loop's read path
+      // (_validateSinkBase, exercised by the "sink base re-validation" describe
+      // block below) prove it's still talking to the SAME directory on every
+      // later poll rather than merely one that resolves to the same path.
+      it('captures an fd-bound identity for the base at start() (#7875)', async () => {
+        const clean = join(baseTmp, 'clean-base-identity')
+        pinBase(clean)
+
+        session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+        session.on('error', () => {})
+        await session.start()
+
+        assert.equal(typeof session._sinkBaseFd, 'number', 'an open fd was captured')
+        assert.ok(session._sinkBaseFd >= 0, 'the fd looks valid')
+        assert.ok(session._sinkBaseIdentity, 'identity was recorded')
+        const live = statSync(clean)
+        assert.equal(session._sinkBaseIdentity.dev, live.dev, 'captured dev matches the live base')
+        assert.equal(session._sinkBaseIdentity.ino, live.ino, 'captured ino matches the live base')
+        // The check this identity feeds must pass immediately after start(),
+        // on the untouched base — a positive control for _validateSinkBase.
+        const check = session._validateSinkBase()
+        assert.equal(check.ok, true, `freshly-started session must validate clean: ${check.reason || ''}`)
       })
     })
   })
@@ -7926,6 +7951,233 @@ describe('ClaudeTuiSession — hook-sink vanish recovery (#5329)', () => {
     assert.equal(ok, true, 'a squatted path must be recoverable, not a permanent spin')
     assert.ok(statSync(session._sinkDir).isDirectory(), 'the squatter file is replaced by a directory')
     assert.equal(readFileSync(join(session._sinkDir, 'owner.pid'), 'utf8'), String(process.pid))
+  })
+
+  // #7875 — a LEGITIMATE recreate (both the base and the session dir vanish,
+  // e.g. a full /tmp clear) produces a brand-new base inode. The identity
+  // _captureSinkBaseIdentity recorded at start() must be refreshed as part of
+  // the recreate, or every poll AFTER a successful recovery would flag the
+  // session's own recovery as a mid-session compromise — a self-inflicted
+  // lockout that would be strictly worse than the bug this PR fixes.
+  it('a legitimate base recreate refreshes the captured identity so the next read does not self-flag as compromised (#7875)', () => {
+    session = makeSession()
+    const vanishedBase = join(dir, 'base-that-vanishes-7875')
+    mkdirSync(vanishedBase, { recursive: true, mode: 0o700 })
+    session._sinkDir = join(vanishedBase, 's-recreate-test-7875')
+    // Simulate what start() captured: identity of the ORIGINAL base.
+    const fd0 = openSync(vanishedBase, 'r')
+    session._sinkBaseFd = fd0
+    session._sinkBaseIdentity = { dev: fstatSync(fd0).dev, ino: fstatSync(fd0).ino }
+
+    // Both the base AND the session dir vanish (not just the session dir).
+    rmSync(vanishedBase, { recursive: true, force: true })
+
+    const ok = session._recoverSinkDir(new Error('ENOENT'))
+    assert.equal(ok, true, 'legitimate recreate succeeds')
+
+    // The recreated base is a brand-new inode — the next validation must see
+    // it as trustworthy, not lock the session out of its own recovery.
+    const check = session._validateSinkBase()
+    assert.equal(check.ok, true, `a legitimate recreate must not lock the session out: ${check.reason || ''}`)
+  })
+
+  // #7875 — the ORIGINAL bug: `isDir` used to `return true` unconditionally.
+  // `statSync` follows a symlinked base, so an attacker who leaves a REAL
+  // (readable) directory at the sink path through a symlinked base made this
+  // branch report the sink usable without ever reaching `ensureOwnedBaseDir`.
+  // This reproduces the issue's own probe: the attacker pre-creates content
+  // at the sink path (isDir becomes true), which is exactly the case the
+  // recreate branch below never sees (its `statSync` would ALSO see isDir).
+  it('does not report the sink usable when isDir is true but the base is an untrusted symlink (#7875)', { skip: SKIP_NO_SYMLINK }, () => {
+    const attackerDir = join(dir, 'attacker-owned-7875')
+    const squattedBase = join(dir, 'squatted-base-7875')
+    mkdirSync(attackerDir, { recursive: true })
+    // Attacker pre-creates the session dir's content so statSync(sinkDir)
+    // succeeds as a directory (isDir === true) — readdir failing here for
+    // some OTHER transient reason (EACCES) is the scenario this branch
+    // exists to distinguish from a genuine vanish.
+    const victimContent = join(attackerDir, 's-through-link-7875')
+    mkdirSync(victimContent, { recursive: true })
+    symlinkSync(attackerDir, squattedBase)
+
+    session = makeSession()
+    session._sinkDir = join(squattedBase, 's-through-link-7875')
+
+    const ok = session._recoverSinkDir(new Error('EACCES: permission denied'))
+
+    assert.equal(ok, false, 'a readable dir through an untrusted (symlinked) base must not be reported usable')
+    assert.ok(errorLines.some((m) => /untrusted|readdir failed and its base/i.test(m)),
+      'surfaces a loud error naming the base as untrusted, not the transient-warn path')
+    assert.ok(!warnLines.some((m) => /readdir failed though .* is a directory/.test(m)),
+      'the OLD transient-warn message must not fire for an untrusted base — that message asserts nothing is wrong')
+  })
+
+  // Control: the isDir branch's existing transient-warn behaviour must
+  // survive the #7875 fix when the base IS trustworthy (this is the same
+  // assertion the pre-existing throttled-warn test above makes; repeated
+  // here, co-located with the untrusted-base case, so the two read as a
+  // matched positive/negative pair).
+  it('still reports the sink usable when isDir is true and the base is trustworthy (control) (#7875)', () => {
+    session = makeSession()
+    session._sinkDir = join(dir, 's-exists-trustworthy-7875')
+    mkdirSync(session._sinkDir, { recursive: true })
+    const ok = session._recoverSinkDir(new Error('EACCES: permission denied'))
+    assert.equal(ok, true, 'a stat-able directory through a trustworthy base is still usable')
+  })
+})
+
+// #7875 — the poll loop's READ path (drainHookFiles, inside sendMessage) never
+// re-validated the sink BASE before this fix: `ensureOwnedBaseDir` ran only at
+// start() and on _recoverSinkDir's vanished-dir recreate branch, so a squat
+// that left a READABLE directory at the sink path (readdir SUCCEEDS) was never
+// checked at all — the primary gap the issue describes. These tests drive the
+// real poll loop via sendMessage(), mirroring the #5323/#6178 harness above
+// (construct the session directly, stub _term.write to drop hook files as a
+// synchronous side effect) rather than the full mocked-PTY start() flow, which
+// is unnecessary machinery for exercising drainHookFiles.
+describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7875)', () => {
+  let baseDir, skillsDir, session, warnLines, errorLines
+  const logSpy = (entry) => {
+    if (entry.component !== 'claude-tui-session') return
+    if (entry.level === 'warn') warnLines.push(entry.message)
+    if (entry.level === 'error') errorLines.push(entry.message)
+  }
+  beforeEach(() => {
+    baseDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-readpath-base-'))
+    chmodSync(baseDir, 0o700)
+    skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-readpath-skills-'))
+    warnLines = []; errorLines = []
+    addLogListener(logSpy)
+  })
+  afterEach(async () => {
+    removeLogListener(logSpy)
+    if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+    try { rmSync(baseDir, { recursive: true, force: true }) } catch { /* may already be gone */ }
+    rmSync(skillsDir, { recursive: true, force: true })
+  })
+
+  // Build a session as if start() had already run: a real sink dir under
+  // baseDir, plus the fd-bound identity _captureSinkBaseIdentity would have
+  // recorded at start().
+  function makeStartedSession(sinkName) {
+    const sinkDir = join(baseDir, sinkName)
+    mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
+    const s = new ClaudeTuiSession({
+      cwd: '/tmp', skillsDir, repoSkillsDir: null,
+      resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+    })
+    s._processReady = true
+    s._sessionId = `test-${sinkName}`
+    s._sinkDir = sinkDir
+    s._waitForPrompt = async () => true
+    const fd = openSync(baseDir, 'r')
+    s._sinkBaseFd = fd
+    const st = fstatSync(fd)
+    s._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
+    return s
+  }
+
+  it('keeps consuming normally when nothing about the base changes (control)', async () => {
+    session = makeStartedSession('s-control')
+    const events = []
+    session.on('stream_delta', (e) => events.push(e.delta))
+    session._term = {
+      write: () => {
+        writeFileSync(join(session._sinkDir, 'stop-ok.json'), JSON.stringify({ last_assistant_message: 'all good' }))
+      },
+      kill: () => {},
+    }
+    session.on('error', () => {})
+    await session.sendMessage('hi')
+    assert.deepEqual(events, ['all good'], 'the legitimate stop payload was delivered normally')
+    assert.equal(session._isBusy, false, 'turn ended normally')
+  })
+
+  // The primary gap: readdir SUCCEEDS through the swapped base, so before
+  // this fix the poll loop's happy path never checked anything.
+  it('refuses to trust a readable squat planted after start (base swapped for a symlink) (#7875)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const sinkName = 's-squat-symlink'
+    session = makeStartedSession(sinkName)
+    const errors = []
+    const events = []
+    session.on('error', (e) => errors.push(e))
+    session.on('stream_delta', (e) => events.push(e.delta))
+    session._term = {
+      write: () => {
+        // ATTACKER ACTION, mid-turn: swap the BASE the running session's sink
+        // dir lives under. Replace it with a symlink to an attacker-controlled
+        // dir that has a directory at the EXACT same sink-dir name, so readdir
+        // on the (unchanged) _sinkDir path still SUCCEEDS — sub-case (a) from
+        // the issue.
+        rmSync(baseDir, { recursive: true, force: true })
+        const attackerDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-attacker-'))
+        mkdirSync(join(attackerDir, sinkName), { recursive: true })
+        writeFileSync(join(attackerDir, sinkName, 'stop-evil.json'),
+          JSON.stringify({ last_assistant_message: 'ATTACKER CONTROLLED TEXT' }))
+        symlinkSync(attackerDir, baseDir)
+      },
+      kill: () => {},
+    }
+    await session.sendMessage('hi')
+
+    assert.equal(session._isBusy, false, 'turn ended (not wedged waiting for a stop hook that will never arrive from a trusted source)')
+    assert.equal(events.length, 0, 'the attacker stop payload was never delivered as the turn result')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 1, 'a specific coded error was surfaced, not a bare Error')
+    assert.match(untrusted[0].message, /no longer trustworthy/i)
+  })
+
+  // The identity-comparison requirement: a swap that a PATH-ONLY re-check
+  // (symlink? directory? uid? mode?) cannot distinguish from the original.
+  it('refuses to trust a same-looking replacement directory (dev/ino mismatch, no symlink) (#7875)', async () => {
+    const sinkName = 's-swap-identical'
+    session = makeStartedSession(sinkName)
+    const errors = []
+    const events = []
+    session.on('error', (e) => errors.push(e))
+    session.on('stream_delta', (e) => events.push(e.delta))
+    session._term = {
+      write: () => {
+        // ATTACKER ACTION: no symlink anywhere. Delete the real base dir and
+        // recreate a BRAND NEW one at the exact same path, same mode, same
+        // owner (this test runs as one user) — a path-only check sees
+        // nothing wrong. Only the inode differs.
+        rmSync(baseDir, { recursive: true, force: true })
+        mkdirSync(baseDir, { recursive: true, mode: 0o700 })
+        mkdirSync(join(baseDir, sinkName), { recursive: true, mode: 0o700 })
+        writeFileSync(join(baseDir, sinkName, 'stop-evil.json'),
+          JSON.stringify({ last_assistant_message: 'ATTACKER CONTROLLED TEXT' }))
+      },
+      kill: () => {},
+    }
+    await session.sendMessage('hi')
+
+    assert.equal(session._isBusy, false, 'turn ended')
+    assert.equal(events.length, 0, 'the attacker stop payload from the replacement directory was never delivered')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 1, 'a specific coded error was surfaced')
+    assert.match(untrusted[0].message, /no longer trustworthy/i)
+  })
+
+  it('refuses to trust a base whose permissions were widened mid-session (chmod 0777) (#7875)', { skip: process.platform === 'win32' }, async () => {
+    const sinkName = 's-chmod-widened'
+    session = makeStartedSession(sinkName)
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session._term = {
+      write: () => {
+        // No symlink, no inode change — only the mode bits drift from what
+        // start() established (0700).
+        chmodSync(baseDir, 0o777)
+        writeFileSync(join(session._sinkDir, 'stop-ok.json'), JSON.stringify({ last_assistant_message: 'irrelevant' }))
+      },
+      kill: () => {},
+    }
+    await session.sendMessage('hi')
+
+    assert.equal(session._isBusy, false, 'turn ended')
+    const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
+    assert.equal(untrusted.length, 1, 'a widened base is refused even with no symlink and no inode change')
   })
 })
 

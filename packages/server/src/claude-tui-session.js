@@ -1,6 +1,19 @@
 import { randomBytes, randomUUID } from 'crypto'
 import { execFile } from 'child_process'
-import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'fs'
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs'
 // #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
 // slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
 // event loop — which would freeze EVERY claude-tui session (the default provider).
@@ -451,6 +464,14 @@ export class ClaudeTuiSession extends BaseSession {
     this._sinkDir = null     // created on start, removed on destroy
     this._sinkRecoverErrLoggedMs = 0  // #5329: throttle the can't-recreate error log
     this._sinkTransientWarnLoggedMs = 0  // #5329: throttle the dir-exists-but-readdir-failed warn
+    // #7875 — identity of the sink BASE (dirname(_sinkDir)), captured via an
+    // open fd at start() (and refreshed on a legitimate _recoverSinkDir
+    // recreate). Lets the poll-loop read path prove it's still talking to the
+    // SAME directory ensureOwnedBaseDir validated, not merely one that
+    // currently resolves to the same path. See _validateSinkBase().
+    this._sinkBaseFd = null
+    this._sinkBaseIdentity = null  // { dev, ino }
+    this._sinkBaseCompromiseWarnLoggedMs = 0  // throttle the compromised-base error log
     this._term = null        // persistent PTY for the session's lifetime
     this._settingsPath = null
     // #4013: sidecar file containing the current permission mode. The
@@ -883,6 +904,134 @@ export class ClaudeTuiSession extends BaseSession {
   _hookUnlink(path) { return unlink(path) }
 
   /**
+   * #7875 — bind an fd to the validated sink BASE dir and record its identity
+   * (dev+ino), so a later re-check can tell "still the same directory
+   * ensureOwnedBaseDir validated" from "a directory that currently resolves
+   * to the same PATH" — the latter is exactly what a swap (rm + mkdir, or a
+   * symlink pointed elsewhere) produces, and a path-only re-check cannot tell
+   * them apart. `O_NOFOLLOW` is defence in depth against the narrow race
+   * between `ensureOwnedBaseDir`'s own check and this open (undefined on
+   * Windows, where the bitwise OR below is a no-op — Windows has no uid
+   * semantics either, see _validateSinkBase).
+   *
+   * Called once from start() and again from _recoverSinkDir's recreate
+   * branch (a legitimate recreate changes the inode, so the identity must be
+   * refreshed or every subsequent poll would flag the session's OWN recovery
+   * as a compromise).
+   *
+   * @param {string} base the validated sink base dir (ensureOwnedBaseDir's return)
+   * @throws if the base cannot be opened (caller treats this as base failure)
+   */
+  _captureSinkBaseIdentity(base) {
+    if (this._sinkBaseFd != null) {
+      try { closeSync(this._sinkBaseFd) } catch { /* best effort */ }
+      this._sinkBaseFd = null
+    }
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
+    const fd = openSync(base, flags)
+    const st = fstatSync(fd)
+    this._sinkBaseFd = fd
+    this._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
+  }
+
+  /**
+   * #7875 — re-validate the sink BASE on the poll loop's READ path, not only
+   * at create (start()) / recreate (_recoverSinkDir's vanished branch) time.
+   * Before this, `ensureOwnedBaseDir` ran in exactly those two places, and
+   * the poll loop's happy path (drainHookFiles → readdir succeeds) never
+   * re-checked the base at all: a squat that left a READABLE directory at
+   * the sink path was never checked, and _recoverSinkDir's `isDir` branch
+   * returned `true` for one too (see the mutation table in #7864/#7875).
+   *
+   * Re-applies the same static checks `ensureOwnedBaseDir` enforces at
+   * create (symlink / not-a-directory / foreign uid / group-or-other-
+   * accessible), PLUS the fd-bound identity comparison _captureSinkBaseIdentity
+   * recorded. The mode check deliberately does NOT self-heal the way
+   * `ensureOwnedBaseDir` does for an adopted dir (chmod back to 0700): a mode
+   * WIDENING discovered mid-session, after the base was already validated
+   * once, is itself the signal of tampering the read path exists to catch —
+   * silently re-tightening it and continuing would be exactly the
+   * false-safety shape `docs/false-safety-guards.md` catalogues.
+   *
+   * When `_sinkBaseIdentity` was never captured (no start() has run — e.g.
+   * a unit test poking `_sinkDir` directly), the identity comparison is
+   * skipped and only the static checks apply, matching what
+   * `ensureOwnedBaseDir` itself would enforce.
+   *
+   * Cost: one `lstatSync` per call, no readdir/readFile. Called once per
+   * `drainHookFiles` pass (~every 150ms while a turn is active — see the
+   * poll loop in sendMessage) and once from `_recoverSinkDir`'s `isDir`
+   * branch. A single extra stat syscall on the hot turn path is
+   * sub-millisecond and does not change turn latency for a healthy
+   * ~2-5s tool turn.
+   *
+   * @returns {{ok: true} | {ok: false, reason: string}}
+   */
+  _validateSinkBase() {
+    if (!this._sinkDir) return { ok: false, reason: 'no sink dir is set' }
+    const base = dirname(this._sinkDir)
+    let st
+    try {
+      st = lstatSync(base)
+    } catch (err) {
+      return { ok: false, reason: `${base} is missing or unstat-able (${err.code || err.message})` }
+    }
+    if (st.isSymbolicLink()) return { ok: false, reason: `${base} is now a symlink` }
+    if (!st.isDirectory()) return { ok: false, reason: `${base} is no longer a directory` }
+    // POSIX only, mirroring ensureOwnedBaseDir: Windows has no uid, and its
+    // per-user profile tmpdir already provides the isolation these checks
+    // stand in for. The symlink/is-a-directory checks above and the identity
+    // comparison below apply everywhere.
+    const uid = process.getuid?.()
+    if (uid !== undefined) {
+      if (st.uid !== uid) return { ok: false, reason: `${base} is now owned by uid ${st.uid}, not ${uid}` }
+      if (st.mode & 0o077) {
+        return { ok: false, reason: `${base} is now group/other-accessible (mode ${(st.mode & 0o777).toString(8)})` }
+      }
+    }
+    if (this._sinkBaseIdentity && (st.dev !== this._sinkBaseIdentity.dev || st.ino !== this._sinkBaseIdentity.ino)) {
+      return { ok: false, reason: `${base} was replaced with a different directory since it was validated (dev/ino changed)` }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * #7875 — backstop for a sink base that failed re-validation mid-turn.
+   * Mirrors `_handleStreamStall`/`_handleHardTimeout`: force-clear busy state
+   * via the shared `_teardownTurn` helper (Ctrl-C into the PTY, emit a
+   * coded error, emit the result) rather than parsing whatever the
+   * untrusted base contains. Deliberately does NOT tear down the session
+   * object itself — the same as those other backstops, which leave the
+   * session alive for a retry. If the base is still compromised on the next
+   * turn, this fires again on that turn's very first poll pass (within
+   * ~150ms), so the session settles into "every turn fails fast and clean"
+   * rather than either hanging or trusting attacker-planted data.
+   *
+   * @param {string} reason from _validateSinkBase()
+   */
+  _handleSinkBaseCompromised(reason) {
+    if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleSinkBaseCompromised')
+    const logger = this._log || log
+    const now = Date.now()
+    if (now - this._sinkBaseCompromiseWarnLoggedMs >= 5000) {
+      this._sinkBaseCompromiseWarnLoggedMs = now
+      logger.error(`hook sink base failed re-validation (${reason}) — refusing to read further hook events`)
+    }
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
+    this._teardownTurn('sink_base_compromised', {
+      duration,
+      errorPayload: {
+        code: SINK_BASE_UNTRUSTED_CODE,
+        message: `Hook sink base is no longer trustworthy (${reason}) — refusing to process further tool events. `
+          + `Remove or fix ownership of the base and start a new session.`,
+      },
+      errorBeforeResult: true,
+      gateStreamEndOnMessageId: false,
+    })
+  }
+
+  /**
    * #6178 (review) — run a hot-path hook-drain fs op bounded by HOOK_FS_TIMEOUT_MS
    * AND coalesced so at most one underlying op per (kind,path) is outstanding.
    *
@@ -941,12 +1090,15 @@ export class ClaudeTuiSession extends BaseSession {
    * recreated" path an ENOSPC takes, and the same fail-closed answer start()
    * gives: no hook sink, no pretending there is one.
    *
-   * SCOPE, so this is not mistaken for a mid-session re-validation (#7875):
-   * the check is on the RECREATE branch, and this method only runs when the
-   * poll loop's readdir already FAILED. A squat that leaves a readable dir at
-   * the sink path makes readdir succeed, so neither this nor the `isDir`
-   * branch above ever checks the base. Closing that needs the read path, not
-   * this one.
+   * #7875 — the `isDir` branch below used to `return true` unconditionally:
+   * `statSync` follows a symlinked base, so an attacker-owned directory left
+   * at the sink path (readdir failing for some OTHER transient reason, e.g.
+   * EACCES) reported the sink usable without ever reaching
+   * `ensureOwnedBaseDir`. It now runs the same `_validateSinkBase()` the poll
+   * loop's happy path uses before trusting `isDir`. The readable-squat case
+   * (readdir SUCCEEDS, so this method is never entered at all) is closed by
+   * the read-path check in `drainHookFiles` (sendMessage), not here — this
+   * method only runs after a readdir failure.
    *
    * @param {Error} [cause] the readdir error that triggered recovery
    * @returns {boolean} true if the sink is usable afterward
@@ -963,6 +1115,18 @@ export class ClaudeTuiSession extends BaseSession {
     let isDir = false
     try { isDir = statSync(this._sinkDir).isDirectory() } catch { /* missing or unstat-able */ }
     if (isDir) {
+      // #7875 — a stat-able directory is not necessarily a TRUSTED one: the
+      // base above it may since have become a symlink, changed owner, or
+      // widened permissions. Re-validate before reporting the sink usable.
+      const baseCheck = this._validateSinkBase()
+      if (!baseCheck.ok) {
+        const now = Date.now()
+        if (now - this._sinkRecoverErrLoggedMs >= 5000) {
+          this._sinkRecoverErrLoggedMs = now
+          logger.error(`hook sink ${this._sinkDir} readdir failed and its base is untrusted (${baseCheck.reason}) — refusing to treat it as usable`)
+        }
+        return false
+      }
       const now = Date.now()
       if (now - this._sinkTransientWarnLoggedMs >= 5000) {
         this._sinkTransientWarnLoggedMs = now
@@ -977,7 +1141,12 @@ export class ClaudeTuiSession extends BaseSession {
       // #7372: re-check the BASE (dirname, not the static — this recreates the
       // path this session actually holds) before creating through it, and put
       // the session dir back at 0700. Throws → the catch below.
-      ensureOwnedBaseDir(dirname(this._sinkDir))
+      const recreatedBase = ensureOwnedBaseDir(dirname(this._sinkDir))
+      // #7875 — a legitimate recreate changes the base's inode (or re-adopts
+      // an existing one), so refresh the captured identity here too. Without
+      // this, every poll after a real vanish-and-recover would flag the
+      // session's OWN recovery as a mid-session compromise.
+      this._captureSinkBaseIdentity(recreatedBase)
       mkdirSync(this._sinkDir, { recursive: true, mode: 0o700 })
       try { writeFileSync(join(this._sinkDir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
       if (this._permissionModeFile) {
@@ -1404,6 +1573,12 @@ export class ClaudeTuiSession extends BaseSession {
     let base
     try {
       base = ensureOwnedBaseDir(sinkBase)
+      // #7875 — bind an fd to the validated base and record its identity so
+      // the poll loop's read path (drainHookFiles / _recoverSinkDir) can
+      // re-prove it's still talking to the SAME directory on every pass, not
+      // merely one that currently resolves to the same path. See
+      // _validateSinkBase() for why a path-only re-check isn't enough.
+      this._captureSinkBaseIdentity(base)
     } catch (err) {
       const message = `claude-tui hook sink base ${sinkBase} is not usable: ${err.message}. `
         + `Chroxy will not start a session without hook permissions — remove or fix ownership of ${sinkBase} and try again.`
@@ -3069,6 +3244,17 @@ export class ClaudeTuiSession extends BaseSession {
     let totalConsumed = 0
 
     const drainHookFiles = async () => {
+      // #7875 — re-validate the sink BASE before every readdir, not just at
+      // start()/recreate. A squat that leaves a READABLE directory at the
+      // sink path makes readdir below succeed, so without this check the
+      // happy path never re-checked the base at all — this is the primary
+      // gap the class doc on _validateSinkBase() describes. Cheap: one
+      // lstatSync, no readdir/readFile.
+      const baseCheck = this._validateSinkBase()
+      if (!baseCheck.ok) {
+        this._handleSinkBaseCompromised(baseCheck.reason)
+        return
+      }
       let entries
       try {
         entries = await this._boundedHookFs('readdir', this._sinkDir)
@@ -3174,6 +3360,13 @@ export class ClaudeTuiSession extends BaseSession {
       if (!this._isBusy) break
       await drainHookFiles()
       pollIters++
+      // #7875 — drainHookFiles can now tear the turn down SYNCHRONOUSLY
+      // within this await (_handleSinkBaseCompromised → _teardownTurn),
+      // unlike the timer-driven watchdogs below which fire independently of
+      // this loop. Re-check immediately so a compromised base doesn't sit
+      // through an extra 150ms sleep before the loop notices; the `!_isBusy`
+      // guard at the top of the loop would eventually catch it either way.
+      if (!this._isBusy) break
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
       // stop-hook, emit a progress line. Sized at 5s so a healthy
@@ -4424,6 +4617,14 @@ export class ClaudeTuiSession extends BaseSession {
       catch (err) { log.warn(`sink dir cleanup failed: ${err.message}`) }
       this._sinkDir = null
     }
+    // #7875 — release the fd _captureSinkBaseIdentity opened at start() (or
+    // the last recreate). Never held open past destroy(): a leaked directory
+    // fd is exactly the class of handle-leak #6027 catalogues.
+    if (this._sinkBaseFd != null) {
+      try { closeSync(this._sinkBaseFd) } catch { /* already closed / best effort */ }
+      this._sinkBaseFd = null
+    }
+    this._sinkBaseIdentity = null
     // Sidecar file lived inside _sinkDir which we just removed — clear
     // the reference so setPermissionMode() after destroy() no-ops cleanly.
     this._permissionModeFile = null
