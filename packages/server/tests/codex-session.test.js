@@ -1180,6 +1180,26 @@ describe('CodexSession', () => {
         assert.deepEqual(args.slice(-2), ['--', 'hi'])
         assert.ok(!args.includes('resume'))
       })
+
+      // #7868 — `threadId` sits in a bare POSITIONAL slot (the resume SESSION_ID),
+      // pushed BEFORE the `--` terminator that protects `text`. Unlike `text`, a
+      // thread id can never legitimately start with `-` (it is chroxy's own
+      // identifier, never free-form chat text), so the correct shape is case 1
+      // (reject) — not a `--` terminator, which would not even help here since
+      // resume's SESSION_ID must stay before it (see the comment above
+      // buildCodexArgs). Today this is safe only because every PRODUCER of
+      // resumeSessionId happens to already constrain it (a UUID regex at the WS
+      // ingress, or codex's own thread_id) — buildCodexArgs itself performs no
+      // check, so a future producer that relaxes that constraint would silently
+      // reopen the `resume`-form option-injection this file's own header
+      // documents as a sandbox-escape primitive (`resume` declares
+      // `--dangerously-bypass-approvals-and-sandbox`).
+      it('rejects a dash-leading threadId instead of placing it in the positional resume slot', () => {
+        assert.throws(
+          () => buildCodexArgs('hi', null, '--dangerously-bypass-approvals-and-sandbox'),
+          /unsafe threadId/,
+        )
+      })
     })
 
     // ---------------------------------------------------------------------
