@@ -641,6 +641,36 @@ describe('MCPClient', () => {
       await Promise.all([startPromise, destroyPromise])
       assert.equal(client.state, MCP_STATES.DESTROYED)
     })
+
+    it('spawned child stdin has an error listener so a write-race EPIPE does not crash the process (#7906)', async () => {
+      // A write can race the child's actual death (destroy() sends SIGTERM,
+      // but stdin.writable can still read true for a brief window before the
+      // OS pipe fully tears down). A stream write failure surfaces as an
+      // async 'error' event, not a catchable exception at the write() call
+      // site — with zero listeners, Node's EventEmitter throws synchronously
+      // on emit (generating an uncaught exception in real use, since nothing
+      // is inside a try/catch when the real internal write machinery emits
+      // it). Prove the listener _spawnAndHandshake() attaches is really
+      // there — not just that the constructor ran without error — by
+      // emitting 'error' directly on the real child's real stdin stream and
+      // confirming it does not throw.
+      const client = new MCPClient(stubConfig(), { log: silentLog() })
+      try {
+        await client.start()
+        await waitForState(client, MCP_STATES.READY)
+        const stdin = client._child.stdin
+        assert.ok(stdin.listenerCount('error') > 0, 'the spawned child stdin must have at least one error listener attached')
+        assert.doesNotThrow(
+          () => stdin.emit('error', new Error('EPIPE (simulated write race)')),
+          'an EPIPE-shaped stdin error must not propagate as an uncaught exception',
+        )
+      } finally {
+        // Always tear the real spawned child down, even on assertion
+        // failure — otherwise a red run here leaks a live stub process that
+        // keeps the test file's event loop (and the whole suite run) alive.
+        await client.destroy()
+      }
+    })
   })
 
   describe('_buildChildEnv secret stripping (#6311)', () => {
