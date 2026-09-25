@@ -188,8 +188,26 @@ export const {
 // Tests that explicitly need to override it (e.g. supervisor.test.js) can
 // still set it in their own beforeEach and restore in afterEach — Node's
 // env reads are dynamic.
+//
+// #7271: register the removal handler INSIDE the branch that creates the
+// dir, not as a separately-guarded top-level handler — that way there is no
+// "did this process own the dir" check left to get out of sync with the
+// branch that assigns CHROXY_CONFIG_DIR, and a developer-supplied
+// CHROXY_CONFIG_DIR structurally can never reach the rmSync call below (the
+// `if` never runs, so `process.on('exit', ...)` never registers).
 if (!process.env.CHROXY_CONFIG_DIR) {
-  process.env.CHROXY_CONFIG_DIR = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
+  const ownedConfigTmpDir = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
+  process.env.CHROXY_CONFIG_DIR = ownedConfigTmpDir
+  process.on('exit', () => {
+    try {
+      fs.rmSync(ownedConfigTmpDir, { recursive: true, force: true })
+    } catch {
+      // Best-effort — a cleanup failure must never fail (or even mark) the
+      // test run. `node --test` runs one process per file, so a leaked dir
+      // here just means the OS temp-dir reaper gets one more entry, same as
+      // before this handler existed.
+    }
+  })
 }
 
 // --- Default the credential-store to "no keychain" ----------------------------
@@ -222,6 +240,17 @@ process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 // child_process — never touches the real keychain). See
 // `server_suite_real_keychain_prompts.md`.
 process.env.CHROXY_DISABLE_KEYCHAIN = '1'
+
+// --- Disable the background npm version check ---------------------------------
+// #7265: `WsServer` fires a non-blocking `checkLatestVersion()` fetch to
+// registry.npmjs.org on construction, gated (per its own comment) on
+// `NODE_ENV !== 'test'` — a "skipped in test/CI" that never actually skipped,
+// because nothing in this repo's harness or CI sets NODE_ENV=test. Every one
+// of the ~28 test files that construct a WsServer made a real outbound HTTPS
+// request as a side effect. Sibling of the two keychain flags above: an
+// explicit, harness-set switch that changes exactly one behaviour, matching
+// `session-manager.js`'s fix for the identical pattern (#6952).
+process.env.CHROXY_DISABLE_UPDATE_CHECK = '1'
 
 // --- Scrub Discord webhook env -------------------------------------------------
 // #5413: PushManager always registers a DiscordWebhookSink that activates the
