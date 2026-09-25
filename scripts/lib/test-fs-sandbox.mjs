@@ -129,6 +129,14 @@ export const FS_EXEMPTIONS = {
   ReadStream: 'class', WriteStream: 'class-known-residual',
   FileReadStream: 'class', FileWriteStream: 'class-known-residual',
 
+  // A plain object of numeric flag values (O_RDONLY, O_NOFOLLOW, O_CREAT, …),
+  // not a function — there is nothing here that could invoke a filesystem
+  // operation, let alone mutate one. 'internal' rather than a new category:
+  // it needs no reasoning about read/fd/class, since it is not a call at
+  // all. Imported by claude-hooks/src/config.js (#7894) to build openSync
+  // flags for the ingest-secret's own symlink-refusing, O_NOFOLLOW read.
+  constants: 'internal',
+
   access: 'read', accessSync: 'read',
   exists: 'read', existsSync: 'read',
   glob: 'read', globSync: 'read',
