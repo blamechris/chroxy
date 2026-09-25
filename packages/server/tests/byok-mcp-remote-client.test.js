@@ -328,6 +328,143 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     await client.destroy()
   })
 
+  it('destroy() while the trust gate is pending (allow) must not open a connection (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveGate
+    const gate = new Promise((resolve) => { resolveGate = resolve })
+    // The metadata-refusal check (real, unmocked below) resolves via its own
+    // fast microtask hop — racing a bare "start(); immediately destroy()"
+    // against it would non-deterministically land destroy() during THAT
+    // earlier window instead of this one (and #7906's own metadata-refusal
+    // guard would mask this test, proving nothing about the trust-gate
+    // guard specifically). Signal from inside the trust gate itself so the
+    // test destroys only once start() is confirmed to be suspended here.
+    let gateCalled
+    const gateCalledPromise = new Promise((resolve) => { gateCalled = resolve })
+    let connected = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog(), trustGate: () => { gateCalled(); return gate } },
+    )
+    // Hook the connect seam, not timing.
+    const origAttemptConnect = client._attemptConnect.bind(client)
+    client._attemptConnect = (...a) => { connected = true; return origAttemptConnect(...a) }
+
+    const startPromise = client.start()
+    await gateCalledPromise
+    // start() is now suspended awaiting the trust gate. Nothing is open
+    // yet, so destroy() resolves immediately (no session, no controllers).
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Let the trust gate resolve — allowed=true — and let the suspended
+    // start() resume.
+    resolveGate(true)
+    await startPromise
+
+    assert.equal(connected, false, 'a destroyed client must not attempt to connect after the trust gate resolves')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state, not the resumed start()')
+  })
+
+  it('destroy() while the trust gate is pending (deny) must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveGate
+    const gate = new Promise((resolve) => { resolveGate = resolve })
+    // Same race as the allow-path test above — signal from inside the gate
+    // so destroy() lands in the trust-gate window specifically, not the
+    // earlier metadata-refusal one.
+    let gateCalled
+    const gateCalledPromise = new Promise((resolve) => { gateCalled = resolve })
+    let deadEmitted = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog(), trustGate: () => { gateCalled(); return gate } },
+    )
+    client.on('dead', () => { deadEmitted = true })
+
+    const startPromise = client.start()
+    await gateCalledPromise
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Let the trust gate resolve — allowed=false. Without the #7906 guard,
+    // the deny branch calls _toDead() unconditionally, regressing an
+    // already-destroyed client's state from DESTROYED back to DEAD and
+    // firing a fresh 'dead' event nothing should ever see.
+    resolveGate(false)
+    await startPromise
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late deny must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+  })
+
+  it('destroy() while the metadata-refusal check is pending must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveRefusal
+    const refusalPromise = new Promise((resolve) => { resolveRefusal = resolve })
+    let deadEmitted = false
+    // No trustGate configured — isolates the metadata-refusal await window
+    // (the window a trust gate would otherwise absorb first).
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog() },
+    )
+    client._refuseMetadataTarget = () => refusalPromise
+    client.on('dead', () => { deadEmitted = true })
+
+    const startPromise = client.start()
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Resolve with a TRUTHY refusal. Without the #7906 guard, the `if
+    // (refusal)` branch calls _toDead() unconditionally — same DESTROYED ->
+    // DEAD regression as the trust-gate-deny case above. (A falsy/null
+    // resolution can't distinguish this guard: the very next await —
+    // _prepareStoredToken — already re-checks _destroyed before any
+    // connection is attempted, so only the truthy-refusal branch isolates
+    // this specific line.)
+    resolveRefusal('refusing test address')
+    await startPromise
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late refusal must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+  })
+
+  it('destroy() while priming a stored token is pending must not open a connection (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolvePrepare
+    const preparePromise = new Promise((resolve) => { resolvePrepare = resolve })
+    // Same race as the trust-gate tests above (no trustGate is configured
+    // here, so the earlier window to race against is the metadata-refusal
+    // check) — signal from inside _prepareStoredToken so destroy() lands in
+    // THIS window specifically.
+    let prepareCalled
+    const prepareCalledPromise = new Promise((resolve) => { prepareCalled = resolve })
+    let connected = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog() },
+    )
+    client._prepareStoredToken = () => { prepareCalled(); return preparePromise }
+    const origAttemptConnect = client._attemptConnect.bind(client)
+    client._attemptConnect = (...a) => { connected = true; return origAttemptConnect(...a) }
+
+    const startPromise = client.start()
+    await prepareCalledPromise
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    resolvePrepare()
+    await startPromise
+
+    assert.equal(connected, false, 'a destroyed client must not attempt to connect after priming the stored token')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+  })
+
   it('exposes the same handshake-timeout precedence as the stdio client', () => {
     for (const bogus of [NaN, Infinity, 0, -1, '5s', null, undefined]) {
       const c = new MCPRemoteClient({ name: 'r', url: 'http://x/mcp' }, { log: silentLog(), handshakeTimeoutMs: bogus })
@@ -874,5 +1011,152 @@ describe('MCPRemoteClient — OAuth flow (#6822)', () => {
     // No token → the config's own header (whatever its case) passes through.
     assert.equal(headers.authorization, 'Bearer STATIC')
     assert.equal(headers.Authorization, undefined)
+  })
+
+  it('destroy() while beginAuthorization() is pending must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    // _beginBrowserAuthorization() is reached from start()'s oauth-required
+    // catch handler AFTER the existing post-trust-gate _destroyed re-check,
+    // so entering this method always starts with _destroyed === false. Its
+    // own beginAuthorization() await (real AS-discovery + dynamic client
+    // registration network calls) is a separate, later window this test
+    // isolates directly via the injectable oauthFlow seam.
+    let rejectBegin
+    const beginPromise = new Promise((_resolve, reject) => { rejectBegin = reject })
+    let beginCalled
+    const beginCalledPromise = new Promise((resolve) => { beginCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthRedirectUri: REDIRECT,
+        oauthFlow: {
+          beginAuthorization: () => { beginCalled(); return beginPromise },
+          mcpOAuthRedirectUri: () => REDIRECT,
+        },
+      },
+    )
+    let deadEmitted = false
+    client.on('dead', () => { deadEmitted = true })
+
+    const beginCall = client._beginBrowserAuthorization(new Error('401'))
+    await beginCalledPromise
+    // destroy() lands while beginAuthorization() is in flight. Nothing is
+    // open yet (no connection, no session), so destroy() resolves
+    // immediately.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // beginAuthorization() now REJECTS — e.g. AS discovery failed, or the
+    // underlying fetch was itself aborted by destroy(). Without the #7906
+    // guard, the catch branch falls through to an unconditional _toDead(),
+    // regressing an already-destroyed client's state back to DEAD and
+    // firing a stray 'dead' event.
+    rejectBegin(new Error('discovery failed'))
+    await beginCall
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late begin-authorization failure must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+  })
+
+  it('destroy() while redeeming an authorization code must not resurrect a destroyed client as IDLE (#7906)', async () => {
+    const store = makeMemStore()
+    let resolveComplete
+    const completePromise = new Promise((resolve) => { resolveComplete = resolve })
+    let completeCalled
+    const completeCalledPromise = new Promise((resolve) => { completeCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthStore: store,
+        oauthRedirectUri: REDIRECT,
+        oauthFlow: {
+          completeAuthorization: () => { completeCalled(); return completePromise },
+        },
+      },
+    )
+    // Seed a pending authorization the way _beginBrowserAuthorization would.
+    client._authPending = { state: 'pending-state-123' }
+
+    const completeCall = client.completeAuthorization('the-code')
+    await completeCalledPromise
+    // destroy() lands while redeeming the code (a real token-endpoint
+    // round-trip) is in flight.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // The redemption succeeds AFTER destroy(). Without the #7906 guard,
+    // completeAuthorization() would clobber state to IDLE via a raw field
+    // write that bypasses _setState entirely (no terminal-state
+    // protection), then call start() again — which throws for a destroyed
+    // client only AFTER state was already corrupted.
+    resolveComplete({ accessToken: 'tok-1', refreshToken: 'ref-1', expiresAt: 0 })
+    const out = await completeCall
+
+    assert.deepEqual(out, { ok: true })
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late-redeemed code must not resurrect it as IDLE')
+    // The token itself is fully formed and still safe to persist for a
+    // future reconnect (e.g. after a later re-enable).
+    assert.equal(store.getStoredToken(client._url).accessToken, 'tok-1')
+  })
+
+  it('destroy() while a silent token refresh is pending must not resurrect a destroyed client as DEAD via the no-redirect-URI branch (#7906 re-review)', async () => {
+    // _onOAuthRequired()'s silent-refresh branch (an existing accessToken,
+    // oauth enabled, not yet refresh-attempted) awaits _tryRefresh() — a real
+    // token-endpoint round-trip when the stored record has both a
+    // refreshToken and a tokenEndpoint. Whatever that await resolves to,
+    // _onOAuthRequired falls through to `await this._beginBrowserAuthorization(err)`
+    // UNCONDITIONALLY once it returns — the `refreshed && !this._destroyed`
+    // guard only skips the reconnect-retry branch, it does not stop the
+    // fall-through. _beginBrowserAuthorization()'s own "no redirect URI
+    // configured" early-return branch then calls _toDead() with no
+    // _destroyed re-check — unlike its try/catch path below, which the
+    // #7906 fix did guard — regressing an already-destroyed client back to
+    // DEAD and firing a stray 'dead' event.
+    const store = makeMemStore({
+      'https://example.invalid/mcp': {
+        accessToken: 'stale-access',
+        refreshToken: 'seeded-refresh',
+        expiresAt: 0,
+        clientId: 'c',
+        tokenEndpoint: 'https://example.invalid/token',
+      },
+    })
+    let resolveRefresh
+    const refreshPromise = new Promise((resolve) => { resolveRefresh = resolve })
+    let refreshCalled
+    const refreshCalledPromise = new Promise((resolve) => { refreshCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthStore: store,
+        // No oauthRedirectUri opt, and the injected oauthFlow seam has no
+        // mcpOAuthRedirectUri() either — _beginBrowserAuthorization() falls
+        // into its "no redirect URI configured" branch once reached.
+        oauthFlow: {
+          refreshAccessToken: () => { refreshCalled(); return refreshPromise },
+        },
+      },
+    )
+    client._accessToken = 'stale-access'
+    let deadEmitted = false
+    client.on('dead', () => { deadEmitted = true })
+
+    const call = client._onOAuthRequired(new Error('401'))
+    await refreshCalledPromise
+    // destroy() lands while the silent refresh is in flight.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // The refresh succeeds AFTER destroy(). _onOAuthRequired correctly skips
+    // the reconnect-retry attempt (refreshed && !this._destroyed is false),
+    // but still calls _beginBrowserAuthorization() — which regresses state
+    // to DEAD via its unguarded no-redirect-URI branch.
+    resolveRefresh({ accessToken: 'fresh-access' })
+    await call
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late-resolving silent refresh must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a stray dead event')
   })
 })
