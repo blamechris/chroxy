@@ -836,6 +836,36 @@ jobs:
             exit 1
           fi
 
+      - name: Check every argv sink is gated, catalogued, or provably safe
+        run: |
+          # Issue #7868 — `spawn`/`execFile`/`execFileSync`/`spawnSync` argv
+          # (and every `_buildArgs`/`build*Args`-shaped function) must have
+          # each non-constant element proven safe (assertSafeArgvValue /
+          # isSafeArgvValue / isGitShaRef applied to it, a `--` terminator
+          # before it, or a fused `--flag=`/`key=` token) or listed in the
+          # AUDITED_SINKS catalogue in utils/argv-safety.js with a reason.
+          # Checked in BOTH directions: a catalogue entry that matches no
+          # real finding is stale and fails the build too.
+          #
+          # Exit 2 means the lint could not do its job (bad flags, nothing
+          # scanned, the catalogue module failed to load, a source file
+          # failed to parse) and is reported separately from exit 1 — "the
+          # guard is broken" must never be shown as "the guard passed", nor
+          # as "the code is dirty".
+          set +e
+          scripts/lint-argv-sinks.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK — every argv sink is gated, catalogued, or provably safe"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-argv-sinks could not run (bad flags, it scanned fewer files than --min-files, the AUDITED_SINKS catalogue failed to load, or a source file failed to parse). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-argv-sinks.mjs."
+            exit 1
+          else
+            echo "::error::An argv sink is neither provably safe nor catalogued, or a catalogue entry no longer matches any real finding. See packages/server/scripts/lint-argv-sinks.sh and the AUDITED_SINKS catalogue in packages/server/src/utils/argv-safety.js."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target

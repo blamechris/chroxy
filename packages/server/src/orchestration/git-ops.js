@@ -51,9 +51,9 @@ const DIFF_MAX_BUFFER = 64 * 1024 * 1024
 // a GitOpsError; both messages (`empty <kind>` / `unsafe <kind>: <json>`) are
 // produced there, and orchestration-git-ops.test.js pins the `unsafe` half.
 // Do not re-inline the check here — #7290 was filed because a SECOND, weaker
-// spelling had grown in reader.js. A THIRD is still live and NOT folded in:
-// `rejectGitOptionLike` in environments/backends/k8s.js, scoped to gitRepo
-// fields.
+// spelling had grown in reader.js. A THIRD spelling — `rejectGitOptionLike`
+// in environments/backends/k8s.js, scoped to gitRepo fields — was folded
+// into the shared guard by #7869.
 function assertSafeRef(name, kind = 'ref') {
   try {
     assertSafeArgvValue(name, kind)

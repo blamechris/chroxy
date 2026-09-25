@@ -5,6 +5,7 @@ import { KubeConfig, CoreV1Api, PortForward } from '@kubernetes/client-node'
 import WebSocket from 'ws'
 import { createLogger } from '../../logger.js'
 import { getChroxyHostEnv } from '../../chroxy-host-metadata.js'
+import { assertSafeArgvValue } from '../../utils/argv-safety.js'
 
 const log = createLogger('k8s-backend')
 
@@ -305,26 +306,35 @@ const DEFAULT_WORKSPACE_MOUNT_PATH = '/workspace'
 
 /**
  * Reject argv values that git would interpret as an option rather than a
- * positional argument (argument-injection hardening, #3193).
+ * positional argument (argument-injection hardening, #3193) — routed through
+ * the shared guard in `utils/argv-safety.js` (#7869).
+ *
+ * This was previously a locally-scoped spelling — `typeof value === 'string'
+ * && value.startsWith('-')` — that git-ops.js's own comment named as "a THIRD
+ * … still live and NOT folded in" after #7290 folded a second, equally weak
+ * copy out of ws-file-ops/reader.js. It was strictly weaker than the shared
+ * guard: it fell through (accepted) on a non-string, an empty string, and a
+ * value carrying an embedded NUL/CR/LF, all of which `assertSafeArgvValue`
+ * rejects. A newline in particular matters because several CLIs (including
+ * git's own `--stdin` modes) treat one as a record separator, letting an
+ * embedded newline smuggle a second argument into a single slot.
  *
  * git-clone argv is NOT passed through a shell — the init container runs
  * `command: ['git']` with an explicit `args` array — so classic shell
  * metacharacter injection (`;`, `|`, `$()`, backticks) is structurally
- * impossible. The residual risk is *argument* injection: a value beginning
- * with `-` (e.g. `--upload-pack=…`, `--config=…`) would be parsed by git as a
- * flag. We reject any value whose first character is `-`; the clone argv also
- * uses `--` to terminate option parsing as belt-and-braces.
+ * impossible. The residual risk is *argument* injection, which
+ * `assertSafeArgvValue` covers in full; the clone argv also uses `--` to
+ * terminate option parsing as belt-and-braces.
  *
  * @param {string} value
  * @param {string} field - Field name for the error message
- * @throws {Error} If the value starts with '-'
+ * @throws {Error} If the value is unsafe to place in the git clone argv.
  */
-function rejectGitOptionLike(value, field) {
-  if (typeof value === 'string' && value.startsWith('-')) {
-    throw new Error(
-      `createEnvironment: opts.gitRepo.${field} must not start with "-" ` +
-      '(rejected to prevent git argument injection)',
-    )
+function assertGitRepoFieldSafe(value, field) {
+  try {
+    assertSafeArgvValue(value, `opts.gitRepo.${field}`)
+  } catch (err) {
+    throw new Error(`createEnvironment: ${err.message} (rejected to prevent git argument injection)`)
   }
 }
 
@@ -378,20 +388,20 @@ function validateGitRepo(gitRepo, cwd, workspacePVC) {
       'createEnvironment: opts.gitRepo.url must be a non-empty string',
     )
   }
-  rejectGitOptionLike(spec.url, 'url')
+  assertGitRepoFieldSafe(spec.url, 'url')
 
   if (spec.branch != null) {
     if (typeof spec.branch !== 'string' || spec.branch.length === 0) {
       throw new Error('createEnvironment: opts.gitRepo.branch must be a non-empty string')
     }
-    rejectGitOptionLike(spec.branch, 'branch')
+    assertGitRepoFieldSafe(spec.branch, 'branch')
   }
 
   if (spec.commit != null) {
     if (typeof spec.commit !== 'string' || spec.commit.length === 0) {
       throw new Error('createEnvironment: opts.gitRepo.commit must be a non-empty string')
     }
-    rejectGitOptionLike(spec.commit, 'commit')
+    assertGitRepoFieldSafe(spec.commit, 'commit')
   }
 
   let depth = null
