@@ -1714,9 +1714,10 @@ jobs:
           # file at every commit — `filter: blob:none` is a partial clone that
           # keeps every commit and tree object (so the commit graph and merge
           # base are exactly as complete as an unfiltered fetch-depth:0 clone)
-          # and fetches blobs lazily, on demand, only for the paths actually
-          # diffed. actions/checkout v4.3.1 (this pin) supports `filter`
-          # natively; GitHub's server supports blob:none partial clone.
+          # and fetches blobs lazily for historical commits, downloading only
+          # the current HEAD's working tree and the paths diffed from base.
+          # actions/checkout v4.3.1 (this pin) supports `filter` natively;
+          # GitHub's server supports blob:none partial clone.
           fetch-depth: 0
           filter: blob:none
 
