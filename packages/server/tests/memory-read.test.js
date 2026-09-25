@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
 import { encodeProjectPath } from '../src/jsonl-reader.js'
 import { resolveSessionCwd } from '../src/ws-file-ops/common.js'
 
@@ -311,6 +312,34 @@ describe('memory_read (readMemory) handler', () => {
       assert.equal(projectEntry.exists, true)
       assert.match(projectEntry.error || '', /not a regular file|not readable/i,
         'a FIFO must be refused with a clear reason, not silently treated as missing')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  // #7938 (review) — the test above never reaches the POST-open isFile()
+  // check: a statically planted FIFO is refused by the pre-open stat first.
+  // This one swaps a regular file for a FIFO in exactly the window between
+  // that stat and the open, through readResolvedMemoryFile's test seam.
+  // Without the post-open check the FIFO reads as an EMPTY file (a
+  // non-blocking read of a writerless FIFO is EOF): content '' and no error.
+  it('refuses a FIFO swapped in between the pre-open stat and the open (post-open fstat check)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-fifo-race-'))
+    const target = join(await realpath(dir), 'CLAUDE.md')
+    await writeFile(target, 'a regular file at stat time')
+    try {
+      const HANG_GUARD_MS = 3000
+      const result = await Promise.race([
+        readResolvedMemoryFile(target, async () => {
+          await rm(target)
+          execFileSync('mkfifo', [target])
+        }),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      ])
+      assert.notEqual(result.outcome, 'hung', 'the open blocked on the swapped-in FIFO — openNoFollow needs O_NONBLOCK (#7938)')
+      assert.equal(result.content, null, 'a FIFO must never be read as file content')
+      assert.equal(result.exists, true)
+      assert.equal(result.error, 'Not a regular file')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

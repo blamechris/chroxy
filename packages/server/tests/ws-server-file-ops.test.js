@@ -1051,10 +1051,11 @@ describe('file browser symlink security', () => {
     const HANG_GUARD_MS = 3000
     const start = Date.now()
     send(ws, { type: 'read_file', path: 'evil.fifo' })
-    const content = await Promise.race([
-      waitForMessage(messages, 'file_content', HANG_GUARD_MS),
-      new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
-    ])
+    // waitForMessage REJECTS on its own timeout; map that to the sentinel so
+    // a hang always fails on the assertion below, never on whichever of two
+    // equal-length timers happened to fire first.
+    const content = await waitForMessage(messages, 'file_content', HANG_GUARD_MS)
+      .catch(() => ({ outcome: 'hung' }))
     const elapsed = Date.now() - start
 
     assert.notEqual(content?.outcome, 'hung',
