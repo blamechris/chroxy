@@ -608,6 +608,68 @@ function resolveProjectBlock(raw, cwd) {
 }
 
 /**
+ * #7939: closed vocabulary naming WHICH of the three config sources a
+ * discovered (or newly-added) MCP server came from. Threaded onto each spec
+ * `discoverMcpServerSpecs` returns and, from there, into the spawn-trust
+ * prompt payload (`requestMcpTrust`) — so a user approving a spawn can tell
+ * "my own machine-local config" from "a repository I just cloned" instead of
+ * every prompt looking identical regardless of provenance.
+ *
+ * Deliberately three fixed values, never a raw file path: a path is
+ * unbounded free-form text (and on the wire schema below is typed as a
+ * closed `z.enum`, not `z.string`), and the three values already say
+ * everything the prompt needs — "your machine", "this repo", or "your user
+ * profile".
+ *
+ *   - LOCAL            — `~/.claude.json` → `projects[<cwd>].mcpServers`.
+ *                         Claude Code's "Local" scope: private to this
+ *                         machine + cwd.
+ *   - PROJECT_MCP_JSON — `<cwd>/.mcp.json`. Claude Code's "Project" scope:
+ *                         checked into the repo and shared with the team —
+ *                         REPO-CONTROLLED, so this is the value the trust
+ *                         prompt flags most visibly.
+ *   - USER             — `~/.claude.json` → root `mcpServers`. Claude Code's
+ *                         "User" scope: available across every project on
+ *                         this machine.
+ *
+ * Note the naming collision this deliberately avoids: the READ side's
+ * internal `source` strings below say "project config mcpServers" for the
+ * "Local" scope and "project .mcp.json mcpServers" for the "Project" scope
+ * (both use the word "project" for different things), while the WRITE side's
+ * `MCP_WRITE_SCOPES` calls the very same "Local" scope `'project'` (see
+ * `mcpWriteScopeToSource`). Neither internal vocabulary is fit to show a
+ * user — this enum is the one vocabulary both map onto.
+ */
+export const MCP_SERVER_SOURCE = Object.freeze({
+  LOCAL: 'local',
+  PROJECT_MCP_JSON: 'project-mcp-json',
+  USER: 'user',
+})
+
+/** Ordered value list — for schema/enum construction and validation. */
+export const MCP_SERVER_SOURCE_VALUES = Object.freeze(Object.values(MCP_SERVER_SOURCE))
+
+/**
+ * Map an `addMcpServer` WRITE scope (`MCP_WRITE_SCOPES`: `'user' | 'project'`)
+ * onto the same `MCP_SERVER_SOURCE` vocabulary the READ side uses (#7939), so
+ * a spawn-trust prompt for a server the user is actively adding right now
+ * names its scope with the identical word a rediscovered one would carry
+ * after a restart.
+ *
+ * Write scope `'project'` targets `projects[<realpath(cwd)>].mcpServers`
+ * (see `prepareAddMcpServer` below) — the READ side's "Local" scope, NOT
+ * `.mcp.json` (which is not a writable scope at all; see the comment above
+ * `MCP_WRITE_SCOPES`). Write scope `'user'` (the default) targets the root
+ * `mcpServers` block — the READ side's "User" scope.
+ *
+ * @param {string} scope — an `MCP_WRITE_SCOPES` value
+ * @returns {string} an `MCP_SERVER_SOURCE` value
+ */
+export function mcpWriteScopeToSource(scope) {
+  return scope === 'project' ? MCP_SERVER_SOURCE.LOCAL : MCP_SERVER_SOURCE.USER
+}
+
+/**
  * Read the three MCP config sources Claude Code itself reads, in a single
  * pass, in Claude Code's documented scope-precedence order (highest to
  * lowest), per https://code.claude.com/docs/en/mcp, "Scope Hierarchy and
@@ -690,7 +752,11 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
   if (userRaw) {
     const projectBlock = resolveProjectBlock(userRaw, cwd)
     if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
-      sources.push({ mcpServers: projectBlock.mcpServers, source: 'project config mcpServers' })
+      sources.push({
+        mcpServers: projectBlock.mcpServers,
+        source: 'project config mcpServers',
+        sourceKind: MCP_SERVER_SOURCE.LOCAL,
+      })
     }
   }
 
@@ -702,14 +768,22 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
     if (existsSync(mcpJsonPath)) {
       const raw = readJson(mcpJsonPath, 'project .mcp.json')
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        sources.push({ mcpServers: raw.mcpServers, source: 'project .mcp.json mcpServers' })
+        sources.push({
+          mcpServers: raw.mcpServers,
+          source: 'project .mcp.json mcpServers',
+          sourceKind: MCP_SERVER_SOURCE.PROJECT_MCP_JSON,
+        })
       }
     }
   }
 
   // 3 — "User" scope (lowest precedence): root mcpServers in ~/.claude.json.
   if (userRaw) {
-    sources.push({ mcpServers: userRaw.mcpServers, source: 'user config mcpServers' })
+    sources.push({
+      mcpServers: userRaw.mcpServers,
+      source: 'user config mcpServers',
+      sourceKind: MCP_SERVER_SOURCE.USER,
+    })
   }
 
   return { sources, warnings }
@@ -764,6 +838,16 @@ export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeCo
  * accumulates as a warning, so a corrupt config can't take down session
  * start (mirrors `discoverConfiguredMcpServers` / `loadClaudeMcpConfig`).
  *
+ * #7939: every returned spec also carries `source` (an `MCP_SERVER_SOURCE`
+ * value) naming which of the three scopes it was resolved from — threaded
+ * through to the spawn-trust prompt so an approval can tell "my own config"
+ * from "a repository I just cloned" apart. Attached here (not inside
+ * `parseClaudeMcpConfig`, which is scope-agnostic and reused by the write
+ * path) so the dedup-by-name loop below tags each winning spec with the
+ * SAME source its winning `sources` entry carries — a spec picked from the
+ * "Local" scope is never mislabeled "User" just because `parseClaudeMcpConfig`
+ * doesn't know about scopes.
+ *
  * @param {string} cwd — the session's working directory
  * @param {{ configPath?: string }} [opts]
  * @returns {{ servers: Array<object>, warnings: string[] }}
@@ -771,10 +855,10 @@ export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeCo
 export function discoverMcpServerSpecs(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
   const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
   const byName = new Map()
-  for (const { mcpServers } of sources) {
+  for (const { mcpServers, sourceKind } of sources) {
     const parsed = parseClaudeMcpConfig({ mcpServers })
     for (const spec of parsed.servers) {
-      if (!byName.has(spec.name)) byName.set(spec.name, spec)
+      if (!byName.has(spec.name)) byName.set(spec.name, { ...spec, source: sourceKind })
     }
     warnings.push(...parsed.warnings)
   }

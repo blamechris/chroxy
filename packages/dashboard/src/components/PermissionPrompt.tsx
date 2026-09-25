@@ -37,6 +37,20 @@ import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
 
+// #7939: which of the three MCP config scopes a spawn-trust server came from
+// (mirrors MCP_SERVER_SOURCE in packages/server/src/byok-mcp-config.js and
+// the wire-side McpServerSourceSchema in packages/protocol). Human-readable
+// labels live here, client-side — the wire only carries the closed enum
+// value, never display text, so a future re-wording doesn't need a server
+// deploy. The `project-mcp-json` label is worded to be unmissable: that
+// scope is `<cwd>/.mcp.json`, checked into a cloned repository, so it is the
+// one value this prompt must flag most visibly.
+const MCP_SOURCE_LABELS: Record<string, string> = {
+  local: 'Your local Claude config for this project',
+  'project-mcp-json': "From this repository's .mcp.json",
+  user: 'Your user-wide Claude config',
+}
+
 export interface PermissionPromptProps {
   requestId: string
   tool: string
@@ -58,6 +72,16 @@ export interface PermissionPromptProps {
    * ambiguity to disambiguate).
    */
   sessionLabel?: string
+  /**
+   * #7939 — the raw (already broadcast-redacted) tool input, currently read
+   * ONLY for `tool === 'mcp_spawn'` (`input.mcpServer.source`) to show which
+   * config scope a spawn-trust request came from. Optional and otherwise
+   * unused: every other tool's detail still renders from `description` alone
+   * (the #6543/#6773 pre-write review pulls its OWN full input separately —
+   * this is the already-broadcast, possibly-truncated `toolInput` the store
+   * already has on the message, not a second network round trip).
+   */
+  toolInput?: Record<string, unknown>
 }
 
 function formatCountdown(ms: number): string {
@@ -67,7 +91,7 @@ function formatCountdown(ms: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
 }
 
-export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel }: PermissionPromptProps) {
+export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel, toolInput }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // #3619: anchor on monotonic `performance.now()` so an NTP sync /
@@ -119,6 +143,19 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // PermissionManager at all) silently discard it, so the honest fix is to
   // hide the affordance rather than promise a delivery that never happens.
   const denyReasonHonored = isDenyReasonHonoredProvider(activeProvider, availableProviders)
+
+  // #7939 — for an MCP spawn-trust prompt, surface WHICH config scope the
+  // server was resolved from (`input.mcpServer.source`) so an operator can
+  // tell "my own config" from "a repository I just cloned" apart. Reads the
+  // already-broadcast `toolInput` prop (no pull) — the field is a handful of
+  // bytes, never truncated by the ~10K broadcast cap. An unrecognized/absent
+  // source (older server, or a cfg that predates #7939) renders nothing,
+  // same as any other optional field this component treats as absent.
+  const mcpServerSource =
+    tool === 'mcp_spawn' && toolInput && typeof toolInput.mcpServer === 'object' && toolInput.mcpServer !== null
+      ? (toolInput.mcpServer as Record<string, unknown>).source
+      : undefined
+  const mcpSourceLabel = typeof mcpServerSource === 'string' ? MCP_SOURCE_LABELS[mcpServerSource] : undefined
 
   // #6543 (feature B): per-hunk pre-write review. Gated on the server's `ide`
   // capability (features.ide) + a reviewable tool (Write/Edit). When eligible we
@@ -251,6 +288,22 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       <div className="perm-desc" id={`perm-desc-${requestId}`}>
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
+
+      {/* #7939: MCP spawn-trust prompts name which config scope the server
+          came from. The repo-provided `.mcp.json` case gets the distinct
+          `perm-mcp-source-repo` class (attacker-influenceable content —
+          flagged, not just labeled the same as every other scope). */}
+      {mcpSourceLabel && (
+        <div className="perm-mcp-source" data-testid="perm-mcp-source">
+          <span className="perm-mcp-source-label">Configured from:</span>{' '}
+          <span
+            className={`perm-mcp-source-value${mcpServerSource === 'project-mcp-json' ? ' perm-mcp-source-repo' : ''}`}
+            data-testid="perm-mcp-source-value"
+          >
+            {mcpSourceLabel}
+          </span>
+        </div>
+      )}
 
       {/* #6543 (feature B): per-hunk pre-write review for a Write/Edit when
           features.ide is on. Renders once the pulled input lands; dropped hunks

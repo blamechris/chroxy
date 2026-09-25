@@ -19,7 +19,7 @@ import {
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue } from './redaction.js'
-import { redactMcpUrl, resolveTrustAddress } from './byok-mcp-config.js'
+import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
 // produces entries that never correlate with the persisted rule they audit.
@@ -1102,12 +1102,24 @@ export class PermissionManager extends EventEmitter {
    * credential-stripped (via redactMcpUrl) before it reaches the description
    * or the broadcast input; header VALUES are never passed in.
    *
-   * @param {{ name: string, command?: string, args?: string[], envKeys?: string[], url?: string, headerKeys?: string[] }} server
+   * #7939: `server.source` (an `MCP_SERVER_SOURCE` value — see
+   * byok-mcp-config.js) names WHICH config scope this spawn config came from.
+   * It is validated against the closed `MCP_SERVER_SOURCE_VALUES` roster and
+   * only forwarded into the prompt payload when it matches — an absent or
+   * unrecognized value is silently DROPPED (never passed through as-is),
+   * consistent with never sending free-form text where a closed enum belongs.
+   * A caller that predates #7939 (or a cfg built without going through
+   * discovery/add) simply omits it, and the prompt shows no source, which is
+   * the same "no source" the client already has to handle for every other
+   * field it treats as optional.
+   *
+   * @param {{ name: string, command?: string, args?: string[], envKeys?: string[], url?: string, headerKeys?: string[], source?: string }} server
    * @returns {Promise<boolean>}
    */
   async requestMcpTrust(server) {
     const isRemote = typeof server.url === 'string' && server.url.length > 0
     const safeUrl = isRemote ? redactMcpUrl(server.url) : ''
+    const source = MCP_SERVER_SOURCE_VALUES.includes(server.source) ? server.source : undefined
     // #6834 — for a REMOTE server, best-effort-resolve the host BEFORE we build
     // the prompt so the consent string can show when a "remote" URL actually
     // points at a loopback / private / internal address (owner decision:
@@ -1141,12 +1153,18 @@ export class PermissionManager extends EventEmitter {
                     display: resolved.display,
                   }
                 : null,
+              // #7939: OMITTED (not null) when absent/unrecognized, matching
+              // every other optional field on this payload — a client that
+              // doesn't know the field yet just doesn't see the key.
+              ...(source ? { source } : {}),
             }
           : {
               name: server.name,
               command: server.command,
               args: Array.isArray(server.args) ? [...server.args] : [],
               envKeys: Array.isArray(server.envKeys) ? [...server.envKeys] : [],
+              // #7939: see the remote branch's comment above.
+              ...(source ? { source } : {}),
             },
       }
       const description = isRemote
