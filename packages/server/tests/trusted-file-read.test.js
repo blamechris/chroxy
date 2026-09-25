@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, symlinkSync, mkdirSync, constants as fsConstants } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, symlinkSync, mkdirSync, readdirSync, constants as fsConstants } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -458,6 +458,55 @@ describe('#7893 readTrustedSecretFile — size cap (bounds what a same-uid attac
       const result = readTrustedSecretFile(file, { mode: 0o600, maxSize: 10, deps })
       assert.equal(result.status, 'refused')
       assert.equal(result.code, 'ETOOBIG')
+    })
+  })
+})
+
+describe('#7893 readTrustedSecretFile — real end-to-end fd hygiene (this process\'s own fd count)', () => {
+  // Complements the mocked call-sequence proof above (which pins the exact
+  // fstat-throws leak) with a broad, real-filesystem net: loop the REAL
+  // implementation through every refusal shape it has, using this process's
+  // own /dev/fd listing as ground truth. macOS and Linux both expose
+  // /dev/fd; skipped elsewhere rather than silently asserting nothing.
+  const HAS_DEV_FD = (() => {
+    try {
+      readdirSync('/dev/fd')
+      return true
+    } catch {
+      return false
+    }
+  })()
+
+  it('100 iterations of open/refuse/read across every outcome leaves the fd count flat', { skip: HAS_DEV_FD ? false : '/dev/fd not available on this platform' }, () => {
+    withTmpDir((dir) => {
+      const okFile = join(dir, 'ok-secret')
+      writeFileSync(okFile, 'trusted-content\n', { mode: 0o600 })
+      const wideModeFile = join(dir, 'wide-mode')
+      writeFileSync(wideModeFile, 'x', { mode: 0o644 })
+      const missingFile = join(dir, 'does-not-exist')
+      const bigFile = join(dir, 'too-big')
+      writeFileSync(bigFile, 'y'.repeat(64), { mode: 0o600 })
+      let linkFile = null
+      if (SKIP_NO_SYMLINK === false) {
+        linkFile = join(dir, 'a-symlink')
+        symlinkSync(okFile, linkFile)
+      }
+
+      const before = readdirSync('/dev/fd').length
+
+      for (let i = 0; i < 100; i++) {
+        assert.equal(readTrustedSecretFile(okFile, { mode: 0o600 }).status, 'ok')
+        assert.equal(readTrustedSecretFile(wideModeFile, { mode: 0o600 }).status, 'refused')
+        assert.equal(readTrustedSecretFile(missingFile, { mode: 0o600 }).status, 'absent')
+        assert.equal(readTrustedSecretFile(bigFile, { mode: 0o600, maxSize: 10 }).status, 'refused')
+        if (linkFile) assert.equal(readTrustedSecretFile(linkFile, { mode: 0o600 }).status, 'refused')
+      }
+
+      const after = readdirSync('/dev/fd').length
+      assert.ok(
+        after <= before + 2,
+        `fd count grew from ${before} to ${after} over 100 iterations across ok/EMODE/absent/ETOOBIG/ELOOP outcomes — a leak`,
+      )
     })
   })
 })
