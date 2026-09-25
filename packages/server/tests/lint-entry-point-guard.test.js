@@ -269,6 +269,99 @@ describe('lint-entry-point-guard', () => {
     })
   })
 
+  // #7279: a banned shape spelled as TEXT inside a string or template-literal
+  // body is still matched (reach unchanged — this is prose the lint cannot
+  // tell from a real hand-rolled guard just by looking at it), but the
+  // printed finding says so, instead of presenting it identically to code.
+  describe('a match inside a string literal', () => {
+    test('is still an offender (reach unchanged)', () => {
+      const { status } = runLint({
+        'src/thing.js': "export const note = 'reads argv[1] to find the script slot'\n",
+      })
+      assert.equal(status, 1)
+    })
+
+    test('the finding says it matched inside a string literal', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': "export const note = 'reads argv[1] to find the script slot'\n",
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /\[argv1-index]/)
+      assert.match(stderr, /inside a string literal/)
+    })
+
+    // The exact shape from #7279's provenance: a Windows-exemption manifest's
+    // `note:` field describing a test, in prose, inside a single-quoted string.
+    test('the #7275 provenance case: a manifest note describing a test', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js':
+          "export const note = 'chmods argv[1] unreadable to reach the "
+          + "undecidable-case warning (#7226); Windows still reads it'\n",
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /inside a string literal/)
+    })
+
+    test('a template-literal body (no substitution) is also annotated', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': 'export const note = `reads argv[1] to find the script slot`\n',
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /inside a string literal/)
+    })
+
+    // The literal TAIL of a template expression that DOES have a substitution
+    // is a separate token (TemplateTail) from the no-substitution case above —
+    // proving it is covered too, not just the simpler NoSubstitutionTemplateLiteral
+    // token the previous case exercises.
+    test('the literal tail after a substitution is also annotated', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': 'export const note = `id ${id} reads argv[1] for the slot`\n',
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /inside a string literal/)
+    })
+
+    // POSITIVE CONTROL for the string-literal annotation itself: the identical
+    // text, unquoted, is a real hand-rolled guard and must be reported exactly
+    // as it always was — no "inside a string literal" note attached.
+    test('positive control: the same text UNQUOTED is reported as code, not string', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': 'if (process.argv[1] === __filename) main()\n',
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /\[argv1-index]/)
+      assert.doesNotMatch(stderr, /inside a string literal/)
+    })
+
+    // POSITIVE CONTROL for the substitution carve-out: a REAL argv[1] read
+    // sitting inside a template literal's `${...}` is ordinary code, not
+    // string content, and must still be caught as code — proving the fix
+    // narrows to string/template BODIES and does not swallow a real guard
+    // built through template-literal interpolation.
+    test('positive control: a real read inside a template-literal substitution is still caught as code', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': 'if (`${process.argv[1]}` === __filename) main()\n',
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /\[argv1-index]/)
+      assert.doesNotMatch(stderr, /inside a string literal/)
+    })
+
+    // POSITIVE CONTROL for concatenation: a real argv[1] read built by string
+    // concatenation is fully outside any string-literal node — the read is
+    // plain code, just adjacent to unrelated string operands — and must still
+    // be caught as code, not misread as living inside the neighboring string.
+    test('positive control: a real read beside a concatenated string is still caught as code', () => {
+      const { status, stderr } = runLint({
+        'src/thing.js': "if (('script: ' + process.argv[1]) === __filename) main()\n",
+      })
+      assert.equal(status, 1)
+      assert.match(stderr, /\[argv1-index]/)
+      assert.doesNotMatch(stderr, /inside a string literal/)
+    })
+  })
+
   describe('exemptions', () => {
     test('a sanctioned copy is exempt', () => {
       const { status } = runLint(

@@ -657,6 +657,54 @@ export function enumerateTestFiles(testsRoot) {
   return out.map((p) => relative(pkgRoot, p).split(sep).join('/')).sort()
 }
 
+// Matches a WINDOWS_EXEMPT group heading — `// ── <label> (<N>)` — and
+// captures the label and the declared count. The em-dash run's length is not
+// pinned: only that the line ends in a parenthesised integer, so a heading
+// whose divider got re-wrapped still matches.
+const HEADING_RE = /^\s*\/\/\s*─+\s*(.+?)\s*\((\d+)\)\s*$/
+// A row's opening brace, at the manifest's own two-space indent. Matches
+// `resolveWindowsTestSet`'s row shape: every entry in WINDOWS_EXEMPT is a
+// `{ file, reason, symptom, note, ... }` object literal on its own lines.
+const ROW_START_RE = /^\s*\{\s*$/
+
+/**
+ * Every `// ── <label> (<N>)` heading in `sourceText`, whose declared count
+ * disagrees with the number of row objects actually following it (up to the
+ * next heading or EOF) — repo doctrine (docs/false-safety-guards.md, cause #1)
+ * is that a hardcoded number beside a growing list is exactly the shape that
+ * goes stale unnoticed. #7343: these headings validated nothing.
+ *
+ * A source with NO headings at all (every fixture in
+ * lint-windows-test-exemptions.test.js — `WINDOWS_EXEMPT` there is emitted by
+ * `JSON.stringify`, which never produces a comment) returns an empty list
+ * rather than complaining: there is nothing to verify, which is not the same
+ * as the manifest being wrong. Only a heading whose OWN count disagrees with
+ * reality is a problem.
+ *
+ * @param {string} sourceText the manifest module's raw source
+ * @returns {{label: string, declared: number, actual: number, line: number}[]}
+ */
+export function checkHeadingCounts(sourceText) {
+  const lines = sourceText.split('\n')
+  const headings = []
+  for (let i = 0; i < lines.length; i++) {
+    const m = HEADING_RE.exec(lines[i])
+    if (m) headings.push({ line: i + 1, label: m[1], declared: Number(m[2]) })
+  }
+
+  const mismatches = []
+  for (let h = 0; h < headings.length; h++) {
+    const start = headings[h].line // line[] is 0-based; heading.line is 1-based, i.e. the line AFTER the heading
+    const end = h + 1 < headings.length ? headings[h + 1].line - 1 : lines.length
+    let actual = 0
+    for (let i = start; i < end; i++) if (ROW_START_RE.test(lines[i])) actual++
+    if (actual !== headings[h].declared) {
+      mismatches.push({ ...headings[h], actual })
+    }
+  }
+  return mismatches
+}
+
 /**
  * The single derivation both the gate and the runner use.
  *

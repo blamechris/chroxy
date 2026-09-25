@@ -16,11 +16,9 @@
 //
 // It is deliberately not the only one in this directory: bump-version.test.sh's
 // `install_agents_generator()` stages the same script from shell and cannot
-// import this module. That copy also DISAGREES about the missing-lib case — it
-// skips the copy when scripts/lib is absent, where this one refuses — which is
-// the "'cannot check this' treated as 'nothing to check'" shape from
-// docs/false-safety-guards.md. Reconciling them is tracked separately rather
-// than smuggled into a test-coverage change.
+// import this module. That copy now AGREES on the missing-lib case (#7256) —
+// it refuses too, before staging anything, rather than skipping the copy when
+// scripts/lib is absent.
 
 import { cpSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'

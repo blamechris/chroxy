@@ -11,8 +11,10 @@
  * files"; there is no such state. It checks the one thing that CAN rot: the
  * exempt manifest itself. Stale rows, unknown reason categories, tracked-debt
  * rows with no issue, missing measured symptoms, duplicates, an exempt ratio
- * above the ceiling, and any MUST_RUN_ON_WINDOWS suite relocated into the
- * exempt list.
+ * above the ceiling, any MUST_RUN_ON_WINDOWS suite relocated into the exempt
+ * list, and a `// ── <label> (<N>)` group heading whose count has drifted from
+ * the rows actually beneath it (#7343 — see `checkHeadingCounts` in
+ * lib/windows-test-set.mjs).
  *
  * ── Why this runs on LINUX, in Server Lint ─────────────────────────────────
  *
@@ -36,6 +38,7 @@
  *   2 — the gate could not do its job (bad flags, a path that vanished, a broken walk)
  */
 
+import { readFileSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -125,6 +128,27 @@ const { all, exempt, run, problems } = lib.resolveWindowsTestSet({
   minFiles,
   minMustRun,
 })
+
+// #7343: WINDOWS_EXEMPT's `// ── <label> (<N>)` group headings carried
+// hardcoded counts nothing checked — repo doctrine's first recurring cause, a
+// hardcoded number beside a growing list. Read from the SAME file the manifest
+// itself came from (the fixture path when --manifest points at one), so what
+// this checks is what actually ran, not always the real repo's copy.
+const manifestSourcePath = manifestPath ? resolve(manifestPath) : join(HERE, 'lib', 'windows-test-set.mjs')
+let headingMismatches = []
+try {
+  const manifestSource = readFileSync(manifestSourcePath, 'utf8')
+  headingMismatches = lib.checkHeadingCounts(manifestSource)
+} catch (err) {
+  usageError(`cannot read ${manifestSourcePath} to verify its heading counts: ${err && err.message}`)
+}
+for (const m of headingMismatches) {
+  problems.push({
+    severity: 'manifest',
+    message: `${manifestSourcePath}:${m.line}: heading "${m.label}" says (${m.declared}) but ${m.actual} ` +
+      'row(s) actually follow it before the next heading — fix the count or the rows drifted from it.',
+  })
+}
 
 const brokenProblems = problems.filter((p) => p.severity === 'broken')
 const manifestProblems = problems.filter((p) => p.severity === 'manifest')
