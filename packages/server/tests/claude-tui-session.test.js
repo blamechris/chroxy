@@ -61,6 +61,32 @@ const EXPECTED_NATIVE_ROUTE_FORBIDDEN_ENV = [
 // relocate it alongside HOME and restore it here on teardown.
 const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 
+// #7926 (review) — Linux CI parity helper. Production never sets `_sinkDir`
+// directly under the shared OS tmp root: `start()` first resolves a
+// dedicated, owner-only base via `ensureOwnedBaseDir(SINK_BASE)` (0700,
+// chmod-enforced) and only THEN creates the per-session dir one level below
+// it (`join(base, 's-<uuid>')`). `_validateSinkBase()`/`_evaluateSinkBaseStat`
+// re-check `dirname(_sinkDir)` on every poll — i.e. that owned base, never
+// the shared root above it. A fixture that skips the extra nesting level and
+// sets `_sinkDir` straight to a bare `mkdtempSync(join(tmpdir(), ...))`
+// result puts `dirname(_sinkDir)` AT the shared root instead of below it.
+// That was silently safe on macOS by accident (`os.tmpdir()` is already a
+// private, 0700 per-user directory there) and wrong on Linux, where
+// `os.tmpdir()` is the shared, sticky, world-writable `/tmp` (mode 1777 —
+// the correct, normal POSIX shape for a shared tmp root): the flat fixture
+// tripped the group/other-accessible check on every poll, so every turn in
+// the affected tests ended early via `_handleSinkBaseCompromised` (a forced
+// Ctrl-C into the PTY) — see the regression test below and #7926 CI. Use
+// this helper for any fixture that sets `_sinkDir` and expects the turn to
+// actually complete; it mirrors production's real two-level shape so the
+// check exercises the session's own base, never the shared root.
+function makeSinkDir(prefix) {
+  const base = mkdtempSync(join(tmpdir(), `${prefix}-base-`))
+  const dir = join(base, 's-test')
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  return dir
+}
+
 describe('ClaudeTuiSession', () => {
   let emptySkillsDir
   let session
@@ -1421,7 +1447,7 @@ describe('ClaudeTuiSession', () => {
       })
       session._processReady = true
       session._sessionId = 'test-unlink'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-unlink-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-sink-unlink')
       session._waitForPrompt = async () => true
       session._term = {
         write: () => {
@@ -1453,7 +1479,7 @@ describe('ClaudeTuiSession', () => {
       })
       session._processReady = true
       session._sessionId = 'test-order-6132'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-order-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-sink-order')
       session._waitForPrompt = async () => true
       const events = []
       session.on('tool_start', (e) => events.push(`start:${e.toolUseId}`))
@@ -1498,7 +1524,7 @@ describe('ClaudeTuiSession', () => {
       })
       session._processReady = true
       session._sessionId = 'test-hung-fs-6178'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-hung-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-sink-hung')
       session._waitForPrompt = async () => true
       session._hookFsTimeoutMs = 40
       // Simulate a frozen mount: readdir never resolves. Pre-fix, the poll loop
@@ -2184,7 +2210,7 @@ describe('ClaudeTuiSession', () => {
       })
       session._processReady = true
       session._sessionId = 'test-uuid'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-busy-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-sink-busy')
       // Skip readiness gating — see note in the prior test.
       session._waitForPrompt = async () => true
       session._term = {
@@ -3038,7 +3064,7 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-bp-sink')
       writeIdleSessionFile(fakePid)
       const writes = []
       session._term = {
@@ -3097,7 +3123,7 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-ml-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-bp-sink-ml')
       writeIdleSessionFile(fakePid)
       const writes = []
       session._term = {
@@ -3138,7 +3164,7 @@ describe('ClaudeTuiSession', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
       session._processReady = true
       session._sessionId = 'test'
-      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-bp-sink-mb-'))
+      session._sinkDir = makeSinkDir('chroxy-tui-bp-sink-mb')
       writeIdleSessionFile(fakePid)
       const writes = []
       session._term = {
@@ -3188,7 +3214,7 @@ describe('ClaudeTuiSession', () => {
     // files reach disk AND the prompt the PTY receives names them.
 
     it('appends an attachments suffix to the prompt and writes files to disk', async () => {
-      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-send-'))
+      const sinkDir = makeSinkDir('chroxy-tui-att-send')
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
         resultTimeoutMs: 5000, hardTimeoutMs: 5000,
@@ -3269,7 +3295,7 @@ describe('ClaudeTuiSession', () => {
     })
 
     it('does NOT touch the prompt when no attachments are present', async () => {
-      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-noatt-'))
+      const sinkDir = makeSinkDir('chroxy-tui-att-noatt')
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
         resultTimeoutMs: 5000, hardTimeoutMs: 5000,
@@ -3306,7 +3332,7 @@ describe('ClaudeTuiSession', () => {
       // Failure to write the attachment must NOT lose the user's text.
       // Force the catch path by setting _sinkDir to a path containing a
       // NUL byte so mkdirSync inside materializeAttachments throws.
-      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-att-fail-'))
+      const sinkDir = makeSinkDir('chroxy-tui-att-fail')
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
         resultTimeoutMs: 5000, hardTimeoutMs: 5000,
@@ -8190,6 +8216,71 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     assert.equal(session._isBusy, false, 'turn ended')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
     assert.equal(untrusted.length, 1, 'a widened base is refused even with no symlink and no inode change')
+  })
+
+  // #7926 CI — regression for the false positive this PR's OWN test fixtures
+  // hit on Linux (see makeSinkDir() near the top of this file, and the tests
+  // that now use it). `_evaluateSinkBaseStat` re-checks `dirname(_sinkDir)` —
+  // the session's own dedicated, owner-only base, i.e. exactly what
+  // `ensureOwnedBaseDir(SINK_BASE)` returns at start() — never any directory
+  // ABOVE it. The shared OS tmp root one level further up is normally
+  // sticky + world-writable on Linux (`/tmp`, mode 1777 — the correct,
+  // standard POSIX shape for a shared tmp root) and normally a private 0700
+  // per-user directory on macOS; either way it is not what this check is
+  // about. A fixture that skips the extra nesting level and puts `_sinkDir`
+  // directly under `tmpdir()` accidentally points the check AT that shared
+  // root instead of at a dedicated base below it — passing by luck on macOS
+  // and refusing every turn on Linux CI for a reason that has nothing to do
+  // with the session's own base being compromised (see the 9 CI-only
+  // failures this fix resolves). Pin the contract directly: a properly
+  // nested, owner-only base still validates even when the SHARED PARENT
+  // above it is world-writable — the check must never reach that far up.
+  it('does not inspect any directory above its own owned base (Linux /tmp parity — #7926 CI)', async () => {
+    const sharedRoot = mkdtempSync(join(tmpdir(), 'chroxy-tui-sharedroot-'))
+    try {
+      // Precondition: mkdtemp's default (owner-only) mode, so the widen
+      // below is a real change, not a no-op some platform/umask made moot.
+      assert.equal(statSync(sharedRoot).mode & 0o777, 0o700, 'precondition: mkdtemp starts owner-only')
+      chmodSync(sharedRoot, 0o777) // simulate a Linux-shaped shared /tmp (sticky bit aside)
+      const ownedBase = mkdtempSync(join(sharedRoot, 'owned-'))
+      const sinkName = 's-parity'
+      const sinkDir = join(ownedBase, sinkName)
+      mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = `test-${sinkName}`
+      session._sinkDir = sinkDir
+      session._waitForPrompt = async () => true
+      // Mirror what start()/_captureSinkBaseIdentity records for a real
+      // session, bound to the OWNED base — not the shared root.
+      const fd = openSync(ownedBase, 'r')
+      session._sinkBaseFd = fd
+      const st = fstatSync(fd)
+      session._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      const events = []
+      session.on('stream_delta', (e) => events.push(e.delta))
+      session._term = {
+        write: () => {
+          writeFileSync(join(session._sinkDir, 'stop-ok.json'), JSON.stringify({ last_assistant_message: 'all good' }))
+        },
+        kill: () => {},
+      }
+      await session.sendMessage('hi')
+
+      assert.deepEqual(events, ['all good'],
+        'a properly nested owned base still delivers, regardless of the shared parent\'s mode')
+      assert.equal(errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE).length, 0,
+        'no false SINK_BASE_UNTRUSTED — the check must not reach above dirname(_sinkDir)')
+    } finally {
+      try { chmodSync(sharedRoot, 0o700) } catch { /* best effort */ }
+      rmSync(sharedRoot, { recursive: true, force: true })
+    }
   })
 
   // #7926 (review) — read-side TOCTOU. _validateSinkBase() at the TOP of
