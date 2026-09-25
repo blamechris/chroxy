@@ -144,8 +144,12 @@ describe('container Glob literal-match existence + deep dangling-symlink parity 
       session._sourceSessionId = 'sess-7896'
       const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern: 'nope.ts' } })
       assert.equal(result.isError, false)
-      const hit = lines.find((l) => l.includes('[container-confine]') && l.includes('withheld'))
-      assert.ok(hit, `no containment log line; saw ${JSON.stringify(lines)}`)
+      // Scoped to this test's own session id, not just the first matching
+      // line: `addLogListener` is process-wide, and an unscoped `find` would
+      // silently grade a DIFFERENT test's containment log if one happened to
+      // land in `lines` first.
+      const hit = lines.find((l) => l.includes('[container-confine]') && l.includes('withheld') && l.includes('session=sess-7896'))
+      assert.ok(hit, `no containment log line for session=sess-7896; saw ${JSON.stringify(lines)}`)
       assert.ok(/withheld 1 match\(es\)/.test(hit), `wrong count in ${JSON.stringify(hit)}`)
     } finally {
       removeLogListener(listener)
