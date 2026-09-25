@@ -43,12 +43,21 @@ The server is the user's own machine (see [`encryption-threat-model.md` §2](enc
 >   `session-token-store.js` refuses to read a non-0600 file and logs `devices
 >   will re-pair`, so the symptom is visible. `ingest-secret` sets `0600` at
 >   exclusive create (`event-ingest.js`, `openSync(…, 'ax', 0o600)`) **and
->   re-checks the mode on every existing-file read** (`assertIngestSecretFileTrusted`
+>   re-checks the mode on every existing-file read** (`readIngestSecretFile`
 >   — POSIX only, matching the win32 carve-out every sibling store uses):
 >   a mode other than exactly 0600, or a file owned by a uid other than the
->   one the daemon runs as, is refused rather than trusted, and a `statSync`
+>   one the daemon runs as, is refused rather than trusted, and an open/fstat
 >   failure other than the file being absent refuses rather than assumes
 >   absence. Prefer a local, user-owned directory on a POSIX filesystem.
+> - **The mode/owner check and the read are TOCTOU-safe (#7893).** All four
+>   credential-file readers — the ingest secret, `session-tokens.json`,
+>   `credentials.json`, and `mcp-oauth-tokens.json` — go through the shared
+>   `readTrustedSecretFile` helper (`trusted-file-read.js`): one
+>   `open(O_NOFOLLOW)` + `fstat(fd)` + read from that same fd, never a
+>   `statSync(path)` followed by a separate `readFileSync(path)`. A rename or
+>   symlink swapped in between the two used to be a real window; a symlink at
+>   any of these paths is now refused outright, regardless of what its target's
+>   own mode is.
 > - **Relocating does not move existing secrets.** The old root keeps its copies
 >   until you remove them — `chroxy config-dir status` reports what was left behind
 >   (#7240). A stale `~/.chroxy/session-tokens.json` still grants its sessions'

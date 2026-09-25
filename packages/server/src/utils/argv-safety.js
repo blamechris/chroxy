@@ -146,6 +146,406 @@ function escapeForRegExp(flag) {
 }
 
 /**
+ * Audited-sink catalogue for `scripts/lint-argv-sinks.mjs` (#7868).
+ *
+ * The lint enumerates every `spawn`/`execFile`/`execFileSync`/`spawnSync`
+ * call site (and every `_buildArgs`/`build*Args`-shaped function) in
+ * `packages/server/src` and requires each argv element that is not provably
+ * a compile-time constant to be either provably safe — `assertSafeArgvValue`
+ * / `isSafeArgvValue` applied to it, a `--` terminator placed before it, or
+ * fused into one token behind a fixed non-dash prefix — or listed here.
+ *
+ * Each entry is `{ file, match, reason }`:
+ *   - `file` — the sink's path, relative to `packages/server/src`.
+ *   - `match` — a distinguishing substring of the flagged element's (or, for
+ *     an unresolvable argv, the whole call's) normalised source text. Not a
+ *     line number on purpose: a line number drifts on every unrelated edit
+ *     above it, which would force a churn-only update on every such edit. A
+ *     source-text match only goes stale when the FLAGGED CODE ITSELF changes
+ *     — which is exactly when re-auditing is wanted.
+ *   - `reason` — one line: why this value cannot be attacker-controlled, or
+ *     why the CLI it reaches cannot option-parse it.
+ *
+ * Checked in BOTH directions by the lint (#7199, #7216, #7544, #7639): an
+ * entry that no longer matches any real, still-unguarded finding is STALE
+ * and fails the build (the code moved on — remove the entry), and a real
+ * finding that matches no entry and no structural guard also fails. A list
+ * that only ever grows, or that nothing re-derives against the code, is the
+ * "roster checked in only one direction" shape docs/false-safety-guards.md
+ * catalogues.
+ */
+export const AUDITED_SINKS = [
+  // ── acp-session.js ──
+  {
+    file: 'acp-session.js',
+    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    reason: 'entryRef.args is providers.acp[].args from the operator config.json, loaded once at boot by registerAcpProviders(); no WS/client message reaches it.',
+  },
+
+  // ── auth-probes.js ──
+  {
+    file: 'auth-probes.js',
+    match: 'service',
+    reason: 'keychainItemExists(service) has exactly one production caller, passing the module constant CLAUDE_KEYCHAIN_SERVICE; also sits immediately after the required-arg flag -s, consumed unconditionally regardless of content.',
+  },
+
+  // ── built-in-tools/bash-exec.js ──
+  {
+    file: 'built-in-tools/bash-exec.js',
+    match: 'command',
+    reason: 'this is the Bash tool: command is intentionally run as a full shell string via bash -c, which is the documented feature (pipes/redirection/heredocs), governed by the permission system rather than argv-shape — a different, already-accepted risk class from accidental option injection into an unrelated program.',
+  },
+
+  // ── built-in-tools/tool-transforms.js ──
+  {
+    file: 'built-in-tools/tool-transforms.js',
+    match: 'return { ci, ln, globArg }',
+    reason: 'not actually an argv-returning function despite the *Args name match — it returns { ci, ln, globArg } string fragments consumed by a shell-command-string builder (buildGrepCommand), out of this lint scope by design (see the exec()/execSync() scope note above). pattern/root are already hardened behind -e / a -- terminator (#7295); the --glob fragment is shell-quoted via shellQuote() but its rg/grep-side arity is unverified — tracked as a follow-on rather than fixed here.',
+  },
+
+  // ── byok-mcp-client.js ──
+  {
+    file: 'byok-mcp-client.js',
+    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    reason: 'this._config.{command,args} is an MCP server entry the primary/owner user names to run an arbitrary local program — that is the feature (STRICT-PRIMARY gate + a requestMcpTrust approval prompt before spawn), not option-flag injection into an unrelated binary; not reachable by a non-primary client.',
+  },
+
+  // ── claude-tui-session.js ──
+  {
+    file: 'claude-tui-session.js',
+    match: "execFile(binary, args",
+    reason: "runClaudeAuthStatus's one call site passes a literal ['auth','status','--json','--settings', this._settingsPath] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
+  },
+
+  // ── cli-session.js ──
+  {
+    file: 'cli-session.js',
+    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    reason: '_spawnPersistentProcess(args) has one caller (start()), which passes args = buildClaudeCliArgs({...}) — audited below, at buildClaudeCliArgs itself.',
+  },
+  {
+    file: 'cli-session.js',
+    match: 'model',
+    reason: 'this.model traces to the create_session WS model field, but is gated BEFORE CliSession is constructed by SessionManager against CliSession.getAllowedModels() (a known id allowlist, none starting with "-"), unless an operator opted the provider into config.providers.allowAnyModel (not client-reachable).',
+  },
+  {
+    file: 'cli-session.js',
+    match: "allowedTools.join(',')",
+    reason: 'this.allowedTools is populated only from server config (config.js allowedTools / CHROXY_ALLOWED_TOOLS env) — no WS/client code path sets it.',
+  },
+  {
+    file: 'cli-session.js',
+    match: 'skillsText',
+    reason: 'bound via args.push("--append-system-prompt", skillsText) — a required-arg (<prompt>) two-token flag, measured directly against the installed claude CLI (2.1.282): a bogus flag-shaped value passed this way starts the process normally (swallowed as the flag value), while the identical text as a bare option immediately errors "unknown option" — confirming the required-arg two-token form is safe regardless of skillsText content (argv-safety.js’s own documented case-3 table). skillsText itself does carry client-settable text (sessionPreamble, via set_session_preamble), but that is irrelevant here since the argv SHAPE cannot be reinterpreted.',
+  },
+  // resumeSessionId needs no catalogue entry: `-r, --resume` is declared with
+  // an OPTIONAL argument on the claude CLI (measured — the two-token form
+  // INJECTS, unlike --model/--append-system-prompt above), so buildClaudeCliArgs
+  // asserts it safe directly (case 1) rather than relying on it structurally.
+
+  // ── cli/deploy-cmd.js ──
+  {
+    file: 'cli/deploy-cmd.js',
+    match: 'fullPath',
+    reason: 'join(process.cwd(), file) is always an absolute path (starts with "/"), so it can never be read as a flag regardless of the tracked filename it is built from; CLI-only (chroxy deploy), no WS path.',
+  },
+  {
+    file: 'cli/deploy-cmd.js',
+    match: 'testDir',
+    reason: "join(process.cwd(),'packages','server','tests') is a fully literal path with no variable component; CLI-only.",
+  },
+  {
+    file: 'cli/deploy-cmd.js',
+    match: 'tagName',
+    reason: "`known-good-${Date.now()}` — fixed literal prefix plus a numeric timestamp; can never start with '-'. CLI-only.",
+  },
+  {
+    file: 'cli/deploy-cmd.js',
+    match: 'old',
+    reason: "old comes from `git tag --list 'known-good-*'` output, glob-filtered by git itself to always start with the literal 'known-good-'; never attacker text. CLI-only.",
+  },
+
+  // ── cli/session-cmd.js ──
+  {
+    file: 'cli/session-cmd.js',
+    match: 'target.convId',
+    reason: 'read from the local session-state.json (conversationId set either by a provider CLI itself, or accepted from a remote resume_conversation WS message only after CONVERSATION_ID_RE, a fully anchored canonical-UUID regex); the execFileSync call itself is CLI-only (chroxy resume).',
+  },
+
+  // ── cli/worktree-gc-cmd.js ──
+  {
+    file: 'cli/worktree-gc-cmd.js',
+    match: "execFileSync(cmd, args, { encoding: 'utf8' })",
+    reason: "dirSizeKib's one caller passes exec('du', ['-sk', path]) where path is an absolute filesystem path reported by git's own worktree-list output; CLI-only report path (chroxy worktree gc), not the daemon auto-reaper.",
+  },
+
+  // ── codex-session.js ──
+  {
+    file: 'codex-session.js',
+    match: 'buildCodexArgs(text, this.model, this.resumeSessionId',
+    reason: 'delegates to buildCodexArgs, a separate exported function audited at its own definition (text terminated behind --, model TOML-serialized via -c, sandbox enum-checked, threadId asserted safe — #7868).',
+  },
+  {
+    file: 'codex-session.js',
+    match: 'sandbox',
+    reason: 'resolveCodexSandbox(sandboxOverride) is constrained to the frozen enum CODEX_SANDBOX_MODES (read-only/workspace-write/danger-full-access); any other value is discarded and replaced by the default, and is re-gated at the WS ingress schema.',
+  },
+
+  // ── docker-sdk-session.js / docker-session.js ──
+  // Neither file's create_session wiring (session-manager.js) ever forwards a
+  // client image/memoryLimit/cpuLimit — providerOpts only ever carries
+  // containerId/containerUser/containerCliPath, so _image/_memoryLimit/
+  // _cpuLimit always resolve to their hardcoded literal defaults today.
+  {
+    file: 'docker-sdk-session.js',
+    match: 'this._containerId',
+    reason: 'always Docker-daemon-generated (captured from this own docker run/create stdout) or resolved server-side via environmentManager.getContainerInfo(); restore is cross-validated against the live environment record. Never accepted as raw client text.',
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: 'this._memoryLimit',
+    reason: "opts.memoryLimit || '2g' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: 'this._cpuLimit',
+    reason: "opts.cpuLimit || '2' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: '${this.cwd || process.cwd()}:/workspace',
+    reason: 'this.cwd is gated by validateCwdAllowed(), which must statSync+realpathSync it to an existing real directory before this is ever reached; fixed value-slot after -v, not free text.',
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: 'this._image',
+    reason: "opts.image || 'node:22-slim' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: 'setupCmd',
+    reason: 'interpolates only this._containerUser, regex-gated at construction by VALID_USERNAME_RE (^[a-z_][a-z0-9_-]{0,31}$) — cannot start with "-" or carry shell metacharacters.',
+  },
+  {
+    file: 'docker-sdk-session.js',
+    match: 'containerId',
+    reason: 'local var captured from this._containerId before nulling in destroy(); same chroxy/docker-generated origin as above.',
+  },
+  {
+    file: 'docker-session.js',
+    match: 'this._memoryLimit',
+    reason: "opts.memoryLimit || '2g' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-session.js',
+    match: 'this._cpuLimit',
+    reason: "opts.cpuLimit || '2' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-session.js',
+    match: '${this.cwd || process.cwd()}:/workspace',
+    reason: 'same reasoning as docker-sdk-session.js: this.cwd is gated by validateCwdAllowed() to an existing real directory before reaching here.',
+  },
+  {
+    file: 'docker-session.js',
+    match: 'this._image',
+    reason: "opts.image || 'node:22-slim' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-session.js',
+    match: "spawn('docker', dockerArgs",
+    reason: "dockerArgs is this._containerId (see above, safe) plus the literal 'claude' plus ...buildClaudeCliArgs() — the same delegated, separately-audited builder as cli-session.js.",
+  },
+  {
+    file: 'docker-session.js',
+    match: 'containerId',
+    reason: "local var in destroy(); this file's own constructor never accepts an external containerId at all (self-owned --rm container, per its own docstring).",
+  },
+
+  // ── doctor.js ──
+  {
+    file: 'doctor.js',
+    match: 'execFileSync(s.command, s.args',
+    reason: "checkClaudeTuiCliVersion's default exec seam always receives the literal ['--version'] from its one call site; prepareSpawn only rewraps for a Windows .cmd shim. CLI-only (chroxy doctor).",
+  },
+  {
+    file: 'doctor.js',
+    match: 'execFileSync(spawnSpec.command, spawnSpec.args',
+    reason: "checkBinary's args are either the literal ['--version'] or a provider's static preflight.args declared in source (providers/*.js), never runtime/client data. CLI-only (chroxy doctor).",
+  },
+
+  // ── keychain.js ──
+  // service/account/script are always fixed internal constants across every
+  // real caller in this repo (DEFAULT_SERVICE='chroxy', ACCOUNT='api-token',
+  // IDENTITY_KEY_SERVICE, CRED_KEY_SERVICE, DISCORD_WEBHOOK_KEYCHAIN_SERVICE,
+  // PS_PROTECT/PS_UNPROTECT) — never client-set text. This is a whole-program
+  // fact this per-file lint cannot see (keychain.js only sees its own
+  // parameters), hence the catalogue rather than a structural guard.
+  {
+    file: 'keychain.js',
+    match: 'service',
+    reason: 'every real caller across the repo passes a fixed internal string constant (default "chroxy", or IDENTITY_KEY_SERVICE / CRED_KEY_SERVICE / DISCORD_WEBHOOK_KEYCHAIN_SERVICE) — never client-supplied text.',
+  },
+  {
+    file: 'keychain.js',
+    match: 'account',
+    reason: 'every real caller passes a fixed internal string constant (default ACCOUNT="api-token", or DISCORD_WEBHOOK_KEYCHAIN_ACCOUNT) — never client-supplied text.',
+  },
+  {
+    file: 'keychain.js',
+    match: 'token',
+    reason: "the secret value being stored, always generated server-side or set via local CLI init; also sits as -w's required argument (macOS security add-generic-password), consumed unconditionally regardless of content.",
+  },
+  {
+    file: 'keychain.js',
+    match: 'script',
+    reason: '_dpapi(script, input) is only ever called with PS_PROTECT / PS_UNPROTECT, two hardcoded module-level PowerShell source constants; the actual secret goes over stdin, never argv.',
+  },
+
+  // ── platform.js ──
+  {
+    file: 'platform.js',
+    match: 'filePath',
+    reason: 'every caller builds filePath via configPath()/homedir()-rooted absolute paths, so it always starts with "/" (or a drive letter on Windows) and can never be read as a flag.',
+  },
+  {
+    file: 'platform.js',
+    match: '*${sid}:F',
+    reason: "sid is the Windows account SID from currentUserSid(), regex-matched to /S-1-[0-9-]+/ against `whoami /user` output; the argv element also carries a literal '*' prefix.",
+  },
+  {
+    file: 'platform.js',
+    match: 'String(pid)',
+    reason: 'pid is always a real OS process id (child.pid from Node child_process/pty), never client-supplied text; a Node pid is always a positive integer.',
+  },
+
+  // ── service.js ──
+  {
+    file: 'service.js',
+    match: 'gui/${process.getuid()}',
+    reason: 'process.getuid() is the Node builtin returning the current OS user numeric uid — always a non-negative integer; the template also carries a fixed literal "gui/" prefix.',
+  },
+  {
+    file: 'service.js',
+    match: 'servicePath',
+    reason: "join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`) with SERVICE_LABEL a hardcoded constant — always an internally-computed absolute path, never client input.",
+  },
+  // Review #7929 — the five entries below cover `installWindowsService`,
+  // `getWindowsTaskStatus`, `uninstallService`, `startService`,
+  // `bootstrapLaunchd` and `stopService`, all of which build their `exec`
+  // call through `const exec = options._exec || execFileSync` (a
+  // test-injection seam whose fallback default was invisible to the lint
+  // before #7929's local-alias tracking fix — see collectImports in
+  // lint-argv-sinks.mjs). Every one of these functions is reachable ONLY from
+  // `chroxy service install/uninstall/start/stop/status` (cli/service-cmd.js)
+  // — no WS/client handler calls into service.js at all (grepped at audit
+  // time) — and every real call site there invokes them with NO options
+  // object, so `options._exec`/`options._taskName`/`options._wrapperPath`
+  // are always undefined in production.
+  {
+    file: 'service.js',
+    match: 'taskName',
+    reason: "taskName = options._taskName || WINDOWS_TASK_NAME ('Chroxy', a hardcoded module constant); options._taskName is a test-only seam never set by the one real caller (cli/service-cmd.js, always called with zero args). state.taskName (the uninstallService darwin/win32 branch) is read back from service.json, which is written only by installWindowsService using this same taskName — so it round-trips the same constant. CLI-only, no WS path.",
+  },
+  {
+    file: 'service.js',
+    match: 'wrapperPath',
+    reason: "wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME) — an internally-computed absolute path (join() always returns one) or a test-only override; used as schtasks' /TR value, quoted. CLI-only (chroxy service install).",
+  },
+  {
+    file: 'service.js',
+    match: 'domain',
+    reason: "domain = `gui/${process.getuid()}` — process.getuid() is the Node builtin returning the current OS user's numeric uid (always a non-negative integer), with a fixed literal 'gui/' prefix; can never start with '-'. Passed bare into `${domain}/${SERVICE_LABEL}` and as a positional to `launchctl bootstrap`. CLI-only (chroxy service start/stop).",
+  },
+  {
+    file: 'service.js',
+    match: 'plistPath',
+    reason: 'plistPath is either state.servicePath (written by installWindowsService/installService as an internally-computed absolute path, never client text) or paths.plistPath (a server-computed default from getServicePaths()) — both existsSync-checked absolute paths before this point. CLI-only (chroxy service start).',
+  },
+
+  // ── session-context.js ──
+  {
+    file: 'session-context.js',
+    match: "execFile(GIT, args",
+    reason: "gitCommand(cwd, args)'s only 3 call sites in this file pass fully literal arrays (['rev-parse','--abbrev-ref','HEAD'], ['status','--porcelain'], ['rev-list','--count','@{upstream}..HEAD']) — args is unresolved only at this local helper's own scope.",
+  },
+
+  // ── session-manager.js ──
+  {
+    file: 'session-manager.js',
+    match: 'baseCwd',
+    reason: "baseCwd is always the required argument to git's -C flag, consumed unconditionally regardless of content (argv-safety.js case 3's two-token form); the value itself is client cwd already gated by validateCwdAllowed() to an existing real directory.",
+  },
+  {
+    file: 'session-manager.js',
+    match: 'worktreeDir',
+    reason: 'join(this._worktreeBase || defaultWorktreeBase(), sessionId) — a server-config-rooted absolute path with a hex sessionId (randomBytes or restore-validated /^[a-f0-9]{32}$/); no WS field controls it directly.',
+  },
+  {
+    file: 'session-manager.js',
+    match: 'repoDir',
+    reason: "repoDir is always the required argument to git's -C flag (same reasoning as baseCwd above); traces to the same server-computed baseCwd or restore-validated path.",
+  },
+  {
+    file: 'session-manager.js',
+    match: 'worktreePath',
+    reason: 'set at creation to the server-computed worktreeDir (see above) or, on restore, to a saved path that is exact-matched against the deterministic expected worktreeBase/sessionId path before being accepted — never wired to a live WS field.',
+  },
+
+  // ── supervisor.js ──
+  {
+    file: 'supervisor.js',
+    match: '${tag}^{commit}',
+    reason: "tag is drawn from `git tag --list 'known-good-*'` output, glob-filtered by git itself to always start with the literal 'known-good-' — not attacker text, and structurally cannot start with '-'.",
+  },
+  {
+    file: 'supervisor.js',
+    match: 'fork(script, args, opts)',
+    reason: "_fork(script, args, opts) is a documented override point ('Override point: fork a child process') for test injection — script/args are opaque PARAMETERS forwarded straight through, which per-file static analysis cannot resolve to the one real caller. That caller (_startChild) always passes childScript (a fixed internal path built from import.meta.url, never variable) and a literal [] for args — never attacker content. #7929 added `fork` to the lint's SPAWN_APIS roster; this entry is new because of that, not because the code changed.",
+  },
+
+  // ── tunnel/cloudflare.js ──
+  {
+    file: 'tunnel/cloudflare.js',
+    match: 'spawn(bin, argv, spawnOpts)',
+    reason: "the two real callers build argv from operator config only: this.tunnelName (config.tunnelName, set via `chroxy tunnel setup`, --terminated) and this.port (a server-config number embedded in a fixed 'http://localhost:' prefix); no WS handler touches either.",
+  },
+
+  // ── user-shell-registry.js ──
+  {
+    file: 'user-shell-registry.js',
+    match: 'String(pid)',
+    reason: 'pid originates from node-pty’s real OS pid (this._term.pid) and is additionally gated by Number.isInteger(pid) && pid > 0 on both the write and read paths before reaching here.',
+  },
+
+  // ── utils/resolve-binary.js ──
+  {
+    file: 'utils/resolve-binary.js',
+    match: 'name',
+    reason: "every caller passes one of a small fixed set of internal binary names baked into source ('git','claude','gemini','codex','cloudflared', or a provider's static preflight.binary.name) — never external/client input.",
+  },
+
+  // ── web-task-manager.js ──
+  {
+    file: 'web-task-manager.js',
+    match: 'execFile(cmd, args, { timeout: 15_000',
+    reason: "this generic exec wrapper's one caller passes ['--teleport', task.taskId], where task.taskId is a server-generated randomUUID() looked up from the task map — the client's raw taskId is used only as a Map key, never as the argv value itself. A separate, already-hardened call site handles the client prompt text via buildRemoteTaskArgs()'s -- terminator (#7291).",
+  },
+
+  // ── worktree-gc.js ──
+  // planRepoGc/sweepOrphanChroxyWorktrees/applyPlan run automatically at
+  // daemon boot and (opt-in) on a timer, not only from a human CLI
+  // invocation — but every argv element traces to local git-reported paths,
+  // server config, or a strictly hex-regex-constrained session id, never
+  // WS-client-supplied text.
+  {
+    file: 'worktree-gc.js',
+    match: "execFileSync(GIT, ['-C', cwd, ...args]",
+    reason: 'cwd is always an absolute repo/worktree path from server config or resolveRepoSet discovery; the only variable positionals pushed through args are absolute paths reported by `git worktree list --porcelain` itself, or a --reason-bound lockReason value — never remote/WS-supplied text.',
+  },
+]
+
+/**
  * How does a CLI's `--help` say `flag` is called — specifically, does it take
  * a REQUIRED argument?
  *
