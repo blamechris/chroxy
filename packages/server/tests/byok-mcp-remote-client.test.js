@@ -328,6 +328,143 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     await client.destroy()
   })
 
+  it('destroy() while the trust gate is pending (allow) must not open a connection (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveGate
+    const gate = new Promise((resolve) => { resolveGate = resolve })
+    // The metadata-refusal check (real, unmocked below) resolves via its own
+    // fast microtask hop — racing a bare "start(); immediately destroy()"
+    // against it would non-deterministically land destroy() during THAT
+    // earlier window instead of this one (and #7906's own metadata-refusal
+    // guard would mask this test, proving nothing about the trust-gate
+    // guard specifically). Signal from inside the trust gate itself so the
+    // test destroys only once start() is confirmed to be suspended here.
+    let gateCalled
+    const gateCalledPromise = new Promise((resolve) => { gateCalled = resolve })
+    let connected = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog(), trustGate: () => { gateCalled(); return gate } },
+    )
+    // Hook the connect seam, not timing.
+    const origAttemptConnect = client._attemptConnect.bind(client)
+    client._attemptConnect = (...a) => { connected = true; return origAttemptConnect(...a) }
+
+    const startPromise = client.start()
+    await gateCalledPromise
+    // start() is now suspended awaiting the trust gate. Nothing is open
+    // yet, so destroy() resolves immediately (no session, no controllers).
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Let the trust gate resolve — allowed=true — and let the suspended
+    // start() resume.
+    resolveGate(true)
+    await startPromise
+
+    assert.equal(connected, false, 'a destroyed client must not attempt to connect after the trust gate resolves')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state, not the resumed start()')
+  })
+
+  it('destroy() while the trust gate is pending (deny) must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveGate
+    const gate = new Promise((resolve) => { resolveGate = resolve })
+    // Same race as the allow-path test above — signal from inside the gate
+    // so destroy() lands in the trust-gate window specifically, not the
+    // earlier metadata-refusal one.
+    let gateCalled
+    const gateCalledPromise = new Promise((resolve) => { gateCalled = resolve })
+    let deadEmitted = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog(), trustGate: () => { gateCalled(); return gate } },
+    )
+    client.on('dead', () => { deadEmitted = true })
+
+    const startPromise = client.start()
+    await gateCalledPromise
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Let the trust gate resolve — allowed=false. Without the #7906 guard,
+    // the deny branch calls _toDead() unconditionally, regressing an
+    // already-destroyed client's state from DESTROYED back to DEAD and
+    // firing a fresh 'dead' event nothing should ever see.
+    resolveGate(false)
+    await startPromise
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late deny must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+  })
+
+  it('destroy() while the metadata-refusal check is pending must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolveRefusal
+    const refusalPromise = new Promise((resolve) => { resolveRefusal = resolve })
+    let deadEmitted = false
+    // No trustGate configured — isolates the metadata-refusal await window
+    // (the window a trust gate would otherwise absorb first).
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog() },
+    )
+    client._refuseMetadataTarget = () => refusalPromise
+    client.on('dead', () => { deadEmitted = true })
+
+    const startPromise = client.start()
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // Resolve with a TRUTHY refusal. Without the #7906 guard, the `if
+    // (refusal)` branch calls _toDead() unconditionally — same DESTROYED ->
+    // DEAD regression as the trust-gate-deny case above. (A falsy/null
+    // resolution can't distinguish this guard: the very next await —
+    // _prepareStoredToken — already re-checks _destroyed before any
+    // connection is attempted, so only the truthy-refusal branch isolates
+    // this specific line.)
+    resolveRefusal('refusing test address')
+    await startPromise
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late refusal must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+  })
+
+  it('destroy() while priming a stored token is pending must not open a connection (#7906)', async () => {
+    srv = await startMockMcpServer()
+    let resolvePrepare
+    const preparePromise = new Promise((resolve) => { resolvePrepare = resolve })
+    // Same race as the trust-gate tests above (no trustGate is configured
+    // here, so the earlier window to race against is the metadata-refusal
+    // check) — signal from inside _prepareStoredToken so destroy() lands in
+    // THIS window specifically.
+    let prepareCalled
+    const prepareCalledPromise = new Promise((resolve) => { prepareCalled = resolve })
+    let connected = false
+    const client = new MCPRemoteClient(
+      { name: 'remote', type: 'http', url: srv.url, headers: {} },
+      { log: silentLog() },
+    )
+    client._prepareStoredToken = () => { prepareCalled(); return preparePromise }
+    const origAttemptConnect = client._attemptConnect.bind(client)
+    client._attemptConnect = (...a) => { connected = true; return origAttemptConnect(...a) }
+
+    const startPromise = client.start()
+    await prepareCalledPromise
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    resolvePrepare()
+    await startPromise
+
+    assert.equal(connected, false, 'a destroyed client must not attempt to connect after priming the stored token')
+    assert.equal(srv.captured.length, 0, 'a destroyed client must not touch the network')
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+  })
+
   it('exposes the same handshake-timeout precedence as the stdio client', () => {
     for (const bogus of [NaN, Infinity, 0, -1, '5s', null, undefined]) {
       const c = new MCPRemoteClient({ name: 'r', url: 'http://x/mcp' }, { log: silentLog(), handshakeTimeoutMs: bogus })

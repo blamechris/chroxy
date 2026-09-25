@@ -165,6 +165,12 @@ export class MCPClient extends EventEmitter {
         this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
         allowed = false
       }
+      // #7906: destroy() can land while the trust gate above was pending. No
+      // child exists yet, so a concurrent destroy() already resolved cleanly
+      // (see destroy()'s `!child` branch below) and set state=DESTROYED —
+      // bail here instead of spawning an untracked child once this suspended
+      // start() resumes.
+      if (this._destroyed) return
       if (!allowed) {
         this._setState(MCP_STATES.DEAD)
         this.emit('dead')
@@ -641,6 +647,12 @@ export class MCPRemoteClient extends EventEmitter {
     // before the trust gate so the user is never prompted to trust a URL we
     // will refuse regardless.
     const refusal = await this._refuseMetadataTarget()
+    // #7906: destroy() can land while the metadata-refusal check above (a
+    // real DNS lookup for non-literal hostnames) was pending. Nothing is
+    // open yet, so a concurrent destroy() already resolved cleanly and set
+    // state=DESTROYED — bail before touching state again or consulting the
+    // trust gate.
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
     if (refusal) {
       this._log.warn(`MCP server ${this.name}: ${refusal}`)
       this._toDead()
@@ -656,6 +668,11 @@ export class MCPRemoteClient extends EventEmitter {
         this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
         allowed = false
       }
+      // #7906: same re-check — destroy() can land while the trust gate
+      // itself was pending. No connection exists yet, so bail rather than
+      // resurrect a destroyed client (and never overwrite state=DESTROYED
+      // with DEAD via _toDead()).
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       if (!allowed) {
         this._toDead()
         return
@@ -664,6 +681,10 @@ export class MCPRemoteClient extends EventEmitter {
     // #6822: prime a stored access token (refreshing it up front if expired) so a
     // previously-authorized server reconnects with no user prompt.
     await this._prepareStoredToken()
+    // #7906: destroy() can land while priming the stored token (a refresh
+    // call to the token endpoint) — bail before opening the real connection
+    // below.
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
     this._setState(MCP_STATES.STARTING)
     try {
       await this._attemptConnect()

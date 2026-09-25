@@ -433,6 +433,35 @@ describe('MCPClient', () => {
       assert.equal(client.state, MCP_STATES.DEAD)
       await client.destroy()
     })
+
+    it('destroy() while the trust gate is pending must not spawn a child (#7906)', async () => {
+      let resolveGate
+      const gate = new Promise((resolve) => { resolveGate = resolve })
+      let spawned = false
+      const client = new MCPClient(stubConfig(), {
+        log: silentLog(),
+        trustGate: () => gate,
+      })
+      // Hook spawn detection — the seam, not timing.
+      const origSpawnAndHandshake = client._spawnAndHandshake.bind(client)
+      client._spawnAndHandshake = (...a) => { spawned = true; return origSpawnAndHandshake(...a) }
+
+      const startPromise = client.start()
+      // start() is now suspended awaiting the trust gate. No child exists
+      // yet, so destroy() takes the `!child` fast path and resolves
+      // immediately (byok-mcp-client.js's destroy()).
+      await client.destroy()
+      assert.equal(client.state, MCP_STATES.DESTROYED)
+
+      // Let the trust gate resolve — allowed=true — and let the suspended
+      // start() resume.
+      resolveGate(true)
+      await startPromise
+
+      assert.equal(spawned, false, 'a destroyed client must not spawn after the trust gate resolves')
+      assert.equal(client._child, null, 'no child process handle was ever recorded')
+      assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state, not the resumed start()')
+    })
   })
 
   describe('callTool (#4079)', () => {
