@@ -4,7 +4,15 @@ import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
-import { registerProviderRegistry, getRegistryForProvider, updateModels, resetModels } from '../src/models.js'
+import { registerProviderRegistry, getRegistryForProvider, updateModels, resetModels, isClaudeProvider, resolveRosterProvider } from '../src/models.js'
+// Importing providers.js registers the real provider classes so
+// getRegisteredProviderNames()/isClaudeProvider() resolve the real
+// claude-cli/claude-sdk/claude-tui/claude-channel/claude-byok roster (#7895) —
+// ws-forwarding.js already pulls this in transitively via roster-broadcast.js,
+// but the direct import documents why the parity tests below see the real
+// registry rather than an empty one.
+import '../src/providers.js'
+import { getRegisteredProviderNames, DEFAULT_PROVIDER } from '../src/providers.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -13,14 +21,30 @@ import { registerProviderRegistry, getRegistryForProvider, updateModels, resetMo
  * - onFlush wiring: normalizer delta flush → broadcast
  * - models_updated: broadcasts available_models to ALL clients
  * - models_updated: provider-aware registry lookup (#2993)
+ * - models_updated: per-recipient roster tagging, not one hardcoded tag (#7895)
  * - stream_start: broadcasts session_activity with isBusy=true
  * - result: broadcasts session_activity with isBusy=false + cost
  * - session_updated: broadcasts session name change
  * - Normal session_event: routes to broadcastToSession
  * - setupCliForwarding: forwards events through normalizer, models_updated broadcast
+ * - setupCliForwarding: models_updated tags the roster with the daemon's
+ *   resolved default, not a hardcoded 'claude-cli' (#7895)
  * - executeSideEffects: session_list refresh, push notification trigger, flush_deltas
  * - executeRegistrations: permissionSessionMap/questionSessionMap population
  */
+
+// #7895 — find the broadcast call (from a `mock.fn()` broadcast spy) whose
+// filter accepts `client`. Several call sites now fan a roster out over
+// MULTIPLE `broadcast(msg, filter)` calls (one per known Claude-family tag
+// plus a residual), so "the message" is no longer `calls[0].arguments[0]` —
+// it is whichever call's filter says this particular client should receive.
+// A call with no filter (unconditional broadcast) always matches.
+function findBroadcastFor(broadcastMock, client) {
+  return broadcastMock.mock.calls.find((c) => {
+    const filter = c.arguments[1]
+    return typeof filter !== 'function' || filter(client)
+  })
+}
 
 function makeCtx(overrides = {}) {
   const sm = new EventEmitter()
@@ -260,7 +284,7 @@ describe('setupForwarding', () => {
   })
 
   describe('models_updated event', () => {
-    it('broadcasts available_models to all clients', () => {
+    it('broadcasts available_models to a client with no active session', () => {
       const ctx = makeCtx()
       setupForwarding(ctx)
 
@@ -270,8 +294,14 @@ describe('setupForwarding', () => {
         data: { models: [{ id: 'claude-opus-4-6' }] },
       })
 
-      assert.equal(ctx.broadcast.mock.calls.length, 1)
-      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      // #7895 — a default-registry roster now fans out over multiple
+      // broadcast(msg, filter) calls (one per known Claude-family tag plus a
+      // residual), so "the message" is whichever call's filter accepts a
+      // given client — see findBroadcastFor.
+      const idleClient = { activeSessionId: null }
+      const call = findBroadcastFor(ctx.broadcast, idleClient)
+      assert.ok(call, 'expected a broadcast reaching a client with no active session')
+      const msg = call.arguments[0]
       assert.equal(msg.type, 'available_models')
       assert.deepEqual(msg.models, [{ id: 'claude-opus-4-6' }])
       // Must NOT call broadcastToSession (session-specific) for models
@@ -313,6 +343,8 @@ describe('setupForwarding', () => {
         data: { models: [{ id: 'codex-mini-latest' }] },
       })
 
+      // A non-Claude tag is NOT fanned out — exactly one exact-match broadcast
+      // (#7895: `broadcastRosterPerRecipient`'s `!tagIsDefault` branch).
       assert.equal(ctx.broadcast.mock.calls.length, 1)
       const msg = ctx.broadcast.mock.calls[0].arguments[0]
       assert.equal(msg.type, 'available_models')
@@ -325,8 +357,8 @@ describe('setupForwarding', () => {
       resetModels()
     })
 
-    it('falls back to global Claude registry when session lookup returns null (#2993)', () => {
-      const ctx = makeCtx()
+    it('falls back to the daemon default when session lookup returns null (#2993)', () => {
+      const ctx = makeCtx({ defaultProvider: 'claude-sdk' })
       // getSession returning null simulates an already-destroyed session
       ctx.sessionManager.getSession = mock.fn(() => null)
       setupForwarding(ctx)
@@ -337,19 +369,60 @@ describe('setupForwarding', () => {
         data: { models: [{ id: 'claude-sonnet-4-6' }] },
       })
 
-      assert.equal(ctx.broadcast.mock.calls.length, 1)
-      const msg = ctx.broadcast.mock.calls[0].arguments[0]
+      // A client with no active session resolves to the daemon's configured
+      // default ('claude-sdk' here), not a hardcoded literal (#7895).
+      const idleClient = { activeSessionId: null }
+      const call = findBroadcastFor(ctx.broadcast, idleClient)
+      assert.ok(call, 'expected a broadcast reaching a client with no active session')
+      const msg = call.arguments[0]
       assert.equal(msg.type, 'available_models')
       // Falls back to Claude default — must still produce a valid broadcast
       assert.ok('defaultModel' in msg)
-      // provider must be resolved to 'claude-sdk' (not null) so clients can
-      // route consistently when the fallback path is taken (#2993)
       assert.equal(msg.provider, 'claude-sdk')
+    })
+
+    // #7895 — a NON-Claude daemon default (e.g. a codex-default install) is
+    // the case that distinguishes `resolveRosterProvider(providerName,
+    // defaultProvider)` from the pre-fix `providerName ?? 'claude-sdk'`: both
+    // forms agree whenever a real session is found (session provider always
+    // wins), and even a Claude-family default and 'claude-sdk' resolve to the
+    // SAME shared registry — so this is the only shape that actually
+    // distinguishes them. Without this, a codex-default daemon's idle client
+    // was wrongly told it's on the Claude roster (which it might then be
+    // offered a `set_model` for), instead of being correctly excluded and
+    // fed the codex roster.
+    it('does not mislabel a no-session client as Claude-family when the daemon default is non-Claude (#7895)', () => {
+      const ctx = makeCtx({ defaultProvider: 'codex' })
+      ctx.sessionManager.getSession = mock.fn((id) => (
+        id === 'sess-tui' ? { provider: 'claude-tui' } : null
+      ))
+      setupForwarding(ctx)
+
+      // The event itself comes from a session lookup miss (sessionId 'sess-gone'
+      // resolves to null via the mock above).
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-gone',
+        event: 'models_updated',
+        data: { models: [{ id: 'gpt-5.5' }] },
+      })
+
+      // A codex-default roster must not fan out over the Claude family at
+      // all — exactly one exact-match broadcast, tagged 'codex'. Pre-fix
+      // (`providerName ?? 'claude-sdk'`), a no-session event on a
+      // codex-default daemon was mislabeled 'claude-sdk' and fanned out to
+      // EVERY Claude-family client (claude-cli/claude-tui/…), each wrongly
+      // told the codex model list (`gpt-5.5`) is now theirs.
+      assert.equal(ctx.broadcast.mock.calls.length, 1, 'a non-Claude default roster must not fan out over Claude-family tags')
+      assert.equal(ctx.broadcast.mock.calls[0].arguments[0].provider, 'codex')
+
+      const tuiClient = { activeSessionId: 'sess-tui' }
+      const call = findBroadcastFor(ctx.broadcast, tuiClient)
+      assert.equal(call, undefined, 'a claude-tui-active client must NOT be told it shares a codex-tagged roster')
     })
 
     it('includes provider field in available_models broadcast so clients can route correctly (#2993)', () => {
       const ctx = makeCtx()
-      ctx.sessionManager.getSession = mock.fn(() => ({ provider: 'claude-sdk' }))
+      ctx.sessionManager.getSession = mock.fn((id) => (id === 'sess-claude' ? { provider: 'claude-sdk' } : null))
       setupForwarding(ctx)
 
       ctx.sessionManager.emit('session_event', {
@@ -358,9 +431,119 @@ describe('setupForwarding', () => {
         data: { models: [{ id: 'claude-sonnet-4-6' }] },
       })
 
-      const msg = ctx.broadcast.mock.calls[0].arguments[0]
-      assert.equal(msg.type, 'available_models')
-      assert.equal(msg.provider, 'claude-sdk')
+      const claudeSdkClient = { activeSessionId: 'sess-claude' }
+      const call = findBroadcastFor(ctx.broadcast, claudeSdkClient)
+      assert.ok(call, 'expected a broadcast reaching a claude-sdk client')
+      assert.equal(call.arguments[0].type, 'available_models')
+      assert.equal(call.arguments[0].provider, 'claude-sdk')
+    })
+
+    // #7895 — the issue this PR fixes: a client whose active session runs a
+    // DIFFERENT Claude-family provider than the session that triggered
+    // models_updated used to be sent a roster hardcoded `'claude-sdk'` (or,
+    // with no session at all, still `'claude-sdk'`), which its store discards
+    // because it keys rosters by EXACT tag (store-core/models-by-provider.ts).
+    // These fail on main.
+    describe('#7895 per-recipient roster tagging', () => {
+      function makeMultiClientCtx(defaultProvider) {
+        const ctx = makeCtx(defaultProvider === undefined ? {} : { defaultProvider })
+        ctx.sessionManager.getSession = mock.fn((id) => {
+          if (id === 'sess-origin') return { provider: 'claude-sdk' }
+          if (id === 'sess-cli') return { provider: 'claude-cli' }
+          if (id === 'sess-tui') return { provider: 'claude-tui' }
+          if (id === 'sess-codex') return { provider: 'codex' }
+          return null
+        })
+        return ctx
+      }
+
+      it('a claude-cli client receives its OWN tag, not the originating session\'s tag', () => {
+        const ctx = makeMultiClientCtx()
+        setupForwarding(ctx)
+        ctx.sessionManager.emit('session_event', {
+          sessionId: 'sess-origin',
+          event: 'models_updated',
+          data: { models: [{ id: 'claude-sonnet-4-6' }] },
+        })
+
+        const cliClient = { activeSessionId: 'sess-cli' }
+        const call = findBroadcastFor(ctx.broadcast, cliClient)
+        assert.ok(call, 'expected a broadcast reaching the claude-cli client')
+        assert.equal(call.arguments[0].provider, 'claude-cli')
+        assert.deepEqual(call.arguments[0].models, [{ id: 'claude-sonnet-4-6' }])
+      })
+
+      it('a claude-tui client likewise receives its OWN tag', () => {
+        const ctx = makeMultiClientCtx()
+        setupForwarding(ctx)
+        ctx.sessionManager.emit('session_event', {
+          sessionId: 'sess-origin',
+          event: 'models_updated',
+          data: { models: [{ id: 'claude-sonnet-4-6' }] },
+        })
+
+        const tuiClient = { activeSessionId: 'sess-tui' }
+        const call = findBroadcastFor(ctx.broadcast, tuiClient)
+        assert.ok(call, 'expected a broadcast reaching the claude-tui client')
+        assert.equal(call.arguments[0].provider, 'claude-tui')
+      })
+
+      it('a codex-active client does not receive a Claude-origin roster', () => {
+        const ctx = makeMultiClientCtx()
+        setupForwarding(ctx)
+        ctx.sessionManager.emit('session_event', {
+          sessionId: 'sess-origin',
+          event: 'models_updated',
+          data: { models: [{ id: 'claude-sonnet-4-6' }] },
+        })
+
+        const codexClient = { activeSessionId: 'sess-codex' }
+        const call = findBroadcastFor(ctx.broadcast, codexClient)
+        assert.equal(call, undefined, 'a codex-active client must not receive a Claude-family roster')
+      })
+
+      it('a non-Claude provider (codex) roster is untouched — single broadcast, exact tag', () => {
+        const ctx = makeMultiClientCtx()
+        setupForwarding(ctx)
+        ctx.sessionManager.emit('session_event', {
+          sessionId: 'sess-codex',
+          event: 'models_updated',
+          data: { models: [{ id: 'gpt-5.5' }] },
+        })
+
+        assert.equal(ctx.broadcast.mock.calls.length, 1, 'a non-Claude roster is not fanned out')
+        const [msg, filter] = ctx.broadcast.mock.calls[0].arguments
+        assert.equal(msg.provider, 'codex')
+        assert.equal(filter({ activeSessionId: 'sess-codex' }), true)
+        assert.equal(filter({ activeSessionId: 'sess-cli' }), false)
+      })
+
+      // Extends #7891/#7756's parity idea to this send site: for every
+      // registered Claude-family provider, the tag this path produces for a
+      // client of that provider equals the tag `resolveRosterProvider` (the
+      // same resolution ws-history.js's connect path uses) would give it.
+      it('parity: every Claude-family provider gets EXACTLY the tag the connect path would give it', () => {
+        const ctx = makeCtx({ defaultProvider: 'claude-sdk' })
+        ctx.sessionManager.getSession = mock.fn((id) => (
+          id === 'sess-origin' ? { provider: 'claude-tui' } : { provider: id }
+        ))
+        setupForwarding(ctx)
+        ctx.sessionManager.emit('session_event', {
+          sessionId: 'sess-origin',
+          event: 'models_updated',
+          data: { models: [{ id: 'claude-sonnet-4-6' }] },
+        })
+
+        const claudeFamilyNames = getRegisteredProviderNames().filter((name) => isClaudeProvider(name))
+        assert.ok(claudeFamilyNames.length >= 4, 'sanity: the real registry has multiple Claude-family names')
+        for (const name of claudeFamilyNames) {
+          const client = { activeSessionId: name }
+          const expectedTag = resolveRosterProvider(name, ctx.defaultProvider)
+          const call = findBroadcastFor(ctx.broadcast, client)
+          assert.ok(call, `expected a broadcast reaching a ${name} client`)
+          assert.equal(call.arguments[0].provider, expectedTag, `${name} client must receive a roster tagged '${expectedTag}'`)
+        }
+      })
     })
   })
 
@@ -766,7 +949,13 @@ describe('setupCliForwarding', () => {
   })
 
   it('broadcasts models_updated as available_models bypassing the normalizer', () => {
-    const ctx = makeCliCtx()
+    // #7895 — the daemon is configured for the legacy claude-cli provider
+    // here, so the roster is tagged 'claude-cli'. This is no longer a
+    // hardcoded literal in production (see the tests below) — it is the
+    // resolved value of `resolveRosterProvider(null, defaultProvider)` for
+    // THIS daemon's configured default, so the test configures it explicitly
+    // rather than relying on an implementation-detail default.
+    const ctx = makeCliCtx({ defaultProvider: 'claude-cli' })
     setupForwarding(ctx)
 
     ctx.cliSession.emit('models_updated', {
@@ -781,6 +970,56 @@ describe('setupCliForwarding', () => {
     // CLI mode is always Claude — provider field should be present (#2993)
     assert.ok('provider' in modelsMsg, 'expected provider field in available_models (#2993)')
     assert.equal(modelsMsg.provider, 'claude-cli')
+  })
+
+  // #7895 — the legacy single-session path used to hardcode `provider:
+  // 'claude-cli'` regardless of the daemon's actual configured default,
+  // discarding the roster on a claude-tui/claude-byok daemon (whose client
+  // keys rosters by EXACT tag, store-core/models-by-provider.ts). It must
+  // instead send the SAME tag `ws-history.js`'s legacy connect path
+  // (`resolveRosterProvider(null, billingCanary?.defaultProvider)`) sends for
+  // this session. Fails on main (asserts 'claude-tui', main always sends
+  // 'claude-cli').
+  it('#7895 tags the roster with the daemon default, not a hardcoded claude-cli', () => {
+    const ctx = makeCliCtx({ defaultProvider: 'claude-tui' })
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('models_updated', {
+      models: [{ id: 'claude-opus-4-6' }],
+    })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const modelsMsg = calls.find(m => m.type === 'available_models')
+    assert.ok(modelsMsg, 'expected available_models broadcast')
+    assert.equal(modelsMsg.provider, 'claude-tui')
+  })
+
+  it('#7895 falls back to DEFAULT_PROVIDER when no defaultProvider is configured', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.cliSession.emit('models_updated', { models: [{ id: 'claude-opus-4-6' }] })
+
+    const modelsMsg = ctx.broadcast.mock.calls.map(c => c.arguments[0]).find(m => m.type === 'available_models')
+    assert.ok(modelsMsg)
+    assert.equal(modelsMsg.provider, DEFAULT_PROVIDER)
+  })
+
+  // #7895 parity sweep — extends #7891/#7756's parity idea to the legacy
+  // single-session send site: for every plausible daemon default, the tag
+  // this path produces equals `resolveRosterProvider(null, defaultProvider)`,
+  // the exact resolution `ws-history.js`'s legacy connect path uses.
+  it('#7895 parity: the legacy tag equals resolveRosterProvider(null, defaultProvider) for every configured default', () => {
+    for (const defaultProvider of ['claude-sdk', 'claude-cli', 'claude-tui', 'claude-byok']) {
+      const ctx = makeCliCtx({ defaultProvider })
+      setupForwarding(ctx)
+
+      ctx.cliSession.emit('models_updated', { models: [{ id: 'claude-opus-4-6' }] })
+
+      const modelsMsg = ctx.broadcast.mock.calls.map(c => c.arguments[0]).find(m => m.type === 'available_models')
+      assert.ok(modelsMsg, `expected available_models broadcast for defaultProvider=${defaultProvider}`)
+      assert.equal(modelsMsg.provider, resolveRosterProvider(null, defaultProvider), `mismatch for defaultProvider=${defaultProvider}`)
+    }
   })
 
   it('does not broadcast available_models when models_updated has no models field', () => {
