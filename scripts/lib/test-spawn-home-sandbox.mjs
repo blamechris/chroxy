@@ -151,7 +151,17 @@ function computeOverrideEnv({ realHome, isolatedHome, allowEnv, existingEnv }) {
   const effectiveUserProfile = source.USERPROFILE
   const homeLooksIsolated = typeof effectiveHome === 'string' && effectiveHome !== realHome
   const userProfileStillReal = effectiveUserProfile === realHome
-  if (homeLooksIsolated && !userProfileStillReal) {
+  if (homeLooksIsolated && userProfileStillReal) {
+    // The caller isolated HOME but USERPROFILE is still the ambient real
+    // value, which is every `{ ...process.env, HOME: x }` spawn on win32 CI.
+    // Keep the caller's HOME and point USERPROFILE at it: replacing both
+    // with the sandbox dir clobbers the caller's own isolation, and leaving
+    // USERPROFILE alone leaks the real profile to os.homedir() on win32.
+    const next = { ...source }
+    next.USERPROFILE = effectiveHome
+    return next
+  }
+  if (homeLooksIsolated) {
     // The caller already pointed this env somewhere that is not the real
     // home — a provider-auth fixture, `withEnv({ HOME: tmp })`, or a test
     // exercising its OWN isolation — and USERPROFILE isn't silently still

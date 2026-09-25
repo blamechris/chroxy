@@ -281,6 +281,28 @@ describe('spawn-home sandbox: a spawned child does not see the real home (#7269)
     }
   })
 
+  it('caller isolated HOME but USERPROFILE is still real: keeps the caller HOME and mirrors it into USERPROFILE', () => {
+    // On win32 CI the ambient USERPROFILE is ALWAYS the real profile, so a
+    // caller that isolates only HOME (the repo-wide `{ ...process.env, HOME: x }`
+    // pattern) hits this path on every spawn. Redirecting both keys to the
+    // sandbox dir would clobber the caller's own isolation (the Server Windows
+    // Tests failure on 5ba244c38); skipping the redirect would leak the real
+    // profile through USERPROFILE. Mirroring the caller's HOME into
+    // USERPROFILE does neither. Simulated on any platform by passing the real
+    // home as USERPROFILE explicitly.
+    const customHome = mkdtempSync(join(tmpdir(), 'chroxy-spawn-home-mirror-'))
+    try {
+      const result = spawnSync(process.execPath, ['-e', REPORT_HOME_SCRIPT], {
+        env: { ...process.env, HOME: customHome, USERPROFILE: SPAWN_HOME_REAL },
+      })
+      const report = parseReport(result.stdout)
+      assert.equal(report.envHome, customHome, 'the caller-chosen HOME must be kept, not replaced by the sandbox dir')
+      assert.equal(report.envUserProfile, customHome, 'USERPROFILE must follow the caller-chosen HOME, not stay real and not become the sandbox dir')
+    } finally {
+      rmSync(customHome, { recursive: true, force: true })
+    }
+  })
+
   it('#7946 review: HOME already isolated but USERPROFILE still carries the ambient REAL value — still redirects', () => {
     // Every HOME-reassigning test in this repo (auth-probes.test.js,
     // claude-tui-session.test.js, byok-*.test.js, anthropic-compatible.test.js,
