@@ -2460,8 +2460,16 @@ export class ClaudeTuiSession extends BaseSession {
     // cli-session.js's `buildClaudeCliArgs`: the two-token form of an
     // optional-arg flag INJECTS a dash-leading value as a separate option
     // rather than swallowing it. This spawn goes through node-pty
-    // (`ptyMod.spawn`), not `child_process`, so `scripts/lint-argv-sinks.mjs`
-    // cannot see this call site at all — the guard here is the only gate.
+    // (`ptyMod.spawn`), not `child_process` — at the time this guard was
+    // added, that made the call site invisible to `scripts/lint-argv-sinks.mjs`
+    // entirely, so the guard below was the ONLY gate. #7935 closed that gap:
+    // the lint now scans node-pty spawns too, and (with the accompanying
+    // `pathKeyOf` `this.`-support fix) structurally recognises this exact
+    // `assertSafeArgvValue(this._sessionId, ...)` call as guarding the sink
+    // below — no catalogue entry needed (see `utils/argv-safety.js`'s
+    // `claude-tui-session.js` section). The guard call itself still has to
+    // stay right here regardless: it is what makes the runtime value safe,
+    // not merely what satisfies the lint.
     try {
       assertSafeArgvValue(this._sessionId, 'sessionId')
     } catch (err) {
