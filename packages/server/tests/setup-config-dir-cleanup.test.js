@@ -15,6 +15,20 @@
  * developer-supplied CHROXY_CONFIG_DIR (the existing
  * `if (!process.env.CHROXY_CONFIG_DIR)` branch in _setup.mjs) must never be
  * removed by the exit handler.
+ *
+ * A third case pins the specific design choice #7271's fix made over the
+ * issue's own suggested-fix shape (see the PR description): the exit handler
+ * closes over the `ownedConfigTmpDir` local captured at creation time, rather
+ * than re-reading `process.env.CHROXY_CONFIG_DIR` when the handler fires. A
+ * test that overrides `CHROXY_CONFIG_DIR` mid-run and exits without restoring
+ * it (the documented escape hatch — "Tests that explicitly need to override
+ * it ... can still set it in their own beforeEach and restore in afterEach" —
+ * assumes the restore happens, but an early return, a thrown assertion, or a
+ * forgotten afterEach means it sometimes doesn't) must not change what gets
+ * removed: the ORIGINALLY-owned dir, never whatever path the env var happens
+ * to hold when the process exits. Reading env-at-exit instead of the closure
+ * variable passes every other case in this file unchanged — it only differs
+ * on this one, which is why it needs its own case.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -33,10 +47,20 @@ const dir = process.env.CHROXY_CONFIG_DIR
 console.log(JSON.stringify({ dir, existedDuringRun: !!dir && existsSync(dir) }))
 `
 
-function runProbeChild(env) {
+// Simulates a test that overrides CHROXY_CONFIG_DIR (the documented escape
+// hatch in _setup.mjs) and exits without restoring it. The dir _setup.mjs
+// itself created is reported BEFORE the override so the test can check the
+// right path was removed, not whatever CHROXY_CONFIG_DIR ends up holding.
+const MUTATING_PROBE_SCRIPT = `
+const ownedDir = process.env.CHROXY_CONFIG_DIR
+process.env.CHROXY_CONFIG_DIR = '/nonexistent/must-not-be-touched'
+console.log(JSON.stringify({ ownedDir }))
+`
+
+function runProbeChild(env, script = PROBE_SCRIPT) {
   const harnessDir = mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-cleanup-harness-'))
   const scriptPath = join(harnessDir, 'probe.mjs')
-  writeFileSync(scriptPath, PROBE_SCRIPT)
+  writeFileSync(scriptPath, script)
   try {
     const result = spawnSync(process.execPath, ['--import', SETUP_PATH, scriptPath], {
       encoding: 'utf-8',
@@ -88,5 +112,33 @@ describe('tests/_setup.mjs CHROXY_CONFIG_DIR cleanup (#7271)', () => {
     } finally {
       rmSync(developerDir, { recursive: true, force: true })
     }
+  })
+
+  it('removes the dir it owns even when CHROXY_CONFIG_DIR is left mutated at exit', () => {
+    const envWithoutConfigDir = { ...process.env }
+    delete envWithoutConfigDir.CHROXY_CONFIG_DIR
+    const result = runProbeChild(envWithoutConfigDir, MUTATING_PROBE_SCRIPT)
+
+    assert.equal(result.status, 0, `probe child should exit cleanly (code ${result.status}); stderr: ${result.stderr}`)
+
+    const lastLine = result.stdout.trim().split('\n').filter(Boolean).pop()
+    assert.ok(lastLine, `expected JSON output from probe child; got stdout: ${JSON.stringify(result.stdout)}`)
+    const { ownedDir } = JSON.parse(lastLine)
+
+    assert.ok(
+      typeof ownedDir === 'string' && ownedDir.includes('chroxy-test-cfg-'),
+      `probe child should have created a chroxy-test-cfg- dir, got: ${ownedDir}`
+    )
+
+    // The probe script reassigned process.env.CHROXY_CONFIG_DIR to a bogus
+    // path right before exiting, without restoring it. If the exit handler
+    // read process.env.CHROXY_CONFIG_DIR at exit time instead of the closed-
+    // over ownedConfigTmpDir, it would attempt to rmSync the bogus path
+    // (silently caught) and leave the real owned dir behind.
+    assert.equal(
+      existsSync(ownedDir),
+      false,
+      'the dir _setup.mjs created must still be removed, even though CHROXY_CONFIG_DIR was mutated before exit'
+    )
   })
 })
