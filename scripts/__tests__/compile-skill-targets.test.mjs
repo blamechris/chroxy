@@ -38,7 +38,7 @@ const { deriveDescription, detectUncompiledAgents, emitPi, ALL_TARGETS, REPO_LOC
 // literally, so the exact count is knowable here in a way it is not for a
 // runner that DISCOVERS tests (scripts/lib/assert-test-count.mjs is a lower
 // bound for exactly that reason).
-const EXPECTED_CASES = 43
+const EXPECTED_CASES = 48
 
 let pass = 0
 let fail = 0
@@ -993,6 +993,149 @@ await test('listArtifacts refuses a target it cannot enumerate instead of return
     const found = listArtifacts(repoRoot, target)
     assert(found.length > 0, `listArtifacts('${target}') found no artifacts in the real repo — the enumeration is broken`)
   }
+})
+
+// --- #7255: main() branches with no direct coverage ------------------------
+//
+// #7251/#7253 proved the ENTRY-POINT call site and the --check drift gate. Four
+// branches inside main() itself were proven-by-mutation (issue #7255) to have
+// ZERO coverage of either kind: the --name path-traversal guard, the
+// failed++ -> process.exit(1) aggregate exit, emitCodex (unexported, and never
+// selected by any subprocess run above), and the profile-driven --targets
+// default on the COMPILE path (only --check exercised targetsFromProfile before
+// this — every runCompiler() call above passes --targets explicitly).
+
+await test('the --name path-traversal guard refuses "..", an absolute path, and a name containing "/" — for both a repo-local and a home-dir target, writing nothing (#7255)', () => {
+  withFixture((ctx) => {
+    // Absolute paths and "/"-bearing names both trip the same `/[/\\]/` half of
+    // the guard; keeping all three cases pins that the OTHER half (`..` with no
+    // slash-in-front, and the split/includes check) is not the only thing doing
+    // the work, and that none of the three slips through in a refactor.
+    const unsafeNames = ['../../../evil', pjoin(ctx.dir, 'evil'), 'sub/evil']
+    for (const targets of ['claude', 'codex']) {
+      const beforeRoot = snapshot(ctx.root)
+      const beforeHome = readdirSync(ctx.home).sort().join(',')
+      for (const name of unsafeNames) {
+        const run = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', targets, '--name', name], ctx.home, ctx.dir)
+        assert(
+          run.status === 1,
+          `--targets ${targets} --name ${JSON.stringify(name)} must be refused, got ${run.status}:\n${run.stdout}${run.stderr}`,
+        )
+        // Message-specific, not just the exit code: a neutered guard (the exact
+        // mutation #7255 names — `const unsafe = []`) still exits 1 for these
+        // names, just for a DIFFERENT reason (SOURCE MISSING, since no file named
+        // e.g. "../../../evil.md" exists) — only the message tells them apart.
+        assert(
+          /^Unsafe skill name\(s\): /.test(run.stderr),
+          `the refusal must name the reason for ${JSON.stringify(name)} (targets=${targets}):\n${run.stderr}`,
+        )
+        assert(
+          !/Compiling/.test(run.stdout),
+          `it took the COMPILE path anyway for ${JSON.stringify(name)} (targets=${targets}):\n${run.stdout}`,
+        )
+      }
+      assert(snapshot(ctx.root) === beforeRoot, `a refused --name still wrote into the repo (targets=${targets})`)
+      assert(
+        readdirSync(ctx.home).sort().join(',') === beforeHome,
+        `a refused --name still wrote into $HOME (targets=${targets})`,
+      )
+    }
+  })
+})
+
+await test('an emit failure (source selected by --name is missing) reaches the failed++ -> exit(1) aggregate, not a crash (#7255)', () => {
+  withFixture((ctx) => {
+    const run = runCompiler(ctx.script, ['--repo', ctx.root, '--targets', 'claude', '--name', 'does-not-exist'], ctx.home, ctx.dir)
+    assert(run.status === 1, `expected exit 1, got ${run.status}:\n${run.stdout}${run.stderr}`)
+    // Distinguishes this from every other exit-1 case in the file: the compile
+    // loop was actually ENTERED (unlike the --name guard above and the missing
+    // .claude/commands check, which both exit before main() ever logs this).
+    assert(/^Compiling 1 skill\(s\)/m.test(run.stdout), `must have entered the compile loop:\n${run.stdout}`)
+    assert(
+      /does-not-exist: SOURCE MISSING/.test(run.stderr),
+      `stderr must name the missing source:\n${run.stderr}`,
+    )
+    // The code's own aggregate message, not an uncaught-exception stack trace —
+    // proven to matter: an unwritable output DIR instead of a missing source
+    // throws inside mkdirSync and crashes past this accounting entirely (verified
+    // empirically), which would leave a mutant that swaps `process.exit(1)` for
+    // `process.exit(0)` on this line undetected.
+    assert(
+      /^1 emit\(s\) failed\.$/m.test(run.stderr),
+      `stderr must report the failed-emit count via the aggregate exit, not a raw crash:\n${run.stderr}`,
+    )
+    assert(
+      !existsSync(pjoin(ctx.root, '.claude', 'skills', 'does-not-exist')),
+      'a failed emit must not create an artifact',
+    )
+  })
+})
+
+await test('--targets codex compiles via emitCodex, writing ~/.codex/prompts/<name>.md scoped to the fixture HOME (#7255)', () => {
+  withFixture(({ dir, root, home, script }) => {
+    const run = runCompiler(script, ['--repo', root, '--targets', 'codex'], home, dir)
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+    const codexMd = pjoin(home, '.codex', 'prompts', 'demo.md')
+    assert(existsSync(codexMd), `emitCodex did not write the expected artifact; stdout: ${run.stdout}`)
+    const emitted = readFileSync(codexMd, 'utf8')
+    assert(
+      /^---\ndescription: "[^\n]+"\n---\n\n/.test(emitted),
+      `frontmatter is not a complete, non-empty block:\n${emitted}`,
+    )
+    assert(emitted.includes('# Demo skill'), `the source body must pass through:\n${emitted}`)
+    // Codex natively supports $ARGUMENTS (unlike Gemini, which rewrites it to
+    // {{args}}) — this is emitCodex's one meaningful transform, and the thing
+    // most worth pinning since nothing else in the suite reaches this emitter.
+    assert(
+      emitted.includes('$ARGUMENTS'),
+      `codex must pass $ARGUMENTS through verbatim (no {{args}} rewrite):\n${emitted}`,
+    )
+    assert(
+      !emitted.includes('skill-templates:'),
+      `the registry stamp is install metadata, not skill content:\n${emitted}`,
+    )
+    assert(
+      /\/prompts:demo/.test(run.stdout),
+      `stdout must note the /prompts:<name> invocation, got:\n${run.stdout}`,
+    )
+    // A purely user-global target must never write into the repo.
+    assert(!existsSync(pjoin(root, '.claude', 'skills')), 'a codex-only compile wrote into the repo')
+  })
+})
+
+await test('with no --targets, the compile path reads .claude/skill-profile.md (#7255)', () => {
+  withFixture(({ dir, root, home, script }) => {
+    // Every OTHER subprocess test in this file passes --targets explicitly (the
+    // fixture's safety property, so a test can never reach the codex/pi emitters
+    // by accident). This is the one place that deliberately omits it — the
+    // --check tests earlier in this file exercise targetsFromProfile() too, but
+    // only through the --check branch of main(), never through the plain
+    // COMPILE path (the writing loop) this test drives.
+    writeFileSync(pjoin(root, '.claude', 'skill-profile.md'), 'targets: claude, gemini\n')
+    const run = runCompiler(script, ['--repo', root], home, dir)
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+    assert(
+      /^Compiling 1 skill\(s\) -> \[claude, gemini\]/m.test(run.stdout),
+      `must compile using the profile's targets:\n${run.stdout}`,
+    )
+    assert(existsSync(pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')), 'claude artifact missing')
+    assert(existsSync(pjoin(root, '.gemini', 'commands', 'demo.toml')), 'gemini artifact missing')
+  })
+})
+
+await test('with no --targets and no targets: line, the compile path falls back to claude only (#7255)', () => {
+  withFixture(({ dir, root, home, script }) => {
+    // No .claude/skill-profile.md at all in this fixture — targetsFromProfile()
+    // returns null and main() falls back to ['claude'].
+    const run = runCompiler(script, ['--repo', root], home, dir)
+    assert(run.status === 0, `expected exit 0, got ${run.status}: ${run.stderr}`)
+    assert(
+      /^Compiling 1 skill\(s\) -> \[claude\]/m.test(run.stdout),
+      `must fall back to claude only:\n${run.stdout}`,
+    )
+    assert(existsSync(pjoin(root, '.claude', 'skills', 'demo', 'SKILL.md')), 'claude artifact missing')
+    assert(!existsSync(pjoin(root, '.gemini')), 'gemini must not be compiled when falling back to claude only')
+  })
 })
 
 // --- summary --------------------------------------------------------------
