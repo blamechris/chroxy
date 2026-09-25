@@ -228,6 +228,103 @@ export function run(userValue) {
 }
 `
 
+// ─── Review #7929 blind-spot probes ────────────────────────────────────────
+
+const ALIASED_NAMED_IMPORT_UNGUARDED = `
+import { spawn as run } from 'node:child_process'
+export function launch(userValue) {
+  run('/usr/bin/git', ['diff', userValue], () => {})
+}
+`
+
+const DEFAULT_IMPORT_UNGUARDED = `
+import cp from 'node:child_process'
+export function launch(userValue) {
+  cp.spawn('/usr/bin/git', ['diff', userValue], () => {})
+}
+`
+
+const CJS_REQUIRE_DESTRUCTURE_UNGUARDED = `
+const { execFile } = require('node:child_process')
+export function launch(userValue) {
+  execFile('/usr/bin/git', ['diff', userValue], () => {})
+}
+`
+
+const FORK_UNGUARDED = `
+import { fork } from 'node:child_process'
+export function launch(userValue) {
+  fork('./child.js', ['--value', userValue])
+}
+`
+
+const ALIASED_LOCAL_VIA_FALLBACK_UNGUARDED = `
+import { execFileSync } from 'node:child_process'
+export function launch(userValue, deps = {}) {
+  const exec = deps._exec || execFileSync
+  exec('/usr/bin/git', ['diff', userValue], { encoding: 'utf8' })
+}
+`
+
+const ALIASED_LOCAL_BARE_UNGUARDED = `
+import { execFileSync } from 'node:child_process'
+export function launch(userValue) {
+  const run = execFileSync
+  run('/usr/bin/git', ['diff', userValue], { encoding: 'utf8' })
+}
+`
+
+const WRAPPER_FUNCTION_NOT_ARGS_NAMED_OPAQUE = `
+import { spawn } from 'node:child_process'
+function runGit(cwd, ...args) {
+  spawn('/usr/bin/git', args, { cwd })
+}
+export function launch(userValue) {
+  runGit('/tmp', 'diff', userValue)
+}
+`
+
+const DYNAMIC_IMPORT_NON_CHILD_PROCESS_SPAWN_NOT_SCANNED = `
+export async function launch(userValue) {
+  const ptyMod = await import('node-pty')
+  return ptyMod.spawn('/usr/bin/claude', ['--resume', userValue], {})
+}
+`
+
+// Copilot review thread on this PR (packages/server/scripts/lint-argv-sinks.mjs:431):
+// guard detection was FILE-WIDE, not scoped — a guard call in an unrelated
+// (here, dead/never-called) function silenced a genuinely unguarded sink
+// elsewhere in the file purely because both used a parameter named `value`.
+const UNRELATED_DEAD_GUARD_SAME_NAME_UNGUARDED = `
+import { execFile } from 'node:child_process'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
+
+// Never called from anywhere. Guards its OWN 'value' parameter only.
+function unrelatedDeadCode(value) {
+  assertSafeArgvValue(value, 'value')
+}
+
+export function run(value) {
+  execFile('/usr/bin/git', ['diff', value], () => {})
+}
+`
+
+// Positive control: a guard call in an ENCLOSING scope (module-level, or an
+// outer function around a closure) legitimately dominates a nested sink —
+// this must still pass after scoping the guard lookup.
+const GUARD_IN_ENCLOSING_SCOPE_STILL_GUARDS_NESTED_CLOSURE = `
+import { execFile } from 'node:child_process'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
+
+export function outer(value) {
+  assertSafeArgvValue(value, 'value')
+  const inner = () => {
+    execFile('/usr/bin/git', ['diff', value], () => {})
+  }
+  inner()
+}
+`
+
 describe('lint-argv-sinks', () => {
   describe('required fixtures (issue #7868 acceptance)', () => {
     test('RED: an unguarded new spawn with a variable argv fails', () => {
@@ -464,6 +561,92 @@ describe('lint-argv-sinks', () => {
       const r = runLint({ 'offender.js': UNGUARDED_VARIABLE_ARGV }, { catalogue: EMPTY_CATALOGUE, extraArgs: ['--dry-run'] })
       assert.equal(r.status, 0)
       assert.match(r.stderr, /argv element `userValue`/)
+    })
+  })
+
+  // Review #7929 — does the sink model actually cover the AST shapes a real
+  // author reaches for, not just the ones the original fixtures happened to
+  // exercise? Each RED case here is a proven false negative until fixed.
+  describe('blind-spot probes (review #7929)', () => {
+    test('GREEN (already worked): `import { spawn as run }` (aliased named import) is still tracked', () => {
+      const r = runLint({ 'offender.js': ALIASED_NAMED_IMPORT_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      // The finding is reported under the CANONICAL imported name ('spawn'),
+      // not the local alias ('run') — findings key off spawnApiLocals' VALUE.
+      assert.match(r.stderr, /spawn\(\.\.\.\) argv element `userValue`/)
+    })
+
+    test('GREEN: `import cp from \'child_process\'; cp.spawn(...)` (default import) is tracked', () => {
+      const r = runLint({ 'offender.js': DEFAULT_IMPORT_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /spawn\(\.\.\.\) argv element `userValue`/)
+    })
+
+    test('GREEN: `const { execFile } = require(...)` (CJS destructure) is tracked', () => {
+      const r = runLint({ 'offender.js': CJS_REQUIRE_DESTRUCTURE_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /execFile\(\.\.\.\) argv element `userValue`/)
+    })
+
+    test('GREEN: `fork(modulePath, args)` is tracked (same argv-injection shape as spawn)', () => {
+      const r = runLint({ 'offender.js': FORK_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /fork\(\.\.\.\) argv element `userValue`/)
+    })
+
+    test('GREEN: `const exec = deps._exec || execFileSync` (local alias via fallback default) is tracked', () => {
+      const r = runLint({ 'offender.js': ALIASED_LOCAL_VIA_FALLBACK_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      // Reported under the resolved canonical API name, same convention as
+      // the aliased-import case above.
+      assert.match(r.stderr, /execFileSync\(\.\.\.\) argv element `userValue`/)
+    })
+
+    test('GREEN: `const run = execFileSync` (bare local alias) is tracked', () => {
+      const r = runLint({ 'offender.js': ALIASED_LOCAL_BARE_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /execFileSync\(\.\.\.\) argv element `userValue`/)
+    })
+
+    // Positive control: a wrapper function that forwards its own args to
+    // spawn() but is NOT named `_buildArgs`/`build*Args`/`*Argv` must still be
+    // caught — not because the lint recognises the wrapper (it doesn't), but
+    // because `args` inside runGit is a rest PARAMETER, not a local
+    // `const args = [...]`, so resolveIdentifierArrayBranches cannot resolve
+    // it and the whole spawn call is correctly flagged opaque.
+    test('GREEN (already worked): a same-file spawn wrapper named outside the *Args/*Argv convention is still opaque-flagged', () => {
+      const r = runLint({ 'offender.js': WRAPPER_FUNCTION_NOT_ARGS_NAMED_OPAQUE }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /spawn\(\.\.\.\) — argv could not be statically resolved/)
+    })
+
+    // Confirmed FOLLOW-UP, not fixed here: a spawn-like call on a namespace
+    // bound from a dynamic, non-child_process import (node-pty's own
+    // `pty.spawn(file, args)`) is invisible to the whole import-tracking
+    // model, which only recognises `node:child_process`/`child_process`
+    // sources. This is the exact shape of the live gap fixed directly in
+    // claude-tui-session.js's `_spawnPty` (see the assertSafeArgvValue call
+    // added there) — the lint cannot see that call site at all, before or
+    // after that fix, which is why the fix had to land as a source guard
+    // rather than a catalogue entry.
+    test('CONFIRMED GAP (tracked as follow-up, not fixed here): a dynamically-imported non-child_process spawn (node-pty) is not scanned', () => {
+      const r = runLint({ 'offender.js': DYNAMIC_IMPORT_NON_CHILD_PROCESS_SPAWN_NOT_SCANNED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
+  // Copilot review thread on this PR — guard detection must be scoped to the
+  // sink's own function (and its lexical ancestors), never file-wide.
+  describe('guard scoping is lexical, not file-wide (Copilot review finding)', () => {
+    test('RED->GREEN: a guard call in an unrelated, never-called function does not silence a same-named sink elsewhere', () => {
+      const r = runLint({ 'offender.js': UNRELATED_DEAD_GUARD_SAME_NAME_UNGUARDED }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('POSITIVE CONTROL: a guard call in an ENCLOSING function still guards a nested closure using the same binding', () => {
+      const r = runLint({ 'clean.js': GUARD_IN_ENCLOSING_SCOPE_STILL_GUARDS_NESTED_CLOSURE }, { catalogue: EMPTY_CATALOGUE })
+      assert.equal(r.status, 0, r.stderr)
     })
   })
 

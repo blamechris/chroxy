@@ -430,6 +430,38 @@ export const AUDITED_SINKS = [
     match: 'servicePath',
     reason: "join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`) with SERVICE_LABEL a hardcoded constant — always an internally-computed absolute path, never client input.",
   },
+  // Review #7929 — the five entries below cover `installWindowsService`,
+  // `getWindowsTaskStatus`, `uninstallService`, `startService`,
+  // `bootstrapLaunchd` and `stopService`, all of which build their `exec`
+  // call through `const exec = options._exec || execFileSync` (a
+  // test-injection seam whose fallback default was invisible to the lint
+  // before #7929's local-alias tracking fix — see collectImports in
+  // lint-argv-sinks.mjs). Every one of these functions is reachable ONLY from
+  // `chroxy service install/uninstall/start/stop/status` (cli/service-cmd.js)
+  // — no WS/client handler calls into service.js at all (grepped at audit
+  // time) — and every real call site there invokes them with NO options
+  // object, so `options._exec`/`options._taskName`/`options._wrapperPath`
+  // are always undefined in production.
+  {
+    file: 'service.js',
+    match: 'taskName',
+    reason: "taskName = options._taskName || WINDOWS_TASK_NAME ('Chroxy', a hardcoded module constant); options._taskName is a test-only seam never set by the one real caller (cli/service-cmd.js, always called with zero args). state.taskName (the uninstallService darwin/win32 branch) is read back from service.json, which is written only by installWindowsService using this same taskName — so it round-trips the same constant. CLI-only, no WS path.",
+  },
+  {
+    file: 'service.js',
+    match: 'wrapperPath',
+    reason: "wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME) — an internally-computed absolute path (join() always returns one) or a test-only override; used as schtasks' /TR value, quoted. CLI-only (chroxy service install).",
+  },
+  {
+    file: 'service.js',
+    match: 'domain',
+    reason: "domain = `gui/${process.getuid()}` — process.getuid() is the Node builtin returning the current OS user's numeric uid (always a non-negative integer), with a fixed literal 'gui/' prefix; can never start with '-'. Passed bare into `${domain}/${SERVICE_LABEL}` and as a positional to `launchctl bootstrap`. CLI-only (chroxy service start/stop).",
+  },
+  {
+    file: 'service.js',
+    match: 'plistPath',
+    reason: 'plistPath is either state.servicePath (written by installWindowsService/installService as an internally-computed absolute path, never client text) or paths.plistPath (a server-computed default from getServicePaths()) — both existsSync-checked absolute paths before this point. CLI-only (chroxy service start).',
+  },
 
   // ── session-context.js ──
   {
@@ -465,6 +497,11 @@ export const AUDITED_SINKS = [
     file: 'supervisor.js',
     match: '${tag}^{commit}',
     reason: "tag is drawn from `git tag --list 'known-good-*'` output, glob-filtered by git itself to always start with the literal 'known-good-' — not attacker text, and structurally cannot start with '-'.",
+  },
+  {
+    file: 'supervisor.js',
+    match: 'fork(script, args, opts)',
+    reason: "_fork(script, args, opts) is a documented override point ('Override point: fork a child process') for test injection — script/args are opaque PARAMETERS forwarded straight through, which per-file static analysis cannot resolve to the one real caller. That caller (_startChild) always passes childScript (a fixed internal path built from import.meta.url, never variable) and a literal [] for args — never attacker content. #7929 added `fork` to the lint's SPAWN_APIS roster; this entry is new because of that, not because the code changed.",
   },
 
   // ── tunnel/cloudflare.js ──

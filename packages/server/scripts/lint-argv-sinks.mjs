@@ -130,7 +130,15 @@ const DEFAULT_SRC_DIR = join(REPO_ROOT, 'packages', 'server', 'src')
 const DEFAULT_CATALOGUE = join(DEFAULT_SRC_DIR, 'utils', 'argv-safety.js')
 
 const CHILD_PROCESS_SOURCES = new Set(['child_process', 'node:child_process'])
-const SPAWN_APIS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync'])
+// `fork(modulePath, args, opts)` shares spawn's exact argv-injection shape —
+// `args` becomes the child's `process.argv.slice(2)`, option-parsed by
+// whatever the target module does with it — so it needs the same gate.
+// Review #7929: absent from the original roster; supervisor.js's one real
+// caller passes a literal `[]` today (so this addition finds zero new
+// findings against the real repo), but the gap was structural, not
+// content-dependent — a future dynamic-args fork() call would have shipped
+// ungated and unnoticed.
+const SPAWN_APIS = new Set(['spawn', 'spawnSync', 'execFile', 'execFileSync', 'fork'])
 const GUARD_MODULE_SUFFIX = 'utils/argv-safety.js'
 // `isGitShaRef` is a THIRD, stricter guard exported by argv-safety.js (hex-SHA
 // only — a subset of what isSafeArgvValue accepts). supervisor.js validates
@@ -290,16 +298,32 @@ function collectImports(sourceFile) {
     if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
       const moduleText = stmt.moduleSpecifier.text
       handleNamedBindings(stmt.importClause?.namedBindings, moduleText)
+      // Review #7929: `import cp from 'child_process'` (a DEFAULT import, not
+      // `import * as cp` — a different importClause shape) resolves to the
+      // whole child_process module object under Node's CJS/ESM interop, so
+      // `cp.spawn(...)` is exactly as live a sink as the namespace-import
+      // form. Only the clause's default `name`, never `namedBindings`, so
+      // this was invisible to handleNamedBindings above.
+      if (fromChildProcess(moduleText) && stmt.importClause?.name && !stmt.importClause.isTypeOnly) {
+        spawnNamespaces.add(stmt.importClause.name.text)
+      }
     }
   }
 
-  // Dynamic `const { execFileSync } = await import('child_process')`.
+  // Dynamic `const { execFileSync } = await import('child_process')`, and
+  // (review #7929) the CJS-shaped `const { execFile } = require('child_process')`
+  // — this repo is ESM-only by convention (CLAUDE.md), but the lint's job is
+  // to gate what the parser can see, not what the style guide permits; a
+  // `require()` slipping past code review must still be gated, not silently
+  // invisible to the one check that would have caught its argv.
   forEachDescendant(sourceFile, (node) => {
     if (!ts.isVariableDeclaration(node) || !node.initializer || !node.name) return
     if (!ts.isObjectBindingPattern(node.name)) return
     let call = node.initializer
     if (ts.isAwaitExpression(call)) call = call.expression
-    if (!ts.isCallExpression(call) || call.expression.kind !== ts.SyntaxKind.ImportKeyword) return
+    const isDynamicImport = ts.isCallExpression(call) && call.expression.kind === ts.SyntaxKind.ImportKeyword
+    const isRequire = ts.isCallExpression(call) && ts.isIdentifier(call.expression) && call.expression.text === 'require'
+    if (!isDynamicImport && !isRequire) return
     const arg = call.arguments[0]
     if (!arg || !ts.isStringLiteral(arg) || !CHILD_PROCESS_SOURCES.has(arg.text)) return
     for (const el of node.name.elements) {
@@ -307,6 +331,28 @@ function collectImports(sourceFile) {
       const imported = (el.propertyName ?? el.name).text
       const local = el.name.text
       if (SPAWN_APIS.has(imported)) spawnApiLocals.set(local, imported)
+    }
+  })
+
+  // Review #7929: a local variable bound (directly, or behind a `||`/`??`
+  // test-injection fallback) to an already-tracked spawn API is exactly as
+  // live a sink under its own name — this is the `const exec = opts._exec ||
+  // execFileSync` shape used throughout service.js. Only ONE hop is resolved
+  // (matching the existing one-hop guard-wrapper convention below): a chain
+  // of aliases three deep is not a pattern seen in this codebase and adding
+  // unbounded alias-chasing risks over-matching an unrelated same-named local
+  // in some other function.
+  forEachDescendant(sourceFile, (node) => {
+    if (!ts.isVariableDeclaration(node) || !node.initializer || !ts.isIdentifier(node.name)) return
+    const local = node.name.text
+    if (spawnApiLocals.has(local)) return
+    let rhs = node.initializer
+    if (ts.isBinaryExpression(rhs) &&
+      (rhs.operatorToken.kind === ts.SyntaxKind.BarBarToken || rhs.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) {
+      rhs = rhs.right
+    }
+    if (ts.isIdentifier(rhs) && spawnApiLocals.has(rhs.text)) {
+      spawnApiLocals.set(local, spawnApiLocals.get(rhs.text))
     }
   })
 
@@ -414,20 +460,41 @@ function decomposeDynamicParts(node) {
 // ─── Shape 1: guard call, direct or one-hop wrapper ────────────────────────
 
 /**
- * Every guarded path key in the file: a direct `assertSafeArgvValue(x, ...)`
- * / `isSafeArgvValue(x)` call, or a call to a locally-defined wrapper whose
- * own body calls one of those guards on its first parameter.
+ * Every guarded path key, keyed by the SCOPE (enclosing function node, or
+ * `null` for module scope) it was proven safe in: a direct
+ * `assertSafeArgvValue(x, ...)` / `isSafeArgvValue(x)` call, or a call to a
+ * locally-defined wrapper whose own body calls one of those guards on its
+ * first parameter.
+ *
+ * Scoped, not file-wide (review #7929, a real Copilot finding on this PR):
+ * the original implementation collected every guarded path key into one
+ * flat, file-wide Set, so a guard call inside an unrelated — even entirely
+ * DEAD — function protected a same-named variable ANYWHERE else in the same
+ * file. Confirmed as a live false-negative: a fixture with a never-called
+ * `function deadCode(value) { assertSafeArgvValue(value, 'value') }`
+ * silenced a genuinely unguarded `execFile(..., [..., value])` in a totally
+ * unrelated `run(value)` function, purely because both parameters happened
+ * to share the name `value`. `isGuardedAtScope` below walks from a sink's own
+ * scope up through its ENCLOSING scopes only (never a sibling/unrelated
+ * function) — module scope and every ancestor function legitimately guard a
+ * nested closure's use of the same binding; nothing else does.
+ *
+ * @returns {Map<import('typescript').Node|null, Set<string>>}
  */
-function collectGuardedPathKeys(sourceFile, guardLocals) {
-  const guardedDirect = new Set()
-  const wrapperNames = new Set()
+function collectGuardedPathKeysByScope(sourceFile, guardLocals) {
+  const byScope = new Map()
+  const addTo = (scopeNode, key) => {
+    if (!byScope.has(scopeNode)) byScope.set(scopeNode, new Set())
+    byScope.get(scopeNode).add(key)
+  }
 
+  const wrapperNames = new Set()
   if (guardLocals.size) {
     forEachDescendant(sourceFile, (node) => {
       if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return
       if (!guardLocals.has(node.expression.text)) return
       const key = node.arguments[0] && pathKeyOf(node.arguments[0])
-      if (key !== null && key !== undefined) guardedDirect.add(key)
+      if (key !== null && key !== undefined) addTo(enclosingFunction(node), key)
     })
 
     forEachDescendant(sourceFile, (fn) => {
@@ -449,22 +516,42 @@ function collectGuardedPathKeys(sourceFile, guardLocals) {
     })
   }
 
-  const guardedViaWrapper = new Set()
+  // A wrapper's own guard call establishes that CALLING the wrapper with
+  // value X guards X — scoped the same way, at the CALL site's own scope
+  // (not the wrapper definition's scope), since that is where the caller's
+  // dominance actually runs.
   if (wrapperNames.size) {
     forEachDescendant(sourceFile, (node) => {
       if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) return
       if (!wrapperNames.has(node.expression.text)) return
       const key = node.arguments[0] && pathKeyOf(node.arguments[0])
-      if (key !== null && key !== undefined) guardedViaWrapper.add(key)
+      if (key !== null && key !== undefined) addTo(enclosingFunction(node), key)
     })
   }
 
-  return new Set([...guardedDirect, ...guardedViaWrapper])
+  return byScope
 }
 
-function isShape1Guarded(node, guardedPathKeys) {
+/**
+ * Is `pathKey` guarded in `scopeFn` (the sink's own enclosing function, or
+ * `null` for module scope) or in any scope LEXICALLY ENCLOSING it? Walks
+ * outward — own scope, then parent function, then parent's parent, … up to
+ * and including module scope — and stops at the first match. Never looks at
+ * a sibling or unrelated function, which is exactly the gap this replaces.
+ */
+function isGuardedAtScope(pathKey, scopeFn, byScope) {
+  let cur = scopeFn
+  for (;;) {
+    const set = byScope.get(cur)
+    if (set && set.has(pathKey)) return true
+    if (cur === null) return false
+    cur = enclosingFunction(cur)
+  }
+}
+
+function isShape1Guarded(node, scopeFn, byScope) {
   const key = pathKeyOf(node)
-  return key !== null && guardedPathKeys.has(key)
+  return key !== null && isGuardedAtScope(key, scopeFn, byScope)
 }
 
 // ─── Array / push resolution ────────────────────────────────────────────────
@@ -624,11 +711,14 @@ function resolvesToAuditedBuildArgs(argExpr, scopeFn, sourceFile, depth = 0) {
  * @param {import('typescript').Expression} elem
  * @param {Array<import('typescript').Expression>} branchElements
  * @param {number} index
- * @param {Set<string>} guardedPathKeys
+ * @param {import('typescript').Node|null} scopeFn - the SINK's own enclosing
+ *   function (or null for module scope) — shape-1 guard lookups only look at
+ *   this scope and its lexical ancestors, never a sibling/unrelated function.
+ * @param {Map<import('typescript').Node|null, Set<string>>} guardedByScope
  * @param {Map<string,import('typescript').Expression>} moduleConstants
  * @returns {boolean}
  */
-function isGuardedElement(elem, branchElements, index, guardedPathKeys, moduleConstants) {
+function isGuardedElement(elem, branchElements, index, scopeFn, guardedByScope, moduleConstants) {
   if (isFusedSafeToken(elem)) return true
   for (let j = 0; j < index; j++) {
     const prior = branchElements[j]
@@ -636,9 +726,9 @@ function isGuardedElement(elem, branchElements, index, guardedPathKeys, moduleCo
   }
   if (ts.isTemplateExpression(elem) || (ts.isBinaryExpression(elem) && elem.operatorToken.kind === ts.SyntaxKind.PlusToken)) {
     const parts = decomposeDynamicParts(elem)
-    return parts.every((p) => isConstantExpr(p, moduleConstants) || isShape1Guarded(p, guardedPathKeys))
+    return parts.every((p) => isConstantExpr(p, moduleConstants) || isShape1Guarded(p, scopeFn, guardedByScope))
   }
-  return isShape1Guarded(elem, guardedPathKeys)
+  return isShape1Guarded(elem, scopeFn, guardedByScope)
 }
 
 function isIgnoreMarkerAbove(node, sourceFile, rawLines) {
@@ -665,12 +755,12 @@ function analyzeFile(filePath, keyRoot) {
 
   const { spawnApiLocals, spawnNamespaces, guardLocals } = collectImports(sourceFile)
   const moduleConstants = collectModuleConstants(sourceFile)
-  const guardedPathKeys = collectGuardedPathKeys(sourceFile, guardLocals)
+  const guardedByScope = collectGuardedPathKeysByScope(sourceFile, guardLocals)
 
   const findings = []
   let sinksScanned = 0
 
-  const evaluateBranches = (branches, siteNode, calleeLabel) => {
+  const evaluateBranches = (branches, siteNode, calleeLabel, scopeFn) => {
     if (branches === null) {
       sinksScanned++
       const line = lineOf(siteNode, sourceFile)
@@ -687,7 +777,7 @@ function analyzeFile(filePath, keyRoot) {
       elements.forEach((elem, idx) => {
         if (isConstantExpr(elem, moduleConstants)) return
         sinksScanned++
-        if (isGuardedElement(elem, elements, idx, guardedPathKeys, moduleConstants)) return
+        if (isGuardedElement(elem, elements, idx, scopeFn, guardedByScope, moduleConstants)) return
         if (isIgnoreMarkerAbove(elem, sourceFile, rawLines)) return
         findings.push({
           file: rel,
@@ -715,7 +805,7 @@ function analyzeFile(filePath, keyRoot) {
     const scopeFn = enclosingFunction(node)
     if (resolvesToAuditedBuildArgs(argsArg, scopeFn, sourceFile)) return // audited at its own definition (pass 2)
     const branches = resolveArgvBranches(argsArg, scopeFn, sourceFile)
-    evaluateBranches(branches, node, api)
+    evaluateBranches(branches, node, api, scopeFn)
   })
 
   // 2. `_buildArgs` / `build*Args`-shaped functions: inspect their return value.
@@ -727,7 +817,7 @@ function analyzeFile(filePath, keyRoot) {
     for (const stmt of fn.body.statements) {
       if (!ts.isReturnStatement(stmt) || !stmt.expression) continue
       const branches = resolveArgvBranches(stmt.expression, fn, sourceFile)
-      evaluateBranches(branches, stmt, `${name} (return)`)
+      evaluateBranches(branches, stmt, `${name} (return)`, fn)
     }
   })
 
