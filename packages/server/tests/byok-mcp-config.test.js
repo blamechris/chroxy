@@ -532,13 +532,14 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     assert.deepEqual(res.warnings, [])
   })
 
-  it('a .mcp.json that is a symlink is followed, consistent with every other read in this file', () => {
+  it('a .mcp.json that is a symlink to a REGULAR file is followed, consistent with every other read in this file', () => {
     // writeClaudeConfigAtomic (the WRITE path) refuses to write through a
     // symlink; every READ path in this file (this one, resolveProjectBlock's
-    // realpath resolution, the user-config read above) follows symlinks
-    // unconditionally — a user/repo that symlinked a config meant it, and
-    // the size cap above still applies to the symlink's TARGET (statSync
-    // follows links), so a symlink cannot be used to bypass it.
+    // realpath resolution, the user-config read above) follows symlinks to a
+    // regular file unconditionally — a user/repo that symlinked a config
+    // meant it, and the size cap above still applies to the symlink's TARGET
+    // (statSync follows links), so a symlink to an oversized regular file
+    // cannot be used to bypass the cap.
     const externalDir = mkdtempSync(join(tmpdir(), 'chroxy-mcp-specs-external-'))
     try {
       const externalMcpJson = join(externalDir, 'external.mcp.json')
@@ -549,6 +550,22 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     } finally {
       rmSync(externalDir, { recursive: true, force: true })
     }
+  })
+
+  it('a .mcp.json symlink to a NON-regular target (e.g. a directory) is skipped with a warning, never read', () => {
+    // Copilot review (#7931): .mcp.json is repo-controlled, attacker-
+    // influenceable content. A symlink to a FIFO (no writer) hangs
+    // readFileSync indefinitely — before the trust gate ever runs — and a
+    // symlink to a character device (e.g. /dev/zero) has no real EOF, so
+    // the size cap (which reads `stat.size`, meaningless for either) never
+    // triggers. mkfifo isn't portable to this repo's Windows CI legs, so
+    // this proves the same isFile() gate with a directory symlink instead —
+    // any non-regular stat target takes the identical skip-with-warning path.
+    symlinkSync(cwd, join(cwd, '.mcp.json'))
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /not a regular file/)
   })
 })
 

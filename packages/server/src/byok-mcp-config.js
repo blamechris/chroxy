@@ -650,7 +650,21 @@ function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
       // follows symlinks (as does readFileSync below), consistent with
       // every other read in this file — see writeClaudeConfigAtomic's
       // header comment for why WRITES are guarded but reads are not.
+      //
+      // isFile() guard: `.mcp.json` is repo-controlled, attacker-influenceable
+      // content (a cloned repo can make it a symlink to anything). A symlink
+      // to a FIFO or character device (e.g. `/dev/zero`) reports a `size` that
+      // is meaningless for this purpose — a FIFO with no writer hangs
+      // readFileSync indefinitely (before the trust gate even runs), and a
+      // device like `/dev/zero` has no real EOF, so the size cap above never
+      // triggers. Only a REGULAR file (following symlinks to their target,
+      // same as the size check) is ever read. Mirrors writeClaudeConfigAtomic's
+      // `target.isFile()` check on the write side.
       const stat = statSync(filePath)
+      if (!stat.isFile()) {
+        warnings.push(`MCP config ${filePath} is not a regular file; skipping load`)
+        return null
+      }
       if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
         warnings.push(
           `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`,
