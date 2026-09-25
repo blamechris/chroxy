@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, symlinkSync, mkdirSync, constants as fsConstants } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -8,7 +9,10 @@ import {
   readTrustedSecretFile,
   _openTrustedFdSync,
   defaultTrustedFileReadDeps,
+  DEFAULT_TRUSTED_FILE_MAX_SIZE,
 } from '../src/trusted-file-read.js'
+
+const TRUSTED_FILE_READ_MODULE_PATH = new URL('../src/trusted-file-read.js', import.meta.url).pathname
 
 /**
  * #7893 — four credential-file readers (`event-ingest.js`,
@@ -215,7 +219,30 @@ describe('#7893 _openTrustedFdSync — POSIX branch keeps O_NOFOLLOW (mutation: 
     })
     assert.equal(calls.length, 1)
     assert.equal(calls[0].flags & SENTINEL, SENTINEL, 'the POSIX branch dropped O_NOFOLLOW from the flags — the guard is a no-op')
-    assert.equal(calls[0].flags, fsConstants.O_RDONLY | SENTINEL)
+    // #7893 hardening: O_NONBLOCK is also ORed in (keeps a planted FIFO's
+    // open() from blocking the daemon forever — see the FIFO test below).
+    // Real on every POSIX target this ships for, hence the exact-equality
+    // check; falls back to a no-op 0 only if a platform's Node build lacks
+    // the constant.
+    const expectedNonblock = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+    assert.equal(calls[0].flags, fsConstants.O_RDONLY | SENTINEL | expectedNonblock)
+  })
+
+  it('fstat failure after a successful open still closes the fd (no leak)', () => {
+    const calls = []
+    assert.throws(
+      () => _openTrustedFdSync('/some/path', {
+        hasONoFollow: true,
+        oNofollow: 1,
+        platform: 'linux',
+        openSync: () => { calls.push('open'); return 42 },
+        closeSync: (fd) => { calls.push(`close:${fd}`) },
+        fstatSync: () => { throw Object.assign(new Error('simulated EIO'), { code: 'EIO' }) },
+        lstatSync: () => { throw new Error('lstat must not be used on the POSIX branch') },
+      }),
+      (err) => err.code === 'EIO',
+    )
+    assert.deepEqual(calls, ['open', 'close:42'], 'the fd opened before the failing fstat must be closed, not leaked')
   })
 
   it('refuses a planted symlink with ELOOP through the REAL helper', { skip: process.platform === 'win32' ? 'covered by the forced-win32 branch below' : SKIP_NO_SYMLINK }, () => {
@@ -339,5 +366,98 @@ describe('#7893 _openTrustedFdSync — forced win32 branch (runs on every platfo
       (err) => err.code === 'ENOSYS' && /O_NOFOLLOW/.test(err.message),
     )
     assert.equal(opened, 0)
+  })
+})
+
+describe('#7893 readTrustedSecretFile — a FIFO at the path must not block the daemon', () => {
+  // Regression coverage for a live repro: BEFORE O_NONBLOCK was added to the
+  // POSIX open flags, opening a FIFO with no writer present blocked
+  // `openSync` forever — and since this is a synchronous call on Node's
+  // single thread, that hangs the WHOLE daemon, not just this read. The
+  // "attacker with write access to the containing directory" threat model
+  // #7893 already assumes can plant a FIFO exactly as easily as a symlink.
+  //
+  // The call itself runs in a SUBPROCESS with an enforced wall-clock
+  // timeout, never in this test process directly — a mutation that
+  // reintroduces the block must fail loudly and promptly, not wedge the
+  // whole test run (docs/false-safety-guards.md: "a guard that HANGS
+  // instead of failing" — catalogue entry 17, #7340).
+  it('refuses a FIFO instead of blocking on open() with no writer present', { skip: process.platform === 'win32' ? 'FIFOs are not ordinary files at a Windows path' : false }, () => {
+    withTmpDir((dir) => {
+      const fifoPath = join(dir, 'secret')
+      try {
+        execFileSync('mkfifo', ['-m', '0600', fifoPath])
+      } catch (err) {
+        throw new Error(`mkfifo unavailable on this POSIX host — cannot exercise the FIFO-block regression directly: ${err.message}`)
+      }
+
+      const scriptPath = join(dir, 'run-read.mjs')
+      writeFileSync(scriptPath, [
+        `import { readTrustedSecretFile } from ${JSON.stringify(TRUSTED_FILE_READ_MODULE_PATH)}`,
+        `const result = readTrustedSecretFile(${JSON.stringify(fifoPath)}, { mode: 0o600 })`,
+        'process.stdout.write(JSON.stringify(result))',
+      ].join('\n'))
+
+      let out
+      try {
+        out = execFileSync(process.execPath, [scriptPath], {
+          timeout: 5000,
+          killSignal: 'SIGKILL',
+          encoding: 'utf8',
+        })
+      } catch (err) {
+        if (err.signal || err.killed) {
+          assert.fail('readTrustedSecretFile blocked for 5s+ on a FIFO with no writer instead of returning immediately (O_NONBLOCK regression)')
+        }
+        throw err
+      }
+
+      const result = JSON.parse(out)
+      assert.equal(result.status, 'refused')
+      assert.equal(result.code, 'ENOTFILE', 'a FIFO must be refused as a non-regular file, never read from')
+    })
+  })
+})
+
+describe('#7893 readTrustedSecretFile — size cap (bounds what a same-uid attacker can force allocated)', () => {
+  it('refuses a file over the configured maxSize, without reading it', { skip: process.platform === 'win32' }, () => {
+    withTmpDir((dir) => {
+      const file = join(dir, 'secret')
+      writeFileSync(file, 'x'.repeat(100), { mode: 0o600 })
+      const result = readTrustedSecretFile(file, { mode: 0o600, maxSize: 10 })
+      assert.equal(result.status, 'refused')
+      assert.equal(result.code, 'ETOOBIG')
+    })
+  })
+
+  it('allows a file exactly at maxSize (boundary is size > maxSize, not >=)', { skip: process.platform === 'win32' }, () => {
+    withTmpDir((dir) => {
+      const file = join(dir, 'secret')
+      writeFileSync(file, 'x'.repeat(10), { mode: 0o600 })
+      const result = readTrustedSecretFile(file, { mode: 0o600, maxSize: 10 })
+      assert.equal(result.status, 'ok')
+      assert.equal(result.content, 'x'.repeat(10))
+    })
+  })
+
+  it('the default cap is DEFAULT_TRUSTED_FILE_MAX_SIZE and refuses a real file over it end-to-end', { skip: process.platform === 'win32' }, () => {
+    withTmpDir((dir) => {
+      const file = join(dir, 'secret')
+      writeFileSync(file, Buffer.alloc(DEFAULT_TRUSTED_FILE_MAX_SIZE + 1, 'a'), { mode: 0o600 })
+      const result = readTrustedSecretFile(file, { mode: 0o600 })
+      assert.equal(result.status, 'refused')
+      assert.equal(result.code, 'ETOOBIG')
+    })
+  })
+
+  it('the cap applies even with platform forced to win32 — it is a memory bound, not a mode-bits check', () => {
+    withTmpDir((dir) => {
+      const file = join(dir, 'secret')
+      writeFileSync(file, 'x'.repeat(100), { mode: 0o644 })
+      const deps = { ...defaultTrustedFileReadDeps, platform: 'win32' }
+      const result = readTrustedSecretFile(file, { mode: 0o600, maxSize: 10, deps })
+      assert.equal(result.status, 'refused')
+      assert.equal(result.code, 'ETOOBIG')
+    })
   })
 })

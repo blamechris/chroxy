@@ -45,11 +45,47 @@
  * behaviour — POSIX only (win32 mode bits don't reflect NTFS ACLs, the
  * #4144 carve-out every sibling store already uses) and exactly-0600 by
  * `!==`, not "no wider than 0600".
+ *
+ * ── Three hardenings beyond the TOCTOU fix itself ─────────────────────────
+ *
+ * 1. The POSIX open+fstat is now exception-safe: `fstatSync(fd)` can fail
+ *    after a successful `open()` (EIO, a revoked ACL mid-call, …), and the
+ *    fd must still be closed on that path — a daemon that reads these paths
+ *    repeatedly (session-token-store's `read()` in particular) leaks one fd
+ *    per failure otherwise, a slow exhaustion DoS.
+ * 2. `O_NONBLOCK` is ORed into the POSIX open flags. A regular file is
+ *    unaffected by the flag, but a FIFO planted at a credential path — the
+ *    same "attacker with write access to the directory" the TOCTOU fix
+ *    already assumes — blocks an `O_RDONLY` open with no writer present
+ *    FOREVER. Since this is a synchronous call on Node's single thread, that
+ *    hangs the whole daemon, not just the one read; confirmed by a live
+ *    `mkfifo` repro before this line was added. `O_NONBLOCK` makes the open
+ *    return immediately regardless, and the subsequent `stat.isFile()` check
+ *    refuses the non-regular file before any read is attempted.
+ * 3. The read is capped at `DEFAULT_TRUSTED_FILE_MAX_SIZE` (1 MiB) via the
+ *    fd's `fstat`-reported size, checked BEFORE `readFileSync`. Every real
+ *    credential file here is a few KB; a same-uid attacker who can plant a
+ *    file that also passes the exact-0600-mode + owner-uid checks could
+ *    otherwise plant an arbitrarily large one and force the daemon to
+ *    allocate it wholesale on every read.
  */
 import { openSync, closeSync, fstatSync, lstatSync, readFileSync, constants as fsConstants } from 'node:fs'
 
 /** True when this platform's Node exports a usable `O_NOFOLLOW`. */
 const HAS_O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' && fsConstants.O_NOFOLLOW !== 0
+
+/**
+ * True when this platform's Node exports `O_NONBLOCK`. Real on every POSIX
+ * target this daemon ships for; falls back to `0` (a no-op OR) rather than
+ * refusing, because unlike `O_NOFOLLOW` this is a hardening, not the trust
+ * boundary itself — its absence would reopen a FIFO-blocking hang, not a
+ * symlink-follow.
+ */
+const HAS_O_NONBLOCK = typeof fsConstants.O_NONBLOCK === 'number'
+const O_NONBLOCK = HAS_O_NONBLOCK ? fsConstants.O_NONBLOCK : 0
+
+/** Default cap on bytes read from a trusted secret file (see hardening #3 above). */
+export const DEFAULT_TRUSTED_FILE_MAX_SIZE = 1024 * 1024
 
 /**
  * The real filesystem + platform seam. Tests inject a replacement to force
@@ -99,9 +135,20 @@ export function _openTrustedFdSync(path, deps) {
 
   if (hasONoFollow) {
     // POSIX: one atomic, kernel-enforced decision. No separate check — the
-    // fd we get back IS the trust check's subject.
-    const fd = doOpen(path, O_RDONLY | oNofollow)
-    return { fd, stat: doFstat(fd) }
+    // fd we get back IS the trust check's subject. O_NONBLOCK is harmless
+    // for a regular file and keeps a FIFO planted at the path from blocking
+    // this synchronous open (and therefore the whole daemon) forever
+    // waiting for a writer that will never come.
+    const fd = doOpen(path, O_RDONLY | oNofollow | O_NONBLOCK)
+    try {
+      return { fd, stat: doFstat(fd) }
+    } catch (err) {
+      // fstat can fail after a successful open (EIO, a revoked ACL mid-call,
+      // …). The fd must still be closed here — nothing further up the stack
+      // has its number once this throws.
+      try { doClose(fd) } catch { /* best-effort */ }
+      throw err
+    }
   }
 
   // No O_NOFOLLOW. win32 is the ONE platform where that is expected and
@@ -165,6 +212,12 @@ export function _openTrustedFdSync(path, deps) {
  * @param {boolean} [opts.checkOwner] - also require the fd's uid equal
  *   `process.getuid()` (POSIX only). Off by default — only the ingest
  *   secret checks this today.
+ * @param {number} [opts.maxSize] - refuse (code `ETOOBIG`) a file larger
+ *   than this many bytes, checked via the fd's fstat size BEFORE reading —
+ *   default {@link DEFAULT_TRUSTED_FILE_MAX_SIZE} (1 MiB). Every real
+ *   credential file here is a few KB; this bounds what a same-uid attacker
+ *   who can also satisfy the mode/owner checks can force the daemon to
+ *   allocate on a read.
  * @param {object} [opts.deps] - test seam; defaults to
  *   `defaultTrustedFileReadDeps`.
  * @returns {
@@ -173,7 +226,7 @@ export function _openTrustedFdSync(path, deps) {
  *   | { status: 'ok', content: string, mode: number, uid: number }
  * }
  */
-export function readTrustedSecretFile(path, { mode = 0o600, checkOwner = false, deps = defaultTrustedFileReadDeps } = {}) {
+export function readTrustedSecretFile(path, { mode = 0o600, checkOwner = false, maxSize = DEFAULT_TRUSTED_FILE_MAX_SIZE, deps = defaultTrustedFileReadDeps } = {}) {
   let opened
   try {
     opened = _openTrustedFdSync(path, deps)
@@ -195,6 +248,20 @@ export function readTrustedSecretFile(path, { mode = 0o600, checkOwner = false, 
     }
     const actualMode = Number(stat.mode) & 0o777
     const actualUid = Number(stat.uid)
+    // Size cap BEFORE the read (and on every platform — this is a memory
+    // bound, not a POSIX-mode-bits check). `stat.size` is a BigInt when fstat
+    // was called with `{ bigint: true }` (production deps); a test double
+    // that omits it is read as "unknown" and skips the cap rather than
+    // throwing — production always supplies it.
+    if (typeof stat.size === 'bigint' && stat.size > BigInt(maxSize)) {
+      return {
+        status: 'refused',
+        code: 'ETOOBIG',
+        mode: actualMode,
+        uid: actualUid,
+        cause: new Error(`${path} is ${stat.size} bytes, exceeding the ${maxSize}-byte cap for a trusted secret file`),
+      }
+    }
     if (deps.platform !== 'win32') {
       if (actualMode !== mode) {
         return { status: 'refused', code: 'EMODE', mode: actualMode, uid: actualUid, cause: null }
