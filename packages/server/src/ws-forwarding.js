@@ -1,7 +1,8 @@
 import { createLogger } from './logger.js'
-import { getDefaultModelId, getRegistryForProvider } from './models.js'
+import { getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { settlePush } from './push.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
+import { broadcastRosterPerRecipient } from './roster-broadcast.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -142,7 +143,7 @@ function terminalSubscriberFilter(sessionId) {
 
 /** Multi-session forwarding via normalizer */
 function setupSessionForwarding(normalizer, ctx) {
-  const { sessionManager, devPreview, checkpointManager, broadcast, broadcastToSession } = ctx
+  const { sessionManager, devPreview, checkpointManager, broadcast, broadcastToSession, defaultProvider = null } = ctx
 
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // #5313 (WP-1.3): this listener runs synchronously inside the
@@ -152,23 +153,46 @@ function setupSessionForwarding(normalizer, ctx) {
     // Contain it: wrap the body, log with the session id, and swallow so a
     // single malformed event can't bring down the process.
     try {
-    // models_updated is global — broadcast to ALL clients, not per-session.
+    // models_updated is global — not scoped to viewers of one session (unlike
+    // broadcastToSession). #7895: it is no longer sent to every client
+    // unconditionally either — broadcastRosterPerRecipient fans it out so
+    // each connected client receives it only when the tag names a registry
+    // their own active session actually uses (see that function's docstring,
+    // ./roster-broadcast.js, for the exact per-tag recipient rule).
     // Look up the session's provider so clients receive the provider-scoped
     // defaultModel rather than the Claude-only global. Falls back to the
-    // Claude default registry when the session is not found (e.g. already
-    // destroyed). Includes the provider name in the payload so clients can
-    // route the model list to the correct session type. (#2993)
+    // daemon's resolved default when the session is not found (e.g. already
+    // destroyed) — same resolution `ws-history.js`'s connect path uses
+    // (`resolveRosterProvider`), so a roster this event produces is tagged the
+    // same way whether a client learns of it via reconnect or via this live
+    // push. (#2993)
+    //
+    // #7895 — this used to hardcode the fallback tag to `'claude-sdk'` and
+    // broadcast ONE message. A claude-cli/claude-tui/claude-byok client keys
+    // its roster by the EXACT tag it arrives under
+    // (`packages/store-core/src/models-by-provider.ts`), so that single
+    // `claude-sdk`-tagged message was delivered and discarded by every other
+    // Claude-family client — the same #7756 bug the overlay-reload path was
+    // fixed for. `broadcastRosterPerRecipient` (`./roster-broadcast.js`) is
+    // that same per-recipient re-tagging, shared rather than re-implemented a
+    // third time: a default-registry roster is re-sent once per known
+    // Claude-family tag, each copy filtered to the clients that resolve to it;
+    // a non-Claude roster (codex, gemini, …) is sent once, unchanged, to its
+    // exact-match clients only — untouched from pre-#7895 behaviour.
     if (event === 'models_updated' && data?.models) {
       const sessionEntry = sessionManager.getSession(sessionId)
       const providerName = sessionEntry?.provider ?? null
-      const registry = providerName ? getRegistryForProvider(providerName) : null
-      const defaultModel = registry ? registry.getDefaultModelId() : getDefaultModelId()
-      // When the session is not found (race with teardown) providerName is null
-      // but we still fall back to the Claude default registry, so advertise
-      // 'claude-sdk' rather than null so clients can route the model list
-      // consistently. (#2993)
-      const resolvedProvider = providerName ?? 'claude-sdk'
-      broadcast({ type: 'available_models', models: data.models, defaultModel, provider: resolvedProvider })
+      const rosterProvider = resolveRosterProvider(providerName, defaultProvider)
+      // getRegistryForProvider never returns a falsy value (unknown/null names
+      // fall back to defaultRegistry), and resolveRosterProvider never returns
+      // a falsy tag either — so this always resolves to a real registry.
+      const defaultModel = getRegistryForProvider(rosterProvider).getDefaultModelId()
+      broadcastRosterPerRecipient({
+        broadcast,
+        sessionManager,
+        defaultProvider,
+        message: { type: 'available_models', models: data.models, defaultModel, provider: rosterProvider },
+      })
       return
     }
 
@@ -357,7 +381,7 @@ function setupSessionForwarding(normalizer, ctx) {
 
 /** Legacy single CLI session forwarding via normalizer */
 function setupCliForwarding(normalizer, ctx) {
-  const { cliSession, devPreview, broadcast } = ctx
+  const { cliSession, devPreview, broadcast, defaultProvider = null } = ctx
 
   // #3240: `skill_changed` is forwarded so legacy single-CLI users get the
   // same trust-mismatch broadcast as multi-session mode. The normaliser
@@ -457,12 +481,23 @@ function setupCliForwarding(normalizer, ctx) {
     }
   }))
 
-  // models_updated bypasses normalizer — global broadcast.
-  // CLI mode is always a Claude session; include provider so clients can
-  // route the model list consistently with the multi-session path. (#2993)
+  // models_updated bypasses normalizer — global broadcast. Legacy single-CLI
+  // mode has no sessionManager and exactly one running session, so — unlike
+  // the multi-session path above — there is no per-client provider variance
+  // to fan out over; every connected client sees the SAME roster tag. Tag it
+  // with whatever `ws-history.js`'s legacy connect path
+  // (`resolveRosterProvider(null, billingCanary?.defaultProvider)`) would send
+  // for this daemon, rather than the literal `'claude-cli'` (#7895): a
+  // claude-tui or claude-byok client — or a daemon started with a non-default
+  // `config.provider` — keys its roster by that EXACT tag
+  // (`packages/store-core/src/models-by-provider.ts`), so a hardcoded
+  // `'claude-cli'` was delivered and discarded whenever the connect-time tag
+  // disagreed.
   cliSession.on('models_updated', safeForward('cli:models_updated', (data) => {
     if (data?.models) {
-      broadcast({ type: 'available_models', models: data.models, defaultModel: getDefaultModelId(), provider: 'claude-cli' })
+      const legacyProvider = resolveRosterProvider(null, defaultProvider)
+      const legacyRegistry = getRegistryForProvider(legacyProvider)
+      broadcast({ type: 'available_models', models: data.models, defaultModel: legacyRegistry.getDefaultModelId(), provider: legacyProvider })
     }
   }))
 }
