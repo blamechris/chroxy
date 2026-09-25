@@ -39,7 +39,7 @@ import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopback
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
-import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
+import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER, resolveDaemonDefaultProvider } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { registerAcpProviders } from './acp-session.js'
@@ -938,7 +938,7 @@ export async function startCliServer(config) {
   // bridge). Collision-checked against every provider registered above.
   registerAcpProviders(config)
 
-  const providerType = config.provider || DEFAULT_PROVIDER
+  const providerType = resolveDaemonDefaultProvider(config)
 
   // Warm the models registry from disk cache so the picker is populated before
   // any SDK session fires supportedModels(). Routed through the ACTIVE provider's
@@ -1507,7 +1507,7 @@ export async function startCliServer(config) {
   // refreshes too. A malformed save is ignored (last-good kept).
   //
   // #7756: `defaultProvider` mirrors `billingCanaryMonitor`'s own
-  // `getDefaultProvider` below (`config.provider || DEFAULT_PROVIDER`) — the
+  // `getDefaultProvider` below (`resolveDaemonDefaultProvider(config)`) — the
   // same resolution `ws-history.js` feeds `resolveRosterProvider` via
   // `billingCanary.defaultProvider` — so a no-session client's roster is
   // tagged identically whether it arrives on connect or on a reload.
@@ -1515,7 +1515,7 @@ export async function startCliServer(config) {
     onReload: createOverlayReloadBroadcaster({
       wsServer,
       sessionManager,
-      defaultProvider: config.provider || DEFAULT_PROVIDER,
+      defaultProvider: resolveDaemonDefaultProvider(config),
     }),
   })
 
@@ -1536,8 +1536,8 @@ export async function startCliServer(config) {
   const egressCheckEnabled = config.billing?.egressCheck === true
   const billingCanaryMonitor = new BillingCanaryMonitor({
     getSessions: () => sessionManager.listSessions(),
-    getDefaultProvider: () => config.provider || DEFAULT_PROVIDER,
-    getApiKeyAuth: () => (config.provider || DEFAULT_PROVIDER) === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY),
+    getDefaultProvider: () => resolveDaemonDefaultProvider(config),
+    getApiKeyAuth: () => resolveDaemonDefaultProvider(config) === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY),
     broadcast: (msg) => { try { wsServer?.broadcast(msg) } catch { /* best-effort */ } },
     logger: log,
     resolveEgressIp: egressCheckEnabled ? () => resolvePublicIp() : undefined,

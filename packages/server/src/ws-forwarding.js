@@ -153,7 +153,12 @@ function setupSessionForwarding(normalizer, ctx) {
     // Contain it: wrap the body, log with the session id, and swallow so a
     // single malformed event can't bring down the process.
     try {
-    // models_updated is global — broadcast to ALL clients, not per-session.
+    // models_updated is global — not scoped to viewers of one session (unlike
+    // broadcastToSession). #7895: it is no longer sent to every client
+    // unconditionally either — broadcastRosterPerRecipient fans it out so
+    // each connected client receives it only when the tag names a registry
+    // their own active session actually uses (see that function's docstring,
+    // ./roster-broadcast.js, for the exact per-tag recipient rule).
     // Look up the session's provider so clients receive the provider-scoped
     // defaultModel rather than the Claude-only global. Falls back to the
     // daemon's resolved default when the session is not found (e.g. already

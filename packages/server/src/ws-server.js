@@ -36,7 +36,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
-import { getProviderDataDirs, DEFAULT_PROVIDER } from './providers.js'
+import { getProviderDataDirs, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
@@ -2424,9 +2424,9 @@ export class WsServer {
       // `available_models` send sites in ws-forwarding.js tag a no-session (or
       // legacy single-session) roster identically to `ws-history.js`'s connect
       // path and `createOverlayReloadBroadcaster`'s overlay-reload path — the
-      // SAME `config.provider || DEFAULT_PROVIDER` resolution
+      // SAME resolution (#7932: `resolveDaemonDefaultProvider`, ./providers.js)
       // `billingCanaryMonitor`'s `getDefaultProvider` uses.
-      defaultProvider: this.config?.provider || DEFAULT_PROVIDER,
+      defaultProvider: resolveDaemonDefaultProvider(this.config),
       // #4788 Wave 2: hand the question-route registration through a helper so
       // dispatch and routing-guard stay symmetric. When a question is
       // registered for session S, every currently-connected client that's
