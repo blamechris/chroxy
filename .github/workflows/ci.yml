@@ -875,14 +875,17 @@ jobs:
           # resolveIngestSecret #7923, trusted-file-read.js #7924, claude-tui
           # _hookReadFile #7926), each caught only by adversarial review.
           # Scans packages/server/src AND packages/claude-hooks/src — every
-          # package known to use O_NOFOLLOW today.
+          # package known to use O_NOFOLLOW today — and fails if any OTHER
+          # tracked file under packages/ or scripts/ (tests excluded) starts
+          # referencing it, so a new user cannot sit outside the sweep.
           #
           # Exit 2 means the lint could not do its job (bad flags, it scanned
-          # fewer files than --min-files, or it found zero O_NOFOLLOW opens at
+          # fewer files than --min-files, it found zero O_NOFOLLOW opens at
           # all — this repo has several, so zero means the detector broke, not
-          # that the code got safer) and is reported separately from exit 1 —
-          # "the guard is broken" must never be shown as "the guard passed",
-          # nor as "the code is dirty".
+          # that the code got safer — a file outside the scanned trees uses
+          # O_NOFOLLOW, or a source file failed to parse) and is reported
+          # separately from exit 1 — "the guard is broken" must never be shown
+          # as "the guard passed", nor as "the code is dirty".
           set +e
           scripts/lint-nofollow-nonblock.sh
           rc=$?
@@ -890,7 +893,7 @@ jobs:
           if [ "$rc" -eq 0 ]; then
             echo "OK — every O_NOFOLLOW open() also has O_NONBLOCK or an allowlist reason"
           elif [ "$rc" -eq 2 ]; then
-            echo "::error::lint-nofollow-nonblock could not run (bad flags, it scanned fewer files than --min-files, or it found zero O_NOFOLLOW opens). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-nofollow-nonblock.mjs."
+            echo "::error::lint-nofollow-nonblock could not run (bad flags, it scanned fewer files than --min-files, it found zero O_NOFOLLOW opens, a file outside the scanned trees uses O_NOFOLLOW, or a source file failed to parse). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-nofollow-nonblock.mjs."
             exit 1
           else
             echo "::error::An O_NOFOLLOW open() is missing O_NONBLOCK and is not allowlisted — a planted FIFO/device would hang it forever. See packages/server/scripts/lint-nofollow-nonblock.sh."

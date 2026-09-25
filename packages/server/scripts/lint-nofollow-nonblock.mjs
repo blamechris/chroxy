@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Lint: every raw fs `open()`/`openSync()` whose flags include `O_NOFOLLOW`
- * also includes `O_NONBLOCK`, or carries an allowlist reason (#7938).
+ * Lint: every `O_NOFOLLOW` flags value that reaches an open also carries
+ * `O_NONBLOCK`, or carries an allowlist reason (#7938).
  *
  * `O_NOFOLLOW` refuses a symlink at the final path component; it says nothing
  * about a FIFO, character device, or other non-regular file an attacker can
@@ -16,143 +16,126 @@
  *   - claude-tui's `_hookReadFile` (#7926) — pinned one libuv threadpool thread
  *     per planted FIFO name, exhausting the shared 4-thread pool process-wide.
  *
- * This lint turns "someone remembers to audit the next O_NOFOLLOW site" into
- * something CI enforces, the same shape as `lint-argv-sinks.mjs` did for the
- * argv-injection class (#7868).
+ * ## The two checks
  *
- * ## What is scanned
+ * The lint does not try to recognise "an open call" by its callee. Every way
+ * of spelling one — `openSync`, `fs.open` (callback), `fsp.open`,
+ * `fs.promises.open`, an alias, `deps.openSync`, a dependency-injection
+ * parameter renamed to `doOpen`, a wrapper such as `openNoFollow` — is a call
+ * whose argument carries the flags. So the lint follows the FLAGS VALUE
+ * instead, in both directions:
  *
- * Every `open()`/`openSync()` call in the given `--src-dir` trees (default:
- * `packages/server/src` AND `packages/claude-hooks/src`, so the sweep covers
- * every package known to use `O_NOFOLLOW` today, not just the server) whose
- * callee resolves — by import tracking — to a raw fs API:
+ *   1. FORWARD — every argument of every call (callee-agnostic) is evaluated
+ *      as a flags expression. If any value it can take includes O_NOFOLLOW,
+ *      every such value must also include O_NONBLOCK, or the call must carry
+ *      the allowlist marker. Object/array/function/string arguments are not
+ *      flags and are skipped here — the reverse check covers any O_NOFOLLOW
+ *      inside them.
  *
- *   - `openSync` named-imported from `fs`/`node:fs` (aliased or not).
- *   - `open` named-imported from `fs/promises`/`node:fs/promises` (aliased or
- *     not) — this is the `FileHandle`-returning async open.
- *   - `<ns>.openSync(...)` / `<ns>.promises.open(...)` where `<ns>` is a
- *     namespace or default import of `fs`/`node:fs`.
- *   - `<ns>.open(...)` where `<ns>` is a namespace/default import of
- *     `fs/promises`/`node:fs/promises`, or a `{ promises as <ns> }` import
- *     from `fs`/`node:fs`.
- *   - a bare call to an identifier literally named `open` or `openSync`,
- *     REGARDLESS of import provenance. This is a deliberate, narrow widening:
- *     `open-nofollow.js` — the ONE helper this whole file-ops surface routes
- *     symlink-refusing opens through (#7280) — takes its real `open` function
- *     as an injected dependency-injection PARAMETER (`{ ..., open, ... } =
- *     deps`) so tests can force its win32 emulation branch on every platform.
- *     That parameter shadows the module's own `import { open as fsOpen } from
- *     'fs/promises'`, so import-tracking alone can never see the call this
- *     lint most needs to check. Requiring the call be spelled exactly `open`/
- *     `openSync` (not a looser substring match) keeps this from flagging an
- *     unrelated same-named local elsewhere (`openConnection`, `openModal`,
- *     …) while still catching the DI-seam pattern used here.
+ *   2. REVERSE — every O_NOFOLLOW reference in the source must be accounted
+ *      for. A reference is accounted for when it sits lexically inside a call
+ *      argument the forward check evaluated; or when the expression it is
+ *      built into already carries O_NONBLOCK in every value (`export const F =
+ *      O_RDONLY | O_NOFOLLOW | O_NONBLOCK`); or when it is stored under a name
+ *      that is itself O_NOFOLLOW-named (`oNofollow: fsConstants.O_NOFOLLOW` in
+ *      a deps object — every later use of that name is itself a reference, so
+ *      the value is still followed); or when it is only feature-detected
+ *      (`typeof`, a comparison, `!`, a condition). A reference stored in an
+ *      ordinary local is followed to every use of that local. ANYTHING ELSE —
+ *      a `return`, an `export`, an object property with an unrelated name, a
+ *      renaming destructure, an array element — is a place the value leaves
+ *      the lint's sight, and is a finding. This is what makes an unresolvable
+ *      flow FAIL rather than pass: a flag passed into a function parameter, a
+ *      flags const imported from another module, `this.flags`, and a
+ *      `{ flags }` option bag all reach the reverse check even though the
+ *      forward check cannot see the open that eventually consumes them.
  *
- * `openNoFollow()` itself (the wrapper `open-nofollow.js` exports) is
- * DELIBERATELY NOT treated as a sink at its CALL sites (`reader.js`,
- * `memory.js`, `byok-tool-executor.js`, …) — it is not imported from an fs
- * module, so import-tracking does not see it, and it should not: every caller
- * delegates uniformly to the ONE implementation this lint DOES check (via the
- * `open`-named-parameter rule above), so scrutinising each caller again would
- * be redundant. A caller passing `O_DIRECTORY` (`byok-tool-executor.js`) needs
- * no special-casing for exactly the reason the issue names: a FIFO cannot
- * satisfy `O_DIRECTORY`, so `openNoFollow`'s own unconditional `O_NONBLOCK`
- * covers it for free.
+ * ## Flag-expression evaluation
  *
- * A known, accepted gap: `trusted-file-read.js` destructures its own
- * dependency-injection open function as `openSync: doOpen` — a RENAMED local,
- * not spelled `open`/`openSync` — so this lint cannot trace it. That site is
- * independently verified correct (it carries `O_NONBLOCK` today) and has its
- * own dedicated FIFO regression test (`trusted-file-read.test.js`, "readTrusted
- * SecretFile — a FIFO at the path must not block the daemon"); this lint's
- * value is catching the NEXT such site before it needs the same rediscovery.
+ * A flags expression is evaluated to the SET OF VALUES it can take, each
+ * recorded as "has O_NOFOLLOW?" × "has O_NONBLOCK?" — not to one merged bag of
+ * names, so `c ? O_NOFOLLOW : O_NONBLOCK` is a finding (one of its values has
+ * O_NOFOLLOW and not O_NONBLOCK).
  *
- * ## Flag-expression evidence, not full value resolution
+ *   - `a | b` combines every value of `a` with every value of `b`.
+ *   - `c ? a : b`, and `a || b` / `a ?? b`, are either side's values. The
+ *     platform-fallback idiom `(fsConstants.O_NONBLOCK || 0)` — a falsy
+ *     literal on the right — is read as its left side.
+ *   - A name (identifier, `.property`, `['string']`, destructured or imported
+ *     binding) is recognised by NAME: normalised (lower-cased, `_`/`$`
+ *     removed) it contains `onofollow` / `ononblock` (`O_NOFOLLOW`,
+ *     `fsConstants.O_NONBLOCK`, `oNofollow`). A predicate name (`has…`,
+ *     `is…`, `can…`, `supports…`) never counts: `HAS_O_NONBLOCK` is a
+ *     boolean, not the flag.
+ *   - A local variable is resolved to every value assigned to it anywhere in
+ *     the file: its initializer and each `x = …` are alternatives, wherever
+ *     they sit. An `x |= …` is ORed into all of them only when it is (a) not
+ *     nested in a branch, loop, try block, case, catch or closure, (b)
+ *     positioned BEFORE the read being evaluated, and (c) the variable is
+ *     never reassigned with `=`; otherwise it is only a "maybe" (adds that
+ *     share the same guard text are applied together). The one conditional
+ *     add read as certain is an O_NONBLOCK add guarded by a condition that
+ *     names O_NONBLOCK itself (`if (hasONonBlock) flags |=
+ *     fsConstants.O_NONBLOCK`): O_NONBLOCK is then missing only where the
+ *     platform has no O_NONBLOCK. Any other write (`&=`, `^=`, `++`, a
+ *     destructuring assignment) can clear bits, so it drops O_NONBLOCK from
+ *     every value.
+ *   - An O_NONBLOCK-named local whose resolved values carry no O_NONBLOCK at
+ *     all (`const O_NONBLOCK = 0x800`, a hardcoded number that is O_EXCL on
+ *     macOS) is NOT trusted by its name.
+ *   - Anything else — a call, `&`, `~`, `-`, a computed element access — is
+ *     OPAQUE: O_NOFOLLOW found anywhere inside it still counts (fail closed),
+ *     O_NONBLOCK found inside it does NOT (`(f | NF) & ~O_NONBLOCK` masks it
+ *     out).
  *
- * The flags argument (`open()`/`openSync()`'s 2nd positional argument) is
- * walked as an AST tree, not a same-line regex — `--src-dir` fixtures below
- * include a multi-line call specifically to prove this. Detection is NAME
- * evidence, collected by walking every leaf of the flags expression:
+ * ## What this lint does not prove
  *
- *   - a `PropertyAccessExpression` (`fsConstants.O_NOFOLLOW`,
- *     `constants.O_NOFOLLOW`) is judged by its final `.name` text.
- *   - an `Identifier` is judged by its own text directly (so a destructured
- *     `const { O_NOFOLLOW } = fs.constants` is caught without needing to
- *     trace the destructuring source), AND — if it has a `const`/`let`
- *     declaration in the SAME function or module scope — resolved into that
- *     declaration's initializer PLUS every later `identifier |= <expr>` /
- *     `identifier = <expr>` compound-assignment in the same scope (union of
- *     all of them), recursively, up to a depth bound. This is what makes
- *     `const FLAGS = O_RDONLY | O_NOFOLLOW; openSync(p, FLAGS)` (a same-module
- *     const) and `let flags = O_RDONLY; if (x) flags |= O_NOFOLLOW; if (y)
- *     flags |= O_NONBLOCK; openSync(p, flags)` (claude-hooks/config.js's real
- *     shape) both resolve correctly.
- *   - `|`, `||`, and parenthesised sub-expressions are flattened uniformly —
- *     this lint collects NAMES referenced, not bit values, so it does not need
- *     to distinguish "OR" from "OR-else-fallback"; `(fsConstants.O_NONBLOCK ||
- *     0)` (the win32-fallback idiom used throughout this codebase) is walked
- *     the same as a plain `|`.
- *   - a `ConditionalExpression` (`cond ? a : b`) is walked into BOTH branches.
- *   - a bare identifier with NO local declaration (a function PARAMETER, or an
- *     import) cannot be traced further and is marked opaque — but its own
- *     name is still checked, so `oNofollow`/`hasONoFollow`-style
- *     DI-seam parameter names are still recognised as O_NOFOLLOW evidence
- *     even though the lint cannot see where they were bound.
- *   - anything else (a `CallExpression`, element access, spread, …) is opaque:
- *     no name evidence, but it also means the expression cannot be PROVEN
- *     free of a masking O_NONBLOCK, so see the unresolvable rule below.
- *   - a bare STRING literal (Node's fs also accepts `'r'`/`'ax'`/… mode
- *     strings) is not a flags bitmask at all — the call is skipped entirely,
- *     not flagged.
+ * It guards against mistakes, not deliberate obfuscation: a hardcoded numeric
+ * flag (`0x100` is O_NOFOLLOW on macOS), a computed property name
+ * (`constants['O_' + 'NOFOLLOW']`), or a value laundered through JSON cannot
+ * be traced by name. The NAME rule is the one place it trusts rather than
+ * proves: an O_NONBLOCK-named property (`anything.O_NONBLOCK`), or an
+ * O_NONBLOCK-named binding whose value it cannot see (a parameter, an
+ * import, a call result), is taken at its word. Every flow approximation
+ * above errs the other way — it can only add possible values, so it can
+ * produce a false positive (a value overwritten before the open, two
+ * DIFFERENT guards that are in fact correlated), never a false pass.
  *
- * A call is a CANDIDATE only if O_NOFOLLOW evidence was found somewhere in
- * the resolvable portion of its flags expression — an ordinary unrelated open
- * (a log file, a state file, …) is never flagged, however opaque its flags
- * construction is, because there is nothing here to suggest it has anything
- * to do with symlink refusal. Once a call IS a candidate:
+ * ## Roster
  *
- *   - O_NONBLOCK evidence found anywhere in the same walk → GREEN, regardless
- *     of any opaque term elsewhere (positive evidence is positive evidence).
- *   - no O_NONBLOCK evidence, but an allowlist comment (see below) sits
- *     immediately above → GREEN.
- *   - otherwise → a FINDING. This covers both "fully resolved and genuinely
- *     missing O_NONBLOCK" and "the expression contains an opaque term we
- *     cannot prove doesn't already carry it" — the task is explicit that an
- *     unresolvable flags expression must never silently pass.
+ * In the default mode the lint also reads every tracked code file under
+ * `packages/` and `scripts/` OUTSIDE the scanned trees (tests excluded) and
+ * fails if any of them references an O_NOFOLLOW-named symbol — a package that
+ * starts using O_NOFOLLOW must be added to the sweep, not silently skipped.
  *
  * ## Allowlist
  *
  * `// lint-allow-nofollow-blocking: <reason>` on the line immediately above
- * the call (or its containing statement) allowlists a finding — for a site
- * where blocking is PROVABLY impossible regardless of O_NONBLOCK, e.g. an
- * `O_DIRECTORY` open (a FIFO cannot satisfy `O_DIRECTORY`; the kernel returns
- * `ENOTDIR` immediately rather than blocking). The reason is required
- * (non-empty after the colon) — a bare marker with nothing after it does not
- * count, matching `lint-argv-sinks.mjs`'s `argv-safety-ignore` convention.
+ * the call, the reference, or the statement containing it — for a site where
+ * blocking is PROVABLY impossible regardless of O_NONBLOCK (e.g. an
+ * `O_DIRECTORY` open: a FIFO cannot satisfy it). The reason is required.
  *
  * ## Fail-closed
  *
- * Two independent "the guard is broken, not necessarily the code" exits:
- *   - 0 files scanned (a stale/renamed `--src-dir`).
- *   - 0 O_NOFOLLOW opens found across the WHOLE scan — this repo has many
- *     (open-nofollow.js, trusted-file-read.js, claude-hooks/config.js,
- *     claude-tui-session.js, …); a scanner reporting zero is the exact
- *     "success and not-checking are the same observable outcome" shape
- *     docs/false-safety-guards.md catalogues (#7503).
+ * Exit 2 — "the guard is broken, not necessarily the code" — when: nothing
+ * was scanned; fewer than `--min-files` files were scanned; ZERO call
+ * arguments carrying O_NOFOLLOW were found (this repo has several, so zero
+ * means the detector broke — #7503); an unscanned file references
+ * O_NOFOLLOW; a file fails to parse; or a flags expression is too deep to
+ * evaluate.
  *
- * Exit codes:
- *   0 — every O_NOFOLLOW open found also has O_NONBLOCK or an allowlist reason.
- *   1 — at least one offender.
- *   2 — the lint could not do its job (bad flags, nothing scanned, zero
- *       O_NOFOLLOW opens found, a source file failed to parse).
+ * Exit codes: 0 clean · 1 at least one finding · 2 the lint could not do its job.
  *
  * Flags:
- *   --src-dir <path>   Directory to scan. REPEATABLE. Defaults to
- *                      packages/server/src AND packages/claude-hooks/src,
- *                      each enumerated via `git ls-files`.
- *   --min-files <n>    Fail (exit 2) if FEWER than n files were scanned in
- *                      total across every --src-dir.
- *   --dry-run          Print offenders without failing the exit code.
+ *   --src-dir <path>     Directory to scan. REPEATABLE. Defaults to
+ *                        packages/server/src AND packages/claude-hooks/src,
+ *                        each enumerated via `git ls-files`.
+ *   --min-files <n>      Fail (exit 2) if FEWER than n files were scanned.
+ *   --roster-dir <path>  Directory whose files must NOT reference O_NOFOLLOW
+ *                        (REPEATABLE). Defaults, in default mode only, to
+ *                        every tracked file under packages/ and scripts/.
+ *   --list-checked       Print every call argument the forward check verified.
+ *   --dry-run            Print offenders without failing the exit code.
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
@@ -174,13 +157,19 @@ const DEFAULT_SRC_DIRS = [
   join(REPO_ROOT, 'packages', 'server', 'src'),
   join(REPO_ROOT, 'packages', 'claude-hooks', 'src'),
 ]
+const SELF = fileURLToPath(import.meta.url)
 
-const FS_SOURCES = new Set(['fs', 'node:fs'])
-const FS_PROMISES_SOURCES = new Set(['fs/promises', 'node:fs/promises'])
 const IGNORE_MARKER = 'lint-allow-nofollow-blocking'
-/** Reserved names always treated as an fs open, regardless of provenance — see header. */
-const RESERVED_OPEN_NAMES = new Set(['open', 'openSync'])
-const MAX_RESOLVE_DEPTH = 8
+const MARKER_RE = new RegExp(`^\\s*(?://|\\*)\\s*${IGNORE_MARKER}:\\s*\\S`)
+const SOURCE_EXT_RE = /\.(?:c|m)?js$/
+const ROSTER_EXT_RE = /\.(?:c|m)?(?:j|t)sx?$/
+const TEST_PATH_RE = /(?:^|\/)(?:tests?|__tests__)\/|\.(?:test|spec)\.(?:c|m)?(?:j|t)sx?$/
+const MAX_DEPTH = 64
+
+const NF = 1
+const NB = 2
+
+class LintAbort extends Error {}
 
 function usageError(message) {
   console.error(`lint-nofollow-nonblock: ${message}`)
@@ -188,7 +177,7 @@ function usageError(message) {
 }
 
 function parseArgs(argv) {
-  const out = { srcDirs: [], minFiles: null, dryRun: false }
+  const out = { srcDirs: [], rosterDirs: [], minFiles: null, dryRun: false, listChecked: false }
   const needsValue = (flag, value) => {
     if (value === undefined) usageError(`${flag} requires a value`)
     return value
@@ -196,8 +185,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--src-dir') out.srcDirs.push(needsValue(arg, argv[++i]))
+    else if (arg === '--roster-dir') out.rosterDirs.push(needsValue(arg, argv[++i]))
     else if (arg === '--min-files') out.minFiles = Number(needsValue(arg, argv[++i]))
     else if (arg === '--dry-run') out.dryRun = true
+    else if (arg === '--list-checked') out.listChecked = true
     else usageError(`unknown argument ${JSON.stringify(arg)}`)
   }
   if (out.minFiles !== null && (!Number.isInteger(out.minFiles) || out.minFiles < 0)) {
@@ -208,321 +199,709 @@ function parseArgs(argv) {
 
 // ─── File enumeration ──────────────────────────────────────────────────────
 
-function listFilesByWalk(dir) {
+function walk(dir, extRe) {
   const out = []
   for (const entry of readdirSync(dir)) {
     const full = join(dir, entry)
     const st = statSync(full)
-    if (st.isDirectory()) out.push(...listFilesByWalk(full))
-    else if (entry.endsWith('.js')) out.push(full)
+    if (st.isDirectory()) out.push(...walk(full, extRe))
+    else if (extRe.test(entry)) out.push(full)
   }
   return out.sort()
 }
 
-function listFilesByGit(srcDir) {
-  const rel = relative(REPO_ROOT, srcDir)
-  let out
+function gitLsFiles(relPaths) {
   try {
-    out = execFileSync('git', ['ls-files', '--', rel], { cwd: REPO_ROOT, encoding: 'utf8' })
+    return execFileSync('git', ['ls-files', '--', ...relPaths], { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      .split('\n').filter(Boolean)
   } catch (err) {
-    usageError(`git ls-files failed for ${rel}: ${err.message}`)
+    usageError(`git ls-files failed for ${relPaths.join(' ')}: ${err.message}`)
   }
-  return out.split('\n').filter((l) => l.endsWith('.js')).map((l) => join(REPO_ROOT, l)).sort()
 }
 
-// ─── AST helpers ────────────────────────────────────────────────────────────
-
-function parseFile(source, fileName) {
-  return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, /* setParentNodes */ true, ts.ScriptKind.JS)
+function listSourceFilesByGit(srcDir) {
+  return gitLsFiles([relative(REPO_ROOT, srcDir)])
+    .filter((l) => SOURCE_EXT_RE.test(l)).map((l) => join(REPO_ROOT, l)).sort()
 }
 
-/** forEachChild, but does not descend into a nested function/method body. */
-function forEachChildSkipFunctions(node, cb) {
-  node.forEachChild((child) => {
-    cb(child)
-    if (isFunctionLike(child)) return
-    forEachChildSkipFunctions(child, cb)
-  })
+// ─── Names ───────────────────────────────────────────────────────────────────
+
+function normalizeName(text) {
+  return text.toLowerCase().replace(/[_$]/g, '')
+}
+/** Name bits ignoring the predicate exclusion — for guards and the roster. */
+function rawBits(text) {
+  const n = normalizeName(text)
+  return (n.includes('onofollow') ? NF : 0) | (n.includes('ononblock') ? NB : 0)
+}
+const PREDICATE_PREFIX_RE = /^(?:has|is|can|supports?)/
+/** The flag bits a NAME stands for. A predicate (`hasONoFollow`) is a boolean, not a flag. */
+function nameBits(text) {
+  if (PREDICATE_PREFIX_RE.test(normalizeName(text))) return 0
+  return rawBits(text)
+}
+const IDENTIFIER_LIKE_RE = /^[A-Za-z_$][\w$]*$/
+function stringBits(text) {
+  return IDENTIFIER_LIKE_RE.test(text) ? nameBits(text) : 0
 }
 
-function forEachDescendant(node, cb) {
-  cb(node)
-  node.forEachChild((child) => forEachDescendant(child, cb))
+// ─── Value sets ──────────────────────────────────────────────────────────────
+
+const ZERO = () => ({ alts: new Set([0]), opaque: false })
+function cross(a, b) {
+  const alts = new Set()
+  for (const x of a.alts) for (const y of b.alts) alts.add(x | y)
+  return { alts, opaque: a.opaque || b.opaque }
 }
+function union(a, b) {
+  return { alts: new Set([...a.alts, ...b.alts]), opaque: a.opaque || b.opaque }
+}
+const anyNF = (v) => [...v.alts].some((a) => a & NF)
+const anyNB = (v) => [...v.alts].some((a) => a & NB)
+const allNB = (v) => [...v.alts].every((a) => a & NB)
+/** Every value that carries O_NOFOLLOW also carries O_NONBLOCK. */
+const certified = (v) => [...v.alts].every((a) => !(a & NF) || (a & NB))
+
+// ─── AST helpers ─────────────────────────────────────────────────────────────
 
 function isFunctionLike(node) {
   return ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) ||
-    ts.isArrowFunction(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node)
+    ts.isArrowFunction(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node) ||
+    (typeof ts.isClassStaticBlockDeclaration === 'function' && ts.isClassStaticBlockDeclaration(node))
 }
 
-function enclosingFunction(node) {
-  let cur = node.parent
-  while (cur) {
-    if (isFunctionLike(cur)) return cur
-    cur = cur.parent
+function scopeContainerOf(node) {
+  for (let cur = node.parent; cur; cur = cur.parent) {
+    if (isFunctionLike(cur) || ts.isSourceFile(cur)) return cur
   }
   return null
 }
 
-function lineOf(node, sourceFile) {
-  return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1
+function isAssignmentKind(kind) {
+  return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
 }
 
-function normText(node, source) {
-  return source.slice(node.pos, node.end).trim().replace(/\s+/g, ' ')
+const COMPARISON_KINDS = new Set([
+  ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.LessThanToken, ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.LessThanEqualsToken, ts.SyntaxKind.GreaterThanEqualsToken,
+  ts.SyntaxKind.InstanceOfKeyword, ts.SyntaxKind.InKeyword,
+])
+
+function isTransparentWrapper(node) {
+  return ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) ||
+    ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) ||
+    (typeof ts.isSatisfiesExpression === 'function' && ts.isSatisfiesExpression(node))
 }
 
-// ─── Import tracking ────────────────────────────────────────────────────────
+function isFalsyLiteral(node) {
+  while (isTransparentWrapper(node)) node = node.expression
+  if (ts.isNumericLiteral(node)) return Number(node.text) === 0
+  if (node.kind === ts.SyntaxKind.NullKeyword || node.kind === ts.SyntaxKind.FalseKeyword) return true
+  if (ts.isIdentifier(node) && node.text === 'undefined') return true
+  if (ts.isVoidExpression(node)) return true
+  return false
+}
 
-/**
- * @returns {{ openSyncLocals: Set<string>, openAsyncLocals: Set<string>,
- *             fsNamespaces: Set<string>, fsPromisesNamespaces: Set<string> }}
- */
-function collectOpenImports(sourceFile) {
-  const openSyncLocals = new Set()
-  const openAsyncLocals = new Set()
-  const fsNamespaces = new Set()
-  const fsPromisesNamespaces = new Set()
+/** An argument shape that is never itself a flags bitmask. */
+function isNonFlagShape(node) {
+  return isFunctionLike(node) || ts.isObjectLiteralExpression(node) || ts.isArrayLiteralExpression(node) ||
+    ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node) ||
+    ts.isClassExpression(node) || ts.isSpreadElement(node) || ts.isRegularExpressionLiteral(node)
+}
 
-  const handleNamedBindings = (namedBindings, moduleText) => {
-    if (!namedBindings) return
-    const fromFs = FS_SOURCES.has(moduleText)
-    const fromFsPromises = FS_PROMISES_SOURCES.has(moduleText)
-    if (ts.isNamespaceImport(namedBindings)) {
-      if (fromFs) fsNamespaces.add(namedBindings.name.text)
-      if (fromFsPromises) fsPromisesNamespaces.add(namedBindings.name.text)
-      return
-    }
-    if (ts.isNamedImports(namedBindings)) {
-      for (const spec of namedBindings.elements) {
-        const imported = (spec.propertyName ?? spec.name).text
-        const local = spec.name.text
-        if (fromFs && imported === 'openSync') openSyncLocals.add(local)
-        if (fromFsPromises && imported === 'open') openAsyncLocals.add(local)
-        // `import { promises as fsp } from 'fs'` — fsp.open(...) is the async API.
-        if (fromFs && imported === 'promises') fsPromisesNamespaces.add(local)
-      }
-    }
+/** Is `id` an identifier in a position where it READS a binding's value? */
+function isValueIdentifier(id) {
+  const p = id.parent
+  if (!p) return false
+  if (ts.isPropertyAccessExpression(p) && p.name === id) return false
+  if (ts.isQualifiedName(p)) return false
+  if ((ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p) || ts.isMethodDeclaration(p) ||
+    ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p) || ts.isEnumMember(p)) && p.name === id) return false
+  if (ts.isVariableDeclaration(p) && p.name === id) return false
+  // A destructuring DEFAULT (`{ flags = O_NOFOLLOW } = opts`) is a value; the
+  // bound name and the property it is read from are not.
+  if (ts.isBindingElement(p) && (p.name === id || p.propertyName === id)) return false
+  if (ts.isParameter(p) && p.name === id) return false
+  if ((ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p) || ts.isClassDeclaration(p) || ts.isClassExpression(p)) && p.name === id) return false
+  if (ts.isImportSpecifier(p) || ts.isImportClause(p) || ts.isNamespaceImport(p)) return false
+  // `export { a }` reads `a`; `export { a as b }` reads `a` (propertyName), not `b`.
+  if (ts.isExportSpecifier(p)) return (p.propertyName ?? p.name) === id
+  if (ts.isLabeledStatement(p) || ts.isBreakOrContinueStatement(p)) return false
+  if (ts.isBinaryExpression(p) && p.left === id && isAssignmentKind(p.operatorToken.kind)) return false
+  if ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) &&
+    (p.operator === ts.SyntaxKind.PlusPlusToken || p.operator === ts.SyntaxKind.MinusMinusToken)) return false
+  if (ts.isMetaProperty(p)) return false
+  return true
+}
+
+/** Is `node` only being tested (feature detection), never used as a flag value? */
+function isDetectionContext(node) {
+  let cur = node
+  while (cur.parent && (isTransparentWrapper(cur.parent) ||
+    (ts.isBinaryExpression(cur.parent) && cur.parent.operatorToken.kind === ts.SyntaxKind.AmpersandToken))) {
+    cur = cur.parent
   }
-
-  for (const stmt of sourceFile.statements) {
-    if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
-      const moduleText = stmt.moduleSpecifier.text
-      handleNamedBindings(stmt.importClause?.namedBindings, moduleText)
-      // `import fs from 'fs'` (default import) — same whole-module exposure
-      // as a namespace import under Node's CJS/ESM interop.
-      if (stmt.importClause?.name && !stmt.importClause.isTypeOnly) {
-        if (FS_SOURCES.has(moduleText)) fsNamespaces.add(stmt.importClause.name.text)
-        if (FS_PROMISES_SOURCES.has(moduleText)) fsPromisesNamespaces.add(stmt.importClause.name.text)
-      }
-    }
+  const p = cur.parent
+  if (!p) return false
+  if (ts.isTypeOfExpression(p)) return true
+  if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) return true
+  if (ts.isBinaryExpression(p)) {
+    const k = p.operatorToken.kind
+    if (COMPARISON_KINDS.has(k)) return true
+    if (k === ts.SyntaxKind.AmpersandAmpersandToken && p.left === cur) return true
   }
-
-  return { openSyncLocals, openAsyncLocals, fsNamespaces, fsPromisesNamespaces }
+  if (ts.isConditionalExpression(p) && p.condition === cur) return true
+  if ((ts.isIfStatement(p) || ts.isWhileStatement(p) || ts.isDoStatement(p)) && p.expression === cur) return true
+  if (ts.isForStatement(p) && p.condition === cur) return true
+  return false
 }
 
-// ─── Flag-expression evidence collection ───────────────────────────────────
-
-function normalizeName(text) {
-  return text.toLowerCase().replace(/_/g, '')
-}
-function isNoFollowName(text) {
-  return normalizeName(text).includes('onofollow')
-}
-function isNonBlockName(text) {
-  return normalizeName(text).includes('ononblock')
-}
-
-/**
- * Every assignment CONTRIBUTING to `name`'s value within EXACTLY `scopeFn`
- * (or module scope, when `scopeFn` is `null`): the initializer of its
- * `const`/`let` declaration, plus the RHS of every later `name |= <expr>` /
- * `name = <expr>` in the SAME scope (not crossing into a nested function).
- * Returns `null` if no local declaration for `name` exists in exactly this
- * one scope.
- */
-function resolveVarSourcesInScope(name, scopeFn, sourceFile) {
-  let found = false
-  const sources = []
-  const visit = (node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
-      found = true
-      if (node.initializer) sources.push(node.initializer)
-      return
-    }
-    if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === name) {
-      const kind = node.operatorToken.kind
-      if (kind === ts.SyntaxKind.BarEqualsToken || kind === ts.SyntaxKind.EqualsToken) {
-        sources.push(node.right)
-      }
-    }
-  }
-  if (scopeFn) {
-    forEachChildSkipFunctions(scopeFn.body ?? scopeFn, visit)
-  } else {
-    for (const stmt of sourceFile.statements) {
-      visit(stmt)
-      forEachChildSkipFunctions(stmt, visit)
-    }
-  }
-  return found ? sources : null
-}
-
-/**
- * Resolve `name` starting at `scopeFn` and walking OUTWARD through each
- * enclosing function to module scope — a `let`/`const` declared at module
- * scope (or in an ancestor function) legitimately holds the value a nested
- * function's flags argument references; only a SIBLING/unrelated scope must
- * never be consulted. Returns `null` only when NO scope in the chain (own,
- * every ancestor, and module) declares `name` — a genuine function parameter
- * or outside binding, which the caller then treats as opaque.
- */
-function resolveVarSources(name, scopeFn, sourceFile) {
-  let cur = scopeFn
+/** Walk up from a value reference through everything that only combines/transforms a value. */
+function valueRoot(node) {
+  let cur = node
   for (;;) {
-    const sources = resolveVarSourcesInScope(name, cur, sourceFile)
-    if (sources !== null) return sources
-    if (cur === null) return null
-    cur = enclosingFunction(cur)
-  }
-}
-
-/**
- * Walk `node` (a flags expression, or a fragment of one) collecting NAME
- * evidence. Mutates `evidence` = `{ hasNoFollow, hasNonBlock, opaque }`.
- */
-function collectFlagEvidence(node, scopeFn, sourceFile, evidence, depth = 0) {
-  if (depth > MAX_RESOLVE_DEPTH) { evidence.opaque = true; return }
-
-  if (ts.isParenthesizedExpression(node)) {
-    collectFlagEvidence(node.expression, scopeFn, sourceFile, evidence, depth + 1)
-    return
-  }
-  if (ts.isBinaryExpression(node) &&
-    (node.operatorToken.kind === ts.SyntaxKind.BarToken || node.operatorToken.kind === ts.SyntaxKind.BarBarToken)) {
-    collectFlagEvidence(node.left, scopeFn, sourceFile, evidence, depth + 1)
-    collectFlagEvidence(node.right, scopeFn, sourceFile, evidence, depth + 1)
-    return
-  }
-  if (ts.isConditionalExpression(node)) {
-    collectFlagEvidence(node.whenTrue, scopeFn, sourceFile, evidence, depth + 1)
-    collectFlagEvidence(node.whenFalse, scopeFn, sourceFile, evidence, depth + 1)
-    return
-  }
-  if (ts.isNumericLiteral(node) || node.kind === ts.SyntaxKind.UndefinedKeyword || node.kind === ts.SyntaxKind.NullKeyword) {
-    return // contributes no name
-  }
-  if (ts.isPropertyAccessExpression(node) && !node.questionDotToken) {
-    const name = node.name.text
-    if (isNoFollowName(name)) evidence.hasNoFollow = true
-    if (isNonBlockName(name)) evidence.hasNonBlock = true
-    return
-  }
-  if (ts.isIdentifier(node)) {
-    const name = node.text
-    if (isNoFollowName(name)) evidence.hasNoFollow = true
-    if (isNonBlockName(name)) evidence.hasNonBlock = true
-    const sources = resolveVarSources(name, scopeFn, sourceFile)
-    if (sources === null) {
-      // No local declaration — a function parameter or an outside binding.
-      // Its own name was already checked above; it cannot be traced further.
-      evidence.opaque = true
-      return
+    const p = cur.parent
+    if (!p) return cur
+    if (isTransparentWrapper(p)) { cur = p; continue }
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind
+      if (!isAssignmentKind(k) && !COMPARISON_KINDS.has(k) && k !== ts.SyntaxKind.CommaToken) { cur = p; continue }
+      if (k === ts.SyntaxKind.CommaToken && p.right === cur) { cur = p; continue }
     }
-    for (const src of sources) collectFlagEvidence(src, scopeFn, sourceFile, evidence, depth + 1)
-    return
+    if (ts.isConditionalExpression(p) && p.condition !== cur) { cur = p; continue }
+    if (ts.isPrefixUnaryExpression(p) && p.operator !== ts.SyntaxKind.ExclamationToken &&
+      p.operator !== ts.SyntaxKind.PlusPlusToken && p.operator !== ts.SyntaxKind.MinusMinusToken) { cur = p; continue }
+    return cur
   }
-  // CallExpression, ElementAccessExpression, SpreadElement, an arbitrary
-  // expression we don't specifically model — no name evidence, and we can't
-  // prove it isn't hiding one.
-  evidence.opaque = true
 }
 
-/** @returns {{hasNoFollow: boolean, hasNonBlock: boolean, opaque: boolean}} */
-function evaluateFlagsArg(flagsArg, scopeFn, sourceFile) {
-  const evidence = { hasNoFollow: false, hasNonBlock: false, opaque: false }
-  if (ts.isStringLiteral(flagsArg) || ts.isNoSubstitutionTemplateLiteral(flagsArg)) {
-    return { notAFlagsExpr: true }
+function lineOf(node, sf) {
+  return sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1
+}
+
+function normText(node, sf) {
+  return node.getText(sf).trim().replace(/\s+/g, ' ')
+}
+
+function enclosingStatement(node) {
+  for (let cur = node; cur; cur = cur.parent) {
+    if (cur.parent && (ts.isBlock(cur.parent) || ts.isSourceFile(cur.parent) || ts.isCaseClause(cur.parent) ||
+      ts.isDefaultClause(cur.parent) || ts.isModuleBlock(cur.parent))) return cur
   }
-  collectFlagEvidence(flagsArg, scopeFn, sourceFile, evidence)
-  return evidence
+  return node
 }
 
-// ─── Allowlist marker ───────────────────────────────────────────────────────
-
-function isIgnoreMarkerAbove(node, sourceFile, rawLines) {
-  const line = lineOf(node, sourceFile)
-  const above = rawLines[line - 2] // line is 1-based; line-2 is the 0-based index of the line above
-  if (above === undefined) return false
-  return new RegExp(`^\\s*(?://|\\*)\\s*${IGNORE_MARKER}:\\s*\\S`).test(above)
-}
-
-// ─── Per-file analysis ──────────────────────────────────────────────────────
+// ─── Per-file analysis ───────────────────────────────────────────────────────
 
 function analyzeFile(filePath, keyRoot) {
   const source = readFileSync(filePath, 'utf8')
+  const rel = relative(keyRoot, filePath).split(pathSep).join('/')
+  // A name can only carry O_NOFOLLOW if its text says so, and cross-module
+  // flows are caught where the value is BUILT (the reverse check) — so a file
+  // that never spells "nofollow" has nothing for either check to find.
+  if (!/nofollow/i.test(source)) return { findings: [], checked: [], refs: 0 }
+
   const rawLines = source.split('\n')
-  let sourceFile
+  let sf
   try {
-    sourceFile = parseFile(source, filePath)
+    sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, /* setParentNodes */ true, ts.ScriptKind.JS)
   } catch (err) {
     usageError(`cannot parse ${filePath}: ${err.message}`)
   }
-  const rel = relative(keyRoot, filePath).split(pathSep).join('/')
+  if (sf.parseDiagnostics && sf.parseDiagnostics.length) {
+    const d = sf.parseDiagnostics[0]
+    usageError(`cannot parse ${rel}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`)
+  }
 
-  const { openSyncLocals, openAsyncLocals, fsNamespaces, fsPromisesNamespaces } = collectOpenImports(sourceFile)
+  const markerAbove = (node) => {
+    const lines = new Set([lineOf(node, sf), lineOf(enclosingStatement(node), sf)])
+    for (const line of lines) {
+      const above = rawLines[line - 2]
+      if (above !== undefined && MARKER_RE.test(above)) return true
+    }
+    return false
+  }
 
-  const findings = []
-  let noFollowOpensChecked = 0
-
-  forEachDescendant(sourceFile, (node) => {
-    if (!ts.isCallExpression(node)) return
-
-    let isOpenCall = false
-    if (ts.isIdentifier(node.expression)) {
-      const name = node.expression.text
-      if (openSyncLocals.has(name) || openAsyncLocals.has(name) || RESERVED_OPEN_NAMES.has(name)) {
-        isOpenCall = true
+  // ── Indexes: identifier occurrences and writes, by name ──
+  const identifiersByName = new Map()
+  const writesByName = new Map()
+  const varDecls = [] // hoisted `var` declarations
+  const addWrite = (target, kind, rhs, node) => {
+    if (!writesByName.has(target.text)) writesByName.set(target.text, [])
+    writesByName.get(target.text).push({ target, kind, rhs, node })
+  }
+  const collectDestructuringTargets = (pattern, node) => {
+    const visit = (n) => {
+      if (ts.isIdentifier(n) && !(ts.isPropertyAssignment(n.parent) && n.parent.name === n)) {
+        addWrite(n, 'kill', null, node)
+        return
       }
-    } else if (ts.isPropertyAccessExpression(node.expression) && !node.expression.questionDotToken) {
-      const prop = node.expression.name.text
-      const obj = node.expression.expression
-      if (ts.isIdentifier(obj)) {
-        if (fsNamespaces.has(obj.text) && prop === 'openSync') isOpenCall = true
-        if (fsPromisesNamespaces.has(obj.text) && prop === 'open') isOpenCall = true
-      } else if (ts.isPropertyAccessExpression(obj) && !obj.questionDotToken && prop === 'open') {
-        // fs.promises.open(...)
-        if (ts.isIdentifier(obj.expression) && fsNamespaces.has(obj.expression.text) && obj.name.text === 'promises') {
-          isOpenCall = true
+      n.forEachChild(visit)
+    }
+    visit(pattern)
+  }
+  const indexVisit = (node) => {
+    if (ts.isIdentifier(node)) {
+      if (!identifiersByName.has(node.text)) identifiersByName.set(node.text, [])
+      identifiersByName.get(node.text).push(node)
+    } else if (ts.isBinaryExpression(node) && isAssignmentKind(node.operatorToken.kind)) {
+      const k = node.operatorToken.kind
+      const left = node.left
+      if (ts.isIdentifier(left)) {
+        if (k === ts.SyntaxKind.EqualsToken || k === ts.SyntaxKind.BarBarEqualsToken || k === ts.SyntaxKind.QuestionQuestionEqualsToken) {
+          addWrite(left, 'base', node.right, node)
+        } else if (k === ts.SyntaxKind.BarEqualsToken) {
+          addWrite(left, 'add', node.right, node)
+        } else {
+          addWrite(left, 'kill', null, node)
+        }
+      } else if (ts.isObjectLiteralExpression(left) || ts.isArrayLiteralExpression(left)) {
+        collectDestructuringTargets(left, node)
+      }
+    } else if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand)) {
+      addWrite(node.operand, 'kill', null, node)
+    } else if (ts.isVariableDeclarationList(node) &&
+      (node.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) {
+      for (const d of node.declarations) varDecls.push(d)
+    }
+    node.forEachChild(indexVisit)
+  }
+  indexVisit(sf)
+
+  // ── Scope resolution ──
+  const bindingInName = (nameNode, name) => {
+    if (ts.isIdentifier(nameNode)) return nameNode.text === name ? nameNode : null
+    for (const el of nameNode.elements) {
+      if (ts.isOmittedExpression(el)) continue
+      if (ts.isIdentifier(el.name)) { if (el.name.text === name) return el; continue }
+      const inner = bindingInName(el.name, name)
+      if (inner) return inner
+    }
+    return null
+  }
+  const bindingFor = (decl, name) => {
+    const b = bindingInName(decl.name, name)
+    if (!b) return null
+    return b === decl.name ? { kind: 'var', node: decl } : { kind: 'binding', node: b }
+  }
+  const findInStatements = (stmts, name, isFile) => {
+    for (const s of stmts) {
+      if (ts.isVariableStatement(s)) {
+        for (const d of s.declarationList.declarations) {
+          const b = bindingFor(d, name)
+          if (b) return b
+        }
+      } else if ((ts.isFunctionDeclaration(s) || ts.isClassDeclaration(s)) && s.name && s.name.text === name) {
+        return { kind: 'opaque', node: s }
+      } else if (isFile && ts.isImportDeclaration(s) && s.importClause) {
+        const ic = s.importClause
+        if (ic.name && ic.name.text === name) return { kind: 'opaque', node: ic }
+        const nb = ic.namedBindings
+        if (nb && ts.isNamespaceImport(nb) && nb.name.text === name) return { kind: 'opaque', node: nb }
+        if (nb && ts.isNamedImports(nb)) {
+          for (const sp of nb.elements) if (sp.name.text === name) return { kind: 'import', node: sp }
         }
       }
     }
-    if (!isOpenCall) return
+    return null
+  }
+  const findHoistedVar = (container, name) => {
+    for (const d of varDecls) {
+      if (scopeContainerOf(d) !== container) continue
+      const b = bindingFor(d, name)
+      if (b) return b
+    }
+    return null
+  }
+  const resolveCache = new Map()
+  const resolveId = (id) => {
+    if (resolveCache.has(id)) return resolveCache.get(id)
+    const name = id.text
+    let found = null
+    for (let cur = id.parent; cur && !found; cur = cur.parent) {
+      if (ts.isBlock(cur) || ts.isSourceFile(cur) || ts.isCaseClause(cur) || ts.isDefaultClause(cur) || ts.isModuleBlock(cur)) {
+        found = findInStatements(cur.statements, name, ts.isSourceFile(cur))
+      }
+      if (!found && (ts.isForStatement(cur) || ts.isForOfStatement(cur) || ts.isForInStatement(cur)) &&
+        cur.initializer && ts.isVariableDeclarationList(cur.initializer)) {
+        for (const d of cur.initializer.declarations) { found = bindingFor(d, name); if (found) break }
+      }
+      if (!found && ts.isCatchClause(cur) && cur.variableDeclaration && bindingInName(cur.variableDeclaration.name, name)) {
+        found = { kind: 'opaque', node: cur.variableDeclaration }
+      }
+      if (!found && isFunctionLike(cur)) {
+        for (const p of cur.parameters) {
+          const b = bindingInName(p.name, name)
+          if (b) { found = b === p.name ? { kind: 'param', node: p } : { kind: 'binding', node: b }; break }
+        }
+        if (!found && ts.isFunctionExpression(cur) && cur.name && cur.name.text === name) found = { kind: 'opaque', node: cur }
+        if (!found) found = findHoistedVar(cur, name)
+      }
+      if (!found && ts.isSourceFile(cur)) found = findHoistedVar(cur, name)
+    }
+    resolveCache.set(id, found)
+    return found
+  }
 
-    const flagsArg = node.arguments[1]
-    if (!flagsArg) return // open(path) with no explicit flags — nothing to check
+  // ── Evaluation ──
+  const declCache = new Map()
+  const visiting = new Set()
 
-    const scopeFn = enclosingFunction(node)
-    const evidence = evaluateFlagsArg(flagsArg, scopeFn, sourceFile)
-    if (evidence.notAFlagsExpr) return // a string mode specifier, e.g. 'ax' — not our concern
-    if (!evidence.hasNoFollow) return // nothing suggests this open is O_NOFOLLOW-flavoured
+  const opaqueLeaf = (node, depth) => {
+    let nf = false
+    node.forEachChild((child) => {
+      if (nf || isFunctionLike(child)) return
+      if (anyNF(evaluate(child, depth + 1))) nf = true
+    })
+    return { alts: new Set([nf ? NF : 0]), opaque: true }
+  }
 
-    noFollowOpensChecked++
-    if (evidence.hasNonBlock) return // green
-    if (isIgnoreMarkerAbove(node, sourceFile, rawLines)) return // allowlisted
+  /** Guard signature of a write relative to its variable's scope, or null if unconditional. */
+  const conditionOf = (writeNode, scopeRoot) => {
+    const parts = []
+    let nbDetected = true
+    let child = writeNode
+    for (let cur = writeNode.parent; cur && cur !== scopeRoot; child = cur, cur = cur.parent) {
+      let guard = null
+      let guardExpr = null
+      if (ts.isIfStatement(cur) && child !== cur.expression) {
+        guardExpr = cur.expression
+        guard = `${child === cur.thenStatement ? 'if' : 'else'}(${normText(cur.expression, sf)})`
+      } else if (ts.isConditionalExpression(cur) && child !== cur.condition) {
+        guardExpr = cur.condition
+        guard = `${child === cur.whenTrue ? '?' : ':'}(${normText(cur.condition, sf)})`
+      } else if (ts.isBinaryExpression(cur) && child === cur.right &&
+        [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(cur.operatorToken.kind)) {
+        guardExpr = cur.left
+        guard = `${cur.operatorToken.kind}(${normText(cur.left, sf)})`
+      } else if ((ts.isForStatement(cur) || ts.isForOfStatement(cur) || ts.isForInStatement(cur) || ts.isWhileStatement(cur) ||
+        ts.isDoStatement(cur)) && child === cur.statement) {
+        // (a do-body runs once, but a `break`/`continue` inside it can skip the write)
+        guard = `loop@${cur.pos}`
+      } else if (ts.isTryStatement(cur) && child === cur.tryBlock) {
+        // anything earlier in the try block can throw past the write
+        guard = `try@${cur.pos}`
+      } else if (ts.isCaseClause(cur) || ts.isDefaultClause(cur) || ts.isCatchClause(cur) || isFunctionLike(cur)) {
+        guard = `branch@${cur.pos}`
+      }
+      if (guard === null) continue
+      parts.push(guard)
+      let mentionsNB = false
+      if (guardExpr) {
+        const scan = (n) => {
+          if (mentionsNB) return
+          if ((ts.isIdentifier(n) || ts.isStringLiteral(n)) && (rawBits(n.text) & NB)) mentionsNB = true
+          n.forEachChild(scan)
+        }
+        scan(guardExpr)
+      }
+      if (!mentionsNB) nbDetected = false
+    }
+    return parts.length ? { sig: parts.join(' '), nbDetected } : null
+  }
 
-    const line = lineOf(node, sourceFile)
-    const reason = evidence.opaque
-      ? 'includes O_NOFOLLOW but the flags expression could not be fully resolved (an unresolvable term), and no O_NONBLOCK was found'
-      : 'includes O_NOFOLLOW but is missing O_NONBLOCK — a FIFO/device planted at this path would hang this open() forever'
+  /**
+   * Every value `vd` can hold where it is READ at source position `usePos`.
+   * Flow is approximated conservatively — every approximation ADDS values:
+   * each initializer/`=` is a possible value wherever it sits; an `|=` is
+   * ORed into all of them only when it is unconditional, sits BEFORE the
+   * read, and the variable is never reassigned (otherwise the lint cannot
+   * order the writes, so the add is only "maybe").
+   */
+  const evalVarDecl = (vd, depth, usePos) => {
+    const name = vd.name.text
+    const scopeRoot = scopeContainerOf(vd)
+    const bases = []
+    if (vd.initializer) bases.push(vd.initializer)
+    const adds = []
+    let kill = false
+    for (const w of writesByName.get(name) ?? []) {
+      const r = resolveId(w.target)
+      if (!r || r.node !== vd) continue
+      if (w.kind === 'base') bases.push(w.rhs)
+      else if (w.kind === 'kill') kill = true
+      else adds.push(w)
+    }
+    const reassigned = bases.length > 1
+    const unconditional = []
+    const groups = new Map()
+    const addTo = (sig, v) => {
+      if (!groups.has(sig)) groups.set(sig, [])
+      groups.get(sig).push(v)
+    }
+    for (const w of adds) {
+      const v = evaluate(w.rhs, depth + 1)
+      if (w.node.pos > usePos) { addTo(`after-read@${w.node.pos}`, v); continue }
+      const c = conditionOf(w.node, scopeRoot)
+      const certain = !c || (c.nbDetected && allNB(v))
+      if (!certain) addTo(c.sig, v)
+      else if (reassigned) addTo('reassigned', v)
+      else unconditional.push(v)
+    }
+    let result
+    if (bases.length) {
+      result = bases.map((b) => evaluate(b, depth + 1)).reduce(union)
+    } else if (vd.parent && ts.isVariableDeclarationList(vd.parent) && vd.parent.parent &&
+      (ts.isForOfStatement(vd.parent.parent) || ts.isForInStatement(vd.parent.parent))) {
+      // `for (const f of list)` — f is some element of `list`; opaque, but an
+      // O_NOFOLLOW anywhere in `list` still counts.
+      const iterated = evaluate(vd.parent.parent.expression, depth + 1)
+      result = { alts: new Set([anyNF(iterated) ? NF : 0]), opaque: true }
+    } else {
+      result = ZERO()
+    }
+    for (const v of unconditional) result = cross(result, v)
+    for (const vs of groups.values()) result = cross(result, union(vs.reduce(cross), ZERO()))
+    if (kill) result = { alts: new Set([...result.alts].map((a) => a & ~NB)), opaque: true }
+    return result
+  }
+
+  const evalDecl = (decl, depth, usePos) => {
+    // A var's value depends on where it is read (see evalVarDecl); the rest do not.
+    const key = decl.kind === 'var' ? usePos : -1
+    if (!declCache.has(decl.node)) declCache.set(decl.node, new Map())
+    const perUse = declCache.get(decl.node)
+    if (perUse.has(key)) return perUse.get(key)
+    if (visiting.has(decl.node)) return ZERO() // a cycle contributes nothing new
+    visiting.add(decl.node)
+    let result
+    if (decl.kind === 'var') {
+      result = evalVarDecl(decl.node, depth, usePos)
+    } else if (decl.kind === 'binding') {
+      const el = decl.node
+      const prop = el.propertyName
+      const text = prop && (ts.isIdentifier(prop) || ts.isStringLiteral(prop)) ? prop.text : (ts.isIdentifier(el.name) ? el.name.text : '')
+      result = { alts: new Set([nameBits(text)]), opaque: true }
+    } else if (decl.kind === 'import') {
+      const sp = decl.node
+      result = { alts: new Set([nameBits((sp.propertyName ?? sp.name).text)]), opaque: true }
+    } else {
+      result = { alts: new Set([0]), opaque: true }
+    }
+    visiting.delete(decl.node)
+    perUse.set(key, result)
+    return result
+  }
+
+  function evaluate(node, depth = 0) {
+    if (depth > MAX_DEPTH) {
+      throw new LintAbort(`${rel}:${lineOf(node, sf)}: flags expression is too deep to evaluate (> ${MAX_DEPTH})`)
+    }
+    if (isTransparentWrapper(node)) return evaluate(node.expression, depth + 1)
+    if (ts.isBinaryExpression(node)) {
+      const k = node.operatorToken.kind
+      if (k === ts.SyntaxKind.BarToken) return cross(evaluate(node.left, depth + 1), evaluate(node.right, depth + 1))
+      if (k === ts.SyntaxKind.BarBarToken || k === ts.SyntaxKind.QuestionQuestionToken) {
+        if (isFalsyLiteral(node.right)) return evaluate(node.left, depth + 1)
+        return union(evaluate(node.left, depth + 1), evaluate(node.right, depth + 1))
+      }
+      if (k === ts.SyntaxKind.AmpersandAmpersandToken) return union(ZERO(), evaluate(node.right, depth + 1))
+      if (k === ts.SyntaxKind.CommaToken) return evaluate(node.right, depth + 1)
+      if (k === ts.SyntaxKind.EqualsToken) return evaluate(node.right, depth + 1)
+      if (k === ts.SyntaxKind.BarEqualsToken) return cross(evaluate(node.left, depth + 1), evaluate(node.right, depth + 1))
+      return opaqueLeaf(node, depth)
+    }
+    if (ts.isConditionalExpression(node)) return union(evaluate(node.whenTrue, depth + 1), evaluate(node.whenFalse, depth + 1))
+    if (ts.isNumericLiteral(node) || ts.isBigIntLiteral(node) || ts.isVoidExpression(node) ||
+      node.kind === ts.SyntaxKind.NullKeyword || node.kind === ts.SyntaxKind.TrueKeyword ||
+      node.kind === ts.SyntaxKind.FalseKeyword || ts.isTypeOfExpression(node)) return ZERO()
+    if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken) return ZERO()
+    // A call's RESULT (an fd, a FileHandle, a helper's return value) is
+    // opaque but carries no O_NOFOLLOW evidence of its own: its ARGUMENTS
+    // are checked by the forward pass like every other call's, and an
+    // O_NOFOLLOW a helper `return`s is caught by the reverse pass where the
+    // helper builds it. Propagating the arguments' O_NOFOLLOW into the
+    // result would make every `fd` returned by an O_NOFOLLOW open look like
+    // a flags value.
+    if (ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)) {
+      return { alts: new Set([0]), opaque: true }
+    }
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      return { alts: new Set([stringBits(node.text)]), opaque: false }
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      return { alts: new Set([nameBits(node.name.text)]), opaque: false }
+    }
+    if (ts.isElementAccessExpression(node) &&
+      (ts.isStringLiteral(node.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(node.argumentExpression))) {
+      return { alts: new Set([stringBits(node.argumentExpression.text)]), opaque: false }
+    }
+    if (ts.isIdentifier(node)) {
+      if (node.text === 'undefined' || node.text === 'NaN' || node.text === 'Infinity') return ZERO()
+      const own = nameBits(node.text)
+      const decl = resolveId(node)
+      let v = decl ? evalDecl(decl, depth + 1, node.pos) : { alts: new Set([0]), opaque: true }
+      if (own & NF) v = cross(v, { alts: new Set([NF]), opaque: false })
+      // A name is trusted for O_NONBLOCK only when resolution cannot see the
+      // value, or the value it resolves to does carry O_NONBLOCK somewhere
+      // (the `HAS ? fsConstants.O_NONBLOCK : 0` platform-fallback const).
+      if ((own & NB) && (v.opaque || anyNB(v))) v = cross(v, { alts: new Set([NB]), opaque: false })
+      return v
+    }
+    return opaqueLeaf(node, depth)
+  }
+
+  // ── 1. FORWARD: every argument of every call ──
+  const consumed = new Set()
+  const markConsumed = (node) => {
+    consumed.add(node)
+    node.forEachChild((c) => { if (!isFunctionLike(c)) markConsumed(c) })
+  }
+  const findings = []
+  const checked = []
+  const visitCalls = (node) => {
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments) {
+      for (const arg of node.arguments) {
+        if (isNonFlagShape(arg)) continue
+        const v = evaluate(arg)
+        markConsumed(arg)
+        if (!anyNF(v)) continue
+        const line = lineOf(node, sf)
+        checked.push(`${rel}:${line}`)
+        if (certified(v) || markerAbove(node)) continue
+        const reason = 'carries O_NOFOLLOW but is missing O_NONBLOCK in at least one value it can take — a FIFO/device planted at this path would hang the open() forever' +
+          (v.opaque ? ' (part of the flags expression could not be fully resolved, so O_NONBLOCK cannot be proven present)' : '')
+        findings.push({ file: rel, line, text: `call \`${normText(node, sf).slice(0, 160)}\` — argument \`${normText(arg, sf).slice(0, 120)}\` ${reason}` })
+      }
+    }
+    node.forEachChild(visitCalls)
+  }
+  visitCalls(sf)
+
+  // ── 2. REVERSE: every O_NOFOLLOW reference must be accounted for ──
+  const queue = []
+  const visitRefs = (node) => {
+    if (ts.isIdentifier(node)) {
+      if ((nameBits(node.text) & NF) && isValueIdentifier(node)) queue.push(node)
+    } else if (ts.isPropertyAccessExpression(node)) {
+      if ((nameBits(node.name.text) & NF) &&
+        !(ts.isBinaryExpression(node.parent) && node.parent.left === node && isAssignmentKind(node.parent.operatorToken.kind))) queue.push(node)
+    } else if (ts.isElementAccessExpression(node)) {
+      const a = node.argumentExpression
+      if ((ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a)) && (stringBits(a.text) & NF)) queue.push(node)
+    } else if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      const p = node.parent
+      const structural = ts.isElementAccessExpression(p) || ts.isImportDeclaration(p) || ts.isExportDeclaration(p) ||
+        (ts.isPropertyAssignment(p) && p.name === node) || ts.isLiteralTypeNode?.(p) || ts.isExternalModuleReference?.(p)
+      if (!structural && (stringBits(node.text) & NF)) queue.push(node)
+    } else if (ts.isBindingElement(node) || ts.isImportSpecifier(node)) {
+      // A RENAME of an O_NOFOLLOW-named property/export to a name that is not
+      // one: the value continues under a name the checks do not recognise.
+      const from = node.propertyName
+      if (from && (ts.isIdentifier(from) || ts.isStringLiteral(from)) && (nameBits(from.text) & NF) &&
+        ts.isIdentifier(node.name) && !(nameBits(node.name.text) & NF)) queue.push(node)
+    }
+    node.forEachChild(visitRefs)
+  }
+  visitRefs(sf)
+  const refs = queue.length
+
+  const taintedDecls = new Set()
+  const isExported = (declNode) => {
+    for (let cur = declNode; cur && !ts.isSourceFile(cur); cur = cur.parent) {
+      if (ts.isVariableStatement(cur)) return (ts.getCombinedModifierFlags(cur) & ts.ModifierFlags.Export) !== 0
+      if (isFunctionLike(cur)) return false
+    }
+    return false
+  }
+  const taintUses = (declNode, name, origin) => {
+    if (taintedDecls.has(declNode)) return
+    taintedDecls.add(declNode)
+    // `export const F = … | O_NOFOLLOW` — the importer is another module this
+    // file's analysis cannot see, so the export itself is the escape.
+    if (isExported(declNode)) {
+      escape(origin, `is exported as \`${name}\``)
+      return
+    }
+    for (const id of identifiersByName.get(name) ?? []) {
+      if (!isValueIdentifier(id)) continue
+      const r = resolveId(id)
+      if (r && r.node === declNode) queue.push(id)
+    }
+  }
+  const escape = (node, where) => {
     findings.push({
       file: rel,
-      line,
-      text: `open(...) call \`${normText(node, source)}\` ${reason}`,
+      line: lineOf(node, sf),
+      text: `O_NOFOLLOW value \`${normText(node, sf).slice(0, 120)}\` ${where}, where this lint cannot follow it to the open() that consumes it — build it with O_NONBLOCK in the same expression, pass it straight to the open, or allowlist with a reason`,
     })
-  })
+  }
 
-  return { findings, noFollowOpensChecked }
+  for (let i = 0; i < queue.length; i++) {
+    const n = queue[i]
+    if (consumed.has(n) || markerAbove(n)) continue
+    if (ts.isBindingElement(n) || ts.isImportSpecifier(n)) {
+      // A rename: follow every use of the new local name instead.
+      taintUses(n, n.name.text, n)
+      continue
+    }
+    if (isDetectionContext(n)) continue
+    const root = valueRoot(n)
+    if (certified(evaluate(root))) continue
+    const p = root.parent
+    if (ts.isVariableDeclaration(p) && p.initializer === root) {
+      if (!ts.isIdentifier(p.name)) { escape(n, 'is destructured'); continue }
+      if (nameBits(p.name.text) & NF) continue // name-tracked: its uses are references too
+      taintUses(p, p.name.text, n)
+      continue
+    }
+    if (ts.isBinaryExpression(p) && p.right === root && isAssignmentKind(p.operatorToken.kind)) {
+      const left = p.left
+      if (ts.isIdentifier(left)) {
+        if (nameBits(left.text) & NF) continue
+        const r = resolveId(left)
+        if (!r) { escape(n, `is assigned to an undeclared name \`${left.text}\``); continue }
+        taintUses(r.node, left.text, n)
+        continue
+      }
+      if (ts.isPropertyAccessExpression(left) && (nameBits(left.name.text) & NF)) continue
+      escape(n, `is stored into \`${normText(left, sf).slice(0, 60)}\``)
+      continue
+    }
+    if ((ts.isPropertyAssignment(p) && p.initializer === root) || ts.isShorthandPropertyAssignment(p)) {
+      const keyText = p.name && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) ? p.name.text : ''
+      if (nameBits(keyText) & NF) continue // name-tracked property
+      escape(n, `is stored in object property \`${keyText || normText(p.name, sf)}\``)
+      continue
+    }
+    if (ts.isReturnStatement(p) || (ts.isArrowFunction(p) && p.body === root)) { escape(n, 'is returned from a function'); continue }
+    if (ts.isExportAssignment(p) || ts.isExportSpecifier(p)) { escape(n, 'is exported'); continue }
+    escape(n, `flows into a \`${ts.SyntaxKind[p.kind]}\``)
+  }
+
+  return { findings, checked, refs }
+}
+
+// ─── Roster: nothing outside the scanned trees may use O_NOFOLLOW ────────────
+
+function rosterOffenders(files, srcDirs) {
+  const inScanned = (f) => srcDirs.some((d) => f === d || f.startsWith(d + pathSep))
+  const offenders = []
+  for (const file of files) {
+    if (file === SELF || inScanned(file)) continue
+    const relPath = relative(REPO_ROOT, file).split(pathSep).join('/')
+    if (TEST_PATH_RE.test(relPath)) continue
+    let text
+    try { text = readFileSync(file, 'utf8') } catch { continue }
+    if (!/o_?nofollow/i.test(text)) continue
+    const kind = /\.tsx$/.test(file) ? ts.ScriptKind.TSX : /\.ts$/.test(file) ? ts.ScriptKind.TS : /\.jsx$/.test(file) ? ts.ScriptKind.JSX : ts.ScriptKind.JS
+    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind)
+    let hit = null
+    const visit = (n) => {
+      if (hit) return
+      if ((ts.isIdentifier(n) || ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) &&
+        IDENTIFIER_LIKE_RE.test(n.text) && (rawBits(n.text) & NF)) hit = n
+      n.forEachChild(visit)
+    }
+    visit(sf)
+    if (hit) offenders.push(`${relPath}:${sf.getLineAndCharacterOfPosition(hit.getStart(sf)).line + 1}`)
+  }
+  return offenders
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -533,20 +912,31 @@ const srcDirs = (usingDefaultSrcDirs ? DEFAULT_SRC_DIRS : args.srcDirs).map((d) 
 for (const dir of srcDirs) {
   if (!existsSync(dir)) usageError(`--src-dir does not exist: ${dir}`)
 }
+const rosterDirs = args.rosterDirs.map((d) => resolve(d))
+for (const dir of rosterDirs) {
+  if (!existsSync(dir)) usageError(`--roster-dir does not exist: ${dir}`)
+}
 
-const keyRoot = srcDirs[0]
+const keyRoot = usingDefaultSrcDirs ? REPO_ROOT : srcDirs[0]
 const allFindings = []
+const allChecked = []
 let scanned = 0
-let totalNoFollowChecked = 0
+let totalRefs = 0
 
-for (const srcDir of srcDirs) {
-  const files = usingDefaultSrcDirs ? listFilesByGit(srcDir) : listFilesByWalk(srcDir)
-  for (const file of files) {
-    scanned++
-    const { findings, noFollowOpensChecked } = analyzeFile(file, keyRoot)
-    totalNoFollowChecked += noFollowOpensChecked
-    allFindings.push(...findings)
+try {
+  for (const srcDir of srcDirs) {
+    const files = usingDefaultSrcDirs ? listSourceFilesByGit(srcDir) : walk(srcDir, SOURCE_EXT_RE)
+    for (const file of files) {
+      scanned++
+      const { findings, checked, refs } = analyzeFile(file, keyRoot)
+      allFindings.push(...findings)
+      allChecked.push(...checked)
+      totalRefs += refs
+    }
   }
+} catch (err) {
+  if (err instanceof LintAbort) usageError(err.message)
+  throw err
 }
 
 // "Scanned zero files" and "scanned N clean files" must never be the same
@@ -557,12 +947,30 @@ if (scanned === 0) {
 if (args.minFiles !== null && scanned < args.minFiles) {
   usageError(`scanned only ${scanned} file(s), expected at least ${args.minFiles}. Either the walk broke or --min-files is stale.`)
 }
-// Same principle, for the thing this lint actually checks: this repo has
-// MANY O_NOFOLLOW opens today (open-nofollow.js, trusted-file-read.js,
-// claude-hooks/config.js, claude-tui-session.js, …). Zero found means the
-// detector broke, not that the code got safer (#7503).
-if (totalNoFollowChecked === 0) {
-  usageError(`found 0 O_NOFOLLOW-flavoured open() calls across ${scanned} file(s) under ${srcDirs.join(', ')} — the detector is broken, not the code`)
+// This repo has several O_NOFOLLOW opens (open-nofollow.js, trusted-file-read.js,
+// claude-hooks/config.js, claude-tui-session.js). Zero found means the detector
+// broke, not that the code got safer (#7503).
+if (allChecked.length === 0) {
+  usageError(`found 0 call arguments carrying O_NOFOLLOW across ${scanned} file(s) under ${srcDirs.join(', ')} — the detector is broken, not the code`)
+}
+
+// The roster runs in default mode over every tracked file under packages/ and
+// scripts/, or over explicit --roster-dir trees.
+let rosterFiles = []
+if (rosterDirs.length) {
+  for (const d of rosterDirs) rosterFiles.push(...walk(d, ROSTER_EXT_RE))
+} else if (usingDefaultSrcDirs) {
+  rosterFiles = gitLsFiles(['packages', 'scripts']).filter((l) => ROSTER_EXT_RE.test(l)).map((l) => join(REPO_ROOT, l))
+  if (rosterFiles.length === 0) usageError('the roster enumerated 0 files under packages/ and scripts/ — refusing to report it clean')
+}
+const outside = rosterOffenders(rosterFiles, srcDirs)
+if (outside.length) {
+  for (const o of outside) console.error(`${o}  references O_NOFOLLOW but is outside every scanned tree`)
+  usageError(`${outside.length} file(s) outside the scanned trees reference O_NOFOLLOW — add their tree to DEFAULT_SRC_DIRS (or --src-dir) so the lint actually checks them`)
+}
+
+if (args.listChecked) {
+  for (const c of allChecked) console.log(`checked ${c}`)
 }
 
 for (const f of allFindings) {
@@ -570,13 +978,13 @@ for (const f of allFindings) {
 }
 if (allFindings.length) {
   console.error('')
-  console.error(`${allFindings.length} O_NOFOLLOW open(s) are missing O_NONBLOCK and are not allowlisted.`)
-  console.error(`Add O_NONBLOCK to the flags (and verify the post-open code rejects a non-regular file via fstat before reading), or add`)
-  console.error(`// ${IGNORE_MARKER}: <reason> immediately above the call, only where blocking is provably impossible (e.g. an O_DIRECTORY open).`)
+  console.error(`${allFindings.length} O_NOFOLLOW flow(s) are not provably paired with O_NONBLOCK and are not allowlisted.`)
+  console.error('Add O_NONBLOCK to the flags (and verify the post-open code rejects a non-regular file via fstat before reading), or add')
+  console.error(`// ${IGNORE_MARKER}: <reason> immediately above, only where blocking is provably impossible (e.g. an O_DIRECTORY open).`)
 }
 
 const failed = allFindings.length > 0
 if (!failed) {
-  console.log(`OK: ${scanned} file(s) scanned, ${totalNoFollowChecked} O_NOFOLLOW open(s) checked, all carry O_NONBLOCK or an allowlist reason.`)
+  console.log(`OK: ${scanned} file(s) scanned, ${allChecked.length} call argument(s) carrying O_NOFOLLOW checked, ${totalRefs} O_NOFOLLOW reference(s) traced, ${rosterFiles.length} roster file(s) clear — every O_NOFOLLOW flow carries O_NONBLOCK or an allowlist reason.`)
 }
 process.exit(failed && !args.dryRun ? 1 : 0)
