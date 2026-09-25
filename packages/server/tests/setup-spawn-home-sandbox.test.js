@@ -30,7 +30,14 @@
 
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn, spawnSync, execFile, execFileSync, fork } from 'node:child_process'
+import { spawn, spawnSync, exec, execSync, execFile, execFileSync, fork } from 'node:child_process'
+// Default-import and bare-specifier forms, imported here (a module loaded
+// AFTER `_setup.mjs` has already run and patched `node:child_process`'s CJS
+// exports) rather than in a throwaway script, so a future regression that
+// only breaks one import SHAPE is caught by the suite instead of relying on
+// manual verification. See the "ESM import shapes" describe block below.
+import cpDefault from 'node:child_process'
+import { spawn as spawnBareSpecifier } from 'child_process'
 import { promisify } from 'node:util'
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -49,6 +56,7 @@ import {
 } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
 
 const execFileAsync = promisify(execFile)
+const execAsync = promisify(exec)
 
 // A tiny script, printed back via stdout, that reports how a child sees its
 // own home. Every field is checked so a fix that redirects HOME but leaves
@@ -158,6 +166,86 @@ describe('spawn-home sandbox: a spawned child does not see the real home (#7269)
     })
   })
 
+  // `exec`/`execSync` take a SHELL COMMAND STRING, not a file + argv array —
+  // a different parse path through `findOptionsIndex`/`insertionIndex` than
+  // spawn/execFile above, and (unlike those two) neither was exercised by any
+  // test until now: the category-coverage describe block below only proves
+  // `exec`/`execSync` were WRAPPED (the SPAWN_HOME_MARKER is present), not that
+  // the redirect actually reaches a child spawned this way. A fixture FILE
+  // (rather than an inline `-e` script) sidesteps cross-platform shell-quoting
+  // differences (POSIX sh vs win32 cmd.exe) for the command string itself.
+  describe('exec()/execSync() (shell command-string forms)', () => {
+    let fixtureDir
+    let fixtureScript
+    let fixtureCommand
+
+    before(() => {
+      fixtureDir = mkdtempSync(join(tmpdir(), 'chroxy-spawn-home-exec-fixture-'))
+      fixtureScript = join(fixtureDir, 'report-home.cjs')
+      writeFileSync(fixtureScript, `console.log(JSON.stringify({home: require('os').homedir(), envHome: process.env.HOME}))\n`)
+      fixtureCommand = `"${process.execPath}" "${fixtureScript}"`
+    })
+
+    after(() => {
+      rmSync(fixtureDir, { recursive: true, force: true })
+    })
+
+    it('exec(command, callback) — two-arg shape — sees an isolated HOME', async () => {
+      const stdout = await new Promise((resolvePromise, reject) => {
+        exec(fixtureCommand, (err, out) => (err ? reject(err) : resolvePromise(out)))
+      })
+      const report = parseReport(stdout)
+      assert.notEqual(report.home, SPAWN_HOME_REAL)
+      assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+    })
+
+    it('exec(command, options, callback) — three-arg shape with caller options that omit env — still redirects', async () => {
+      const stdout = await new Promise((resolvePromise, reject) => {
+        exec(fixtureCommand, { timeout: 30000 }, (err, out) => (err ? reject(err) : resolvePromise(out)))
+      })
+      const report = parseReport(stdout)
+      assert.notEqual(report.home, SPAWN_HOME_REAL)
+      assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+    })
+
+    it('promisify(exec)(command) sees an isolated HOME (the util.promisify.custom path)', async () => {
+      const { stdout } = await execAsync(fixtureCommand)
+      const report = parseReport(stdout)
+      assert.notEqual(report.home, SPAWN_HOME_REAL)
+      assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+    })
+
+    it('execSync(command) — single-arg shape, no options object at all — sees an isolated HOME', () => {
+      // The overload the option-insertion logic is most likely to mis-handle:
+      // `findOptionsIndex` sees no object argument, so `insertionIndex` must
+      // insert one after the bare command string rather than, say, at index 0.
+      const stdout = execSync(fixtureCommand)
+      const report = parseReport(stdout)
+      assert.notEqual(
+        report.home, SPAWN_HOME_REAL,
+        'execSync(command) with NO options argument was not redirected — the ' +
+        'options-insertion logic likely mis-parsed the single-string-arg shape.',
+      )
+      assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+    })
+  })
+
+  it('execFile(cmd, callback) — file + callback only, no args array or options — still redirects', async () => {
+    // The 2-arg overload: no args array means `findOptionsIndex` sees only a
+    // string and a function, so `insertionIndex` must land the injected
+    // options object between them (`execFile(file, options, callback)`), not
+    // before `file` or after `callback`. Feed the script via stdin (rather
+    // than `-e`, which needs an args array) so the child still reports
+    // something instead of blocking on an unwritten stdin pipe.
+    const stdout = await new Promise((resolvePromise, reject) => {
+      const child = execFile(process.execPath, (err, out) => (err ? reject(err) : resolvePromise(out)))
+      child.stdin.end(REPORT_HOME_SCRIPT)
+    })
+    const report = parseReport(stdout)
+    assert.notEqual(report.home, SPAWN_HOME_REAL)
+    assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+  })
+
   it('strips an operator-exported CLAUDE_CONFIG_DIR from the redirected child too', async () => {
     const child = spawn(process.execPath, ['-e', REPORT_HOME_SCRIPT], {
       env: { ...process.env, CLAUDE_CONFIG_DIR: join(SPAWN_HOME_REAL, '.claude') },
@@ -190,6 +278,42 @@ describe('spawn-home sandbox: a spawned child does not see the real home (#7269)
       )
     } finally {
       rmSync(customHome, { recursive: true, force: true })
+    }
+  })
+
+  it('#7946 review: HOME already isolated but USERPROFILE still carries the ambient REAL value — still redirects', () => {
+    // Every HOME-reassigning test in this repo (auth-probes.test.js,
+    // claude-tui-session.test.js, byok-*.test.js, anthropic-compatible.test.js,
+    // …) does `process.env.HOME = fakeHome` — touching HOME only, never
+    // USERPROFILE. A later spawn with NO explicit `options.env` inherits
+    // `process.env` as-is: HOME then reads as "already isolated" (a string,
+    // not the real home), and a version of `computeOverrideEnv` that keys
+    // off HOME alone would skip the redirect entirely — leaving the
+    // untouched, still-real USERPROFILE to reach the child. `os.homedir()`
+    // reads USERPROFILE, not HOME, on win32, so that child's homedir() (and
+    // any real CLI's own `%USERPROFILE%`-based config-dir resolution) would
+    // still resolve to the developer's REAL Windows profile. Simulated here
+    // on any platform by setting USERPROFILE to the real home directly,
+    // exactly as it ambiently would be on an unredirected Windows shell.
+    const otherFakeHome = mkdtempSync(join(tmpdir(), 'chroxy-spawn-home-home-only-'))
+    const prevHome = process.env.HOME
+    const prevUserProfile = process.env.USERPROFILE
+    process.env.HOME = otherFakeHome // "the test" isolating only HOME
+    process.env.USERPROFILE = SPAWN_HOME_REAL // ambient, never touched by that test
+    try {
+      const result = spawnSync(process.execPath, ['-e', REPORT_HOME_SCRIPT])
+      const report = parseReport(result.stdout)
+      assert.notEqual(
+        report.envUserProfile, SPAWN_HOME_REAL,
+        'USERPROFILE leaked the real home through: HOME looked "already isolated" so the ' +
+        'sandbox skipped the redirect entirely, letting the untouched ambient USERPROFILE ' +
+        '(the real profile dir on win32) reach the child unredirected.',
+      )
+    } finally {
+      rmSync(otherFakeHome, { recursive: true, force: true })
+      process.env.HOME = prevHome
+      if (prevUserProfile === undefined) delete process.env.USERPROFILE
+      else process.env.USERPROFILE = prevUserProfile
     }
   })
 
@@ -235,6 +359,51 @@ describe('spawn-home sandbox: a spawned child does not see the real home (#7269)
       'The in-process fs write sandbox no longer guards the real ~/.claude — it may have been ' +
       'repointed at the isolated home instead of the real one.',
     )
+  })
+})
+
+// #7262: patching the live CJS `child_process` exports only protects ESM
+// consumers if the patch runs BEFORE anything links the built-in module —
+// Node snapshots a builtin's named/default ESM exports off `module.exports`
+// the first time some ESM `import` statement links it, and every import form
+// takes that snapshot independently. The suite above already proves the
+// NAMED `node:child_process` form works (this file's own top-level
+// `import { spawn, ... } from 'node:child_process'`, loaded after
+// `_setup.mjs` has already patched); this block proves the two forms that
+// import doesn't exercise — a DEFAULT import's property access, and the bare
+// `'child_process'` specifier (no `node:` prefix) — so a regression in either
+// is caught here instead of relying on manual verification.
+describe('spawn-home sandbox: ESM import shapes (#7262)', () => {
+  it('a child spawned via the DEFAULT import (`import cp from "node:child_process"; cp.spawn`) sees an isolated HOME', async () => {
+    const child = cpDefault.spawn(process.execPath, ['-e', REPORT_HOME_SCRIPT])
+    let stdout = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    await new Promise((resolvePromise, reject) => {
+      child.on('error', reject)
+      child.on('close', resolvePromise)
+    })
+    const report = parseReport(stdout)
+    assert.notEqual(report.home, SPAWN_HOME_REAL)
+    assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+  })
+
+  it('a child spawned via the BARE specifier (`import { spawn } from "child_process"`, no node: prefix) sees an isolated HOME', () => {
+    const viaBare = spawnBareSpecifier(process.execPath, ['-e', REPORT_HOME_SCRIPT])
+    let stdout = ''
+    viaBare.stdout.on('data', (chunk) => { stdout += chunk })
+    return new Promise((resolvePromise, reject) => {
+      viaBare.on('error', reject)
+      viaBare.on('close', () => {
+        const report = parseReport(stdout)
+        try {
+          assert.notEqual(report.home, SPAWN_HOME_REAL)
+          assert.equal(report.envHome, SPAWN_HOME_ISOLATED)
+          resolvePromise()
+        } catch (e) {
+          reject(e)
+        }
+      })
+    })
   })
 })
 

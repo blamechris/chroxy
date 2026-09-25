@@ -50,8 +50,9 @@
 // reaches the live CJS `module.exports` directly, without linking the
 // synthetic ESM module, so patching happens before any snapshot could be
 // taken — exactly the reasoning `test-fs-sandbox.mjs` documents for `node:fs`.
-// This file's only import is `node:module`; nothing it pulls in may import
-// `child_process` either.
+// This file's only imports are `node:module` and `node:util` (for
+// `promisify.custom`, read as a property — `util` itself never touches
+// `child_process`); neither pulls in anything that imports `child_process`.
 
 import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
@@ -127,15 +128,34 @@ function insertionIndex(args) {
 /**
  * Compute the env a launcher call should actually use, or `null` when no
  * redirect is needed (either the escape hatch is active, or the caller
- * already isolated `HOME` on their own).
+ * already isolated BOTH `HOME` and `USERPROFILE` on their own).
  */
 function computeOverrideEnv({ realHome, isolatedHome, allowEnv, existingEnv }) {
   if (allowEnv && process.env[allowEnv] === '1') return null
-  const effectiveHome = existingEnv ? existingEnv.HOME : process.env.HOME
-  if (typeof effectiveHome === 'string' && effectiveHome !== realHome) {
+  const source = existingEnv || process.env
+  const effectiveHome = source.HOME
+  // #7946 review: checking HOME alone is not enough to conclude "the caller
+  // already isolated this". A test that does `process.env.HOME = fakeHome`
+  // (the pattern every HOME-reassigning test in this repo uses — see
+  // auth-probes.test.js, claude-tui-session.test.js, byok-*.test.js) only
+  // ever touches HOME, never USERPROFILE. A later spawn with NO explicit
+  // `options.env` inherits `process.env` as-is: HOME now reads as
+  // "already isolated" (a string, not realHome) so the ORIGINAL check
+  // returned `null` here and skipped the redirect entirely — leaving
+  // `USERPROFILE` (still the real, untouched value from `process.env`) to
+  // reach the child unredirected. `os.homedir()` reads USERPROFILE, not
+  // HOME, on win32, so that child's homedir() — and any real CLI's own
+  // `%USERPROFILE%`-based config-dir resolution — would still resolve to the
+  // developer's REAL Windows profile despite this guard reporting "already
+  // isolated, nothing to do".
+  const effectiveUserProfile = source.USERPROFILE
+  const homeLooksIsolated = typeof effectiveHome === 'string' && effectiveHome !== realHome
+  const userProfileStillReal = effectiveUserProfile === realHome
+  if (homeLooksIsolated && !userProfileStillReal) {
     // The caller already pointed this env somewhere that is not the real
     // home — a provider-auth fixture, `withEnv({ HOME: tmp })`, or a test
-    // exercising its OWN isolation. Respect it.
+    // exercising its OWN isolation — and USERPROFILE isn't silently still
+    // real either. Respect it.
     return null
   }
   const next = existingEnv ? { ...existingEnv } : { ...process.env }
