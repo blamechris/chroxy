@@ -137,13 +137,30 @@ describe('buildConfinedGlobBody (#7354)', () => {
 
   it('resolves every match and compares it against the resolved root', () => {
     assert.ok(body.includes('__cx_resolve "$__cx_d"'), 'must resolve the match directory')
-    assert.ok(body.includes('__cx_resolve "$f"'), 'must resolve a symlinked entry')
+    // #7897 — the symlinked-entry resolution passes the lenient flag so a
+    // dangling target whose own parent is also missing still resolves
+    // lexically instead of failing outright; the directory-prefetch call
+    // above stays strict (no flag) since it resolves a real, existing
+    // directory entry, never a followed symlink target.
+    assert.ok(body.includes('__cx_resolve "$f" 1'), 'must resolve a symlinked entry leniently')
     assert.ok(body.includes('"$__cx_target"|"$__cx_target"/*'), 'must compare against the root')
   })
 
   it('withholds an unresolvable match rather than emitting it (fail closed)', () => {
-    assert.ok(body.includes('if ! __cx_r=$(__cx_resolve "$f"); then'))
+    assert.ok(body.includes('if ! __cx_r=$(__cx_resolve "$f" 1); then'))
     assert.ok(body.includes('__cx_lastv=n'))
+  })
+
+  it('#7896 — withholds a non-symlink match that does not exist on disk', () => {
+    // A purely literal `pattern` (no wildcard) reaches the `for` loop
+    // verbatim even when nothing matches it — nullglob only suppresses a
+    // pattern bash actually attempted to expand. The existence check must sit
+    // in an `elif` after the `-L` branch: a symlink is not `-e`-testable when
+    // dangling and is already existence-checked (via resolution) above.
+    assert.ok(body.includes('elif [ ! -e "$f" ]; then'), 'no literal-match existence check')
+    const elifLine = body.split('\n').findIndex((l) => l.includes('elif [ ! -e "$f" ]'))
+    const lLine = body.split('\n').findIndex((l) => l.includes('if [ -L "$f" ]; then'))
+    assert.ok(elifLine > lLine, 'the existence check must be an elif of the -L branch, not a separate if')
   })
 
   it('emits no marker for a withheld match (no existence oracle, #7341)', () => {
@@ -161,11 +178,14 @@ describe('buildConfinedGlobBody (#7354)', () => {
     ])
   })
 
-  it('counts every withheld match, on all three withhold branches', () => {
-    // A count that is right for two of three branches understates the trace by
-    // exactly the cases an operator most wants to see.
+  it('counts every withheld match, on all four withhold branches', () => {
+    // A count that is right for some but not all branches understates the
+    // trace by exactly the cases an operator most wants to see. #7896 added a
+    // 4th branch (a non-existent literal match) to the pre-existing 3
+    // (directory containment, symlink-resolution failure, symlink-target
+    // containment).
     const increments = body.split('\n').filter((l) => l.includes('__cx_withheld=$((__cx_withheld+1))'))
-    assert.equal(increments.length, 3)
+    assert.equal(increments.length, 4)
     assert.ok(body.includes('__cx_withheld=0'), 'the counter must start at a known value')
   })
 

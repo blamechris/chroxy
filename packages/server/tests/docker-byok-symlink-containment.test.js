@@ -1054,10 +1054,57 @@ describe('__cx_resolve_new — the create-mode walk, driven directly (#7876)', {
   })
 })
 
+describe('__cx_resolve\'s lenient flag — the n>0 gate, driven directly (#7897)', { skip: POSIX_ONLY || SKIP_NO_SYMLINK }, () => {
+  // #7897's own doc claims the lenient fallback is gated to `$__n -gt 0` so
+  // the ORIGINAL `$1`'s own first-hop parent — Read/Grep naming a path with
+  // no such directory at all — "stays a hard failure regardless of this
+  // flag". No caller can reach this directly: Glob's one lenient call site
+  // (`__cx_resolve "$f" 1`) only ever runs on a match whose own containing
+  // directory was already proven to exist by the directory-containment check
+  // earlier in `buildConfinedGlobBody`, so `$__n` is never 0 at the point a
+  // real `cd -P` failure occurs there — the n>0 vs n>=0 distinction is
+  // unreachable through that caller by construction. That makes it exactly
+  // the shape `docs/false-safety-guards.md` warns about: a refusal no input
+  // can reach is only proven (or disproven) by driving the function itself,
+  // and an untested defensive gate is where a future caller that reuses the
+  // lenient flag without Glob's precondition would silently get more
+  // leniency than #7897 intended.
+  beforeEach(() => { buildWriteFixture() })
+  afterEach(() => { rmSync(wfRoot, { recursive: true, force: true }) })
+
+  it('refuses when the FIRST hop\'s own parent is missing, even with the lenient flag set', async () => {
+    // `real` exists (from buildWriteFixture); its child `totally-missing`
+    // does not, and this call never follows a symlink first — `$__n` is 0 at
+    // the point `cd -P` fails, so this must stay a hard failure regardless
+    // of the trailing `1`.
+    const body = [
+      'if __r=$(__cx_resolve "$__cx_target/real/totally-missing/x.ts" 1); then',
+      '  printf \'KEPT:%s\\n\' "$__r"',
+      'else',
+      '  printf \'REFUSED\\n\'',
+      'fi',
+    ].join('\n')
+    const cmd = buildConfinedContainerCommand({ target: '/workspace', body, mode: 'read' })
+    const local = cmd.split(CONTAINER_WORKSPACE).join(wfWs)
+    const { stdout } = await pexec('bash', ['-c', local])
+    const confined = parseConfinedContainerStdout(stdout)
+    assert.equal(confined.ok, true, `containment preamble failed: ${JSON.stringify(confined)}`)
+    assert.equal(confined.body, 'REFUSED\n', 'the lenient flag widened the original path\'s own first-hop parent')
+  })
+})
+
 describe('buildConfinedContainerCommand modes (#7876)', () => {
-  it('the default mode emits the read resolver only, unchanged by create mode existing', () => {
+  it('the default mode resolves $__cx_target with __cx_resolve, unchanged by create mode existing', () => {
     const cmd = buildConfinedContainerCommand({ target: '/workspace/a', body: 'true' })
-    assert.equal(cmd.includes('__cx_resolve_new'), false, 'read mode picked up the create-mode walk')
+    // #7897 — 'read' mode now carries the __cx_resolve_new DEFINITION too
+    // (__cx_resolve's lenient fallback, used only by Glob, calls it), but the
+    // top-level $__cx_target resolution in 'read' mode must still go through
+    // __cx_resolve, never __cx_resolve_new — that is the property this test
+    // actually pins.
+    assert.equal(
+      cmd.includes(`__cx_target=$(__cx_resolve_new '/workspace/a')`), false,
+      'read mode resolved $__cx_target with the create-mode walk',
+    )
     assert.ok(cmd.includes(`__cx_target=$(__cx_resolve '/workspace/a')`), 'read mode lost __cx_resolve')
     assert.deepEqual(
       cmd,
