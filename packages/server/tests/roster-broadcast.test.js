@@ -122,4 +122,40 @@ describe('broadcastRosterPerRecipient (#7895)', () => {
     assert.ok(call, 'expected the residual to reach an unknown-provider client')
     assert.equal(call.arguments[0].provider, 'claude-sdk')
   })
+
+  // Copilot review (PR #7932) — a daemon explicitly defaulted to a REAL,
+  // REGISTERED non-Claude provider (`--provider codex`, so
+  // `resolveRosterProvider(null, 'codex') === 'codex'`) used to have that
+  // name added to `knownTags` unconditionally, re-tagging a Claude-origin
+  // roster as `'codex'` and delivering it to any client resolving to that
+  // tag — including a REAL codex-active session, whose own bucket key IS
+  // `'codex'`. That client would store a Claude model list under its own
+  // provider's slot and could then `set_model` a Claude id into a codex
+  // session — the exact cross-provider leak #7728 fixed. Distinguishes this
+  // from the 'my-synthetic-default' case above: that name is UNREGISTERED,
+  // so it legitimately falls back to the default (Claude) registry; `codex`
+  // is registered with its OWN registry and must never be manufactured as a
+  // Claude-family tag.
+  it('does not mislabel a Claude roster as a REAL non-Claude defaultProvider (codex) and leak it to a codex-active client', () => {
+    const broadcast = mock.fn()
+    const sessionManager = { getSession: (id) => (id === 'sess-codex' ? { provider: 'codex' } : null) }
+    broadcastRosterPerRecipient({
+      broadcast,
+      sessionManager,
+      defaultProvider: 'codex',
+      message: { type: 'available_models', models: [{ id: 'claude-sonnet-4-6' }], defaultModel: null, provider: 'claude-sdk' },
+    })
+
+    const codexClient = { activeSessionId: 'sess-codex' }
+    const call = findFor(broadcast, codexClient)
+    assert.ok(!call, 'a codex-active client must not receive the Claude roster mislabeled as codex')
+
+    // No client should ever see this Claude roster tagged 'codex' — not the
+    // real codex client above, and not an idle client either (idle clients on
+    // a codex-default daemon get their roster from the codex registry via
+    // ws-history.js's connect path, never a re-tagged Claude one).
+    for (const call of broadcast.mock.calls) {
+      assert.notEqual(call.arguments[0].provider, 'codex', 'the Claude-origin roster must never be sent tagged as codex')
+    }
+  })
 })

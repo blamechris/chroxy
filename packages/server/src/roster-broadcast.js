@@ -110,9 +110,10 @@ export function overlayBroadcastReachesProvider(message, activeProvider, tagIsDe
  *   `ctx.broadcast`, both already `(msg, filter) => void`.
  * @param {object} deps.sessionManager
  * @param {string|null} [deps.defaultProvider] - this daemon's resolved default
- *   (`config.provider || DEFAULT_PROVIDER`) — the same value `ws-history.js`
- *   feeds `resolveRosterProvider` via `billingCanary.defaultProvider`. Omitted,
- *   `resolveRosterProvider` falls back to `DEFAULT_PROVIDER` itself.
+ *   (`resolveDaemonDefaultProvider(config)`, `./providers.js`) — the same value
+ *   `ws-history.js` feeds `resolveRosterProvider` via
+ *   `billingCanary.defaultProvider`. Omitted, `resolveRosterProvider` falls
+ *   back to `DEFAULT_PROVIDER` itself.
  * @param {{ type: string, models: Array, defaultModel?: string|null, provider?: string|null }} deps.message
  * @returns {void}
  */
@@ -144,7 +145,27 @@ export function broadcastRosterPerRecipient({ broadcast, sessionManager, default
   // The tag a client with no active session — or a session reporting no
   // provider — is served. Same resolution `ws-history.js` uses on connect, so
   // an idle client's bucket key matches whichever of the two sent last.
-  knownTags.add(resolveRosterProvider(null, defaultProvider))
+  //
+  // Only added when it NAMES the default registry — i.e. when this daemon's
+  // own configured default is itself Claude-family (the ordinary case:
+  // DEFAULT_PROVIDER is 'claude-tui') or an unregistered/custom name (which
+  // `getRegistryForProvider` also falls back to the default registry for).
+  // A daemon explicitly defaulted to a REAL non-Claude provider (`--provider
+  // codex`) resolves this to `'codex'` — a REGISTERED tag with its OWN
+  // registry and its own real recipients. Adding it unconditionally used to
+  // re-tag THIS Claude roster as `'codex'` and hand it to every codex-active
+  // (and idle) client on that daemon: a Claude model list filed under the
+  // exact bucket key a codex session reads, with `set_model` live on tap —
+  // the precise cross-provider leak #7728 exists to prevent, reintroduced by
+  // this fallback tag. An idle client on such a daemon has no business
+  // receiving a Claude roster at all (ws-history.js's connect path would tag
+  // ITS roster 'codex' too, from the codex registry, never Claude) — it falls
+  // through to the residual broadcast below instead, tagged with the
+  // message's own literal, which no codex session's bucket key matches.
+  const idleTag = resolveRosterProvider(null, defaultProvider)
+  if (usesDefaultModelsRegistry(idleTag)) {
+    knownTags.add(idleTag)
+  }
 
   for (const tag of knownTags) {
     broadcast({ ...message, provider: tag }, (client) => resolveRosterProvider(
