@@ -1366,8 +1366,15 @@ export class WsServer {
     this._draining = false
     this._latestVersion = null
 
-    // Background version check (non-blocking, skipped in test/CI)
-    if (process.env.NODE_ENV !== 'test') {
+    // Background version check (non-blocking, skipped in test/CI). #7265: this
+    // used to be gated on `process.env.NODE_ENV !== 'test'`, but nothing in this
+    // repo's harness or CI ever sets NODE_ENV=test, so the skip never fired and
+    // every WsServer construction in the test suite made a real outbound request
+    // to registry.npmjs.org. Gate on an explicit, harness-set switch instead —
+    // matches the CHROXY_DISABLE_KEYCHAIN / CHROXY_CRED_DISABLE_KEYCHAIN pattern
+    // in tests/_setup.mjs — so this changes exactly one behaviour and can't
+    // re-arm (or fail to arm) any other NODE_ENV gate.
+    if (process.env.CHROXY_DISABLE_UPDATE_CHECK !== '1') {
       checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch((err) => {
         log.warn(`Failed to check latest npm version: ${err.message} (non-critical, update check skipped)`)
       })
