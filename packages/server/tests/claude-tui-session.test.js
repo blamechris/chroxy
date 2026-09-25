@@ -737,6 +737,100 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // #7954 review — `_spawnPty` restructured its `args` build from
+  // `[...idArgs, '--settings', ..., '--no-chrome']` (a spread into a fresh
+  // array literal) to `const args = <ternary>; args.push('--settings', ...,
+  // '--no-chrome')` so `scripts/lint-argv-sinks.mjs` can statically resolve
+  // it (a spread of a locally-built array is opaque to its array resolver).
+  // The PR description calls this "behavior-identical"; this table-driven
+  // suite proves the REAL argv is byte-identical across every combination of
+  // the branches that feed it (resumed vs fresh, skipPermissions, model,
+  // skills prefix) by running the genuine `_spawnPty` against a capturing
+  // node-pty stand-in (the `_ptyModOverride` seam — see the #6417 drift
+  // guard above) rather than trusting a hand-reasoned equivalence. Expected
+  // arrays are written directly from the documented argv contract (idArgs,
+  // then --settings/--no-chrome, then the three conditional flags in their
+  // documented order), not derived from the production source, so this
+  // fails exactly as loudly on a dropped/reordered/duplicated element as on
+  // the spread-vs-push shape itself.
+  describe('argv construction — behavior-identical restructure (#7954 review)', () => {
+    let fakeHome
+    let origSpawnPty
+    let session
+
+    beforeEach(() => {
+      fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-tui-argv-matrix-home-'))
+      writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify({ projects: {} }))
+      process.env._ORIG_HOME = process.env.HOME
+      process.env.HOME = fakeHome
+      process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
+      origSpawnPty = ClaudeTuiSession.prototype._spawnPty
+    })
+
+    afterEach(async () => {
+      if (session) { try { await session.destroy() } catch { /* ignore */ } session = null }
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      if (process.env._ORIG_HOME) { process.env.HOME = process.env._ORIG_HOME; delete process.env._ORIG_HOME }
+      process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
+      if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
+    })
+
+    let portCounter = 15000
+    const SESSION_ID = 'argv-matrix-uuid'
+    const MODEL_ID = 'argv-matrix-model'
+    const SKILLS_TEXT = 'argv-matrix-skills-text'
+
+    for (const resumed of [false, true]) {
+      for (const skipPermissions of [false, true]) {
+        for (const withModel of [false, true]) {
+          for (const withSkills of [false, true]) {
+            const label = `resumed=${resumed} skipPermissions=${skipPermissions} model=${withModel} skills=${withSkills}`
+            it(`captures byte-identical real argv: ${label}`, async () => {
+              const port = portCounter++
+              session = new ClaudeTuiSession({
+                cwd: '/tmp',
+                port,
+                skillsDir: emptySkillsDir,
+                repoSkillsDir: null,
+                ...(skipPermissions ? { skipPermissions: true } : {}),
+                ...(withModel ? { model: MODEL_ID } : {}),
+              })
+              session._sessionId = SESSION_ID
+              session._resumedFromPersisted = resumed
+              session._settingsPath = join(fakeHome, 'settings.json')
+              // Deterministic regardless of the real skills-loader's own
+              // empty/non-empty behaviour — this suite is about argv
+              // construction, not skills discovery.
+              session._buildCombinedSkillsPrefix = () => (withSkills ? SKILLS_TEXT : '')
+              // The capturing stub throws after capturing (see below), which
+              // _spawnPty's own spawn try/catch turns into an 'error' emit —
+              // a listener is required or node:test reports it as unhandled
+              // (matches the #6417 drift-guard pattern above).
+              session.on('error', () => {})
+
+              let realArgs = null
+              session._ptyModOverride = {
+                spawn: (_cmd, args) => { realArgs = args; throw new Error('captured-and-bail') },
+              }
+              await session._spawnPty(true)
+              assert.ok(realArgs, 'the real _spawnPty invoked node-pty spawn')
+
+              const expected = resumed
+                ? ['--resume', SESSION_ID]
+                : ['--session-id', SESSION_ID]
+              expected.push('--settings', session._settingsPath, '--no-chrome')
+              if (skipPermissions) expected.push('--dangerously-skip-permissions')
+              if (withModel) expected.push('--model', MODEL_ID)
+              if (withSkills) expected.push('--append-system-prompt', SKILLS_TEXT)
+
+              assert.deepEqual(realArgs, expected, `argv mismatch for ${label}`)
+            })
+          }
+        }
+      }
+    }
+  })
+
   describe('constructor', () => {
     it('defaults provider id to claude-tui', () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
