@@ -124,6 +124,29 @@ describe('CliSession resume — buildClaudeCliArgs (#4887)', () => {
         'a phantom resume id would 404 or fork into a wrong conversation')
     }
   })
+
+  // #7868 — `-r, --resume` is declared with an OPTIONAL argument on the claude
+  // CLI (`[value]`), not a required one, so a two-token `['--resume', id]`
+  // with a dash-leading id is OPTION-PARSED rather than swallowed as the
+  // flag's value: measured against claude 2.1.282, `claude -p --resume
+  // --bogus-flag ...` fails with `error: unknown option '--bogus-flag'`
+  // (i.e. --resume's slot went unfilled and --bogus-flag was read as its own
+  // option) rather than starting normally. resumeSessionId can never
+  // legitimately start with `-` — it is chroxy's own session identifier, not
+  // free-form chat text — so the correct shape is rejection, not a `--`
+  // terminator.
+  it('rejects a dash-leading resumeSessionId instead of placing it in the --resume value slot', () => {
+    assert.throws(
+      () => buildClaudeCliArgs({
+        model: null,
+        permissionMode: 'approve',
+        allowedTools: [],
+        skillsText: '',
+        resumeSessionId: '--dangerously-skip-permissions',
+      }),
+      /unsafe resumeSessionId/,
+    )
+  })
 })
 
 describe('CliSession resume — capability + constructor (#4887)', () => {

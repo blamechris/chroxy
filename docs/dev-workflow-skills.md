@@ -31,6 +31,7 @@ Chroxy's development workflow is driven by reusable slash commands. Their neutra
 | `claude` | `.claude/skills/<name>/SKILL.md` (the v2.1.x "skills" path — the legacy `.claude/commands/` slash-command discovery is broken upstream, so Claude loads from here) | ✅ in-repo |
 | `gemini` | `.gemini/commands/<name>.toml` (TOML; `$ARGUMENTS` → `{{args}}`) | ✅ in-repo |
 | `codex` | `~/.codex/prompts/<name>.md` (invoked `/prompts:<name>`; **user-global**, not project-scoped) | ❌ per-machine |
+| `pi` | `~/.pi/agent/skills/<name>/SKILL.md` (invoked `/skill:<name>`; **user-global**, not project-scoped) | ❌ per-machine |
 
 ## Codex is opt-in and off by default
 
@@ -75,7 +76,7 @@ It never touches `codex`/`pi`, which compile into `~/.codex` and `~/.pi`: per-ma
 
 ### Discoverability hint
 
-When you compile, `compile-skill-targets.mjs` prints a one-line hint if it detects an agent's home directory (`~/.codex`, `~/.gemini`) whose target you did **not** select — a nudge so a Codex or Gemini user doesn't silently miss the skills. It never adds the target for you (that would write to a home dir you didn't ask about); it just tells you the flag to pass.
+When you compile, `compile-skill-targets.mjs` prints a one-line hint if it detects an agent's home directory (`~/.codex`, `~/.pi`) whose target you did **not** select — a nudge so a Codex or Pi user doesn't silently miss the skills. (`~/.gemini` is **not** checked, because gemini compiles into the repo's `.gemini/commands/` and is in the default targets; a missing gemini skill is visible in the repo itself.) It never adds the target for you (that would write to a home dir you didn't ask about); it just tells you the flag to pass.
 
 ## Two things called skills
 
@@ -85,13 +86,13 @@ When you compile, `compile-skill-targets.mjs` prints a one-line hint if it detec
 | **What it is** | Instruction snippets injected into the model's prompt | Slash-command playbooks (`/full-review`, `/check-pr`, …) |
 | **Where it lives** | `~/.chroxy/skills/*.md` + `<repo>/.chroxy/skills/*.md` | `.claude/commands/*.md` → compiled to native targets |
 | **Needs a running Chroxy?** | **Yes** — injected at session start | **No** — a build-time authoring tool |
-| **Provider-agnostic?** | **Yes** — injected for any provider (with optional `providers:` scoping) | Compiled per coding agent (claude / gemini / codex) |
+| **Provider-agnostic?** | **Yes** — injected for any provider (with optional `providers:` scoping) | Compiled per coding agent (claude / gemini / codex / pi) |
 | **How invoked** | Auto-injected; listed via `list_skills` | `/full-review` etc. in your coding agent |
 | **Source of truth** | Your files | The `blamechris/skill-templates` registry via `/skill` |
 
 ## A third, external "skills": Pi Coding Agent
 
-The [Pi Coding Agent](https://github.com/earendil-works/pi) has its own "skills" ecosystem — a **separate, external** system that does not interoperate with either Chroxy system above. Emitting Chroxy's dev-workflow skills into Pi's native format is tracked as a future compile target in #6573.
+The [Pi Coding Agent](https://github.com/earendil-works/pi) has its own "skills" ecosystem — a **separate, external** system that does not interoperate with either Chroxy system above. Emitting Chroxy's dev-workflow skills into Pi's native format is supported via the `pi` compile target (`#6573`).
 
 ## See also
 

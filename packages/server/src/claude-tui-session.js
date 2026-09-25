@@ -40,6 +40,7 @@ import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sideca
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -2448,6 +2449,25 @@ export class ClaudeTuiSession extends BaseSession {
     // claude does not know the conversation id, ONE drop-and-retry-FRESH
     // attempt with a new uuid (#5348/#5417, see _scheduleRespawn) before
     // exhaustion destroys the session.
+    //
+    // #7929 follow-on: `_sessionId` is always a self-minted `randomUUID()` (or
+    // a persisted value that traces back to one — see the constructor and the
+    // two `randomUUID()` assignments below) and so can never legitimately
+    // start with `-`, exactly like codex-session.js's `threadId` (argv-safety
+    // case 1). Guarding it costs nothing and matters because `-r, --resume`
+    // is declared with an OPTIONAL argument on the claude CLI (`claude --help`:
+    // `-r, --resume [value]`) — measured while fixing #7868/#7869 in
+    // cli-session.js's `buildClaudeCliArgs`: the two-token form of an
+    // optional-arg flag INJECTS a dash-leading value as a separate option
+    // rather than swallowing it. This spawn goes through node-pty
+    // (`ptyMod.spawn`), not `child_process`, so `scripts/lint-argv-sinks.mjs`
+    // cannot see this call site at all — the guard here is the only gate.
+    try {
+      assertSafeArgvValue(this._sessionId, 'sessionId')
+    } catch (err) {
+      this.emit('error', { message: `Refusing to spawn claude TUI: ${err.message}` })
+      return
+    }
     const idArgs = this._resumedFromPersisted
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]

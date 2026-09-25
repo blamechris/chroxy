@@ -1,11 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PairingManager } from '../src/pairing.js'
 import { createSessionTokenStore } from '../src/session-token-store.js'
 import { validateConfig } from '../src/config.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // A keychain stub that reports "no keychain here" so the store exercises its 0600
 // PLAINTEXT fallback — no real macOS keychain access (avoids modal prompts / the
@@ -145,6 +146,32 @@ describe('#6598 createSessionTokenStore', () => {
       chmodSync(file, 0o644)
       const store = createSessionTokenStore({ dir, keychain: noKeychain })
       assert.deepEqual(store.load(), [], 'a 0644 file is refused → empty')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // #7893: the store used to statSync(path) (mode check) and then separately
+  // readFileSync(path) — a rename/symlink-swap window between the two. This
+  // is the deterministic proxy for that race: the swap happens once, before
+  // the read, rather than mid-syscall.
+  it('#7893: refuses a symlink swapped in for the store file, even to a well-formed 0600 file elsewhere (today it is followed)', { skip: process.platform === 'win32' ? 'covered by trusted-file-read win32 tests' : SKIP_NO_SYMLINK }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-stst-'))
+    try {
+      const store = createSessionTokenStore({ dir, keychain: noKeychain })
+      store.save([['tok-a', { createdAt: 123, sessionId: 's1' }]])
+      const file = join(dir, 'session-tokens.json')
+
+      const elsewhere = join(dir, 'elsewhere.json')
+      writeFileSync(elsewhere, JSON.stringify({ v: 1, entries: [['evil-tok', { createdAt: 1, sessionId: null }]] }), { mode: 0o600 })
+      // Swap: the path now points at a DIFFERENT 0600 file we own.
+      rmSync(file)
+      symlinkSync(elsewhere, file)
+
+      assert.deepEqual(
+        store.load(), [],
+        'a symlink swapped in after the trusted save must be refused (empty, like any unreadable store), never followed to the swapped-in entries',
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

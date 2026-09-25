@@ -3592,4 +3592,100 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(PermissionRuleSchema.safeParse({ tool: 'Write', decision: 'allow', path: '' }).success, false)
     })
   })
+
+  // #7870 — GetDiffSchema was `z.object({ type: z.literal('get_diff') }).passthrough()`,
+  // so `base` reached the server as a value of arbitrary type and length; nothing
+  // upstream of getDiff's own runtime gates (packages/server/src/ws-file-ops/reader.js)
+  // narrowed it. This closes the schema half: `base` is now a bounded, typed field.
+  //
+  // Deliberately NOT replicating reader.js's charset/isSafeArgvValue grammar here.
+  // packages/server/tests/ws-server-file-ops.test.js's #7290/#7298 regression suite
+  // sends dash-leading and pathspec-shaped bases (`-O/...`, `--exit-code`, `--stat`,
+  // `HEAD:/etc/passwd`, `/etc/passwd`, `file.txt`) OVER THE WIRE and asserts the
+  // SERVER divertsthem to the HEAD fallback (`error: null`) rather than refusing the
+  // request — that is the reviewed, mutation-proven #7862 contract: a bad base is
+  // never fatal to the client, it just doesn't select a base. Rejecting those shapes
+  // at the protocol layer would turn a graceful fallback into a hard wire error and
+  // break that suite. The wire's job here is bounding TYPE and LENGTH (the DoS/log-
+  // amplification concern #7870 raises — "a multi-megabyte base is spawned as an argv
+  // element"); which strings are a *usable* git revision stays the server's decision,
+  // exactly as the #7862 review left it.
+  describe('GetDiffSchema base (#7870)', () => {
+    // Mirrors packages/server/src/ws-file-ops/reader.js's MAX_DIFF_BASE_LENGTH gate.
+    // GET_DIFF_BASE_MAX_LENGTH is the single source of truth — the server imports it
+    // from this package (see packages/server/tests/ws-server-file-ops.test.js's own
+    // '#7870' describe block, which runs the SAME legitimate-forms table through the
+    // server's isSafeArgvValue + charset gate so the two layers are pinned together).
+    const LEGITIMATE_BASES = [
+      'HEAD', 'HEAD~1', 'HEAD^', 'main', 'chroxy-7298-base', 'file.txt',
+      'chroxy-7298-long', // the UNPADDED ref from the server's own length-gate test
+      '-O/chroxy-7290-no-such-orderfile',
+      '--exit-code', '--stat', '--output=/tmp/x',
+      'HEAD:/etc/passwd', 'HEAD:/chroxy-7298/definitely/not/here', '/etc/passwd',
+    ]
+
+    it('accepts every legitimate wire form the server\'s own #7290/#7298 suite sends', async () => {
+      const { GetDiffSchema } = await import('../src/schemas/client.ts')
+      for (const base of LEGITIMATE_BASES) {
+        const r = GetDiffSchema.safeParse({ type: 'get_diff', base })
+        assert.ok(r.success, `base ${JSON.stringify(base)} must be accepted at the wire — the server owns the grammar decision`)
+      }
+    })
+
+    it('omitted base is still valid (unchanged contract)', async () => {
+      const { GetDiffSchema } = await import('../src/schemas/client.ts')
+      assert.ok(GetDiffSchema.safeParse({ type: 'get_diff' }).success)
+    })
+
+    it('rejects a base over GET_DIFF_BASE_MAX_LENGTH, accepts one at the bound', async () => {
+      const { GetDiffSchema, GET_DIFF_BASE_MAX_LENGTH } = await import('../src/schemas/client.ts')
+      assert.equal(GET_DIFF_BASE_MAX_LENGTH, 256, 'a full OID is 40 chars — 256 stays generous')
+      assert.ok(
+        GetDiffSchema.safeParse({ type: 'get_diff', base: 'a'.repeat(GET_DIFF_BASE_MAX_LENGTH) }).success,
+        'exactly at the bound must be accepted'
+      )
+      assert.equal(
+        GetDiffSchema.safeParse({ type: 'get_diff', base: 'a'.repeat(GET_DIFF_BASE_MAX_LENGTH + 1) }).success,
+        false,
+        'one char over the bound must be rejected'
+      )
+    })
+
+    it('rejects a non-string base', async () => {
+      const { GetDiffSchema } = await import('../src/schemas/client.ts')
+      for (const bad of [123, true, {}, [], null]) {
+        assert.equal(
+          GetDiffSchema.safeParse({ type: 'get_diff', base: bad }).success,
+          false,
+          `${JSON.stringify(bad)} must be rejected`
+        )
+      }
+    })
+
+    it('accepts an explicit sessionId (previously reached the handler only via .passthrough())', async () => {
+      const { GetDiffSchema } = await import('../src/schemas/client.ts')
+      const r = GetDiffSchema.safeParse({ type: 'get_diff', sessionId: 'sess-1' })
+      assert.ok(r.success)
+      assert.equal(r.data.sessionId, 'sess-1')
+      // Proves the field is DECLARED (typed), not merely let through by
+      // .passthrough() — an undeclared key would accept any type unchecked.
+      assert.equal(
+        GetDiffSchema.safeParse({ type: 'get_diff', sessionId: 12345 }).success,
+        false,
+        'sessionId must be typed as a string'
+      )
+    })
+
+    it('still passes unknown keys through (forward-compat, matching every other client schema)', async () => {
+      const { GetDiffSchema } = await import('../src/schemas/client.ts')
+      const r = GetDiffSchema.safeParse({ type: 'get_diff', someFutureField: 'x' })
+      assert.ok(r.success, '.passthrough() is intentionally kept — see the file-level comment above')
+    })
+
+    it('ClientMessageSchema rejects an over-long base at the discriminated-union layer too', async () => {
+      const { ClientMessageSchema, GET_DIFF_BASE_MAX_LENGTH } = await import('../src/schemas/client.ts')
+      const r = ClientMessageSchema.safeParse({ type: 'get_diff', base: 'a'.repeat(GET_DIFF_BASE_MAX_LENGTH + 1) })
+      assert.equal(r.success, false)
+    })
+  })
 })
