@@ -350,7 +350,116 @@ describe('Grep argv option injection (#7295)', () => {
 
     it('keeps `-e` immediately before the pattern even with a glob filter present', () => {
       const cmd = build('-Wall', '/work', { glob: '*.c' })
-      assert.match(cmd, /--no-heading --glob '\*\.c' -e '-Wall' -- '\/work'/)
+      assert.match(cmd, /--no-heading --glob='\*\.c' -e '-Wall' -- '\/work'/)
+    })
+  })
+
+  // #7928 — `glob` is `buildGrepArgs`'s OTHER model-controlled interpolation
+  // (besides `pattern`, hardened above). Unlike `pattern`/`root`, it is bound
+  // to a NAMED flag (`--glob`) rather than a bare positional, so neither the
+  // `-e` two-token bind nor the `--` terminator applies — those need a
+  // positional slot to terminate INTO. Measured against ripgrep 15.2.0
+  // (`-g GLOB, --glob=GLOB`, required-arg): the OLD space-separated form
+  // (`--glob <value>`) already consumed a hostile next token as the glob's
+  // own value in every case probed (`--pre=<script>`, `-e`, `--files`,
+  // short-circuiting `-h`/`--help`/`-V`/`--version`) — none reached rg's own
+  // option parser as a distinct flag. That measurement is a fact about one rg
+  // build, not a contract this repo controls, so the fix moves to the JOINED
+  // `--glob=<value>` form (argv-safety.js case 3), which removes the arity
+  // question entirely: the value is fused into the same shell word as the
+  // flag name and cannot become a second argv element regardless of what
+  // `--glob` requires. `shellQuote` closing SHELL injection is UNCHANGED and
+  // separately proven below (quote breakout, `$()`, backticks, embedded
+  // newline) — arity and shell-quoting are different classes with different
+  // fixes, and this file now covers both for `glob`.
+  describe('the --glob flag (#7928)', () => {
+    // Values that probe ARITY (does `--glob` swallow a flag-shaped next token
+    // as its own value?) mixed with values that probe SHELL QUOTING (can the
+    // value break out of the single-quoted argv element?). Both classes must
+    // be inert either way.
+    const HOSTILE_GLOBS = [
+      '--pre=/tmp/evil.sh',
+      '-e',
+      '--files',
+      "a' ; touch MARKER_SHOULD_NOT_EXIST ; '",
+      '$(touch MARKER_SHOULD_NOT_EXIST)',
+      '`touch MARKER_SHOULD_NOT_EXIST`',
+      'line1\nline2',
+    ]
+
+    describe('command shape', () => {
+      it('fuses every glob value into a single `--glob=<value>` token, never a separate argv element', () => {
+        for (const glob of HOSTILE_GLOBS) {
+          const cmd = build('TODO', '/work', { glob })
+          // `--glob` followed by whitespace-then-quote would be TWO argv
+          // elements after bash word-splits the unquoted `--glob` token from
+          // the quoted value — exactly the shape that puts the value at the
+          // mercy of rg's declared arity for the flag.
+          assert.doesNotMatch(cmd, /--glob\s+'/, `glob=${JSON.stringify(glob)} cmd=${cmd}`)
+          assert.match(cmd, /--glob=/, `glob=${JSON.stringify(glob)} cmd=${cmd}`)
+        }
+      })
+    })
+
+    describe('execution proof (rg branch)', () => {
+      // ARMS the negative control below (same reasoning as the pattern-slot
+      // positive control): if a REAL --pre flag on this rg build did not
+      // execute the preprocessor, "marker was not written" would pass for
+      // free and the negative control would prove nothing.
+      it('POSITIVE CONTROL: the marker mechanism really does fire when --pre IS a genuine flag', POSIX_ONLY, async (t) => {
+        if (requireRgOrSkip(t, 'the --glob marker-mechanism positive control')) return
+        const fx = await makeFixture()
+        try {
+          const cmd = `rg -n --no-heading --pre=${shellQuoteForTest(fx.script)} -e 'compile' ${shellQuoteForTest(fx.root)}`
+          await runBuilt(cmd, { cwd: fx.root })
+          assert.equal(
+            await exists(fx.marker),
+            true,
+            `the fixture is INERT: rg did not execute the preprocessor even when --pre was a real flag. cmd=${cmd}`,
+          )
+        } finally {
+          await fx.cleanup()
+        }
+      })
+
+      it('NEGATIVE CONTROL: a hostile --glob value must not execute a program or break out of quoting', POSIX_ONLY, async (t) => {
+        if (requireRgOrSkip(t, 'the --glob execution proof')) return
+        const fx = await makeFixture()
+        try {
+          for (const glob of HOSTILE_GLOBS.map((g) => g.replace('/tmp/evil.sh', fx.script))) {
+            const cmd = build('compile', fx.root, { glob })
+            const res = await runBuilt(cmd, { cwd: fx.root, timeoutMs: 8_000 })
+            assert.equal(res.timedOut, false, `hung on glob=${JSON.stringify(glob)} cmd=${cmd}`)
+            assert.equal(
+              await exists(fx.marker),
+              false,
+              `glob=${JSON.stringify(glob)} caused the --pre preprocessor to execute (option injection). cmd=${cmd} rc=${res.code} stderr=${res.stderr}`,
+            )
+            assert.equal(
+              await exists(path.join(fx.root, 'MARKER_SHOULD_NOT_EXIST')),
+              false,
+              `glob=${JSON.stringify(glob)} broke out of shell quoting. cmd=${cmd} rc=${res.code} stderr=${res.stderr}`,
+            )
+          }
+        } finally {
+          await fx.cleanup()
+        }
+      })
+
+      it('POSITIVE CONTROL: an ordinary glob still filters correctly through the joined form', POSIX_ONLY, async (t) => {
+        if (requireRgOrSkip(t, 'the --glob positive control')) return
+        const fx = await makeFixture()
+        try {
+          await writeFile(path.join(fx.root, 'b.md'), 'compile with -Wall enabled\n')
+          const cmd = build('compile', fx.root, { glob: '*.txt' })
+          const res = await runBuilt(cmd, { cwd: fx.root })
+          assert.equal(res.code, 0, `expected a match, got rc=${res.code} stderr=${res.stderr} cmd=${cmd}`)
+          assert.match(res.stdout, /a\.txt/)
+          assert.doesNotMatch(res.stdout, /b\.md/)
+        } finally {
+          await fx.cleanup()
+        }
+      })
     })
   })
 
