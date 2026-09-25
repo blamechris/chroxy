@@ -297,7 +297,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         <div className="perm-mcp-source" data-testid="perm-mcp-source">
           <span className="perm-mcp-source-label">Configured from:</span>{' '}
           <span
-            className={`perm-mcp-source-value${mcpServerSource === 'project-mcp-json' ? ' perm-mcp-source-repo' : ''}`}
+            className={mcpServerSource === 'project-mcp-json' ? 'perm-mcp-source-repo' : undefined}
             data-testid="perm-mcp-source-value"
           >
             {mcpSourceLabel}
