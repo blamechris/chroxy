@@ -59,9 +59,12 @@
 // CLOSED since, each with its own adversarial-round-equivalent (a fix
 // derived from reading Node's actual `internal/fs/glob.js` GLOBSTAR
 // algorithm directly, not guessed from probes, for #7912; a change proven
-// not to weaken the round-2 DoS guard for #7916's partial fix; both #7917
-// and #7918 are pure additions that only WIDEN what already-passing patterns
-// keep passing) — their patterns are in the main table above now:
+// not to weaken the round-2 DoS guard for #7916's partial fix; #7917 only
+// WIDENS what already-passing patterns keep passing; #7918 was meant to, but
+// its first expander also stripped a comma-less `{...}` that spans `/` and
+// walked an absolute alternative as a workspace path — both caught in review
+// and pinned by rows below, `{curly/dup}` and `{,x}/src/...`) — their
+// patterns are in the main table above now:
 //   - #7912: `**` refused to absorb ANY dot-prefixed entry while crossing
 //     toward a deeper match. FIXED: `**` now absorbs a dot-named entry
 //     exactly when the pattern segment immediately after it (skipping
@@ -192,6 +195,12 @@ async function buildFixture() {
   await file(join(ROOT, 'dup', 'inner.txt'))
   await mk(join(ROOT, 'nested'))
   await file(join(ROOT, 'nested', 'dup'), 'file named dup')
+  // #7918 review — a real path spelled like a comma-less brace group that
+  // spans a `/` (`{curly/dup}`): fs.glob does not treat `{...}` without a
+  // top-level comma as alternation, so the pattern `{curly/dup}` names
+  // exactly this path.
+  await mk(join(ROOT, '{curly'))
+  await file(join(ROOT, '{curly', 'dup}'), 'literal braces')
 
   // names with spaces / unicode / brackets / braces
   await mk(join(ROOT, 'spaces and unicode'))
@@ -333,6 +342,13 @@ const PATTERNS = [
   // in the directoryOnly result-push gate)
   'src/', 'sub/', 'dup/', '**/', '*/', 'empty-dir/', 'empty-dir/*', 'empty-dir/**', 'plaindir/',
   'src-link/',
+  // #7918 review — #7917's rule reaches a symlink to a FILE too: fs.glob's
+  // trailing-slash filter applies no type check to a determinately-named
+  // entry, so `file-link.txt/` matches the file symlink. (#7917's acceptance
+  // offered "follow the target's real type" as one option; parity with
+  // fs.glob is what this PR chose, and these rows pin that choice against
+  // the oracle rather than leaving it to one comment.)
+  'file-link.txt/', '[f]ile-link.txt/', '*-link.txt/',
 
   // ./x and normalization
   './src/*.ts', './src-link/*.ts', 'src/./*.ts', 'src//*.ts', './*.env', './**',
@@ -341,6 +357,15 @@ const PATTERNS = [
   // alternative '{dup,nested/dup}' (now expanded globally before /-split —
   // see `expandBraces`'s doc)
   '**/dup', '**/dup/*', 'dup', 'nested/dup', '*/dup', '{dup,dup2}', '{dup,nested/dup}',
+  // #7918 review — more slash-spanning shapes, each checked against fs.glob:
+  // a comma-less group spanning `/` is LITERAL (`{curly/dup}` is a real path
+  // in the fixture; the first #7918 expander stripped the braces and walked
+  // `curly/dup` instead), an alternative that concatenates into an absolute
+  // path contributes nothing (`{,x}/src/...` → `/src/index.ts`; the first
+  // expander walked it as the workspace's `src/index.ts`), and the
+  // expansion composes with directory-only (#7917), `**`, and siblings.
+  '{curly/dup}', '{,x}/src/{index.ts,utils/helper.ts}', '{dup,nested/dup}/', '{src-link/,x/y}',
+  '{src,x/y}/**', '{a,b}/{dup,nested/dup}', '{sub/selfloop,x/y}/file.txt', '{**/.*,x/y}',
 
   // spaces / unicode / brackets / braces in real names (space matched via `?`)
   'spaces?and?unicode/*', 'spaces?and?unicode/*.txt', 'spaces?and?unicode/my*.txt',
