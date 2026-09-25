@@ -912,14 +912,23 @@ was checked against `--help` on the pinned version for exactly this reason.
 - `scripts/check-release-pr-subject.mjs` — content-triggered, fails closed
 - `packages/server/src/utils/is-entry-point.js` — the entry-point guard. It
   exists in three files that cannot import one another
-  (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why), and
-  two gates hold it: `scripts/__tests__/is-entry-point.test.mjs` fails if the
-  three diverge (`#7222`), and
-  `packages/server/scripts/lint-entry-point-guard.mjs` walks the tree and fails
-  if a fourth appears (`#7235`). The two importable copies each have their own
-  suite — `packages/server/tests/is-entry-point.test.js` and
+  (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why). Three
+  layers protect it, but only the first two protect the **guard itself** — the
+  third protects **call sites**, an orthogonal problem: ① `scripts/__tests__/is-entry-point.test.mjs`
+  fails if the three guard copies diverge (`#7222`); ② `packages/server/scripts/lint-entry-point-guard.mjs`
+  walks the repo and fails if a fourth copy appears (`#7235`). Together, these
+  ensure the three copies are identical. The two importable copies each have
+  their own suite — `packages/server/tests/is-entry-point.test.js` and
   `scripts/__tests__/is-entry-point.test.mjs`; the sidecar's inline third copy
   is held only by the drift gate, since it cannot be imported to be tested.
+  ③ **Call-site coverage** is a separate gate: the guard is called from five
+  sites. Two have tests asserting both directions (the guard gating execution
+  when false, and permitting it when true): `scripts/gen-agents-md.mjs:79` and
+  `scripts/compile-skill-targets.mjs:636` (`#7251`). The other three — `packages/server/src/server-cli-child.js:179`,
+  `packages/server/src/channels/chroxy-channel-server.js:241`, and
+  `packages/server/sidecar/agent.js:1320` — have no call-site tests (`#7254`).
+  A guard that reads `false` at a call site means the entry point never runs,
+  the process exits 0, and nothing distinguishes that from a successful no-op.
 
 ### 15. The denylist for the neighbouring threat, mistaken for containment — `#7341`
 
