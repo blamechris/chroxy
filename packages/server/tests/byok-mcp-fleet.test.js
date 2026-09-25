@@ -546,8 +546,9 @@ describe('MCPFleet', () => {
       // whose expectation is derived from its own subject can never go red).
       // It is independently audited from every literal status string this
       // producer (byok-mcp-fleet.js) actually emits on the wire: 'connected'
-      // and 'failed' (mcpStateToStatus), 'connecting' (mcpStateToStatus
-      // default), 'disabled' (getServerStatuses' parked-server branch,
+      // and 'failed' (mcpStateToStatus), 'connecting' (mcpStateToStatus's
+      // explicit IDLE/STARTING/RESTARTING cases — its default now throws),
+      // 'disabled' (getServerStatuses' parked-server branch,
       // line ~189) and 'oauth-required' (getServerStatuses' OAuth branch,
       // line ~196). The protocol schema itself (packages/protocol/src/
       // schemas/server/session.ts, ServerMcpServersSchema.servers[].status)
