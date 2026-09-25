@@ -608,6 +608,114 @@ function resolveProjectBlock(raw, cwd) {
 }
 
 /**
+ * Read the three MCP config sources Claude Code itself reads, in a single
+ * pass, in Claude Code's documented scope-precedence order (highest to
+ * lowest), per https://code.claude.com/docs/en/mcp, "Scope Hierarchy and
+ * Precedence" (read 2026-09-24): "When the same server is defined in more
+ * than one place, Claude Code connects to it once, using the definition
+ * from the highest-precedence source."
+ *
+ *   1. "Local" scope   — `projects[<realpath(cwd)>].mcpServers` in
+ *                         `~/.claude.json`. Private to this cwd.
+ *   2. "Project" scope — `mcpServers` in `<cwd>/.mcp.json`, checked into the
+ *                         repo and shared with the team.
+ *   3. "User" scope     — `mcpServers` at the root of `~/.claude.json`,
+ *                         available across every project on this machine.
+ *
+ * Both `discoverConfiguredMcpServers` (name-only, lenient, for claude-tui's
+ * display) and `discoverMcpServerSpecs` (full spec, exec-validated, for the
+ * BYOK spawn path) call this ONE function to enumerate sources, so the order
+ * a duplicated name resolves in can never drift between "what the user is
+ * told is configured" and "what actually spawns" — only the per-entry
+ * validation strictness differs between the two callers (#7112 review: a
+ * pre-#7112 version of this file had two independently-hand-rolled orderings
+ * that had drifted to be exact opposites of each other).
+ *
+ * Never throws: each read is guarded and a parse failure is reported via
+ * `warnings` on the returned object, so a corrupt config can't take down
+ * session start.
+ *
+ * @param {string} cwd — the session's working directory
+ * @param {string} configPath — resolved `~/.claude.json` path (or override)
+ * @returns {{ sources: Array<{ mcpServers: unknown, source: string }>, warnings: string[] }}
+ */
+function readMcpSourcesInPrecedenceOrder(cwd, configPath) {
+  const warnings = []
+  const sources = []
+
+  const readJson = (filePath, source) => {
+    try {
+      // statSync before readFileSync so a pathologically large file (see
+      // CLAUDE_CONFIG_MAX_BYTES) doesn't block session start. statSync
+      // follows symlinks (as does readFileSync below), consistent with
+      // every other read in this file — see writeClaudeConfigAtomic's
+      // header comment for why WRITES are guarded but reads are not.
+      //
+      // isFile() guard: `.mcp.json` is repo-controlled, attacker-influenceable
+      // content (a cloned repo can make it a symlink to anything). A symlink
+      // to a FIFO or character device (e.g. `/dev/zero`) reports a `size` that
+      // is meaningless for this purpose — a FIFO with no writer hangs
+      // readFileSync indefinitely (before the trust gate even runs), and a
+      // device like `/dev/zero` has no real EOF, so the size cap above never
+      // triggers. Only a REGULAR file (following symlinks to their target,
+      // same as the size check) is ever read. Mirrors writeClaudeConfigAtomic's
+      // `target.isFile()` check on the write side.
+      const stat = statSync(filePath)
+      if (!stat.isFile()) {
+        warnings.push(`MCP config ${filePath} is not a regular file; skipping load`)
+        return null
+      }
+      if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
+        warnings.push(
+          `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`,
+        )
+        return null
+      }
+      return JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (err) {
+      warnings.push(`Failed to parse MCP config ${filePath} (${source}): ${err?.message || String(err)}`)
+      return null
+    }
+  }
+
+  let userRaw = null
+  if (configPath && existsSync(configPath)) {
+    userRaw = readJson(configPath, 'user config')
+    if (userRaw != null && (typeof userRaw !== 'object' || Array.isArray(userRaw))) {
+      userRaw = null
+    }
+  }
+
+  // 1 — "Local" scope (highest precedence): projects[<realpath(cwd)>].mcpServers.
+  if (userRaw) {
+    const projectBlock = resolveProjectBlock(userRaw, cwd)
+    if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
+      sources.push({ mcpServers: projectBlock.mcpServers, source: 'project config mcpServers' })
+    }
+  }
+
+  // 2 — "Project" scope: <cwd>/.mcp.json, checked into the repo. cwd may not
+  // exist (removed tmp dir, stale worktree) — join+existsSync just reports
+  // false rather than throwing.
+  if (cwd) {
+    const mcpJsonPath = join(cwd, '.mcp.json')
+    if (existsSync(mcpJsonPath)) {
+      const raw = readJson(mcpJsonPath, 'project .mcp.json')
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        sources.push({ mcpServers: raw.mcpServers, source: 'project .mcp.json mcpServers' })
+      }
+    }
+  }
+
+  // 3 — "User" scope (lowest precedence): root mcpServers in ~/.claude.json.
+  if (userRaw) {
+    sources.push({ mcpServers: userRaw.mcpServers, source: 'user config mcpServers' })
+  }
+
+  return { sources, warnings }
+}
+
+/**
  * Discover the CONFIGURED (not live-connected) MCP servers a Claude Code
  * session running in `cwd` would load. This is the honest fallback the
  * claude-tui provider uses (#6820): the interactive TUI communicates over a
@@ -615,11 +723,13 @@ function resolveProjectBlock(raw, cwd) {
  * stream-json `system/init` event that carries live `mcp_servers` with real
  * connection status. So the TUI path can only report what the config DECLARES.
  *
- * Merges the three sources Claude Code itself reads, deduped by name (first
- * source wins on a name collision, matching read precedence):
- *   1. user/global scope  — `mcpServers` at the root of `~/.claude.json`
- *   2. project scope      — `projects[<realpath(cwd)>].mcpServers` in `~/.claude.json`
- *   3. project-local      — `mcpServers` in `<cwd>/.mcp.json`
+ * Merges the three sources `readMcpSourcesInPrecedenceOrder` enumerates,
+ * deduped by name (first source wins on a name collision — see that
+ * function for the precedence order and why it is shared with
+ * `discoverMcpServerSpecs`). Entry validation here is deliberately LENIENT
+ * (any object counts as "configured", even one `discoverMcpServerSpecs`
+ * would reject as unspawnable) because this path is display-only visibility,
+ * not a spawn decision.
  *
  * Never throws: each read is guarded and failures accumulate as warnings, so a
  * corrupt config can't take down session start.
@@ -629,61 +739,45 @@ function resolveProjectBlock(raw, cwd) {
  * @returns {{ servers: Array<{ name: string }>, warnings: string[] }}
  */
 export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
-  const warnings = []
+  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
   const byName = new Map()
-  const add = (names) => {
-    for (const name of names) {
+  for (const { mcpServers, source } of sources) {
+    for (const name of collectConfiguredNames(mcpServers, { warnings, source })) {
       if (!byName.has(name)) byName.set(name, { name })
     }
   }
+  return { servers: [...byName.values()], warnings }
+}
 
-  const readJson = (filePath, source) => {
-    try {
-      // statSync before readFileSync so a pathologically large file (see
-      // CLAUDE_CONFIG_MAX_BYTES) doesn't block session start.
-      const stat = statSync(filePath)
-      if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
-        warnings.push(
-          `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`,
-        )
-        return null
-      }
-      return JSON.parse(readFileSync(filePath, 'utf8'))
-    } catch (err) {
-      warnings.push(`${source}: failed to read ${filePath}: ${err?.message || String(err)}`)
-      return null
+/**
+ * #7112: `discoverConfiguredMcpServers` above returns declared NAMES only —
+ * built for claude-tui's read-only display, lenient about entry shape (any
+ * object counts). The BYOK spawn path (`byok-session.js`) needs full,
+ * SPAWNABLE specs: the same exec-oriented validation `parseClaudeMcpConfig`
+ * applies (command/url/transport disambiguation, arg/env coercion), resolved
+ * across the SAME three config sources, via the SAME
+ * `readMcpSourcesInPrecedenceOrder` ordering `discoverConfiguredMcpServers`
+ * uses — so the two can never independently drift on WHICH source wins a
+ * name collision again.
+ *
+ * Never throws: each source is read defensively and a parse failure
+ * accumulates as a warning, so a corrupt config can't take down session
+ * start (mirrors `discoverConfiguredMcpServers` / `loadClaudeMcpConfig`).
+ *
+ * @param {string} cwd — the session's working directory
+ * @param {{ configPath?: string }} [opts]
+ * @returns {{ servers: Array<object>, warnings: string[] }}
+ */
+export function discoverMcpServerSpecs(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
+  const { sources, warnings } = readMcpSourcesInPrecedenceOrder(cwd, configPath)
+  const byName = new Map()
+  for (const { mcpServers } of sources) {
+    const parsed = parseClaudeMcpConfig({ mcpServers })
+    for (const spec of parsed.servers) {
+      if (!byName.has(spec.name)) byName.set(spec.name, spec)
     }
+    warnings.push(...parsed.warnings)
   }
-
-  // 1 + 2 — ~/.claude.json global root + project-scoped block.
-  if (configPath && existsSync(configPath)) {
-    const raw = readJson(configPath, 'user config')
-    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-      add(collectConfiguredNames(raw.mcpServers, { warnings, source: 'user config mcpServers' }))
-      const projectBlock = resolveProjectBlock(raw, cwd)
-      if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
-        add(collectConfiguredNames(projectBlock.mcpServers, {
-          warnings,
-          source: 'project config mcpServers',
-        }))
-      }
-    }
-  }
-
-  // 3 — <cwd>/.mcp.json project-local.
-  if (cwd) {
-    const mcpJsonPath = join(cwd, '.mcp.json')
-    if (existsSync(mcpJsonPath)) {
-      const raw = readJson(mcpJsonPath, 'project .mcp.json')
-      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-        add(collectConfiguredNames(raw.mcpServers, {
-          warnings,
-          source: 'project .mcp.json mcpServers',
-        }))
-      }
-    }
-  }
-
   return { servers: [...byName.values()], warnings }
 }
 
