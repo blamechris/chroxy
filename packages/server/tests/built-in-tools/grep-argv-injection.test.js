@@ -410,7 +410,10 @@ describe('Grep argv option injection (#7295)', () => {
         if (requireRgOrSkip(t, 'the --glob marker-mechanism positive control')) return
         const fx = await makeFixture()
         try {
-          const cmd = `rg -n --no-heading --pre=${shellQuoteForTest(fx.script)} -e 'compile' ${shellQuoteForTest(fx.root)}`
+          // --no-config matches the production builder (buildGrepCommand always
+          // passes it) so this control stays hermetic against a developer's real
+          // ripgrep config (e.g. RIPGREP_CONFIG_PATH) on the machine running it.
+          const cmd = `rg --no-config -n --no-heading --pre=${shellQuoteForTest(fx.script)} -e 'compile' ${shellQuoteForTest(fx.root)}`
           await runBuilt(cmd, { cwd: fx.root })
           assert.equal(
             await exists(fx.marker),

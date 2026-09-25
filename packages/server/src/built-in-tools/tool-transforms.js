@@ -819,6 +819,11 @@ export function confinedContainerFailureMessage(label, reason, path) {
 /**
  * Derive the rg/grep flag fragments from a Grep tool input: case-insensitive
  * (`-i`), line numbers (`-n`, default on), and an optional `--glob` filter.
+ * `--glob` is ripgrep-specific and is threaded only into `buildGrepCommand`'s
+ * `rg` branch — the `grep -r` fallback (used when `rg` is absent) has no
+ * `--glob` equivalent and silently ignores `globArg` (GNU grep's nearest
+ * analog is `--include`, not implemented here); `ci`/`ln`/`pattern`/`root`
+ * apply identically on both branches.
  *
  * SECURITY (#7928): `glob` is model-controlled, same as `pattern`/`root`
  * (#7295) — but unlike those two, it is bound to a NAMED flag (`--glob`)
