@@ -1055,9 +1055,17 @@ describe('__cx_resolve_new — the create-mode walk, driven directly (#7876)', {
 })
 
 describe('buildConfinedContainerCommand modes (#7876)', () => {
-  it('the default mode emits the read resolver only, unchanged by create mode existing', () => {
+  it('the default mode resolves $__cx_target with __cx_resolve, unchanged by create mode existing', () => {
     const cmd = buildConfinedContainerCommand({ target: '/workspace/a', body: 'true' })
-    assert.equal(cmd.includes('__cx_resolve_new'), false, 'read mode picked up the create-mode walk')
+    // #7897 — 'read' mode now carries the __cx_resolve_new DEFINITION too
+    // (__cx_resolve's lenient fallback, used only by Glob, calls it), but the
+    // top-level $__cx_target resolution in 'read' mode must still go through
+    // __cx_resolve, never __cx_resolve_new — that is the property this test
+    // actually pins.
+    assert.equal(
+      cmd.includes(`__cx_target=$(__cx_resolve_new '/workspace/a')`), false,
+      'read mode resolved $__cx_target with the create-mode walk',
+    )
     assert.ok(cmd.includes(`__cx_target=$(__cx_resolve '/workspace/a')`), 'read mode lost __cx_resolve')
     assert.deepEqual(
       cmd,
