@@ -1225,6 +1225,49 @@ describe('executeBuiltinTool', () => {
         assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant, took ${elapsedMs}ms`)
       })
 
+      // #7918 — `hasSlashSpanningBrace`/`expandBraces`'s OWN bound
+      // (`GLOB_BRACE_EXPANSION_CAP`, 1,000), independent of the pre-existing
+      // length/depth caps above: 11 SIBLING (not nested) two-way brace
+      // groups multiply to 2^11 = 2,048 alternatives while the pattern
+      // itself stays ~60 characters and 1 level deep — well under both of
+      // `globPatternComplexityReason`'s bounds, so this pattern would sail
+      // through unrejected without its own cap. The first group spans a
+      // `/` (`{a/x,b}`) so the pattern actually takes the whole-pattern
+      // expansion path at all; the other ten are ordinary `{c,d}`-shaped
+      // multipliers.
+      it('Glob rejects a slash-spanning brace pattern whose alternatives exceed the expansion cap, fast', { timeout: 5000 }, async () => {
+        const groups = ['{a/x,b}', ...Array.from({ length: 10 }, (_, i) => `{${String.fromCharCode(99 + i * 2)},${String.fromCharCode(100 + i * 2)}}`)]
+        const pattern = groups.join('')
+        assert.ok(pattern.length < 200, 'sanity: this pattern must stay far under the 2000-char length cap')
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /brace alternatives/)
+        assert.ok(elapsedMs < PERF_BUDGET_MS, `rejection must be near-instant (abandoned at the FIRST group that exceeds the cap, not after full expansion), took ${elapsedMs}ms`)
+      })
+
+      // Positive control for the cap above: the SAME shape (a slash-spanning
+      // brace mixed with ordinary sibling groups) but with few enough total
+      // alternatives to stay under the cap must still expand and match
+      // normally — proves the cap rejects on COUNT, not merely on the
+      // presence of multiple sibling groups.
+      it('Glob still expands a slash-spanning brace pattern with several (under-cap) sibling groups', async () => {
+        mkdirSync(join(dir, 'nested'))
+        writeFileSync(join(dir, 'nested', 'dup'), 'file named dup')
+        mkdirSync(join(dir, 'dup'))
+        writeFileSync(join(dir, 'dup', 'inner.txt'), '1')
+
+        const r = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: '{dup,nested/dup}{,x}' }, ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        const lines = r.content.split('\n')
+        assert.ok(lines.includes('dup'), 'the first alternative, expanded with the empty second-group option, must match')
+        assert.ok(lines.includes('nested/dup'), 'the slash-spanning alternative, expanded with the empty second-group option, must match')
+      })
+
       // Nested braces AT the cap (32 levels, 129 chars) — the case this cap
       // must NOT break: legitimate-if-unusual input stays usable, both when
       // it matches and when it doesn't. Measured on this machine: compiling
@@ -1961,6 +2004,88 @@ describe('executeBuiltinTool', () => {
         const lines = r.content.split('\n')
         assert.ok(lines.includes('loopdir/selfloop'), 'the self-loop symlink itself is still listed')
         assert.equal(lines.includes('loopdir/selfloop/selfloop'), false, '"**" must not re-discover the loop through its own absorption')
+      })
+
+      // #7916 (partial fix) — `visitedDirs`'s ancestor-cycle refusal used to
+      // apply unconditionally, refusing even a fully `**`-free, all-literal
+      // pattern's own explicit re-entry through a self-loop
+      // (`sub/selfloop/file.txt`, verified directly against Node 22's
+      // `glob()` to actually match there). `openVerifiedDirForDescend`'s new
+      // `enforceCycleGuard` parameter (derived from `walkGlob`'s
+      // `hasGlobstar`) skips the refusal specifically when the WHOLE pattern
+      // contains no `**` at all — see that parameter's doc for why this is
+      // safe: a `**`-free pattern's recursion depth is hard-bounded by its
+      // own segment count, independent of the filesystem's symlink
+      // structure, so there is nothing here for the DoS guard to protect
+      // against.
+      it('a fully **-free literal chain re-entering an ancestor through a self-loop now matches (parity #7916 partial fix)', {
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'sub', 'file.txt'), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'sub/selfloop/file.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'sub/selfloop/file.txt', 'a single, fully-literal re-entry through the self-loop must be found, matching fs.glob')
+      })
+
+      // #7916 (partial fix, termination proof) — the relaxation above is only
+      // safe because a `**`-free pattern's OWN LENGTH bounds how many times
+      // it can re-enter the self-loop, never the filesystem's cycle. This
+      // test is the adversarial case that claim has to survive: a pattern
+      // that spells the self-loop segment out MANY times in a row (proving
+      // the bound really is the pattern's length, not some smaller constant
+      // that happened to work for one hop) still terminates quickly and
+      // still matches — verified directly against Node 22's `glob()` on the
+      // identical fixture and pattern (`took 6ms` for 20 hops on this
+      // machine), so this is a real parity claim, not merely "does not
+      // hang".
+      it('terminates quickly on a **-free pattern with many repeated self-loop hops, matching fs.glob (DoS/termination #7916 partial fix)', {
+        timeout: 10_000,
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'sub', 'file.txt'), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const hops = 20
+        const pattern = `sub/${'selfloop/'.repeat(hops)}file.txt`
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        const ms = Date.now() - t0
+
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a ${hops}-hop **-free self-loop chain must terminate quickly, took ${ms}ms`)
+        assert.equal(r.content, `sub/${'selfloop/'.repeat(hops)}file.txt`, 'must match fs.glob exactly for this exact chain length')
+      })
+
+      // #7916 (partial fix, control) — the relaxation is scoped to `**`-free
+      // patterns ONLY. A pattern that combines an explicit self-loop chain
+      // WITH a trailing `**` must still be governed by the full, unchanged
+      // `visitedDirs` guard — proving the `hasGlobstar` gate actually reads
+      // the WHOLE compiled pattern, not just whether the entry currently
+      // being matched happens to be a `**` segment.
+      it('still enforces the full ancestor-cycle guard when the pattern contains ** anywhere, even after literal selfloop hops (DoS control #7916 partial fix)', {
+        timeout: 5_000,
+        // symlinkSync needs a privilege the Windows CI runner lacks by default (#7288).
+        skip: process.platform === 'win32',
+      }, async () => {
+        mkdirSync(join(dir, 'sub'))
+        for (let i = 0; i < 40; i++) writeFileSync(join(dir, 'sub', `f${i}.txt`), '1')
+        symlinkSync('.', join(dir, 'sub', 'selfloop'))
+
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({
+          toolName: 'Glob', input: { pattern: 'sub/selfloop/selfloop/**' }, ...ctx(),
+        })
+        const ms = Date.now() - t0
+        assert.equal(r.isError, false)
+        assert.ok(ms < 2000, `a **-containing pattern through a self-loop must still be bounded, took ${ms}ms`)
+        const lines = r.content.split('\n')
+        assert.ok(lines.length < 200, `a **-containing pattern through a self-loop must still be bounded in match count, got ${lines.length}`)
       })
 
       // #7910 review (parity) — a trailing `**` closing with ZERO width onto a
