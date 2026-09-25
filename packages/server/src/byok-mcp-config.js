@@ -687,6 +687,110 @@ export function discoverConfiguredMcpServers(cwd, { configPath = defaultClaudeCo
   return { servers: [...byName.values()], warnings }
 }
 
+/**
+ * #7112: `discoverConfiguredMcpServers` above returns declared NAMES only —
+ * built for claude-tui's read-only display, lenient about entry shape (any
+ * object counts). The BYOK spawn path (`byok-session.js`) needs full,
+ * SPAWNABLE specs: the same exec-oriented validation `parseClaudeMcpConfig`
+ * applies (command/url/transport disambiguation, arg/env coercion), resolved
+ * across the same three config sources.
+ *
+ * Precedence on a name collision, highest to lowest, per Claude Code's
+ * documented scope hierarchy (https://code.claude.com/docs/en/mcp, "Scope
+ * Hierarchy and Precedence", read 2026-09-24): "When the same server is
+ * defined in more than one place, Claude Code connects to it once, using the
+ * definition from the highest-precedence source. The entire server entry
+ * from that source is used; fields are not merged across scopes."
+ *
+ *   1. "Local" scope   — `projects[<realpath(cwd)>].mcpServers` in
+ *                         `~/.claude.json`. Private to this cwd.
+ *   2. "Project" scope — `mcpServers` in `<cwd>/.mcp.json`, checked into the
+ *                         repo and shared with the team.
+ *   3. "User" scope     — `mcpServers` at the root of `~/.claude.json`,
+ *                         available across every project on this machine.
+ *
+ * NOTE: this is the OPPOSITE order from the comment on
+ * `discoverConfiguredMcpServers` above (which documents user-first
+ * precedence for its name-only dedup). That function's precedence is a
+ * pre-existing display-only inconsistency and is out of scope for #7112 —
+ * left as-is rather than folded into this fix.
+ *
+ * Never throws: each source is read defensively and a parse failure
+ * accumulates as a warning, so a corrupt config can't take down session
+ * start (mirrors `discoverConfiguredMcpServers` / `loadClaudeMcpConfig`).
+ *
+ * @param {string} cwd — the session's working directory
+ * @param {{ configPath?: string }} [opts]
+ * @returns {{ servers: Array<object>, warnings: string[] }}
+ */
+export function discoverMcpServerSpecs(cwd, { configPath = defaultClaudeConfigPath() } = {}) {
+  const warnings = []
+  const byName = new Map()
+  const addServers = (specs) => {
+    for (const spec of specs) {
+      if (!byName.has(spec.name)) byName.set(spec.name, spec)
+    }
+  }
+
+  const readJson = (filePath, source) => {
+    try {
+      // statSync before readFileSync so a pathologically large file (see
+      // CLAUDE_CONFIG_MAX_BYTES) doesn't block session start.
+      const stat = statSync(filePath)
+      if (stat.size > CLAUDE_CONFIG_MAX_BYTES) {
+        warnings.push(
+          `MCP config ${filePath} exceeds size cap (${stat.size} bytes > ${CLAUDE_CONFIG_MAX_BYTES} bytes); skipping load`,
+        )
+        return null
+      }
+      return JSON.parse(readFileSync(filePath, 'utf8'))
+    } catch (err) {
+      warnings.push(`Failed to parse MCP config ${filePath} (${source}): ${err?.message || String(err)}`)
+      return null
+    }
+  }
+
+  let userRaw = null
+  if (configPath && existsSync(configPath)) {
+    userRaw = readJson(configPath, 'user config')
+    if (userRaw != null && (typeof userRaw !== 'object' || Array.isArray(userRaw))) {
+      userRaw = null
+    }
+  }
+
+  // 1 — "Local" scope (highest precedence): projects[<realpath(cwd)>].mcpServers.
+  if (userRaw) {
+    const projectBlock = resolveProjectBlock(userRaw, cwd)
+    if (projectBlock && typeof projectBlock === 'object' && !Array.isArray(projectBlock)) {
+      const parsed = parseClaudeMcpConfig({ mcpServers: projectBlock.mcpServers })
+      addServers(parsed.servers)
+      warnings.push(...parsed.warnings)
+    }
+  }
+
+  // 2 — "Project" scope: <cwd>/.mcp.json, checked into the repo.
+  if (cwd) {
+    const mcpJsonPath = join(cwd, '.mcp.json')
+    if (existsSync(mcpJsonPath)) {
+      const raw = readJson(mcpJsonPath, 'project .mcp.json')
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        const parsed = parseClaudeMcpConfig(raw)
+        addServers(parsed.servers)
+        warnings.push(...parsed.warnings)
+      }
+    }
+  }
+
+  // 3 — "User" scope (lowest precedence): root mcpServers in ~/.claude.json.
+  if (userRaw) {
+    const parsed = parseClaudeMcpConfig(userRaw)
+    addServers(parsed.servers)
+    warnings.push(...parsed.warnings)
+  }
+
+  return { servers: [...byName.values()], warnings }
+}
+
 // ---------------------------------------------------------------------------
 // #6974 — MCP server add/remove (config MUTATION).
 //

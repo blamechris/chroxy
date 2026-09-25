@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,6 +8,7 @@ import {
   DEFAULT_TRUST_DNS_TIMEOUT_MS,
   classifyIpAddress,
   discoverConfiguredMcpServers,
+  discoverMcpServerSpecs,
   isBlockedMetadataHost,
   loadClaudeMcpConfig,
   parseClaudeMcpConfig,
@@ -350,6 +351,161 @@ describe('discoverConfiguredMcpServers (#6820)', () => {
     assert.deepEqual(res.servers, [{ name: 'good' }])
     assert.equal(res.warnings.length, 1)
     assert.match(res.warnings[0], /bad/)
+  })
+})
+
+/**
+ * #7112: `discoverConfiguredMcpServers` above returns NAMES only (for claude-tui's
+ * name-only display, lenient validation). The BYOK spawn path needs full,
+ * spawnable SPECS — the same exec-oriented validation `parseClaudeMcpConfig`
+ * applies — resolved across the SAME three sources, in the precedence Claude
+ * Code documents (https://code.claude.com/docs/en/mcp, "Scope Hierarchy and
+ * Precedence", read 2026-09-24):
+ *   "Local scope" (projects[<realpath(cwd)>].mcpServers in ~/.claude.json)
+ *     > "Project scope" (<cwd>/.mcp.json)
+ *     > "User scope" (root mcpServers in ~/.claude.json)
+ * "When the same server is defined in more than one place, Claude Code
+ * connects to it once, using the definition from the highest-precedence
+ * source." Note this is the OPPOSITE order from the comment on
+ * `discoverConfiguredMcpServers` above (user-first) — that function is
+ * names-only display and its precedence bug is out of scope for #7112.
+ */
+describe('discoverMcpServerSpecs (#7112)', () => {
+  let cfgDir
+  let cwd
+  let configPath
+
+  beforeEach(() => {
+    cfgDir = mkdtempSync(join(tmpdir(), 'chroxy-mcp-specs-cfg-'))
+    cwd = mkdtempSync(join(tmpdir(), 'chroxy-mcp-specs-cwd-'))
+    configPath = join(cfgDir, 'claude.json')
+  })
+
+  afterEach(() => {
+    rmSync(cfgDir, { recursive: true, force: true })
+    rmSync(cwd, { recursive: true, force: true })
+  })
+
+  it('returns empty (no warnings) when nothing is configured', () => {
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.deepEqual(res.warnings, [])
+  })
+
+  it('resolves user-scope servers with FULL specs (command/args/env), not just names', () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { fs: { command: 'npx', args: ['-y', 'x'], env: { A: '1' } } } }),
+    )
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'fs', command: 'npx', args: ['-y', 'x'], env: { A: '1' } }])
+  })
+
+  it('#7112: resolves a server declared ONLY under projects[realpath(cwd)].mcpServers', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        projects: { [realCwd]: { mcpServers: { projonly: { command: 'node', args: ['p.js'] } } } },
+      }),
+    )
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'projonly', command: 'node', args: ['p.js'], env: {} }])
+    assert.deepEqual(res.warnings, [])
+  })
+
+  it('resolves a project-local .mcp.json server under cwd', () => {
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { local1: { command: 'node' } } }))
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'local1', command: 'node', args: [], env: {} }])
+  })
+
+  it('precedence on a name collision: project scope ("Local") beats .mcp.json ("Project") beats user root ("User")', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: { shared: { command: 'user-cmd' } },
+        projects: { [realCwd]: { mcpServers: { shared: { command: 'project-cmd' } } } },
+      }),
+    )
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { shared: { command: 'local-cmd' } } }))
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.equal(res.servers.length, 1)
+    assert.equal(res.servers[0].command, 'project-cmd', 'projects[cwd] ("Local" scope) must win over .mcp.json and user root')
+  })
+
+  it('precedence: .mcp.json ("Project") beats user root ("User") when project scope is absent', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { shared: { command: 'user-cmd' } } }))
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { shared: { command: 'local-cmd' } } }))
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.equal(res.servers[0].command, 'local-cmd')
+  })
+
+  it('a symlinked cwd resolves the project block via realpath', () => {
+    const realCwd = realpathSync(cwd)
+    const symlinkDir = join(cfgDir, 'symlinked-cwd')
+    symlinkSync(realCwd, symlinkDir)
+    writeFileSync(
+      configPath,
+      JSON.stringify({ projects: { [realCwd]: { mcpServers: { viaSymlink: { command: 'node' } } } } }),
+    )
+    const res = discoverMcpServerSpecs(symlinkDir, { configPath })
+    assert.deepEqual(res.servers.map((s) => s.name), ['viaSymlink'])
+  })
+
+  it('a project block for a DIFFERENT cwd is not loaded', () => {
+    const otherCwd = mkdtempSync(join(tmpdir(), 'chroxy-mcp-specs-othercwd-'))
+    writeFileSync(
+      configPath,
+      JSON.stringify({ projects: { [realpathSync(otherCwd)]: { mcpServers: { notmine: { command: 'node' } } } } }),
+    )
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    rmSync(otherCwd, { recursive: true, force: true })
+  })
+
+  it('applies the SAME exec-oriented validation parseClaudeMcpConfig does (missing command is skipped with a warning)', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        projects: { [realCwd]: { mcpServers: { broken: { args: ['no-command'] } } } },
+      }),
+    )
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /broken/)
+    assert.match(res.warnings[0], /command is required/)
+  })
+
+  it('includes remote/HTTP servers from every source', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        projects: { [realCwd]: { mcpServers: { remote: { type: 'http', url: 'https://example/mcp' } } } },
+      }),
+    )
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [{ name: 'remote', type: 'http', url: 'https://example/mcp', headers: {} }])
+  })
+
+  it('never throws on corrupt user config JSON — accumulates a warning, returns empty', () => {
+    writeFileSync(configPath, '{ not valid json')
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers, [])
+    assert.equal(res.warnings.length, 1)
+    assert.match(res.warnings[0], /Failed to parse/)
+  })
+
+  it('never throws on corrupt .mcp.json — accumulates a warning, keeps other sources', () => {
+    writeFileSync(configPath, JSON.stringify({ mcpServers: { good: { command: 'npx' } } }))
+    writeFileSync(join(cwd, '.mcp.json'), '{ not valid json')
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.deepEqual(res.servers.map((s) => s.name), ['good'])
+    assert.equal(res.warnings.length, 1)
   })
 })
 
