@@ -1099,4 +1099,64 @@ describe('MCPRemoteClient — OAuth flow (#6822)', () => {
     // future reconnect (e.g. after a later re-enable).
     assert.equal(store.getStoredToken(client._url).accessToken, 'tok-1')
   })
+
+  it('destroy() while a silent token refresh is pending must not resurrect a destroyed client as DEAD via the no-redirect-URI branch (#7906 re-review)', async () => {
+    // _onOAuthRequired()'s silent-refresh branch (an existing accessToken,
+    // oauth enabled, not yet refresh-attempted) awaits _tryRefresh() — a real
+    // token-endpoint round-trip when the stored record has both a
+    // refreshToken and a tokenEndpoint. Whatever that await resolves to,
+    // _onOAuthRequired falls through to `await this._beginBrowserAuthorization(err)`
+    // UNCONDITIONALLY once it returns — the `refreshed && !this._destroyed`
+    // guard only skips the reconnect-retry branch, it does not stop the
+    // fall-through. _beginBrowserAuthorization()'s own "no redirect URI
+    // configured" early-return branch then calls _toDead() with no
+    // _destroyed re-check — unlike its try/catch path below, which the
+    // #7906 fix did guard — regressing an already-destroyed client back to
+    // DEAD and firing a stray 'dead' event.
+    const store = makeMemStore({
+      'https://example.invalid/mcp': {
+        accessToken: 'stale-access',
+        refreshToken: 'seeded-refresh',
+        expiresAt: 0,
+        clientId: 'c',
+        tokenEndpoint: 'https://example.invalid/token',
+      },
+    })
+    let resolveRefresh
+    const refreshPromise = new Promise((resolve) => { resolveRefresh = resolve })
+    let refreshCalled
+    const refreshCalledPromise = new Promise((resolve) => { refreshCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthStore: store,
+        // No oauthRedirectUri opt, and the injected oauthFlow seam has no
+        // mcpOAuthRedirectUri() either — _beginBrowserAuthorization() falls
+        // into its "no redirect URI configured" branch once reached.
+        oauthFlow: {
+          refreshAccessToken: () => { refreshCalled(); return refreshPromise },
+        },
+      },
+    )
+    client._accessToken = 'stale-access'
+    let deadEmitted = false
+    client.on('dead', () => { deadEmitted = true })
+
+    const call = client._onOAuthRequired(new Error('401'))
+    await refreshCalledPromise
+    // destroy() lands while the silent refresh is in flight.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // The refresh succeeds AFTER destroy(). _onOAuthRequired correctly skips
+    // the reconnect-retry attempt (refreshed && !this._destroyed is false),
+    // but still calls _beginBrowserAuthorization() — which regresses state
+    // to DEAD via its unguarded no-redirect-URI branch.
+    resolveRefresh({ accessToken: 'fresh-access' })
+    await call
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late-resolving silent refresh must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a stray dead event')
+  })
 })

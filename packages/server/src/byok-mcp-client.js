@@ -825,6 +825,15 @@ export class MCPRemoteClient extends EventEmitter {
     if (!this._oauthEnabled || !redirectUri) {
       this._statusReason = 'oauth-required'
       this._log.warn(`MCP server ${this.name}: requires OAuth but the flow is disabled or no redirect URI is configured`)
+      // #7906: this method can be reached with _destroyed already true —
+      // _onOAuthRequired()'s silent-refresh branch falls through to
+      // `await this._beginBrowserAuthorization(err)` unconditionally once
+      // its own `await this._tryRefresh()` settles, regardless of whether
+      // destroy() landed during that await. No connection exists yet here
+      // either, so bail rather than regress an already-destroyed client to
+      // DEAD via _toDead() (and fire a stray 'dead' event nothing should
+      // see) — same reasoning as the guard below this method's try/catch.
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       this._toDead()
       return
     }
