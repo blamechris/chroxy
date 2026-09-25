@@ -1012,4 +1012,91 @@ describe('MCPRemoteClient — OAuth flow (#6822)', () => {
     assert.equal(headers.authorization, 'Bearer STATIC')
     assert.equal(headers.Authorization, undefined)
   })
+
+  it('destroy() while beginAuthorization() is pending must not resurrect a destroyed client as DEAD (#7906)', async () => {
+    // _beginBrowserAuthorization() is reached from start()'s oauth-required
+    // catch handler AFTER the existing post-trust-gate _destroyed re-check,
+    // so entering this method always starts with _destroyed === false. Its
+    // own beginAuthorization() await (real AS-discovery + dynamic client
+    // registration network calls) is a separate, later window this test
+    // isolates directly via the injectable oauthFlow seam.
+    let rejectBegin
+    const beginPromise = new Promise((_resolve, reject) => { rejectBegin = reject })
+    let beginCalled
+    const beginCalledPromise = new Promise((resolve) => { beginCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthRedirectUri: REDIRECT,
+        oauthFlow: {
+          beginAuthorization: () => { beginCalled(); return beginPromise },
+          mcpOAuthRedirectUri: () => REDIRECT,
+        },
+      },
+    )
+    let deadEmitted = false
+    client.on('dead', () => { deadEmitted = true })
+
+    const beginCall = client._beginBrowserAuthorization(new Error('401'))
+    await beginCalledPromise
+    // destroy() lands while beginAuthorization() is in flight. Nothing is
+    // open yet (no connection, no session), so destroy() resolves
+    // immediately.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // beginAuthorization() now REJECTS — e.g. AS discovery failed, or the
+    // underlying fetch was itself aborted by destroy(). Without the #7906
+    // guard, the catch branch falls through to an unconditional _toDead(),
+    // regressing an already-destroyed client's state back to DEAD and
+    // firing a stray 'dead' event.
+    rejectBegin(new Error('discovery failed'))
+    await beginCall
+
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late begin-authorization failure must not resurrect it as DEAD')
+    assert.equal(deadEmitted, false, 'a destroyed client must not emit a fresh dead event')
+  })
+
+  it('destroy() while redeeming an authorization code must not resurrect a destroyed client as IDLE (#7906)', async () => {
+    const store = makeMemStore()
+    let resolveComplete
+    const completePromise = new Promise((resolve) => { resolveComplete = resolve })
+    let completeCalled
+    const completeCalledPromise = new Promise((resolve) => { completeCalled = resolve })
+    const client = new MCPRemoteClient(
+      { name: 'oauth-race', type: 'http', url: 'https://example.invalid/mcp', headers: {} },
+      {
+        log: silentLog(),
+        oauthStore: store,
+        oauthRedirectUri: REDIRECT,
+        oauthFlow: {
+          completeAuthorization: () => { completeCalled(); return completePromise },
+        },
+      },
+    )
+    // Seed a pending authorization the way _beginBrowserAuthorization would.
+    client._authPending = { state: 'pending-state-123' }
+
+    const completeCall = client.completeAuthorization('the-code')
+    await completeCalledPromise
+    // destroy() lands while redeeming the code (a real token-endpoint
+    // round-trip) is in flight.
+    await client.destroy()
+    assert.equal(client.state, MCP_STATES.DESTROYED)
+
+    // The redemption succeeds AFTER destroy(). Without the #7906 guard,
+    // completeAuthorization() would clobber state to IDLE via a raw field
+    // write that bypasses _setState entirely (no terminal-state
+    // protection), then call start() again — which throws for a destroyed
+    // client only AFTER state was already corrupted.
+    resolveComplete({ accessToken: 'tok-1', refreshToken: 'ref-1', expiresAt: 0 })
+    const out = await completeCall
+
+    assert.deepEqual(out, { ok: true })
+    assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late-redeemed code must not resurrect it as IDLE')
+    // The token itself is fully formed and still safe to persist for a
+    // future reconnect (e.g. after a later re-enable).
+    assert.equal(store.getStoredToken(client._url).accessToken, 'tok-1')
+  })
 })

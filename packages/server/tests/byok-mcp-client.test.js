@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { MCPClient, MCP_STATES, MCP_PROTOCOL_VERSION, MCP_CLIENT_VERSION, DEFAULT_HANDSHAKE_TIMEOUT_MS } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -543,6 +544,102 @@ describe('MCPClient', () => {
       const elapsed = Date.now() - t0
       // SIGTERM is swallowed; SIGKILL fires at 1000ms; child exits ~immediately.
       assert.ok(elapsed >= 900 && elapsed <= 2000, `destroy took ${elapsed}ms, expected ~1000ms (SIGTERM grace before SIGKILL)`)
+    })
+
+    it('destroy() while the handshake is in flight must not resurrect a destroyed client as READY (#7906)', async () => {
+      // A fake but well-behaved child — real _onExit()/destroy() wiring,
+      // no real subprocess/pipe involved (a real child's stdin can EPIPE
+      // non-deterministically once SIGTERM lands, which is environmental
+      // noise unrelated to the defect under test). The JSON-RPC seam
+      // (_request) is hooked so the initialize/tools-list RESPONSES arrive
+      // under test control — simulating a child whose already-buffered
+      // reply is processed AFTER destroy() sends SIGTERM but BEFORE the
+      // process has actually exited.
+      const client = new MCPClient(stubConfig(), { log: silentLog() })
+      const fakeChild = new EventEmitter()
+      fakeChild.kill = () => { /* pretend SIGTERM was sent; exit fires later, explicitly, below */ }
+      fakeChild.stdin = { writable: true, write: () => {} }
+      client._child = fakeChild
+      fakeChild.on('exit', (code, signal) => client._onExit(code, signal))
+      client._setState(MCP_STATES.STARTING)
+
+      let resolveInit, resolveTools
+      let initCalled, toolsCalled
+      const initCalledPromise = new Promise((resolve) => { initCalled = resolve })
+      const toolsCalledPromise = new Promise((resolve) => { toolsCalled = resolve })
+      client._request = (method) => {
+        if (method === 'initialize') {
+          initCalled()
+          return new Promise((resolve) => { resolveInit = resolve })
+        }
+        if (method === 'tools/list') {
+          toolsCalled()
+          return new Promise((resolve) => { resolveTools = resolve })
+        }
+        return Promise.resolve({})
+      }
+
+      let readyEmitted = false
+      client.on('ready', () => { readyEmitted = true })
+
+      // Exactly what _spawnAndHandshake() does after spawning: fire the
+      // handshake without awaiting it.
+      const handshakeDone = client._handshake().catch(() => {})
+      await initCalledPromise
+
+      // destroy() lands while `initialize` is still pending. The fake
+      // child hasn't "exited" yet (we fire that explicitly below), so
+      // destroy() takes the kill-and-wait-for-exit branch, matching a real
+      // child that hasn't actually terminated yet either.
+      const destroyPromise = client.destroy()
+      assert.notEqual(client.state, MCP_STATES.READY, 'must not be READY while destroy() is in flight')
+
+      // The already-buffered `initialize` response arrives AFTER SIGTERM
+      // but before the process has actually exited.
+      resolveInit({ protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {} })
+      await toolsCalledPromise
+      resolveTools({ tools: [{ name: 'evil-tool' }] })
+      await handshakeDone
+
+      assert.equal(readyEmitted, false, 'a destroyed client must not emit a stray ready event')
+      assert.equal(client.state, MCP_STATES.STARTING, 'state must not regress to READY while the (still-alive) fake child has not exited yet')
+
+      // Now the process actually exits (fires late, as a real SIGTERM
+      // would) — _onExit forces the terminal DESTROYED transition.
+      fakeChild.emit('exit', null, 'SIGTERM')
+      await destroyPromise
+      assert.equal(client.state, MCP_STATES.DESTROYED, 'destroy() owns the terminal state; a late-arriving handshake must not resurrect it as READY')
+    })
+
+    it('client.start() resolves (not hang) when destroy() lands mid-handshake (#7906)', async () => {
+      // End-to-end acceptance for the wrapper fix in start(): a real child
+      // is used here (unlike the test above) because the point is to prove
+      // the PUBLIC start() promise settles via the real _spawnAndHandshake
+      // -> _onExit machinery, not just that _handshake() itself behaves.
+      const client = new MCPClient(stubConfig(), { log: silentLog() })
+      let resolveInit
+      const origRequest = client._request.bind(client)
+      let initCalled
+      const initCalledPromise = new Promise((resolve) => { initCalled = resolve })
+      client._request = (method, params, timeoutMs) => {
+        if (method === 'initialize') {
+          initCalled()
+          return new Promise((resolve) => { resolveInit = resolve })
+        }
+        return origRequest(method, params, timeoutMs)
+      }
+
+      const startPromise = client.start()
+      await initCalledPromise
+      const destroyPromise = client.destroy()
+      // Release the handshake only after destroy() has been issued —
+      // without the #7906 wrapper fix (adding DESTROYED to start()'s
+      // state-settle listener), start() would hang here forever, since
+      // this race never reaches READY/DEAD.
+      resolveInit({ protocolVersion: MCP_PROTOCOL_VERSION, capabilities: {} })
+
+      await Promise.all([startPromise, destroyPromise])
+      assert.equal(client.state, MCP_STATES.DESTROYED)
     })
   })
 
