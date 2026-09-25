@@ -1013,8 +1013,32 @@ export const RequestSessionContextSchema = z.object({
     type: z.literal('request_session_context'),
     sessionId: z.string().max(256).optional(),
 });
+// #7870 — `base` used to reach the server via `.passthrough()` alone: an
+// arbitrary-type, arbitrary-length value with nothing upstream of getDiff's
+// own runtime gates (packages/server/src/ws-file-ops/reader.js) to narrow it.
+// `GET_DIFF_BASE_MAX_LENGTH` is exported so the server can import the SAME
+// number for its own MAX_DIFF_BASE_LENGTH gate rather than redeclaring it —
+// one constant, not two that can drift.
+//
+// Deliberately NOT a charset/grammar constraint here (no isSafeArgvValue
+// mirror, no revision regex): packages/server/tests/ws-server-file-ops.test.js's
+// #7290/#7298 regression suite sends dash-leading and pathspec-shaped bases
+// (`-O/...`, `--exit-code`, `HEAD:/etc/passwd`, `/etc/passwd`, `file.txt`)
+// OVER THE WIRE and asserts the reviewed #7862 contract: an unusable base is
+// diverted to the HEAD fallback (`error: null`), never a hard failure.
+// Rejecting those shapes here would turn that graceful fallback into a wire
+// error and break the very suite that proves the security fix. This layer
+// bounds TYPE and LENGTH only — the DoS/log-amplification concern #7870
+// raises ("a multi-megabyte base is spawned as an argv element on every
+// get_diff") — and leaves "is this string a usable git revision" as the
+// server's decision, exactly where #7862's review left it.
+export const GET_DIFF_BASE_MAX_LENGTH = 256;
 export const GetDiffSchema = z.object({
     type: z.literal('get_diff'),
+    base: z.string().max(GET_DIFF_BASE_MAX_LENGTH).optional(),
+    // Read by handler-utils.js#resolveSession (msg.sessionId) for a multi-session
+    // client; previously reached the handler only via .passthrough(), undeclared.
+    sessionId: z.string().max(256).optional(),
 }).passthrough();
 export const GitStatusSchema = z.object({
     type: z.literal('git_status'),

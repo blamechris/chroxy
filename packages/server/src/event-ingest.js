@@ -26,8 +26,9 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, openSync, writeSync, closeSync, statSync } from 'node:fs'
+import { mkdirSync, openSync, writeSync, closeSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { readTrustedSecretFile } from './trusted-file-read.js'
 import { safeTokenCompare } from './token-compare.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { writeFileRestricted } from './platform.js'
@@ -179,18 +180,27 @@ function sleepSync(ms) {
 }
 
 /**
- * #7246 — enforce the 0600 mode boundary on the on-disk ingest secret before
- * it is ever trusted, matching the read-path precedent `session-tokens.json`
- * (`session-token-store.js`) and `credentials.json` (`credential-store.js`)
- * already hold: `ingest-secret` set 0600 at exclusive create but never
- * re-checked it on read, so a file widened later (a restore that drops
- * modes, a filesystem that can't express POSIX modes, an operator `chmod`)
- * was read and trusted regardless. This closes that asymmetry the SAME way
- * — refuse, don't silently repair — rather than warn-and-rechmod: a
- * silently-rewritten mode gives the operator no signal anything was ever
- * wrong, and every sibling credential store in this codebase refuses.
+ * #7246 / #7893 — enforce the 0600 mode + owner-uid boundary on the on-disk
+ * ingest secret before it is ever trusted, matching the read-path precedent
+ * `session-tokens.json` (`session-token-store.js`) and `credentials.json`
+ * (`credential-store.js`) already hold: `ingest-secret` set 0600 at
+ * exclusive create but never re-checked it on read, so a file widened later
+ * (a restore that drops modes, a filesystem that can't express POSIX modes,
+ * an operator `chmod`) was read and trusted regardless. This refuses rather
+ * than silently repairs — a silently-rewritten mode gives the operator no
+ * signal anything was ever wrong, and every sibling credential store in
+ * this codebase refuses.
  *
- * Three ways an existing file can fail to be trustworthy, each fail-CLOSED
+ * #7893: the mode/owner check and the read itself go through
+ * `readTrustedSecretFile` (trusted-file-read.js) — ONE `open(O_NOFOLLOW)` +
+ * `fstat(fd)` + read from that same fd, never a `statSync(path)` followed by
+ * a separate `readFileSync(path)`. The old two-step form left a window for
+ * a process with write access to `~/.chroxy` to rename a different file (or
+ * a symlink) over the path between the check and the read; a symlink is now
+ * refused outright (ELOOP), never followed regardless of what its target's
+ * mode is.
+ *
+ * Ways an existing file can fail to be trustworthy, each fail-CLOSED
  * (thrown, never a fall-through to "use the secret" or "mint a new one over
  * it" — a wrong mode is an operator problem to fix, not ours to paper over):
  *   - the mode is not exactly 0600 (POSIX only — win32 mode bits don't
@@ -200,38 +210,36 @@ function sleepSync(ms) {
  *     (POSIX only). Unprivileged, a symlink (or bind-mount) into another
  *     user's 0600 file already can't be READ — the OS refuses it. Running
  *     privileged (root), that protection disappears, so this check restores
- *     it explicitly. `uid !== null` (not a truthy check): uid 0 is a valid,
- *     falsy uid and a truthy test would silently disable the comparison for
- *     exactly the daemon whose reach a foreign file matters most for.
- *   - `statSync` itself fails for a reason other than "the file is gone"
- *     (permission denied on a path component, too many symlinks, …) — an
- *     `ENOENT` after `existsSync` said the file was there is a genuine
- *     create/delete race and is treated as "absent" by the caller; anything
- *     else is refused rather than assumed absent.
+ *     it explicitly.
+ *   - the path is (or becomes) a symlink, or the open cannot otherwise be
+ *     proven symlink-free (ELOOP from trusted-file-read.js)
+ *   - the open/fstat itself fails for a reason other than "the file is
+ *     gone" (permission denied on a path component, …) — an ENOENT is
+ *     treated as "absent" by the caller (falls through to create-new); any
+ *     other failure is refused rather than assumed absent.
  *
- * Returns `false` only for the ENOENT race (caller falls through to the
- * create-new-secret path); returns `true` when the file is present, 0600,
- * and same-uid-owned (or the checks don't apply — win32).
+ * Returns `null` only for the absent case (caller falls through to the
+ * create-new-secret path); returns the trimmed secret string when the file
+ * is present, 0600, same-uid-owned, and symlink-free (or the POSIX-only
+ * checks don't apply — win32).
  */
-function assertIngestSecretFileTrusted(secretPath) {
-  let stat
-  try {
-    stat = statSync(secretPath)
-  } catch (err) {
-    if (err && err.code === 'ENOENT') return false
-    throw new Error(`unable to stat ${secretPath}: ${err.message}`)
+function readIngestSecretFile(secretPath) {
+  const result = readTrustedSecretFile(secretPath, { mode: 0o600, checkOwner: true })
+  if (result.status === 'absent') return null
+  if (result.status === 'ok') return result.content.trim()
+
+  // status === 'refused'
+  if (result.code === 'EMODE') {
+    throw new Error(`${secretPath} has mode ${result.mode.toString(8).padStart(3, '0')}; refusing to read (must be 0600)`)
   }
-  if (process.platform !== 'win32') {
-    const perms = stat.mode & 0o777
-    if (perms !== 0o600) {
-      throw new Error(`${secretPath} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600)`)
-    }
+  if (result.code === 'EOWNER') {
     const uid = typeof process.getuid === 'function' ? process.getuid() : null
-    if (uid !== null && stat.uid !== uid) {
-      throw new Error(`${secretPath} is owned by uid ${stat.uid} rather than uid ${uid}; refusing to read`)
-    }
+    throw new Error(`${secretPath} is owned by uid ${result.uid} rather than uid ${uid}; refusing to read`)
   }
-  return true
+  if (result.code === 'ELOOP') {
+    throw new Error(`${secretPath} failed the symlink/identity check; refusing to read (${result.cause.message})`)
+  }
+  throw new Error(`unable to stat ${secretPath}: ${result.cause ? result.cause.message : result.code}`)
 }
 
 /**
@@ -241,10 +249,8 @@ function assertIngestSecretFileTrusted(secretPath) {
  * logs and carries on).
  */
 export function loadOrCreateIngestSecret(secretPath = defaultIngestSecretPath()) {
-  if (existsSync(secretPath) && assertIngestSecretFileTrusted(secretPath)) {
-    const existing = readFileSync(secretPath, 'utf-8').trim()
-    if (existing.length > 0) return existing
-  }
+  const existing = readIngestSecretFile(secretPath)
+  if (existing !== null && existing.length > 0) return existing
   const secret = randomBytes(32).toString('base64url')
   mkdirSync(dirname(secretPath), { recursive: true })
   // Atomic exclusive-create ('ax' fails with EEXIST if the file already exists) so
@@ -263,15 +269,13 @@ export function loadOrCreateIngestSecret(secretPath = defaultIngestSecretPath())
       // yet. Retry briefly (yielding the CPU so the winner can be scheduled) so its
       // write lands and BOTH processes converge on the winner's secret — overwriting
       // here would clobber the winner's inode and re-open the very split-secret race.
-      // #7246: same trust check as the existsSync branch above — the winner created
-      // this file via 'ax' with an explicit 0o600, but nothing stops a chmod or a
-      // symlink-replace landing between its create and our read, so re-verify rather
+      // #7246/#7893: same trusted read as above — the winner created this file via
+      // 'ax' with an explicit 0o600, but nothing stops a chmod or a symlink-replace
+      // landing between its create and our read, so re-verify (TOCTOU-safe) rather
       // than assume a freshly-'ax'-created file is still what it was.
       for (let attempt = 0; attempt < 10; attempt++) {
-        if (assertIngestSecretFileTrusted(secretPath)) {
-          const existing = readFileSync(secretPath, 'utf-8').trim()
-          if (existing.length > 0) return existing
-        }
+        const raced = readIngestSecretFile(secretPath)
+        if (raced !== null && raced.length > 0) return raced
         if (attempt < 9) sleepSync(5)
       }
       // Still empty after the retry window — genuinely corrupt (not a live winner);

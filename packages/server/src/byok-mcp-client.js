@@ -165,6 +165,12 @@ export class MCPClient extends EventEmitter {
         this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
         allowed = false
       }
+      // #7906: destroy() can land while the trust gate above was pending. No
+      // child exists yet, so a concurrent destroy() already resolved cleanly
+      // (see destroy()'s `!child` branch below) and set state=DESTROYED —
+      // bail here instead of spawning an untracked child once this suspended
+      // start() resumes.
+      if (this._destroyed) return
       if (!allowed) {
         this._setState(MCP_STATES.DEAD)
         this.emit('dead')
@@ -172,14 +178,20 @@ export class MCPClient extends EventEmitter {
       }
     }
     this._spawnAndHandshake()
-    // Resolve when state stabilises — first READY (handshake success) or
-    // DEAD (max restart attempts exhausted). RESTARTING intermediate states
-    // are transparent to the caller; what they want is "is this thing
-    // usable or not", and that's the steady-state answer.
+    // Resolve when state stabilises — first READY (handshake success), DEAD
+    // (max restart attempts exhausted), or DESTROYED (#7906: destroy() can
+    // land while _spawnAndHandshake()'s handshake is in flight — see the
+    // _destroyed re-check at the end of _handshake(). That path never
+    // reaches READY/DEAD, so without DESTROYED here this promise would hang
+    // forever — _onExit() forces DESTROYED once the already-signalled
+    // child actually exits, but nothing upstream of it is READY/DEAD).
+    // RESTARTING intermediate states are transparent to the caller; what
+    // they want is "is this thing usable or not (or gone)", and that's the
+    // steady-state answer.
     if (this._state !== MCP_STATES.READY && this._state !== MCP_STATES.DEAD) {
       await new Promise((resolve) => {
         const onState = ({ next }) => {
-          if (next === MCP_STATES.READY || next === MCP_STATES.DEAD) {
+          if (next === MCP_STATES.READY || next === MCP_STATES.DEAD || next === MCP_STATES.DESTROYED) {
             this.off('state', onState)
             resolve()
           }
@@ -229,6 +241,20 @@ export class MCPClient extends EventEmitter {
     this._child = child
     child.on('error', (err) => {
       this._log.warn(`MCP server ${this.name}: child error: ${err?.message || err}`)
+    })
+    // #7906: a write can race the child's actual death — SIGTERM is sent,
+    // but stdin.writable can still read true for a brief window before the
+    // OS pipe is fully torn down (destroy() racing _notify()'s handshake
+    // write is one real path here: initialize resolves late, _notify()
+    // fires immediately after, right as the killed child is exiting). A
+    // stream write failure (EPIPE) is reported asynchronously as an
+    // 'error' event, not a catchable exception at the write() call site —
+    // with no listener, Node treats it as unhandled and CRASHES THE WHOLE
+    // PROCESS. _request()'s write passes a callback (which absorbs a
+    // reported error) but _notify()'s does not, so this listener is the
+    // one guard that covers every stdin write regardless of call site.
+    child.stdin.on('error', (err) => {
+      this._log.debug(`MCP server ${this.name}: stdin write error: ${err?.message || err}`)
     })
     child.stderr.on('data', (chunk) => {
       this._log.debug(`MCP server ${this.name} stderr: ${chunk.toString().trimEnd()}`)
@@ -283,6 +309,16 @@ export class MCPClient extends EventEmitter {
       this._resources = await this._loadListing('resources/list', 'resources')
     }
     this._restartAttempts = 0
+    // #7906: destroy() can land at any point during the handshake awaits
+    // above (initialize / tools/list / prompts/list / resources/list) —
+    // the child's stdout data can already be buffered/received before
+    // destroy()'s SIGTERM actually terminates the process, so the pending
+    // _request() promises above can still resolve successfully after
+    // _destroyed flips true. _onExit() will eventually force state back to
+    // DESTROYED once the (already-signalled) child actually exits, but
+    // without this check the handshake would resurrect a destroyed client
+    // as READY — and emit 'ready' with populated tools — in the meantime.
+    if (this._destroyed) return
     this._setState(MCP_STATES.READY)
     this.emit('ready', this._tools)
   }
@@ -641,6 +677,12 @@ export class MCPRemoteClient extends EventEmitter {
     // before the trust gate so the user is never prompted to trust a URL we
     // will refuse regardless.
     const refusal = await this._refuseMetadataTarget()
+    // #7906: destroy() can land while the metadata-refusal check above (a
+    // real DNS lookup for non-literal hostnames) was pending. Nothing is
+    // open yet, so a concurrent destroy() already resolved cleanly and set
+    // state=DESTROYED — bail before touching state again or consulting the
+    // trust gate.
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
     if (refusal) {
       this._log.warn(`MCP server ${this.name}: ${refusal}`)
       this._toDead()
@@ -656,6 +698,11 @@ export class MCPRemoteClient extends EventEmitter {
         this._log.warn(`MCP server ${this.name}: trust gate threw: ${err?.message || err}`)
         allowed = false
       }
+      // #7906: same re-check — destroy() can land while the trust gate
+      // itself was pending. No connection exists yet, so bail rather than
+      // resurrect a destroyed client (and never overwrite state=DESTROYED
+      // with DEAD via _toDead()).
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       if (!allowed) {
         this._toDead()
         return
@@ -664,6 +711,10 @@ export class MCPRemoteClient extends EventEmitter {
     // #6822: prime a stored access token (refreshing it up front if expired) so a
     // previously-authorized server reconnects with no user prompt.
     await this._prepareStoredToken()
+    // #7906: destroy() can land while priming the stored token (a refresh
+    // call to the token endpoint) — bail before opening the real connection
+    // below.
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
     this._setState(MCP_STATES.STARTING)
     try {
       await this._attemptConnect()
@@ -774,6 +825,15 @@ export class MCPRemoteClient extends EventEmitter {
     if (!this._oauthEnabled || !redirectUri) {
       this._statusReason = 'oauth-required'
       this._log.warn(`MCP server ${this.name}: requires OAuth but the flow is disabled or no redirect URI is configured`)
+      // #7906: this method can be reached with _destroyed already true —
+      // _onOAuthRequired()'s silent-refresh branch falls through to
+      // `await this._beginBrowserAuthorization(err)` unconditionally once
+      // its own `await this._tryRefresh()` settles, regardless of whether
+      // destroy() landed during that await. No connection exists yet here
+      // either, so bail rather than regress an already-destroyed client to
+      // DEAD via _toDead() (and fire a stray 'dead' event nothing should
+      // see) — same reasoning as the guard below this method's try/catch.
+      if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
       this._toDead()
       return
     }
@@ -799,6 +859,15 @@ export class MCPRemoteClient extends EventEmitter {
       this._statusReason = 'oauth-required'
       this._log.warn(`MCP server ${this.name}: could not begin OAuth authorization: ${authErr?.message || authErr}`)
     }
+    // #7906: destroy() can land while beginAuthorization() above (real AS
+    // discovery + dynamic client registration network calls) was pending —
+    // including via the catch branch immediately above, when destroy()'s
+    // abort of an in-flight request (or an unrelated network failure) makes
+    // that call reject rather than resolve. No connection exists yet, so
+    // bail rather than regress an already-destroyed client to DEAD via
+    // _toDead() (which would also fire a stray 'dead' event nothing should
+    // see).
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return }
     // Not ready — DEAD until a code is submitted (contributes zero tools). The
     // oauth-required fields survive _toDead so the fleet can surface them.
     this._toDead()
@@ -825,6 +894,14 @@ export class MCPRemoteClient extends EventEmitter {
     })
     this._oauthStore.setStoredToken(this._url, record)
     this._accessToken = record.accessToken
+    // #7906: destroy() can land while redeeming the code above (a real
+    // network round-trip). The token just persisted above is fully formed
+    // and safe to keep for a future reconnect, but a destroyed client must
+    // never be resurrected: the raw `_state = IDLE` write below bypasses
+    // _setState entirely (no terminal-state protection), and the
+    // reconnecting `start()` call would otherwise throw ("MCPRemoteClient
+    // destroyed") only AFTER state was already clobbered to IDLE.
+    if (this._destroyed) { this._setState(MCP_STATES.DESTROYED); return { ok: true } }
     // Clear the pending-auth surface and reconnect.
     try { this._oauthFlow.unregisterOAuthCallback?.(pending.state) } catch { /* best-effort */ }
     this._authPending = null

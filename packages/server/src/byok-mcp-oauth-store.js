@@ -22,12 +22,13 @@
  * (mirrors credential-cipher) so tests drive the encrypted path with an in-memory
  * key and NEVER touch the real OS keychain.
  */
-import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'node:fs'
+import { statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
 import { configPath } from './config-dir.js'
+import { readTrustedSecretFile } from './trusted-file-read.js'
 import {
   isEncryptedEnvelope,
   decryptEnvelope,
@@ -152,29 +153,30 @@ export function serverKeyForUrl(url) {
  * an encrypted envelope. Returns `{ data, fileExists, error }`. On any read error
  * `data` is `{}` and `error` carries a VALUE-FREE reason (never a token). Modeled
  * on credential-store.readStore.
+ *
+ * #7893: the mode check and the read go through `readTrustedSecretFile` — ONE
+ * `open(O_NOFOLLOW)` + `fstat(fd)` + read from that same fd, so a rename or
+ * symlink-swap of `mcp-oauth-tokens.json` between the mode check and the
+ * read (the old `statSync(path)` then `readFileSync(path)` shape) is refused
+ * outright rather than followed.
  */
 function readStore() {
   const file = tokensFilePath()
-  let stat
-  try {
-    stat = statSync(file)
-  } catch (err) {
-    if (err.code === 'ENOENT') return { data: {}, fileExists: false, error: null }
-    return { data: {}, fileExists: false, error: `unable to stat ${file}: ${err.message}` }
-  }
-  if (process.platform !== 'win32') {
-    const perms = stat.mode & 0o777
-    if (perms !== 0o600) {
+  const result = readTrustedSecretFile(file, { mode: 0o600 })
+  if (result.status === 'absent') return { data: {}, fileExists: false, error: null }
+  if (result.status === 'refused') {
+    if (result.code === 'EMODE') {
       return {
         data: {},
         fileExists: true,
-        error: `${file} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600)`,
+        error: `${file} has mode ${result.mode.toString(8).padStart(3, '0')}; refusing to read (must be 0600)`,
       }
     }
+    return { data: {}, fileExists: false, error: `unable to stat ${file}: ${result.cause ? result.cause.message : result.code}` }
   }
   let parsed
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'))
+    parsed = JSON.parse(result.content)
   } catch (err) {
     return { data: {}, fileExists: true, error: `${file} unreadable or not valid JSON: ${err.message}` }
   }

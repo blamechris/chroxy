@@ -213,6 +213,56 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
     })
 
+    // #7929 follow-on — `_spawnPty` builds `['--resume', this._sessionId]` /
+    // `['--session-id', this._sessionId]` and hands it straight to node-pty's
+    // own `spawn`, not `child_process`'s — so `scripts/lint-argv-sinks.mjs`
+    // (which only recognises `child_process` spawn/execFile call sites and
+    // `_buildArgs`/`build*Args`-shaped functions) cannot see this sink at all.
+    // `-r, --resume` is an OPTIONAL-arg flag on the claude CLI (`claude --help`
+    // prints `-r, --resume [value]`), so a dash-leading value in the two-token
+    // form is read as a SEPARATE option rather than swallowed — the same class
+    // of bug #7929 fixed in cli-session.js's `buildClaudeCliArgs` and
+    // codex-session.js's `buildCodexArgs`, at a THIRD call site neither the
+    // lint nor that PR's manual sweep reached.
+    it('rejects a dash-leading persisted sessionId before it reaches --resume (argv option-injection guard)', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty // run the genuine method
+      let ptySpawned = false
+      let errored = null
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12350, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session.on('error', (e) => { errored = e })
+      session._sessionId = '--dangerously-skip-permissions'
+      session._resumedFromPersisted = true
+      session._settingsPath = join(fakeHome, 'settings.json')
+      session._ptyModOverride = {
+        spawn: (_cmd, args) => { ptySpawned = true; return { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, args } },
+      }
+      await session._spawnPty(true)
+      assert.equal(ptySpawned, false,
+        'a dash-leading sessionId must never reach node-pty spawn as the value of --resume')
+      assert.ok(errored, 'the rejection surfaces as an error event, matching the existing spawn-failure contract')
+      assert.match(errored.message, /sessionId/)
+      assert.ok(!session._term, 'no PTY left behind after a rejected sessionId')
+    })
+
+    it('rejects a dash-leading fresh sessionId before it reaches --session-id (argv option-injection guard)', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty
+      let ptySpawned = false
+      let errored = null
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12351, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session.on('error', (e) => { errored = e })
+      session._sessionId = '-x'
+      session._resumedFromPersisted = false
+      session._settingsPath = join(fakeHome, 'settings.json')
+      session._ptyModOverride = {
+        spawn: (_cmd, args) => { ptySpawned = true; return { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, args } },
+      }
+      await session._spawnPty(true)
+      assert.equal(ptySpawned, false,
+        'a dash-leading sessionId must never reach node-pty spawn as the value of --session-id')
+      assert.ok(errored, 'the rejection surfaces as an error event')
+      assert.match(errored.message, /sessionId/)
+    })
+
     it('verifies and passes one explicit native execution context to every REAL TUI spawn', async () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty
       const previous = process.env.ANTHROPIC_AUTH_TOKEN
