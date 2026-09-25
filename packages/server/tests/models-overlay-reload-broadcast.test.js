@@ -324,18 +324,21 @@ describe('#7722 overlay hot-reload broadcasts one provider-tagged roster per reg
   // the broadcaster. Nothing in this file can execute `startCliServer()` to
   // exercise it end-to-end (no test does), so — like the wiring test above —
   // this is a source pin: deleting the argument, or hardcoding a literal
-  // instead of `config.provider || DEFAULT_PROVIDER` (the same resolution
-  // `billingCanaryMonitor`'s `getDefaultProvider` uses immediately below it),
-  // goes red here even though no unit test can observe the live daemon.
+  // instead of `resolveDaemonDefaultProvider(config)` (#7932 — the same
+  // resolution `billingCanaryMonitor`'s `getDefaultProvider` uses immediately
+  // below it; see that function's docstring, ./providers.js, for why the five
+  // textually-identical `config.provider || DEFAULT_PROVIDER` copies this
+  // repo had accumulated were collapsed to one export), goes red here even
+  // though no unit test can observe the live daemon.
   //
   // A single contiguous token sequence, not a wildcard spanning the object
   // literal's body — the file's own comment above (on the sibling wiring
   // test) documents why a bounded `{[\s\S]{0,N}?...}` span is a false
   // NEGATIVE waiting to happen the moment that literal grows past the cap.
-  it('the watcher wiring passes defaultProvider: config.provider || DEFAULT_PROVIDER', () => {
+  it('the watcher wiring passes defaultProvider: resolveDaemonDefaultProvider(config)', () => {
     const src = readFileSync(fileURLToPath(new URL('../src/server-cli.js', import.meta.url)), 'utf-8')
-    const wiring = /defaultProvider:\s*config\.provider\s*\|\|\s*DEFAULT_PROVIDER/
-    assert.ok(wiring.test(src), 'createOverlayReloadBroadcaster(...) must pass defaultProvider: config.provider || DEFAULT_PROVIDER')
+    const wiring = /defaultProvider:\s*resolveDaemonDefaultProvider\(config\)/
+    assert.ok(wiring.test(src), 'createOverlayReloadBroadcaster(...) must pass defaultProvider: resolveDaemonDefaultProvider(config)')
   })
 })
 

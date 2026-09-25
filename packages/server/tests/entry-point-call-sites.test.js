@@ -311,11 +311,22 @@ describe('entry-point call site: server-cli-child.js (#7254)', () => {
       // port should not be able to change what this test observes.
       CHROXY_OLLAMA_BASE_URL: 'http://127.0.0.1:1',
       // The WsServer constructor fires a background fetch of
-      // registry.npmjs.org unless NODE_ENV === 'test' (ws-server.js:1281).
-      // Nothing in this harness sets NODE_ENV, so without this the forked
-      // child opens a real outbound HTTPS connection — confirmed with lsof —
-      // and on an egress-restricted runner adds a pending socket and a 5s
-      // timer to a test whose whole point is bounded, hermetic behaviour.
+      // registry.npmjs.org unless CHROXY_DISABLE_UPDATE_CHECK === '1'
+      // (ws-server.js, #7265 — this used to be gated on NODE_ENV === 'test',
+      // which nothing in this harness ever set, so the fetch fired anyway
+      // regardless of the NODE_ENV line below). The forked child already
+      // inherits CHROXY_DISABLE_UPDATE_CHECK from tests/_setup.mjs via
+      // execArgv (see the comment above `boot`), so setting it here too is
+      // redundant defense-in-depth, not the load-bearing mechanism: without
+      // EITHER one, the forked child opens a real outbound HTTPS connection —
+      // confirmed with lsof — and on an egress-restricted runner adds a
+      // pending socket and a 5s timer to a test whose whole point is bounded,
+      // hermetic behaviour.
+      CHROXY_DISABLE_UPDATE_CHECK: '1',
+      // Kept for continuity — no longer load-bearing for the version-check
+      // fetch above (that gate no longer reads NODE_ENV), but left in place
+      // rather than dropped speculatively in case anything else on this real
+      // entry-point boot path reads it.
       NODE_ENV: 'test',
     }
     // An inherited API_TOKEN would change the auth branch the child takes; the
