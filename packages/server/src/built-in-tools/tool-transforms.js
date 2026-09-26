@@ -314,11 +314,19 @@ export function globPatternComplexityReason(pattern) {
   // expression's literal '{'/'}' members from real brace syntax: every
   // recursion `parseSegmentTokens` actually performs happens on a MATCHED
   // '{'...'}' pair, which this counter always sees too (an unmatched '{' —
-  // what `findMatchingBrace` treats as a literal and never recurses into —
+  // what the parser treats as a literal and never recurses into —
   // can only make this counter's depth reading HIGHER than the true parse
   // depth, never lower). Over-rejecting a pattern that merely contains many
   // literal, unmatched '{' characters is an acceptable false positive for a
   // guard whose only job is to never under-count real recursion.
+  //
+  // #7951 review — that argument holds for a BRACKET-OBLIVIOUS pairer (bash
+  // in the container). The host parser now pairs braces bracket-AWARE, so a
+  // '}' inside '[...]' lowers this counter without closing anything the host
+  // parser sees, and this reading can UNDER-count the host's depth. The host
+  // therefore re-measures with its own pairing (`hostBraceDepthExceeded` in
+  // byok-tool-executor.js) against the same ceiling; this counter stays as
+  // the bound for the container.
   let depth = 0
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i]
