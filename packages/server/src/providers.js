@@ -80,6 +80,28 @@ const PROVIDERS = {
 // (#5819) — see the protocol constant's doc for the billing rationale.
 export { DEFAULT_PROVIDER, USER_SHELL_PROVIDER }
 
+/**
+ * #7932 — the ONE derivation of "this daemon's resolved default provider".
+ *
+ * `config.provider || DEFAULT_PROVIDER` was being written out as an inline
+ * expression at five call sites across server-cli.js and ws-server.js —
+ * `providerType` (models-cache warm), `createOverlayReloadBroadcaster`'s
+ * `defaultProvider`, `BillingCanaryMonitor`'s `getDefaultProvider` +
+ * `getApiKeyAuth`, and `setupForwarding`'s `defaultProvider` ctx field — each
+ * one commenting that it "mirrors" one of the others rather than calling a
+ * shared function. A textually-identical expression repeated across files is
+ * exactly the copy this repo's own doctrine warns drifts silently (a fork
+ * that changes `config.provider` to `config.defaultProvider` at one site, or
+ * adds a new fallback tier, only updates the copy it touched) — so it is
+ * collapsed to one export.
+ *
+ * @param {{ provider?: string|null }|null|undefined} config
+ * @returns {string}
+ */
+export function resolveDaemonDefaultProvider(config) {
+  return config?.provider || DEFAULT_PROVIDER
+}
+
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 // #5994: user-shell is NOT a chat provider — it's a terminal-only session
 // created via a dedicated shell affordance (#5986/#5987), never the chat

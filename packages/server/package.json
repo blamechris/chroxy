@@ -43,7 +43,7 @@
     "qrcode": "^1.5.3",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
-    "ws": "^8.16.0",
+    "ws": "^8.21.3",
     "zod": "^4.3.6"
   },
   "engines": {
@@ -58,6 +58,7 @@
   "devDependencies": {
     "c8": "^11.0.0",
     "eslint": "^9.39.3",
+    "js-yaml": "^4.1.1",
     "playwright": "^1.58.2",
     "typescript": "^5.9.3"
   }

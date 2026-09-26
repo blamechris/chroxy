@@ -76,10 +76,15 @@ describe('ClaudeTuiSession — configured mcp_servers emission (#6820)', () => {
 
     session._emitConfiguredMcpServers()
 
+    // #7112 review: discoverConfiguredMcpServers now shares one precedence
+    // ordering with the BYOK spawn path's discoverMcpServerSpecs (Local >
+    // Project/.mcp.json > User) instead of the old, independently-hand-rolled
+    // user-first order — so .mcp.json ("Project" scope) is visited before
+    // the user-root config ("User" scope).
     assert.deepEqual(events[0], {
       servers: [
-        { name: 'globalfs', status: 'configured' },
         { name: 'repotool', status: 'configured' },
+        { name: 'globalfs', status: 'configured' },
       ],
     })
   })

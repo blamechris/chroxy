@@ -1419,7 +1419,7 @@ describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193
         image: 'agent:latest',
         gitRepo: { url: '--upload-pack=touch /tmp/pwned' },
       }),
-      /must not start with "-"/,
+      /unsafe opts\.gitRepo\.url/,
     )
   })
 
@@ -1432,7 +1432,7 @@ describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193
         image: 'agent:latest',
         gitRepo: { url: 'https://example.com/r.git', branch: '--config=core.fsmonitor=evil' },
       }),
-      /branch must not start with "-"/,
+      /unsafe opts\.gitRepo\.branch/,
     )
   })
 
@@ -1445,7 +1445,43 @@ describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193
         image: 'agent:latest',
         gitRepo: { url: 'https://example.com/r.git', commit: '--evil' },
       }),
-      /commit must not start with "-"/,
+      /unsafe opts\.gitRepo\.commit/,
+    )
+  })
+
+  // ─── #7869: fold rejectGitOptionLike into the shared argv-safety guard ────
+  //
+  // The three tests above already covered the leading-dash case, which the
+  // old locally-scoped `rejectGitOptionLike` also caught — folding it into
+  // `assertSafeArgvValue` does not change that outcome (only the message).
+  // These two prove the actual STRENGTHENING: an embedded newline was
+  // previously accepted by `rejectGitOptionLike` (it only checked
+  // `startsWith('-')`) and is now rejected by the shared guard, because a
+  // newline can smuggle a second line into a single git-clone argv slot.
+
+  it('throws when gitRepo.branch contains an embedded newline (argument injection guard)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-branch-newline',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', branch: 'main\n--upload-pack=touch /tmp/pwned' },
+      }),
+      /unsafe opts\.gitRepo\.branch/,
+    )
+  })
+
+  it('throws when gitRepo.url contains an embedded newline (argument injection guard)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-url-newline',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git\n--upload-pack=touch /tmp/pwned' },
+      }),
+      /unsafe opts\.gitRepo\.url/,
     )
   })
 

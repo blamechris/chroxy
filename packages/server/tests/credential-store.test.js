@@ -1,8 +1,9 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, statSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, statSync, readFileSync, existsSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -134,6 +135,23 @@ describe('credential-store', () => {
       // ...and the status surface reports the mode error explicitly.
       const status = getCredentialsStatus()
       assert.match(status.fileError, /must be 0600/)
+    })
+
+    // #7893: readStore() used to statSync(path) (mode check) and then
+    // separately readFileSync(path) — a rename/symlink-swap window between
+    // the two. This is the deterministic proxy for that race: the swap
+    // happens once, before the read, rather than mid-syscall.
+    it('#7893: refuses a symlink swapped in for credentials.json, even to a well-formed 0600 file elsewhere (today it is followed)', { skip: process.platform === 'win32' ? 'covered by trusted-file-read win32 tests' : SKIP_NO_SYMLINK }, () => {
+      setStoredCredential('GEMINI_API_KEY', 'legit-value')
+      const elsewhere = join(tmpHome, '.chroxy', 'elsewhere.json')
+      writeFileSync(elsewhere, JSON.stringify({ GEMINI_API_KEY: 'evil-swapped-value' }), { mode: 0o600 })
+      // Swap: credentials.json now points at a DIFFERENT 0600 file we own.
+      rmSync(credPath())
+      symlinkSync(elsewhere, credPath())
+
+      assert.equal(getStoredCredential('GEMINI_API_KEY'), null, 'a symlink swap must be refused, never followed to the swapped-in value')
+      const status = getCredentialsStatus()
+      assert.ok(status.fileError, 'the status surface must report the refusal')
     })
   })
 

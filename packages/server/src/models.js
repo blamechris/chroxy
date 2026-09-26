@@ -486,6 +486,35 @@ function usableContextWindow(source) {
 }
 
 /**
+ * #7810 — validate the cache file's `learnedContextWindows` field on read.
+ * Each value must be the same shape `updateContextWindow` itself is willing
+ * to STORE into the map (a finite positive integer): this reader cannot
+ * trust that every byte on disk went through a well-behaved write path (a
+ * hand-edit, an older/corrupted build, a partial write), so it re-validates
+ * independently rather than passing the parsed value straight through — #7771
+ * found `updateContextWindow`'s OWN input guard admits NaN (`typeof NaN ===
+ * 'number'` and `NaN <= 0` is false, so the existing `contextWindow <= 0`
+ * check never fires for it), which is exactly the kind of value this map
+ * must not resurrect from disk. A missing/absent field (an old-format cache
+ * written before this key existed) and a non-object value both yield an
+ * empty map rather than throwing — loadCache() must keep working with the
+ * map absent.
+ *
+ * @param {unknown} raw - `parsed.learnedContextWindows` from a cache file.
+ * @returns {Map<string, number>}
+ */
+function parseLearnedContextWindows(raw) {
+  const out = new Map()
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+  for (const [fullId, value] of Object.entries(raw)) {
+    if (typeof fullId !== 'string' || fullId.length === 0) continue
+    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) continue
+    out.set(fullId, value)
+  }
+  return out
+}
+
+/**
  * Factory function that creates an isolated models registry.
  * Each instance has its own mutable state, preventing test pollution.
  *
@@ -672,9 +701,20 @@ export function createModelsRegistry(hooks = {}) {
       declaredFullIds.set(entry.fullId, entry)
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
-        // Override the base row's label/window from the overlay when supplied.
+        // Override the base row's label/window/shortId from the overlay when
+        // supplied. #7802 — SPREAD the base row first: `docs/guides/model-
+        // overlay.md` documents the overlay's reach on an existing id as
+        // exactly `label` / `contextWindow` / `shortId`, nothing else, so
+        // every OTHER key the base row carried (`reasoningLevels`,
+        // `defaultReasoningLevel`, `provenance`, and anything future
+        // `MODEL_ENTRY_METADATA_KEYS` growth adds) must survive an override
+        // untouched. A bare 4-key literal here silently dropped all of them —
+        // for `reasoningLevels` specifically, that disabled the
+        // `set_thinking_level` gate for a model the overlay only meant to
+        // relabel.
         if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
           baseByFullId.set(entry.fullId, Object.freeze({
+            ...baseRow,
             id: entry.shortId ?? baseRow.id,
             label: entry.label ?? baseRow.label,
             fullId: baseRow.fullId,
@@ -789,7 +829,131 @@ export function createModelsRegistry(hooks = {}) {
     return overlayDeclaredFullIds.has(fullId) && !providerReportedFullIds.has(fullId)
   }
 
-  let activeModels = fallbackModels
+  /**
+   * True for a row that must never be broadcast carrying `provenance`, and
+   * the one place that strips it back off when a producer stamped it anyway.
+   *
+   * For a row that is genuinely part of this repo's own static seed (a
+   * `baseFallbackModels` entry the operator never named), `provenance:
+   * 'catalogued'` means "this repo's in-repo catalogue vouches for this
+   * row", which is true, and stays. For a row that is in the roster ONLY
+   * because the operator's overlay declares its fullId
+   * (`isUnpersistableDeclaredRow`), no source may make that claim — since
+   * #7802 keeps a static base row's own metadata alive under an overlay
+   * label/window override, a declared-only row can carry that base row's
+   * `provenance` stamp straight through (e.g. an overlay-declared override
+   * of a retired provider id). Stripping leaves it ABSENT rather than
+   * mislabeled; every OTHER metadata key (`reasoningLevels`, …) is
+   * unaffected.
+   *
+   * #7888 round 3 — this used to be re-implemented (or forgotten) at each of
+   * SIX places that could put a row into `activeModels`: the construction
+   * initializer, `updateModels`'s and `loadCache`'s union loops (each via a
+   * now-removed `unionRowMetadataSources` wrapper that stripped `provenance`
+   * from the `withModelMetadata` SOURCES instead of the built row — same
+   * outcome, different shape), `applyOverlay`'s cache-warmed and fully-cold
+   * branches, and `resetModels()`. Three rounds of review fixed those one at
+   * a time (#7806, then the cache-warmed branch, then the last three) — the
+   * whack-a-mole shape the round-3 task exists to end. Every one of those
+   * call sites now builds its array and hands it to `setActiveModels()`
+   * below, which maps every row through this function before it is ever
+   * assigned to `activeModels`; no call site maps through it directly
+   * anymore, so a future one cannot forget to.
+   */
+  function stripUnpersistableProvenance(row) {
+    if (row.provenance === undefined) return row
+    if (!isUnpersistableDeclaredRow(row.fullId)) return row
+    const { provenance: _provenance, ...rest } = row
+    return Object.freeze(rest)
+  }
+
+  // Authoritative contextWindow values observed from SDK `modelUsage`,
+  // keyed by fullId. These override the static resolveContextWindow()
+  // heuristic and must survive subsequent updateModels() refreshes
+  // (which otherwise rebuild every entry from the heuristic on every
+  // SDK session init). Cleared on resetModels(). Declared here, ahead of
+  // `setActiveModels`'s first call below, because `resolveDeclaredRowWindow`
+  // (which that call reaches through `setActiveModels`) closes over it — a
+  // `const`/`let` declared after that first call would still be in its
+  // temporal dead zone when the closure runs.
+  const contextWindowOverrides = new Map()
+
+  // #7810 — ratchet-learned contextWindow values for DECLARATION-ONLY rows: a
+  // fullId `isUnpersistableDeclaredRow()` excludes from `persistableModels()`
+  // because the operator's overlay, not a provider report, is its only
+  // justification for being in the roster. That row is rebuilt from the
+  // overlay + heuristic on every boot (`unionableSeedRows()`, in both
+  // `updateModels()` and `loadCache()`), which otherwise throws away a
+  // window a live turn actually measured. Persisted under its OWN cache key
+  // (`saveCacheImpl`), separate from `models`, so the row itself still
+  // cannot outlive its declaration (`isUnpersistableDeclaredRow` is
+  // unaffected) while the measured window survives a restart. Keyed by
+  // fullId; `let` so `loadCache()` can replace it wholesale, the same way it
+  // replaces `providerReportedFullIds`. Cleared on resetModels(). Same
+  // TDZ reason as `contextWindowOverrides` above for living ahead of
+  // `setActiveModels`'s first call.
+  let learnedContextWindows = new Map()
+
+  /**
+   * #7810 round 2 — the ONE place a declaration-only row's contextWindow is
+   * resolved to the precedence this feature documents: live override >
+   * operator-declared > learned > heuristic. Folded into `setActiveModels`
+   * (below) rather than left at each call site that can hand it a
+   * declaration-only row, for the same reason #7888 round 3 made
+   * `setActiveModels` the only place `activeModels` is assigned at all: a
+   * rule copied to N call sites is a rule N-1 of them can drift from.
+   *
+   * Round 1 of THIS review (`withLiveOrLearnedWindow`, since removed) copied
+   * the rule to two of `applyOverlay`'s branches and got the coverage right,
+   * but not the precedence: it returned a declaration-only row UNCHANGED
+   * whenever the operator had pinned an explicit `contextWindow`, which
+   * skips the live override too, not just the learned map — inverting the
+   * documented order. Reachable in production: a live turn ratchets a
+   * declaration-only row via `updateContextWindow`, then `reloadModelsOverlay`
+   * fires (e.g. an unrelated edit to `~/.chroxy/models.json`) against an
+   * overlay entry that pins that SAME id — the pin silently overwrote the
+   * more-recent live measurement for the rest of the process, no restart
+   * required. Verified against the pre-round-2 code: declare `my-model`
+   * unpinned, ratchet it to 272000 live, then hot-reload an overlay that
+   * pins it to 50000 — the roster read back 50000, not 272000.
+   *
+   * The `??` chain here has no such special case: `contextWindowOverrides`
+   * is consulted UNCONDITIONALLY first, exactly like the (already-correct)
+   * `updateModels()` union-loop chain did before this round removed its now-
+   * redundant copy. A row that is not declaration-only is returned
+   * unchanged — a provider-reported row's override handling lives inline
+   * where that row is built (the main `updateModels()` conversion loop),
+   * unrelated to this map.
+   */
+  function resolveDeclaredRowWindow(row) {
+    if (!isUnpersistableDeclaredRow(row.fullId)) return row
+    const resolved = contextWindowOverrides.get(row.fullId)
+      ?? overlayDeclaredFullIds.get(row.fullId)?.contextWindow
+      ?? learnedContextWindows.get(row.fullId)
+      ?? row.contextWindow
+    if (resolved === undefined || resolved === row.contextWindow) return row
+    return { ...row, contextWindow: resolved }
+  }
+
+  /**
+   * The ONLY assignment to `activeModels` (`updateContextWindow` included —
+   * see below). Every row that becomes part of the active roster passes
+   * through `stripUnpersistableProvenance` and `resolveDeclaredRowWindow`
+   * here, once each, so neither invariant can be bypassed by a call site
+   * that builds a models array correctly in every other respect but forgets
+   * one of these two steps — the defect shape all three rounds of #7888
+   * review found, and #7810 round 2 reopened one level down for the window
+   * value specifically. Idempotent on a row that doesn't need adjusting, so
+   * callers may pass an array that is already a mix of previously-active
+   * rows (`updateContextWindow`) and freshly-built ones (`applyOverlay`'s
+   * cache-warmed seed) without sorting them first.
+   */
+  function setActiveModels(models) {
+    activeModels = models.map((m) => resolveDeclaredRowWindow(stripUnpersistableProvenance(m)))
+  }
+
+  let activeModels
+  setActiveModels(fallbackModels)
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
@@ -808,12 +972,6 @@ export function createModelsRegistry(hooks = {}) {
   // Snapshot of the last saved cache payload so saveCache() can skip
   // redundant writes. `null` forces the first save to always run.
   let lastSavedSnapshot = null
-  // Authoritative contextWindow values observed from SDK `modelUsage`,
-  // keyed by fullId. These override the static resolveContextWindow()
-  // heuristic and must survive subsequent updateModels() refreshes
-  // (which otherwise rebuild every entry from the heuristic on every
-  // SDK session init). Cleared on resetModels().
-  const contextWindowOverrides = new Map()
 
   // #4106: warn-once set for synthesized 1M variants that lack a matching
   // pricing entry. updateModels() can be called repeatedly across the
@@ -854,7 +1012,10 @@ export function createModelsRegistry(hooks = {}) {
     const filtered = models.some((m) => isDisallowedModelId(m.id) || isDisallowedModelId(m.fullId))
       ? models.filter((m) => !isDisallowedModelId(m.id) && !isDisallowedModelId(m.fullId))
       : models
-    activeModels = filtered
+    // #7888 round 3 — the chokepoint: every write to `activeModels` this
+    // registry makes (except `updateContextWindow`'s in-place window update,
+    // which routes through the same function) funnels through here.
+    setActiveModels(filtered)
     // #6219 review (#6232): never leave defaultModelId pointing at a model that
     // isn't in the active list — e.g. the SDK marked the now-filtered disallowed
     // model (fable) as "Default", so nextDefault is its short id which isn't in
@@ -863,6 +1024,9 @@ export function createModelsRegistry(hooks = {}) {
     // (opus → sonnet) else the first model (mirrors updateModels' fallback). Only
     // fires when filtering actually dropped the chosen default — a present
     // nextDefault (the common case + loadCache's own discard result) is kept.
+    // Reads `filtered`, not `activeModels` — stripping `provenance` never
+    // touches `id`/`fullId`, so the two are equivalent for this lookup, and
+    // `filtered` is already in hand.
     const defaultPresent =
       nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
     if (nextDefault != null && !defaultPresent) {
@@ -871,7 +1035,10 @@ export function createModelsRegistry(hooks = {}) {
     } else {
       defaultModelId = nextDefault
     }
-    rebuildLookups(filtered)
+    // Rebuilds from `activeModels` (the post-strip list) rather than
+    // `filtered` so the lookup tables always mirror exactly what
+    // `getModels()` serves, not a pre-chokepoint snapshot of it.
+    rebuildLookups(activeModels)
   }
 
   /**
@@ -896,16 +1063,41 @@ export function createModelsRegistry(hooks = {}) {
     return activeModels.filter((m) => !isUnpersistableDeclaredRow(m.fullId))
   }
 
-  // Takes the list so `saveCacheImpl` can hash the exact array it writes.
-  function snapshotString(models = persistableModels()) {
-    return canonicalStringify({ models, defaultModelId })
+  /**
+   * #7810 — `learnedContextWindows` entries whose fullId the overlay no
+   * longer declares are pruned here, mutating the map in place, so the map
+   * cannot grow without bound across overlay edits and a deleted
+   * declaration's learned window cannot resurrect the row it belonged to
+   * (the same invariant `isUnpersistableDeclaredRow` upholds for the row
+   * itself — see that function). Called from `saveCacheImpl` (so the prune
+   * actually reaches disk) and from `loadCache` (so a file saved before the
+   * declaration was removed doesn't reintroduce a stale entry in memory).
+   */
+  function prunedLearnedContextWindows() {
+    for (const fullId of learnedContextWindows.keys()) {
+      if (!overlayDeclaredFullIds.has(fullId)) learnedContextWindows.delete(fullId)
+    }
+    return learnedContextWindows
+  }
+
+  // Takes the lists so `saveCacheImpl` can hash the exact payload it writes.
+  // #7810 — `learned` is part of the hash, not an afterthought: a ratchet on
+  // a declaration-only row never changes `persistableModels()` (the row is
+  // excluded from it by definition), so hashing `models`/`defaultModelId`
+  // alone would make a save that ONLY updates the learned window compare
+  // equal to the last save and get skipped by the `snapshot ===
+  // lastSavedSnapshot` short-circuit below — the exact write-skip-key gap
+  // #7799 round 3 found for `providerReportedFullIds`, reopened for this map.
+  function snapshotString(models = persistableModels(), learned = prunedLearnedContextWindows()) {
+    return canonicalStringify({ models, defaultModelId, learnedContextWindows: Object.fromEntries(learned) })
   }
 
   // Hoisted out of the returned method so loadCache() can heal the disk
   // file in the same pass when stale entries are pruned (#3162).
   function saveCacheImpl(path) {
     const persistable = persistableModels()
-    const snapshot = snapshotString(persistable)
+    const learned = prunedLearnedContextWindows()
+    const snapshot = snapshotString(persistable, learned)
     if (snapshot === lastSavedSnapshot) return true
 
     try {
@@ -935,6 +1127,12 @@ export function createModelsRegistry(hooks = {}) {
         // This is the same array the write-skip key above hashed (#7799 round
         // 3) — computed once, so the key cannot describe a different payload.
         models: persistable,
+        // #7810 — ratchet-learned windows for the rows `models` just excluded.
+        // Own key, separate from `models`, so the row itself stays out of the
+        // roster payload (it must still not outlive its declaration) while
+        // the measured window survives a restart. Same pruned map the
+        // write-skip key hashed, converted to a plain object for JSON.
+        learnedContextWindows: Object.fromEntries(learned),
         defaultModelId,
         savedAt: Date.now(),
       }, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
@@ -979,25 +1177,68 @@ export function createModelsRegistry(hooks = {}) {
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
       } else if (lastCacheModels) {
-        // Cache-warmed (loadCache) but no SDK refresh yet — apply the new
-        // fallback (base + overlay overrides + overlay-only rows) while
-        // PRESERVING the cache entries it doesn't cover (date-suffixed ids past
-        // the family filter, e.g. `claude-sonnet-4-20250514`). Preserve from the
-        // CACHE list, not `activeModels`, so an overlay-only row the operator
-        // REMOVED still drops (it lives in fallbackModels, never lastCacheModels)
-        // — matched on fullId so an overlay override of a cached/fallback row
-        // still wins (it's in fallbackModels → the cache copy is skipped).
+        // Cache-warmed (loadCache) but no SDK refresh yet. PRESERVE every
+        // cache entry (date-suffixed ids past the family filter, e.g.
+        // `claude-sonnet-4-20250514`, AND — #7808 — any id the cache shares
+        // with the re-folded fallback) and let the new fallback (base +
+        // overlay overrides + overlay-only rows) contribute only the ids the
+        // cache does NOT already carry. Preserve from the CACHE list, not
+        // `activeModels`, so an overlay-only row the operator REMOVED still
+        // drops (it lives in fallbackModels, never lastCacheModels).
+        //
+        // #7808 — the cache row must win outright for a shared fullId, not
+        // merely by presence: `lastCacheModels` is what the provider itself
+        // last reported (`loadCache` stamps `providerReportedFullIds` from
+        // it), so a model the binary still serves must not have its live
+        // label/window overwritten by an overlay decoration just because a
+        // hot reload landed before the next refresh — the same precedence
+        // `updateModels`/`loadCache` already hold, where a reported row is
+        // never touched by the overlay at all (`docs/guides/model-
+        // overlay.md`: "Where the provider does still report the model, its
+        // own values win"). Before this fix the seed (which — #7777 — can
+        // carry the OPERATOR's decoration for an id it overrides) was spread
+        // first, so it won the collision and that decorated copy could reach
+        // `saveCache()`.
         //
         // #7776 — the seed half of that list is the #3075 union's THIRD copy,
         // so it reads `unionableSeedRows()` like the other two: on a non-Claude
         // registry an overlay reload must not put back the statics that
-        // `loadCache`/`updateModels` just declined to.
+        // `loadCache`/`updateModels` just declined to. Its contribution here is
+        // now scoped the same way that union scopes its OWN additions: only ids
+        // the reported roster (the cache, in this window) does not carry.
+        //
+        // #7806 (missed site) — an id only here because the operator declared
+        // it must not go out `provenance: 'catalogued'` just because this
+        // union pushes the built `fallbackModels` row straight through
+        // instead of routing it via `withModelMetadata`. #7888 round 3 — no
+        // longer stripped here: `applyModels` → `setActiveModels` strips
+        // `provenance` from every row in `next` (cache-preserved rows
+        // included — a no-op for them, since they're provider-reported)
+        // before it is ever assigned to `activeModels`, so this array can be
+        // built without worrying about which half needs it.
         const seed = unionableSeedRows()
-        const byFullId = new Set(seed.map((m) => m.fullId))
-        const preserved = lastCacheModels.filter((m) => !byFullId.has(m.fullId))
-        const next = preserved.length > 0 ? Object.freeze([...seed, ...preserved]) : seed
+        const cacheFullIds = new Set(lastCacheModels.map((m) => m.fullId))
+        const seedOnly = seed.filter((m) => !cacheFullIds.has(m.fullId))
+        const next = seedOnly.length > 0 ? Object.freeze([...lastCacheModels, ...seedOnly]) : lastCacheModels
+        // #7810 round 2 — no per-site restoration call needed here any more:
+        // `applyModels` → `setActiveModels` → `resolveDeclaredRowWindow` now
+        // applies the live-override/learned-window precedence to every row
+        // this branch hands it (cache-preserved rows included — a no-op for
+        // them, since they're provider-reported), the same way `applyModels`
+        // already strips `provenance` unconditionally.
         applyModels(next, defaultModelId)
       } else {
+        // #7888 re-review — the fully-cold reload (no SDK data, no cache
+        // warmed yet: first boot before `loadCache()` ever succeeds, or a
+        // hot-reload racing the first refresh). Same construction-time gap as
+        // the `activeModels` initializer: `fallbackModels` can carry a
+        // declared-only override's stray `provenance` straight from the base
+        // row it overrides, and this branch has no union to route it
+        // through. #7888 round 3 — `applyModels` strips it now; no per-site
+        // map needed here either.
+        // #7810 round 2 — same reasoning for the window: `applyModels` now
+        // restores it too, so `fallbackModels` can go straight through here
+        // exactly like `provenance` does.
         applyModels(fallbackModels, defaultModelId)
       }
       return activeModels
@@ -1143,20 +1384,38 @@ export function createModelsRegistry(hooks = {}) {
           // this branch runs precisely when the provider did NOT report the id,
           // so `providerMeta` is the static table rather than a live answer, and
           // #5932's precedence (SDK live > overlay > static heuristic) has the
-          // overlay ahead of it. A live window still wins — `contextWindowOverrides`
-          // is read first, as before. Fields the operator did not supply are
+          // overlay ahead of it. Fields the operator did not supply are
           // `undefined` and fall straight through, so a bare declaration renders
           // exactly as it did.
+          //
+          // #7810 round 2 — this row's `contextWindow` only needs to reach the
+          // operator-declared/heuristic tier here: `declared?.contextWindow`
+          // falling through to the static/heuristic fallback. A live override
+          // and a ratchet-learned value both outrank that, but neither is
+          // read here any more — `applyModels` → `setActiveModels` →
+          // `resolveDeclaredRowWindow` applies that full precedence (live
+          // override > operator-declared > learned > heuristic) to every
+          // declaration-only row on its way into `activeModels`, once, so
+          // this construction site only has to get its OWN tier right.
           const declared = overlayDeclaredFullIds.get(fb.fullId)
           const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
           const id = declared?.shortId ?? providerMeta?.id ?? deriveIdFn(fb.fullId)
           const label = declared?.label || providerMeta?.label || humanizeModelId(id)
-          const contextWindow = contextWindowOverrides.get(fb.fullId)
-            ?? declared?.contextWindow
+          const contextWindow = declared?.contextWindow
             ?? providerMeta?.contextWindow
             ?? fb.contextWindow
             ?? resolveContextWindowFn(fb.fullId)
-          converted.push(withModelMetadata({ id, label, fullId: fb.fullId, contextWindow }, providerMeta, fb))
+          // #7806 — a declared-only row (the operator's overlay is its ONLY
+          // justification for being here) must not inherit `provenance` from
+          // either source. #7888 round 3 — no longer stripped inline here:
+          // `providerMeta`/`fb` pass through `withModelMetadata` as-is, and
+          // `applyModels` → `setActiveModels` strips `provenance` off the
+          // built row below, once, for every row this function returns.
+          converted.push(withModelMetadata(
+            { id, label, fullId: fb.fullId, contextWindow },
+            providerMeta,
+            fb,
+          ))
           seenFullIds.add(fb.fullId)
         }
       }
@@ -1279,21 +1538,46 @@ export function createModelsRegistry(hooks = {}) {
         return false
       }
       let changed = false
-      activeModels = activeModels.map(m => {
+      // #7888 round 3 — routed through `setActiveModels` (the chokepoint)
+      // rather than assigning `activeModels` directly, so this is not a
+      // seventh place that could reintroduce the whack-a-mole bug if it were
+      // ever rewritten to build rows a different way. A no-op in practice
+      // today: every row already came from `setActiveModels`, so none of
+      // them carry unpersistable `provenance` to begin with, and
+      // `{ ...m, contextWindow }` doesn't add any.
+      const updated = activeModels.map(m => {
         if ((m.id === modelId || m.fullId === modelId) && m.contextWindow !== contextWindow) {
           changed = true
           // Persist the authoritative value so a later updateModels()
           // refresh doesn't revert us to the static heuristic.
           contextWindowOverrides.set(m.fullId, contextWindow)
+          // #7810 — a declaration-only row (nothing here but the operator's
+          // overlay justifies its presence) is withheld from the persisted
+          // cache entirely (`isUnpersistableDeclaredRow`), so without this a
+          // ratchet learned here would be thrown away on every restart.
+          // Record it under its own key so `saveCache`/`loadCache` can carry
+          // the window without the row. Re-validated with the same
+          // finite-positive-integer check the read side enforces — the guard
+          // above admits NaN (#7771: `typeof NaN === 'number'` and
+          // `NaN <= 0` is false, so it never fires), and this new
+          // persistence path must not write a value it would refuse to load
+          // back.
+          if (isUnpersistableDeclaredRow(m.fullId) && Number.isInteger(contextWindow) && contextWindow > 0) {
+            learnedContextWindows.set(m.fullId, contextWindow)
+          }
           return { ...m, contextWindow }
         }
         return m
       })
+      setActiveModels(updated)
       return changed
     },
 
     resetModels() {
       contextWindowOverrides.clear()
+      // #7810: the declaration-only counterpart of contextWindowOverrides —
+      // a reset forgets everything learned, this map included.
+      learnedContextWindows.clear()
       pricingDriftWarned.clear()
       // #5932: drop the retained SDK + cache lists too, so a reset truly returns
       // to the bare fallback view (a later applyOverlay won't re-merge stale
@@ -1304,6 +1588,16 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
+      // #7888 re-review — the line above is exactly what makes an overlay
+      // override of a base row declaration-only again: without a strip
+      // between here and `activeModels`, a row that HAD lost `provenance`
+      // (an earlier construction/applyOverlay/union pass stripped it)
+      // reacquires the base row's stamp straight from `fallbackModels`,
+      // which never had it stripped in the first place. #7888 round 3 —
+      // `applyModels` now strips unconditionally (`setActiveModels`), so
+      // this call can pass `fallbackModels` straight through; the ordering
+      // that makes it correct is that `providerReportedFullIds` was already
+      // cleared above, before `applyModels` runs.
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
@@ -1344,6 +1638,23 @@ export function createModelsRegistry(hooks = {}) {
         const raw = readFileSync(path, 'utf-8')
         const parsed = JSON.parse(raw)
         if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return false
+
+        // #7810 — hydrate the ratchet-learned windows for declaration-only
+        // rows BEFORE the union loop below runs (it reads this map). Absent
+        // on an old-format payload written before this key existed —
+        // `parseLearnedContextWindows` returns an empty map for that,
+        // exactly like a missing/corrupt value in any one entry. Replaces
+        // (not merges) the in-memory map, the same way `providerReportedFullIds`
+        // is replaced below — the disk file is the source of truth for what a
+        // PREVIOUS boot learned. Pruned immediately against the CURRENT
+        // overlay so a file saved before a declaration was removed can't
+        // reintroduce a stale entry into memory (`saveCache` prunes on write,
+        // but a file from an older build, or one edited by hand, may not
+        // have been).
+        learnedContextWindows = parseLearnedContextWindows(parsed.learnedContextWindows)
+        const learnedCountBeforePrune = learnedContextWindows.size
+        prunedLearnedContextWindows()
+        const learnedWasPruned = learnedContextWindows.size < learnedCountBeforePrune
 
         // Filter out cached entries whose family is no longer in
         // FALLBACK_MODELS, OR whose minor version was superseded (#3162).
@@ -1504,9 +1815,23 @@ export function createModelsRegistry(hooks = {}) {
             const providerMeta = getModelMetadataFn ? getModelMetadataFn(fb.fullId) : null
             const id = declared?.shortId ?? providerMeta?.id ?? deriveIdFn(fb.fullId)
             const label = declared?.label || providerMeta?.label || humanizeModelId(id)
+            // #7810 round 2 — same operator-declared/heuristic tier as the
+            // `updateModels` copy of this union; the learned-window and live-
+            // override tiers above it are no longer read here — see the
+            // comment on `resolveDeclaredRowWindow`, which `applyModels` runs
+            // over this array's rows (and the ones this function reads off
+            // disk unfiltered) before any of them reach `activeModels`.
             const contextWindow = declared?.contextWindow
               ?? providerMeta?.contextWindow ?? fb.contextWindow ?? resolveContextWindowFn(fb.fullId)
-            models.push(withModelMetadata({ id, fullId: fb.fullId, label, contextWindow }, providerMeta, fb))
+            // #7806 — same declared-only provenance rule as the `updateModels`
+            // copy of this union. #7888 round 3 — same removal too: the
+            // strip happens once, in `applyModels` → `setActiveModels`, over
+            // whatever this function returns.
+            models.push(withModelMetadata(
+              { id, fullId: fb.fullId, label, contextWindow },
+              providerMeta,
+              fb,
+            ))
             seenFullIds.add(fb.fullId)
           }
         }
@@ -1533,7 +1858,14 @@ export function createModelsRegistry(hooks = {}) {
         // Heal the disk file when we pruned anything. Without this the
         // CLI-only/offline path would re-filter the same stale entries on
         // every startup since updateModels() never runs to overwrite them.
-        if (droppedStaleCount > 0 || defaultDiscarded) {
+        // #7810 — `learnedWasPruned` joins the same heal trigger: the
+        // baseline snapshot just taken above already reflects the PRUNED
+        // in-memory map (a declaration removed since this file was written),
+        // so without forcing a write here `saveCacheImpl`'s own
+        // snapshot-matches-baseline skip would never let the stale entry
+        // actually leave the file — every future load would re-prune the
+        // same dead entry from memory without it ever going away on disk.
+        if (droppedStaleCount > 0 || defaultDiscarded || learnedWasPruned) {
           // Force a write by clearing the snapshot baseline (saveCacheImpl
           // skips when snapshot matches lastSavedSnapshot).
           lastSavedSnapshot = null

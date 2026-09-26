@@ -67,6 +67,18 @@
  * Opt-out for the rare test that legitimately needs to write to the real
  * home (none expected): set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'`
  * scoped to the test, then restore.
+ *
+ * ── Reach: this guard is IN-PROCESS only (#7269) ──────────────────────────
+ *
+ * Everything above patches THIS process's `node:fs`. A SPAWNED child process
+ * (a real provider binary, or a test stand-in like `process.execPath` resolved
+ * in place of `claude`) is outside that monkey-patch and, without the sandbox
+ * below, inherits the developer's REAL `HOME` — free to write into their
+ * actual `~/.claude`/`~/.gemini`/`~/.codex` the instant it starts. See
+ * `scripts/lib/test-spawn-home-sandbox.mjs`, installed further down, which
+ * closes that gap at the `child_process` launcher boundary instead — WITHOUT
+ * reassigning `process.env.HOME` here (that would break the very tests this
+ * paragraph describes; see that module's header for why).
  */
 
 import { createRequire } from 'node:module'
@@ -74,6 +86,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
+import { installSpawnHomeSandbox } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
 import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
@@ -188,9 +201,66 @@ export const {
 // Tests that explicitly need to override it (e.g. supervisor.test.js) can
 // still set it in their own beforeEach and restore in afterEach — Node's
 // env reads are dynamic.
+//
+// #7271: register the removal handler INSIDE the branch that creates the
+// dir, not as a separately-guarded top-level handler — that way there is no
+// "did this process own the dir" check left to get out of sync with the
+// branch that assigns CHROXY_CONFIG_DIR, and a developer-supplied
+// CHROXY_CONFIG_DIR structurally can never reach the rmSync call below (the
+// `if` never runs, so `process.on('exit', ...)` never registers).
 if (!process.env.CHROXY_CONFIG_DIR) {
-  process.env.CHROXY_CONFIG_DIR = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
+  const ownedConfigTmpDir = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-cfg-'))
+  process.env.CHROXY_CONFIG_DIR = ownedConfigTmpDir
+  process.on('exit', () => {
+    try {
+      fs.rmSync(ownedConfigTmpDir, { recursive: true, force: true })
+    } catch {
+      // Best-effort — a cleanup failure must never fail (or even mark) the
+      // test run. `node --test` runs one process per file, so a leaked dir
+      // here just means the OS temp-dir reaper gets one more entry, same as
+      // before this handler existed.
+    }
+  })
 }
+
+// --- Redirect a SPAWNED child's HOME to a per-process tmp dir (#7269) --------
+// Sibling gap to the fs sandbox above: that guard is in-process only, and a
+// real provider binary (or a test stand-in for one — `process.execPath`
+// resolved in place of `claude`) spawned via `child_process` inherits the
+// developer's REAL `HOME` by default, free to write into the developer's
+// actual `~/.claude`/`~/.gemini`/`~/.codex` the moment it starts. See
+// `scripts/lib/test-spawn-home-sandbox.mjs` for the full design note —
+// notably why this redirects the env handed to each `child_process` launcher
+// call rather than reassigning `process.env.HOME` here (the latter is exactly
+// what this file's fs-sandbox comment above says NOT to do, and #7269's own
+// issue body says the same).
+//
+// Same ownership shape as the CHROXY_CONFIG_DIR block above (#7271): the
+// removal handler is registered INSIDE the branch that creates the dir, so
+// there is no separately-tracked "do we own this" flag to fall out of sync.
+// Unlike CHROXY_CONFIG_DIR there is no developer-supplied override to respect
+// here — every test process gets its own isolated home — so the dir is always
+// created.
+const ownedSpawnHomeTmpDir = fs.mkdtempSync(join(tmpdir(), 'chroxy-test-home-'))
+process.on('exit', () => {
+  try {
+    fs.rmSync(ownedSpawnHomeTmpDir, { recursive: true, force: true })
+  } catch {
+    // Best-effort, same reasoning as the CHROXY_CONFIG_DIR cleanup above.
+  }
+})
+
+export const SPAWN_HOME_REAL = REAL_HOME
+export const SPAWN_HOME_ISOLATED = ownedSpawnHomeTmpDir
+
+export const {
+  installed: SPAWN_HOME_INSTALLED,
+  skipped: SPAWN_HOME_SKIPPED,
+} = installSpawnHomeSandbox({
+  realHome: REAL_HOME,
+  isolatedHome: ownedSpawnHomeTmpDir,
+  allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
+})
 
 // --- Default the credential-store to "no keychain" ----------------------------
 // #5154: the credential store encrypts credentials.json with an OS-keychain
@@ -222,6 +292,17 @@ process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 // child_process — never touches the real keychain). See
 // `server_suite_real_keychain_prompts.md`.
 process.env.CHROXY_DISABLE_KEYCHAIN = '1'
+
+// --- Disable the background npm version check ---------------------------------
+// #7265: `WsServer` fires a non-blocking `checkLatestVersion()` fetch to
+// registry.npmjs.org on construction, gated (per its own comment) on
+// `NODE_ENV !== 'test'` — a "skipped in test/CI" that never actually skipped,
+// because nothing in this repo's harness or CI sets NODE_ENV=test. Every one
+// of the ~28 test files that construct a WsServer made a real outbound HTTPS
+// request as a side effect. Sibling of the two keychain flags above: an
+// explicit, harness-set switch that changes exactly one behaviour, matching
+// `session-manager.js`'s fix for the identical pattern (#6952).
+process.env.CHROXY_DISABLE_UPDATE_CHECK = '1'
 
 // --- Scrub Discord webhook env -------------------------------------------------
 // #5413: PushManager always registers a DiscordWebhookSink that activates the

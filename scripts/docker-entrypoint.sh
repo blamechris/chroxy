@@ -58,7 +58,7 @@ prepare_config() {
       exit 1
     fi
     for prefix in $blocked_prefixes; do
-      if [ "$resolved_path" = "$prefix" ] || echo "$resolved_path" | grep -q "^${prefix}/"; then
+      if [ "$resolved_path" = "$prefix" ] || grep -q "^${prefix}/" <<<"$resolved_path"; then
         echo "ERROR: WORKSPACE_PATH resolves to a system directory: ${resolved_path}"
         echo "  Paths under ${prefix}/ are not allowed as workspace mounts."
         echo "  Set WORKSPACE_PATH to your project directory instead."

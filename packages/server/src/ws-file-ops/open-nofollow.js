@@ -77,10 +77,37 @@ import { constants as fsConstants } from 'fs'
  * resolution + containment check in `common.js` (see its
  * `realpathOfDeepestAncestor` note), which is why the callers here run that
  * first and this second.
+ *
+ * ── #7938 — O_NONBLOCK, so a planted FIFO can't hang the open() itself ─────
+ *
+ * `O_NOFOLLOW` refuses a symlink; it says nothing about a FIFO, character
+ * device, or other non-regular file an attacker plants at the same path.
+ * POSIX `open(2)` for a FIFO opened `O_RDONLY` with no `O_NONBLOCK` blocks the
+ * calling thread until a writer connects — forever, if none ever does. Three
+ * independent call sites in this codebase (claude-hooks `resolveIngestSecret`,
+ * `trusted-file-read.js`'s credential-store read, claude-tui's
+ * `_hookReadFile`) shipped exactly this hang, each caught only by adversarial
+ * review after the fact. `O_NONBLOCK` is now ORed into every open this helper
+ * performs, on both branches, so the fix lives in the ONE place instead of
+ * being re-discovered per caller. It is a POSIX no-op for a regular file (the
+ * open still succeeds and reads normally) but changes semantics for a
+ * FIFO/device: the open returns immediately regardless of a writer, and a
+ * subsequent blocking `read()` on an empty FIFO would then fail with `EAGAIN`
+ * rather than hang. Every caller that reads the returned handle's CONTENT
+ * (not just its identity) must therefore check `isFile()` via `fstat` on the
+ * handle BEFORE reading, so a FIFO/device is refused with a clear error
+ * instead of surfacing as a confusing `EAGAIN` from the read call — see
+ * `reader.js`/`memory.js`'s post-open checks. `O_NONBLOCK` is undefined on
+ * win32 (same `#ifdef`-gated story as `O_NOFOLLOW`), so `O_NONBLOCK` below is
+ * `0` there and the OR is a no-op, matching `HAS_O_NOFOLLOW`'s idiom.
  */
 
 /** True when this platform's Node exports a usable `O_NOFOLLOW`. */
 const HAS_O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' && fsConstants.O_NOFOLLOW !== 0
+
+/** True when this platform's Node exports a usable `O_NONBLOCK` (#7938). */
+const HAS_O_NONBLOCK = typeof fsConstants.O_NONBLOCK === 'number' && fsConstants.O_NONBLOCK !== 0
+const O_NONBLOCK = HAS_O_NONBLOCK ? fsConstants.O_NONBLOCK : 0
 
 /**
  * The real filesystem seam. Tests inject a replacement to force the win32
@@ -128,8 +155,12 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
   const { hasONoFollow, oNofollow, platform, open, lstat, fstat } = deps
 
   if (hasONoFollow) {
-    // POSIX: unchanged behaviour — one atomic, kernel-enforced decision.
-    return open(path, flags | oNofollow, mode)
+    // POSIX: one atomic, kernel-enforced decision for the symlink refusal,
+    // PLUS O_NONBLOCK (#7938) so a FIFO/device planted at the path can't hang
+    // this open() forever waiting for a counterpart end. No-op for a regular
+    // file; see the module header for what callers must do differently now
+    // that a FIFO's open returns instead of blocking.
+    return open(path, flags | oNofollow | O_NONBLOCK, mode)
   }
 
   // No O_NOFOLLOW. win32 is the ONE platform where that is expected and where
@@ -156,7 +187,12 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
     if (err.code !== 'ENOENT') throw err
   }
 
-  const fh = await open(path, flags, mode)
+  // #7938 — O_NONBLOCK here too, belt-and-suspenders: win32 has no `mkfifo`-
+  // planted-FIFO attack surface (O_NONBLOCK is undefined there, so this ORs
+  // in 0), but nothing about the win32 emulation branch's own reasoning
+  // depends on blocking-open semantics, so there is no reason to special-case
+  // it out.
+  const fh = await open(path, flags | O_NONBLOCK, mode)
 
   // Step 3 — prove the fd we hold is the file the path names. `{ bigint: true }`
   // because a Windows file index does not fit in a Number.

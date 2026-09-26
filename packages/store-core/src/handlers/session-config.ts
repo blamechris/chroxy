@@ -190,3 +190,25 @@ export function handleThinkingLevelChanged(msg: Record<string, unknown>): { leve
   const raw = parseStringField(msg, 'level')
   return { level: isWellFormedThinkingLevel(raw) ? raw : LEGACY_DEFAULT_THINKING_LEVEL }
 }
+
+/**
+ * #7807 — `thinking_level_changed` as a session patch for the shared dispatch
+ * table, mirroring `handleModelChangedPatch`. Targets the resolved session
+ * (msg.sessionId, else the active session) and sets its `thinkingLevel`. This
+ * is what lets the mobile app pick up the server's three `thinking_level_changed`
+ * senders (ws-history.js reconnect replay, settings-handlers.js after an
+ * accepted set, event-normalizer.js's `ready` burst) for free via `runDispatch`
+ * — it previously only imported the plain `handleThinkingLevelChanged` parser
+ * and never called it. Replaces the dashboard's former dashboard-local
+ * `handleThinkingLevelChanged` HANDLERS-map entry, which did the same
+ * resolve-then-updateSession by hand.
+ */
+export function handleThinkingLevelChangedPatch(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: { thinkingLevel: handleThinkingLevelChanged(msg).level },
+  }
+}

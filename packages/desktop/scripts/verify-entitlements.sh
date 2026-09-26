@@ -103,7 +103,7 @@ check_keys() {
         # malformed `<key>comXappleXsecurityXdeviceXaudio-input</key>`. The
         # surrounding `<key>...</key>` anchors also guard against substring
         # collisions (e.g. `audio-input` vs `audio-input-foo`).
-        if ! printf '%s\n' "$blob" | grep -qF "<key>${key}</key>"; then
+        if ! grep -qF "<key>${key}</key>" <<<"$blob"; then
             if [ -z "$MISSING_KEYS" ]; then
                 MISSING_KEYS="$key"
             else

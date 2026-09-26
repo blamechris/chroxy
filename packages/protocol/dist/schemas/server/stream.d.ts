@@ -304,6 +304,70 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
     remainingMs: z.ZodOptional<z.ZodNumber>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+/**
+ * #7939: which of the three MCP config scopes a spawn-trust request's server
+ * was resolved from — mirrors `MCP_SERVER_SOURCE` in
+ * packages/server/src/byok-mcp-config.js (the single source of truth for the
+ * value set; this schema is the wire-side bound on it). A closed `z.enum`,
+ * not `z.string()`: the whole point of carrying this field is to let a
+ * client tell "your own machine-local config" apart from "a repository you
+ * just cloned" ('project-mcp-json' — checked into the repo, so
+ * attacker-influenceable), and a free-form string would let a future server
+ * bug (or a compromised/legacy server) smuggle arbitrary display text into a
+ * security-relevant prompt. See permission-manager.js `requestMcpTrust`,
+ * which validates against the matching `MCP_SERVER_SOURCE_VALUES` roster
+ * server-side and drops (never passes through) an unrecognized value before
+ * it ever reaches this schema.
+ */
+export declare const McpServerSourceSchema: z.ZodEnum<{
+    local: "local";
+    user: "user";
+    "project-mcp-json": "project-mcp-json";
+}>;
+/**
+ * #7939: the structured `input.mcpServer` shape `requestMcpTrust` builds for
+ * a `tool: 'mcp_spawn'` permission_request (see permission-manager.js). NOT
+ * enforced by `ServerPermissionRequestSchema.input` above — that field stays
+ * `z.any()` because `permission_request` carries a different input shape per
+ * `tool` and validating the union at the envelope level would mean updating
+ * this schema for every existing tool's input shape, not just new ones. This
+ * schema instead documents + validates the mcp_spawn sub-shape on its own, so
+ * a client (or a test) that specifically cares about MCP-trust fields has
+ * something narrower than `z.any()` to parse against.
+ *
+ * Two variants (stdio vs remote), discriminated the same way the server
+ * builds them: a remote server carries `url`/`headerKeys` and never
+ * `command`/`args`/`envKeys`, and vice versa. `source` is OPTIONAL on both —
+ * an older server (pre-#7939) omits it entirely, and a client must degrade to
+ * "no source shown" rather than treat a missing field as a parse failure, so
+ * an old client/new server (or new client/old server) pairing never breaks.
+ */
+export declare const McpTrustServerInputSchema: z.ZodUnion<readonly [z.ZodObject<{
+    name: z.ZodString;
+    url: z.ZodString;
+    headerKeys: z.ZodArray<z.ZodString>;
+    resolvedAddress: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+        resolved: z.ZodBoolean;
+        addresses: z.ZodArray<z.ZodString>;
+        classification: z.ZodString;
+        display: z.ZodString;
+    }, z.core.$strip>>>;
+    source: z.ZodOptional<z.ZodEnum<{
+        local: "local";
+        user: "user";
+        "project-mcp-json": "project-mcp-json";
+    }>>;
+}, z.core.$strip>, z.ZodObject<{
+    name: z.ZodString;
+    command: z.ZodString;
+    args: z.ZodArray<z.ZodString>;
+    envKeys: z.ZodArray<z.ZodString>;
+    source: z.ZodOptional<z.ZodEnum<{
+        local: "local";
+        user: "user";
+        "project-mcp-json": "project-mcp-json";
+    }>>;
+}, z.core.$strip>]>;
 export declare const ServerPermissionExpiredSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_expired">;
     requestId: z.ZodString;

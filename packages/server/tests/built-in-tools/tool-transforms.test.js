@@ -137,13 +137,30 @@ describe('buildConfinedGlobBody (#7354)', () => {
 
   it('resolves every match and compares it against the resolved root', () => {
     assert.ok(body.includes('__cx_resolve "$__cx_d"'), 'must resolve the match directory')
-    assert.ok(body.includes('__cx_resolve "$f"'), 'must resolve a symlinked entry')
+    // #7897 — the symlinked-entry resolution passes the lenient flag so a
+    // dangling target whose own parent is also missing still resolves
+    // lexically instead of failing outright; the directory-prefetch call
+    // above stays strict (no flag) since it resolves a real, existing
+    // directory entry, never a followed symlink target.
+    assert.ok(body.includes('__cx_resolve "$f" 1'), 'must resolve a symlinked entry leniently')
     assert.ok(body.includes('"$__cx_target"|"$__cx_target"/*'), 'must compare against the root')
   })
 
   it('withholds an unresolvable match rather than emitting it (fail closed)', () => {
-    assert.ok(body.includes('if ! __cx_r=$(__cx_resolve "$f"); then'))
+    assert.ok(body.includes('if ! __cx_r=$(__cx_resolve "$f" 1); then'))
     assert.ok(body.includes('__cx_lastv=n'))
+  })
+
+  it('#7896 — withholds a non-symlink match that does not exist on disk', () => {
+    // A purely literal `pattern` (no wildcard) reaches the `for` loop
+    // verbatim even when nothing matches it — nullglob only suppresses a
+    // pattern bash actually attempted to expand. The existence check must sit
+    // in an `elif` after the `-L` branch: a symlink is not `-e`-testable when
+    // dangling and is already existence-checked (via resolution) above.
+    assert.ok(body.includes('elif [ ! -e "$f" ]; then'), 'no literal-match existence check')
+    const elifLine = body.split('\n').findIndex((l) => l.includes('elif [ ! -e "$f" ]'))
+    const lLine = body.split('\n').findIndex((l) => l.includes('if [ -L "$f" ]; then'))
+    assert.ok(elifLine > lLine, 'the existence check must be an elif of the -L branch, not a separate if')
   })
 
   it('emits no marker for a withheld match (no existence oracle, #7341)', () => {
@@ -152,16 +169,23 @@ describe('buildConfinedGlobBody (#7354)', () => {
     // ever sees the body — see splitWithheldTrailer.
     const printed = body.split('\n').filter((l) => l.includes('printf')).map((l) => l.trim())
     assert.deepEqual(printed, [
-      `printf '%s\\n' "$f"`,
+      // #7357 — NUL-delimited, not '\n': a filename may legally contain a
+      // newline, and a '\n'-joined stream can't tell "one match with an
+      // embedded newline" apart from "two matches". The trailer line stays
+      // '\n'-terminated — it is fixed host-authored text, never a filename.
+      `printf '%s\\0' "$f"`,
       `printf '%s %s\\n' '${CONTAINER_CONFINE_WITHHELD}' "$__cx_withheld"`,
     ])
   })
 
-  it('counts every withheld match, on all three withhold branches', () => {
-    // A count that is right for two of three branches understates the trace by
-    // exactly the cases an operator most wants to see.
+  it('counts every withheld match, on all four withhold branches', () => {
+    // A count that is right for some but not all branches understates the
+    // trace by exactly the cases an operator most wants to see. #7896 added a
+    // 4th branch (a non-existent literal match) to the pre-existing 3
+    // (directory containment, symlink-resolution failure, symlink-target
+    // containment).
     const increments = body.split('\n').filter((l) => l.includes('__cx_withheld=$((__cx_withheld+1))'))
-    assert.equal(increments.length, 3)
+    assert.equal(increments.length, 4)
     assert.ok(body.includes('__cx_withheld=0'), 'the counter must start at a known value')
   })
 
@@ -218,8 +242,23 @@ describe('buildGrepArgs', () => {
   it('honors -i, -n=false, and a glob filter', () => {
     assert.deepEqual(
       buildGrepArgs({ '-i': true, '-n': false, glob: '*.go' }),
-      { ci: '-i', ln: '', globArg: ` --glob '*.go'` },
+      { ci: '-i', ln: '', globArg: ` --glob='*.go'` },
     )
+  })
+
+  // #7928 — `--glob` is a NAMED flag, so its value must be fused into the
+  // same token (`--glob=<value>`) rather than passed as a separate argv
+  // element. A space-separated `--glob <value>` form would only be as safe
+  // as rg's declared arity for that flag, which is a per-CLI fact this
+  // builder must not assume (see the function's own doc + #7295's -e/--
+  // precedent for pattern/root). This is the command-shape half of the
+  // grep-argv-injection.test.js #7928 proof.
+  it('joins the glob value to `--glob=` rather than passing it as a separate argv element', () => {
+    const { globArg } = buildGrepArgs({ glob: '--pre=/tmp/evil.sh' })
+    assert.equal(globArg, ` --glob='--pre=/tmp/evil.sh'`)
+    // No whitespace between `--glob=` and the opening quote: a space here
+    // would let the shell hand rg two argv elements instead of one.
+    assert.doesNotMatch(globArg, /--glob\s+'/)
   })
 })
 
@@ -238,7 +277,7 @@ describe('buildGrepCommand', () => {
   })
 
   it('threads the glob arg into the rg command', () => {
-    assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
+    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'` }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
   })
 
   it('rootExpr substitutes a shell expression for the quoted root (#7354)', () => {

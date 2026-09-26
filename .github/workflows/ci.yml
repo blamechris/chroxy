@@ -6,11 +6,72 @@ on:
   pull_request:
 
 # Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
-# commits, rebases) doesn't run the full matrix N times. Keying on the PR's
-# source branch groups a PR's runs together; on push to main `head_ref` is empty
-# so we fall back to the unique `run_id` — every main run gets its own group and
-# is therefore never cancelled OR queued behind another main run (each validates
-# a distinct merged commit and must complete).
+# commits, rebases) doesn't run the full matrix N times: `cancel-in-progress`
+# is scoped to `pull_request` events only, and the group for every other event
+# keys on `github.ref` instead of `github.run_id` (#7905).
+#
+# THE BUG THIS REPLACED: `group: ci-${{ github.head_ref || github.run_id }}`
+# with `cancel-in-progress: true` unconditionally. `github.head_ref` is
+# populated only for `pull_request`/`pull_request_target` (GitHub's contexts
+# reference), so on every push to `main` it fell back to `github.run_id` —
+# which GitHub documents as "a unique number for each workflow run within a
+# repository" (same reference), unique BY DEFINITION. Every push to `main`
+# therefore got its own group, so no queued `main` run could ever supersede an
+# older one. On 2026-09-24 an autonomous wave merged 7 PRs in ~3 hours: 7
+# independent `main` CI runs queued up behind the three long jobs pinned to the
+# single `chroxy-linux-winbox-01` runner (LONG-JOB PINNING, below); one PR's
+# jobs sat QUEUED 4+ hours with every other runner idle, and 6 of the 7 `main`
+# runs had to be cancelled by hand.
+#
+# THE FIX, per GitHub's documented concurrency semantics (Using jobs > Using
+# concurrency): with `cancel-in-progress` false (its default, and what every
+# NON-`pull_request` event — i.e. a `push` to `main` — now resolves to; a
+# `pull_request` event still resolves it to `true`, unchanged from before),
+# "any existing pending job or workflow in the same concurrency group will be
+# canceled and the new queued job or workflow will take its place," and by
+# default "at most one job or
+# workflow run can be pending" per group — a run already IN PROGRESS is left to
+# finish. `github.ref` for a `push` is "the branch or tag ref that was pushed"
+# (`refs/heads/main` here, since `on.push.branches` names only `main`) — the
+# SAME value across every push to that branch, unlike `run_id`. So a burst of
+# `main` pushes now settles to at most one running plus one pending run (the
+# latest), and every commit still gets covered by either the run validating it
+# directly or a later run on top of it — see "WHAT A SKIPPED INTERMEDIATE
+# COMMIT LOSES" below. `pull_request` behaviour is unchanged: `head_ref` (the
+# PR's source branch) is always populated there, so the `|| github.ref`
+# fallback never fires for PR events, and `cancel-in-progress` still cancels a
+# PR's own in-progress run exactly as before.
+#
+# WHAT A SKIPPED INTERMEDIATE COMMIT LOSES, stated so it reads as an accepted
+# cost rather than an unexamined one. A commit whose `main`-push run gets
+# cancelled as PENDING (superseded by a later push in the same burst) gets no
+# dedicated CI run of its own: no per-commit coverage artifact, no chance to
+# bisect a later red build to that exact SHA without a manual re-run. Nothing
+# in this repo currently depends on every `main` commit having run: there is no
+# `workflow_run` consumer anywhere in `.github/workflows/` (grepped at fix
+# time), no coverage badge, and no deploy gated on push-to-main CI (`release.yml`
+# triggers only on a version TAG push or manual dispatch, both untouched by this
+# group). The one thing that DOES need `main`-push CI to run periodically — the
+# `dashboard-smoke` job's hosted npm-cache producer role, see its own comment —
+# still gets it: the run already IN PROGRESS when a burst starts, and the
+# newest PENDING one once it finishes, both execute in full. Only jobs strictly
+# BETWEEN those two SHAs in a fast burst are skipped, and this repo squash-merges
+# (CLAUDE.md), so a "skipped" commit was already `main`'s HEAD for at most the
+# minutes until the next merge landed — the intermediate SHA was never itself
+# the thing anyone needed to bisect from except immediately after that merge.
+#
+# CI.YML'S TRIGGER SET IS EXACTLY {push, pull_request} (checked above at
+# `on:`), and that is load-bearing for the group expression's safety, not
+# incidental: `head_ref` is empty for every event type EXCEPT `pull_request`/
+# `pull_request_target`, so a third trigger — `workflow_dispatch`, `merge_group`,
+# `schedule` — would also fall through to `|| github.ref` and, on `main`, land
+# in the SAME `ci-refs/heads/main` group as an ordinary push. That is not
+# necessarily wrong (a manual re-run of `main` coalescing with a concurrent push
+# is arguably the right behaviour), but this fix never evaluated it — adding a
+# third trigger type needs this comment revisited first.
+# `packages/server/tests/ci-main-push-concurrency.test.js` pins the trigger set
+# and fails loudly the day a third one is added, rather than silently sharing a
+# group.
 #
 # LONG-JOB PINNING (#7471): Server Tests, Dashboard Tests and Scripts Tests
 # run on `runner-target.outputs.longrunner` instead of `outputs.runner`. Jobs
@@ -50,8 +111,8 @@ on:
 # longrunner output + its pin test
 # (packages/server/tests/ci-long-job-runner-pinning.test.js).
 concurrency:
-  group: ci-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -775,6 +836,70 @@ jobs:
             exit 1
           fi
 
+      - name: Check every argv sink is gated, catalogued, or provably safe
+        run: |
+          # Issue #7868 — `spawn`/`execFile`/`execFileSync`/`spawnSync` argv
+          # (and every `_buildArgs`/`build*Args`-shaped function) must have
+          # each non-constant element proven safe (assertSafeArgvValue /
+          # isSafeArgvValue / isGitShaRef applied to it, a `--` terminator
+          # before it, or a fused `--flag=`/`key=` token) or listed in the
+          # AUDITED_SINKS catalogue in utils/argv-safety.js with a reason.
+          # Checked in BOTH directions: a catalogue entry that matches no
+          # real finding is stale and fails the build too.
+          #
+          # Exit 2 means the lint could not do its job (bad flags, nothing
+          # scanned, the catalogue module failed to load, a source file
+          # failed to parse) and is reported separately from exit 1 — "the
+          # guard is broken" must never be shown as "the guard passed", nor
+          # as "the code is dirty".
+          set +e
+          scripts/lint-argv-sinks.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK — every argv sink is gated, catalogued, or provably safe"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-argv-sinks could not run (bad flags, it scanned fewer files than --min-files, the AUDITED_SINKS catalogue failed to load, or a source file failed to parse). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-argv-sinks.mjs."
+            exit 1
+          else
+            echo "::error::An argv sink is neither provably safe nor catalogued, or a catalogue entry no longer matches any real finding. See packages/server/scripts/lint-argv-sinks.sh and the AUDITED_SINKS catalogue in packages/server/src/utils/argv-safety.js."
+            exit 1
+          fi
+
+      - name: Check every O_NOFOLLOW open() also has O_NONBLOCK
+        run: |
+          # Issue #7938 — a planted FIFO/device with no O_NONBLOCK blocks a
+          # POSIX open(2) forever, even one hardened with O_NOFOLLOW (which
+          # refuses only a symlink, not a FIFO). Three independently-hardened
+          # readers in one wave shipped exactly this hang (claude-hooks
+          # resolveIngestSecret #7923, trusted-file-read.js #7924, claude-tui
+          # _hookReadFile #7926), each caught only by adversarial review.
+          # Scans packages/server/src AND packages/claude-hooks/src — every
+          # package known to use O_NOFOLLOW today — and fails if any OTHER
+          # tracked file under packages/ or scripts/ (tests excluded) starts
+          # referencing it, so a new user cannot sit outside the sweep.
+          #
+          # Exit 2 means the lint could not do its job (bad flags, it scanned
+          # fewer files than --min-files, it found zero O_NOFOLLOW opens at
+          # all — this repo has several, so zero means the detector broke, not
+          # that the code got safer — a file outside the scanned trees uses
+          # O_NOFOLLOW, or a source file failed to parse) and is reported
+          # separately from exit 1 — "the guard is broken" must never be shown
+          # as "the guard passed", nor as "the code is dirty".
+          set +e
+          scripts/lint-nofollow-nonblock.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "OK — every O_NOFOLLOW open() also has O_NONBLOCK or an allowlist reason"
+          elif [ "$rc" -eq 2 ]; then
+            echo "::error::lint-nofollow-nonblock could not run (bad flags, it scanned fewer files than --min-files, it found zero O_NOFOLLOW opens, a file outside the scanned trees uses O_NOFOLLOW, or a source file failed to parse). The GUARD is broken, not necessarily the code. See packages/server/scripts/lint-nofollow-nonblock.mjs."
+            exit 1
+          else
+            echo "::error::An O_NOFOLLOW open() is missing O_NONBLOCK and is not allowlisted — a planted FIFO/device would hang it forever. See packages/server/scripts/lint-nofollow-nonblock.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
     needs: runner-target
@@ -881,6 +1006,18 @@ jobs:
         # concluded a handler did not exist. Needs the full git index, so it
         # must run after a normal (non-sparse) checkout.
         run: bash scripts/lint-no-nul-bytes.sh
+
+      - name: No producer piped into an early-exiting grep -q under pipefail
+        # #7907 — under `set -o pipefail`, `echo/printf/cat "$x" | grep -q PAT`
+        # can report "not found" when PAT genuinely is present: grep -q exits on
+        # its first match without draining stdin, and pipefail promotes the
+        # still-writing producer's SIGPIPE into the pipeline's exit status. Hit
+        # live in CI on PR #7892 (scripts/__tests__/merge-updater-feeds.test.sh,
+        # fixed by #7908 alongside bump-version.test.sh). #7907 fixed the
+        # PRODUCTION sites this lint now watches — including the pre-merge
+        # review gate, where a false "not found" silently SKIPS the gate. Needs
+        # the full git index, so it must run after a normal checkout.
+        run: bash scripts/lint-no-pipe-into-grep-q.sh
 
   store-core-tests:
     name: Store Core Tests
@@ -1014,6 +1151,19 @@ jobs:
     # Self-hosted (#6046): the jest-expo "failed to run" suites were transform
     # OOM under the 7.7GB VM, not arch — with the runner at 24GB all 147 suites
     # (1973 tests) pass on ARM64. Fork PRs still route to ubuntu-24.04.
+    #
+    # #7947: the `chroxy-linux-*` containers carry no per-container memory
+    # limit (the shared Docker VM is the only bound — see
+    # ~/actions-runner-linux/docker-compose.yml), and jest's default worker
+    # count is nproc-1 = 7 on this 8-CPU host. Measured in a matching
+    # node:22-bookworm container: 7 workers + --coverage peaks around 9GB
+    # RSS; two App Tests jobs landing on the pool's two replicas at once (as
+    # happened on #7932/#7933, minutes apart) sums to ~18GB against a 16GB
+    # host and the kernel OOM-killer SIGKILLs a jest worker mid-suite — every
+    # test had already passed, only the worker died. --maxWorkers=2 below
+    # measured ~4-6.5GB peak per run (confirmed under an 8g cgroup cap, the
+    # worst-case per-container share with two replicas busy), so two
+    # concurrent runs stay under the 16GB host with headroom to spare.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
@@ -1041,7 +1191,10 @@ jobs:
         run: npm run bundle-xterm
 
       - name: Run tests with coverage
-        run: npm test
+        # --maxWorkers=2 (#7947): caps concurrent jest workers so two App
+        # Tests jobs on the pool's two replicas can't jointly OOM the shared
+        # 16GB Docker VM. Local `npm test` is untouched — the cap is CI-only.
+        run: npm test -- --maxWorkers=2
 
       - name: Upload app coverage
         if: always()
@@ -1411,6 +1564,15 @@ jobs:
         # because the token survived via the exported API_TOKEN.
         run: bash scripts/__tests__/docker-entrypoint.test.sh
 
+      - name: Run require-review-before-merge.sh tests
+        # #7907 — the pre-merge review gate's "does this command mention pr
+        # merge" check used to be `echo "$COMMAND" | grep -q 'pr merge'` under
+        # this script's own `set -euo pipefail`; a pipefail+SIGPIPE race on a
+        # large COMMAND (the batch-merge-script/heredoc shape this hook is
+        # explicitly meant to catch) could silently SKIP the whole gate. `gh`
+        # is stubbed deterministically — no network, no real gh auth needed.
+        run: bash scripts/__tests__/require-review-before-merge.test.sh
+
       - name: Run merge-updater-feeds.mjs tests
         # #7504 — this suite existed, was executable, and ran in NO workflow.
         # Its subject is release-critical: release.yml's `github-release` job
@@ -1451,6 +1613,16 @@ jobs:
 
       - name: Run lint-no-nul-bytes golden test
         run: bash scripts/__tests__/lint-no-nul-bytes.test.sh
+
+      - name: Run lint-no-pipe-into-grep-q golden test
+        # #7907 — positive/negative controls for the guard above: every flag
+        # variation (-Eq, -qF, --quiet, no-space pipe, -E -q) must be caught,
+        # file-backed and here-string forms must NOT be flagged, a script
+        # without pipefail is out of scope, the allowlist comment (both forms)
+        # suppresses a reviewed case, and the lint's own source does not
+        # self-match. Also proves an empty scan dir fails loud (exit 2) rather
+        # than reporting a silent, indistinguishable "clean".
+        run: bash scripts/__tests__/lint-no-pipe-into-grep-q.test.sh
 
       - name: Run lint-thinking-level-roster golden test
         # #7730 — positive controls for the guard above: a restored Set, a TS
@@ -1565,14 +1737,39 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
-    timeout-minutes: 3
+    # #7873 — this job's only step used to be a straight fetch-depth:0 checkout
+    # under a 3-minute budget. On this repo's 7,800+-PR history, a full clone
+    # downloads every blob (file content) ever committed, and that alone
+    # exceeded 3 minutes as soon as the runner was even lightly loaded — the
+    # `Run actions/checkout` step itself was the thing that hit the timeout,
+    # twice in a row, both cancelled at ~3m05s. `cancelled` reads as
+    # infra noise, not the deterministic budget miss it is, which is exactly
+    # why it kept getting re-run instead of fixed.
+    #
+    # `filter: blob:none` below (see the checkout step) removes the actual
+    # cost — it keeps the full commit/tree graph (so git log/diff stay exactly
+    # correct, no depth to size or guess) while deferring blob downloads to
+    # on-demand, and this script only ever needs the content of two paths
+    # (package.json, CHANGELOG.md) at two commits. 10 minutes is margin on top
+    # of that, not a substitute for it: the job still does almost no work once
+    # checked out.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The check diffs against the base branch; a shallow clone would make
           # that diff unavailable and the script fails closed (exit 2) rather
-          # than silently passing.
+          # than silently passing. Full history is needed for git log/diff
+          # correctness (fetch-depth: 0), but not full blob CONTENT for every
+          # file at every commit — `filter: blob:none` is a partial clone that
+          # keeps every commit and tree object (so the commit graph and merge
+          # base are exactly as complete as an unfiltered fetch-depth:0 clone)
+          # and fetches blobs lazily for historical commits, downloading only
+          # the current HEAD's working tree and the paths diffed from base.
+          # actions/checkout v4.3.1 (this pin) supports `filter` natively;
+          # GitHub's server supports blob:none partial clone.
           fetch-depth: 0
+          filter: blob:none
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

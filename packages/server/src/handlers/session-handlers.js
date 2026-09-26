@@ -88,15 +88,16 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // `config.provider || DEFAULT_PROVIDER`, the same value
   // `billingCanary.defaultProvider` carries to the ws-history senders — and
   // resolve the registry from that same name so the tag names whatever
-  // produced the rows. `switchProvider` is unchanged for the permission-mode
-  // copy below, which must still describe the SESSION.
+  // produced the rows. #7811 — the permission-mode copy below now reads the
+  // SAME resolved roster provider: a provider-less entry runs as the daemon
+  // default, so the default's mode copy is the one that describes it.
   const switchProvider = entry.provider || null
   const switchRosterProvider = resolveRosterProvider(switchProvider, ctx.services.config?.provider)
   const switchRegistry = getRegistryForProvider(switchRosterProvider)
   ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchRosterProvider })
   // #6638: also re-send the permission-mode copy so switching to/from a Codex
   // session updates the mode descriptions (Codex has different tools + no plan mode).
-  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchProvider, entry.session.constructor) })
+  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchRosterProvider, entry.session.constructor) })
   broadcastFocusChanged(client, targetId, ctx)
 }
 

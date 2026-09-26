@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -307,6 +307,7 @@ describe('ClaudeByokSession', () => {
           command: 'node',
           args: ['github-mcp.js'],
           env: { GITHUB_TOKEN: 'secret' },
+          source: 'user',
         },
       ])
       const ready = captured.find((e) => e.name === 'ready')
@@ -443,6 +444,214 @@ describe('ClaudeByokSession', () => {
       assert.ok(capturedTools)
       assert.ok(capturedTools.every((t) => !t.name.startsWith('mcp__')), 'no MCP tools when fleet is null')
       await session.destroy()
+    })
+
+    // #7112: project-scoped MCP servers (written under
+    // projects[<realpath(cwd)>].mcpServers in ~/.claude.json, or a repo-local
+    // .mcp.json) must be loaded and spawned exactly like user-scope servers —
+    // including going through the SAME spawn-trust gate. Pre-fix, the
+    // constructor's `loadClaudeMcpConfig` call only ever read the config's
+    // root `mcpServers` block, so every test in this block failed on main.
+    describe('#7112 project-scoped MCP servers', () => {
+      it('loads a server declared ONLY under projects[realpath(cwd)].mcpServers', () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realCwd]: { mcpServers: { projonly: { command: 'node', args: ['p.js'], env: {} } } } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.deepEqual(session._mcpServerConfigs, [
+            { name: 'projonly', command: 'node', args: ['p.js'], env: {}, source: 'local' },
+          ])
+          assert.deepEqual(session.mcpServers.map((s) => s.name), ['projonly'])
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('loads a repo-local .mcp.json server under cwd', () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { repolocal: { command: 'node', args: ['r.js'] } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd })
+          assert.deepEqual(session._mcpServerConfigs.map((s) => s.name), ['repolocal'])
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('a repo-local .mcp.json server ALSO goes through the spawn-trust gate — it does NOT auto-spawn without trust', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          // Attacker-influenceable content: a .mcp.json checked into a cloned repo
+          // must not get a free pass around the trust prompt any more than a
+          // user- or project-scoped server does.
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd })
+          let prompted = 0
+          session._permissions.requestMcpTrust = async () => { prompted += 1; return false }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(prompted, 1, 'a .mcp.json-sourced spawn must be gated through requestMcpTrust exactly like any other scope')
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'a denied .mcp.json server must never spawn')
+          await session.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('the same server name in user + project scope resolves to the PROJECT entry (higher precedence)', () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            mcpServers: { shared: { command: 'user-cmd' } },
+            projects: { [realCwd]: { mcpServers: { shared: { command: 'project-cmd' } } } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.equal(session._mcpServerConfigs.length, 1)
+          assert.equal(session._mcpServerConfigs[0].command, 'project-cmd')
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('a project block for a DIFFERENT cwd is not loaded', () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        const otherCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-other-cwd-'))
+        try {
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realpathSync(otherCwd)]: { mcpServers: { notmine: { command: 'node' } } } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.deepEqual(session._mcpServerConfigs, [])
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+          rmSync(otherCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('mcpConfigPath: null (Task subagent) still skips discovery even when the cwd has a project-scoped config', () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realCwd]: { mcpServers: { projonly: { command: 'node' } } } },
+          }))
+          // Sanity: discovery DOES find it when mcpConfigPath is not explicitly null.
+          const parent = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.equal(parent._mcpServerConfigs.length, 1)
+
+          // A Task subagent is constructed with mcpConfigPath: null (byok-session.js
+          // _executeTaskTool) — this must still skip discovery entirely, even though
+          // `this._mcpConfigPath` falls back to the SAME default path (tmpHome/.claude.json)
+          // that carries the project-scoped server above.
+          const child = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: null })
+          assert.deepEqual(child._mcpServerConfigs, [],
+            'a Task subagent (mcpConfigPath: null) must not independently discover MCP config')
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('a project-scoped server goes through the SAME spawn-trust gate as a user-scope one — it does NOT auto-spawn without trust', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realCwd]: { mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } } } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          let prompted = 0
+          session._permissions.requestMcpTrust = async () => { prompted += 1; return false }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(prompted, 1, 'the project-scoped spawn must be gated through requestMcpTrust exactly like a user-scope server')
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'a denied project-scoped server must never spawn')
+          await session.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('an ALLOWED project-scoped server spawns, and trust persists silently for the next session start', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realCwd]: { mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } } } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          session._permissions.requestMcpTrust = async () => true
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+          await session.destroy()
+
+          // Next session start with the SAME cwd/config reconnects silently.
+          const session2 = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          let prompted = 0
+          session2._permissions.requestMcpTrust = async () => { prompted += 1; return true }
+          session2._client = { messages: { stream: () => fakeStream([]) } }
+          await session2.start()
+          assert.equal(prompted, 0, 'an already-trusted project-scoped tuple must not re-prompt')
+          assert.equal(session2._mcpFleet.clients[0].state, MCP_STATES.READY)
+          await session2.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      // #7112 review: a .mcp.json server that reuses the NAME of an
+      // already-trusted user-scope server, but with a DIFFERENT
+      // command/args, now wins precedence (project/.mcp.json beats user
+      // root). The trust gate is keyed on the full spawn config
+      // (name+command+args+env — see byok-mcp-trust.js trustKeyComponents),
+      // not on name alone, so this must NOT silently inherit the user-scope
+      // trust and auto-spawn — it is a materially different, attacker-
+      // influenceable (cloned-repo) config and must prompt again.
+      it('a .mcp.json server reusing a trusted user-scope NAME but a DIFFERENT command re-prompts (does not inherit trust)', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-project-cwd-'))
+        try {
+          const configPath = join(tmpHome, '.claude.json')
+          // User previously trusted "stub" running the real stub script directly.
+          recordTrust(
+            { name: 'stub', command: process.execPath, args: [MCP_STUB], env: {} },
+            process.env.CHROXY_MCP_TRUST_PATH,
+          )
+          writeFileSync(configPath, JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+          }))
+          // A cloned repo's .mcp.json declares a SAME-NAME "stub" server with an
+          // extra argv entry — a different, untrusted spawn config that now wins
+          // precedence over the trusted user-scope entry.
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB, '--evil-flag'], env: {} } },
+          }))
+          const session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          assert.equal(session._mcpServerConfigs[0].args.length, 2, 'the .mcp.json entry (with the extra arg) must be the one that resolved')
+          let prompted = 0
+          session._permissions.requestMcpTrust = async () => { prompted += 1; return false }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.equal(prompted, 1, 'a same-name, different-command server must NOT inherit the old trust record — it must re-prompt')
+          assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.DEAD, 'denied without inheriting trust, it must never spawn')
+          await session.destroy()
+        } finally {
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
     })
 
     // #6824: per-server enable/disable (BYOK lane authoritative).
@@ -701,6 +910,282 @@ describe('ClaudeByokSession', () => {
       const elapsed = Date.now() - t0
       assert.ok(elapsed <= 2500, `destroy took ${elapsed}ms, expected <= 2500ms (FLEET_KILL_GRACE_MS + safety)`)
       assert.equal(session._mcpFleet, null, 'fleet reference cleared after destroy')
+    })
+
+    // #7012: a session that starts with ZERO configured MCP servers has no
+    // fleet — `addMcpServer` used to only attach to an EXISTING fleet
+    // (`if (this._mcpFleet)`), so the session's first-ever server was
+    // persisted but never connected until a restart.
+    describe('addMcpServer first-connect (#7012)', () => {
+      function writeEmptyMcpConfig() {
+        const path = join(tmpHome, '.claude.json')
+        writeFileSync(path, JSON.stringify({ mcpServers: {} }))
+        return path
+      }
+
+      it('connects the first added server without a restart (no fleet existed at start)', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        session._permissions.on('permission_request', (data) => {
+          session._permissions.respondToPermission(data.requestId, 'allow')
+        })
+        await session.start()
+        assert.equal(session._mcpFleet, null, 'precondition: nothing configured at start, so no fleet yet')
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.ok(session._mcpFleet, 'the first add must build the fleet instead of waiting for a restart')
+        assert.equal(session._mcpFleet.clients.length, 1)
+        assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+        assert.notEqual(res.status, 'configured', 'status must reflect the live connection, not the static fallback')
+        assert.equal(res.status, 'connected')
+        assert.deepEqual(session._mcpFleet.getServerStatuses(), [
+          { name: 'stub', status: 'connected', enabled: true, canToggle: true },
+        ])
+        await session.destroy()
+      })
+
+      it('prompts for trust exactly once — the fleet construction must not double-prompt', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        const prompts = []
+        session._permissions.on('permission_request', (data) => {
+          prompts.push(data)
+          session._permissions.respondToPermission(data.requestId, 'allow')
+        })
+        await session.start()
+
+        await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(prompts.length, 1, 'the pre-write trust decision must be the ONLY prompt — the fleet gate must see it already trusted')
+        assert.equal(session._mcpFleet.clients[0].state, MCP_STATES.READY)
+        await session.destroy()
+      })
+
+      it('a denied first add creates no fleet and persists nothing', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        session._permissions.on('permission_request', (data) => {
+          session._permissions.respondToPermission(data.requestId, 'deny')
+        })
+        await session.start()
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, false)
+        assert.equal(res.code, 'TRUST_DENIED')
+        assert.equal(session._mcpFleet, null, 'a denied add must not build a fleet')
+        assert.deepEqual(JSON.parse(readFileSync(mcpConfigPath, 'utf8')).mcpServers, {})
+        await session.destroy()
+      })
+
+      it('a second add to an already-live fleet still uses fleet.addServer and does not disturb the first client', async () => {
+        preTrustStub()
+        recordTrust(
+          { name: 'stub2', command: process.execPath, args: [MCP_STUB], env: {} },
+          process.env.CHROXY_MCP_TRUST_PATH,
+        )
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+
+        await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+        const fleetAfterFirst = session._mcpFleet
+        const firstClient = fleetAfterFirst.clients[0]
+
+        const res = await session.addMcpServer('stub2', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(session._mcpFleet, fleetAfterFirst, 'the SAME fleet instance — no rebuild')
+        assert.equal(session._mcpFleet.clients[0], firstClient, 'the first client is untouched')
+        assert.equal(session._mcpFleet.clients.length, 2)
+        await session.destroy()
+      })
+
+      it('two concurrent adds to a fleet-less session create exactly one fleet', async () => {
+        recordTrust({ name: 'a', command: process.execPath, args: [MCP_STUB], env: {} }, process.env.CHROXY_MCP_TRUST_PATH)
+        recordTrust({ name: 'b', command: process.execPath, args: [MCP_STUB], env: {} }, process.env.CHROXY_MCP_TRUST_PATH)
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        assert.equal(session._mcpFleet, null)
+
+        const [resA, resB] = await Promise.all([
+          session.addMcpServer('a', { command: process.execPath, args: [MCP_STUB], env: {} }),
+          session.addMcpServer('b', { command: process.execPath, args: [MCP_STUB], env: {} }),
+        ])
+
+        assert.equal(resA.ok, true, resA.error)
+        assert.equal(resB.ok, true, resB.error)
+        assert.ok(session._mcpFleet, 'exactly one fleet must exist')
+        assert.equal(session._mcpFleet.clients.length, 2, 'both servers landed in the SAME fleet')
+        assert.deepEqual(session._mcpFleet.clients.map((c) => c.name).sort(), ['a', 'b'])
+        await session.destroy()
+      })
+
+      it('_ensureMcpFleet is idempotent — a second call returns the SAME fleet without rebuilding', async () => {
+        preTrustStub()
+        const configPath = join(tmpHome, '.claude.json')
+        writeFileSync(configPath, JSON.stringify({
+          mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+        }))
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath: configPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        const fleetAfterStart = session._mcpFleet
+        assert.ok(fleetAfterStart)
+
+        const fleetAgain = await session._ensureMcpFleet()
+
+        assert.equal(fleetAgain, fleetAfterStart, 'a second call must return the SAME instance, not rebuild')
+        assert.equal(session._mcpFleet, fleetAfterStart, 'session._mcpFleet must not have been replaced')
+        assert.equal(session._mcpFleet.clients.length, 1, 'no duplicate client — the original was not re-spawned')
+        await session.destroy()
+      })
+
+      it('addMcpServer called before start() persists the config but builds no fleet', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._permissions = { async requestMcpTrust() { return true } }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(res.status, 'configured', 'no live status — nothing was spawned before start()')
+        assert.equal(session._mcpFleet, null, 'a pre-start add must not spawn a child ahead of _processReady')
+
+        // start() now picks the persisted entry up normally.
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        assert.ok(session._mcpFleet)
+        assert.equal(session._mcpFleet.clients.length, 1)
+        await session.destroy()
+      })
+
+      it('a session destroyed mid-add creates no fleet', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._client = { messages: { stream: () => fakeStream([]) } }
+        await session.start()
+        // Simulate destroy() racing the in-flight add: the trust decision only
+        // resolves after destroy() has already run and set `_destroying`.
+        session._permissions = {
+          async requestMcpTrust() {
+            await session.destroy()
+            return true
+          },
+        }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.equal(session._mcpFleet, null, 'a session torn down mid-add must not spawn a new MCP child')
+      })
+    })
+
+    // #7939: the spawn-trust prompt must name WHICH config scope a server came
+    // from, so a user approving a spawn can tell "my own config" from "a
+    // repository I just cloned" apart. These pin the `source` field on the
+    // `requestMcpTrust` payload for both the live-add path (byok-session's
+    // `_decideMcpSpawnTrust`, gated by write SCOPE) and the discovery path
+    // (the fleet's trust gate, gated by which config FILE the server was
+    // read from) — the two must converge on the identical MCP_SERVER_SOURCE
+    // vocabulary.
+    describe('#7939 spawn-trust source', () => {
+      function writeEmptyMcpConfig() {
+        const path = join(tmpHome, '.claude.json')
+        writeFileSync(path, JSON.stringify({ mcpServers: {} }))
+        return path
+      }
+
+      it('addMcpServer at the default ("user") scope carries source: "user" in the trust request', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        let captured = null
+        session._permissions.requestMcpTrust = async (req) => { captured = req; return true }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, true, res.error)
+        assert.ok(captured, 'requestMcpTrust must have been called')
+        assert.equal(captured.source, 'user', 'the default write scope ("user") must map to the "user" MCP_SERVER_SOURCE')
+      })
+
+      it('addMcpServer at the "project" scope carries source: "local" (write scope "project" targets the READ side\'s "Local" scope)', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        let captured = null
+        session._permissions.requestMcpTrust = async (req) => { captured = req; return true }
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} }, 'project')
+
+        assert.equal(res.ok, true, res.error)
+        assert.ok(captured, 'requestMcpTrust must have been called')
+        assert.equal(captured.source, 'local')
+      })
+
+      it('a denied add never persists — source threading does not change the deny-before-write contract', async () => {
+        const mcpConfigPath = writeEmptyMcpConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath })
+        session._permissions.requestMcpTrust = async () => false
+
+        const res = await session.addMcpServer('stub', { command: process.execPath, args: [MCP_STUB], env: {} })
+
+        assert.equal(res.ok, false)
+        assert.equal(res.code, 'TRUST_DENIED')
+        assert.deepEqual(session._mcpServerConfigs, [], 'a denied add must persist nothing')
+      })
+
+      it('a discovered .mcp.json server carries source: "project-mcp-json" through to the fleet\'s trust gate', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-mcpjson-source-'))
+        let session = null
+        try {
+          writeFileSync(join(projectCwd, '.mcp.json'), JSON.stringify({
+            mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } },
+          }))
+          session = new ClaudeByokSession({ cwd: projectCwd })
+          let captured = null
+          session._permissions.requestMcpTrust = async (req) => { captured = req; return true }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.ok(captured, 'requestMcpTrust must have been called during fleet start')
+          assert.equal(captured.source, 'project-mcp-json')
+        } finally {
+          // #7939 mutation-test lesson: destroy() must run even when an
+          // assertion above throws, or the spawned MCP stub child (see
+          // MCP_STUB) leaks and the test runner hangs waiting for it.
+          if (session) await session.destroy()
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
+
+      it('a discovered project-scoped (projects[cwd].mcpServers) server carries source: "local" through to the fleet\'s trust gate', async () => {
+        const projectCwd = mkdtempSync(join(tmpdir(), 'chroxy-byok-projectscope-source-'))
+        let session = null
+        try {
+          const realCwd = realpathSync(projectCwd)
+          const configPath = join(tmpHome, '.claude.json')
+          writeFileSync(configPath, JSON.stringify({
+            projects: { [realCwd]: { mcpServers: { stub: { command: process.execPath, args: [MCP_STUB], env: {} } } } },
+          }))
+          session = new ClaudeByokSession({ cwd: projectCwd, mcpConfigPath: configPath })
+          let captured = null
+          session._permissions.requestMcpTrust = async (req) => { captured = req; return true }
+          session._client = { messages: { stream: () => fakeStream([]) } }
+          await session.start()
+          assert.ok(captured, 'requestMcpTrust must have been called during fleet start')
+          assert.equal(captured.source, 'local')
+        } finally {
+          if (session) await session.destroy()
+          rmSync(projectCwd, { recursive: true, force: true })
+        }
+      })
     })
   })
 

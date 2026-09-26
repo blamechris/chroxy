@@ -83,7 +83,18 @@ collect() {
     | while IFS= read -r f; do
         # Strip // line comments and /* */ block comments (the latter across
         # newlines, via the /s flag), then test for a remaining hex literal.
-        if perl -0777 -pe 's{//[^\n]*}{}g; s{/\*.*?\*/}{}gs' "$f" 2>/dev/null | grep -Eq "$PAT"; then
+        #
+        # perl's stripped output is captured into a variable and fed to grep
+        # via a here-string rather than piped directly: `grep -q` exits the
+        # instant it finds a match, without draining the rest of its stdin,
+        # and under this script's `set -euo pipefail` a still-writing perl
+        # left mid-write gets SIGPIPE, which pipefail promotes to the whole
+        # pipeline's (i.e. this `if`'s) exit status — flipping a genuine,
+        # early, uncommented hex literal into "not found" on large files. A
+        # here-string hands grep the data directly, with no separate writer
+        # process for a SIGPIPE to land on.
+        stripped="$(perl -0777 -pe 's{//[^\n]*}{}g; s{/\*.*?\*/}{}gs' "$f" 2>/dev/null)"
+        if grep -Eq "$PAT" <<<"$stripped"; then
           printf '%s\n' "$f"
         fi
       done \

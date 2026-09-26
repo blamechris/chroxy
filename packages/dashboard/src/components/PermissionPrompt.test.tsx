@@ -1141,3 +1141,115 @@ describe('PermissionPrompt — deny-reason honesty gate (#6888)', () => {
     expect(onRespond).toHaveBeenCalledWith('req-1', 'deny', null)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #7939 — MCP spawn-trust prompt shows WHICH config scope the server came
+// from, with the repo-provided `.mcp.json` case visibly flagged.
+// ---------------------------------------------------------------------------
+describe('PermissionPrompt — MCP spawn-trust source (#7939)', () => {
+  beforeEach(() => {
+    resetMockStore()
+  })
+
+  it('renders the "Configured from" line for a recognized source', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-1"
+        tool="mcp_spawn"
+        description='Spawn MCP server "github" running node'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'github', command: 'node', args: [], envKeys: [], source: 'user' } }}
+      />
+    )
+    expect(screen.getByTestId('perm-mcp-source')).toBeInTheDocument()
+    expect(screen.getByTestId('perm-mcp-source-value')).toHaveTextContent('Your user-wide Claude config')
+  })
+
+  it('flags the repo-provided .mcp.json source distinctly from local/user', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-2"
+        tool="mcp_spawn"
+        description='Spawn MCP server "sneaky" running npx'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'sneaky', command: 'npx', args: [], envKeys: [], source: 'project-mcp-json' } }}
+      />
+    )
+    const value = screen.getByTestId('perm-mcp-source-value')
+    expect(value).toHaveTextContent("From this repository's .mcp.json")
+    expect(value.className).toContain('perm-mcp-source-repo')
+  })
+
+  it('renders the "local" scope label distinctly from the repo-flagged one', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-3"
+        tool="mcp_spawn"
+        description='Spawn MCP server "fs" running node'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'fs', command: 'node', args: [], envKeys: [], source: 'local' } }}
+      />
+    )
+    const value = screen.getByTestId('perm-mcp-source-value')
+    expect(value).toHaveTextContent('Your local Claude config for this project')
+    expect(value.className).not.toContain('perm-mcp-source-repo')
+  })
+
+  it('renders nothing when toolInput carries no source (older server / wire-compat)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-4"
+        tool="mcp_spawn"
+        description='Spawn MCP server "github" running node'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'github', command: 'node', args: [], envKeys: [] } }}
+      />
+    )
+    expect(screen.queryByTestId('perm-mcp-source')).not.toBeInTheDocument()
+  })
+
+  it('renders nothing when toolInput carries an unrecognized source (defensive — server already drops these)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-5"
+        tool="mcp_spawn"
+        description='Spawn MCP server "github" running node'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'github', command: 'node', args: [], envKeys: [], source: 'not-a-real-scope' } }}
+      />
+    )
+    expect(screen.queryByTestId('perm-mcp-source')).not.toBeInTheDocument()
+  })
+
+  it('renders nothing when toolInput is absent entirely', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-6"
+        tool="mcp_spawn"
+        description='Spawn MCP server "github" running node'
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('perm-mcp-source')).not.toBeInTheDocument()
+  })
+
+  it('does not render the MCP source line for a non-mcp_spawn tool even if toolInput happens to carry mcpServer', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-mcp-7"
+        tool="Bash"
+        description="ls"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        toolInput={{ mcpServer: { name: 'github', command: 'node', args: [], envKeys: [], source: 'user' } }}
+      />
+    )
+    expect(screen.queryByTestId('perm-mcp-source')).not.toBeInTheDocument()
+  })
+})

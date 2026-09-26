@@ -469,7 +469,9 @@ describe('container Glob/Grep/Read symlink containment (#7354)', { skip: POSIX_O
       const backend = {
         calls: [],
         async execInEnvironment() {
-          return { stdout: `${CONTAINER_CONFINE_OK}\nsrc/a.ts\n`, stderr: '' }
+          // #7357 — NUL-terminated match, matching buildConfinedGlobBody's
+          // real delimiter; the trailer is what's absent here, not the NUL.
+          return { stdout: `${CONTAINER_CONFINE_OK}\nsrc/a.ts\0`, stderr: '' }
         },
       }
       const session = buildSession(backend)
@@ -1052,10 +1054,57 @@ describe('__cx_resolve_new — the create-mode walk, driven directly (#7876)', {
   })
 })
 
+describe('__cx_resolve\'s lenient flag — the n>0 gate, driven directly (#7897)', { skip: POSIX_ONLY || SKIP_NO_SYMLINK }, () => {
+  // #7897's own doc claims the lenient fallback is gated to `$__n -gt 0` so
+  // the ORIGINAL `$1`'s own first-hop parent — Read/Grep naming a path with
+  // no such directory at all — "stays a hard failure regardless of this
+  // flag". No caller can reach this directly: Glob's one lenient call site
+  // (`__cx_resolve "$f" 1`) only ever runs on a match whose own containing
+  // directory was already proven to exist by the directory-containment check
+  // earlier in `buildConfinedGlobBody`, so `$__n` is never 0 at the point a
+  // real `cd -P` failure occurs there — the n>0 vs n>=0 distinction is
+  // unreachable through that caller by construction. That makes it exactly
+  // the shape `docs/false-safety-guards.md` warns about: a refusal no input
+  // can reach is only proven (or disproven) by driving the function itself,
+  // and an untested defensive gate is where a future caller that reuses the
+  // lenient flag without Glob's precondition would silently get more
+  // leniency than #7897 intended.
+  beforeEach(() => { buildWriteFixture() })
+  afterEach(() => { rmSync(wfRoot, { recursive: true, force: true }) })
+
+  it('refuses when the FIRST hop\'s own parent is missing, even with the lenient flag set', async () => {
+    // `real` exists (from buildWriteFixture); its child `totally-missing`
+    // does not, and this call never follows a symlink first — `$__n` is 0 at
+    // the point `cd -P` fails, so this must stay a hard failure regardless
+    // of the trailing `1`.
+    const body = [
+      'if __r=$(__cx_resolve "$__cx_target/real/totally-missing/x.ts" 1); then',
+      '  printf \'KEPT:%s\\n\' "$__r"',
+      'else',
+      '  printf \'REFUSED\\n\'',
+      'fi',
+    ].join('\n')
+    const cmd = buildConfinedContainerCommand({ target: '/workspace', body, mode: 'read' })
+    const local = cmd.split(CONTAINER_WORKSPACE).join(wfWs)
+    const { stdout } = await pexec('bash', ['-c', local])
+    const confined = parseConfinedContainerStdout(stdout)
+    assert.equal(confined.ok, true, `containment preamble failed: ${JSON.stringify(confined)}`)
+    assert.equal(confined.body, 'REFUSED\n', 'the lenient flag widened the original path\'s own first-hop parent')
+  })
+})
+
 describe('buildConfinedContainerCommand modes (#7876)', () => {
-  it('the default mode emits the read resolver only, unchanged by create mode existing', () => {
+  it('the default mode resolves $__cx_target with __cx_resolve, unchanged by create mode existing', () => {
     const cmd = buildConfinedContainerCommand({ target: '/workspace/a', body: 'true' })
-    assert.equal(cmd.includes('__cx_resolve_new'), false, 'read mode picked up the create-mode walk')
+    // #7897 — 'read' mode now carries the __cx_resolve_new DEFINITION too
+    // (__cx_resolve's lenient fallback, used only by Glob, calls it), but the
+    // top-level $__cx_target resolution in 'read' mode must still go through
+    // __cx_resolve, never __cx_resolve_new — that is the property this test
+    // actually pins.
+    assert.equal(
+      cmd.includes(`__cx_target=$(__cx_resolve_new '/workspace/a')`), false,
+      'read mode resolved $__cx_target with the create-mode walk',
+    )
     assert.ok(cmd.includes(`__cx_target=$(__cx_resolve '/workspace/a')`), 'read mode lost __cx_resolve')
     assert.deepEqual(
       cmd,
@@ -1114,15 +1163,20 @@ describe('parseConfinedContainerStdout (#7354)', () => {
   })
 })
 
-describe('splitWithheldTrailer (#7354)', () => {
-  it('strips the trailer and returns the count', () => {
+describe('splitWithheldTrailer (#7354 / #7357)', () => {
+  // #7357 — matches are NUL-delimited (buildConfinedGlobBody), not '\n'-joined:
+  // a filename may legally contain a newline, and joining on '\n' cannot tell
+  // "one match with an embedded newline" apart from "two matches". The
+  // trailer stays its own '\n'-terminated line — fixed host-authored text,
+  // never a filename, so it carries no such ambiguity.
+  it('strips the trailer and returns the NUL-delimited matches', () => {
     assert.deepEqual(
-      splitWithheldTrailer(`src/a.ts\nsrc/b.ts\n${CONTAINER_CONFINE_WITHHELD} 3\n`),
-      { body: 'src/a.ts\nsrc/b.ts\n', withheld: 3 },
+      splitWithheldTrailer(`src/a.ts\0src/b.ts\0${CONTAINER_CONFINE_WITHHELD} 3\n`),
+      { body: 'src/a.ts\0src/b.ts\0', withheld: 3 },
     )
   })
 
-  it('handles a body that is ONLY the trailer', () => {
+  it('handles a body that is ONLY the trailer (zero matches — no NUL at all)', () => {
     assert.deepEqual(
       splitWithheldTrailer(`${CONTAINER_CONFINE_WITHHELD} 2\n`),
       { body: '', withheld: 2 },
@@ -1137,20 +1191,37 @@ describe('splitWithheldTrailer (#7354)', () => {
   })
 
   it('reports an ABSENT trailer as null, never as zero', () => {
-    for (const body of ['src/a.ts\n', '', 'x', null, undefined]) {
+    for (const body of ['src/a.ts\0', '', 'x', null, undefined]) {
       assert.equal(splitWithheldTrailer(body).withheld, null, `claimed a count for ${JSON.stringify(body)}`)
     }
   })
 
-  it('only the LAST line can be the trailer', () => {
-    // A file named like the trailer, in the middle of the results, must stay a
-    // result — and must not hand the log a number the container never sent.
-    const body = `${CONTAINER_CONFINE_WITHHELD} 9\nsrc/a.ts\n`
-    assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
+  it('only what follows the LAST NUL can be the trailer', () => {
+    // A MATCH whose name happens to look exactly like the trailer text — a
+    // real file could be named that — must stay a match, and only the true
+    // final trailer (after the last NUL) is stripped. Getting this backwards
+    // would hand the log a number the container never sent (a match text
+    // mistaken for the trailer) or leak the trailer into the model-facing
+    // body (the true trailer mistaken for a match).
+    const body = `${CONTAINER_CONFINE_WITHHELD} 9\0src/a.ts\0${CONTAINER_CONFINE_WITHHELD} 3\n`
+    assert.deepEqual(splitWithheldTrailer(body), {
+      body: `${CONTAINER_CONFINE_WITHHELD} 9\0src/a.ts\0`,
+      withheld: 3,
+    })
   })
 
   it('rejects a malformed count rather than coercing it', () => {
-    const body = `src/a.ts\n${CONTAINER_CONFINE_WITHHELD} -1\n`
+    const body = `src/a.ts\0${CONTAINER_CONFINE_WITHHELD} -1\n`
     assert.deepEqual(splitWithheldTrailer(body), { body, withheld: null })
+  })
+
+  it('an embedded newline inside a match survives as part of ONE entry', () => {
+    // The whole point of the NUL delimiter: `nl\nSECRET.ts` must come back as
+    // a single match, not split into `nl` and `SECRET.ts` by anything that
+    // still keys off '\n'.
+    assert.deepEqual(
+      splitWithheldTrailer(`nl\nSECRET.ts\0keep.ts\0${CONTAINER_CONFINE_WITHHELD} 0\n`),
+      { body: 'nl\nSECRET.ts\0keep.ts\0', withheld: 0 },
+    )
   })
 })
