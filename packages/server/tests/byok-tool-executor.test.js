@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renam
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -1176,6 +1176,538 @@ describe('executeBuiltinTool', () => {
       })
     })
 
+    // #7951 — a matched `{...}` with NO top-level comma is literal, never
+    // alternation, in the PER-SEGMENT compiler (`parseSegmentTokens`) — the
+    // same rule `expandBraces` already enforced on the slash-spanning path.
+    // Before this fix, `parseSegmentTokens` treated EVERY matched brace pair
+    // as an `alt` token regardless of comma count, so `{dup}` wrongly
+    // matched a real file/dir named `dup`, and a real file literally named
+    // `{braces}.txt` was never reachable by the pattern that names it.
+    describe('comma-less brace is literal, not alternation (#7951)', () => {
+      it('{dup} does not match a real file/dir named "dup"', async () => {
+        writeFileSync(join(dir, 'dup'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{dup}' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('a pattern with literal braces matches a real file spelled with literal braces', async () => {
+        writeFileSync(join(dir, '{braces}.txt'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{braces}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, '{braces}.txt')
+      })
+
+      it('a wildcard INSIDE a comma-less brace still functions', async () => {
+        // `{a*}` has no top-level comma, so the braces are literal — but the
+        // `*` between them is still an ordinary wildcard token, matching a
+        // real file whose name is spelled with literal braces around
+        // whatever the `*` absorbed.
+        writeFileSync(join(dir, '{axyz}'), '1')
+        writeFileSync(join(dir, 'axyz'), '1') // negative control: braces are NOT stripped
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{a*}' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, '{axyz}', 'only the literally-braced file matches, never the unbraced one')
+      })
+
+      it('a NESTED group with its own top-level comma still expands inside a comma-less outer group', async () => {
+        // `{{dup,nested}}` — outer group has no comma (one option: the
+        // inner `{dup,nested}`), so its braces stay literal; the INNER
+        // group does have a comma and still expands, matching `fs.glob`'s
+        // own rule (`expandBraces`'s doc: "anything expandable nested
+        // inside it still expands").
+        writeFileSync(join(dir, '{dup}'), '1')
+        writeFileSync(join(dir, '{nested}'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{{dup,nested}}' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, '{dup}\n{nested}')
+      })
+
+      // #7951 — braceCloseTable's PAIRING bracket-awareness, exercised
+      // through the PER-SEGMENT path directly (no '/' inside the braces, so
+      // this never takes expandBraces's whole-pattern route — the parity
+      // harness's equivalent row for this shape (`bracecomma/{a[}]b,s}`)
+      // goes through the SAME per-segment compiler for the same reason, but
+      // this pins it here too, independent of that harness's oracle).
+      // `{a[}]b,s}` — the embedded `}` inside `[}]` is a class member, not
+      // a group closer, so the REAL outer group spans the whole text (one
+      // top-level comma, splitting into `a[}]b` and `s`); `a[}]b` recompiles
+      // with `[}]` as a real class matching literal `}`, requiring a 3-char
+      // name `a}b` that does not exist, so only `s` matches.
+      it('an embedded "}" inside a bracket class does not end a comma-less-looking group early', async () => {
+        writeFileSync(join(dir, 's'), '1')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{a[}]b,s}' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 's')
+      })
+    })
+
+    // #7951 — `{X..Y}` / `{X..Y..S}` range expansion, matching `fs.glob`'s
+    // own observed behavior (see `parseRangeGroup`'s doc for every case
+    // measured directly against it: ascending/descending, zero-padded,
+    // negative, stepped, mixed-case letter ranges). The permanent parity
+    // harness (byok-glob-fs-glob-parity.test.js) proves this end-to-end
+    // against the real oracle; these direct-call tests pin the ARITHMETIC
+    // (padding width, direction, the zero-step refusal) at full scale,
+    // the same reason `expandBraces` itself is called directly above.
+    describe('range expansion (#7951)', () => {
+      it('parseRangeGroup: ascending, descending, and single-member numeric ranges', () => {
+        assert.equal(parseRangeGroup('1..3').count, 3)
+        assert.deepEqual([0, 1, 2].map((k) => parseRangeGroup('1..3').nth(k)), ['1', '2', '3'])
+        assert.equal(parseRangeGroup('3..1').count, 3)
+        assert.deepEqual([0, 1, 2].map((k) => parseRangeGroup('3..1').nth(k)), ['3', '2', '1'])
+        assert.equal(parseRangeGroup('5..5').count, 1)
+        assert.deepEqual([parseRangeGroup('5..5').nth(0)], ['5'])
+      })
+
+      it('parseRangeGroup: zero-padding takes the WIDER endpoint\'s own printed length, sign included', () => {
+        // Verified directly against fs.glob: {001..10} and {1..010} both
+        // produce 001..010 (width 3); {-01..1} produces -01, 000, 001
+        // (width 3 — the '-' counts toward the width).
+        const a = parseRangeGroup('001..10')
+        assert.deepEqual([0, 1, 9].map((k) => a.nth(k)), ['001', '002', '010'])
+        const b = parseRangeGroup('1..010')
+        assert.deepEqual([0, 1, 9].map((k) => b.nth(k)), ['001', '002', '010'])
+        const c = parseRangeGroup('-01..1')
+        assert.deepEqual([0, 1, 2].map((k) => c.nth(k)), ['-01', '000', '001'])
+        // A lone "0" has no second digit to pad — not padded.
+        assert.deepEqual([parseRangeGroup('0..2').nth(0), parseRangeGroup('0..2').nth(2)], ['0', '2'])
+      })
+
+      it('parseRangeGroup: stepped ranges, both directions', () => {
+        const asc = parseRangeGroup('1..10..2')
+        assert.equal(asc.count, 5)
+        assert.deepEqual([0, 1, 2, 3, 4].map((k) => asc.nth(k)), ['1', '3', '5', '7', '9'])
+        const desc = parseRangeGroup('10..1..3')
+        assert.deepEqual([0, 1, 2, 3].map((k) => desc.nth(k)), ['10', '7', '4', '1'])
+      })
+
+      it('parseRangeGroup: single-letter ranges, ascending/descending/mixed-case', () => {
+        const az = parseRangeGroup('a..c')
+        assert.equal(az.count, 3)
+        assert.deepEqual([0, 1, 2].map((k) => az.nth(k)), ['a', 'b', 'c'])
+        const desc = parseRangeGroup('c..a')
+        assert.deepEqual([0, 1, 2].map((k) => desc.nth(k)), ['c', 'b', 'a'])
+        // Mixed case: a raw UTF-16 code-unit walk, matching fs.glob's own
+        // observed behavior (verified directly: {a..C} steps THROUGH the
+        // punctuation code points between 'C' and 'a' in ASCII).
+        const mixed = parseRangeGroup('a..C')
+        assert.equal(mixed.count, 'a'.charCodeAt(0) - 'C'.charCodeAt(0) + 1)
+        assert.equal(mixed.nth(0), 'a')
+        assert.equal(mixed.nth(mixed.count - 1), 'C')
+      })
+
+      it('parseRangeGroup: refuses a zero (or unparsable) step — never divides by zero, never returns a range', () => {
+        assert.equal(parseRangeGroup('1..10..0'), null)
+        assert.equal(parseRangeGroup('a..z..0'), null)
+      })
+
+      it('parseRangeGroup: rejects non-range shapes (mixed type, multi-char letters, non-integer, a comma)', () => {
+        for (const body of ['ab..cd', 'a..3', '1..a', '1..3.5', '1..3,x', 'dup']) {
+          assert.equal(parseRangeGroup(body), null, `${JSON.stringify(body)} must not be treated as a range`)
+        }
+      })
+
+      it('hasRangeBrace: true for a range shape, false for an ordinary pattern or comma-less brace', () => {
+        assert.equal(hasRangeBrace('file{1..3}.txt'), true)
+        assert.equal(hasRangeBrace('{a..z}'), true)
+        assert.equal(hasRangeBrace('*.ts'), false)
+        assert.equal(hasRangeBrace('{dup}'), false)
+        assert.equal(hasRangeBrace('{ts,js}'), false)
+        // Bracket-expression aware, matching the pairing awareness above:
+        // a `..` inside `[...]` is a class member (a two-member class:
+        // '.' and '.'), not range syntax.
+        assert.equal(hasRangeBrace('{[..]}'), false)
+      })
+
+      it('expandBraces expands a numeric range end to end, including a non-slash-spanning pattern', () => {
+        assert.deepEqual(expandBraces('file{1..3}.txt').sort(), ['file1.txt', 'file2.txt', 'file3.txt'])
+        assert.deepEqual(expandBraces('{01..03}.txt').sort(), ['01.txt', '02.txt', '03.txt'])
+      })
+
+      it('Glob expands a non-slash-spanning numeric range against real files', async () => {
+        writeFileSync(join(dir, 'file1.txt'), '1')
+        writeFileSync(join(dir, 'file2.txt'), '1')
+        writeFileSync(join(dir, 'file3.txt'), '1')
+        writeFileSync(join(dir, 'file4.txt'), '1') // negative control — must NOT appear
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'file{1..3}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'file1.txt\nfile2.txt\nfile3.txt')
+      })
+
+      it('Glob expands a letter range against real files', async () => {
+        writeFileSync(join(dir, 'a.txt'), '1')
+        writeFileSync(join(dir, 'b.txt'), '1')
+        writeFileSync(join(dir, 'c.txt'), '1')
+        writeFileSync(join(dir, 'd.txt'), '1') // negative control
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{a..c}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'a.txt\nb.txt\nc.txt')
+      })
+
+      it('Glob with a zero-step range fails closed: no throw, treated as literal, clean "No matches"', async () => {
+        // fs.glob itself THROWS `RangeError: Invalid array length` for this
+        // exact shape (measured directly — see parseRangeGroup's doc and
+        // the parity harness's comment on why this pattern is excluded from
+        // its oracle-based table). This tool must never reproduce that
+        // crash: a zero step is refused as a range and the group falls back
+        // to literal `{...}` text, which matches no real file here.
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'x{1..10..0}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /No matches/)
+      })
+
+      // #7951 acceptance — the SAME count-before-materialize cap #7945 built
+      // for comma groups, applied to ranges: `{1..100000}` (100,001 members)
+      // and `{a..z}{a..z}{a..z}` (17,576 combinations) both exceed
+      // GLOB_BRACE_EXPANSION_CAP (1,000) and must FAIL CLOSED with a clean
+      // EINVAL, never a silent truncation and never by generating the range
+      // to find out how big it is.
+      it('Glob rejects an over-cap numeric range fast, without materializing it', { timeout: 5000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{1..100000}' }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /brace alternatives/)
+        assert.ok(elapsedMs < 2000, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      it('Glob rejects an over-cap combinatorial letter-range pattern fast, without materializing it', { timeout: 5000 }, async () => {
+        const t0 = Date.now()
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{a..z}{a..z}{a..z}' }, ...ctx() })
+        const elapsedMs = Date.now() - t0
+        assert.equal(r.isError, true)
+        assert.match(r.content, /EINVAL: glob pattern is too complex/)
+        assert.match(r.content, /brace alternatives/)
+        assert.ok(elapsedMs < 2000, `rejection must be near-instant, took ${elapsedMs}ms`)
+      })
+
+      // #7951 acceptance — a dedicated, tight timing budget (the task's own
+      // number: the first #7945 draft blocked the event loop 292 SECONDS on
+      // an analogous comma-group shape). Called directly, the same reason
+      // `expandBraces`'s own linear-time test above calls it directly rather
+      // than through the whole tool dispatch (root resolution, the deadline
+      // race, confinement overhead would fold into the measurement and
+      // loosen what the number actually proves).
+      it('expandBraces/hasRangeBrace stay well under 50ms on adversarial range patterns (event-loop-block budget)', { timeout: 5000 }, () => {
+        for (const pattern of ['{1..100000}', '{1..999999999999}', '{a..z}{a..z}{a..z}', 'x{1..10..0}.txt']) {
+          const t0 = Date.now()
+          hasRangeBrace(pattern)
+          expandBraces(pattern)
+          const elapsedMs = Date.now() - t0
+          assert.ok(elapsedMs < 50, `${JSON.stringify(pattern)} must stay under 50ms, took ${elapsedMs}ms`)
+        }
+      })
+
+      // #7951 acceptance — workspace containment: a range's own generated
+      // members never contain a `.` or a `/`. A MIXED-CASE letter range
+      // does produce one EMPTY member (the backslash code point, as
+      // `fs.glob` does — see parseRangeGroup's doc), so `.{Z..a}.` can spell
+      // a `..` segment; the containment test below the next two covers that.
+      // What these two prove is that the pre-existing
+      // `globPatternEscapeReason` check (unchanged by this fix) still
+      // rejects a literal `..` segment WRITTEN NEXT TO a range group,
+      // before the new `hasRangeBrace` gate ever runs.
+      it('a literal ".." segment next to a range group is still rejected up front, never expanded', async () => {
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '{0..1}/../{2..3}' }, ...ctx() })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /parent-directory/)
+      })
+
+      it('a numeric or single-case letter range never generates an empty member, "." or ".." (direct proof over every generated member)', () => {
+        for (const body of ['1..1000', '-500..500', 'a..z', 'z..a', '001..500']) {
+          const info = parseRangeGroup(body)
+          for (let k = 0; k < Math.min(info.count, 2000); k++) {
+            const member = info.nth(k)
+            assert.ok(member.length > 0, `${body}#${k} must never be empty`)
+            assert.notEqual(member, '.', `${body}#${k} must never be a bare "."`)
+            assert.notEqual(member, '..', `${body}#${k} must never be ".."`)
+            assert.ok(!member.includes('/'), `${body}#${k} must never contain "/"`)
+          }
+        }
+      })
+    })
+
+    // #7951 review — defects found in the range/brace changes after they
+    // were written, each measured against real `fs.glob` (Node 22) and, for
+    // the arithmetic, against the `brace-expansion` source Node bundles.
+    describe('range/brace review fixes (#7951 review)', () => {
+      it('a ONE-member range still expands: a total of 1 is not "nothing expands"', async () => {
+        // expandBraces returned `[pattern]` whenever the whole count was 1,
+        // which was only ever true of "no group expands" before ranges
+        // existed; `{5..5}` and `{1..3..5}` have exactly one member each.
+        assert.deepEqual(expandBraces('file{5..5}.txt'), ['file5.txt'])
+        assert.deepEqual(expandBraces('{1..3..5}'), ['1'])
+        assert.deepEqual(expandBraces('{00..0}'), ['00'])
+        assert.deepEqual(expandBraces('{x}'), ['{x}'], 'a group that does not expand still hands the pattern back verbatim')
+        writeFileSync(join(dir, 'file2.txt'), '1')
+        writeFileSync(join(dir, 'file{2..2}.txt'), '1') // negative control: the braces are syntax, not text
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'file{2..2}.txt' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.equal(r.content, 'file2.txt')
+      })
+
+      it('a zero-padded STEP turns padding on, with the width still taken from the endpoints', () => {
+        // brace-expansion: `pad = n.some(isPadded)` over start, end AND step;
+        // `width = Math.max(n[0].length, n[1].length)`.
+        const r = parseRangeGroup('1..10..01')
+        assert.equal(r.count, 10)
+        assert.deepEqual([0, 1, 8, 9].map((k) => r.nth(k)), ['01', '02', '09', '10'])
+        const narrow = parseRangeGroup('1..3..01')
+        assert.deepEqual([0, 1, 2].map((k) => narrow.nth(k)), ['1', '2', '3'], 'width 1: padding on, nothing to pad')
+      })
+
+      it('a mixed-case letter range emits the backslash code point as an EMPTY member, never "\\\\"', async () => {
+        const r = parseRangeGroup('Z..a')
+        const members = Array.from({ length: r.count }, (_, k) => r.nth(k))
+        assert.deepEqual(members, ['Z', '[', '', ']', '^', '_', '`', 'a'])
+        writeFileSync(join(dir, 'qq'), '1')
+        const g = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'q{Z..a}q' }, ...ctx() })
+        assert.equal(g.isError, false)
+        assert.equal(g.content, 'qq')
+      })
+
+      it('numeric ranges are exact past 2^53 and at any length — never NaN, never rounded, never 1e+21', () => {
+        const big = parseRangeGroup('9007199254740993..9007199254740995')
+        assert.equal(big.count, 3)
+        assert.deepEqual([0, 1, 2].map((k) => big.nth(k)), ['9007199254740993', '9007199254740994', '9007199254740995'])
+        // Two equal 400-digit endpoints: as floats both are Infinity, so the
+        // count was NaN, every `>= cap` test was false, and the group
+        // silently expanded to NOTHING.
+        const nines = '9'.repeat(400)
+        const same = parseRangeGroup(`${nines}..${nines}`)
+        assert.equal(same.count, 1)
+        assert.equal(same.nth(0), nines)
+        assert.deepEqual(expandBraces(`x{${nines}..${nines}}`), [`x${nines}`])
+        assert.ok(parseRangeGroup(`1..${nines}`).count > 1000)
+        assert.equal(expandBraces(`{1..${nines}}`), null, 'over the cap fails closed, even when the count is astronomically large')
+        const e21 = parseRangeGroup('1000000000000000000000..1000000000000000000001')
+        assert.deepEqual([e21.nth(0), e21.nth(1)], ['1000000000000000000000', '1000000000000000000001'])
+      })
+
+      it('a letter range with an enormous step yields its start letter, not a NUL', () => {
+        // `Math.abs(Number(step))` is Infinity for 400 digits and
+        // `Infinity * 0` is NaN, which `String.fromCharCode` turns into U+0000.
+        const r = parseRangeGroup(`a..z..${'9'.repeat(400)}`)
+        assert.equal(r.count, 1)
+        assert.equal(r.nth(0), 'a')
+        const numeric = parseRangeGroup(`1..10..${'9'.repeat(400)}`)
+        assert.equal(numeric.count, 1)
+        assert.equal(numeric.nth(0), '1')
+      })
+
+      it('an empty range member that spells ".." cannot walk out of the search root', async () => {
+        // `.{Z..a}.` expands to `.Z.`, `.[.`, `..`, `.].`, ... — the empty
+        // member makes a real `..` segment. Positive control: `fs.glob`
+        // itself expands the same pattern to a match OUTSIDE the root, so
+        // the pattern really does reach `..` — the tool must not follow it.
+        mkdirSync(join(dir, 'sub'))
+        writeFileSync(join(dir, 'outside.txt'), '1')
+        writeFileSync(join(dir, 'sub', 'inside.txt'), '1')
+        const raw = await Array.fromAsync(fsGlob('.{Z..a}./*', { cwd: join(dir, 'sub') }))
+        assert.ok(raw.some((p) => p.includes('outside.txt')), `control: fs.glob must reach the parent through the empty member, got ${JSON.stringify(raw)}`)
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '.{Z..a}./*', path: 'sub' }, ...ctx() })
+        assert.equal(r.isError, false)
+        assert.ok(!r.content.includes('outside'), `must not escape the root: ${r.content}`)
+        assert.match(r.content, /No matches/)
+      })
+
+      it('hasRangeBrace skips a bracket expression exactly as expandBraces does (the gate is exact, not a superset)', () => {
+        // The implementer's mutation 10 ("not independently observable"):
+        // a range INSIDE a bracket expression is a class to both functions.
+        // Through Glob the skip is invisible (expandBraces would hand the
+        // pattern back unchanged), so it is pinned here, directly.
+        assert.equal(hasRangeBrace('x[{1..3}]'), false)
+        assert.deepEqual(expandBraces('x[{1..3}]'), ['x[{1..3}]'])
+        assert.equal(hasRangeBrace('x[{1..3}]{1..2}'), true, 'control: a range outside the class is still seen')
+      })
+
+      it('brace nesting the host parser sees is capped even when the bracket-oblivious counter reads it as shallow', async () => {
+        // `{,` x30, then a class `[}}}…]` whose 30 `}` walk the shared
+        // counter back down, repeated: the host parser pairs bracket-aware,
+        // so every `{,` really nests. 480 levels in 1,953 characters.
+        const dense = (levels) => {
+          let s = ''
+          for (let open = 0; open < levels;) {
+            const n = Math.min(30, levels - open)
+            s += '{,'.repeat(n) + '[' + '}'.repeat(n) + ']'
+            open += n
+          }
+          return s + 'y' + '}'.repeat(levels)
+        }
+        const deep = dense(480)
+        assert.equal(globPatternComplexityReason(deep), null, 'control: the shared, bracket-oblivious counter passes this pattern')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: deep }, ...ctx() })
+        assert.equal(r.isError, true)
+        assert.match(r.content, /nesting deeper than 32 levels/)
+        // Boundary: exactly 32 real levels is allowed, 33 is not.
+        const at = (levels) => '{,'.repeat(30) + '[' + '}'.repeat(30) + ']' + '{,'.repeat(levels - 30) + 'y' + '}'.repeat(levels)
+        assert.equal(globPatternComplexityReason(at(33)), null)
+        const ok = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: at(32) }, ...ctx() })
+        assert.equal(ok.isError, false, ok.content)
+        const over = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: at(33) }, ...ctx() })
+        assert.equal(over.isError, true)
+        assert.match(over.content, /nesting deeper than 32 levels/)
+      })
+
+      it('the host depth cap is applied to every EXPANSION: an expansion can nest far deeper than the raw pattern reads', async () => {
+        // `{[,` + `{`x30 + `]}` is a comma group whose bracket span `[,{{…]`
+        // hides 30 `{` from any bracket-aware reading of the RAW pattern; its
+        // second alternative, `{`x30 + `]`, puts them in plain text. Two such
+        // groups, each followed by `[` + `}`x31 + `]` to walk the
+        // bracket-oblivious counter back down, then `,}` x60: the raw pattern
+        // reads one level both ways, while one of its 4 expansions really
+        // nests 60 `alt` levels (with 9 groups, 270 levels in 1,158 chars).
+        // `{1..1}` routes the pattern through expansion. This is why runGlob
+        // measures `patterns`, not `pattern`.
+        const hide = '{[,' + '{'.repeat(30) + ']}' + '[' + '}'.repeat(31) + ']'
+        const pattern = '{1..1}' + hide.repeat(2) + ',}'.repeat(60)
+        assert.equal(globPatternComplexityReason(pattern), null, 'control: the shared counter passes the pattern')
+        assert.equal(hostBraceDepthExceeded(pattern), false, 'control: the raw pattern reads shallow to the host scan as well')
+        const expanded = expandBraces(pattern)
+        assert.equal(expanded.length, 4)
+        const deep = expanded.filter(hostBraceDepthExceeded)
+        assert.equal(deep.length, 1)
+        const altDepth = (tokens) => tokens.reduce((d, t) => (t.t === 'alt' ? Math.max(d, 1 + Math.max(...t.options.map(altDepth))) : d), 0)
+        assert.equal(altDepth(compileCaseCheck(deep[0]).matchers[0]), 60, 'the parser really nests that deep, not just the scan')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, r.content)
+        assert.match(r.content, /nesting deeper than 32 levels/)
+      })
+
+      // Both timing tests below compare against a CONTROL measured in the same
+      // process, interleaved, best of N — not against a wall-clock budget. The
+      // absolute budget they replace (40ms for the depth scan) read ~4ms on
+      // the dev Mac uninstrumented, ~31ms under `npm test`'s c8 (V8 block
+      // coverage costs a per-character JS loop ~9x), and 153ms on the Linux
+      // CI runner: a red build on code that had not regressed. CPU speed,
+      // runner contention and coverage counters slow a subject and a control
+      // of the same shape alike, so the RATIO holds where a budget cannot,
+      // and a super-linear regression moves it by an order of magnitude.
+      //
+      // Up to `runs` interleaved pairs, stopping early once three pairs read
+      // under half the limit: a busy runner can inflate every one of a few
+      // sub-millisecond samples (seen at 2x CPU oversubscription on the dev
+      // Mac: one family read 6x for a run), so a pass may take more samples,
+      // while a regression never reads under half the limit and always runs
+      // them all.
+      function bestRatio(subject, control, runs, limit) {
+        let bestS = Infinity
+        let bestC = Infinity
+        for (let r = 0; r < runs; r++) {
+          let t0 = performance.now()
+          control()
+          bestC = Math.min(bestC, performance.now() - t0)
+          t0 = performance.now()
+          subject()
+          bestS = Math.min(bestS, performance.now() - t0)
+          if (r >= 2 && bestS / bestC < limit / 2) break
+        }
+        return { ratio: bestS / bestC, bestS, bestC }
+      }
+
+      it('the host depth scan is linear: every bracket/brace family costs a small multiple of a bracket-oblivious pass', { timeout: 120_000 }, () => {
+        // runGlob runs hostBraceDepthExceeded synchronously over every
+        // expanded pattern — up to 1,000 of up to 2,000 chars — before the
+        // walk, so it must stay ONE pass per pattern. Called directly on long
+        // strings (the scan has no length cap of its own), where one pass and
+        // a rescan differ by orders of magnitude. The control is the same
+        // depth count without the bracket skip, over the same string.
+        //
+        // Measured subject/control, worst family per run: 1.3-2.3 under c8 on
+        // the dev Mac (20 runs), 2.3-2.6 under V8 coverage in
+        // node:22-bookworm (20 runs), at most 2.6 under c8 with the CPU 2x
+        // oversubscribed (10 runs). A rescan: dropping the `lastClose` skip
+        // reads 173x under c8 on the unclosed family; a per-`{` prefix
+        // rescan reads 1,360-3,340x. Skipping brackets through the
+        // allocating parseBracketExpr again is a constant factor, not a
+        // rescan — red uninstrumented, not under c8, and not this test's job.
+        const MAX_RATIO = 8
+        const obliviousPass = (s) => {
+          let depth = 0
+          let max = 0
+          for (let j = 0; j < s.length; j++) {
+            const c = s.charCodeAt(j)
+            if (c === 0x7b) { if (++depth > max) max = depth } else if (c === 0x7d && depth > 0) depth--
+          }
+          return max
+        }
+        const families = {
+          // An unclosed `[` must not re-scan to the end (the `lastClose` skip).
+          'unclosed [': '['.repeat(150_000),
+          'closed [x]': '[x]'.repeat(50_000),
+          '{} pairs': '{}'.repeat(8_000),
+          '[{} mixed': '[{}'.repeat(5_000),
+          '[}]{} bracket-hidden': '[}]{}'.repeat(3_000),
+        }
+        let sink = 0
+        for (const [name, s] of Object.entries(families)) {
+          assert.equal(hostBraceDepthExceeded(s), false, `${name}: control — the family must pass, so the whole string is scanned`)
+          const { ratio, bestS, bestC } = bestRatio(() => { sink += hostBraceDepthExceeded(s) ? 1 : 0 }, () => { sink += obliviousPass(s) }, 15, MAX_RATIO)
+          assert.ok(ratio < MAX_RATIO, `${name}: depth scan took ${ratio.toFixed(1)}x the oblivious pass (${bestS.toFixed(3)}ms vs ${bestC.toFixed(3)}ms) — a rescan, not one pass`)
+        }
+        assert.ok(sink > 0, 'both sides ran and produced a result')
+      })
+
+      it('the host depth scan over a range\'s 999 expansions stays under a measured ceiling', { timeout: 60_000 }, () => {
+        // The runGlob-scale cost of the scan above: 999 expansions of ~2,000
+        // chars in each family, all passing, so every one is scanned in full.
+        // Measured, best of 3, worst family per run: 3-6ms on the dev Mac
+        // uninstrumented, 31-35ms under c8 (20 runs), 93-95ms under V8
+        // coverage in node:22-bookworm (20 runs), up to 81ms under c8 with the
+        // CPU 2x oversubscribed; the one CI reading (Linux runner, c8, whole
+        // suite in parallel) was 153ms for the unclosed family. The ratio
+        // test above is what catches a super-linear regression; this is the
+        // absolute ceiling on the synchronous block runGlob pays, with ~6x
+        // headroom over that CI reading (the #7910 perf guard went 250ms ->
+        // 2000ms on the same kind of evidence).
+        const AGG_CEILING_MS = 1000
+        for (const unit of ['[', '[x]', '{}', '[{}', '[}]{}']) {
+          const expanded = expandBraces('{1..999}' + unit.repeat(Math.floor(1990 / unit.length)))
+          assert.equal(expanded.length, 999)
+          assert.equal(expanded.some(hostBraceDepthExceeded), false, `${unit}: control — every expansion passes, so all 999 are scanned`)
+          let best = Infinity
+          for (let run = 0; run < 3; run++) {
+            const t0 = performance.now()
+            for (const p of expanded) hostBraceDepthExceeded(p)
+            best = Math.min(best, performance.now() - t0)
+          }
+          assert.ok(best < AGG_CEILING_MS, `${unit}: depth scan over 999 expansions took ${best.toFixed(1)}ms (ceiling ${AGG_CEILING_MS}ms)`)
+        }
+      })
+
+      it('per-segment brace pairing is one pass: a run of unmatched `{` costs no more than the brackets around it', { timeout: 120_000 }, () => {
+        // Each `{[}]` is a `{` bracket-aware pairing leaves unmatched. The
+        // shipped per-`{` scan re-parsed every unclosed `[` after it with a
+        // full `indexOf`, and `{1..999}` makes runGlob compile 999 such
+        // patterns: 2,146ms per Glob call on the dev Mac, against ~90ms with
+        // one pairing pass. The control is the same pattern with the `{`
+        // removed (same length, same brackets, same unclosed run), so
+        // whatever the brackets cost on this machine cancels out.
+        //
+        // Measured subject/control: 1.8-1.9 on the dev Mac uninstrumented and
+        // under c8, and in node:22-bookworm (20 runs each), at most 2.0 with
+        // the CPU 2x oversubscribed — the one pairing pass is a second walk
+        // over the same brackets. Restoring the per-`{` scan, or rebuilding
+        // the table at every `{`: 28x both ways. On CI the old absolute 1s
+        // budget read 825ms — 83% of it, on code that had not regressed.
+        const MAX_RATIO = 6
+        const subject = expandBraces('{1..999}' + '{[}]'.repeat(30) + '['.repeat(1870))
+        const control = expandBraces('{1..999}' + '[}]'.repeat(30) + '['.repeat(1900))
+        assert.equal(subject.length, 999)
+        assert.equal(control.length, 999)
+        assert.equal(subject[0].length, control[0].length)
+        const { ratio, bestS, bestC } = bestRatio(
+          () => { for (const p of subject) compileCaseCheck(p) },
+          () => { for (const p of control) compileCaseCheck(p) },
+          5,
+          MAX_RATIO,
+        )
+        assert.ok(ratio < MAX_RATIO, `30 unmatched "{" made compiling ${ratio.toFixed(1)}x slower (${bestS.toFixed(0)}ms vs ${bestC.toFixed(0)}ms) — pairing is rescanning per "{"`)
+      })
+    })
+
     // #7898 round 4 — every prior round (1-3) found a NEW super-linear
     // blow-up in this matcher (silent false negatives, a backtracking-regex
     // ReDoS, an O(n^2) brace-alternative branch). This suite is the
@@ -1372,16 +1904,21 @@ describe('executeBuiltinTool', () => {
         assert.deepEqual(expandBraces('{{dup,nested/dup}}').sort(), ['{dup}', '{nested/dup}'])
         // An unmatched '{' is a literal, and scanning continues past it.
         assert.deepEqual(expandBraces('{x/{a,b}').sort(), ['{x/a', '{x/b'])
-        // Brace syntax inside a bracket expression is a class member: a `}`
-        // there does not close the group and a `,` there does not split it.
-        // (This bracket-awareness is #7918's own choice — `fs.glob`'s brace
-        // expansion is bracket-unaware and splits `{a[,]b,c/d}` three ways;
-        // filed as a follow-up. Pinned here because the linear rewrite
-        // re-implements it, and a pairing pass that ignored brackets
-        // otherwise survived every other test in this file.)
+        // Brace syntax (`{`/`}`) inside a bracket expression is a class
+        // member for PAIRING purposes: a `}` there does not close the group
+        // early (verified directly against `fs.glob`: `{a[}]b,fc}` only
+        // matches a real file named `fc`, never one shaped like the
+        // truncated group a bracket-oblivious pairing scan would find).
         assert.deepEqual(expandBraces('[{,]{a,b/c}').sort(), ['[{,]a', '[{,]b/c'])
         assert.deepEqual(expandBraces('{a,[}]b/c}').sort(), ['[}]b/c', 'a'])
-        assert.deepEqual(expandBraces('{a[,]b,c/d}').sort(), ['a[,]b', 'c/d'])
+        // #7951 — but a COMMA inside a bracket expression is deliberately
+        // NOT a class member for SPLITTING purposes: it still splits, the
+        // OPPOSITE awareness from pairing just above, matching `fs.glob`'s
+        // own measured behavior exactly (`{a[,]b,c/d}` against real files
+        // named `a[`, `]b`, `c/d` splits 3 ways, not the 2 a bracket-aware
+        // split gave before this fix — see the parity harness's `#7951`
+        // rows, which prove this end-to-end against `fs.glob` itself).
+        assert.deepEqual(expandBraces('{a[,]b,c/d}').sort(), [']b', 'a[', 'c/d'])
       })
 
       it('expandBraces refuses an over-cap pattern without materializing it', { timeout: 5000 }, () => {

@@ -733,6 +733,11 @@ export class PermissionManager extends EventEmitter {
       // execution via the _pendingPermissions entry above; this payload is
       // broadcast/display only, so a secret in a value (or the stringified
       // fallback description) must not reach subscribed clients.
+      // #7968: carry the floor verdict computed above so an external consumer
+      // of permission_request (e.g. the agent-control MCP, #7854) can tell a
+      // floored prompt apart from an ordinary one. Stashed on _lastPermissionData
+      // too, so both the resend path (resendPendingPermissions) and this
+      // broadcast agree — one computation, replayed verbatim.
       const permPayload = {
         requestId,
         tool: toolName,
@@ -740,6 +745,7 @@ export class PermissionManager extends EventEmitter {
         input: sanitizeToolInput(toolInput),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
+        floored: protectedTarget,
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)
@@ -1247,6 +1253,10 @@ export class PermissionManager extends EventEmitter {
       // #6038: redact before broadcast (description embeds server.command/argv0;
       // input carries args/envKeys). Raw values for execution live on the
       // _pendingPermissions entry above.
+      // #7968: mcp_spawn carries no PROTECTED_PATH_INPUT_FIELDS (its input is
+      // `{ mcpServer: {...} }`, not a bare file_path/path/notebook_path), so
+      // isFlooredTarget is always false here — computed rather than hardcoded
+      // so this stays correct if that ever changes.
       const permPayload = {
         requestId,
         tool: 'mcp_spawn',
@@ -1254,6 +1264,7 @@ export class PermissionManager extends EventEmitter {
         input: sanitizeToolInput(input),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
+        floored: isFlooredTarget('mcp_spawn', input, this._cwd),
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)
