@@ -403,8 +403,13 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // characters with the counter never above 30, and overflowed the stack
   // inside the matcher with less headroom (`--stack-size=250`). Same ceiling,
   // measured the way THIS parser pairs, on exactly the strings the walk will
-  // compile (an expansion splices text together, which can re-delimit a
-  // bracket expression, so the raw pattern's reading would not be enough).
+  // compile. The raw pattern's reading is NOT enough: an alternative split out
+  // of a bracket expression puts the braces that expression hid into plain
+  // text — `{[,` + `{`x30 + `]}` reads one level raw, and its second
+  // alternative opens 30 — so 9 such groups read 1 level raw and expand to a
+  // 270-level `alt` nest (pinned in byok-tool-executor.test.js, "applied to
+  // every EXPANSION"). Linear in the expansion's total length; see
+  // `hostBraceNestingDepth`'s COST note for the measured bound.
   if (patterns.some(hostBraceDepthExceeded)) {
     return {
       content: globPatternComplexityMessage(`"{" nesting deeper than ${GLOB_PATTERN_MAX_BRACE_DEPTH} levels`),
@@ -1609,28 +1614,41 @@ function segmentMatches(tokens, str) {
  * is the only place this flag is read.
  */
 function parseBracketExpr(seg, openIdx) {
-  let j = openIdx + 1
-  let negate = false
-  if (seg[j] === '!' || seg[j] === '^') {
-    negate = true
-    j++
-  }
-  const start = j
-  if (seg[j] === ']') j++
-  // #7918 review — the native `indexOf` rather than a JS loop: same answer
-  // (the first `]` at or after `j`, or none), but a run of unclosed `[` costs
-  // one full scan per `[` either way, and #7918's brace expansion can hand
-  // up to GLOB_BRACE_EXPANSION_CAP patterns to `compileCaseCheck` per call,
-  // so the constant factor of that quadratic is no longer paid once.
-  j = seg.indexOf(']', j)
-  if (j === -1) return null
-  const body = seg.slice(start, j)
-  if (body.length === 0) return null
+  const next = bracketExprEnd(seg, openIdx)
+  if (next === -1) return null
+  const negate = seg[openIdx + 1] === '!' || seg[openIdx + 1] === '^'
+  const body = seg.slice(openIdx + (negate ? 2 : 1), next - 1)
   // '-' is left alone (ranges mean the same thing in a JS class); '^' and ']'
   // are escaped so an unlucky position (leading '^', an already-consumed
   // leading ']') can't be misread as class syntax.
   const classBody = body.replace(/\^/g, '\\^').replace(/\]/g, '\\]')
-  return { source: `[${negate ? '^' : ''}${classBody}]`, next: j + 1, soleDot: !negate && body === '.' }
+  return { source: `[${negate ? '^' : ''}${classBody}]`, next, soleDot: !negate && body === '.' }
+}
+
+/**
+ * Where the bracket expression opening at `seg[openIdx] === '['` ends: the
+ * index just past its closing `]`, or -1 when this `[` is a literal. This is
+ * {@link parseBracketExpr}'s delimiting rule and its only implementation —
+ * that function calls this one — so a scan that only needs to SKIP a bracket
+ * expression (`hostBraceNestingDepth`) can do so without building the class
+ * source, and cannot disagree with the parser about where the class ends.
+ *
+ * #7918 review — the native `indexOf` rather than a JS loop: same answer (the
+ * first `]` at or after `j`, or none), but a run of unclosed `[` costs one
+ * full scan per `[` either way, and #7918's brace expansion can hand up to
+ * GLOB_BRACE_EXPANSION_CAP patterns to `compileCaseCheck` per call, so the
+ * constant factor of that quadratic is no longer paid once.
+ */
+function bracketExprEnd(seg, openIdx) {
+  let j = openIdx + 1
+  if (seg[j] === '!' || seg[j] === '^') j++
+  const start = j
+  if (seg[j] === ']') j++
+  j = seg.indexOf(']', j)
+  // An empty body cannot actually occur (a `]` at `start` is consumed as a
+  // member above), but the rule "no body, no class" is kept explicit.
+  if (j === -1 || j === start) return -1
+  return j + 1
 }
 
 /**
@@ -1691,26 +1709,40 @@ function braceCloseTable(seg) {
  * on their depth, which the bracket-oblivious `globPatternComplexityReason`
  * counter is not for this parser (see `runGlob`'s #7951 review note).
  *
- * `lastClose`: `runGlob` runs this over EVERY expanded pattern before the
- * walk, synchronously. An unclosed `[` costs {@link parseBracketExpr} a full
- * `indexOf` to the end, so a run of them is quadratic per pattern — measured
- * ~70ms for the 999 expansions of `{1..999}` + 1,990 `[`, against ~4ms when
- * every `[` after the last `]` is skipped (it cannot open a class: no `]`
- * follows it, so `parseBracketExpr` would return null anyway).
+ * COST — `runGlob` runs this over EVERY expanded pattern before the walk,
+ * synchronously: up to 1,000 patterns of up to 2,000 chars, so it must be one
+ * pass per pattern. It cannot instead run once over the raw pattern — an
+ * expansion can nest far deeper than the pattern it came from (see the
+ * runGlob note) — so its total is linear in the expansion's OUTPUT, the same
+ * order as materializing that output and deduplicating it just before.
+ *   - `lastClose`: an unclosed `[` costs {@link bracketExprEnd} a full
+ *     `indexOf` to the end, so a run of them is quadratic per pattern —
+ *     ~70ms for the 999 expansions of `{1..999}` + 1,990 `[`, against ~3ms
+ *     when every `[` after the last `]` is skipped (it cannot open a class:
+ *     no `]` follows it).
+ *   - {@link bracketExprEnd}, not {@link parseBracketExpr}: the skip needs
+ *     only where a class ends, and building each class's source cost ~6x on
+ *     a run of closed classes (`[x]` x663 behind `{1..999}`: 34ms -> 6ms).
+ * Measured, 999 expansions of each worst family: 3-6ms on the dev Mac; 6-16x
+ * that under V8 block coverage (c8), which instruments this per-character
+ * loop — which is why its tests compare against a control, not a clock.
  */
 function hostBraceNestingDepth(s) {
   const lastClose = s.lastIndexOf(']')
+  const n = s.length
   let depth = 0
   let max = 0
   let j = 0
-  while (j < s.length) {
-    const c = s[j]
-    if (c === '[' && j < lastClose) {
-      const parsed = parseBracketExpr(s, j)
-      if (parsed) { j = parsed.next; continue }
+  while (j < n) {
+    const c = s.charCodeAt(j)
+    if (c === 0x7b) { // {
+      if (++depth > max) max = depth
+    } else if (c === 0x7d) { // }
+      if (depth > 0) depth--
+    } else if (c === 0x5b && j < lastClose) { // [
+      const end = bracketExprEnd(s, j)
+      if (end !== -1) { j = end; continue }
     }
-    if (c === '{') { depth++; if (depth > max) max = depth }
-    else if (c === '}' && depth > 0) depth--
     j++
   }
   return max

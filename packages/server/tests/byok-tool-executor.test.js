@@ -1551,35 +1551,160 @@ describe('executeBuiltinTool', () => {
         assert.match(over.content, /nesting deeper than 32 levels/)
       })
 
-      it('the host depth check over every expansion stays inside the event-loop budget', { timeout: 30_000 }, () => {
-        // runGlob runs hostBraceDepthExceeded over all (up to 1,000)
-        // expanded patterns synchronously before the walk. Measured ~4ms
-        // here; ~70ms when an unclosed `[` re-scans to the end each time.
-        // Best of three, so one scheduler hiccup cannot fail it.
-        const expanded = expandBraces('{1..999}' + '['.repeat(1990))
-        assert.equal(expanded.length, 999)
-        let best = Infinity
-        for (let run = 0; run < 3; run++) {
-          const t0 = performance.now()
-          for (const p of expanded) assert.equal(hostBraceDepthExceeded(p), false)
-          best = Math.min(best, performance.now() - t0)
-        }
-        assert.ok(best < 40, `depth check over 999 expansions must stay well under 50ms, best of 3 took ${best.toFixed(1)}ms`)
+      it('the host depth cap is applied to every EXPANSION: an expansion can nest far deeper than the raw pattern reads', async () => {
+        // `{[,` + `{`x30 + `]}` is a comma group whose bracket span `[,{{…]`
+        // hides 30 `{` from any bracket-aware reading of the RAW pattern; its
+        // second alternative, `{`x30 + `]`, puts them in plain text. Two such
+        // groups, each followed by `[` + `}`x31 + `]` to walk the
+        // bracket-oblivious counter back down, then `,}` x60: the raw pattern
+        // reads one level both ways, while one of its 4 expansions really
+        // nests 60 `alt` levels (with 9 groups, 270 levels in 1,158 chars).
+        // `{1..1}` routes the pattern through expansion. This is why runGlob
+        // measures `patterns`, not `pattern`.
+        const hide = '{[,' + '{'.repeat(30) + ']}' + '[' + '}'.repeat(31) + ']'
+        const pattern = '{1..1}' + hide.repeat(2) + ',}'.repeat(60)
+        assert.equal(globPatternComplexityReason(pattern), null, 'control: the shared counter passes the pattern')
+        assert.equal(hostBraceDepthExceeded(pattern), false, 'control: the raw pattern reads shallow to the host scan as well')
+        const expanded = expandBraces(pattern)
+        assert.equal(expanded.length, 4)
+        const deep = expanded.filter(hostBraceDepthExceeded)
+        assert.equal(deep.length, 1)
+        const altDepth = (tokens) => tokens.reduce((d, t) => (t.t === 'alt' ? Math.max(d, 1 + Math.max(...t.options.map(altDepth))) : d), 0)
+        assert.equal(altDepth(compileCaseCheck(deep[0]).matchers[0]), 60, 'the parser really nests that deep, not just the scan')
+        const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern }, ...ctx() })
+        assert.equal(r.isError, true, r.content)
+        assert.match(r.content, /nesting deeper than 32 levels/)
       })
 
-      it('per-segment brace pairing is one pass: bracket-heavy segments behind a range compile in bounded total time', { timeout: 60_000 }, () => {
-        // Each `{[}]` is a `{` bracket-aware pairing leaves unmatched; the
+      // Both timing tests below compare against a CONTROL measured in the same
+      // process, interleaved, best of N — not against a wall-clock budget. The
+      // absolute budget they replace (40ms for the depth scan) read ~4ms on
+      // the dev Mac uninstrumented, ~31ms under `npm test`'s c8 (V8 block
+      // coverage costs a per-character JS loop ~9x), and 153ms on the Linux
+      // CI runner: a red build on code that had not regressed. CPU speed,
+      // runner contention and coverage counters slow a subject and a control
+      // of the same shape alike, so the RATIO holds where a budget cannot,
+      // and a super-linear regression moves it by an order of magnitude.
+      //
+      // Up to `runs` interleaved pairs, stopping early once three pairs read
+      // under half the limit: a busy runner can inflate every one of a few
+      // sub-millisecond samples (seen at 2x CPU oversubscription on the dev
+      // Mac: one family read 6x for a run), so a pass may take more samples,
+      // while a regression never reads under half the limit and always runs
+      // them all.
+      function bestRatio(subject, control, runs, limit) {
+        let bestS = Infinity
+        let bestC = Infinity
+        for (let r = 0; r < runs; r++) {
+          let t0 = performance.now()
+          control()
+          bestC = Math.min(bestC, performance.now() - t0)
+          t0 = performance.now()
+          subject()
+          bestS = Math.min(bestS, performance.now() - t0)
+          if (r >= 2 && bestS / bestC < limit / 2) break
+        }
+        return { ratio: bestS / bestC, bestS, bestC }
+      }
+
+      it('the host depth scan is linear: every bracket/brace family costs a small multiple of a bracket-oblivious pass', { timeout: 120_000 }, () => {
+        // runGlob runs hostBraceDepthExceeded synchronously over every
+        // expanded pattern — up to 1,000 of up to 2,000 chars — before the
+        // walk, so it must stay ONE pass per pattern. Called directly on long
+        // strings (the scan has no length cap of its own), where one pass and
+        // a rescan differ by orders of magnitude. The control is the same
+        // depth count without the bracket skip, over the same string.
+        //
+        // Measured subject/control, worst family per run: 1.3-2.3 under c8 on
+        // the dev Mac (20 runs), 2.3-2.6 under V8 coverage in
+        // node:22-bookworm (20 runs), at most 2.6 under c8 with the CPU 2x
+        // oversubscribed (10 runs). A rescan: dropping the `lastClose` skip
+        // reads 173x under c8 on the unclosed family; a per-`{` prefix
+        // rescan reads 1,360-3,340x. Skipping brackets through the
+        // allocating parseBracketExpr again is a constant factor, not a
+        // rescan — red uninstrumented, not under c8, and not this test's job.
+        const MAX_RATIO = 8
+        const obliviousPass = (s) => {
+          let depth = 0
+          let max = 0
+          for (let j = 0; j < s.length; j++) {
+            const c = s.charCodeAt(j)
+            if (c === 0x7b) { if (++depth > max) max = depth } else if (c === 0x7d && depth > 0) depth--
+          }
+          return max
+        }
+        const families = {
+          // An unclosed `[` must not re-scan to the end (the `lastClose` skip).
+          'unclosed [': '['.repeat(150_000),
+          'closed [x]': '[x]'.repeat(50_000),
+          '{} pairs': '{}'.repeat(8_000),
+          '[{} mixed': '[{}'.repeat(5_000),
+          '[}]{} bracket-hidden': '[}]{}'.repeat(3_000),
+        }
+        let sink = 0
+        for (const [name, s] of Object.entries(families)) {
+          assert.equal(hostBraceDepthExceeded(s), false, `${name}: control — the family must pass, so the whole string is scanned`)
+          const { ratio, bestS, bestC } = bestRatio(() => { sink += hostBraceDepthExceeded(s) ? 1 : 0 }, () => { sink += obliviousPass(s) }, 15, MAX_RATIO)
+          assert.ok(ratio < MAX_RATIO, `${name}: depth scan took ${ratio.toFixed(1)}x the oblivious pass (${bestS.toFixed(3)}ms vs ${bestC.toFixed(3)}ms) — a rescan, not one pass`)
+        }
+        assert.ok(sink > 0, 'both sides ran and produced a result')
+      })
+
+      it('the host depth scan over a range\'s 999 expansions stays under a measured ceiling', { timeout: 60_000 }, () => {
+        // The runGlob-scale cost of the scan above: 999 expansions of ~2,000
+        // chars in each family, all passing, so every one is scanned in full.
+        // Measured, best of 3, worst family per run: 3-6ms on the dev Mac
+        // uninstrumented, 31-35ms under c8 (20 runs), 93-95ms under V8
+        // coverage in node:22-bookworm (20 runs), up to 81ms under c8 with the
+        // CPU 2x oversubscribed; the one CI reading (Linux runner, c8, whole
+        // suite in parallel) was 153ms for the unclosed family. The ratio
+        // test above is what catches a super-linear regression; this is the
+        // absolute ceiling on the synchronous block runGlob pays, with ~6x
+        // headroom over that CI reading (the #7910 perf guard went 250ms ->
+        // 2000ms on the same kind of evidence).
+        const AGG_CEILING_MS = 1000
+        for (const unit of ['[', '[x]', '{}', '[{}', '[}]{}']) {
+          const expanded = expandBraces('{1..999}' + unit.repeat(Math.floor(1990 / unit.length)))
+          assert.equal(expanded.length, 999)
+          assert.equal(expanded.some(hostBraceDepthExceeded), false, `${unit}: control — every expansion passes, so all 999 are scanned`)
+          let best = Infinity
+          for (let run = 0; run < 3; run++) {
+            const t0 = performance.now()
+            for (const p of expanded) hostBraceDepthExceeded(p)
+            best = Math.min(best, performance.now() - t0)
+          }
+          assert.ok(best < AGG_CEILING_MS, `${unit}: depth scan over 999 expansions took ${best.toFixed(1)}ms (ceiling ${AGG_CEILING_MS}ms)`)
+        }
+      })
+
+      it('per-segment brace pairing is one pass: a run of unmatched `{` costs no more than the brackets around it', { timeout: 120_000 }, () => {
+        // Each `{[}]` is a `{` bracket-aware pairing leaves unmatched. The
         // shipped per-`{` scan re-parsed every unclosed `[` after it with a
         // full `indexOf`, and `{1..999}` makes runGlob compile 999 such
-        // patterns. Measured on the dev Mac: 2,146ms per Glob call before
-        // (main: ~0ms, it paired bracket-oblivious), ~90ms after.
-        const pattern = '{1..999}' + '{[}]'.repeat(30) + '['.repeat(1870)
-        const expanded = expandBraces(pattern)
-        assert.equal(expanded.length, 999)
-        const t0 = Date.now()
-        for (const p of expanded) compileCaseCheck(p)
-        const elapsedMs = Date.now() - t0
-        assert.ok(elapsedMs < 1000, `compiling 999 expansions must stay well under a second, took ${elapsedMs}ms`)
+        // patterns: 2,146ms per Glob call on the dev Mac, against ~90ms with
+        // one pairing pass. The control is the same pattern with the `{`
+        // removed (same length, same brackets, same unclosed run), so
+        // whatever the brackets cost on this machine cancels out.
+        //
+        // Measured subject/control: 1.8-1.9 on the dev Mac uninstrumented and
+        // under c8, and in node:22-bookworm (20 runs each), at most 2.0 with
+        // the CPU 2x oversubscribed — the one pairing pass is a second walk
+        // over the same brackets. Restoring the per-`{` scan, or rebuilding
+        // the table at every `{`: 28x both ways. On CI the old absolute 1s
+        // budget read 825ms — 83% of it, on code that had not regressed.
+        const MAX_RATIO = 6
+        const subject = expandBraces('{1..999}' + '{[}]'.repeat(30) + '['.repeat(1870))
+        const control = expandBraces('{1..999}' + '[}]'.repeat(30) + '['.repeat(1900))
+        assert.equal(subject.length, 999)
+        assert.equal(control.length, 999)
+        assert.equal(subject[0].length, control[0].length)
+        const { ratio, bestS, bestC } = bestRatio(
+          () => { for (const p of subject) compileCaseCheck(p) },
+          () => { for (const p of control) compileCaseCheck(p) },
+          5,
+          MAX_RATIO,
+        )
+        assert.ok(ratio < MAX_RATIO, `30 unmatched "{" made compiling ${ratio.toFixed(1)}x slower (${bestS.toFixed(0)}ms vs ${bestC.toFixed(0)}ms) — pairing is rescanning per "{"`)
       })
     })
 
