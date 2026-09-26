@@ -7,11 +7,14 @@ import { join } from 'node:path'
 import {
   CLAUDE_CONFIG_MAX_BYTES,
   DEFAULT_TRUST_DNS_TIMEOUT_MS,
+  MCP_SERVER_SOURCE,
+  MCP_SERVER_SOURCE_VALUES,
   classifyIpAddress,
   discoverConfiguredMcpServers,
   discoverMcpServerSpecs,
   isBlockedMetadataHost,
   loadClaudeMcpConfig,
+  mcpWriteScopeToSource,
   parseClaudeMcpConfig,
   redactMcpUrl,
   resolveTrustAddress,
@@ -401,7 +404,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
       JSON.stringify({ mcpServers: { fs: { command: 'npx', args: ['-y', 'x'], env: { A: '1' } } } }),
     )
     const res = discoverMcpServerSpecs(cwd, { configPath })
-    assert.deepEqual(res.servers, [{ name: 'fs', command: 'npx', args: ['-y', 'x'], env: { A: '1' } }])
+    assert.deepEqual(res.servers, [{ name: 'fs', command: 'npx', args: ['-y', 'x'], env: { A: '1' }, source: MCP_SERVER_SOURCE.USER }])
   })
 
   it('#7112: resolves a server declared ONLY under projects[realpath(cwd)].mcpServers', () => {
@@ -413,14 +416,47 @@ describe('discoverMcpServerSpecs (#7112)', () => {
       }),
     )
     const res = discoverMcpServerSpecs(cwd, { configPath })
-    assert.deepEqual(res.servers, [{ name: 'projonly', command: 'node', args: ['p.js'], env: {} }])
+    assert.deepEqual(res.servers, [{ name: 'projonly', command: 'node', args: ['p.js'], env: {}, source: MCP_SERVER_SOURCE.LOCAL }])
     assert.deepEqual(res.warnings, [])
   })
 
   it('resolves a project-local .mcp.json server under cwd', () => {
     writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { local1: { command: 'node' } } }))
     const res = discoverMcpServerSpecs(cwd, { configPath })
-    assert.deepEqual(res.servers, [{ name: 'local1', command: 'node', args: [], env: {} }])
+    assert.deepEqual(res.servers, [{ name: 'local1', command: 'node', args: [], env: {}, source: MCP_SERVER_SOURCE.PROJECT_MCP_JSON }])
+  })
+
+  // #7939: each spec's `source` names the SCOPE it won precedence from, not
+  // just the scope's mere presence — proven by three overlapping sources so
+  // a bug that stamped every spec with e.g. the LAST-visited scope's source
+  // (rather than the WINNING one) would be caught.
+  it('#7939: source on a spec matches whichever scope actually won the name collision', () => {
+    const realCwd = realpathSync(cwd)
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        mcpServers: { shared: { command: 'user-cmd' } },
+        projects: { [realCwd]: { mcpServers: { shared: { command: 'project-cmd' } } } },
+      }),
+    )
+    writeFileSync(join(cwd, '.mcp.json'), JSON.stringify({ mcpServers: { shared: { command: 'local-cmd' } } }))
+    const res = discoverMcpServerSpecs(cwd, { configPath })
+    assert.equal(res.servers.length, 1)
+    assert.equal(res.servers[0].command, 'project-cmd')
+    assert.equal(res.servers[0].source, MCP_SERVER_SOURCE.LOCAL, 'the winning ("Local") scope\'s source, not .mcp.json\'s or user\'s')
+  })
+
+  it('#7939: MCP_SERVER_SOURCE_VALUES lists exactly the three scope values', () => {
+    assert.deepEqual([...MCP_SERVER_SOURCE_VALUES].sort(), ['local', 'project-mcp-json', 'user'])
+  })
+
+  it('#7939: mcpWriteScopeToSource maps the two WRITE scopes onto the READ vocabulary', () => {
+    assert.equal(mcpWriteScopeToSource('project'), MCP_SERVER_SOURCE.LOCAL)
+    assert.equal(mcpWriteScopeToSource('user'), MCP_SERVER_SOURCE.USER)
+    // Default write scope (addMcpServerToConfig's `scope = 'user'`) must map
+    // to USER too, so an unscoped/unknown caller degrades to the SAFER (more
+    // visible / less "trust me" implying) label rather than throwing.
+    assert.equal(mcpWriteScopeToSource(undefined), MCP_SERVER_SOURCE.USER)
   })
 
   it('precedence on a name collision: project scope ("Local") beats .mcp.json ("Project") beats user root ("User")', () => {
@@ -492,7 +528,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
       }),
     )
     const res = discoverMcpServerSpecs(cwd, { configPath })
-    assert.deepEqual(res.servers, [{ name: 'remote', type: 'http', url: 'https://example/mcp', headers: {} }])
+    assert.deepEqual(res.servers, [{ name: 'remote', type: 'http', url: 'https://example/mcp', headers: {}, source: MCP_SERVER_SOURCE.LOCAL }])
   })
 
   it('never throws on corrupt user config JSON — accumulates a warning, returns empty', () => {
@@ -529,7 +565,7 @@ describe('discoverMcpServerSpecs (#7112)', () => {
     const missingCwd = join(cwd, 'does-not-exist')
     writeFileSync(configPath, JSON.stringify({ mcpServers: { fs: { command: 'npx' } } }))
     const res = discoverMcpServerSpecs(missingCwd, { configPath })
-    assert.deepEqual(res.servers, [{ name: 'fs', command: 'npx', args: [], env: {} }])
+    assert.deepEqual(res.servers, [{ name: 'fs', command: 'npx', args: [], env: {}, source: MCP_SERVER_SOURCE.USER }])
     assert.deepEqual(res.warnings, [])
   })
 

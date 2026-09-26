@@ -195,6 +195,61 @@ describe('MCPFleet', () => {
       try { fs.rmSync(tmpStorePath) } catch {}
     })
 
+    // #7939: the fleet's trust gate is the SPAWN-TIME backstop (the primary
+    // gate for a discovered config; the belt-and-braces re-check for a
+    // live-added one). It must forward the discovery-time `cfg.source` into
+    // the `requestMcpTrust` payload so the prompt can name which config scope
+    // this server came from — the whole point being to distinguish "my own
+    // config" from "a repository I just cloned" (a `.mcp.json` server).
+    it('forwards cfg.source into the requestMcpTrust payload', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-source.json`
+      let captured = null
+      const fakePermissionManager = {
+        requestMcpTrust: async (req) => { captured = req; return true },
+      }
+      const server = { ...cfg('withsource'), source: 'project-mcp-json' }
+      const fleet = new MCPFleet([server], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      // try/finally: fleet.start() spawns a real child process (see cfg()) —
+      // an assertion failure must not skip destroy() and leak it.
+      try {
+        await fleet.start()
+        assert.ok(captured, 'requestMcpTrust must have been called')
+        assert.equal(captured.source, 'project-mcp-json')
+      } finally {
+        await fleet.destroy()
+        try { (await import('node:fs')).rmSync(tmpStorePath) } catch {}
+      }
+    })
+
+    // Mutation control for the test above: a cfg built WITHOUT going through
+    // discovery (e.g. a bare test fixture, or a pre-#7939 caller) has no
+    // `.source` at all — the gate must forward `undefined` rather than
+    // inventing a value, so the client can tell "no source" from "some source".
+    it('omits source from the requestMcpTrust payload when cfg carries none', async () => {
+      const tmpStorePath = `/tmp/chroxy-mcp-trust-test-${process.pid}-${Date.now()}-nosource.json`
+      let captured = null
+      const fakePermissionManager = {
+        requestMcpTrust: async (req) => { captured = req; return true },
+      }
+      const fleet = new MCPFleet([cfg('nosource')], {
+        log: silentLog(),
+        permissionManager: fakePermissionManager,
+        trustStorePath: tmpStorePath,
+      })
+      try {
+        await fleet.start()
+        assert.ok(captured, 'requestMcpTrust must have been called')
+        assert.equal(captured.source, undefined)
+      } finally {
+        await fleet.destroy()
+        try { (await import('node:fs')).rmSync(tmpStorePath) } catch {}
+      }
+    })
+
     it('no permissionManager → no trust gate, spawn behaves as in #4077', async () => {
       const fleet = new MCPFleet([cfg('alpha')], { log: silentLog() })
       await fleet.start()

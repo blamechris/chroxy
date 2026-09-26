@@ -151,6 +151,9 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           remainingMs={remainingMs}
           onRespond={(reqId, decision, editedInput, reason) => sendPermissionResponse(reqId, decision, editedInput, reason)}
           sessionLabel={buildSessionLabel(storeMsg.originSessionId, sessions)}
+          // #7939 — already-broadcast tool input (no extra pull); currently
+          // read only for an mcp_spawn prompt's `mcpServer.source`.
+          toolInput={storeMsg.toolInput}
         />
       )
     }

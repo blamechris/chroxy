@@ -127,6 +127,25 @@ export function langFromPath(filePath: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// MCP spawn-trust source labels (#7939)
+// ---------------------------------------------------------------------------
+
+/**
+ * Human-readable label for each `MCP_SERVER_SOURCE` value (mirrors
+ * packages/server/src/byok-mcp-config.js and the wire-side
+ * `McpServerSourceSchema` in packages/protocol). Client-side text only — the
+ * wire carries just the closed enum value, so re-wording this never needs a
+ * server deploy. `project-mcp-json` is worded to be unmissable: that scope is
+ * `<cwd>/.mcp.json`, checked into a cloned repository, so it is the one value
+ * this card must flag most visibly.
+ */
+const MCP_SOURCE_LABELS: Record<string, string> = {
+  local: 'Your local Claude config for this project',
+  'project-mcp-json': "From this repository's .mcp.json",
+  user: 'Your user-wide Claude config',
+};
+
+// ---------------------------------------------------------------------------
 // Permission detail renderer
 // ---------------------------------------------------------------------------
 
@@ -290,6 +309,47 @@ export function renderPermissionDetail(tool?: string, toolInput?: Record<string,
           <>
             <Text style={[styles.permDetailLabel, { marginTop: 6 }]}>Blocked Domains</Text>
             <Text selectable style={styles.permDetailCode}>{blocked.join(', ')}</Text>
+          </>
+        )}
+      </View>
+    );
+  }
+
+  // MCP spawn-trust: server name + command/url + which config scope it came
+  // from (#7939), so an approval can tell "my own config" from "a repository
+  // I just cloned" apart. `source` is optional (older server, or wire-compat)
+  // — an absent/unrecognized value simply omits the "Configured from" row.
+  if (toolName === 'mcp_spawn' && toolInput.mcpServer && typeof toolInput.mcpServer === 'object') {
+    const server = toolInput.mcpServer as Record<string, unknown>;
+    const name = typeof server.name === 'string' ? server.name : null;
+    const command = typeof server.command === 'string' ? server.command : null;
+    const url = typeof server.url === 'string' ? server.url : null;
+    const source = typeof server.source === 'string' ? server.source : null;
+    const sourceLabel = source ? MCP_SOURCE_LABELS[source] : undefined;
+    return (
+      <View style={styles.permDetailBlock}>
+        {name && (
+          <>
+            <Text style={styles.permDetailLabel}>Server</Text>
+            <Text selectable style={styles.permDetailCode}>{name}</Text>
+          </>
+        )}
+        {(command || url) && (
+          <>
+            <Text style={[styles.permDetailLabel, { marginTop: 6 }]}>{command ? 'Command' : 'URL'}</Text>
+            <Text selectable style={styles.permDetailCode}>{command || url}</Text>
+          </>
+        )}
+        {sourceLabel && (
+          <>
+            <Text style={[styles.permDetailLabel, { marginTop: 6 }]}>Configured from</Text>
+            <Text
+              selectable
+              style={source === 'project-mcp-json' ? styles.permDetailMcpSourceRepo : styles.permDetailMcpSource}
+              testID="permission-mcp-source"
+            >
+              {sourceLabel}
+            </Text>
           </>
         )}
       </View>
@@ -549,6 +609,19 @@ const styles = StyleSheet.create({
     padding: 8,
     borderRadius: 6,
     overflow: 'hidden',
+  },
+  // #7939: MCP spawn-trust "Configured from" value. The repo-provided
+  // `.mcp.json` scope gets the stronger red flag — attacker-influenceable
+  // content (a cloned repo controls it) — while local/user configs get the
+  // plain secondary-text treatment.
+  permDetailMcpSource: {
+    color: COLORS.textSecondary,
+    fontSize: 13,
+  },
+  permDetailMcpSourceRepo: {
+    color: COLORS.accentRed,
+    fontSize: 13,
+    fontWeight: '600',
   },
   messageText: {
     color: COLORS.textPrimary,
