@@ -1,10 +1,13 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import http from 'node:http'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { PermissionManager } from '../src/permission-manager.js'
-import { isFlooredTarget } from '../src/permission-floor.js'
+import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS } from '../src/permission-floor.js'
 import { createPermissionHandler, evaluateHookFloorRequest } from '../src/ws-permissions.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 
@@ -145,13 +148,30 @@ describe('#7968 event-normalizer.js forwards floored onto the wire message', () 
     assert.equal(result.messages[0].msg.floored, false)
   })
 
-  it('coerces a missing/non-boolean floored to false rather than passing garbage through', () => {
-    const normalizer = new EventNormalizer()
-    const result = normalizer.normalize('permission_request', {
-      requestId: 'req-3', tool: 'Read', description: 'x', input: {}, remainingMs: 1000,
-    }, { sessionId: 'sess-1' })
-    assert.equal(result.messages[0].msg.floored, false)
-  })
+  // A missing or non-boolean `floored` on the session event is "the emitter did
+  // not state a verdict" — it must FAIL CLOSED to `true`, never to `false`.
+  // `false` is the one value a downstream consumer (#7854's agent-control)
+  // treats as clearance to `allow` unattended, so coercing an absent verdict to
+  // `false` would turn "cannot tell" into "not floored" at the server, before
+  // the consumer's own absent -> refuse rule ever sees the message. Every
+  // in-process emitter today is PermissionManager, which always sets a real
+  // boolean; this pins the direction for any emitter that does not (a
+  // third-party provider, ACP's pending permission bridge #7320, a relay).
+  for (const [label, extra] of [
+    ['missing', {}],
+    ['null', { floored: null }],
+    ['the string "false"', { floored: 'false' }],
+    ['0', { floored: 0 }],
+    ['the string "yes"', { floored: 'yes' }],
+  ]) {
+    it(`a ${label} floored fails CLOSED to floored:true, never false`, () => {
+      const normalizer = new EventNormalizer()
+      const result = normalizer.normalize('permission_request', {
+        requestId: 'req-3', tool: 'Read', description: 'x', input: {}, remainingMs: 1000, ...extra,
+      }, { sessionId: 'sess-1' })
+      assert.equal(result.messages[0].msg.floored, true)
+    })
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -187,18 +207,24 @@ function postJson(port, path, body) {
   })
 }
 
-async function startTestDaemon({ sessionCwd = CWD, resolveSession = true } = {}) {
+async function startTestDaemon({ sessionCwd = CWD, resolveSession = true, rateLimit, resendBeforeResolve = false } = {}) {
   const prompts = []
+  const resent = []
   const pendingPermissions = new Map()
   const handler = createPermissionHandler({
-    sendFn: () => {},
+    sendFn: (ws, msg) => { if (msg?.type === 'permission_request') resent.push(msg) },
     broadcastFn: (msg) => {
       if (msg?.type !== 'permission_request') return
       prompts.push(msg)
       // handlePermissionRequest registers the pending entry AFTER broadcasting
       // (it holds the HTTP response open) — resolve on a later tick, same
       // ordering a real client sees, so the request can complete cleanly.
-      setTimeout(() => handler.resolvePermission(msg.requestId, 'deny'), 0)
+      // `resendBeforeResolve` replays the still-pending entry to a
+      // "reconnecting" client first, exactly as resendPendingPermissions would.
+      setTimeout(() => {
+        if (resendBeforeResolve) handler.resendPendingPermissions({}, { id: 'reconnecting-client' })
+        handler.resolvePermission(msg.requestId, 'deny')
+      }, 0)
     },
     validateBearerAuth: () => true,
     validateHookAuth: () => true,
@@ -210,6 +236,7 @@ async function startTestDaemon({ sessionCwd = CWD, resolveSession = true } = {})
     findSessionByHookSecret: (secret) => (
       (resolveSession && secret === 'test-secret') ? { session: { cwd: sessionCwd }, sessionId: 'sess-1' } : null
     ),
+    ...(rateLimit ? { rateLimit } : {}),
   })
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url === '/permission') {
@@ -223,6 +250,7 @@ async function startTestDaemon({ sessionCwd = CWD, resolveSession = true } = {})
   return {
     port: server.address().port,
     prompts,
+    resent,
     handler,
     close: async () => {
       handler.destroy()
@@ -259,6 +287,26 @@ describe('#7968 hook-routed pipeline: POST /permission broadcast carries floored
       await daemon.close()
     }
   })
+
+  // The legacy resend reads `pendingPermissions[].data.floored`, which the
+  // creation path stashes separately from the value it broadcasts. The resend
+  // tests below use hand-built stashes, so only an END-TO-END create -> resend
+  // proves the stash holds the SAME verdict the creation broadcast carried.
+  for (const [input, expected] of [[{ file_path: '.env' }, true], [{ file_path: 'src/a.js' }, false]]) {
+    it(`a hook-created prompt resent on reconnect replays its creation verdict (${input.file_path} -> ${expected})`, async () => {
+      const daemon = await startTestDaemon({ resendBeforeResolve: true })
+      try {
+        await postJson(daemon.port, '/permission', { tool_name: 'Read', tool_input: input, cwd: CWD })
+        assert.equal(daemon.prompts.length, 1)
+        assert.equal(daemon.resent.length, 1, 'the pending prompt must have been resent')
+        assert.equal(daemon.resent[0].requestId, daemon.prompts[0].requestId)
+        assert.equal(daemon.prompts[0].floored, expected)
+        assert.equal(daemon.resent[0].floored, expected)
+      } finally {
+        await daemon.close()
+      }
+    })
+  }
 
   it('uses the OWNING SESSION cwd, never the payload cwd or some other (daemon) cwd (#7968/#7020)', async () => {
     const daemon = await startTestDaemon({ sessionCwd: SESSION_CWD })
@@ -347,6 +395,120 @@ describe('#7968 resend paths forward floored', () => {
       handler.destroy()
     }
   })
+
+  // The builder now fails a missing verdict CLOSED (`true`), so a resend that
+  // DROPPED the field would still pass the `floored: true` case above. Only a
+  // stashed `false` replayed as `false` proves the SDK-mode resend reads the
+  // stash at all.
+  it('SDK-mode resend replays a stashed floored:false as false', () => {
+    const sent = []
+    const handler = createPermissionHandler({
+      sendFn: (ws, msg) => sent.push(msg),
+      broadcastFn: () => {},
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map(),
+      getSessionManager: () => ({
+        _sessions: new Map([
+          ['sess-1', {
+            session: {
+              _pendingPermissions: new Map([['req-5', {}]]),
+              _lastPermissionData: new Map([
+                ['req-5', {
+                  requestId: 'req-5', tool: 'Read', description: 'x', input: {},
+                  remainingMs: 300_000, createdAt: Date.now(), floored: false,
+                }],
+              ]),
+            },
+          }],
+        ]),
+      }),
+      pairingManager: null,
+      findSessionByHookSecret: () => null,
+    })
+    try {
+      handler.resendPendingPermissions({}, { id: 'client-1' })
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].floored, false)
+    } finally {
+      handler.destroy()
+    }
+  })
+
+  // A stash that carries NO verdict (an entry written by something other than
+  // the two creation sites, or one that predates them) must replay as floored
+  // — the same fail-closed direction as the normalizer above. A resend is the
+  // message a reconnecting consumer actually sees, so defaulting it to `false`
+  // would hand an unattended `allow` a prompt nobody ever cleared.
+  it('SDK-mode resend of a stash with NO floored field replays floored:true (fail closed)', () => {
+    const sent = []
+    const handler = createPermissionHandler({
+      sendFn: (ws, msg) => sent.push(msg),
+      broadcastFn: () => {},
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map(),
+      getSessionManager: () => ({
+        _sessions: new Map([
+          ['sess-1', {
+            session: {
+              _pendingPermissions: new Map([['req-3', {}]]),
+              _lastPermissionData: new Map([
+                ['req-3', {
+                  requestId: 'req-3', tool: 'Write', description: 'x', input: {},
+                  remainingMs: 300_000, createdAt: Date.now(),
+                }],
+              ]),
+            },
+          }],
+        ]),
+      }),
+      pairingManager: null,
+      findSessionByHookSecret: () => null,
+    })
+    try {
+      handler.resendPendingPermissions({}, { id: 'client-1' })
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].floored, true)
+    } finally {
+      handler.destroy()
+    }
+  })
+
+  it('legacy HTTP-held resend of a stash with NO floored field replays floored:true (fail closed)', () => {
+    const sent = []
+    const pendingPermissions = new Map([
+      ['req-4', {
+        data: {
+          requestId: 'req-4', tool: 'Write', description: 'y', input: {},
+          remainingMs: 300_000, createdAt: Date.now(),
+        },
+      }],
+    ])
+    const handler = createPermissionHandler({
+      sendFn: (ws, msg) => sent.push(msg),
+      broadcastFn: () => {},
+      validateBearerAuth: () => true,
+      validateHookAuth: () => true,
+      pushManager: null,
+      pendingPermissions,
+      permissionSessionMap: new Map(),
+      getSessionManager: () => null,
+      pairingManager: null,
+      findSessionByHookSecret: () => null,
+    })
+    try {
+      handler.resendPendingPermissions({}, { id: 'client-1' })
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].floored, true)
+    } finally {
+      handler.destroy()
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -382,6 +544,155 @@ describe('#7968 PARITY: in-process and hook-routed pipelines agree', () => {
       assert.equal(inProcessFloored, hookFloored, 'both pipelines must agree with each other')
     })
   }
+})
+
+// ---------------------------------------------------------------------------
+// 6. WIRE PARITY over a matrix built from permission-floor.js's OWN sets.
+//
+// Section 5 compares the in-process EVENT (before event-normalizer.js) with the
+// hook-routed WIRE message, over a dozen relative targets. That leaves out the
+// hop that decides what the consumer actually reads (the normalizer's coercion)
+// and every resolution shape the floor handles beyond a plain relative path:
+// absolute targets, `./` and `..`, case variants (the floor lowercases per
+// segment; APFS/NTFS are case-insensitive, so `.GIT/HOOKS` IS `.git/hooks`),
+// and real symlinks — a symlinked dir into `.git`, a `..` AFTER a symlink (which
+// open(2) climbs from the link's target, so it only floors via the floor's
+// second, symlink-following pass), and a file symlink onto a secret.
+//
+// Tools come from SECRET_READ_FLOOR_TOOLS (the read floor) plus mutating and
+// unknown tools (the full floor); fields come from PROTECTED_PATH_INPUT_FIELDS
+// plus the `changes[]` array form. Both pipelines are driven end-to-end to the
+// WIRE: in-process = PermissionManager -> EventNormalizer -> built message;
+// hook-routed = POST /permission -> broadcast message. The expectation is the
+// isFlooredTarget oracle, and the two wire values must also equal each other.
+// ---------------------------------------------------------------------------
+
+describe('#7968 WIRE PARITY: both pipelines, a matrix from permission-floor.js\'s own sets', () => {
+  // Windows runners have no symlink privilege (the runner account lacks
+  // SeCreateSymbolicLinkPrivilege), so the symlink rows are POSIX-only. That is
+  // stated here and asserted below — never a silent "no symlink rows ran".
+  const withSymlinks = process.platform !== 'win32'
+  let root
+  let daemon
+
+  before(async () => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-7968-parity-')))
+    mkdirSync(join(root, '.git', 'hooks'), { recursive: true })
+    writeFileSync(join(root, '.git', 'config'), '')
+    writeFileSync(join(root, '.env'), '')
+    mkdirSync(join(root, 'src'), { recursive: true })
+    writeFileSync(join(root, 'src', 'a.js'), '')
+    if (withSymlinks) {
+      symlinkSync(join(root, '.git'), join(root, 'gitlink'))
+      symlinkSync(join(root, '.git', 'hooks'), join(root, 'hookslink'))
+      symlinkSync(join(root, '.env'), join(root, 'envlink'))
+      symlinkSync(join(root, 'src'), join(root, 'srclink'))
+    }
+    // One daemon for the whole matrix, so the limiter must not be the thing
+    // that decides how many rows run.
+    daemon = await startTestDaemon({
+      sessionCwd: root,
+      rateLimit: { windowMs: 60_000, maxMessages: 1_000_000, burst: 1_000_000 },
+    })
+  })
+
+  after(async () => {
+    if (daemon) await daemon.close()
+    if (root) rmSync(root, { recursive: true, force: true })
+  })
+
+  function buildTargets() {
+    const targets = [
+      // secret files, incl. case variants and non-plain relative spellings
+      '.env', '.env.local', './.env', 'src/../.env', '.ENV', '.Env.Production',
+      'id_rsa', 'deploy/ID_ED25519', '.npmrc', '.pgpass', '.netrc',
+      'certs/server.PEM', 'app.key', 'keystore.p12', 'x.pfx',
+      // credential-dense config files (floored on BOTH floors)
+      '.git/config', '.GIT/CONFIG', '.git/credentials', '.config/git/config',
+      '.claude/settings.json', '.claude/settings.local.json', '.Claude/Settings.JSON',
+      // config dirs (write floor only)
+      '.git/hooks/pre-commit', '.Git/Hooks/pre-commit', '.git/HEAD',
+      '.vscode/tasks.json', '.claude/skills/x.md', '.config/git/ignore',
+      // `..` traversal out of the session cwd
+      '../.env', '../../sibling/.git/config', '../other/src/a.js',
+      'src/../../x/.claude/settings.json',
+      // absolute
+      join(root, '.git', 'hooks', 'post-checkout'), join(root, '.env'), join(root, 'src', 'a.js'),
+      // ordinary work, including near-miss names the floor must NOT match
+      'src/a.js', 'README.md', 'packages/server/src/x.js', 'env.js', '.envrc', 'my.env', 'git/config',
+    ]
+    if (withSymlinks) {
+      targets.push('gitlink/config', 'gitlink/hooks/pre-commit', 'hookslink/../config', 'envlink', 'srclink/a.js')
+    }
+    return targets
+  }
+
+  function buildInputs() {
+    const tools = [...SECRET_READ_FLOOR_TOOLS, 'Write', 'Edit', 'NotebookEdit', 'MultiEdit']
+    const rows = []
+    for (const target of buildTargets()) {
+      for (const tool of tools) {
+        for (const field of PROTECTED_PATH_INPUT_FIELDS) rows.push([tool, { [field]: target }])
+      }
+      // codex apply_patch shape: a benign top-level file_path, the target in changes[]
+      rows.push(['apply_patch', { file_path: root, changes: [{ path: 'src/a.js', kind: 'update' }, { path: target, kind: 'update' }] }])
+    }
+    // path-less tools: nothing the floor can match, on either pipeline
+    rows.push(['Bash', { command: 'cat .env' }], ['WebFetch', { url: 'https://example.com/.env' }])
+    return rows
+  }
+
+  it('in-process wire === hook-routed wire === isFlooredTarget, for every row', async () => {
+    const rows = buildInputs().map(([tool, input]) => [tool, input, isFlooredTarget(tool, input, root)])
+
+    // Non-vacuity: the matrix must actually span both verdicts, and the symlink
+    // rows must include one that ONLY the symlink-following pass floors.
+    const flooredCount = rows.filter(([, , e]) => e === true).length
+    const clearCount = rows.filter(([, , e]) => e === false).length
+    assert.ok(flooredCount >= 100, `matrix must carry many floored rows (got ${flooredCount})`)
+    assert.ok(clearCount >= 100, `matrix must carry many clear rows (got ${clearCount})`)
+    if (withSymlinks) {
+      assert.equal(isFlooredTarget('Write', { file_path: 'hookslink/../config' }, root), true,
+        'fixture sanity: a `..` after a symlink into .git/hooks must floor')
+      assert.equal(isFlooredTarget('Write', { file_path: 'hookslink/../config' }, '/nonexistent-7968'), false,
+        'fixture sanity: the same spelling does NOT floor lexically — only the symlink pass catches it')
+    } else {
+      assert.equal(process.platform, 'win32', 'symlink rows may only be absent on win32')
+    }
+
+    const pm = new PermissionManager({ log: silentLog, cwd: root })
+    const normalizer = new EventNormalizer()
+    const mismatches = []
+    try {
+      for (const [tool, input, expected] of rows) {
+        // in-process, through the normalizer to the built wire message
+        const events = []
+        const onReq = (d) => events.push(d)
+        pm.on('permission_request', onReq)
+        const pending = pm.handlePermission(tool, input, null, 'approve')
+        pm.off('permission_request', onReq)
+        assert.equal(events.length, 1, `in-process must prompt for ${tool}`)
+        const wireInProcess = normalizer.normalize('permission_request', events[0], { sessionId: 'sess-1' }).messages[0].msg.floored
+        pm.respondToPermission(events[0].requestId, 'deny')
+        await pending
+
+        // hook-routed, through POST /permission to the broadcast. The payload
+        // cwd is deliberately unrelated: only the SESSION cwd may anchor it.
+        const seen = daemon.prompts.length
+        await postJson(daemon.port, '/permission', { tool_name: tool, tool_input: input, cwd: '/' })
+        assert.equal(daemon.prompts.length, seen + 1, `hook path must broadcast for ${tool}`)
+        const wireHook = daemon.prompts[seen].floored
+
+        if (typeof wireInProcess !== 'boolean' || typeof wireHook !== 'boolean'
+          || wireInProcess !== expected || wireHook !== expected) {
+          mismatches.push(`${tool} ${JSON.stringify(input)}: oracle=${expected} in-process=${wireInProcess} hook=${wireHook}`)
+        }
+      }
+    } finally {
+      pm.destroy()
+    }
+    assert.deepEqual(mismatches.slice(0, 20), [], `${mismatches.length} row(s) disagree`)
+  })
 })
 
 // Sanity: evaluateHookFloorRequest is still exported and usable directly

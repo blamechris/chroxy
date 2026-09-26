@@ -21,8 +21,9 @@ import {
  * docs/security/permission-floor.md) — to this same envelope. Unlike
  * `description`/`remainingMs`/`sessionId`, `floored` is NEVER conditionally
  * omitted: every emit site must state whether the floor forced this prompt,
- * so the field is required in the builder's TS signature (a caller cannot
- * forget it) while the wire SCHEMA keeps it optional — so a client parsing an
+ * so the field is required in the builder's TS signature AND — because every
+ * caller is plain JS, which that signature cannot bind — defaulted to `true`
+ * (fail closed) at runtime, while the wire SCHEMA keeps it optional — so a client parsing an
  * OLDER server's message (built before #7968, with no `floored` key at all)
  * still parses successfully and just sees the field absent. This mirrors the
  * existing `input` field's "required in TS, permissive at runtime" shape
@@ -126,8 +127,26 @@ describe('buildPermissionRequestMessage (#6031)', () => {
       }
       const result = ServerPermissionRequestSchema.safeParse(oldServerMessage)
       assert.equal(result.success, true)
-      assert.ok(!('floored' in oldServerMessage))
+      // Assert on the PARSED output, not the literal this test built: the
+      // schema must not invent a verdict (a `.default(false)` here would hand
+      // an old server's unmarked prompt to a consumer as "not floored").
+      assert.ok(!('floored' in result.data), 'the schema must not default an absent floored')
     })
+
+    // #7968 — every caller of this builder is plain JavaScript (the server has
+    // no checkJs), so the TS signature's `floored: boolean` binds none of them.
+    // The runtime must therefore enforce "every permission_request states the
+    // verdict" itself, and in the fail-closed direction: a caller that states
+    // no verdict gets `floored: true`, never an absent key and never `false`.
+    for (const [label, extra] of [['omitted', {}], ['undefined', { floored: undefined }], ['null', { floored: null }]]) {
+      it(`a JS caller whose floored is ${label} gets floored:true (fail closed), never an absent key`, () => {
+        const msg = buildPermissionRequestMessage({
+          requestId: 'req-12', tool: 'Write', input: { file_path: 'x' }, ...extra,
+        })
+        assert.equal(msg.floored, true)
+        assert.equal(ServerPermissionRequestSchema.safeParse(msg).success, true)
+      })
+    }
   })
 
   describe('malformed input is rejected', () => {

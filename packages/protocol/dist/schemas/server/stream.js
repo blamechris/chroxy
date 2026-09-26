@@ -529,9 +529,9 @@ export const ServerPermissionRequestSchema = z.object({
     // #7968: the protected-path / secret-read permission-floor verdict (see
     // docs/security/permission-floor.md) for THIS prompt — true when the floor
     // forced it to a human, regardless of permission mode or an `allow` rule.
-    // A NEW server always sends it (buildPermissionRequestMessage requires the
-    // field in its TS signature, matching `input`'s "required in TS, permissive
-    // at runtime" shape below) on every emit site, both pipelines. Kept OPTIONAL
+    // A NEW server always sends it on every emit site, both pipelines
+    // (buildPermissionRequestMessage requires it in TS and, because its callers
+    // are plain JS, also defaults a missing value to `true` at runtime). Kept OPTIONAL
     // here — rather than required — so a client parsing a permission_request
     // from an OLDER server (pre-#7968, which never sends this key at all) still
     // parses successfully; it just sees the field absent and must not assume
@@ -764,8 +764,11 @@ export const ServerPermissionAuditResultSchema = z.object({
  *    permission_request must state the floor's verdict. Like `input`, it is
  *    REQUIRED in this TS signature even though the schema field is optional
  *    (`z.boolean().optional()`, so an OLDER server's message with no `floored`
- *    key at all still parses) — the type system is what stops a NEW emit site
- *    from forgetting it.
+ *    key at all still parses). The TS requirement only binds a TypeScript
+ *    caller, and every current caller is plain JS (packages/server has no
+ *    checkJs) — so the RUNTIME is what enforces it: a missing/null `floored`
+ *    is built as `true` (fail-closed: the floor's rule is that every ambiguous
+ *    case resolves toward floored), and a non-boolean one fails the schema.
  *
  * Validation failures throw a descriptive `Error` (with the Zod issues) rather
  * than returning a partial object, so a drift bug surfaces loudly at the emit
@@ -777,7 +780,11 @@ export function buildPermissionRequestMessage(fields) {
         requestId: fields.requestId,
         tool: fields.tool,
         input: fields.input,
-        floored: fields.floored,
+        // #7968: FAIL-CLOSED default. Every caller is plain JS, so the TS
+        // `floored: boolean` above binds none of them at runtime; a caller that
+        // states no verdict (undefined/null) gets `true`, never an absent key and
+        // never `false`. A wrong-typed value still reaches the schema and throws.
+        floored: fields.floored ?? true,
     };
     // Omit optional fields when absent so the wire shape stays identical to the
     // hand-built literals (clients fall back to the active session when

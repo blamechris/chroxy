@@ -775,12 +775,13 @@ Object.assign(EVENT_MAP, {
         input: data.input,
         remainingMs: data.remainingMs,
         // #7968: the permission-floor verdict permission-manager.js computed
-        // (protectedTarget / isFlooredTarget) for this prompt. Coerced with
-        // `=== true` (never a bare pass-through) so a missing/non-boolean
-        // value on the session event can never smuggle something other than
-        // a real boolean onto the wire — the builder's `floored` param is
-        // required precisely so this call site cannot forget it.
-        floored: data.floored === true,
+        // (protectedTarget / isFlooredTarget) for this prompt. Coerced to a
+        // real boolean, and FAIL-CLOSED: only an explicit `false` goes out as
+        // `false`. A missing or non-boolean value means the emitter stated no
+        // verdict, and `false` is the one value a consumer (#7854's
+        // agent-control) reads as clearance to `allow` unattended — so
+        // "unknown" must become `true` here, never `false`.
+        floored: data.floored !== false,
       }),
     }],
     registrations: [{ map: 'permission', key: data.requestId, value: ctx.sessionId }],

@@ -834,7 +834,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                   // stashed on this SAME _lastPermissionData entry — never
                   // re-derived here (the resend path has no tool input to
                   // re-evaluate against; the entry already carries the answer).
-                  floored: permData.floored === true,
+                  // Fail-closed: a stash with no verdict replays as floored.
+                  floored: permData.floored !== false,
                 }))
               } catch (err) {
                 log.warn(`Skipping malformed pending permission ${requestId} on resend: ${err?.message ?? err}`)
@@ -874,7 +875,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             remainingMs,
             // #7968: replay the floor verdict stashed on pending.data at
             // creation time (handlePermissionRequest above) — never re-derived.
-            floored: pending.data.floored === true,
+            // Fail-closed: a stash with no verdict replays as floored.
+            floored: pending.data.floored !== false,
           }))
         } catch (err) {
           log.warn(`Skipping malformed pending legacy permission ${requestId} on resend: ${err?.message ?? err}`)

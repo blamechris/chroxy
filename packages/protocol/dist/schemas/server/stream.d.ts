@@ -510,8 +510,11 @@ export declare const ServerPermissionAuditResultSchema: z.ZodObject<{
  *    permission_request must state the floor's verdict. Like `input`, it is
  *    REQUIRED in this TS signature even though the schema field is optional
  *    (`z.boolean().optional()`, so an OLDER server's message with no `floored`
- *    key at all still parses) — the type system is what stops a NEW emit site
- *    from forgetting it.
+ *    key at all still parses). The TS requirement only binds a TypeScript
+ *    caller, and every current caller is plain JS (packages/server has no
+ *    checkJs) — so the RUNTIME is what enforces it: a missing/null `floored`
+ *    is built as `true` (fail-closed: the floor's rule is that every ambiguous
+ *    case resolves toward floored), and a non-boolean one fails the schema.
  *
  * Validation failures throw a descriptive `Error` (with the Zod issues) rather
  * than returning a partial object, so a drift bug surfaces loudly at the emit
