@@ -303,6 +303,7 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
     input: z.ZodAny;
     remainingMs: z.ZodOptional<z.ZodNumber>;
     sessionId: z.ZodOptional<z.ZodString>;
+    floored: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 /**
  * #7939: which of the three MCP config scopes a spawn-trust request's server
@@ -504,6 +505,13 @@ export declare const ServerPermissionAuditResultSchema: z.ZodObject<{
  *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
  *    BEFORE handing values to this builder — it is a shape guard, not a
  *    redaction layer, and must not re-process already-redacted values.
+ *  - `floored` (#7968) is the ODD ONE OUT among the fields above: it is always
+ *    SET on the built message (never conditionally omitted), because every
+ *    permission_request must state the floor's verdict. Like `input`, it is
+ *    REQUIRED in this TS signature even though the schema field is optional
+ *    (`z.boolean().optional()`, so an OLDER server's message with no `floored`
+ *    key at all still parses) — the type system is what stops a NEW emit site
+ *    from forgetting it.
  *
  * Validation failures throw a descriptive `Error` (with the Zod issues) rather
  * than returning a partial object, so a drift bug surfaces loudly at the emit
@@ -513,6 +521,7 @@ export declare function buildPermissionRequestMessage(fields: {
     requestId: string;
     tool: string;
     input: unknown;
+    floored: boolean;
     description?: string;
     remainingMs?: number;
     sessionId?: string;

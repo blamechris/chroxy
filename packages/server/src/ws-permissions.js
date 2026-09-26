@@ -351,12 +351,23 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
       log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=${ownerSessionId ?? 'none'}, sourceIp=${clientIp})`)
 
+      // #7968 — the SAME floor verdict `POST /permission-floor` would answer
+      // for this exact tool call, via the SAME evaluateHookFloorRequest (which
+      // itself calls the single-source isFlooredTarget). The cwd basis is the
+      // OWNING SESSION's cwd (`ownerSession.cwd`, resolved above from the
+      // presented hook secret) — never the daemon's `process.cwd()` and never
+      // the payload's own `cwd` (#7020: a caller-chosen base can under-floor).
+      // An unresolvable session fails CLOSED (floored:true), matching
+      // handlePermissionFloorCheck's own fail-closed contract.
+      const floored = evaluateHookFloorRequest(hookData, ownerSession?.cwd ?? null).floor
+
       broadcastFn(buildPermissionRequestMessage({
         requestId,
         tool,
         description,
         input: sanitizedInput,
         remainingMs: 300_000,
+        floored,
         // #5667: carry the owning session so clients route the prompt to the
         // session that actually asked, instead of falling back to whatever tab
         // is focused. Matches the resend-on-reconnect (line ~485) and SDK
@@ -429,7 +440,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
           sendJson(res, 200, { decision })
         },
         timer,
-        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now() },
+        // #7968: stash the SAME floor verdict computed above so a reconnect
+        // resend (resendPendingPermissions' legacy-HTTP branch) replays it
+        // rather than re-deriving (or silently dropping) it.
+        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored },
       })
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
@@ -816,6 +830,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                   input: permData.input,
                   remainingMs,
                   sessionId,
+                  // #7968: replay the floor verdict permission-manager.js
+                  // stashed on this SAME _lastPermissionData entry — never
+                  // re-derived here (the resend path has no tool input to
+                  // re-evaluate against; the entry already carries the answer).
+                  floored: permData.floored === true,
                 }))
               } catch (err) {
                 log.warn(`Skipping malformed pending permission ${requestId} on resend: ${err?.message ?? err}`)
@@ -853,6 +872,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             description: pending.data.description,
             input: pending.data.input,
             remainingMs,
+            // #7968: replay the floor verdict stashed on pending.data at
+            // creation time (handlePermissionRequest above) — never re-derived.
+            floored: pending.data.floored === true,
           }))
         } catch (err) {
           log.warn(`Skipping malformed pending legacy permission ${requestId} on resend: ${err?.message ?? err}`)

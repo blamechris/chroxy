@@ -558,6 +558,19 @@ export const ServerPermissionRequestSchema = z.object({
   // payloads so the dashboard can route the prompt to the right session tab.
   // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
   sessionId: z.string().optional(),
+  // #7968: the protected-path / secret-read permission-floor verdict (see
+  // docs/security/permission-floor.md) for THIS prompt — true when the floor
+  // forced it to a human, regardless of permission mode or an `allow` rule.
+  // A NEW server always sends it (buildPermissionRequestMessage requires the
+  // field in its TS signature, matching `input`'s "required in TS, permissive
+  // at runtime" shape below) on every emit site, both pipelines. Kept OPTIONAL
+  // here — rather than required — so a client parsing a permission_request
+  // from an OLDER server (pre-#7968, which never sends this key at all) still
+  // parses successfully; it just sees the field absent and must not assume
+  // `false` from that absence (an external consumer such as the agent-control
+  // MCP, #7854, should treat "field missing" as "cannot tell — do not allow
+  // unattended", not as "not floored").
+  floored: z.boolean().optional(),
 })
 
 /**
@@ -786,6 +799,13 @@ export const ServerPermissionAuditResultSchema = z.object({
  *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
  *    BEFORE handing values to this builder — it is a shape guard, not a
  *    redaction layer, and must not re-process already-redacted values.
+ *  - `floored` (#7968) is the ODD ONE OUT among the fields above: it is always
+ *    SET on the built message (never conditionally omitted), because every
+ *    permission_request must state the floor's verdict. Like `input`, it is
+ *    REQUIRED in this TS signature even though the schema field is optional
+ *    (`z.boolean().optional()`, so an OLDER server's message with no `floored`
+ *    key at all still parses) — the type system is what stops a NEW emit site
+ *    from forgetting it.
  *
  * Validation failures throw a descriptive `Error` (with the Zod issues) rather
  * than returning a partial object, so a drift bug surfaces loudly at the emit
@@ -799,6 +819,8 @@ export function buildPermissionRequestMessage(fields: {
   // emitter dropping `input` — keeping it required is what makes this builder a
   // real drift guard (Copilot review on #6052). All emit sites pass it.
   input: unknown
+  // #7968: REQUIRED for the same reason as `input` above — see the doc comment.
+  floored: boolean
   description?: string
   remainingMs?: number
   sessionId?: string
@@ -808,6 +830,7 @@ export function buildPermissionRequestMessage(fields: {
     requestId: fields.requestId,
     tool: fields.tool,
     input: fields.input,
+    floored: fields.floored,
   }
   // Omit optional fields when absent so the wire shape stays identical to the
   // hand-built literals (clients fall back to the active session when

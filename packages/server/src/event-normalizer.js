@@ -774,6 +774,13 @@ Object.assign(EVENT_MAP, {
         description: data.description,
         input: data.input,
         remainingMs: data.remainingMs,
+        // #7968: the permission-floor verdict permission-manager.js computed
+        // (protectedTarget / isFlooredTarget) for this prompt. Coerced with
+        // `=== true` (never a bare pass-through) so a missing/non-boolean
+        // value on the session event can never smuggle something other than
+        // a real boolean onto the wire — the builder's `floored` param is
+        // required precisely so this call site cannot forget it.
+        floored: data.floored === true,
       }),
     }],
     registrations: [{ map: 'permission', key: data.requestId, value: ctx.sessionId }],
