@@ -4108,6 +4108,26 @@ button.sidebar-token-view-session-row:hover {
   margin-bottom: 8px;
 }
 
+/* #7939: MCP spawn-trust "Configured from" line. */
+.perm-mcp-source {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.perm-mcp-source-label {
+  font-weight: 600;
+}
+
+/* The repo-provided `.mcp.json` scope is flagged — attacker-influenceable
+ * content (a cloned repo controls it), so it gets the same warning color
+ * `.perm-command-edit-hint` uses rather than blending in with the other two
+ * (machine-local) scopes. */
+.perm-mcp-source-repo {
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
 .perm-tool {
   font-weight: 600;
   color: var(--accent-purple);

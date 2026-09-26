@@ -110,16 +110,24 @@ function formatEpoch(ms: number | null | undefined): string {
  * Seed value for the `datetime-local` input, or '' when the stored epoch is not
  * a renderable instant.
  *
+ * `<input type="datetime-local">` carries no timezone: browsers render (and
+ * `buildCadence` below parses, via `Date.parse`) its string as the LOCAL wall
+ * clock. Formatting the seed from `toISOString()` (UTC) disagreed with that —
+ * #7135 — so every round trip through this field silently shifted by the
+ * runner's UTC offset. Building the string from the local getters instead
+ * keeps both halves speaking the same clock.
+ *
  * This is called from a `useState` initializer, i.e. DURING RENDER, so an
- * unguarded `toISOString()` here does not degrade — it throws past this
- * component to the ROOT error boundary and replaces the entire dashboard (chat,
+ * unguarded conversion here does not degrade — it throws past this component
+ * to the ROOT error boundary and replaces the entire dashboard (chat,
  * terminal, everything) with the error fallback until a full page reload.
  */
-function toDatetimeLocalValue(ms: number | null | undefined): string {
+export function toDatetimeLocalValue(ms: number | null | undefined): string {
   const d = epochToDate(ms)
   if (!d) return ''
   try {
-    return d.toISOString().slice(0, 16)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
   } catch {
     return ''
   }

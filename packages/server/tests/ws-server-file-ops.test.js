@@ -2,12 +2,17 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
-import { setLogListener } from '../src/logger.js'
+import { setLogListener, addLogListener, removeLogListener } from '../src/logger.js'
+import { truncateForLog, createReaderOps } from '../src/ws-file-ops/reader.js'
+import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
+
+const realExecFileAsync = promisify(execFileCb)
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -1033,6 +1038,36 @@ describe('file browser symlink security', () => {
     ws.close()
   })
 
+  // #7938 — a FIFO planted at the requested path, instead of a regular file,
+  // must be refused promptly rather than hanging the read forever. Before
+  // O_NONBLOCK was added to openNoFollow (the one helper every ws-file-ops
+  // read goes through), `open(path, O_RDONLY)` on a FIFO with no writer
+  // connected blocks the calling thread indefinitely.
+  it('read_file: does not hang when the target is a FIFO instead of a regular file', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const fifoPath = join(tempDir, 'evil.fifo')
+    execFileSync('mkfifo', [fifoPath])
+    const { ws, messages } = await createFileBrowserTestServer()
+
+    const HANG_GUARD_MS = 3000
+    const start = Date.now()
+    send(ws, { type: 'read_file', path: 'evil.fifo' })
+    // waitForMessage REJECTS on its own timeout; map that to the sentinel so
+    // a hang always fails on the assertion below, never on whichever of two
+    // equal-length timers happened to fire first.
+    const content = await waitForMessage(messages, 'file_content', HANG_GUARD_MS)
+      .catch(() => ({ outcome: 'hung' }))
+    const elapsed = Date.now() - start
+
+    assert.notEqual(content?.outcome, 'hung',
+      `read_file blocked for >= ${HANG_GUARD_MS}ms on a planted FIFO — the open needs O_NONBLOCK (#7938)`)
+    assert.ok(elapsed < 2500, `read_file must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
+    assert.equal(content.content, null, 'a FIFO must never be read as file content')
+    assert.match(content.error || '', /not a regular file/i,
+      'a FIFO must be refused via the post-open isFile() check, not a different/incidental error (#7938)')
+
+    ws.close()
+  })
+
   it('read_file: rejects null bytes in path', async () => {
     const { ws, messages } = await createFileBrowserTestServer()
 
@@ -1090,9 +1125,9 @@ describe('get_diff handler', () => {
     rmDirRobust(tempDir)
   })
 
-  async function createDiffTestServer() {
+  async function createDiffTestServer(cwd = tempDir) {
     const mockSession = createMockSession()
-    mockSession.cwd = tempDir
+    mockSession.cwd = cwd
 
     server = new WsServer({
       port: 0,
@@ -1103,6 +1138,25 @@ describe('get_diff handler', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
     return { ws, messages }
+  }
+
+  /**
+   * Call getDiff directly, bypassing the WS message pipeline and its
+   * ClientMessageSchema validation entirely. #7870 bounds `base` to
+   * GET_DIFF_BASE_MAX_LENGTH (256) AT THE WIRE now — an over-length base sent
+   * via `send(ws, ...)` is rejected before it ever reaches this handler (see
+   * the '#7870' wire-level tests below). The server's OWN MAX_DIFF_BASE_LENGTH
+   * gate inside reader.js is independent, second-layer defense-in-depth that
+   * stays correct even for a future caller reaching getDiff by a path that
+   * skips schema validation — pinned here by calling it directly.
+   */
+  function directReader() {
+    const sent = []
+    const send = (_ws, msg) => sent.push(msg)
+    const boundResolve = (cwd) => resolveSessionCwd(cwd, new Map(), 60_000)
+    const boundValidate = (absPath, cwd) => validatePathWithinCwd(absPath, cwd, new Map(), 60_000)
+    const reader = createReaderOps(send, boundResolve, boundValidate)
+    return { reader, sent }
   }
 
   it('returns empty files array when no changes', async () => {
@@ -1400,6 +1454,601 @@ describe('get_diff handler', () => {
     assert.equal(prev.files[0].path, 'file.txt')
 
     ws.close()
+  })
+
+  // ── #7298: the dash-free path oracle ──────────────────────────────────────
+  //
+  // #7290 closed the LEADING-DASH route (`-O<path>`). This is the route that
+  // needs no dash: `:` and `/` were both members of the charset allowlist, so
+  // `HEAD:<path>` and a bare absolute path both reached git as revisions, and
+  // git's stderr was forwarded verbatim. Measured against git 2.55.0, every
+  // one of these passed both halves of the old guard:
+  //
+  //   base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk,
+  //                              but not in 'HEAD'
+  //   base='HEAD:absent.txt'   -> fatal: path 'absent.txt' does not exist in 'HEAD'
+  //   base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+  //                              at '<cwdReal>'          <- also leaks the cwd
+  //
+  // The fix has two halves and each of the tests below isolates ONE of them,
+  // deliberately — a single test cannot, because the halves overlap on the
+  // probes above (drop half 2 and the two `HEAD:<path>` replies still differ
+  // from the DEFAULT reply; drop half 1 and they no longer differ from each
+  // other, but raw stderr is still forwarded on any other git failure):
+  //
+  //   half 1  resolve the base with `rev-parse --verify --quiet <base>^{commit}`
+  //           and drop `:` from the charset -> an unusable base is silently
+  //           equivalent to the default base
+  //   half 2  never forward raw git stderr -> a fixed 'Failed to run git diff'
+
+  it('#7298: HEAD:<path> bases are indistinguishable from each other and from the default (half 1)', async () => {
+    // A non-empty working tree, so "fell back to HEAD" and "errored out" are
+    // observably different replies rather than both being an empty file list.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // Baseline: no base at all. This is what an unusable base must look like.
+    send(ws, { type: 'get_diff' })
+    const baseline = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(baseline.error, null)
+    assert.equal(baseline.files.length, 1, 'baseline must be a real, non-empty diff')
+
+    // A path that DOES exist on the daemon's filesystem, outside the cwd.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD:/etc/passwd' })
+    const present = await waitForMessage(messages, 'diff_result', 5000)
+
+    // A path that does NOT exist.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD:/chroxy-7298/definitely/not/here' })
+    const absent = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(
+      present.error, absent.error,
+      'a path that exists and one that does not must produce the SAME error'
+    )
+    assert.deepEqual(
+      present.files, absent.files,
+      'a path that exists and one that does not must produce the SAME files'
+    )
+    // …and both must be the default reply, not an error of any kind. Without
+    // this clause the pair is equal under half 2 alone (both error out with
+    // the same fixed string) and the oracle is closed only by scrubbing the
+    // message, never by refusing to ask git the question.
+    assert.equal(present.error, baseline.error, 'an unusable base falls back to HEAD')
+    assert.deepEqual(present.files, baseline.files, 'an unusable base falls back to HEAD')
+
+    ws.close()
+  })
+
+  it('#7298: an absolute-path base does not leak the daemon cwd', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: '/etc/passwd' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    const serialized = JSON.stringify(result)
+    assert.ok(
+      !serialized.includes(tempDir) && !serialized.includes(realpathSync(tempDir)),
+      `the workspace path must never reach the client; got: ${serialized.slice(0, 400)}`
+    )
+    assert.ok(
+      !/outside repository|exists on disk|ambiguous argument/i.test(result.error || ''),
+      `raw git stderr must not be forwarded; got error: ${result.error}`
+    )
+
+    ws.close()
+  })
+
+  it('#7298: raw git stderr is never forwarded to the client (half 2)', async () => {
+    // Force `git diff` itself to fail in a way half 1 cannot pre-empt: a diff
+    // larger than getDiff's 2MB maxBuffer. execFile rejects with
+    // 'stdout maxBuffer length exceeded', which the old `error: err.message`
+    // branch handed straight to the client.
+    // 1.5MB per side: the diff carries both, so it is ~3MB against a 2MB
+    // maxBuffer — over the limit with margin, at half the I/O of the 3MB
+    // payload this started with (Copilot review of #7862).
+    const SIDE = 1536 * 1024
+    writeFileSync(join(tempDir, 'big.txt'), 'x'.repeat(SIDE) + '\n')
+    execFileSync(GIT, ['add', 'big.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'big'], { cwd: tempDir, stdio: 'pipe' })
+    writeFileSync(join(tempDir, 'big.txt'), 'y'.repeat(SIDE) + '\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 10000)
+
+    assert.equal(
+      result.error, 'Failed to run git diff',
+      'the git failure detail must stay server-side'
+    )
+    assert.deepEqual(result.files, [])
+
+    ws.close()
+  })
+
+  it('#7298: a branch name still resolves to its own commit (positive control)', async () => {
+    // rev-parse is the new gate; prove it does not reject legitimate bases.
+    writeFileSync(join(tempDir, 'file.txt'), 'second content\n')
+    execFileSync(GIT, ['add', 'file.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['branch', 'chroxy-7298-base', 'HEAD~1'], { cwd: tempDir, stdio: 'pipe' })
+
+    const { ws, messages } = await createDiffTestServer()
+
+    // The branch points at the FIRST commit, so the second commit shows up.
+    send(ws, { type: 'get_diff', base: 'chroxy-7298-base' })
+    const branch = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(branch.error, null)
+    assert.equal(branch.files.length, 1, 'a branch name must reach git as a real revision')
+    assert.equal(branch.files[0].path, 'file.txt')
+
+    // …and it must differ from HEAD, which is clean. Asserting "no error"
+    // alone would pass for a guard that silently rewrote every base to HEAD.
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'HEAD' })
+    const head = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(head.error, null)
+    assert.deepEqual(head.files, [], 'HEAD is clean, so the two bases must differ')
+
+    ws.close()
+  })
+
+  it('#7298: a base naming a repo path is not handed to git as a pathspec (the RESOLUTION, not the charset)', async () => {
+    // The mutation that proved "half 1" reverted TWO independent changes at
+    // once — `:` back in the charset AND the rev-parse bypassed — so it could
+    // not tell which of them the tests were pinning. Reverting only the
+    // rev-parse (charset left narrowed) leaves the rest of this suite GREEN,
+    // because every probe above is a `HEAD:<path>` or an absolute path, and
+    // the charset alone already diverts those to the HEAD fallback.
+    //
+    // This is the observable that separates them. A base that passes the
+    // charset and names no commit but DOES name a file is read by git as a
+    // PATHSPEC, and the reply narrows to that one file (measured, git 2.55.0):
+    //
+    //     git diff --name-only            -> file.txt, second.txt
+    //     git diff --name-only file.txt   -> file.txt      (exit 0)
+    //
+    // so the reply is observably different from the fallback, and a client
+    // can walk the workspace one path at a time. Resolution refuses the
+    // question; the charset never sees it.
+    writeFileSync(join(tempDir, 'second.txt'), 'second initial\n')
+    execFileSync(GIT, ['add', 'second.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second file'], { cwd: tempDir, stdio: 'pipe' })
+    // Two tracked files modified, so a pathspec-filtered reply is narrower
+    // than the fallback one rather than accidentally identical to it.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    writeFileSync(join(tempDir, 'second.txt'), 'second modified\n')
+
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff' })
+    const baseline = await waitForMessage(messages, 'diff_result', 5000)
+    assert.equal(baseline.error, null)
+    assert.deepEqual(
+      baseline.files.map(f => f.path).sort(), ['file.txt', 'second.txt'],
+      'baseline must show BOTH modified files, or the assertion below is vacuous'
+    )
+
+    messages.length = 0
+    send(ws, { type: 'get_diff', base: 'file.txt' })
+    const pathBase = await waitForMessage(messages, 'diff_result', 5000)
+
+    assert.equal(pathBase.error, baseline.error)
+    assert.deepEqual(
+      pathBase.files.map(f => f.path).sort(), ['file.txt', 'second.txt'],
+      'a base naming no commit must fall back to HEAD — reaching git, which reads it as a pathspec, narrows the reply and answers whether that path exists'
+    )
+
+    ws.close()
+  })
+
+  it('#7298: the workspace path stays server-side on EVERY error branch, not just the git-diff one', async () => {
+    // Half 2 was applied to the `git diff` catch only. Two other branches of
+    // getDiff still forwarded a raw `err.message`, and this one names the
+    // workspace with no crafted base at all: the outer catch wraps
+    // `resolveSessionCwd`, whose realpath() throws
+    // `ENOENT: no such file or directory, realpath '<cwdReal>'` once the
+    // session cwd is gone — a removed worktree, an unmounted volume, a
+    // rename. A bound (share-a-session) client reaches it with a bare
+    // `get_diff`.
+    // A cwd of its own, so the removal below cannot race the suite's own
+    // tempDir teardown (and never has to delete a .git dir on Windows).
+    const goneDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-gone-'))
+    const goneReal = realpathSync(goneDir)
+    const { ws, messages } = await createDiffTestServer(goneDir)
+
+    rmSync(goneDir, { recursive: true, force: true })
+
+    send(ws, { type: 'get_diff' })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    const serialized = JSON.stringify(result)
+    assert.ok(
+      !serialized.includes(goneDir) && !serialized.includes(goneReal),
+      `the workspace path must never reach the client; got: ${serialized.slice(0, 400)}`
+    )
+    assert.equal(result.error, 'Failed to run git diff')
+    assert.deepEqual(result.files, [])
+
+    ws.close()
+  })
+
+  it('#7298: an oversized base is rejected by length, and only its length is logged', async () => {
+    // Copilot review of this PR: `base` was unconstrained on the wire at the
+    // time (GetDiffSchema was .passthrough()), so every byte of it was spawned
+    // twice — once per `rev-parse` — and could be echoed back into an error
+    // message. The oracle is closed either way (an oversized base resolves to
+    // no commit and falls back to HEAD), so the observable here is the COST
+    // gate, not the reply: the rejection is logged, by length, before git is
+    // spawned at all.
+    //
+    // #7870 moved the length gate one layer EARLIER: GetDiffSchema itself now
+    // rejects a base over GET_DIFF_BASE_MAX_LENGTH (256) at the wire (see the
+    // '#7870' tests below), so a 5000-char base sent via `send(ws, ...)` would
+    // never reach this handler at all. This test now calls getDiff DIRECTLY to
+    // keep pinning the server's OWN, independent length gate — defense-in-
+    // depth that must hold even for a caller that reaches getDiff by a path
+    // that skips schema validation.
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+
+    const { reader, sent } = directReader()
+
+    const entries = []
+    const listener = (entry) => entries.push(entry)
+    addLogListener(listener)
+
+    try {
+      await reader.getDiff({}, 'a'.repeat(5000), tempDir)
+
+      // The reply is the ordinary fallback — an oversized base is not an error.
+      assert.equal(sent.length, 1)
+      const result = sent[0]
+      assert.equal(result.type, 'diff_result')
+      assert.equal(result.error, null)
+      assert.equal(result.files.length, 1)
+
+      const rejection = entries.find(e => /base rejected/.test(e.message || ''))
+      assert.ok(rejection, `expected a rejection log line; got: ${entries.map(e => e.message).join(' | ').slice(0, 300)}`)
+      assert.ok(
+        rejection.message.includes('5000'),
+        `the rejection must name the length; got: ${rejection.message}`
+      )
+      assert.ok(
+        !rejection.message.includes('aaaaaaaaaa'),
+        'the rejected value must never be logged — only its length'
+      )
+    } finally {
+      removeLogListener(listener)
+    }
+  })
+
+  it('#7298: an oversized base never reaches a rev-parse argv, even when it names a real commit', async () => {
+    // The test above asserts the LOG LINE, and the log line is not the gate.
+    // Deleting `rawBase.length <= MAX_DIFF_BASE_LENGTH &&` from the candidate
+    // conjunction — the term that actually keeps the oversized value out of
+    // the two `rev-parse` argvs — leaves the `log.warn` above it untouched, so
+    // the whole suite stays green while the bound is gone: a guard whose
+    // observable is not the behaviour it claims (docs/false-safety-guards.md).
+    //
+    // This is the observable that separates them. `<ref>^0` names the commit
+    // <ref> itself and CHAINS, so a real branch padded with `^0` is a revision
+    // built only from charset-allowed characters, carrying no leading dash,
+    // that git resolves to a real non-HEAD commit at any length (measured,
+    // git 2.55.0). Over the bound it must be indistinguishable from the HEAD
+    // fallback. Called directly for the same reason as the test above — #7870
+    // means a 277-char base like this one no longer reaches getDiff over the
+    // wire at all.
+    writeFileSync(join(tempDir, 'file.txt'), 'second content\n')
+    execFileSync(GIT, ['add', 'file.txt'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['commit', '-m', 'second'], { cwd: tempDir, stdio: 'pipe' })
+    execFileSync(GIT, ['branch', 'chroxy-7298-long', 'HEAD~1'], { cwd: tempDir, stdio: 'pipe' })
+
+    const padded = 'chroxy-7298-long' + '^0'.repeat(130)
+    assert.ok(padded.length > 256, `the probe must exceed the bound; got ${padded.length} chars`)
+
+    const { reader, sent } = directReader()
+
+    // Control: the SAME ref, unpadded, does resolve and does reach git — so a
+    // red below is the length diverting it, not the ref being unresolvable.
+    // Without this the assertion would pass for a branch that never existed.
+    await reader.getDiff({}, 'chroxy-7298-long', tempDir)
+    const short = sent[0]
+    assert.equal(short.error, null)
+    assert.deepEqual(
+      short.files.map(f => f.path), ['file.txt'],
+      'control: the unpadded ref must resolve to its own commit and show the second commit'
+    )
+
+    sent.length = 0
+    await reader.getDiff({}, padded, tempDir)
+    const long = sent[0]
+
+    assert.equal(long.error, null)
+    assert.deepEqual(
+      long.files.map(f => f.path), [],
+      'an oversized base must be the HEAD fallback (clean) — resolving it to HEAD~1 means the value reached a rev-parse argv'
+    )
+  })
+
+  // ── #7870: the wire-level gate itself ──────────────────────────────────────
+  it('#7870: an over-length base is rejected AT THE WIRE, before getDiff ever runs', async () => {
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: 'a'.repeat(257) })
+    const result = await waitForMessage(messages, 'error', 5000)
+
+    assert.equal(result.code, 'INVALID_MESSAGE')
+    assert.ok(
+      !messages.some(m => m.type === 'diff_result'),
+      'the message must never reach getDiff — it never even leaves the schema layer'
+    )
+
+    ws.close()
+  })
+
+  it('#7870: a base exactly at the wire bound (256 chars) still reaches getDiff normally', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: 'a'.repeat(256) })
+    const result = await waitForMessage(messages, 'diff_result', 5000)
+
+    // Not a real ref, so it resolves to nothing and falls back to HEAD — the
+    // point here is only that it reaches getDiff at all (no INVALID_MESSAGE).
+    assert.equal(result.error, null)
+    assert.equal(result.files.length, 1)
+
+    ws.close()
+  })
+
+  it('#7870: a non-string base is rejected AT THE WIRE', async () => {
+    const { ws, messages } = await createDiffTestServer()
+
+    send(ws, { type: 'get_diff', base: 12345 })
+    const result = await waitForMessage(messages, 'error', 5000)
+
+    assert.equal(result.code, 'INVALID_MESSAGE')
+    assert.ok(!messages.some(m => m.type === 'diff_result'))
+
+    ws.close()
+  })
+
+  it('#7298: a git failure detail is bounded before it reaches the log', () => {
+    // The wire gets a fixed string and the detail goes to the log; this keeps
+    // the log copy bounded too. An execFile rejection's `message` carries the
+    // whole command line plus the child's stderr, and nothing in either is
+    // bounded by the caller.
+    //
+    // Asserted on the helper rather than through a forced git failure ON
+    // PURPOSE: every git failure this suite can provoke yields a SHORT message
+    // (`stdout maxBuffer length exceeded` and friends), so an integration
+    // assertion on the length would pass identically with the truncation
+    // deleted — a test that cannot fail. The end-to-end amplification path is
+    // covered by the length gate in the test above, which stops an oversized
+    // input reaching the argv this message quotes.
+    const short = 'git diff failed: stdout maxBuffer length exceeded'
+    assert.equal(truncateForLog(short), short, 'a short detail passes through unchanged')
+
+    const long = 'z'.repeat(2000)
+    const bounded = truncateForLog(long)
+    assert.ok(
+      bounded.length < 600,
+      `a 2000-char detail must be bounded; got ${bounded.length} chars`
+    )
+    assert.ok(bounded.includes('2000'), 'the bound must record the original length')
+    assert.equal(truncateForLog(undefined), '', 'a missing detail is the empty string, never "undefined"')
+  })
+
+  it('#7298: a non-repo cwd is classified without logging an error every request', async () => {
+    // "Not a git repository" is the ordinary state of a session whose cwd is
+    // not a checkout, and it recurs on EVERY get_diff that session sends. The
+    // fixed-string sweep above wired a log.error into that path; logging a
+    // routine classification at error level buries the failures worth reading
+    // (Copilot review of this PR).
+    const plainDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-norepo-'))
+
+    try {
+      const { ws, messages } = await createDiffTestServer(plainDir)
+
+      // After start(), which clears every listener.
+      const entries = []
+      const listener = (entry) => entries.push(entry)
+      addLogListener(listener)
+
+      try {
+        send(ws, { type: 'get_diff' })
+        const result = await waitForMessage(messages, 'diff_result', 5000)
+
+        // The client still gets the classification — silence is not the fix.
+        assert.equal(result.error, 'Not a git repository')
+
+        const errors = entries.filter(e => e.level === 'error')
+        assert.deepEqual(
+          errors.map(e => e.message), [],
+          'an expected non-repo cwd must not log at error level'
+        )
+
+        ws.close()
+      } finally {
+        removeLogListener(listener)
+      }
+    } finally {
+      rmSync(plainDir, { recursive: true, force: true })
+    }
+  })
+
+  // ── #7871: createReaderOps' execImpl seam ──────────────────────────────
+  //
+  // createReaderOps previously called execFileAsync on the module-level GIT
+  // binding directly, so getDiff's preflight branch could only be reached by
+  // a REAL non-repo/permission-denied/timeout condition on the test host —
+  // "cannot check this" silently treated as "nothing to check"
+  // (docs/false-safety-guards.md). createGitOps already had this seam
+  // (ws-file-ops/git.js's 5th arg); createReaderOps now matches it.
+
+  // Build an injectable exec that routes by (file, args) and records every
+  // call, mirroring the router pattern in tests/git-create-pr.test.js.
+  function makeSeamReader(route) {
+    const calls = []
+    const sent = []
+    const execImpl = async (file, args, opts) => {
+      calls.push({ file, args: [...args], opts })
+      return route(file, args, opts)
+    }
+    const send = (_ws, msg) => sent.push(msg)
+    const boundResolve = (cwd) => resolveSessionCwd(cwd, new Map(), 60_000)
+    const boundValidate = (absPath, cwd) => validatePathWithinCwd(absPath, cwd, new Map(), 60_000)
+    const reader = createReaderOps(send, boundResolve, boundValidate, execImpl)
+    return { reader, sent, calls }
+  }
+
+  it('#7871: createReaderOps accepts an execImpl seam, matching createGitOps', () => {
+    // Signature/contract check: the 4th arg exists and defaults sanely (no
+    // throw when omitted — matches production wiring in ws-file-ops/index.js).
+    assert.doesNotThrow(() => createReaderOps(() => {}, async () => tempDir, async () => ({ valid: true })))
+  })
+
+  it('#7871: every git invocation inside getDiff routes through the injected exec (all 5 call sites)', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
+    // Delegates to the REAL execFileAsync so behaviour matches production —
+    // only the routing is observed, not faked.
+    const { reader, sent, calls } = makeSeamReader((file, args, opts) => realExecFileAsync(file, args, opts))
+
+    await reader.getDiff({}, undefined, tempDir)
+
+    assert.equal(sent[0].type, 'diff_result')
+    assert.equal(sent[0].error, null, 'the seam must not change getDiff behaviour when it just delegates')
+
+    const shapes = calls.map(c => c.args.slice(0, 2).join(' '))
+    assert.ok(shapes.includes('rev-parse --git-dir'), 'preflight must route through the seam')
+    assert.ok(
+      calls.filter(c => c.args[0] === 'rev-parse' && c.args[1] === '--verify').length >= 1,
+      'resolveCommit (rev-parse --verify) must route through the seam'
+    )
+    // A real repo with a commit resolves headOid, so this is `git diff <oid>`
+    // (never the bare `['diff']` form, which only fires in an empty repo).
+    assert.ok(calls.some(c => c.args[0] === 'diff' && c.args.length === 2 && c.args[1] !== '--cached'), '`git diff <oid>` must route through the seam')
+    assert.ok(calls.some(c => c.args[0] === 'diff' && c.args[1] === '--cached'), 'staged `git diff --cached` must route through the seam')
+    assert.ok(calls.some(c => c.args[0] === 'ls-files'), 'the untracked-files scan must route through the seam')
+  })
+
+  it('#7871: the preflight failure branch is reachable via the seam for a non-128 failure (ENOENT)', async () => {
+    // Before this seam, this branch could only be swept "by inspection" —
+    // there was no way to make execFileAsync fail with anything but a real
+    // host condition. #7862's review noted exactly this (issue body).
+    const { reader, sent, calls } = makeSeamReader((file, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') {
+        const err = new Error(`spawn ${GIT} ENOENT`)
+        err.code = 'ENOENT'
+        throw err
+      }
+      throw new Error(`unexpected exec in this test: ${args.join(' ')}`)
+    })
+
+    await reader.getDiff({}, undefined, tempDir)
+
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'diff_result')
+    assert.equal(sent[0].error, 'Failed to run git diff')
+    assert.deepEqual(sent[0].files, [])
+    // #7298 must hold on this branch too: no raw message (which would carry
+    // the resolved git binary path) reaches the client.
+    assert.ok(!JSON.stringify(sent[0]).includes(GIT), 'the git binary path must never reach the client')
+    assert.equal(calls.length, 1, 'must fail fast at the preflight — no further git calls')
+  })
+
+  // ── #7877: exit-128 classification ──────────────────────────────────────
+  //
+  // getDiff's preflight treated EVERY exit-128 as "Not a git repository"
+  // (`stderr.includes(...) || code === 128`) and logged nothing for the
+  // "|| code === 128" half. `fatal: detected dubious ownership in repository`
+  // — common on mounted volumes and container/worktree setups — is also
+  // exit 128 but is NOT "not a git repository"; an operator had no trace.
+
+  it('#7877: a non-"not a git repository" exit-128 (dubious ownership) is logged server-side; the client still gets a fixed string', async () => {
+    const DUBIOUS = "fatal: detected dubious ownership in repository at '/some/mounted/path'"
+    const { reader, sent } = makeSeamReader((file, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') {
+        const err = new Error(DUBIOUS)
+        err.code = 128
+        err.stderr = DUBIOUS + '\n'
+        throw err
+      }
+      throw new Error(`unexpected exec in this test: ${args.join(' ')}`)
+    })
+
+    const entries = []
+    const listener = (entry) => entries.push(entry)
+    addLogListener(listener)
+    try {
+      await reader.getDiff({}, undefined, tempDir)
+    } finally {
+      removeLogListener(listener)
+    }
+
+    // Client contract unchanged: still a fixed classification, never raw stderr.
+    assert.equal(sent[0].error, 'Not a git repository')
+    assert.ok(
+      !JSON.stringify(sent[0]).includes('dubious ownership'),
+      'raw stderr must never reach the client (#7298 must hold)'
+    )
+
+    // #7877: the operator now sees it, and NOT at error level (it's a routine-
+    // ish classification, not an unexpected daemon failure).
+    const hit = entries.find(e => /dubious ownership/i.test(e.message || ''))
+    assert.ok(hit, `expected a log entry mentioning the real cause; got: ${entries.map(e => e.message).join(' | ')}`)
+    assert.equal(hit.level, 'warn')
+  })
+
+  it('#7877: the genuine not-a-git-repo classification stays quiet (no log at any level)', async () => {
+    const NOTREPO = 'fatal: not a git repository (or any of the parent directories): .git'
+    const { reader, sent } = makeSeamReader((file, args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') {
+        const err = new Error(NOTREPO)
+        err.code = 128
+        err.stderr = NOTREPO + '\n'
+        throw err
+      }
+      throw new Error(`unexpected exec in this test: ${args.join(' ')}`)
+    })
+
+    const entries = []
+    const listener = (entry) => entries.push(entry)
+    addLogListener(listener)
+    try {
+      await reader.getDiff({}, undefined, tempDir)
+    } finally {
+      removeLogListener(listener)
+    }
+
+    assert.equal(sent[0].error, 'Not a git repository')
+    assert.deepEqual(entries, [], 'the genuine non-repo case must log nothing at all, at any level')
+  })
+
+  it('#7877: the preflight forces LC_ALL=C/LANG=C so the classification is locale-independent', async () => {
+    let capturedEnv = null
+    const { reader, sent } = makeSeamReader((file, args, opts) => {
+      if (args[0] === 'rev-parse' && args[1] === '--git-dir') {
+        capturedEnv = opts?.env
+        const err = new Error('fatal: not a git repository (or any of the parent directories): .git')
+        err.code = 128
+        err.stderr = 'fatal: not a git repository (or any of the parent directories): .git\n'
+        throw err
+      }
+      throw new Error(`unexpected exec in this test: ${args.join(' ')}`)
+    })
+
+    await reader.getDiff({}, undefined, tempDir)
+
+    assert.equal(sent[0].error, 'Not a git repository')
+    assert.ok(capturedEnv, 'the preflight call must pass an env option')
+    assert.equal(capturedEnv.LC_ALL, 'C')
+    assert.equal(capturedEnv.LANG, 'C')
   })
 })
 

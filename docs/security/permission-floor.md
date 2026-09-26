@@ -52,6 +52,20 @@ searches. Containment for `Glob` therefore lives at the tool, not in the floor �
 actual boundary. When auditing whether a tool is covered, ask what the tool *reads*,
 not which of its fields the floor happens to scan.
 
+**And ask which process can see the filesystem the answer depends on** (#7354). Every
+check named above runs on the **host**, and for the container provider the paths belong
+to the **container**. A lexical rule cannot see a symlinked directory inside
+`/workspace`, so `{"pattern":"esc/*"}` and `{"path":"esc"}` — with `/workspace/esc ->
+/etc` in the guest — were both spotless to `globMatchEscapesRoot` and to
+`remapToContainerPath`, and both read the image's `/etc`. Container `Glob`, `Grep` and
+`Read` now wrap their `docker exec` in a confinement preamble
+(`buildConfinedContainerCommand` in `built-in-tools/tool-transforms.js`) that resolves
+the path physically *inside* the container and refuses unless it lands under the
+resolved `/workspace`; the body then operates on the resolved path, not the alias. The
+host-side lexical checks are kept in front of it — they need nothing from the guest's
+userland — and the host refuses any container reply that does not carry the preamble's
+sentinel, so a command that lost the guard is an error rather than a quiet "no matches".
+
 ## 2. Precedence — the floor beats every lenient mode
 
 The floor is checked **before** any short-circuit, on **both** pipelines:
@@ -93,6 +107,69 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   `.git`/`.claude` with no prompt. The hook now asks the daemon instead of
   re-deriving path rules in bash (a shell copy would be a second source of truth and
   would drift — the #6986/#7001 lesson).
+- **The hook-routed pipeline's own files are floored by the filesystem, and the base
+  dir is checked rather than assumed** (#7337 for `claude-cli`, #7372 for
+  `claude-tui`). Both providers keep their per-session state — `settings.json` that
+  registers the hook, the hook payloads, and the re-readable `permission-mode`
+  sidecar the hook consults on every tool call — in a dir under `os.tmpdir()`.
+  `mkdirSync(base, { recursive: true })` returns silently when the base already
+  exists, *including when it is a symlink to a directory*, and then creates children
+  through it at the umask default. On Linux `os.tmpdir()` is the shared `/tmp`, so
+  another local user could pre-create `/tmp/chroxy-claude-tui`, read the
+  world-readable base to learn the session uuid, and substitute a session dir whose
+  `permission-mode` reads `auto`. `ensureOwnedBaseDir()` in
+  `packages/server/src/utils/stale-session-dirs.js` is the one implementation of the
+  check — it creates the base at `0700`, refuses a symlinked or foreign-uid base, and
+  re-asserts the mode on an adopted one. macOS is unaffected (per-user `$TMPDIR` at
+  `0700`), which is precisely why this is an explicit check and not a platform
+  assumption. The two providers differ on the *response*, deliberately: `claude-cli`
+  degrades to env-var-only (losing mid-session mode switching), while **`claude-tui`
+  fails session start** with `SINK_BASE_UNTRUSTED` — its sink carries the whole hook
+  pipeline, so running on without it would be a session that reports success while
+  the floor is silently unenforced.
+- **The base check above only ran at create time and at vanish-recreate time — not
+  on every read — until #7875.** `ensureOwnedBaseDir()` ran in exactly two places
+  for `claude-tui`: `start()`, and `_recoverSinkDir()`'s recreate branch, which is
+  reached only when the poll loop's `readdir` has *failed*. A squat that instead
+  left a **readable** directory at the sink path (base swapped for a symlink whose
+  target has a same-named session dir already inside it, or the base's own
+  permissions widened after start) made `readdir` **succeed**, so neither check was
+  ever reached — the attacker's `pre-`/`post-`/`stop-*.json` files were parsed as
+  genuine hook events, and `claude`'s own hook writes passed through the squatted
+  base too, so the attacker could read every tool input/output for the rest of the
+  session and control the `permission-mode` sidecar the hook re-reads on every tool
+  call (the hard floor in `permission-floor.js` still held; everything layered above
+  it did not). `start()` now binds an fd to the validated base and records its
+  `dev`+`ino`; every `drainHookFiles` poll pass (~every 150ms during an active
+  turn) and `_recoverSinkDir`'s stat-able-but-unreadable branch re-`lstat` the base
+  and compare symlink/directory/uid/mode **and** that identity — a path-only
+  re-check cannot tell the original base from a same-looking replacement (same
+  mode, same owner, same path, different inode), which is why the fd-bound identity
+  is the primary check, not the mode/uid checks alone. A failed re-check ends the
+  current turn with `SINK_BASE_UNTRUSTED` (Ctrl-C into the PTY, no attacker payload
+  ever read); the session is left running for a retry rather than torn down
+  outright, matching how the other mid-turn backstops (`_handleHardTimeout`,
+  `_handleStreamStall`) already behave — a base still compromised on the next turn
+  is caught again on that turn's very first poll.
+- **Two narrower gaps in the #7875 fix, closed in review (#7926).** (1) Read-side
+  TOCTOU: the base is checked once at the top of a `drainHookFiles` pass, but
+  `readdir`/`readFile` are real async fs calls that yield the event loop — a base
+  swap landing after a file was already read, but before the pass finished, was
+  never re-checked. `drainHookFiles` now collects a pass's reads into a pending
+  batch without emitting or unlinking anything, re-validates the base exactly once
+  more, and discards the ENTIRE batch (not just files read after the swap) on a
+  mismatch. (2) The base check says nothing about an individual file inside a base
+  that DID validate: `_hookReadFile` previously followed a symlink unconditionally.
+  It now opens each hook file with `O_NOFOLLOW` and requires a regular file, so a
+  symlink planted at a hook-file name is skipped (logged) rather than parsed as a
+  genuine payload. That `open()` also sets `O_NONBLOCK` (re-review fix, same #7926):
+  without it, a FIFO planted at a hook-file name would block the `open()` call
+  itself until a writer connects — confirmed to leave the underlying libuv-threadpool
+  op permanently unsettled, one occupied thread per distinct planted FIFO name,
+  shared process-wide across every session's `fs` calls. `O_NONBLOCK` makes `open()`
+  return immediately regardless of a writer, so the `isFile()` check can still refuse
+  it; POSIX defines `O_NONBLOCK` as a no-op for a regular file, so legitimate reads
+  are unaffected.
 - **SDK Auto uses the SDK's native `PreToolUse` callback.** `bypassPermissions`
   suppresses `canUseTool`, but the callback still runs before every tool. It sends
   the tool name and input through the same `PermissionManager`: benign operations

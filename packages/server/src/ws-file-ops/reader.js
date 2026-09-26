@@ -1,14 +1,54 @@
-import { readFile, stat, mkdir, realpath, open } from 'fs/promises'
+import { readFile, stat, mkdir, realpath } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { GET_DIFF_BASE_MAX_LENGTH } from '@chroxy/protocol'
 import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
+import { openNoFollow } from './open-nofollow.js'
+import { createLogger } from '../logger.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
 
 const execFileAsync = promisify(execFileCb)
+const log = createLogger('ws')
+
+/**
+ * Longest `base` getDiff will hand to git. A revision is short — a full OID is
+ * 40 characters and a ref name far less — so this rejects nothing legitimate,
+ * and it bounds what could otherwise be spent per request: two `rev-parse`
+ * argvs, plus whatever git echoes back into an error message.
+ *
+ * #7870 — imported rather than redeclared: `GetDiffSchema` (packages/protocol)
+ * now rejects a `base` over this same length AT THE WIRE, before getDiff ever
+ * runs. This constant is the single source both layers read, so the two
+ * cannot drift the way a hand-copied number could. This gate stays anyway —
+ * it is the server's OWN, independent defense-in-depth boundary, correct even
+ * for a future caller that reaches getDiff by a path that skips schema
+ * validation (see packages/server/tests/ws-server-file-ops.test.js's direct
+ * `createReaderOps` calls, which exercise it without going over the wire).
+ */
+const MAX_DIFF_BASE_LENGTH = GET_DIFF_BASE_MAX_LENGTH
+
+/** Longest error detail written to the server log in one line (#7298). */
+const MAX_LOGGED_ERROR_LENGTH = 500
+
+/**
+ * Bound one error detail before it reaches the log.
+ *
+ * An `execFile` rejection's `message` carries the whole command line — which
+ * includes the client's own `base` — followed by the child's stderr, and
+ * neither is bounded by anything the caller controls. Logging it raw turns an
+ * oversized input into log amplification, so the log gets a prefix and the
+ * original length instead.
+ */
+export function truncateForLog(message) {
+  const text = String(message ?? '')
+  return text.length > MAX_LOGGED_ERROR_LENGTH
+    ? `${text.slice(0, MAX_LOGGED_ERROR_LENGTH)}… (truncated, ${text.length} chars)`
+    : text
+}
 
 /** Image extensions to MIME type mapping (module-level to avoid per-call allocation) */
 const IMAGE_MIME = {
@@ -27,9 +67,15 @@ const IMAGE_MIME = {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {Function} [execImpl] - injectable promisified execFile seam (defaults to the
+ *   real one; matches createGitOps' 5th arg, #7871). Every git invocation inside
+ *   getDiff routes through this — `rev-parse --git-dir`, both `rev-parse --verify`
+ *   calls, both `diff` calls, and `ls-files` — so the preflight failure branch
+ *   (and the exit-128 classification, #7877) can be driven by tests without a
+ *   real non-repo/permission-denied/timeout condition on the host.
  * @returns {Object} reader operation methods
  */
-export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd, execImpl = execFileAsync) {
 
   /**
    * Read file content at a given path within the session CWD.
@@ -155,14 +201,29 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         return
       }
 
-      // Open with O_NOFOLLOW to close the post-validation TOCTOU window:
-      // if the file at resolvedAbsPath was replaced with a symlink between
-      // validatePathWithinCwd() and this open(), the kernel rejects it (ELOOP).
+      // openNoFollow closes the post-validation TOCTOU window: if the file at
+      // resolvedAbsPath was replaced with a symlink between
+      // validatePathWithinCwd() and this open, it is rejected with ELOOP — by
+      // the kernel on POSIX (O_NOFOLLOW), by an lstat + fd-identity check on
+      // win32, where O_NOFOLLOW does not exist and the bare flag silently
+      // no-opped until #7280. See open-nofollow.js for the exact per-platform
+      // guarantee and the race it cannot close.
       let buf
       {
         let fh
         try {
-          fh = await open(resolvedAbsPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+          fh = await openNoFollow(resolvedAbsPath, fsConstants.O_RDONLY)
+          // #7938 — `fileStat` above was taken BEFORE this open, so it can't
+          // see a FIFO/device swapped in during the TOCTOU window between
+          // that stat and this open. openNoFollow's O_NONBLOCK keeps the
+          // open from hanging on a planted FIFO with no writer, but the
+          // content must still not be read from anything but a regular file
+          // — re-check on the OPENED fd, which can't be raced the same way.
+          const fhStat = await fh.stat()
+          if (!fhStat.isFile()) {
+            // No path in the text: this reaches the client verbatim.
+            throw new Error('Not a regular file')
+          }
           buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -294,7 +355,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const absInCwd = normalize(resolve(cwdReal, requestedPath.trim()))
 
       // Determine whether the target file already exists so we can choose
-      // between O_NOFOLLOW (existing) and parent-validated creation (new).
+      // between a symlink-refusing truncate (existing) and parent-validated
+      // creation (new).
       let resolvedTarget
       let fileExists = false
       try {
@@ -338,17 +400,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Create parent directories if needed
       await mkdir(resolve(absPath, '..'), { recursive: true })
 
-      // Write the file using O_NOFOLLOW to close the post-validation TOCTOU
-      // window: if a symlink is swapped in at absPath between validation and
-      // this open(), the kernel rejects it with ELOOP.
+      // Write the file through openNoFollow to close the post-validation TOCTOU
+      // window: a symlink swapped in at absPath between validation and this
+      // open is rejected with ELOOP on every platform (#7280 — the bare
+      // O_NOFOLLOW flag this used to pass is undefined on win32 and ORed to 0).
       const data = Buffer.from(content || '', 'utf-8')
       {
         let fh
         try {
           const flags = fileExists
-            ? fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC
-            : fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_CREAT | fsConstants.O_EXCL
-          fh = await open(absPath, flags, 0o666)
+            ? fsConstants.O_WRONLY | fsConstants.O_TRUNC
+            : fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+          fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -364,7 +427,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             // Race: file was created between our existence check and O_EXCL open.
             // Retry once using the existing-file path (O_TRUNC without O_EXCL).
             try {
-              fh = await open(absPath, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW | fsConstants.O_TRUNC, 0o666)
+              fh = await openNoFollow(absPath, fsConstants.O_WRONLY | fsConstants.O_TRUNC, 0o666)
               await fh.writeFile(data)
             } catch (retryErr) {
               if (retryErr.code === 'ELOOP') {
@@ -410,8 +473,9 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
    * The TARGET is chosen SERVER-side (`<cwd>/CLAUDE.md`) — the client sends only
    * the note text, never a path — so the write is path-confined BY CONSTRUCTION.
    * validatePathWithinCwd is still run for symlink-escape defence (a CLAUDE.md
-   * symlinked out of the workspace is rejected), and the open uses O_NOFOLLOW to
-   * close the post-validation TOCTOU window, matching writeFileContent above.
+   * symlinked out of the workspace is rejected), and the open goes through
+   * openNoFollow to close the post-validation TOCTOU window, matching
+   * writeFileContent above.
    *
    * The write uses O_APPEND (+ O_CREAT): each append lands atomically at EOF, so
    * concurrent appends can't lose a line and a crash can't truncate the file —
@@ -476,7 +540,15 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           if (st.size > 0) {
             let rfh
             try {
-              rfh = await open(absPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+              // #7938 — openNoFollow's O_NONBLOCK keeps a FIFO raced in at this
+              // path from hanging the open. No post-open isFile() check here,
+              // deliberately: the read below is a positioned read (pread), and
+              // pread on a FIFO fails ESPIPE and on a directory EISDIR, both
+              // landing in the advisory catch exactly as a refusal would. A
+              // check could not change any outcome (a mutation deleting one
+              // survived every test for that reason), and the one byte read is
+              // never returned to the client — it only picks the separator.
+              rfh = await openNoFollow(absPath, fsConstants.O_RDONLY)
               const tail = Buffer.alloc(1)
               await rfh.read(tail, 0, 1, st.size - 1)
               needsLeadingNewline = tail[0] !== 0x0a
@@ -493,13 +565,14 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // O_APPEND: atomic append at EOF (no lost-update / truncation window).
       // O_CREAT (WITHOUT O_EXCL) opens-or-creates, so there is no EEXIST race to
-      // retry — a concurrent creator just means we append instead. O_NOFOLLOW
-      // keeps the symlink-escape defence on the final component.
+      // retry — a concurrent creator just means we append instead. openNoFollow
+      // keeps the symlink-escape defence on the final component, on win32 as
+      // well as POSIX (#7280).
       {
         let fh
         try {
-          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW
-          fh = await open(absPath, flags, 0o666)
+          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+          fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -542,20 +615,56 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // Check if the directory is a git repository before running git commands
       try {
-        await execFileAsync(GIT, ['rev-parse', '--git-dir'], {
+        // #7877 — LC_ALL/LANG=C: the classification below reads git's stderr
+        // for an English substring. Left to the daemon host's own locale, a
+        // translated "not a git repository" message would silently miss that
+        // substring and fall into the "other exit-128" branch on EVERY
+        // request from that host — exactly the per-request log spam #7862's
+        // review downgrade was trying to avoid. Forcing C here makes the
+        // classification locale-independent without touching any other git
+        // invocation in this function (none of the others string-match stderr).
+        await execImpl(GIT, ['rev-parse', '--git-dir'], {
           cwd: cwdReal,
           timeout: 5000,
+          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
         })
       } catch (revParseErr) {
         const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
-        const isNotGitRepo = stderr.includes('not a git repository') ||
-          revParseErr.code === 128
+        // #7877 — git exits 128 for MANY fatals, not only "not a git
+        // repository": `fatal: detected dubious ownership in repository at
+        // '<path>'` (mounted volumes, container/worktree setups) is the one
+        // chroxy actually hits. The old `stderr.includes(...) || code === 128`
+        // OR'd every other 128 into the same bucket, so a dubious-ownership
+        // session was misreported to the client AND logged nowhere — the
+        // operator had no trace of the real cause.
+        //
+        // The client-facing contract is UNCHANGED here on purpose (still a
+        // fixed 'Not a git repository' for any exit-128, never raw stderr —
+        // #7298 must hold): the fix is that an "other 128" is now visible to
+        // the operator. `isOtherExit128Fatal` is exactly the case the old
+        // predicate swallowed: an exit-128 whose stderr, in the forced C
+        // locale above, does NOT actually say "not a git repository".
+        const isGenuineNotGitRepo = stderr.includes('not a git repository')
+        const isOtherExit128Fatal = !isGenuineNotGitRepo && revParseErr.code === 128
+        const isNotGitRepo = isGenuineNotGitRepo || isOtherExit128Fatal
+
+        if (isOtherExit128Fatal) {
+          // Routine-ish (dubious ownership, etc.) but worth an operator's
+          // attention — warn, not error, and not silence (#7877).
+          log.warn(`git rev-parse --git-dir exited 128 without a "not a git repository" message — classified as non-repo anyway: ${truncateForLog(revParseErr.message)}`)
+        } else if (!isNotGitRepo) {
+          // Only the genuinely UNEXPECTED failure (git missing, timeout,
+          // EACCES) logs at error level. "Not a git repository" is the
+          // ordinary state of a session whose cwd is not a checkout, and it
+          // arrives on every `get_diff` that session sends — logging it at
+          // error level buries the failures worth reading, which is the same
+          // defect as not logging at all (Copilot review of #7862).
+          log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
+        }
         sendFn(ws, {
           type: 'diff_result',
           files: [],
-          error: isNotGitRepo
-            ? 'Not a git repository'
-            : `Git error: ${revParseErr.message || 'unknown failure'}`,
+          error: isNotGitRepo ? 'Not a git repository' : 'Failed to run git diff',
         })
         return
       }
@@ -567,8 +676,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // used to be the only check, and it put `-` INSIDE its character class,
       // so every single-token option passed it: `--stat`, `-p`, `--exit-code`,
       // `--ext-diff`, and `-O<path>` — which makes git read <path> as a diff
-      // orderfile and report whether it could, straight back to the client via
-      // the `error: err.message` branches below.
+      // orderfile and report whether it could, straight back to the client,
+      // which at the time forwarded `err.message` verbatim (see #7298 below).
       //
       // isSafeArgvValue is the load-bearing half (it rejects the leading dash);
       // the allowlist stays as a charset narrowing. A `--` separator canNOT
@@ -577,64 +686,102 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // correct here; falling back to 'HEAD' preserves the pre-existing
       // contract for any unusable base.
       //
-      // SCOPE — this closes the LEADING-DASH route and only that. A path
-      // oracle survives here that needs no dash at all, because `:` and `/`
-      // are both in the charset and git's stderr is forwarded verbatim:
+      // #7298 — HALF 1 of 2. The charset above is a NARROWING, never a
+      // decision: it cannot tell a revision from a path, and `:` and `/` used
+      // to be members, so `HEAD:<path>` and a bare absolute path both reached
+      // git as revisions and git answered on the wire (measured, git 2.55.0):
       //
       //     base='HEAD:/etc/passwd' -> fatal: path '/etc/passwd' exists on
       //                                disk, but not in 'HEAD'
       //     base='HEAD:absent'      -> fatal: path 'absent' does not exist in 'HEAD'
-      //     base='/etc/passwd'      -> fatal: '/etc/passwd' is outside repository
-      //     base='/no/such/file'    -> fatal: ambiguous argument ...
+      //     base='/etc/passwd'      -> fatal: '/etc/passwd' is outside
+      //                                repository at '<cwdReal>'
       //
-      // That is pre-existing (charset and stderr-forwarding are both unchanged
-      // by #7290) and is tracked separately; closing it means resolving the
-      // base with `rev-parse --verify` and not forwarding raw git stderr,
-      // which is a wider contract change than this fix. Do not read the guard
-      // below as sealing the oracle — it seals one route into it.
-      const diffBase = (isSafeArgvValue(rawBase) && /^[a-zA-Z0-9._\-\/~^@{}:]+$/.test(rawBase))
+      // — a filesystem-wide path-existence oracle, as the daemon user,
+      // escaping the session cwd, plus the workspace path itself.
+      //
+      // So RESOLVE the base instead of pattern-matching it: only a revision
+      // that names a real commit in THIS repo is ever handed to `git diff`,
+      // and everything else falls back to HEAD (the pre-existing contract for
+      // an unusable base) without git being asked the client's question at
+      // all. `rev-parse --verify --quiet` is silent on failure — it exits 1
+      // with empty stderr for every probe above — so the resolution step is
+      // not itself an oracle. `:` is dropped from the charset in the same
+      // change: `<rev>:<path>` names a BLOB, never a commit.
+      //
+      // Do NOT "harden" this by appending a `--` to the diff argv instead.
+      // That changes an unresolvable base's error to `fatal: bad revision`,
+      // which the old `unknown revision` recovery predicate missed — and `--`
+      // does not stop option parsing for a token that precedes it anyway
+      // (#7290, utils/argv-safety.js).
+      // The length bound is the third gate, and it is about COST rather than
+      // about the oracle: `base` is unconstrained on the wire (#7870), and
+      // every byte of it is spawned twice (both `rev-parse` calls) and can be
+      // echoed back into an error message. A revision is short, so nothing
+      // legitimate is rejected. Only the LENGTH is logged — never the value,
+      // which is the input this whole function exists to distrust.
+      if (rawBase.length > MAX_DIFF_BASE_LENGTH) {
+        log.warn(`get_diff base rejected: ${rawBase.length} chars exceeds the ${MAX_DIFF_BASE_LENGTH}-char limit`)
+      }
+      const candidate = (
+        rawBase.length <= MAX_DIFF_BASE_LENGTH &&
+        isSafeArgvValue(rawBase) &&
+        /^[a-zA-Z0-9._\-\/~^@{}]+$/.test(rawBase)
+      )
         ? rawBase
         : 'HEAD'
 
+      /** Resolve a revision to a commit OID, or null when it names no commit. */
+      const resolveCommit = async (rev) => {
+        try {
+          const { stdout } = await execImpl(
+            GIT, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`],
+            { cwd: cwdReal, timeout: 5000 }
+          )
+          return stdout.trim() || null
+        } catch {
+          return null
+        }
+      }
+
+      const headOid = await resolveCommit('HEAD')
+      // An unresolvable base is HEAD. HEAD itself is unresolvable only in a
+      // repo with no commits, where `git diff HEAD` used to fail into the
+      // `unknown revision` recovery — so go straight to the plain `git diff`
+      // that recovery ran, and drop the stderr-substring predicate with it.
+      const baseOid = candidate === 'HEAD'
+        ? headOid
+        : (await resolveCommit(candidate)) || headOid
+      const baseIsHead = baseOid === null || baseOid === headOid
+
       let diffOutput = ''
       try {
-        const { stdout } = await execFileAsync(GIT, ['diff', diffBase], {
+        const { stdout } = await execImpl(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
         })
         diffOutput = stdout
       } catch (err) {
-        if (err.message && err.message.includes('unknown revision')) {
-          try {
-            const { stdout } = await execFileAsync(GIT, ['diff'], {
-              cwd: cwdReal,
-              maxBuffer: 2 * 1024 * 1024,
-              timeout: 10000,
-            })
-            diffOutput = stdout
-          } catch (innerErr) {
-            sendFn(ws, {
-              type: 'diff_result',
-              files: [],
-              error: innerErr.message || 'Failed to run git diff',
-            })
-            return
-          }
-        } else {
-          sendFn(ws, {
-            type: 'diff_result',
-            files: [],
-            error: err.message || 'Failed to run git diff',
-          })
-          return
-        }
+        // #7298 — HALF 2 of 2. Raw git stderr used to go to the client
+        // verbatim, which is what made every message above readable on the
+        // wire. Half 1 keeps the client's own string out of that stderr, but
+        // any git failure can name a path (the workspace, an object, a
+        // config), so the detail stays server-side and the wire gets a fixed
+        // string. Both halves are load-bearing; neither is redundant.
+        log.error(`git diff failed: ${truncateForLog(err.message)}`)
+        sendFn(ws, {
+          type: 'diff_result',
+          files: [],
+          error: 'Failed to run git diff',
+        })
+        return
       }
 
-      // Also get staged changes if diffBase is HEAD
-      if (diffBase === 'HEAD') {
+      // Also get staged changes if the effective base is HEAD
+      if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execFileAsync(GIT, ['diff', '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -664,7 +811,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // Discover untracked files (new files not yet staged)
       try {
-        const { stdout: untrackedOutput } = await execFileAsync(
+        const { stdout: untrackedOutput } = await execImpl(
           GIT, ['ls-files', '--others', '--exclude-standard'],
           { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
         )
@@ -736,10 +883,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         error: null,
       })
     } catch (err) {
+      // #7298 — the last raw-message branch, and the one that names the
+      // workspace without any help from the client: this catch wraps
+      // `resolveSessionCwd`, whose `realpath()` throws
+      // `ENOENT: no such file or directory, realpath '<cwdReal>'` when the
+      // session cwd is gone (removed worktree, unmounted volume, rename).
+      // That is the same `cwdReal` leak the issue is about, reachable by a
+      // bound client sending a bare `get_diff` with no crafted base at all.
+      log.error(`getDiff failed: ${truncateForLog(err.message)}`)
       sendFn(ws, {
         type: 'diff_result',
         files: [],
-        error: err.message || 'Unknown error',
+        error: 'Failed to run git diff',
       })
     }
   }

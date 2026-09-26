@@ -1,9 +1,21 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, mkdir, writeFile, symlink } from 'fs/promises'
+import { openSync, closeSync, constants as fsConstants } from 'fs'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+
+/**
+ * Open-and-close a non-blocking READER on `fifo`. A no-op when nothing is
+ * waiting; if a regression ever lets a write-open block on the FIFO, this
+ * releases the stranded threadpool thread so the run fails on its assertion
+ * instead of hanging at exit.
+ */
+function releaseBlockedWriter(fifo) {
+  try { closeSync(openSync(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)) } catch { /* nothing to release */ }
+}
 
 describe('writeFile handler', () => {
   let tmpDir
@@ -122,7 +134,8 @@ describe('writeFile handler', () => {
   it('allows writing through a symlink that resolves within CWD', async () => {
     responses.length = 0
     // Internal symlink: points to a file within CWD — realpath resolves it,
-    // validation passes, and O_NOFOLLOW writes to the resolved real file.
+    // validation passes, and the symlink-refusing open (openNoFollow) writes
+    // to the RESOLVED real file, which is not itself a symlink.
     const realFile = join(tmpDir, 'real-target.txt')
     await writeFile(realFile, 'real content', 'utf-8')
     const linkPath = join(tmpDir, 'internal-link.txt')
@@ -149,7 +162,9 @@ describe('writeFile handler', () => {
   })
 
   it('blocks new-file write through a PARENT directory symlink pointing outside CWD (2026-04-11 audit blocker 4)', async () => {
-    // Pre-audit: O_NOFOLLOW only checks the final path component.
+    // Pre-audit: the symlink-refusing open checks only the FINAL path
+    // component (true of O_NOFOLLOW on POSIX and of the win32 lstat +
+    // fd-identity emulation added in #7280 alike).
     // `validatePathWithinCwd` fell back to the lexical path on ENOENT for
     // a non-existent target, so it never noticed that a PARENT of the new
     // file was a symlink escaping the workspace. Creating a new file like
@@ -265,5 +280,29 @@ describe('writeFile handler', () => {
     assert.equal(responses[0].error, null, 'internal parent symlink must not be blocked')
     const content = await readFile(join(realDir, 'legitimate.txt'), 'utf-8')
     assert.equal(content, 'ok content')
+  })
+
+  // #7938 — openNoFollow ORs O_NONBLOCK into WRITE opens as well. A FIFO with
+  // no reader now fails the open with ENXIO instead of blocking it forever
+  // waiting for one (the behaviour before #7938); this pins that write_file
+  // turns that into a prompt error response.
+  it('write_file to a planted FIFO returns an error promptly instead of hanging (#7938)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    responses.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-write-fifo-'))
+    const fifo = join(dir, 'evil.fifo')
+    execFileSync('mkfifo', [fifo])
+    try {
+      const outcome = await Promise.race([
+        fileOps.writeFile(mockWs, 'evil.fifo', 'data', dir).then(() => 'returned'),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 3000)),
+      ])
+      assert.equal(outcome, 'returned', 'write_file blocked opening a FIFO with no reader — openNoFollow needs O_NONBLOCK (#7938)')
+      assert.equal(responses.length, 1)
+      assert.equal(responses[0].type, 'write_file_result')
+      assert.ok(responses[0].error, 'a FIFO target must produce an error, not a successful write')
+    } finally {
+      releaseBlockedWriter(fifo)
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

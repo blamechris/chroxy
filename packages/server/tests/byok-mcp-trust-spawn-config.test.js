@@ -372,7 +372,9 @@ describe('#7001 deny-before-write (ClaudeByokSession.addMcpServer)', () => {
         return decision
       },
     }
-    // No fleet: addMcpServer's fleet-attach step is skipped, so nothing is spawned.
+    // No fleet, and start() never ran (_processReady stays false): addMcpServer's
+    // fleet-attach step (#7012's _ensureMcpFleet path) is gated on _processReady,
+    // so it is skipped here too and nothing is spawned.
     session._mcpFleet = null
     session._emitMcpServers = () => {}
     return { session, calls }

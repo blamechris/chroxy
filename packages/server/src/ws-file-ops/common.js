@@ -33,8 +33,11 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * symlink to `/etc`, then:
  *   - realpath('.venv/bin/evil.sh') → ENOENT (bin/evil.sh doesn't exist)
  *   - fallback uses the lexical path → looks like it stays in workspace
- *   - O_NOFOLLOW only checks the FINAL component → the kernel happily
- *     follows the `.venv` symlink to `/etc` and writes there
+ *   - the symlink-refusing open (`openNoFollow`, and O_NOFOLLOW before it)
+ *     only checks the FINAL component → the `.venv` symlink is followed to
+ *     `/etc` and the write lands there. True on every platform: O_NOFOLLOW is
+ *     a final-component flag, and the win32 lstat + fd-identity emulation
+ *     added in #7280 inspects exactly the same one component.
  *
  * Walking up to the deepest existing ancestor closes the gap: realpath
  * on `.venv/` yields `/etc`, we reconstruct the target as `/etc/bin/

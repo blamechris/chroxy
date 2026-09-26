@@ -18,9 +18,10 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync, chmodSync, symlinkSync, chownSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { createHttpHandler } from '../src/http-routes.js'
 import {
   loadOrCreateIngestSecret,
@@ -580,13 +581,19 @@ describe('loadOrCreateIngestSecret', () => {
 
   it('reads an existing secret (trimmed) instead of regenerating', () => {
     const secretPath = join(dir, 'ingest-secret')
-    writeFileSync(secretPath, 'pre-seeded-secret\n')
+    // #7246: mode 0600 explicitly — loadOrCreateIngestSecret now re-checks the
+    // mode on every existing-file read, so a "pre-seeded" fixture must be
+    // written the way a legitimate secret actually lands on disk.
+    writeFileSync(secretPath, 'pre-seeded-secret\n', { mode: 0o600 })
     assert.equal(loadOrCreateIngestSecret(secretPath), 'pre-seeded-secret')
   })
 
   it('regenerates over an empty file', () => {
     const secretPath = join(dir, 'ingest-secret')
-    writeFileSync(secretPath, '')
+    // #7246: same as above — 0600 so the empty-file recovery path is reached
+    // (an empty file with the WRONG mode should refuse, not recover; that
+    // boundary is covered below).
+    writeFileSync(secretPath, '', { mode: 0o600 })
     const secret = loadOrCreateIngestSecret(secretPath)
     assert.ok(secret.length >= 40)
   })
@@ -600,6 +607,167 @@ describe('loadOrCreateIngestSecret', () => {
       if (prev === undefined) delete process.env.CHROXY_CONFIG_DIR
       else process.env.CHROXY_CONFIG_DIR = prev
     }
+  })
+})
+
+// #7246: ingest-secret set 0600 at exclusive create but never re-checked the
+// mode on an existing-file read — a pre-existing or later-widened file was
+// trusted regardless of its permissions. This mirrors the read-path boundary
+// session-token-store.js (session-tokens.json) and credential-store.js
+// (credentials.json) already enforce: refuse rather than warn-and-repair.
+describe('loadOrCreateIngestSecret — #7246 mode re-check on read (fail-closed)', () => {
+  let dir
+  let secretPath
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ingest-secret-mode-'))
+    secretPath = join(dir, 'ingest-secret')
+  })
+
+  it('refuses to read an existing secret with a widened (0644) mode', { skip: process.platform === 'win32' }, () => {
+    writeFileSync(secretPath, 'widened-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o644)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 644; refusing to read \(must be 0600\)/,
+      'a 0644 ingest-secret must be refused, not silently trusted'
+    )
+  })
+
+  it('refuses to read an existing secret with a NARROWER (0400) mode too — the boundary is exactly 0600', { skip: process.platform === 'win32' }, () => {
+    // The mode check compares with `!==`, not `>` — narrower is not "safer" by
+    // the letter of the contract (docs/security/bearer-token-authority.md and
+    // the sibling stores all require exactly 0600), and a `perms > 0o600`
+    // mutant silently accepts this case while still refusing every widened
+    // one above, so it must be asserted on its own.
+    writeFileSync(secretPath, 'narrowed-secret\n', { mode: 0o600 })
+    chmodSync(secretPath, 0o400)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /has mode 400; refusing to read \(must be 0600\)/,
+      'a 0400 ingest-secret must be refused too — the rule is EXACTLY 0600, not "no wider than 0600"'
+    )
+  })
+
+  it('refuses a symlink whose resolved target carries a widened mode', { skip: process.platform === 'win32' }, () => {
+    const targetPath = join(dir, 'real-secret')
+    writeFileSync(targetPath, 'target-secret\n', { mode: 0o600 })
+    chmodSync(targetPath, 0o640) // group-readable — still wrong, not just world-readable
+    symlinkSync(targetPath, secretPath)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /refusing to read/,
+      'a symlink at the secret path must be refused outright (#7893 — O_NOFOLLOW), never followed to check the TARGET\'s mode',
+    )
+  })
+
+  // #7893: a rename/symlink-swap window used to sit between statSync(path)
+  // (the trust check) and readFileSync(path) (the read) — a process with
+  // write access to the containing directory could swap in a DIFFERENT file
+  // between the two. This is the deterministic proxy for that race: the
+  // swap happens once, before the read, rather than mid-syscall (which
+  // cannot be won or lost deterministically in a test).
+  it('#7893: refuses a symlink swapped in AFTER the secret is created, even to a well-formed 0600 file elsewhere (today it is followed)', { skip: process.platform === 'win32' ? 'covered by the trusted-file-read win32 helper tests' : SKIP_NO_SYMLINK }, () => {
+    const realSecret = loadOrCreateIngestSecret(secretPath) // a real, trusted 0600 secret
+    const elsewhere = join(dir, 'elsewhere-secret')
+    writeFileSync(elsewhere, 'attacker-controlled-but-well-formed\n', { mode: 0o600 })
+    // Swap: the path now points at a DIFFERENT 0600 file we own.
+    unlinkSync(secretPath)
+    symlinkSync(elsewhere, secretPath)
+    assert.throws(
+      () => loadOrCreateIngestSecret(secretPath),
+      /refusing to read/,
+      'a symlink swapped in after the trusted create must be refused, not followed — the mode of the file it points at is irrelevant',
+    )
+    // Sanity: the swap really would have changed what got read, proving this
+    // is not a vacuous assertion.
+    assert.notEqual(realSecret, readFileSync(elsewhere, 'utf8').trim())
+  })
+
+  it('refuses an existing secret owned by another uid', { skip: typeof process.getuid !== 'function' }, () => {
+    // A foreign-owned file can't be built as a normal user (no chown), so this
+    // exercises the comparison from the other side, matching
+    // stale-session-dirs.test.js's "refuses a base owned by another uid":
+    // a file we own looks foreign to a process claiming a different uid.
+    writeFileSync(secretPath, 'owned-by-someone-else\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    process.getuid = () => realUid + 1
+    try {
+      assert.throws(
+        () => loadOrCreateIngestSecret(secretPath),
+        new RegExp(`is owned by uid ${realUid} rather than uid ${realUid + 1}; refusing to read`),
+        'a same-mode file owned by a different uid must still be refused'
+      )
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  // Regression guard for the specific `if (uid)` footgun the implementation
+  // comment calls out: uid 0 (root) is a valid but FALSY value, so a truthy
+  // check (`if (uid) …`) would silently disable the comparison for exactly
+  // the daemon whose reach a foreign file matters most for. Claiming uid 0
+  // while the file is owned by our real (non-zero, off-CI-root) uid must
+  // still be a mismatch — mirrors stale-session-dirs.test.js's "refuses a
+  // foreign base when the daemon runs as root (uid 0)".
+  it('refuses when the CALLER claims uid 0 (root) and the file is owned by a different uid', { skip: typeof process.getuid !== 'function' }, () => {
+    writeFileSync(secretPath, 'root-check\n', { mode: 0o600 })
+    const realGetuid = process.getuid
+    const realUid = realGetuid.call(process)
+    if (realUid === 0) {
+      // Actually running as root (e.g. a Linux CI runner) — chown the file
+      // itself to a different uid so the mismatch is real, not simulated.
+      chownSync(secretPath, 1, 1)
+      assert.throws(() => loadOrCreateIngestSecret(secretPath), /refusing to read/)
+      return
+    }
+    process.getuid = () => 0
+    try {
+      assert.throws(
+        () => loadOrCreateIngestSecret(secretPath),
+        new RegExp(`is owned by uid ${realUid} rather than uid 0; refusing to read`),
+        'uid 0 must not be treated as "no uid to compare" via a truthy check'
+      )
+    } finally {
+      process.getuid = realGetuid
+    }
+  })
+
+  // #7893: the mode/owner trust check moved from statSync(path) to
+  // fstatSync(the OPENED fd) (via trusted-file-read.js's readTrustedSecretFile),
+  // so a stat-failure mock on node:fs's `statSync` no longer intercepts
+  // anything the read path calls. Exercised instead with a REAL non-ENOENT
+  // open failure: an unreadable containing directory, mirroring
+  // credential-store-durable.test.js's "unreadable store" tests.
+  it('fails closed (throws) when the secret cannot be opened for a reason other than being absent', () => {
+    if (process.platform === 'win32') return // POSIX dir-permission semantics
+    if (process.getuid && process.getuid() === 0) return // root ignores mode bits
+    writeFileSync(secretPath, 'unreachable\n', { mode: 0o600 })
+    chmodSync(dir, 0o000)
+    try {
+      assert.throws(
+        () => loadOrCreateIngestSecret(secretPath),
+        /unable to stat/,
+        'a non-ENOENT open failure must throw, never fall through to reading or recreating the secret',
+      )
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+  })
+
+  // #7893: the old two-step existsSync(path) + statSync(path) shape had a
+  // real window for a create/delete race to land ENOENT on the SECOND call
+  // after the FIRST said "present". Collapsing the presence check and the
+  // trust check into one open() call (the whole point of this fix) makes
+  // that specific race structurally impossible — there is no longer a
+  // second syscall to race against the first. What remains observable is
+  // the base case this specialized into: a genuinely absent file falls
+  // through to create-new-secret rather than refusing.
+  it('a genuinely absent secret falls through to create-new-secret (not a refusal)', () => {
+    assert.ok(!existsSync(secretPath))
+    const secret = loadOrCreateIngestSecret(secretPath)
+    assert.ok(secret.length >= 40, 'a fresh secret was minted rather than throwing')
   })
 })
 

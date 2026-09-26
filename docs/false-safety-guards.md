@@ -348,16 +348,22 @@ is handed to something that parses it under a different grammar — a pathspec, 
 revision, a glob, a shell word, a URL — the validation proves nothing.** The
 sibling instances that audit turned up are `#7290` (a revision allowlist whose
 comment claims it blocks flags, while `-` is inside its character class) and
-`#7291` (client prompts in positional argv slots with no `--`) — both
+`#7291`/`#7342` (client prompts in positional argv slots with no `--`) — all
 now catalogued as entry 13.
 
-### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291` (partial)
+### 13. The allowlist that permitted what its comment forbade — `#7290`, `#7291`
 
-`#7290` is closed. `#7291` is **not** — its `codex-session.js` half is still
-open, because fixing it needs an argv reorder around a documented
-`--sandbox`-before-`resume` invariant that only the repo's spawn-and-assert
-clap harness can verify, and that harness needs a working codex binary. This
-entry describes the half that landed; do not read it as closing `#7291`.
+`#7290` and `#7291` are both closed. The `codex-session.js` half outlived the
+first fix by two months for a mechanical reason worth recording: it needed an
+argv reorder around a documented `--sandbox`-before-`resume` invariant that
+only the repo's spawn-and-assert clap harness can verify, and that harness
+needs a working codex binary. `#7342` finished it against codex-cli 0.154.0 —
+the prompt now sits behind a `--` terminator on both branches with every flag
+moved ahead of it, and `tests/integration/codex-spawn-argv.integration.test.js`
+spawns the real binary on a dash-leading prompt (plus a hand-built pre-fix
+control that must stay red) rather than asserting an argv shape alone. The same
+PR took gemini's `-p <text>` / `-m <id>` to the `=`-joined form that CLI's
+`requiresArg` flags require.
 
 Entry 12 predicted these two as its siblings. Both are the same shape: a guard
 whose *comment* describes a stronger check than its *code* performs.
@@ -399,22 +405,130 @@ The field is unconstrained on the wire: `GetDiffSchema` is
 `z.object({ type: z.literal('get_diff') }).passthrough()`, so nothing upstream
 narrows it either.
 
-**The fix closes the leading-dash route and only that.** Said plainly because
-the first draft of this entry did not: `:` and `/` are both in the charset
-allowlist, and git's stderr is still forwarded verbatim, so a path oracle
-needing no dash at all survives —
+**`#7290`'s fix closed the leading-dash route and only that.** Said plainly
+because the first draft of this entry did not: `:` and `/` were both in the
+charset allowlist, and git's stderr was still forwarded verbatim, so a path
+oracle needing no dash at all survived it —
 
 ```
 base='HEAD:/etc/passwd'  -> fatal: path '/etc/passwd' exists on disk, but not in 'HEAD'
 base='HEAD:absent'       -> fatal: path 'absent' does not exist in 'HEAD'
-base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository
+base='/etc/passwd'       -> fatal: '/etc/passwd' is outside repository at '<cwdReal>'
 base='/no/such/file'     -> fatal: ambiguous argument …
 ```
 
-— which is pre-existing, tracked separately, and needs `rev-parse --verify`
-plus not forwarding raw git stderr. A guard entry that overstates its own
-reach is the same defect in miniature, which is why it is corrected here
-rather than left to read as sealed.
+A guard entry that overstates its own reach is the same defect in miniature,
+which is why it was corrected here rather than left to read as sealed.
+
+**That surviving route is now closed too — `#7298`.** The lesson it adds is
+about the shape of the guard, not about one more character in a class: **a
+charset allowlist is a narrowing, never a decision.** It cannot tell a
+revision from a path, so every round of it is a round of guessing which
+characters a path needs — and `HEAD:<path>` needs none that a branch name does
+not. The fix stops pattern-matching the base and **resolves** it instead:
+
+```js
+git rev-parse --verify --quiet <base>^{commit}
+```
+
+Only a revision naming a real commit in *this* repo reaches `git diff`;
+anything else falls back to `HEAD` — the pre-existing contract for an unusable
+base — without git ever being asked the client's question. `--verify --quiet`
+is silent on failure (exit 1, empty stderr, for all four probes above), so the
+resolution step is not itself an oracle. `:` came out of the charset in the
+same change, because `<rev>:<path>` names a blob and never a commit.
+
+**The second half was not optional, and neither was the first.** Raw git
+stderr no longer goes to the client at all — the wire gets a fixed
+`'Failed to run git diff'` and the detail is logged server-side — because half
+1 keeps only the *client's own string* out of git's error, while any git
+failure can still name a path of its own (the workspace, an object, a config).
+`base='/etc/passwd'` leaked `cwdReal`, the daemon's absolute workspace path,
+through exactly that channel.
+
+**Half 2 first went into the branch the issue had measured, and only that
+one** — the shape this catalogue calls *a guard wired to only some of its
+callers*. `getDiff` has three reply branches that carried a raw `err.message`,
+and the fix reached one. The other two survived a review that had the issue
+open in front of it, because the issue named the `git diff` catch by name and
+the sweep was never widened past it. The sharper of the two needs **no crafted
+base at all**: the function's outer catch wraps `resolveSessionCwd`, whose
+`realpath()` throws
+
+```
+ENOENT: no such file or directory, realpath '<cwdReal>'
+```
+
+once the session cwd is gone (a removed worktree, an unmounted volume, a
+rename) — the same `cwdReal` on the wire that the issue is about, reachable by
+a bound share-a-session client sending a bare `get_diff`. The third, the
+`rev-parse --git-dir` preflight, forwarded git's stderr for every non-128
+failure. **When a fix is "stop forwarding X", its unit is the reply surface,
+not the line the reporter happened to measure.**
+
+The two halves overlap on the probes above, which is why **one test cannot
+prove both** and the suite in `tests/ws-server-file-ops.test.js` isolates them
+separately — the recurring mistake this document is about. Drop half 2 and the
+two `HEAD:<path>` replies still differ from the DEFAULT reply, so the negative
+control asserts equality with the no-base reply, not merely with each other.
+Drop half 1 and the two replies become equal — the oracle closed by *scrubbing
+the message* rather than by refusing to ask — so a second test forces a git
+failure half 1 cannot pre-empt (a diff over the 2MB `maxBuffer`) and pins the
+error string. Both mutations were run and both go red.
+
+**And a mutation that reverts two changes at once cannot say which one the
+tests were pinning.** "Half 1" was really two independent edits — dropping `:`
+from the charset, and resolving with `rev-parse` — reverted together as a
+unit, which went red and read as proof of both. The finer mutation says
+otherwise: restore *only* the `rev-parse` bypass, leave the charset narrowed,
+and the whole suite is **green**, because every probe in it is a `HEAD:<path>`
+or an absolute path, and the charset alone already diverts those to the HEAD
+fallback. The load-bearing half — the one the entry above argues *is* the
+lesson — was the untested one, and a later "the charset already handles this"
+cleanup would have deleted it against a green suite.
+
+The observable that separates them is a base that passes the charset, names no
+commit, and **does** name a file, which git then reads as a pathspec
+(git 2.55.0):
+
+```
+git diff --name-only            -> file.txt, second.txt
+git diff --name-only file.txt   -> file.txt          (exit 0, narrower reply)
+```
+
+Resolution refuses that question and falls back to the full HEAD diff; the
+charset never sees it. A test pins the equality, and it goes red under the
+bypass. **Mutate one edit at a time, and when a "half" turns out to be two
+things, the mutation list grows to match.**
+
+**The third gate then repeated the shape one layer along: its test asserted the
+LOG LINE, and the log line is not the gate.** `MAX_DIFF_BASE_LENGTH` is two
+pieces of code — a `log.warn` that reports an oversized `base`, and a
+`rawBase.length <= MAX_DIFF_BASE_LENGTH &&` conjunct that keeps the value out
+of both `rev-parse` argvs — and only the first is observable from a test that
+reads the log. Delete the conjunct alone and the warn still fires, the reply is
+still the HEAD fallback, and the suite is **green** with the bound gone.
+Success and not-checking were the same observable *again*, one commit after the
+entry above was written about it.
+
+Nothing on the wire can separate them, because closing the oracle is precisely
+what makes an oversized base and an unresolvable one indistinguishable, and
+`createReaderOps` has no exec seam to watch the argv with (#7871). The probe
+that works is one that is oversized **and** resolvable: `<ref>^0` names the
+commit `<ref>` itself and *chains*, so a real branch padded with `^0`×130 is a
+264-character revision made only of charset-allowed characters, carrying no
+leading dash, that git resolves to a real non-HEAD commit (git 2.55.0). Over
+the bound it must be indistinguishable from the HEAD fallback; without the
+conjunct it resolves to `HEAD~1` and the reply changes. **When a guard both
+logs and decides, a test that reads the log has pinned the logging.** And note
+the honest cost the probe exposes: the bound *can* reject a legitimate
+revision — "rejects nothing legitimate" is a statement about real-world ref
+names, not about git's grammar.
+
+And do not "harden" this by appending a `--` to the diff argv: that turns an
+unresolvable base's error into `fatal: bad revision`, which the old
+`unknown revision` recovery predicate missed — a *narrower* recovery wearing
+the look of a fix. `rev-parse` removes the string-matching predicate entirely.
 
 **The obvious fix does not work, and the issue itself proposed it.** Appending
 a `--` separator — `['diff', diffBase, '--']` — is ineffective, because `--`
@@ -478,6 +592,41 @@ covers injection generally. It does not stop *argument* injection: the spawned
 program still runs its own option parser over that array. The two are different
 classes with different fixes, and "we use execFile, not exec" is an answer to
 only one of them.
+
+**The sweep's remaining sites closed in `#7296`, and the Docker one adds a
+variant worth naming: an allowlist constrains a value's PREFIX, never its
+POSITION.** `create_environment`'s image reached a bare positional in
+`docker run`, and `docker-image-allowlist.js` was the control — a header
+claiming it "prevents the WS handler itself from being used as a privileged
+pull primitive" over matching that is `pattern.endsWith('*')` →
+`image.startsWith(prefix)`. That says nothing about whether the value will be
+read as an image or as a FLAG: a catch-all pattern admits `--privileged`, and
+an exact pattern launders it outright. The shipped default list was safe only
+by accident of its prefixes — entry 13's shape again, a comment claiming more
+than its code performs. The fix is the rejection (`isSafeArgvValue`, since an
+image reference can never legitimately begin with `-`) with a `--` separator in
+the argv as the belt. The other two sites — cloudflared's tunnel name and
+`chroxy deploy`'s `known-good-ref` — are the two established shapes: a `--`
+before the positional, and a reject. The ref's argv already carried a `--`,
+*after* the ref, which is the inert case this entry measured.
+
+Fix shape is still per-CLI and still measured, this time on the shipped
+binaries, with probes that could not reach a daemon or an account (a dead
+`DOCKER_HOST`, a nonexistent `--origincert`):
+
+| probe | without `--` | with `--` |
+|---|---|---|
+| `docker 29.7.2 run … --help sleep infinity` | prints run's help | `--help` taken as the IMAGE |
+| `cloudflared 2026.8.3 tunnel run … --help` | prints run's help | "error parsing tunnel ID" |
+| `cloudflared tunnel create … --help` | prints create's help | consumed as the NAME |
+
+A partial guard is how this class survives, so the cloudflared name is also
+refused at the **writer** — the interactive `chroxy tunnel setup` prompt is the
+only producer of `config.tunnelName`, and it now rejects anything that is not
+`[A-Za-z0-9][A-Za-z0-9._-]*`. And the deploy ref's predicate moved into
+`utils/argv-safety.js` (`isGitShaRef`) rather than being transcribed a second
+time: the supervisor's rollback path already validated the same file, and a
+second copy of a security regex is the drift this document is full of.
 
 ### 14. The quoting that stopped the wrong injection — `#7295`
 
@@ -763,14 +912,36 @@ was checked against `--help` on the pinned version for exactly this reason.
 - `scripts/check-release-pr-subject.mjs` — content-triggered, fails closed
 - `packages/server/src/utils/is-entry-point.js` — the entry-point guard. It
   exists in three files that cannot import one another
-  (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why), and
-  two gates hold it: `scripts/__tests__/is-entry-point.test.mjs` fails if the
-  three diverge (`#7222`), and
-  `packages/server/scripts/lint-entry-point-guard.mjs` walks the tree and fails
-  if a fourth appears (`#7235`). The two importable copies each have their own
-  suite — `packages/server/tests/is-entry-point.test.js` and
+  (`scripts/lib/entry-point-guard-copies.mjs` is the list, and says why). Three
+  layers protect it, but only the first two protect the **guard itself** — the
+  third protects **call sites**, an orthogonal problem: ① `scripts/__tests__/is-entry-point.test.mjs`
+  fails if the three guard copies diverge (`#7222`); ② `packages/server/scripts/lint-entry-point-guard.mjs`
+  walks the repo and fails if a fourth copy appears (`#7235`). Together, these
+  ensure the three copies are identical. The two importable copies each have
+  their own suite — `packages/server/tests/is-entry-point.test.js` and
   `scripts/__tests__/is-entry-point.test.mjs`; the sidecar's inline third copy
   is held only by the drift gate, since it cannot be imported to be tested.
+  ③ **Call-site coverage** is a separate gate, and the set of call sites is
+  not enumerated anywhere in the repo — `git grep -n "isEntryPoint("` is how
+  to find the current one, since a hardcoded count here would go stale the
+  next time a site is added or removed. As of this writing, most have a test
+  asserting both directions (the guard gating execution when false, and
+  permitting it when true): `scripts/gen-agents-md.mjs:79`,
+  `scripts/compile-skill-targets.mjs:636` (`#7236`, closed by `#7251`),
+  `scripts/lint-workflow-npm-env.mjs:367` and
+  `scripts/lint-write-only-ctx-fields.mjs:2553` (both `#7236`), and the two
+  server call sites, `packages/server/src/server-cli-child.js:179` and
+  `packages/server/src/channels/chroxy-channel-server.js:241`
+  (`#7254`, closed by `#7264`). Two remain uncovered: `scripts/lib/contributing-roster.mjs:126`
+  (no tracking issue filed — every test that touches that module imports
+  `parseRoster`/`parseExemptions` directly and never runs the script itself,
+  even though `scripts/check-required-contexts.sh` does exactly that in CI),
+  and the sidecar's own inlined guard in `packages/server/sidecar/agent.js` —
+  the harder of the two, since the module cannot import the shared
+  `isEntryPoint` function to begin with, so it has no exported guard to
+  reuse a call-site helper against. A guard that reads `false` at any of
+  these means the entry point never runs, the process exits 0, and nothing
+  distinguishes that from a successful no-op.
 
 ### 15. The denylist for the neighbouring threat, mistaken for containment — `#7341`
 
@@ -2446,3 +2617,180 @@ place", the guard has no failing input. When an assertion's subject is a value
 the test itself computed, ask what production seam would have to be wrong for it
 to fire — if there isn't one, it is decoration. And read a mutation's output, not
 just its exit code — `!= 0` hides which assertion actually fired.
+
+### 34. The flag that does not exist on half the fleet — `#7280`
+
+`O_NOFOLLOW` is a POSIX flag. Node exports it only under `#ifdef O_NOFOLLOW`, so
+on win32 `fsConstants.O_NOFOLLOW` is `undefined` — and `undefined` in a bitwise
+OR **coerces to `0`**. Measured on the chroxy-win host (Win 11, Node 22.23.1):
+`O_NOFOLLOW: undefined`, `O_WRONLY | O_NOFOLLOW | O_TRUNC === 513`. The
+O_NOFOLLOW term contributed nothing.
+
+Six `open()` calls across `ws-file-ops/reader.js` and `ws-file-ops/memory.js`
+relied on that flag to refuse a symlink at the final component — the
+post-validation TOCTOU defence for every dashboard file read, write, append and
+memory read. On Windows **four** of them — the three `O_RDONLY` reads and the
+`O_APPEND | O_CREAT` append — opened the symlink's **target** instead:
+silently, no error, no log line. The comments around them asserted the
+protection in plain English (`memory.js`: "The final open uses O_NOFOLLOW to
+refuse a symlink"), which was true on POSIX and false on win32.
+
+The other two pass `O_WRONLY | O_TRUNC`, which Windows rejects with `EINVAL`
+outright for an entirely unrelated reason (#7284, measured in
+`docs/records/windows-path-containment-7273.md`). Worth stating rather than
+rounding up to "all six", because the distinction is the point of this
+catalogue: those two were not *defended*, they were *unreachable*, and the
+accident that made them safe disappears the moment #7284 is fixed by adding a
+create disposition. A guard whose current safety is supplied by a neighbouring
+bug is the same false safety one layer over.
+
+**Why no test could go red.** Each site's refusal is observed through its ELOOP
+branch. With the flag gone the open SUCCEEDS, so the ELOOP branch is
+unreachable and every symlink-refusal test passes on Windows *by never reaching
+the branch it means to test* — cause 2 in its purest form, and the reason this
+is not a coverage problem: the coverage is real, it just measures a different
+platform's code path. The Windows CI job runs all these files and was green
+throughout.
+
+**Two things that make this class hard to see.** The flag is a CONSTANT, so
+there is no call to inspect and nothing to stub; and the degradation is a
+silent numeric identity (`x | undefined === x`), not a throw. A missing FUNCTION
+would have been a `TypeError` on the first Windows run. A missing constant is a
+no-op that type-checks, lints, and reads correctly at the call site.
+
+**The fix** is one helper — `ws-file-ops/open-nofollow.js` — that every site
+routes through. POSIX ORs the real flag in, unchanged. win32 assembles the
+refusal: `lstat` before the open (a reparse-point symlink or junction is refused
+without opening it), the open, then `fstat(fd)` against a fresh `lstat(path)` on
+`dev` + `ino` with `{ bigint: true }`, because a Windows file index does not fit
+in a Number. A mismatch, a symlink that appeared, an lstat that failed, or an
+inode of `0` (the comparison would be vacuous) all close the fd and refuse with
+`code: 'ELOOP'`, so the callers' existing handling is untouched. An unexpected
+platform — no `O_NOFOLLOW`, not win32 — throws `ENOSYS` rather than degrading to
+a plain open: this whole entry is about what a silent fallback costs.
+
+**What the guard is, and how it goes red.** Three groups, and the third is the
+one that keeps the fix from decaying:
+1. the POSIX branch's flag is pinned through the injected `open` — dropping
+   `| oNofollow` reds it, and reds the real planted-symlink case too;
+2. the win32 branch is exercised **on every platform** by injecting
+   `hasONoFollow: false`, so macOS/Linux CI proves the Windows path. Deleting
+   the identity comparison reds one test; deleting the whole post-open check
+   reds five. The symlink-PLANTING cases carry `SKIP_NO_SYMLINK` (the Windows CI
+   account has no symlink privilege — entry 11), and the injected-lstat cases
+   need no fixture, so the Windows runner still executes the branch;
+3. a source sweep asserts neither file references `fsConstants.O_NOFOLLOW`,
+   that neither imports an open-capable binding from `fs`/`fs/promises`, and
+   that each calls `openNoFollow()` exactly N times. Leaving ONE of the six
+   sites unconverted reds three assertions.
+
+   That middle assertion is itself a worked example of cause 1. Its first form
+   compared the raw `a, b as c` import entries against the string `'open'`, so
+   `import { open as rawOpen }` read as the unrelated name `'open as rawOpen'`
+   and passed — and because adding a NEW raw-open site removes no
+   `openNoFollow()` call, the pinned count did not move either. A brand-new
+   unguarded open evaded all three assertions of the sweep written to forbid
+   exactly that, and only a mutation found it. It now judges the IMPORTED name
+   rather than the local one, covers `open`/`openSync`/`promises`, and refuses
+   a namespace or default import of either module outright — because a local
+   alias is precisely what a named-import check cannot see through.
+
+**Guard against it:** a platform-conditional CONSTANT is a silent no-op waiting
+to happen — `undefined | x` is `x`, and nothing announces it. When a guard's
+strength comes from a constant, assert the constant exists on the platforms that
+should have it AND that the code still passes it; then give the platforms that
+lack it an explicit branch, and make an unrecognised platform a refusal. And
+when a security branch exists for one OS, put a seam in it so every OS's CI can
+run it — a branch only Windows reaches is a branch nothing proves.
+### 35. The containment check that could not see the filesystem it guarded — `#7354`
+
+Entry 15's fix was right about **where** to check (the output, not the input) and
+still could not close the hole, because it checked the output in the wrong
+**process**.
+
+Container `Glob` confines its results with `globMatchEscapesRoot`: a match is
+refused if it begins with `/` or contains a `..` segment. Container `Grep` and
+`Read` confine their `path` / `file_path` with `remapToContainerPath`: an absolute
+path outside the mount, or a `..` that escapes it, is refused. Both are purely
+LEXICAL, and both ran on the **host**. The filesystem they were reasoning about is
+the **container's**.
+
+So `esc/passwd`, where `/workspace/esc` is a symlink to `/etc` inside the
+container, has no leading `/`, no `..`, and sails through every one of them:
+
+```
+IN   {"pattern":"esc/*"}          -> esc/passwd, esc/shadow      isError:false
+IN   {"pattern":"*","path":"esc"} -> passwd, shadow              isError:false
+```
+
+The shape: **a guard asking a question about state it has no access to, and
+answering it from the string instead.** The host cannot stat, realpath or readlink
+anything in the container, so "does this path resolve inside /workspace" was not
+merely answered wrongly — it was not answerable at that layer at all, and the
+lexical check reads as a containment boundary precisely because it is spelled like
+the host's (`confineGlobMatches`, which really does realpath every match).
+
+Three things that made it survive:
+
+1. *The residual was documented and therefore felt handled.* `docker-byok-session.js`
+   carried a `RESIDUAL, tracked by #7354` comment naming the exact bypass. A known
+   gap with an issue number attached looks like work in progress rather than a live
+   hole — and `Glob` is auto-approved in `acceptEdits` via `ACCEPT_EDITS_TOOLS`
+   while `Bash`, which owns this capability honestly, is refused a whitelist
+   outright by `NEVER_AUTO_ALLOW`.
+2. *The stub could not have caught it.* Every container test fed the dispatcher
+   canned stdout. A canned reply is the test author's belief about what the
+   container returns, so the pre-fix half of any red/green claim was an assertion
+   about that belief. The fix's suite runs the daemon's actual `docker exec` script
+   through a real `bash` against a real symlink tree, with `/workspace` rewritten to
+   a temp dir: delete the resolution and bash genuinely hands back `esc/secret.txt`.
+3. *Fixing the directory case invites walking past the file case.* The issue named
+   symlinked DIRECTORIES. `/workspace/leak.txt -> /etc/passwd` is the same defect
+   one field over and is covered by the same resolver — but only because it was
+   looked for (project memory: `adjacent_field_wire_cap_pattern`).
+
+The fix moves the question inside: a bash preamble resolves the path physically
+(`cd -P` per directory component, a bounded `readlink` loop for a symlinked leaf),
+compares it against the resolved workspace, and prints one of three sentinels. The
+host refuses **any** reply whose first line is not one of them — an unparseable
+container reply is an error, never "no matches". The lexical checks stay as the
+first layer: they need nothing from the guest's userland, and the two are
+independent (one reads the string, the other reads the filesystem), so this is not
+the "two readings, one shared rule" pairing where agreement proves nothing.
+
+One half of the fix re-created the shape in miniature and had to be paid for
+separately. A Glob MATCH that resolves outside is withheld rather than refused —
+`isError:false`, "No matches" — because telling the model "matched, but outside"
+is an existence oracle on a tool `acceptEdits` auto-approves. That is the right
+call for the model and the wrong one for the operator: the successful outcome of
+the guard was byte-identical to the outcome of no guard at all, on the only path
+where nothing else is observable. The container now counts what it withheld and
+prints the count as a trailer the host strips and logs (`[container-confine]`),
+so the guard firing has a trace. Counts, never paths — logging the names and
+link targets would move the disclosure rather than close it. **A guard that can
+only ever report success needs a channel that is not the caller's**; when the
+answer cannot go to the requester, it still has to go somewhere.
+
+**Guard against it:** when a guard's predicate names state — a file, a link, a
+permission — ask which process can actually observe that state. If it is not the
+process running the guard, the check is a spelling test, whatever its variable
+names claim. And when a fake stands in for that other process, make the fake run
+the real thing, or the red half of red-before-green is a fixture.
+
+**Residual closed by `#7876`.** Container `Write` and `Edit` were left lexical by
+the fix above, and they were the worse half: `{"file_path":"esc/hosts"}` WROTE
+through the link, and `Edit` read it first with `cat`. The read resolver could not
+simply be reused, because it needs the parent to exist and `Write` names paths
+several levels short of existing, then `mkdir -p`s the gap. The fix is a
+**deepest-existing-ancestor walk** (`__cx_resolve_new`, `'create'` mode of the
+same preamble): peel components off the end until what is left exists, resolve
+THAT physically, refuse unless it lands inside the workspace, re-append the
+remainder (refusing any `..`, `.` or empty component in it), and have the body
+create and write only under the resolved path, never the lexical alias. The one
+line most likely to be written wrong is "exists". `[ -e ]` follows a link, so a
+DANGLING link reads as absent: the walk steps past it, resolves only the
+workspace, passes, and `>` then follows the link and CREATES its target outside.
+The test is `[ -e ] || [ -L ]`, which stops on the link and hands it to the
+resolver, where it is an escape or a failure but never a pass. The mutation that
+drops `-L` reds exactly one test (the dangling LEAF), and nothing else in the
+suite notices, which is why that test exists.

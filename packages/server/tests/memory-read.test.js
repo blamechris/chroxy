@@ -1,9 +1,11 @@
 import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'fs/promises'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
 import { encodeProjectPath } from '../src/jsonl-reader.js'
 import { resolveSessionCwd } from '../src/ws-file-ops/common.js'
 
@@ -137,24 +139,28 @@ describe('memory_read (readMemory) handler', () => {
     // Two @import references to the SAME file must still only produce one
     // entry (dedup already worked before the fix) — the assertion that
     // matters here is that the underlying file is only actually opened
-    // ONCE, not once per reference. Requires a module instance whose
-    // `fs/promises` `open` binding resolves to the mock below, so this
-    // dynamically re-imports memory.js under a cache-busted specifier
-    // AFTER registering the mock — a plain top-of-file static import (as
-    // used by `fileOps` elsewhere in this suite) would already be bound to
-    // the real `open` before any per-test mock.module() call could apply.
+    // ONCE, not once per reference. Requires a module instance whose `open`
+    // binding resolves to the mock below, so this dynamically re-imports
+    // memory.js under a cache-busted specifier AFTER registering the mock —
+    // a plain top-of-file static import (as used by `fileOps` elsewhere in
+    // this suite) would already be bound to the real one before any per-test
+    // mock.module() call could apply.
+    //
+    // #7280 moved the seam: memory.js no longer calls `fs/promises`' `open`
+    // directly, because a bare `O_NOFOLLOW` is undefined (and ORs to 0) on
+    // win32. It goes through `openNoFollow`, so that is what is counted here.
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-dupimport-'))
     await writeFile(join(dir, 'dup.md'), 'dup content', 'utf-8')
     await writeFile(join(dir, 'CLAUDE.md'), 'See @dup.md and again @dup.md here.', 'utf-8')
 
-    const realFsp = await import('fs/promises')
+    const realNoFollow = await import('../src/ws-file-ops/open-nofollow.js')
     const dupOpens = []
-    const mockHandle = mock.module('fs/promises', {
+    const mockHandle = mock.module('../src/ws-file-ops/open-nofollow.js', {
       namedExports: {
-        ...realFsp,
-        open: async (...args) => {
+        ...realNoFollow,
+        openNoFollow: (...args) => {
           if (String(args[0]).endsWith('dup.md')) dupOpens.push(args[0])
-          return realFsp.open(...args)
+          return realNoFollow.openNoFollow(...args)
         },
       },
     })
@@ -274,6 +280,69 @@ describe('memory_read (readMemory) handler', () => {
 
     await rm(outsideDir, { recursive: true, force: true })
     await rm(dir, { recursive: true, force: true })
+  })
+
+  // #7938 — a FIFO planted at CLAUDE.md's path, instead of a symlink or a
+  // regular file, must be refused promptly rather than hanging the read.
+  // Before O_NONBLOCK was added to openNoFollow (the one helper every
+  // ws-file-ops read goes through), `open(path, O_RDONLY)` on a FIFO with no
+  // writer connected blocks the calling thread forever — the exact defect
+  // class that hit claude-hooks resolveIngestSecret (#7923),
+  // trusted-file-read.js's credential-store read (#7924), and claude-tui's
+  // _hookReadFile (#7926), each caught only by adversarial review.
+  it('does not hang when CLAUDE.md is a FIFO instead of a regular file', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-fifo-'))
+    const fifoPath = join(dir, 'CLAUDE.md')
+    execFileSync('mkfifo', [fifoPath])
+    try {
+      const HANG_GUARD_MS = 3000
+      const start = Date.now()
+      const result = await Promise.race([
+        fileOps.readMemory(mockWs, dir).then(() => ({ outcome: 'resolved' })),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      ])
+      const elapsed = Date.now() - start
+      assert.notEqual(result.outcome, 'hung',
+        `readMemory blocked for >= ${HANG_GUARD_MS}ms on a FIFO planted at CLAUDE.md — the open needs O_NONBLOCK (#7938)`)
+      assert.ok(elapsed < 2000, `readMemory must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
+
+      const { entries } = responses[0]
+      const projectEntry = entries.find((e) => e.scope === 'project')
+      assert.equal(projectEntry.content, null, 'a FIFO must never be read as file content')
+      assert.equal(projectEntry.exists, true)
+      assert.match(projectEntry.error || '', /not a regular file|not readable/i,
+        'a FIFO must be refused with a clear reason, not silently treated as missing')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  // #7938 (review) — the test above never reaches the POST-open isFile()
+  // check: a statically planted FIFO is refused by the pre-open stat first.
+  // This one swaps a regular file for a FIFO in exactly the window between
+  // that stat and the open, through readResolvedMemoryFile's test seam.
+  // Without the post-open check the FIFO reads as an EMPTY file (a
+  // non-blocking read of a writerless FIFO is EOF): content '' and no error.
+  it('refuses a FIFO swapped in between the pre-open stat and the open (post-open fstat check)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-fifo-race-'))
+    const target = join(await realpath(dir), 'CLAUDE.md')
+    await writeFile(target, 'a regular file at stat time')
+    try {
+      const HANG_GUARD_MS = 3000
+      const result = await Promise.race([
+        readResolvedMemoryFile(target, async () => {
+          await rm(target)
+          execFileSync('mkfifo', [target])
+        }),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      ])
+      assert.notEqual(result.outcome, 'hung', 'the open blocked on the swapped-in FIFO — openNoFollow needs O_NONBLOCK (#7938)')
+      assert.equal(result.content, null, 'a FIFO must never be read as file content')
+      assert.equal(result.exists, true)
+      assert.equal(result.error, 'Not a regular file')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('skips an @import of ~/.claude/.credentials.json (non-markdown target under an allowed root) without reading it', async () => {

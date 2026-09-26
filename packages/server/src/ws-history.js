@@ -396,7 +396,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   let sessionInfo = {}
   // #6638: the active session's provider, captured for the auth_ok permission-mode
   // copy (Codex gets codex-tuned descriptions). `entry` below is block-scoped, so
-  // hoist the provider to function scope.
+  // hoist the provider to function scope. #7811: this is `null` when there is no
+  // active session, so it is resolved through `resolveRosterProvider` at the
+  // send site below (same as `rosterProvider` further down this function)
+  // rather than used directly — otherwise a codex-default daemon would fold
+  // the CLAUDE mode copy into auth_ok for a client that has no session yet.
   let authOkProvider = null
   if (sessionManager) {
     // #6687: resolve the active session with the SAME precedence block 2 uses to
@@ -676,6 +680,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       ? streamStallTimeoutMs
       : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
+  // #7811: same fallback the roster send further down this function applies —
+  // fold in the daemon's resolved default when there is no active session,
+  // instead of the CLAUDE default copy that `permissionModesForProvider(null)`
+  // returns. Otherwise a codex-default daemon's auth_ok would carry Claude's
+  // mode picker text.
+  const authOkRosterProvider = resolveRosterProvider(authOkProvider, billingCanary?.defaultProvider)
   const authOkDelivered = send(ws, {
     type: 'auth_ok',
     clientId: client.id,
@@ -697,7 +707,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // client never has to wait for (or react to) the discrete
     // `available_permission_modes` burst frame. The discrete frame is still
     // sent below for older clients that read the enum only from it.
-    availablePermissionModes: permissionModesForProvider(authOkProvider),
+    availablePermissionModes: permissionModesForProvider(authOkRosterProvider),
     resultTimeoutMs: effectiveResultTimeoutMs,
     hardTimeoutMs: effectiveHardTimeoutMs,
     streamStallTimeoutMs: effectiveStreamStallTimeoutMs,
@@ -921,9 +931,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // resolved from that SAME name (`resolveRosterProvider`) so the tag names
     // the registry that actually produced the rows.
     //
-    // `activeProvider` itself is deliberately left as-is: it also drives the
-    // discovery refresh and the permission-mode copy below, and neither should
-    // start firing for a client that has no session.
+    // `activeProvider` itself is deliberately left as-is for the discovery
+    // refresh below: that must keep no-opping for a client that has no
+    // session. The permission-mode copy is a DIFFERENT statement — #7811: it
+    // used to also read `activeProvider` (null with no session), so a
+    // codex-default daemon paired the correctly-tagged `rosterProvider` roster
+    // above with the CLAUDE mode-picker copy. It now reads `rosterProvider`
+    // too, same as the roster it describes.
     const activeProvider = entry?.provider || null
     const rosterProvider = resolveRosterProvider(activeProvider, billingCanary?.defaultProvider)
     const activeRegistry = getRegistryForProvider(rosterProvider)
@@ -934,7 +948,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // schedule. With no active session activeProvider is null and there is nothing
     // to refresh (scheduleProviderModelsRefresh no-ops on a null provider).
     scheduleProviderModelsRefresh(ctx, ws, activeProvider)
-    send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(activeProvider) })
+    send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(rosterProvider) })
     permissions.resendPendingPermissions(ws, client)
     // #5555: fire the connect-time bootstrap burst (providers + slash commands
     // + agents) so a new client never sends its 3-request list_* round trip.

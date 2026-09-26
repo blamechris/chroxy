@@ -13,6 +13,15 @@
 #
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUMP="$REPO_ROOT/scripts/bump-version.sh"
 
@@ -21,7 +30,7 @@ BUMP="$REPO_ROOT/scripts/bump-version.sh"
 # case executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=25
+EXPECTED_CASES=30
 
 PASS=0
 FAIL=0
@@ -189,15 +198,25 @@ STUB
 # only gen-agents-md.mjs dies with ERR_MODULE_NOT_FOUND the moment the generator
 # gains a sibling import — which is exactly what happened when that extraction
 # landed. Copying the directory means the NEXT sibling helper is staged
-# automatically; the `[ -d ]` guard keeps it working against a tree that has no
-# scripts/lib at all.
+# automatically.
+#
+# Fails closed when scripts/lib is missing (#7256), matching
+# scripts/__tests__/helpers/stage-script.mjs's stageScript(), which does the
+# identical job for the .mjs test files and THROWS rather than staging less
+# than asked. "Could not stage it" is not "there was nothing to stage" — a
+# fixture staged without lib/ would leave the child dying downstream with a
+# bare ERR_MODULE_NOT_FOUND naming a temp path instead of this cause. The lib
+# check runs BEFORE the script is copied, so a failure never leaves a partial,
+# silently-broken fixture behind.
 install_agents_generator() {
   local dir="$1"
   mkdir -p "$dir/scripts"
-  cp "$REPO_ROOT/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
-  if [ -d "$REPO_ROOT/scripts/lib" ]; then
-    cp -R "$REPO_ROOT/scripts/lib" "$dir/scripts/lib"
+  if [ ! -d "$REPO_ROOT/scripts/lib" ]; then
+    echo "install_agents_generator: no $REPO_ROOT/scripts/lib — gen-agents-md.mjs imports from it; staging without it would leave the child dying with a bare ERR_MODULE_NOT_FOUND naming a temp path instead of this cause." >&2
+    return 1
   fi
+  cp "$REPO_ROOT/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
+  cp -R "$REPO_ROOT/scripts/lib" "$dir/scripts/lib"
 }
 
 # A CLAUDE.md carrying both version markers the bump rewrites. Without them the
@@ -426,13 +445,110 @@ EOF
   }
 
   # Error message must reference the TODO placeholder
-  echo "$output" | grep -q "TODO" || {
+  grep -q "TODO" <<<"$output" || {
     echo "    error message did not mention TODO: $output" >&2
     return 1
   }
 
   # CHANGELOG must be unchanged (no 0.2.0 section)
   ! grep -q "^## \[0.2.0\]" "$dir/CHANGELOG.md" || return 1
+}
+
+# #7907 — the TODO check used to be `echo "$PRIOR_SECTION" | grep -qE
+# "^- TODO:"`. This script runs under `set -euo pipefail` (line 19). grep -q
+# exits the instant it finds a match without draining the rest of its stdin;
+# if the producer (echo) is still writing when that happens, SIGPIPE hits it
+# and pipefail promotes that broken-pipe write error into the whole
+# pipeline's exit status — even though grep itself matched. That flips the
+# `if` false, silently SKIPPING the abort — a normal short TODO section (as
+# in the case above) can't trigger this, since the whole echo fits in one
+# write() syscall, but a large prior section can. Reproduced 3/3 against the
+# pre-fix script (see the PR body for the transcript): the bump proceeded and
+# wrote a 0.2.0 CHANGELOG section despite the unresolved TODO. The fix
+# (`grep -qE "^- TODO:" <<<"$PRIOR_SECTION"`) hands grep the data directly, so
+# there is no separate writer process for SIGPIPE to land on.
+test_blocks_when_prior_todo_unresolved_survives_pipefail_sigpipe() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+
+  # TODO marker on the very first line of the section (matches ^- TODO: right
+  # away), followed by a single >390KB padding line — the same shape that
+  # reproduces the SIGPIPE race 10/10 on this repo's dev/CI hosts.
+  local pad
+  pad="$(python3 -c "import sys; sys.stdout.write('p' * 400000)")"
+  {
+    echo "# Changelog"
+    echo ""
+    echo "## [0.1.0] - 2026-01-01"
+    echo ""
+    echo "- TODO: describe additions for this release (or delete this section)"
+    echo "$pad"
+  } > "$dir/CHANGELOG.md"
+
+  local output
+  output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.2.0 2>&1)
+  local status=$?
+
+  [ "$status" -ne 0 ] || {
+    echo "    expected non-zero exit (TODO guard should have blocked the bump), got 0" >&2
+    return 1
+  }
+
+  ! grep -q "^## \[0.2.0\]" "$dir/CHANGELOG.md" || {
+    echo "    TODO guard was SKIPPED — bump wrote a 0.2.0 section despite the unresolved TODO" >&2
+    return 1
+  }
+  return 0
+}
+
+# #7907 — the version-format check used to be `echo "$NEW_VERSION" | grep -qE
+# '^[0-9]+\.[0-9]+\.[0-9]+$'`. Same pipefail+SIGPIPE shape as the TODO check
+# above: an ordinary short version string can't race (fits in one write()
+# syscall), but a caller-supplied value with an embedded newline followed by
+# a large trailing payload reproduces it — the FIRST line is a genuinely
+# valid "x.y.z", grep matches on it and exits, and the shell is still
+# mid-write on the remaining padding when the pipe closes. Reproduced 3/3
+# against the pre-fix script: a valid leading version was rejected as
+# "Invalid version format" with a literal `write error: Broken pipe` on
+# stderr — the exact signature #7892's CI failure had. The fix
+# (`grep -qE '...' <<<"$NEW_VERSION"`) hands grep the data directly, so
+# there is no separate writer process for SIGPIPE to land on.
+test_version_format_check_survives_pipefail_sigpipe() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.1.0"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.1.0" "### Fixed
+- Something"
+
+  local pad
+  pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
+  local new_version="1.2.3
+$pad"
+
+  local output
+  output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh "$new_version" 2>&1)
+
+  if grep -q "Broken pipe" <<<"$output"; then
+    echo "    saw a Broken pipe write error — the SIGPIPE race reproduced" >&2
+  fi
+
+  if grep -q "Invalid version format" <<<"$output"; then
+    echo "    a genuinely valid leading version (1.2.3) was rejected as invalid: $output" >&2
+    return 1
+  fi
+  # Accepted the version and proceeded past the format check (further
+  # failures from the embedded-newline value propagating into later stages
+  # are out of scope for this check — the point under test is the FIRST gate).
+  grep -q "^Bumping version:" <<<"$output" || {
+    echo "    did not proceed past the version-format check as expected: $output" >&2
+    return 1
+  }
+  return 0
 }
 
 test_no_changelog_flag_skips_scaffold() {
@@ -541,15 +657,15 @@ test_help_prints_full_header() {
   output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh --help 2>&1)
   [ $? -eq 0 ] || return 1
 
-  echo "$output" | grep -q "Usage:" || {
+  grep -q "Usage:" <<<"$output" || {
     echo "    --help missing 'Usage:'" >&2
     return 1
   }
-  echo "$output" | grep -q "no-changelog" || {
+  grep -q "no-changelog" <<<"$output" || {
     echo "    --help missing '--no-changelog' line" >&2
     return 1
   }
-  echo "$output" | grep -q "CHANGELOG scaffolding" || {
+  grep -q "CHANGELOG scaffolding" <<<"$output" || {
     echo "    --help truncated before CHANGELOG scaffolding paragraph" >&2
     return 1
   }
@@ -650,7 +766,7 @@ EOF
     echo "    expected non-zero exit when chroxy-desktop stanza is missing, got 0" >&2
     return 1
   }
-  echo "$output" | grep -q "Cargo.lock" || {
+  grep -q "Cargo.lock" <<<"$output" || {
     echo "    error message did not mention Cargo.lock: $output" >&2
     return 1
   }
@@ -810,7 +926,7 @@ CLAUDEMD
   # ...and say why.
   local out
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 || true )
-  echo "$out" | grep -q "does not contain the expected version reference" || return 1
+  grep -q "does not contain the expected version reference" <<<"$out" || return 1
   return 0
 }
 
@@ -837,7 +953,7 @@ test_agents_md_regenerated_and_verified_in_root_frame() {
   trap "rm -rf '$dir'" RETURN
   build_fake_repo "$dir" "0.5.7"
   install_bump_script "$dir"
-  install_agents_generator "$dir"
+  install_agents_generator "$dir" || return 1
   write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
 
 - A real fix (#42)"
@@ -846,7 +962,7 @@ test_agents_md_regenerated_and_verified_in_root_frame() {
 
   local out
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || return 1
-  echo "$out" | grep -q "AGENTS.md regenerated from CLAUDE.md" || return 1
+  grep -q "AGENTS.md regenerated from CLAUDE.md" <<<"$out" || return 1
 
   # The mirror really moved...
   ! grep -q '^STALE$' "$dir/AGENTS.md" || return 1
@@ -875,7 +991,7 @@ test_agents_md_fails_when_generator_writes_to_another_tree() {
 
   # The other tree is a complete, self-consistent repo root: it has its own
   # CLAUDE.md, so the generator running in ITS frame succeeds and exits 0.
-  install_agents_generator "$other"
+  install_agents_generator "$other" || return 1
   write_claude_md "$other/CLAUDE.md" "9.9.9"
   mkdir -p "$dir/scripts"
   ln -sf "$other/scripts/gen-agents-md.mjs" "$dir/scripts/gen-agents-md.mjs"
@@ -885,7 +1001,7 @@ test_agents_md_fails_when_generator_writes_to_another_tree() {
   # ...and say which tree it is complaining about.
   local out
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 || true )
-  echo "$out" | grep -q "not in sync" || return 1
+  grep -q "not in sync" <<<"$out" || return 1
 
   # The evidence the old check could not see: the caller's mirror is still
   # stale, while the generator's own tree was regenerated quite happily.
@@ -936,9 +1052,9 @@ STUB
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || return 1
   # ...must NOT have printed the false success...
-  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  ! grep -q 'AGENTS.md regenerated from CLAUDE.md' <<<"$out" || return 1
   # ...and must name the actual cause rather than blaming drift.
-  printf '%s' "$out" | grep -q 'produced no output at all' || return 1
+  grep -q 'produced no output at all' <<<"$out" || return 1
   grep -q '^STALE$' "$dir/AGENTS.md" || return 1
   return 0
 }
@@ -969,6 +1085,123 @@ STUB
   return 0
 }
 
+# --- pipefail + SIGPIPE self-test (#7892) -------------------------------------
+#
+# This harness runs under `set -uo pipefail` (line 14). Every check above used
+# to pipe a captured variable into grep -q: `echo "$out" | grep -q … || …` or
+# `printf '%s' "$out" | grep -q … || …`, several of them NEGATED absence
+# checks (`! printf '%s' "$out" | grep -q … || return 1`). grep -q exits the
+# instant it finds a match, without draining the rest of its stdin; if the
+# producer (echo/printf) is still writing when that happens, SIGPIPE hits the
+# producer, and pipefail promotes that broken-pipe write error into the whole
+# PIPELINE's exit status — even though grep itself matched. That flips a
+# genuine match into the `if`/`||` taking the wrong branch: a positive check
+# reads a FOUND string as NOT FOUND (fail-loud, PR #7892's actual CI failure
+# on this repo's sibling harness, merge-updater-feeds.test.sh), and a NEGATED
+# absence check reads text that IS present as absent — a false PASS, the
+# fail-open direction, and the more dangerous one.
+#
+# Every site above is now a here-string (`grep -q … <<<"$out"`), so there is
+# no separate writer process for a SIGPIPE to land on.
+#
+# A single big `printf '%s' "$var" | grep -q` does not reliably reproduce the
+# race on macOS — measured: XNU's pipe write() auto-grows to hold one atomic
+# write whole, clean past 50MB in a single call, on this host. The race needs
+# the producer to still be writing in SEPARATE syscalls when grep -q exits —
+# the same shape real script output takes (built up incrementally across many
+# writes) — so the haystack below is built the same way: many small writes,
+# the needle in the very first one, and a total size well past either
+# platform's fixed pipe buffer (16KB macOS / 64KB+ Linux). Measured 10/10
+# reproductions at ~394KB on this host.
+test_pipefail_sigpipe_self_test() {
+  local needle="SIGPIPE-SELFTEST-NEEDLE-AT-START"
+  local pad_line="pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+
+  emit_sigpipe_selftest_haystack() {
+    printf '%s\n' "$needle"
+    local i=0
+    while [ "$i" -lt 2000 ]; do
+      printf '%s\n' "$pad_line"
+      i=$((i + 1))
+    done
+  }
+
+  # The OLD, buggy shape — reproduced locally, as evidence only. Nowhere else
+  # in this file pipes a captured variable into grep any more. This is
+  # supporting evidence for the fix below, not the assertion under test: a
+  # kernel/runner whose pipe buffering doesn't race on this exact haystack
+  # shape must not fail the suite over an environmental non-repro, so it is a
+  # NOTE, not a return 1. The fixed (here-string) behavior a few lines down is
+  # what's actually asserted.
+  if emit_sigpipe_selftest_haystack | grep -qF -- "$needle" 2>/dev/null; then
+    echo "    NOTE: old piped grep -q form found the needle cleanly on this host —" >&2
+    echo "    could not reproduce the SIGPIPE race here (environment-dependent, not a failure)" >&2
+  else
+    echo "    old piped grep -q form reproduced the SIGPIPE race (needle IS present, reported as not found)" >&2
+  fi
+  # The needle genuinely is present (shown below); on a host where the old
+  # piped form races, it reports otherwise once pipefail promotes printf's
+  # broken-pipe write error to the pipeline's exit status.
+
+  local haystack
+  haystack="$(emit_sigpipe_selftest_haystack)"
+
+  # The fixed (here-string) shape must find a needle that really is there...
+  grep -qF -- "$needle" <<<"$haystack" || {
+    echo "    fixed (here-string) form failed to find a needle that IS present" >&2
+    return 1
+  }
+  # ...and must still correctly report a genuinely absent needle as absent —
+  # the negative control, proving the fix isn't just "always say found".
+  if grep -qF -- "NEEDLE-THAT-IS-NOT-PRESENT-XYZ" <<<"$haystack"; then
+    echo "    fixed form reported a needle that is NOT present" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Static guard: no `echo`/`printf` capturing a shell variable and piping it
+# into an early-exiting `grep -q` (the shape all 15 sites above used to have)
+# may remain in this file's CODE. The functional tests above use real (small)
+# bump-version.sh output and would not reliably trip the SIGPIPE race the way
+# test_pipefail_sigpipe_self_test's synthetic haystack does, so a regression
+# on any ONE of those 15 sites would otherwise go unnoticed until CI got
+# unlucky again — this catches all of them at once, structurally. Comment
+# lines (this file quotes the buggy shape as documentation above) are
+# excluded so the guard cannot flag its own prose.
+#
+# Scope: this only matches `echo`/`printf` producers, because those are the
+# only shape this file ever had (a captured shell variable re-emitted and
+# piped straight into grep). It does NOT cover every `producer | grep -q` in
+# this file — e.g. `head -N "$file" | grep -q` and `awk '...' "$file" | grep
+# -qx` also appear here, reading a handful of short lines straight off disk.
+# Those write their (tiny, single-shot) output in one syscall well under
+# either platform's pipe buffer, so they cannot reproduce the "producer still
+# writing in separate syscalls when grep exits" race this guard exists for —
+# widening the match to cover them would not close a real gap, just add noise.
+# If a future site pipes a LARGE captured variable through anything other than
+# echo/printf into a `-q`-flavored grep, add that producer name here.
+#
+# The pipe and the grep invocation are matched loosely on purpose: `\|[[:space:]]*grep`
+# tolerates zero spaces or a tab around the pipe (`echo "$x"|grep -q`), and
+# `-[A-Za-z]*q[A-Za-z]*|--quiet` matches -q with -q in ANY position among other
+# short flags (-Eq, -qF, -iq, -Fq, ...) or --quiet — not just a bare `-q`. A
+# flag-order variation is exactly the kind of edit someone reaches for without
+# thinking of it as touching this pattern (e.g. switching to -Eq for a real
+# regex needle), and the earlier literal `grep -q` substring match let every
+# one of those through.
+test_no_unsafe_grep_pipe_pattern_remains() {
+  local self="$REPO_ROOT/scripts/__tests__/bump-version.test.sh"
+  local hits
+  hits="$(grep -vE '^[[:space:]]*#' "$self" | grep -E '(echo|printf)[^|]*\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q[A-Za-z]*|--quiet)' || true)"
+  if [ -n "$hits" ]; then
+    echo "    found unsafe pipe-into-grep pattern(s) in $self:" >&2
+    echo "$hits" >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- runner ------------------------------------------------------------------
 
 echo "Running bump-version.sh tests"
@@ -983,6 +1216,10 @@ run_test "is idempotent when a section for the new version already exists" \
   test_idempotent_when_section_exists
 run_test "blocks the bump when the prior section still has a TODO" \
   test_blocks_when_prior_todo_unresolved
+run_test "#7907 — TODO check survives pipefail+SIGPIPE on a >128KB prior section" \
+  test_blocks_when_prior_todo_unresolved_survives_pipefail_sigpipe
+run_test "#7907 — version-format check survives pipefail+SIGPIPE on a padded argument" \
+  test_version_format_check_survives_pipefail_sigpipe
 run_test "--no-changelog flag skips the scaffold and TODO check" \
   test_no_changelog_flag_skips_scaffold
 run_test "--no-changelog flag works in either argument order" \
@@ -1097,7 +1334,7 @@ test_agents_md_regeneration_succeeds() {
 
   local out
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || return 1
-  printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  grep -q 'AGENTS.md regenerated from CLAUDE.md' <<<"$out" || return 1
   # ...and it actually wrote, rather than the message being decorative again.
   grep -q '^GENERATED$' "$dir/AGENTS.md" || return 1
   ! grep -q '^STALE$' "$dir/AGENTS.md" || return 1
@@ -1115,9 +1352,9 @@ test_agents_md_silent_noop_fails_the_bump() {
   local out rc=0
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || return 1
-  printf '%s' "$out" | grep -q 'is not in sync with' || return 1
+  grep -q 'is not in sync with' <<<"$out" || return 1
   # The false success must NOT also have been printed.
-  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  ! grep -q 'AGENTS.md regenerated from CLAUDE.md' <<<"$out" || return 1
 }
 
 # The write is skipped but --check still runs, so it reports drift and exits 1.
@@ -1130,10 +1367,51 @@ test_agents_md_stale_after_regeneration_fails_the_bump() {
   local out rc=0
   out=$( (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) 2>&1 ) || rc=$?
   [ "$rc" -ne 0 ] || return 1
-  printf '%s' "$out" | grep -q 'is not in sync with' || return 1
-  ! printf '%s' "$out" | grep -q 'AGENTS.md regenerated from CLAUDE.md' || return 1
+  grep -q 'is not in sync with' <<<"$out" || return 1
+  ! grep -q 'AGENTS.md regenerated from CLAUDE.md' <<<"$out" || return 1
 }
 
+# --- install_agents_generator fails closed when scripts/lib is missing (#7256) --
+#
+# scripts/__tests__/helpers/stage-script.mjs does the identical staging job for
+# the .mjs test files and THROWS when the sibling lib/ is absent, naming the
+# cause. This shell copy used to silently skip the lib/ copy instead when
+# scripts/lib was missing — "cannot check this" read as "nothing to check",
+# the #2 recurring cause in docs/false-safety-guards.md — leaving a fixture
+# whose child process would die downstream with a bare ERR_MODULE_NOT_FOUND
+# naming a temp path instead of the real cause.
+#
+# Calls the REAL install_agents_generator (not a re-implementation) against a
+# scratch REPO_ROOT that has the generator script but no scripts/lib, by
+# overriding REPO_ROOT for a subshell — the override never escapes to the
+# parent shell or to the other test cases, which rely on the real REPO_ROOT.
+test_install_agents_generator_fails_closed_when_lib_missing() {
+  local fake_root dest
+  fake_root=$(mktemp -d)
+  dest=$(mktemp -d)
+  trap "rm -rf '$fake_root' '$dest'" RETURN
+
+  mkdir -p "$fake_root/scripts"
+  printf '// stub generator, deliberately no sibling lib/\n' \
+    > "$fake_root/scripts/gen-agents-md.mjs"
+
+  local out status
+  out=$( ( REPO_ROOT="$fake_root"; install_agents_generator "$dest" ) 2>&1 )
+  status=$?
+
+  # Must fail rather than silently stage a partial fixture...
+  [ "$status" -ne 0 ] || return 1
+  # ...and name the cause, the way stage-script.mjs's thrown message does.
+  grep -qi "lib" <<<"$out" || return 1
+  # ...and must NOT have staged the script without its sibling lib/ — that
+  # partial state is exactly what used to die downstream with an opaque
+  # ERR_MODULE_NOT_FOUND instead of a diagnosable message here.
+  [ ! -e "$dest/scripts/gen-agents-md.mjs" ] || return 1
+  return 0
+}
+
+run_test "install_agents_generator fails closed when scripts/lib is missing (#7256)" \
+  test_install_agents_generator_fails_closed_when_lib_missing
 run_test "AGENTS.md regeneration reports success when it really regenerated" \
   test_agents_md_regeneration_succeeds
 run_test "a generator that silently no-ops fails the bump (#7198 shape)" \
@@ -1148,6 +1426,10 @@ run_test "an absent AGENTS.md fails the bump rather than reading as nothing-to-c
   test_agents_md_fails_when_mirror_is_absent
 run_test "a generator that exits during IMPORT fails the bump (#7231 regression)" \
   test_agents_md_fails_when_generator_exits_during_import
+run_test "grep -q checks in this harness survive SIGPIPE under pipefail on a >128KB haystack (#7892)" \
+  test_pipefail_sigpipe_self_test
+run_test "no unsafe producer-piped-into-grep pattern remains in this file" \
+  test_no_unsafe_grep_pipe_pattern_remains
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

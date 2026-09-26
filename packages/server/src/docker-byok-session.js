@@ -131,10 +131,16 @@ import {
   GLOB_PATTERN_SHELL_METACHARS,
   globPatternEscapeReason,
   globPatternEscapeMessage,
+  globPatternComplexityReason,
+  globPatternComplexityMessage,
   globMatchEscapesRoot,
-  buildGlobCommand,
   buildGrepArgs,
   buildGrepCommand,
+  buildConfinedContainerCommand,
+  buildConfinedGlobBody,
+  parseConfinedContainerStdout,
+  splitWithheldTrailer,
+  confinedContainerFailureMessage,
 } from './built-in-tools/tool-transforms.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import {
@@ -2022,6 +2028,41 @@ export class DockerByokSession extends ClaudeByokSession {
     })
   }
 
+  /**
+   * SECURITY (#7354) — the operator's view of the containment seam.
+   *
+   * Every other outcome of these three tools is visible to SOMEBODY: a refusal
+   * reaches the model as `isError`, a match reaches it as content. A WITHHELD
+   * match reaches nobody — the tool_result is byte-identical to "matched
+   * nothing", deliberately, because anything else is an existence oracle on a
+   * tool `acceptEdits` auto-approves. That leaves an operator unable to tell a
+   * containment that is holding from one that was never wired up, which is the
+   * false-safety shape itself. This line is the difference.
+   *
+   * Counts only. The names of what was withheld, and the paths they resolved
+   * to, are exactly what containment refused to disclose — putting them in the
+   * daemon log would move the leak rather than close it.
+   */
+  _logContainment(label, detail) {
+    const session = this._sourceSessionId || '-'
+    const container = typeof this._containerId === 'string' ? this._containerId.slice(0, 12) : '-'
+    log.warn(`[container-confine] ${label}: ${detail} (session=${session} container=${container})`)
+  }
+
+  /** #7354 — one line per Glob that withheld something, or whose count was lost. */
+  _logWithheldGlobMatches(inContainer, lexical) {
+    if (inContainer === null) {
+      // Not a containment failure — the withholding already happened in the
+      // container. It IS an observability failure, and saying so beats
+      // reporting a count of zero we did not measure.
+      this._logContainment('Glob', `withheld-count unavailable from the container; ${lexical} withheld by the host lexical layer`)
+      return
+    }
+    const total = inContainer + lexical
+    if (total === 0) return
+    this._logContainment('Glob', `withheld ${total} match(es) resolving outside ${CONTAINER_WORKSPACE} (in-container ${inContainer}, host-lexical ${lexical})`)
+  }
+
   async _containerRead(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     // Use sed for offset/limit slicing inside the container so we
@@ -2040,14 +2081,46 @@ export class DockerByokSession extends ClaudeByokSession {
     // regardless of provider. The `awk` runs INSIDE the container after
     // the `sed | head` slice, so we still apply the line cap and the
     // byte cap before formatting (a 1GB line stays bounded).
-    const cmd = `sed -n '${startLine},${endLine}p' ${shellQuote(containerPath)} | head -c ${READ_MAX_BYTES} | awk -v start=${startLine} 'BEGIN{n=start} {printf "%5d→%s\\n", n, $0; n++}'`
+    //
+    // #7354 — `remapToContainerPath` is LEXICAL, so `esc/passwd` (where
+    // `/workspace/esc` is a symlink to `/etc` inside the container) passes it
+    // untouched. The confinement preamble resolves the path physically in the
+    // container and hands the body the RESOLVED path in `"$__cx_target"`.
+    const cmd = buildConfinedContainerCommand({
+      target: containerPath,
+      body: `sed -n '${startLine},${endLine}p' "$__cx_target" | head -c ${READ_MAX_BYTES} | awk -v start=${startLine} 'BEGIN{n=start} {printf "%5d→%s\\n", n, $0; n++}'`,
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      this._logContainment('Read', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Read', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (stderr && stderr.trim()) {
       return { content: `Read failed: ${stderr.trim()}`, isError: true }
     }
-    return { content: stdout, isError: false }
+    return { content: confined.body, isError: false }
   }
 
+  /**
+   * SECURITY (#7876) — confined INSIDE the container, like Read/Glob/Grep.
+   * `remapToContainerPath` is lexical and cannot see a symlinked directory in
+   * /workspace (the link is on the CONTAINER's filesystem), so the write runs
+   * under `buildConfinedContainerCommand` in `'create'` mode: the
+   * deepest-existing-ancestor walk resolves the longest existing prefix of the
+   * path physically, refuses unless it lands inside the resolved workspace, and
+   * re-appends the not-yet-existing remainder. The body then `mkdir -p`s,
+   * writes and measures ONLY `"$__cx_target"` — every directory it creates is
+   * created under the RESOLVED ancestor, never under the lexical alias, so a
+   * link swapped on the alias after the check cannot redirect the write.
+   *
+   * Known residual: a link swapped INSIDE the already-resolved prefix between
+   * the check and the write — the same check-then-use window the host-side
+   * tools and #7354 accept.
+   */
   async _containerWrite(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     // Fix for PR #5021 review (Copilot, comment id 3348029266): host-side
@@ -2070,23 +2143,53 @@ export class DockerByokSession extends ClaudeByokSession {
     // We base64-encode on the way in to dodge any quoting hazards
     // with newlines / single quotes / backticks in `content`.
     const encoded = Buffer.from(content, 'utf8').toString('base64')
-    const parentDir = posix.dirname(containerPath)
-    const cmd = [
-      `mkdir -p ${shellQuote(parentDir)}`,
-      `echo ${shellQuote(encoded)} | base64 -d > ${shellQuote(containerPath)}`,
-      `wc -c < ${shellQuote(containerPath)}`,
-    ].join(' && ')
+    // `${__cx_target%/*}` is the resolved parent. `__cx_target` is always an
+    // absolute path under the resolved workspace (the preamble refused
+    // anything else), so it can neither be empty nor begin with `-`.
+    const cmd = buildConfinedContainerCommand({
+      target: containerPath,
+      mode: 'create',
+      body: [
+        'mkdir -p "${__cx_target%/*}"',
+        `echo ${shellQuote(encoded)} | base64 -d > "$__cx_target"`,
+        'wc -c < "$__cx_target"',
+      ].join(' && '),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      // The message names only the path the caller supplied — never where it
+      // resolved (existence-oracle rule, #7341/#7354).
+      this._logContainment('Write', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Write', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (stderr && stderr.trim()) {
       return { content: `Write failed: ${stderr.trim()}`, isError: true }
     }
-    const bytesWritten = Number(stdout.trim()) || 0
+    const bytesWritten = Number(confined.body.trim()) || 0
     return {
       content: `Wrote ${bytesWritten} bytes to ${input.file_path}.`,
       isError: false,
     }
   }
 
+  /**
+   * SECURITY (#7876) — the READ half (`cat`) runs under the same in-container
+   * confinement as `_containerWrite`, so a symlinked directory inside
+   * /workspace can neither be read through nor, since a refused read returns
+   * before the write-back, written through.
+   *
+   * `'create'` mode, not the default read mode: both resolve a path whose leaf
+   * exists identically, but `'create'` is the resolver the write-back uses, so
+   * the file Edit reads and the file it writes are resolved by the same walk. A
+   * missing file (at any depth) still resolves to an in-workspace path and
+   * surfaces as `cat`'s own "No such file", not as a containment error — the
+   * Read route's contract. The write-back through `_containerWrite` resolves
+   * again, independently; that second resolution is a second check, not a gap.
+   */
   async _containerEdit(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     const oldString = typeof input?.old_string === 'string' ? input.old_string : ''
@@ -2095,13 +2198,26 @@ export class DockerByokSession extends ClaudeByokSession {
     }
     // Read the file via the same execInEnvironment path so a missing
     // file surfaces as a tool_result rather than an exception.
-    const { stdout: existing, stderr: readErr } = await this._execAsContainerUser({
-      cmd: `cat ${shellQuote(containerPath)}`,
+    const { stdout: readOut, stderr: readErr } = await this._execAsContainerUser({
+      cmd: buildConfinedContainerCommand({
+        target: containerPath,
+        mode: 'create',
+        body: 'cat "$__cx_target"',
+      }),
       timeout: 30_000,
     })
+    const confined = parseConfinedContainerStdout(readOut)
+    if (!confined.ok) {
+      this._logContainment('Edit', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Edit', confined.reason, input?.file_path),
+        isError: true,
+      }
+    }
     if (readErr && readErr.trim()) {
       return { content: `Edit failed: ${readErr.trim()}`, isError: true }
     }
+    const existing = confined.body
     // Strict-unique-match + NO_CHANGE guard + LITERAL replacement via the shared
     // transform (same one the host file-ops Edit uses) — #5882 closes the drift
     // where this path lacked the NO_CHANGE guard and used slice vs the host's
@@ -2177,39 +2293,97 @@ export class DockerByokSession extends ClaudeByokSession {
     if (escapeReason) {
       return { content: globPatternEscapeMessage(escapeReason), isError: true }
     }
+    // #7898 round 4 — same cap as the host (byok-tool-executor.js's runGlob),
+    // from the same shared check: an over-long or deeply brace-nested pattern
+    // costs nothing beyond this scan on the host, but on the container it
+    // would still be shipped into `buildConfinedGlobBody` and shelled out via
+    // `docker exec` for bash's own brace expansion to chew on. Rejecting it
+    // here, before that round-trip, keeps host and container refusing the
+    // same input for the same reason rather than only one of them.
+    const complexityReason = globPatternComplexityReason(pattern)
+    if (complexityReason) {
+      return { content: globPatternComplexityMessage(complexityReason), isError: true }
+    }
     if (signal?.aborted) {
       return { content: 'Interrupted before docker exec', isError: true }
     }
     const root = input?.path
       ? remapToContainerPath(input.path, this.cwd)
       : CONTAINER_WORKSPACE
-    const cmd = buildGlobCommand(pattern, root)
+    // #7354 — TWO layers now, and the lexical one below is still the first.
+    // The preamble resolves `root` physically inside the container and refuses
+    // when it lands outside /workspace (the `path` route), and the body resolves
+    // each MATCH before emitting it (the `pattern` route). Both are things only
+    // the container can answer: the symlink lives on ITS filesystem.
+    const cmd = buildConfinedContainerCommand({
+      target: root,
+      // `cd -P` into the resolved root, so `$PWD` and `$__cx_target` are the
+      // same physical directory and the per-match comparison in the body is
+      // against the place the glob actually ran in.
+      setup: '{ unset CDPATH; cd -P -- "$__cx_target"; }',
+      body: buildConfinedGlobBody(pattern),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
-    if (!stdout && stderr && stderr.trim()) {
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      // An escaping `path` ARGUMENT is an explicit refusal — the caller named
+      // that directory outright, so the error tells them nothing they did not
+      // already supply. Matches that escape are a different thing entirely and
+      // are dropped silently in the container (see buildConfinedGlobBody).
+      this._logContainment('Glob', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Glob', confined.reason, input?.path),
+        isError: true,
+      }
+    }
+    // #7354 — the withheld-count trailer is stripped BEFORE anything else looks
+    // at the body: it must never reach the model (no-oracle), and it must never
+    // make the "no stdout, but stderr" branch below unreachable by keeping the
+    // body permanently non-empty.
+    const { body: globBody, withheld: withheldInContainer } = splitWithheldTrailer(confined.body)
+    if (!globBody && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
     }
     // #7341 — confine the RESULTS, not just the pattern. This is the layer
     // that actually holds: it inspects what the shell PRODUCED (a leading `/`
     // or a `..` segment) rather than trying to predict what it will produce,
     // and every one of the six expansion bypasses found in review is plainly
-    // visible here while being invisible in the pattern text. The host does
-    // strictly better (a realpath walk per match); from out here the matches
-    // are inside the container, so lexical is what is reachable.
+    // visible here while being invisible in the pattern text.
     //
-    // RESIDUAL, tracked by #7354: a symlinked directory inside /workspace
-    // (`esc -> /etc` in the CONTAINER's filesystem) produces a lexically clean
-    // match that resolves out. Closing it needs the match resolved in-container,
-    // and it is reachable through `input.path` as well as `pattern` — that route
-    // is shared with _containerGrep/_containerRead, so it is wider than Glob.
+    // #7354 KEPT IT, and deliberately: the in-container resolution above is
+    // strictly stronger, but it is also the layer that can be defeated by an
+    // image whose `readlink` is missing or whose shell misbehaves, and this one
+    // needs neither. Deleting it would trade a check that cannot fail for one
+    // that depends on the guest's userland. The two are independent — one reads
+    // the string, the other reads the filesystem — so they are not the
+    // "shared rule = free pass" pairing.
     //
-    // This comment said "tracked separately" while nothing tracked it, which is
-    // the same false-safety shape as the bug above: an assertion of a stronger
-    // state than reality, in a place no test can check. The issue now exists.
+    // Withheld matches read as no match TO THE MODEL — no count, no marker.
+    // Anything that distinguishes "matched, but outside" from "matched nothing"
+    // is an existence oracle on a tool auto-approved in `acceptEdits`. The
+    // operator gets the count instead, in the daemon log (#7354).
     //
-    // Withheld matches read as no match — no count, no marker. Anything that
-    // distinguishes "matched, but outside" from "matched nothing" is an
-    // existence oracle on a tool auto-approved in `acceptEdits`.
-    const files = stdout.split('\n').filter(Boolean).filter((f) => !globMatchEscapesRoot(f))
+    // #7357 — split on NUL, matching `buildConfinedGlobBody`'s delimiter: a
+    // filename may legally contain a newline, and a `\n`-split here would
+    // turn one such match into two entries, one of them a nonexistent path.
+    // `filter(Boolean)` drops the single empty tail element the trailing NUL
+    // produces (and would drop nothing else — an empty match can't exist).
+    const emitted = globBody.split('\0').filter(Boolean)
+    const containmentOk = emitted.filter((f) => !globMatchEscapesRoot(f))
+    // A match that survived containment but still contains a newline is
+    // dropped from what reaches the model — the tool_result itself is
+    // `\n`-joined text, so there is no way to keep it in the OUTPUT without
+    // reintroducing the exact split this fix removes from the TRANSFER. This
+    // is a display-format decision, not a containment one (the host Glob
+    // drops the same shape, for the same reason — byok-tool-executor.js's
+    // `runGlob`), so it gets its own log line rather than being folded into
+    // the security-relevant withheld count below.
+    const files = containmentOk.filter((f) => !f.includes('\n'))
+    const droppedForNewline = containmentOk.length - files.length
+    this._logWithheldGlobMatches(withheldInContainer, emitted.length - containmentOk.length)
+    if (droppedForNewline > 0) {
+      this._logContainment('Glob', `dropped ${droppedForNewline} match(es) containing an embedded newline (unambiguous single-line output only, #7357)`)
+    }
     if (files.length === 0) return { content: `No matches for ${pattern}`, isError: false }
     return { content: files.join('\n'), isError: false }
   }
@@ -2231,13 +2405,31 @@ export class DockerByokSession extends ClaudeByokSession {
     // review, Copilot comment 3348029186) — without the mask the legitimate
     // "No matches" branch below would be unreachable.
     const { ci, ln, globArg } = buildGrepArgs(input)
-    const cmd = buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit: true })
+    // #7354 — the `path` route is shared with Read/Glob and is lexical, so
+    // `{"path":"esc"}` searched `/etc` through a symlinked directory. Resolve
+    // it in-container and search the RESOLVED root (`rootExpr`), which is what
+    // the host already does — it passes `safeResolveRoot`'s realpath, never the
+    // alias it was handed.
+    const cmd = buildConfinedContainerCommand({
+      target: root,
+      body: buildGrepCommand({
+        pattern, rootExpr: '"$__cx_target"', ci, ln, globArg, maskExit: true,
+      }),
+    })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
-    if (!stdout && stderr && stderr.trim()) {
+    const confined = parseConfinedContainerStdout(stdout)
+    if (!confined.ok) {
+      this._logContainment('Grep', `refused a path (${confined.reason})`)
+      return {
+        content: confinedContainerFailureMessage('Grep', confined.reason, input?.path),
+        isError: true,
+      }
+    }
+    if (!confined.body && stderr && stderr.trim()) {
       return { content: `Grep failed: ${stderr.trim()}`, isError: true }
     }
-    if (!stdout) return { content: `No matches for ${pattern}`, isError: false }
-    return { content: stdout, isError: false }
+    if (!confined.body) return { content: `No matches for ${pattern}`, isError: false }
+    return { content: confined.body, isError: false }
   }
 
   /**

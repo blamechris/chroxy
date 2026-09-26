@@ -91,6 +91,9 @@ import type {
   SessionHealth,
   SessionInfo,
   SlashCommand,
+  // #7807: the current session's reasoning/thinking level, mirroring the
+  // dashboard's `SessionState['thinkingLevel']` field.
+  ThinkingLevel,
   WebFeatureStatus,
   WebTask,
 } from '@chroxy/store-core';
@@ -278,6 +281,12 @@ export interface SessionState extends BaseSessionState {
   // `persist:'project'`. Written by permission_rules_updated (persistentRules
   // field via the shared dispatch table). Surfaced in the SessionRules screen.
   persistentRules?: PermissionRule[];
+  // #7807: current session's reasoning/thinking level, written by the shared
+  // `handleThinkingLevelChangedPatch` dispatch-table entry (thinking_level_changed).
+  // Mirrors the dashboard's `SessionState['thinkingLevel']`. No app UI reads
+  // this yet — the app has no thinking-level control — so this only makes the
+  // store reflect server state; wiring a control is a tracked follow-up.
+  thinkingLevel: ThinkingLevel;
 }
 
 export interface SessionNotification {

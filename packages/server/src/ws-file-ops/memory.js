@@ -1,8 +1,9 @@
-import { stat, open } from 'fs/promises'
+import { stat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
 import { resolve, dirname, normalize, extname } from 'path'
 import { homedir } from 'os'
 import { realpathOfDeepestAncestor } from './common.js'
+import { openNoFollow } from './open-nofollow.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { encodeProjectPath } from '../jsonl-reader.js'
 
@@ -157,14 +158,19 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
 /**
  * Phase 2 of the confined-memory-file read: `stat`/`open`/read an ALREADY
  * resolved+validated real path (see `resolveConfinedMemoryPath`). The final
- * open uses O_NOFOLLOW to close the post-validation TOCTOU window (a symlink
- * swapped in at the target between validation and open is rejected, not
- * followed).
+ * open goes through `openNoFollow`, which closes the post-validation TOCTOU
+ * window (a symlink swapped in at the target between validation and open is
+ * rejected with ELOOP, not followed) on win32 as well as POSIX — the bare
+ * `O_NOFOLLOW` flag this used to pass is undefined on Windows and ORed to 0,
+ * so the refusal documented here was not actually happening there (#7280).
  *
  * @param {string} resolvedPath - Real (post-realpath, already containment-checked) path
+ * @param {() => Promise<void>} [__testBetweenStatAndOpen] - TEST-ONLY seam, run
+ *   after the pre-open `stat` and before the open so a test can swap the file
+ *   for a FIFO deterministically. Every production caller passes one argument.
  * @returns {Promise<{path: string, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
  */
-async function readResolvedMemoryFile(resolvedPath) {
+export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndOpen) {
   const base = { path: resolvedPath, exists: false, content: null, truncated: false, skipped: false, error: null }
 
   let fileStat
@@ -182,10 +188,25 @@ async function readResolvedMemoryFile(resolvedPath) {
     return { ...base, exists: true, error: 'File too large (max 512KB)' }
   }
 
+  if (__testBetweenStatAndOpen) await __testBetweenStatAndOpen()
+
   let buf
   let fh
   try {
-    fh = await open(resolvedPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
+    fh = await openNoFollow(resolvedPath, fsConstants.O_RDONLY)
+    // #7938 — the `fileStat.isFile()` check above ran BEFORE this open, so it
+    // cannot see a non-regular file (a FIFO/device) swapped in during the
+    // TOCTOU window between that stat and this open. openNoFollow's O_NONBLOCK
+    // keeps the open itself from hanging on a planted FIFO with no writer, but
+    // reading its content is still the wrong thing to do — re-check isFile()
+    // on the OPENED fd, which cannot be raced the same way, before reading.
+    // Without this, a FIFO raced in here reads as an EMPTY file (a
+    // non-blocking read of a writerless FIFO is EOF): exists, content '',
+    // no error. Same text as the pre-open refusal above.
+    const fhStat = await fh.stat()
+    if (!fhStat.isFile()) {
+      throw new Error('Not a regular file')
+    }
     buf = await fh.readFile()
   } catch (err) {
     if (err.code === 'ELOOP') {

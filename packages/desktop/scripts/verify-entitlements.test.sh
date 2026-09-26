@@ -23,9 +23,9 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
 #
-# 13, not the 10 `assert_exit` call sites: three cases increment PASS/FAIL
+# 14, not the 11 `assert_exit` call sites: three cases increment PASS/FAIL
 # inline, outside the shared helper.
-EXPECTED_CASES=13
+EXPECTED_CASES=14
 
 PASS=0
 FAIL=0
@@ -75,6 +75,41 @@ write_plist "$GOOD_PLIST" \
     "com.apple.security.cs.disable-library-validation" \
     "com.apple.security.device.audio-input"
 assert_exit "passes when all required entitlements present" 0 "$(run_verifier "$GOOD_PLIST")"
+
+# #7907 — check_keys() used to be `printf '%s\n' "$blob" | grep -qF
+# "<key>${key}</key>"`. This script runs under `set -euo pipefail` (line 30).
+# grep -q exits the instant it finds a match without draining the rest of its
+# stdin; if the producer (printf) is still writing when that happens, SIGPIPE
+# hits it and pipefail promotes that broken-pipe write error into the whole
+# pipeline's (the `if !`'s) exit status — even though grep itself matched.
+# That flips a genuinely-present key into "missing", failing the build
+# CLOSED. An ordinary small plist (like GOOD_PLIST above) can't trigger this —
+# the whole printf fits in one write() syscall — but a large blob with the
+# first required key near the start reproduces it: reproduced 5/5 against the
+# pre-fix script, with ALL FOUR required keys misreported as missing despite
+# every one being genuinely present (see the PR body for the transcript). The
+# fix (`grep -qF "<key>${key}</key>" <<<"$blob"`) hands grep the data
+# directly, so there is no separate writer process for SIGPIPE to land on.
+LARGE_PLIST="$TMP_DIR/large.plist"
+{
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<plist version="1.0">'
+    echo '<dict>'
+    echo '    <key>com.apple.security.cs.allow-jit</key>'
+    echo '    <true/>'
+    echo '    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>'
+    echo '    <true/>'
+    echo '    <key>com.apple.security.cs.disable-library-validation</key>'
+    echo '    <true/>'
+    echo '    <key>com.apple.security.device.audio-input</key>'
+    echo '    <true/>'
+    printf '    <!-- padding: '
+    python3 -c "print('p' * 400000, end='')" 2>/dev/null || perl -e 'print "p" x 400000'
+    echo ' -->'
+    echo '</dict>'
+    echo '</plist>'
+} > "$LARGE_PLIST"
+assert_exit "#7907 — passes on a >390KB plist with all keys genuinely present (pipefail+SIGPIPE survives)" 0 "$(run_verifier "$LARGE_PLIST")"
 
 # Case 2 — missing audio-input (the #4801 regression) → exit 1
 MISSING_AUDIO="$TMP_DIR/missing-audio.plist"

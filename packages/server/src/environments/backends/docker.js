@@ -665,7 +665,23 @@ export class DockerBackend {
         runArgs.push('--add-host', 'host.docker.internal:host-gateway')
       }
 
-      runArgs.push(image, 'sleep', 'infinity')
+      // #7296 — `image` reaches here from the wire (`create_environment`), and
+      // a bare positional is option-parsed by `docker run`. The allowlist
+      // refuses a dash-leading reference; this terminates option parsing so
+      // the refusal is not the only thing standing between a flag and the
+      // daemon. Measured on Docker 29.7.2: `docker run -- --help sleep
+      // infinity` does NOT print help (the `--` is consumed and `--help`
+      // becomes the image), while the same argv without `--` does.
+      //
+      // What the separator needs from the argv above it is narrow and worth
+      // stating exactly: every FLAG NAME there is a chroxy literal, so no
+      // earlier token is a bare `--` that would terminate option parsing
+      // ahead of this one. The flag VALUES are not all chroxy's own
+      // (memoryLimit/cpuLimit arrive from the wire; containerEnv, mounts and
+      // forwardPorts from devcontainer.json) — but each sits in a slot pflag
+      // consumes as the preceding flag's argument, so it is a bad-value error
+      // there, never a new option.
+      runArgs.push('--', image, 'sleep', 'infinity')
 
       this._execFile('docker', runArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
         if (err) {

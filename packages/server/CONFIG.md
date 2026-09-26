@@ -195,6 +195,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 |-----|------|----------|---------------------|-------------|
 | _(env-only)_ | string | - | `CHROXY_CONFIG_DIR` | Absolute path to the config/state root, replacing the `~/.chroxy` default for **all** daemon state — see [The config root](#the-config-root-chroxy_config_dir). Cannot be a `config.json` key: it is what locates `config.json`. A **relative** value is refused with a warning and falls back to the default, rather than being resolved against the daemon's cwd. Relocating an existing install leaves state behind at `~/.chroxy`; `chroxy config-dir status` reports it and `chroxy config-dir migrate --yes` copies it forward. |
 | _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to raise or lower that per-window cap (the rate limiter's own `maxMessages` option — unrelated to the `maxMessages` config key above); the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `\|\|` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
+| _(env-only)_ | boolean | - | `CHROXY_DISABLE_UPDATE_CHECK` | Skips the non-blocking background check of `registry.npmjs.org` for the latest published version that `WsServer` otherwise fires once on construction (#7265). Set it to the literal `1` to disable. Primarily a test-harness switch — `packages/server/tests/_setup.mjs` sets it for the whole suite so tests never make that outbound request — but it is a legitimate operator escape hatch too, e.g. on an egress-restricted or offline host. No `config.json` key is exposed. |
 
 ### Environment variable names
 
@@ -585,7 +586,7 @@ The `provider` key picks which AI CLI backs a session by default:
 | `claude-sdk` | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
 | `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | Claude Code subscription login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 |
-| `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
+| `gemini` | `gemini --prompt=<text>` CLI | `GEMINI_API_KEY` |
 | `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
 

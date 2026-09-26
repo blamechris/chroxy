@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
+import { CONTAINER_CONFINE_OK } from '../src/built-in-tools/tool-transforms.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
 
@@ -64,6 +65,18 @@ function execFileStub(byCmd = {}) {
  * Stub DockerBackend that captures `execInEnvironment` calls and returns
  * a canned `{ stdout, stderr }`. Lets us assert the exact bash commands
  * the docker-byok tool dispatcher constructs for each tool.
+ *
+ * #7354 — the canned stdout is prefixed with the confinement OK sentinel WHEN
+ * AND ONLY WHEN the command the daemon sent actually carries the in-container
+ * confinement preamble. A real container running that script prints the
+ * sentinel; one running a script without it does not. Emitting it
+ * unconditionally would make the stub lie in the one direction that matters —
+ * a Glob/Grep/Read that lost its guard would still look guarded here.
+ *
+ * Symlink resolution itself is NOT emulated. That question is answered against
+ * real symlinks and a real bash in `docker-byok-symlink-containment.test.js`;
+ * this file stays what it has always been, an assertion about the command
+ * shapes the dispatcher builds.
  */
 function backendStub({ execResponses = {}, defaultResponse = { stdout: '', stderr: '' } } = {}) {
   const calls = []
@@ -73,7 +86,12 @@ function backendStub({ execResponses = {}, defaultResponse = { stdout: '', stder
       calls.push({ containerId, ...opts })
       const matcher = Object.keys(execResponses).find((needle) => opts.cmd.includes(needle))
       const resp = matcher ? execResponses[matcher] : defaultResponse
-      return { stdout: resp.stdout || '', stderr: resp.stderr || '' }
+      const body = resp.stdout || ''
+      const confined = opts.cmd.includes(CONTAINER_CONFINE_OK)
+      return {
+        stdout: confined ? `${CONTAINER_CONFINE_OK}\n${body}` : body,
+        stderr: resp.stderr || '',
+      }
     },
   }
 }
@@ -439,7 +457,18 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(result.isError, false)
     assert.match(result.content, /file contents here/)
     assert.equal(_dockerBackend.calls.length, 1)
-    assert.match(_dockerBackend.calls[0].cmd, /sed -n '1,2000p' '\/workspace\/foo\.txt'/)
+    // #7354 — the slice runs against `"$__cx_target"`, the path the
+    // in-container preamble RESOLVED, not the lexical `/workspace/foo.txt` it
+    // was handed. The lexical path is still what gets resolved, and it is
+    // asserted as the preamble's argument below.
+    assert.ok(
+      /sed -n '1,2000p' "\$__cx_target"/.test(_dockerBackend.calls[0].cmd),
+      'Read must slice the resolved path',
+    )
+    assert.ok(
+      _dockerBackend.calls[0].cmd.includes(`__cx_resolve '/workspace/foo.txt'`),
+      'Read must resolve the remapped path in-container',
+    )
     assert.match(_dockerBackend.calls[0].cmd, /head -c/)
     // PR #5021 review fix (Copilot, comment id 3348029235): the awk
     // pass formats each line as 5-space-padded line number + arrow,
@@ -486,10 +515,16 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.match(result.content, /Wrote 5 bytes/)
     assert.equal(_dockerBackend.calls.length, 1)
     const cmd = _dockerBackend.calls[0].cmd
-    assert.match(cmd, /mkdir -p '\/workspace\/src'/)
-    assert.match(cmd, /base64 -d > '\/workspace\/src\/new\.js'/)
+    // #7876 — the lexical `/workspace/src/new.js` is resolved in-container by
+    // the create-mode walk; the parent is created and the content written
+    // under the RESOLVED `"$__cx_target"`, never under the lexical path.
+    // Booleans, not assert.match: the subject is a multi-KB script (#7340).
+    assert.ok(cmd.includes(`__cx_resolve_new '/workspace/src/new.js'`), 'Write must resolve the remapped path in-container')
+    assert.ok(cmd.includes('mkdir -p "${__cx_target%/*}"'), 'Write must create the RESOLVED parent')
+    assert.ok(cmd.includes('base64 -d > "$__cx_target"'), 'Write must write the RESOLVED path')
+    assert.equal(cmd.includes(`mkdir -p '/workspace/src'`), false, 'Write created the lexical parent')
     // The base64 of 'hello' is aGVsbG8=
-    assert.match(cmd, /aGVsbG8=/)
+    assert.ok(cmd.includes('aGVsbG8='), 'content not base64-encoded into the command')
   })
 
   it('Write refuses missing/non-string content with EINVAL', async () => {
@@ -728,8 +763,11 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
         globPatternEscapeReason(pattern), null,
         `precondition: ${pattern} must reach the shell, or this tests the wrong layer`,
       )
+      // #7357 — NUL-delimited, matching the real buildConfinedGlobBody output;
+      // a '\n'-joined fixture here would test a shape the container no longer
+      // produces.
       const _dockerBackend = backendStub({
-        defaultResponse: { stdout: '../etc/passwd\n/etc/shadow\nsrc/ok.ts\n', stderr: '' },
+        defaultResponse: { stdout: '../etc/passwd\0/etc/shadow\0src/ok.ts\0', stderr: '' },
       })
       const { session } = buildSession({ backend: _dockerBackend })
       const result = await session._dispatchBuiltinTool({ toolName: 'Glob', input: { pattern } })
@@ -747,9 +785,10 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     // nested braces — and every one of them is invisible in the pattern and
     // plainly visible HERE, in what the shell produced. So this test bypasses
     // the pattern guard entirely and feeds the escaping output straight back.
+    // #7357 — NUL-delimited, matching the real buildConfinedGlobBody output.
     const _dockerBackend = backendStub({
       defaultResponse: {
-        stdout: '/etc/passwd\n../../etc/shadow\nsrc/a.ts\n..\n',
+        stdout: '/etc/passwd\0../../etc/shadow\0src/a.ts\0..\0',
         stderr: '',
       },
     })
@@ -768,7 +807,7 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
 
   it('Glob reports an all-withheld result as no match, with no count (oracle)', async () => {
     const _dockerBackend = backendStub({
-      defaultResponse: { stdout: '/etc/passwd\n/etc/shadow\n', stderr: '' },
+      defaultResponse: { stdout: '/etc/passwd\0/etc/shadow\0', stderr: '' },
     })
     const { session } = buildSession({ backend: _dockerBackend })
     const result = await session._dispatchBuiltinTool({
@@ -782,7 +821,7 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
   it('Glob still runs an ordinary in-workspace pattern (positive control #7341)', async () => {
     // Without this the test above would pass just as well against a Glob that
     // refused every pattern outright.
-    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\n', stderr: '' } })
+    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'src/a.ts\0', stderr: '' } })
     const { session } = buildSession({ backend: _dockerBackend })
     const result = await session._dispatchBuiltinTool({
       toolName: 'Glob',

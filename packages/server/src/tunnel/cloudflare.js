@@ -201,10 +201,18 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
     }
 
     return new Promise((resolve, reject) => {
+      // #7296 — `tunnelName` is a bare positional and operator config
+      // (config.js types it as a plain string with no pattern), so a
+      // dash-leading value is read by cloudflared as a FLAG. The `--`
+      // terminates option parsing with every flag ahead of it. Measured on
+      // cloudflared 2026.8.3 (probed with a bogus --origincert, so nothing
+      // touched the account): `tunnel run --help` prints help, while
+      // `tunnel run -- --help` fails with "error parsing tunnel ID" — i.e. the
+      // separator is honoured and the value is taken as the NAME.
       const argv = [
         'tunnel', 'run',
         '--url', `http://localhost:${this.port}`,
-        this.tunnelName,
+        '--', this.tunnelName,
       ]
       const spawnOpts = {
         stdio: ['ignore', 'pipe', 'pipe'],

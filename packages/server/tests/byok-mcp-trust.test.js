@@ -142,6 +142,52 @@ describe('byok-mcp-trust', () => {
       const b = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/b' })
       assert.notEqual(a, b)
     })
+
+    // #7939 review: `trustKeyComponents` is untouched by #7939's `source`
+    // threading (byok-mcp-config.js / byok-session.js / byok-mcp-fleet.js now
+    // attach a `source` field to spawn configs before they reach the trust
+    // gate), and the PR's own description says so ("Verified by reading the
+    // implementation; no code change was needed there") — but nothing pinned
+    // that claim. `trustKeyComponents` builds its return value as an explicit
+    // literal ({ v, kind, name, ... }), never a spread of the input `server`,
+    // so an extra `source` key cannot leak into the key today — but that
+    // safety is structural, not tested, and a future refactor toward
+    // spreading `server` (a plausible simplification) would silently start
+    // keying trust by config SCOPE, which would be a real regression: the
+    // same command/args/env re-prompting (or worse, requiring a fresh
+    // recordTrust) purely because a server got relabeled from 'user' to
+    // 'local' on a restart, or — the dangerous direction — two configs that
+    // should be considered different (same name+command, different scope)
+    // silently sharing a trust entry is NOT the risk here since command/args
+    // already differ; the risk this guards is trust CHURN, not a bypass, but
+    // it is exactly the kind of silent behavior change #7939's mutation
+    // table did not otherwise cover.
+    it('a `source` field on the server config never changes the trust key (#7939)', () => {
+      const stdioPlain = trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'], env: {} })
+      for (const source of ['local', 'project-mcp-json', 'user']) {
+        assert.equal(
+          trustTupleKey({ name: 'gh', command: 'node', args: ['mcp.js'], env: {}, source }),
+          stdioPlain,
+          `stdio trust key must be identical regardless of source: ${source}`,
+        )
+      }
+
+      const remotePlain = trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/api' })
+      for (const source of ['local', 'project-mcp-json', 'user']) {
+        assert.equal(
+          trustTupleKey({ name: 'gh', url: 'https://mcp.example.com/api', source }),
+          remotePlain,
+          `remote trust key must be identical regardless of source: ${source}`,
+        )
+      }
+    })
+
+    it('`source` never appears in the component bag `trustKeyComponents` returns (#7939)', () => {
+      const stdio = trustKeyComponents({ name: 'gh', command: 'node', args: ['mcp.js'], source: 'project-mcp-json' })
+      assert.equal('source' in stdio, false)
+      const remote = trustKeyComponents({ name: 'gh', url: 'https://mcp.example.com/api', source: 'project-mcp-json' })
+      assert.equal('source' in remote, false)
+    })
   })
 
   describe('loadTrustStore', () => {

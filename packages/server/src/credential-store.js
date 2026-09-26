@@ -49,6 +49,7 @@ import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
 import { configPath } from './config-dir.js'
+import { readTrustedSecretFile } from './trusted-file-read.js'
 import {
   CRED_KEY_SERVICE,
   isEncryptedEnvelope,
@@ -221,6 +222,13 @@ function credentialsFilePath() {
 /**
  * Read + parse the credentials file, enforcing the 0600 mode boundary.
  *
+ * #7893: the mode check and the read go through `readTrustedSecretFile` —
+ * ONE `open(O_NOFOLLOW)` + `fstat(fd)` + read from that same fd, so a
+ * rename or symlink-swap of `credentials.json` between the mode check and
+ * the read (the old `statSync(path)` then `readFileSync(path)` shape) is
+ * refused outright — a symlink is never followed, regardless of what its
+ * target's own mode is.
+ *
  * @returns {{ data: Record<string, string>, fileExists: boolean, error: string | null }}
  *   `data` is the parsed object (empty when missing/unreadable). `error` is a
  *   human-readable reason when the file exists but cannot be safely read
@@ -228,31 +236,27 @@ function credentialsFilePath() {
  */
 function readStore() {
   const file = credentialsFilePath()
-  let stat
-  try {
-    stat = statSync(file)
-  } catch (err) {
-    if (err.code === 'ENOENT') return { data: {}, fileExists: false, error: null }
-    return { data: {}, fileExists: false, error: `unable to stat ${file}: ${err.message}` }
-  }
-
-  // Refuse any mode that is not exactly 0600 (POSIX) — both more-permissive
-  // (e.g. 0644) and stricter (e.g. 0400) modes are rejected. On win32 the mode
-  // bits don't reflect NTFS ACLs, so skip the check there (matches #4144).
-  if (process.platform !== 'win32') {
-    const perms = stat.mode & 0o777
-    if (perms !== 0o600) {
+  const result = readTrustedSecretFile(file, { mode: 0o600 })
+  if (result.status === 'absent') return { data: {}, fileExists: false, error: null }
+  if (result.status === 'refused') {
+    // Refuse any mode that is not exactly 0600 (POSIX) — both more-permissive
+    // (e.g. 0644) and stricter (e.g. 0400) modes are rejected. On win32 the mode
+    // bits don't reflect NTFS ACLs, so skip the check there (matches #4144).
+    if (result.code === 'EMODE') {
       return {
         data: {},
         fileExists: true,
-        error: `${file} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${file})`,
+        error: `${file} has mode ${result.mode.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${file})`,
       }
     }
+    // Any other refusal (open/fstat failure, symlink refused, not a regular
+    // file, …) — never assumed absent; surfaced as a read failure.
+    return { data: {}, fileExists: false, error: `unable to stat ${file}: ${result.cause ? result.cause.message : result.code}` }
   }
 
   let parsed
   try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'))
+    parsed = JSON.parse(result.content)
   } catch (err) {
     return { data: {}, fileExists: true, error: `${file} unreadable or not valid JSON: ${err.message}` }
   }

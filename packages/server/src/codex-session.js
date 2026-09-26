@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
 import {
   CONTEXT_WINDOW_HEADROOM,
   getRatchetCap,
@@ -299,19 +300,60 @@ export function toTomlBasicString(value) {
  * @returns {string[]}
  */
 export function buildCodexArgs(text, model, threadId = null, sandboxOverride = undefined) {
-  // INVARIANT: --sandbox must be passed to the parent `exec`, not to the
+  // INVARIANT 1: --sandbox must be passed to the parent `exec`, not to the
   // `resume` subcommand. `codex exec resume --sandbox ...` errors out with
   // `unexpected argument '--sandbox' found` (verified against codex-cli
-  // 0.128.0) because --sandbox is only declared on the parent `exec` command.
-  // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
+  // 0.128.0, still true on 0.154.0) because --sandbox is only declared on the
+  // parent `exec` command. Keep --sandbox BEFORE the `resume` subcommand.
+  //
+  // INVARIANT 2 (#7342/#7291): `text` is TERMINATED, never bare. It is the raw
+  // client chat message, and it used to sit in a bare positional slot on both
+  // branches, where codex option-PARSED it. Measured on codex-cli 0.154.0:
+  //
+  //   codex exec "- first bullet" --json …
+  //     → error: unexpected argument '- ' found
+  //       tip: to pass '- ' as a value, use '-- - '            (exit 2)
+  //   codex exec --sandbox read-only resume <id> "--thread-source=x" --json …
+  //     → consumed as an OPTION; the prompt slot falls empty and codex drops
+  //       to "Reading prompt from stdin..."                    (exit 1)
+  //
+  // `resume` also declares --dangerously-bypass-approvals-and-sandbox, so the
+  // second shape was a sandbox-escape primitive and not merely a parse bug. A
+  // leading dash is LEGITIMATE input ("- first bullet"), so the fix is the `--`
+  // terminator (utils/argv-safety.js case 2), not rejection.
+  //
+  // Everything after `--` is POSITIONAL, which is why every flag — and the
+  // resume SESSION_ID, itself a positional — is emitted BEFORE it, and why
+  // `text` must stay the LAST element. Appending a flag after it would silently
+  // turn that flag into part of the prompt.
+  //
+  // #7868 — unlike `text`, `threadId` can never LEGITIMATELY start with `-`:
+  // it is chroxy's own identifier (a codex `thread_id`, or a client-supplied
+  // resume target already required to be a canonical UUID at the WS layer —
+  // see handlers/conversation-handlers.js's CONVERSATION_ID_RE), never free-
+  // form chat text. So the correct shape here is case 1 (reject), not a `--`
+  // terminator — which would not even help, since the SESSION_ID positional
+  // must stay BEFORE the separator (INVARIANT above). Before this, nothing in
+  // buildCodexArgs itself constrained threadId's shape: safety depended
+  // entirely on every external producer already happening to constrain it,
+  // which is the exact "someone remembers to sweep" pattern this issue's own
+  // lint exists to close. `resume` declares
+  // --dangerously-bypass-approvals-and-sandbox, so a producer that ever
+  // relaxed that external constraint would have reopened a sandbox-escape
+  // primitive, not just a parse nuisance.
+  if (threadId) assertSafeArgvValue(threadId, 'threadId')
   const sandbox = resolveCodexSandbox(sandboxOverride)
   const args = threadId
-    ? ['exec', '--sandbox', sandbox, 'resume', threadId, text, '--json', '--skip-git-repo-check']
-    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', sandbox]
+    ? ['exec', '--sandbox', sandbox, 'resume', '--json', '--skip-git-repo-check']
+    : ['exec', '--json', '--skip-git-repo-check', '--sandbox', sandbox]
   if (model) {
     // #7766 — SERIALIZED, not interpolated. See the SECURITY INVARIANT above.
     args.push('-c', `model=${toTomlBasicString(model)}`)
   }
+  // Positionals, in order: [SESSION_ID] on the resume form, then the prompt
+  // behind the terminator.
+  if (threadId) args.push(threadId)
+  args.push('--', text)
   return args
 }
 

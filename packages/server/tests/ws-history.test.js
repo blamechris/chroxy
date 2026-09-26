@@ -17,7 +17,7 @@ import {
   _reserveEagerDerivationSlot,
   _resetEagerDerivationBudgetForTests,
 } from '../src/ws-history.js'
-import { PERMISSION_MODES } from '../src/handler-utils.js'
+import { PERMISSION_MODES, getPermissionModes } from '../src/handler-utils.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { MAX_SANE_DURATION_MS, DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
@@ -26,7 +26,7 @@ import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../
 // resolves to the correct provider class in per-provider tests below.
 // registerProvider is used by the scheduleProviderModelsRefresh suite to
 // inject fake provider classes (#5450).
-import { registerProvider } from '../src/providers.js'
+import { registerProvider, getProvider } from '../src/providers.js'
 // #7730 — the codex thinking-level replay is exercised against the REAL session
 // class, because the thing under test IS the `get thinkingLevel` override: the
 // base class returns undefined and the replay below skips exactly that value.
@@ -110,6 +110,18 @@ function registerClient(ctx, ws, overrides = {}) {
   ctx.clients.set(ws, client)
   return client
 }
+
+// #7811 — `PERMISSION_MODES` (handler-utils.js) is the back-compat constant
+// built with `ProviderClass = undefined`, which is what every no-session /
+// no-billing-canary send used to carry (`activeProvider`/`authOkProvider` are
+// `null` with no session). Those sends now resolve through
+// `resolveRosterProvider`, same as the `available_models` roster sent
+// alongside them, and with no billing canary that resolves to
+// `DEFAULT_PROVIDER` — a concrete provider, not `null` — so `ProviderClass` is
+// now resolved too and `getPermissionModes` appends its enforcement note.
+// `DEFAULT_PROVIDER_MODES` is that corrected expectation: the same reference
+// computation the fixed send performs.
+const DEFAULT_PROVIDER_MODES = getPermissionModes(DEFAULT_PROVIDER, getProvider(DEFAULT_PROVIDER))
 
 // ── sendPostAuthInfo ───────────────────────────────────────────────────────
 
@@ -795,7 +807,10 @@ describe('sendPostAuthInfo — multi-session mode', () => {
     assert.ok(types.includes('available_models'))
     assert.ok(types.includes('available_permission_modes'))
     const permModes = ctx._sends.find(m => m.type === 'available_permission_modes')
-    assert.deepEqual(permModes.modes, PERMISSION_MODES)
+    // #7811 — the entry carries no provider and no billingCanary is wired, so
+    // this resolves to DEFAULT_PROVIDER (same fallback the roster send above
+    // it uses), not the bare `ProviderClass = undefined` copy.
+    assert.deepEqual(permModes.modes, DEFAULT_PROVIDER_MODES)
   })
 
   it('sets client.activeSessionId to the resolved session', () => {
@@ -1381,7 +1396,10 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     sendPostAuthInfo(ctx, ws)
     const authOk = ctx._sends.find(m => m.type === 'auth_ok')
     assert.equal(authOk.capabilities.authBootstrap, true)
-    assert.deepEqual(authOk.availablePermissionModes, PERMISSION_MODES)
+    // #7811 — no session, no billingCanary → resolves to DEFAULT_PROVIDER
+    // (see DEFAULT_PROVIDER_MODES), not the bare `ProviderClass = undefined`
+    // copy `PERMISSION_MODES` represents.
+    assert.deepEqual(authOk.availablePermissionModes, DEFAULT_PROVIDER_MODES)
   })
 
   it('still sends the discrete available_permission_modes frame (old-client compat)', () => {
@@ -1395,7 +1413,9 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     sendPostAuthInfo(ctx, ws)
     const permModes = ctx._sends.find(m => m.type === 'available_permission_modes')
     assert.ok(permModes, 'discrete available_permission_modes frame still sent')
-    assert.deepEqual(permModes.modes, PERMISSION_MODES)
+    // #7811 — see DEFAULT_PROVIDER_MODES: the entry carries no provider and no
+    // billingCanary is wired, so this resolves to DEFAULT_PROVIDER.
+    assert.deepEqual(permModes.modes, DEFAULT_PROVIDER_MODES)
   })
 
   it('a codex active session at connect gets codex-tuned mode copy (#6638)', () => {
@@ -1416,6 +1436,48 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
       assert.match(modes.find(m => m.id === 'acceptEdits').description, /apply_patch/, 'codex copy')
       assert.doesNotMatch(modes.find(m => m.id === 'auto').description, /dangerously-skip-permissions/, 'no Claude flag')
     }
+  })
+
+  // #7811 — a no-session connect used to derive `available_permission_modes`
+  // (and the auth_ok fold of it) from `activeProvider`/`authOkProvider`, which
+  // is `null` when there is no active session, so both always rendered the
+  // CLAUDE copy regardless of the daemon's actual default provider — even
+  // though the `available_models` roster sent in the same burst was already
+  // correctly tagged with the resolved daemon default (#7759). A client on a
+  // codex-default daemon that has not created a session yet would see codex's
+  // roster paired with Claude's mode picker copy (Read/Write/Edit/NotebookEdit
+  // language, a `--dangerously-skip-permissions` mention) instead of codex's
+  // (apply_patch / shell / connector language). Assert on the DESCRIPTIONS,
+  // not the ids — every provider exposes the same `approve`/`acceptEdits`/…
+  // ids, so an id-only comparison passes under both the buggy and fixed
+  // reading and proves nothing.
+  it('a no-active-session connect on a codex-default daemon gets codex-tuned mode copy, not Claude (#7811)', () => {
+    const { manager } = createMockSessionManager([])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, billingCanary: { defaultProvider: 'codex' } })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    const frame = ctx._sends.find(m => m.type === 'available_permission_modes')
+    assert.ok(frame, 'available_permission_modes not sent on a no-session connect')
+    for (const modes of [authOk.availablePermissionModes, frame.modes]) {
+      assert.deepEqual(modes.map(m => m.id), PERMISSION_MODES.map(m => m.id), 'ids unchanged')
+      assert.match(modes.find(m => m.id === 'acceptEdits').description, /apply_patch/,
+        'no-session connect on a codex-default daemon must get codex-tuned copy')
+      assert.doesNotMatch(modes.find(m => m.id === 'auto').description, /dangerously-skip-permissions/,
+        'must not fall back to the Claude copy')
+    }
+    // auth_ok's fold (authOkRosterProvider) and the discrete frame
+    // (rosterProvider) are computed independently, from separately hoisted
+    // `entry` lookups earlier and later in the same function, through the
+    // same resolveRosterProvider(_, billingCanary?.defaultProvider) call. The
+    // two must never disagree within one handshake — that would be worse
+    // than the original bug, since a client can no longer tell which field
+    // to trust. Pin the exact equality rather than relying on the
+    // per-property checks above to have covered every field.
+    assert.deepEqual(authOk.availablePermissionModes, frame.modes,
+      'auth_ok and the discrete available_permission_modes frame must carry identical mode copy')
   })
 
   it('multi-session: emits an auth_bootstrap burst with providers + slashCommands + agents', async () => {
