@@ -575,6 +575,12 @@ jobs:
     # everything, twice here and once everywhere else, and container generations
     # do get recreated.
     #
+    # 2026-09-26, #7324: the premise above no longer holds. The lockfile-
+    # freshness step (the second resolve) was removed with the committed
+    # packages/server/package-lock.json, so this job now resolves npm ONCE like
+    # its neighbours. The 10 minutes is kept as headroom rather than cut back:
+    # lowering it can only add false reds to a required check.
+    #
     # The cost of the extra five minutes is that a genuinely hung job takes 10
     # minutes to fail instead of 5, and holds a slot in the shared self-hosted
     # pool that much longer while it does. That is the right trade for a
