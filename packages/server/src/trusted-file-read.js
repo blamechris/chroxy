@@ -190,7 +190,9 @@ export function _openTrustedFdSync(path, deps) {
     const onPath = doLstat(path)
     if (onPath.isSymbolicLink()) throw refusal(path, 'a symlink appeared at the path after open')
     if (onFd.ino === 0n || onPath.ino === 0n) {
-      logger.warn(describeNoFileIndex('readTrustedSecretFile', path, onFd, onPath))
+      // Best-effort, as in open-nofollow.js: a throwing log sink must not turn
+      // this refusal into "identity check failed" and drop its reason.
+      try { logger.warn(describeNoFileIndex('readTrustedSecretFile', path, onFd, onPath)) } catch { /* best-effort */ }
       throw Object.assign(
         refusal(path, 'no usable file index — the identity check would be vacuous'),
         { reason: NO_FILE_INDEX },

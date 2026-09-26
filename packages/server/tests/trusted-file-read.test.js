@@ -382,14 +382,19 @@ describe('#7874 _openTrustedFdSync — a volume reporting file index 0 is refuse
     const rec = (level) => (msg) => { calls.push({ level, msg }) }
     return { calls, debug: rec('debug'), info: rec('info'), warn: rec('warn'), error: rec('error') }
   }
-  function win32Deps({ post = statLike(), onFd = statLike(), log } = {}) {
+  function win32Deps({ pre = statLike(), post = statLike(), onFd = statLike(), postThrows = null, log } = {}) {
     const state = { closed: false }
     let lstatCalls = 0
     const deps = {
       hasONoFollow: false,
       oNofollow: undefined,
       platform: 'win32',
-      lstatSync: () => { lstatCalls++; return lstatCalls === 1 ? statLike() : post },
+      lstatSync: () => {
+        lstatCalls++
+        if (lstatCalls === 1) return pre
+        if (postThrows) throw postThrows
+        return post
+      },
       openSync: () => 11,
       fstatSync: () => onFd,
       closeSync: () => { state.closed = true },
@@ -423,15 +428,35 @@ describe('#7874 _openTrustedFdSync — a volume reporting file index 0 is refuse
     })
   }
 
-  it('an identity mismatch is refused WITHOUT the index-0 line or reason', () => {
-    const log = recordingLog()
-    const { deps } = win32Deps({ post: statLike({ ino: 43n }), log })
+  // The same four non-index refusals the open-nofollow suite checks: none may
+  // emit the index-0 line or reason.
+  for (const [label, opts] of [
+    ['a symlink before open', { pre: statLike({ symlink: true }) }],
+    ['a symlink after open', { post: statLike({ symlink: true }) }],
+    ['an identity mismatch', { post: statLike({ ino: 43n }) }],
+    ['a failed post-open lstat', { postThrows: Object.assign(new Error('gone'), { code: 'ENOENT' }) }],
+  ]) {
+    it(`${label} is refused WITHOUT the index-0 line or reason`, () => {
+      const log = recordingLog()
+      const { deps } = win32Deps({ ...opts, log })
+      let caught = null
+      try { _openTrustedFdSync('C:\\cfg\\secret', deps) } catch (e) { caught = e }
+      assert.ok(caught, 'the open was not refused')
+      assert.equal(caught.code, 'ELOOP')
+      assert.equal(caught.reason, undefined)
+      assert.equal(log.calls.length, 0, `unexpected log line: ${log.calls.map((c) => c.msg).join(' | ')}`)
+    })
+  }
+
+  it('a log sink that THROWS does not change the refusal: still ELOOP, still no-file-index, fd closed', () => {
+    const throwing = { debug() {}, info() {}, error() {}, warn() { throw new Error('sink exploded') } }
+    const { deps, state } = win32Deps({ post: statLike({ ino: 0n }), onFd: statLike({ ino: 0n }), log: throwing })
     let caught = null
-    try { _openTrustedFdSync('C:\\cfg\\secret', deps) } catch (e) { caught = e }
+    try { _openTrustedFdSync('C:\\cfg\\bad-sink', deps) } catch (e) { caught = e }
     assert.ok(caught, 'the open was not refused')
     assert.equal(caught.code, 'ELOOP')
-    assert.equal(caught.reason, undefined)
-    assert.equal(log.calls.length, 0)
+    assert.equal(caught.reason, 'no-file-index', `the sink's throw replaced the refusal: ${caught.message}`)
+    assert.equal(state.closed, true)
   })
 
   it('with no injected log (the production shape), the line reaches the REAL logger', () => {

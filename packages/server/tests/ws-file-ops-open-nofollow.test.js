@@ -476,6 +476,17 @@ describe('#7874 openNoFollow — a volume reporting file index 0 is refused, and
     })
   }
 
+  it('a log sink that THROWS does not change the refusal: still ELOOP, still no-file-index, handle closed', async () => {
+    const throwing = { debug() {}, info() {}, error() {}, warn() { throw new Error('sink exploded') } }
+    const { deps, fh } = win32Deps({ post: statLike({ ino: 0n }), onFd: statLike({ ino: 0n }), log: throwing })
+    let caught = null
+    await _openNoFollowImpl('C:\\ws\\bad-sink.txt', fsConstants.O_RDONLY, undefined, deps).catch((e) => { caught = e })
+    assert.ok(caught, 'the open was not refused')
+    assert.equal(caught.code, 'ELOOP')
+    assert.equal(caught.reason, NO_FILE_INDEX, `the sink's throw replaced the refusal: ${caught.message}`)
+    assert.equal(fh.closed, true)
+  })
+
   it('with no injected log (the production shape), the line reaches the REAL logger', async () => {
     const entries = []
     const listener = (e) => { entries.push(e) }

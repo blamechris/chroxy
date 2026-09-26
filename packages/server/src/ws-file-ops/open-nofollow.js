@@ -259,7 +259,10 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
     if (onFd.ino === 0n || onPath.ino === 0n) {
       // #7874: refused, per the module header's policy, and logged so the
       // refusal cannot be mistaken for a symlink or containment rejection.
-      logger.warn(describeNoFileIndex('openNoFollow', path, onFd, onPath))
+      // Best-effort: this line sits inside the try below, so a throwing log
+      // sink would otherwise be rethrown as "identity check failed" and lose
+      // both the reason and the diagnostic.
+      try { logger.warn(describeNoFileIndex('openNoFollow', path, onFd, onPath)) } catch { /* best-effort */ }
       throw Object.assign(
         eloop(path, 'no usable file index — the identity check would be vacuous'),
         { reason: NO_FILE_INDEX }
