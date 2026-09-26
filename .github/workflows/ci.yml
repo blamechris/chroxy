@@ -1841,7 +1841,7 @@ jobs:
       # packages/server/tests/ci-npm-cache-routing.test.js pins, specifically:
       # a producer exists that is GitHub-hosted AND x86_64 (an `ubuntu-*-arm`
       # runner saves the arm64 entry, which no hosted fork job reads), carries
-      # `cache: npm` with the three-lockfile key, has no job-level `if:`, and sits
+      # `cache: npm` with the `**/package-lock.json` key, has no job-level `if:`, and sits
       # in a workflow whose `push:` names `main` with no `paths:` filter. It also
       # carries the one named exception this `cache: npm` needs.
       #

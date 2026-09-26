@@ -1001,9 +1001,10 @@ reads — not which of its fields the list happens to scan.
 Two instances, one PR, both in the same guard.
 
 **The file.** `ci-cache-key.test.js` enforced that setup-node's
-`cache-dependency-path` is `**/package-lock.json` — this is a three-lockfile
-monorepo, and the default key is the root file alone, so a bare key means a
-dependency change under `packages/` restores a stale cache. It read `ci.yml`
+`cache-dependency-path` is `**/package-lock.json` — the monorepo has lockfiles
+below the root (three in all at the time, two since `#7324`), and the default
+key is the root file alone, so a bare key means a dependency change under
+`packages/` restores a stale cache. It read `ci.yml`
 and nothing else. `maestro-nightly.yml` carried the bare key (found while fixing
 `#7383`, not by this guard) and `release.yml` carried it **four times** — so a
 *release* build could be cut from a stale cache, which is the worst place in the

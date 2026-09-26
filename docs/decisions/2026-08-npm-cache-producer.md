@@ -39,7 +39,7 @@ and it is the whole reason this is a short document.** `ci.yml`'s
 - runs a root `npm ci`.
 
 It simply declared no `cache:`, so it **cold-installed the whole monorepo on every
-run and saved nothing**. Adding `cache: npm` with the three-lockfile key makes it
+run and saved nothing**. Adding `cache: npm` with the `**/package-lock.json` key makes it
 the producer at **no meaningful cost to the job**.
 
 ### Measured, after the fact — and it corrects this record's first claim

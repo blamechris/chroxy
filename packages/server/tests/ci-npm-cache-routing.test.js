@@ -403,7 +403,8 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
     //     off without touching anything this file used to look at,
     //   - `cache: npm` literally — a routed expression resolves to empty on the
     //     self-hosted branch, so a routed job is not a dependable producer,
-    //   - the three-lockfile key, or it produces an entry under the WRONG key.
+    //   - the `**/package-lock.json` key (LOCKFILE_GLOB), or it produces an
+    //     entry under the WRONG key.
     producers = workflows.flatMap(w =>
       w.jobs.flatMap(job =>
         job.steps
@@ -555,7 +556,7 @@ describe('the hosted npm cache keeps a producer (#7386)', () => {
       producers.length > 0,
       'NO job produces the hosted npm cache. A fork PR on ubuntu-24.04 restores ' +
         '`node-cache-Linux-x64-npm-*`, and only a GitHub-hosted job running on `main` with ' +
-        '`cache: npm` + the three-lockfile key can save it. See ' +
+        '`cache: npm` + the `**/package-lock.json` key can save it. See ' +
         'docs/decisions/2026-08-npm-cache-producer.md for what to restore and where.'
     )
   })

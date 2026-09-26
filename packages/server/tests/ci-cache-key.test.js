@@ -10,9 +10,11 @@ import {
 } from './helpers/workflow-reader.js'
 
 /**
- * setup-node's npm cache KEY must cover all three lockfiles — in every workflow.
+ * setup-node's npm cache KEY must cover every lockfile — in every workflow.
  *
- * This repo is an npm-workspaces monorepo with three `package-lock.json` files.
+ * This repo is an npm-workspaces monorepo with two `package-lock.json` files:
+ * the root and `packages/server/sidecar/` (`packages/server`'s own was deleted
+ * in #7324 and is now derived from the root at desktop-bundle time).
  * `actions/setup-node`'s default `cache-dependency-path` is the ROOT lockfile
  * alone, so a job that omits the input, or sets it to the bare
  * `package-lock.json`, hashes only the root file: a dependency change under
