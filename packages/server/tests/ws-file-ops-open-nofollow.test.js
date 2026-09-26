@@ -12,7 +12,9 @@ import {
   openNoFollow,
   _openNoFollowImpl,
   defaultOpenNoFollowDeps,
+  NO_FILE_INDEX,
 } from '../src/ws-file-ops/open-nofollow.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * #7280 — `O_NOFOLLOW` does not exist on Windows. Node exports it only under
@@ -385,6 +387,113 @@ describe('#7280 openNoFollow — forced win32 branch (runs on every platform)', 
       (err) => err.code === 'ENOSYS' && /O_NOFOLLOW/.test(err.message)
     )
     assert.equal(opened, 0, 'an unexpected platform must be a refusal, never a silent plain open')
+  })
+})
+
+/** A log sink that records every call, for the #7874 assertions. */
+function recordingLog() {
+  const calls = []
+  const rec = (level) => (msg) => { calls.push({ level, msg }) }
+  return { calls, debug: rec('debug'), info: rec('info'), warn: rec('warn'), error: rec('error') }
+}
+
+/**
+ * The injected win32 deps for one step-3 outcome. `pre` is the pre-open lstat,
+ * `post` the post-open lstat, `onFd` the fstat of the opened handle.
+ */
+function win32Deps({ pre = statLike(), post = statLike(), onFd = statLike(), postThrows = null, log } = {}) {
+  const fh = fakeHandle(onFd)
+  let lstatCalls = 0
+  const deps = {
+    hasONoFollow: false,
+    oNofollow: undefined,
+    platform: 'win32',
+    lstat: async () => {
+      lstatCalls++
+      if (lstatCalls === 1) return pre
+      if (postThrows) throw postThrows
+      return post
+    },
+    open: async () => fh,
+    fstat: async (h) => h.stat(),
+  }
+  if (log) deps.log = log
+  return { deps, fh }
+}
+
+describe('#7874 openNoFollow — a volume reporting file index 0 is refused, and SAYS so', () => {
+  // Policy (owner decision, 2026-09-26): keep the hard refusal, with a log line
+  // that names the index-0 cause so the refusal cannot be mistaken for a
+  // symlink. The wire code stays ELOOP. These run on every platform through
+  // injected deps: no CI runner has an index-less volume to test against.
+  for (const [label, fdIno, pathIno] of [
+    ['the fd', 0n, 42n],
+    ['the path', 42n, 0n],
+    ['both', 0n, 0n],
+  ]) {
+    it(`index 0 on ${label}: ELOOP on the wire, reason 'no-file-index', ONE warn naming the cause and the path`, async () => {
+      const log = recordingLog()
+      const { deps, fh } = win32Deps({
+        pre: statLike({ ino: pathIno }),
+        post: statLike({ ino: pathIno, dev: 9n }),
+        onFd: statLike({ ino: fdIno, dev: 9n }),
+        log,
+      })
+      let caught = null
+      await _openNoFollowImpl('C:\\ws\\noindex.txt', fsConstants.O_RDONLY, undefined, deps).catch((e) => { caught = e })
+      assert.ok(caught, 'the open was not refused')
+      assert.equal(caught.code, 'ELOOP', 'the wire contract changed; every caller keys on ELOOP')
+      assert.equal(caught.reason, NO_FILE_INDEX)
+      assert.equal(fh.closed, true, 'the refused handle was leaked')
+      assert.equal(log.calls.length, 1, `expected exactly one log call, got ${log.calls.length}`)
+      const [{ level, msg }] = log.calls
+      assert.equal(level, 'warn')
+      assert.ok(msg.includes('C:\\ws\\noindex.txt'), 'the line does not name the path')
+      assert.ok(msg.includes('file index 0'), 'the line does not name the cause')
+      assert.ok(msg.includes('NOT a symlink'), 'the line does not rule out a symlink')
+      assert.ok(msg.includes('dev=9'), 'the line does not name the volume')
+    })
+  }
+
+  // Distinguishable means the OTHER refusals do not emit this line. If every
+  // refusal logged it (say, from inside `eloop()`), the log would say "file
+  // index 0" for a real symlink and mislead the reader the other way.
+  for (const [label, opts] of [
+    ['a symlink before open', { pre: statLike({ symlink: true }) }],
+    ['a symlink after open', { post: statLike({ symlink: true }) }],
+    ['an identity mismatch', { post: statLike({ ino: 43n }) }],
+    ['a failed post-open lstat', { postThrows: Object.assign(new Error('gone'), { code: 'ENOENT' }) }],
+  ]) {
+    it(`${label} is refused WITHOUT the index-0 line or reason`, async () => {
+      const log = recordingLog()
+      const { deps } = win32Deps({ ...opts, log })
+      let caught = null
+      await _openNoFollowImpl('C:\\ws\\other.txt', fsConstants.O_RDONLY, undefined, deps).catch((e) => { caught = e })
+      assert.ok(caught, 'the open was not refused')
+      assert.equal(caught.code, 'ELOOP')
+      assert.equal(caught.reason, undefined)
+      assert.equal(log.calls.length, 0, `unexpected log line: ${log.calls.map((c) => c.msg).join(' | ')}`)
+    })
+  }
+
+  it('with no injected log (the production shape), the line reaches the REAL logger', async () => {
+    const entries = []
+    const listener = (e) => { entries.push(e) }
+    addLogListener(listener)
+    try {
+      const { deps } = win32Deps({ post: statLike({ ino: 0n }), onFd: statLike({ ino: 0n }) })
+      assert.equal('log' in deps, false)
+      await assert.rejects(
+        () => _openNoFollowImpl('C:\\ws\\real-sink.txt', fsConstants.O_RDONLY, undefined, deps),
+        (err) => err.code === 'ELOOP' && err.reason === NO_FILE_INDEX
+      )
+    } finally {
+      removeLogListener(listener)
+    }
+    const mine = entries.filter((e) => e.message.includes('C:\\ws\\real-sink.txt'))
+    assert.equal(mine.length, 1, `expected one real log entry for the path, got ${mine.length}`)
+    assert.equal(mine[0].component, 'open-nofollow')
+    assert.equal(mine[0].level, 'warn')
   })
 })
 

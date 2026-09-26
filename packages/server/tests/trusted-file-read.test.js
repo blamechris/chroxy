@@ -11,6 +11,7 @@ import {
   defaultTrustedFileReadDeps,
   DEFAULT_TRUSTED_FILE_MAX_SIZE,
 } from '../src/trusted-file-read.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 const TRUSTED_FILE_READ_MODULE_PATH = new URL('../src/trusted-file-read.js', import.meta.url).pathname
 
@@ -366,6 +367,90 @@ describe('#7893 _openTrustedFdSync — forced win32 branch (runs on every platfo
       (err) => err.code === 'ENOSYS' && /O_NOFOLLOW/.test(err.message),
     )
     assert.equal(opened, 0)
+  })
+})
+
+describe('#7874 _openTrustedFdSync — a volume reporting file index 0 is refused, and SAYS so', () => {
+  // Same policy as ws-file-ops/open-nofollow.js (owner decision 2026-09-26):
+  // refuse, keep ELOOP on the wire, and log a line naming the index-0 cause.
+  // Before #7874 this branch had no test at all.
+  function statLike({ dev = 7n, ino = 42n, symlink = false } = {}) {
+    return { dev, ino, isSymbolicLink: () => symlink, mode: 0o600n, uid: 0n, isFile: () => true }
+  }
+  function recordingLog() {
+    const calls = []
+    const rec = (level) => (msg) => { calls.push({ level, msg }) }
+    return { calls, debug: rec('debug'), info: rec('info'), warn: rec('warn'), error: rec('error') }
+  }
+  function win32Deps({ post = statLike(), onFd = statLike(), log } = {}) {
+    const state = { closed: false }
+    let lstatCalls = 0
+    const deps = {
+      hasONoFollow: false,
+      oNofollow: undefined,
+      platform: 'win32',
+      lstatSync: () => { lstatCalls++; return lstatCalls === 1 ? statLike() : post },
+      openSync: () => 11,
+      fstatSync: () => onFd,
+      closeSync: () => { state.closed = true },
+    }
+    if (log) deps.log = log
+    return { deps, state }
+  }
+
+  for (const [label, fdIno, pathIno] of [
+    ['the fd', 0n, 42n],
+    ['the path', 42n, 0n],
+    ['both', 0n, 0n],
+  ]) {
+    it(`index 0 on ${label}: ELOOP, reason 'no-file-index', ONE warn naming the cause and the path, fd closed`, () => {
+      const log = recordingLog()
+      const { deps, state } = win32Deps({
+        post: statLike({ ino: pathIno, dev: 9n }),
+        onFd: statLike({ ino: fdIno, dev: 9n }),
+        log,
+      })
+      let caught = null
+      try { _openTrustedFdSync('C:\\cfg\\secret', deps) } catch (e) { caught = e }
+      assert.ok(caught, 'the open was not refused')
+      assert.equal(caught.code, 'ELOOP')
+      assert.equal(caught.reason, 'no-file-index')
+      assert.equal(state.closed, true, 'the refused fd was leaked')
+      assert.equal(log.calls.length, 1, `expected exactly one log call, got ${log.calls.length}`)
+      assert.equal(log.calls[0].level, 'warn')
+      assert.ok(log.calls[0].msg.startsWith('readTrustedSecretFile refused C:\\cfg\\secret'), 'the line does not name the caller and path')
+      assert.ok(log.calls[0].msg.includes('file index 0'), 'the line does not name the cause')
+    })
+  }
+
+  it('an identity mismatch is refused WITHOUT the index-0 line or reason', () => {
+    const log = recordingLog()
+    const { deps } = win32Deps({ post: statLike({ ino: 43n }), log })
+    let caught = null
+    try { _openTrustedFdSync('C:\\cfg\\secret', deps) } catch (e) { caught = e }
+    assert.ok(caught, 'the open was not refused')
+    assert.equal(caught.code, 'ELOOP')
+    assert.equal(caught.reason, undefined)
+    assert.equal(log.calls.length, 0)
+  })
+
+  it('with no injected log (the production shape), the line reaches the REAL logger', () => {
+    const entries = []
+    const listener = (e) => { entries.push(e) }
+    addLogListener(listener)
+    try {
+      const { deps } = win32Deps({ post: statLike({ ino: 0n }), onFd: statLike({ ino: 0n }) })
+      assert.throws(
+        () => _openTrustedFdSync('C:\\cfg\\real-sink', deps),
+        (err) => err.code === 'ELOOP' && err.reason === 'no-file-index',
+      )
+    } finally {
+      removeLogListener(listener)
+    }
+    const mine = entries.filter((e) => e.message.includes('C:\\cfg\\real-sink'))
+    assert.equal(mine.length, 1, `expected one real log entry for the path, got ${mine.length}`)
+    assert.equal(mine[0].component, 'trusted-file-read')
+    assert.equal(mine[0].level, 'warn')
   })
 })
 
