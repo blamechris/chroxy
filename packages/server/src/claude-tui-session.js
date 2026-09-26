@@ -971,17 +971,42 @@ export class ClaudeTuiSession extends BaseSession {
    * refreshed or every subsequent poll would flag the session's OWN recovery
    * as a compromise).
    *
+   * #7938 — `O_NONBLOCK` is also ORed in. Without it, a FIFO swapped in for
+   * `base` during the exact race the comment above describes (between
+   * `ensureOwnedBaseDir`'s check and this open) would block this open()
+   * forever waiting for a writer — the same class of hang that hit
+   * claude-hooks `resolveIngestSecret` (#7923), `trusted-file-read.js`
+   * (#7924), and this file's OWN `_hookReadFile` (#7926 re-review), all three
+   * missing exactly this flag. `O_NONBLOCK` is a no-op for a regular
+   * directory open on every platform that matters here (undefined on
+   * Windows, where the bitwise OR is a no-op like `O_NOFOLLOW` above); what
+   * it changes is that a FIFO no longer blocks the open. That means the open
+   * can now SUCCEED against a FIFO, so the post-open `isDirectory()` check
+   * below is required to refuse it — without O_NONBLOCK the FIFO case never
+   * reached this line at all, so there was nothing to check; with it, there
+   * is.
+   *
    * @param {string} base the validated sink base dir (ensureOwnedBaseDir's return)
-   * @throws if the base cannot be opened (caller treats this as base failure)
+   * @throws if the base cannot be opened, or is not (still) a directory
+   *   (caller treats this as base failure)
    */
   _captureSinkBaseIdentity(base) {
     if (this._sinkBaseFd != null) {
       try { closeSync(this._sinkBaseFd) } catch { /* best effort */ }
       this._sinkBaseFd = null
     }
-    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0)
     const fd = openSync(base, flags)
-    const st = fstatSync(fd)
+    let st
+    try {
+      st = fstatSync(fd)
+      if (!st.isDirectory()) {
+        throw new Error(`${base} is not a directory`)
+      }
+    } catch (err) {
+      try { closeSync(fd) } catch { /* best effort */ }
+      throw err
+    }
     this._sinkBaseFd = fd
     this._sinkBaseIdentity = { dev: st.dev, ino: st.ino }
   }

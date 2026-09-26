@@ -213,6 +213,17 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         let fh
         try {
           fh = await openNoFollow(resolvedAbsPath, fsConstants.O_RDONLY)
+          // #7938 — `fileStat` above was taken BEFORE this open, so it can't
+          // see a FIFO/device swapped in during the TOCTOU window between
+          // that stat and this open. openNoFollow's O_NONBLOCK keeps the
+          // open from hanging on a planted FIFO with no writer, but the
+          // content must still not be read from anything but a regular file
+          // — re-check on the OPENED fd, which can't be raced the same way.
+          const fhStat = await fh.stat()
+          if (!fhStat.isFile()) {
+            // No path in the text: this reaches the client verbatim.
+            throw new Error('Not a regular file')
+          }
           buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -529,6 +540,14 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           if (st.size > 0) {
             let rfh
             try {
+              // #7938 — openNoFollow's O_NONBLOCK keeps a FIFO raced in at this
+              // path from hanging the open. No post-open isFile() check here,
+              // deliberately: the read below is a positioned read (pread), and
+              // pread on a FIFO fails ESPIPE and on a directory EISDIR, both
+              // landing in the advisory catch exactly as a refusal would. A
+              // check could not change any outcome (a mutation deleting one
+              // survived every test for that reason), and the one byte read is
+              // never returned to the client — it only picks the separator.
               rfh = await openNoFollow(absPath, fsConstants.O_RDONLY)
               const tail = Buffer.alloc(1)
               await rfh.read(tail, 0, 1, st.size - 1)
