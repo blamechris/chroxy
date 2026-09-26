@@ -58,6 +58,57 @@ export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 
 // stronger check than its code performs.
 export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'Agent', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation'])
 
+// #7973 — tools an EXTERNAL PLANNER (agent-control's `chroxy_respond_permission`,
+// packages/server/src/agent-control/client.js) may never approve with `allow`,
+// WHATEVER the protected-path floor's `floored` verdict says about the request
+// — these are high-authority independent of any path field:
+//   - `mcp_spawn` (#4462): an `allow` PERSISTS a permanent "trust this binary"
+//     grant to disk (byok-mcp-fleet's recordTrust). `autoAllowPending()` below
+//     already refuses to fold this into a bypass-mode sweep, via the
+//     `pending.mcpTrust` flag it sets on the pending entry — a per-REQUEST
+//     runtime marker, not a tool-name membership check. `mcp_spawn` was never
+//     added to NEVER_AUTO_ALLOW above because that set gates PERSISTED
+//     permission RULES, a mechanism `requestMcpTrust` never consults in the
+//     first place (it skips `_matchesRule` entirely).
+//   - `request_permissions` (codex's sandbox-scope escalation prompt) is
+//     already in NEVER_AUTO_ALLOW, so a persisted "always allow" RULE for it
+//     is rejected. This set additionally covers the ONE-SHOT external-planner
+//     `allow` path in agent-control, which NEVER_AUTO_ALLOW does not govern.
+//
+// FINDING (#7973): `autoAllowPending()` itself does not consult this set (or
+// NEVER_AUTO_ALLOW) for `request_permissions` — a pending request carries
+// neither `protectedTarget` nor `mcpTrust`, so it falls through
+// autoAllowPending's default branch and IS folded into a bypass-mode sweep if
+// the session switches to auto/bypass mode mid-turn. This PR does NOT change
+// that daemon behavior (tracked separately as #7975) — it only shares this
+// exact Set with agent-control, so the two paths cannot hand-roll
+// independent, driftable copies of "which tools are too high-authority for
+// an unattended approver to ever say yes to."
+//
+// Exported so agent-control/client.js imports this EXACT Set (identity, not
+// an equal-valued copy) rather than hand-rolling a second list.
+export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
+
+// #7973 — tools that execute an arbitrary, caller-supplied command/shell
+// string. The protected-path floor (`isFlooredTarget`, permission-floor.js)
+// inspects PATH-carrying input fields only — it is fundamentally unable to
+// see a command string, so `floored: false` on one of these tools means "no
+// path field looked protected," not "this command is safe" (`cat .env` is an
+// ordinary, unfloored Bash invocation). Names are sourced from the actual
+// providers that call `handlePermission` with a real tool name — never
+// guessed:
+//   - `Bash` — the Claude Agent SDK (sdk-session.js) and BYOK's built-in tool
+//     executor (byok-tool-executor.js) both use this exact name.
+//   - `shell` — codex's app-server driver (codex-app-server-session.js).
+// Gemini sessions (gemini-session.js) declare `permissions: false` and never
+// call `handlePermission` at all; ACP-backed providers (acp-session.js) deny
+// every permission request outright without reaching this module either — so
+// there is no third command-tool name to add today.
+//
+// Exported for the same reason as NOT_DELEGABLE_TOOLS above — one shared Set,
+// imported (not copied) by agent-control/client.js.
+export const COMMAND_TOOLS = new Set(['Bash', 'shell'])
+
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since
 // #6794/#6803, so keep them resolvable from this module for existing importers.

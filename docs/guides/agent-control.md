@@ -54,7 +54,7 @@ different problem this adapter deliberately does not solve:
 | `chroxy_send_input` | **yes** | Sends text input, returns the daemon's correlated `input_ack` verbatim. *Session-owned* (see below): a session this process did not create is refused with `reason: 'not_owned'`, before any network I/O. Gated on a fresh model-status check when the session has a recorded model expectation (see "Model truth" below). |
 | `chroxy_get_events` | no | Bounded, cursor-based read of a session's retained, normalized event log. Observing is unrestricted — any session this connection can subscribe to, not only ones this process created. |
 | `chroxy_interrupt_session` | **yes** | Best-effort interrupt (the protocol has no correlated ack for this). *Session-owned*: same `not_owned` refusal as `chroxy_send_input`. |
-| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. `allow` is additionally refused for a floor-forced request — see "Answering permissions is a human-level decision" below. |
+| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. `allow` is additionally refused for a floor-forced request, a never-delegable tool (`mcp_spawn`/`request_permissions`), or a command-style tool without `--allow-command-approvals` — see "Answering permissions is a human-level decision" below. |
 
 **Session-owned, uniformly.** `chroxy_send_input`, `chroxy_interrupt_session`, and
 `chroxy_respond_permission` all gate on the SAME ownership set (`_ownedSessions` in
@@ -142,11 +142,33 @@ apply, and both are now enforced:
   daemon that implements #7968 is running, `allow` works again for ordinary (non-floored)
   prompts, and a floored prompt is left for a person exactly as the floor intends.
 
+- **Never-delegable tools (enforced, #7973).** Two tools are refused `allow` **unconditionally
+  — whatever `floored` says** — because they are high-authority independent of any path field:
+  - `mcp_spawn`: an `allow` PERSISTS a permanent "trust this binary" MCP-server grant to disk
+    (#4462). The daemon's own bypass-mode sweep (`autoAllowPending()` in
+    `permission-manager.js`) already refuses to fold this into an auto-allow; agent-control
+    mirrors that intent for its own one-shot `allow` path.
+  - `request_permissions` (codex's sandbox-scope escalation prompt).
+  These are the exact `NOT_DELEGABLE_TOOLS` set exported from `permission-manager.js` and
+  imported (never copied) by `agent-control/client.js` — `allow` refuses with
+  `reason: 'not_delegable'`; `deny` still goes through.
+- **Command-tool approvals (deny-only by default, opt-in, #7973).** `Bash` (Claude SDK / BYOK)
+  and codex's `shell` carry an arbitrary, caller-supplied command string. The protected-path
+  floor inspects PATH-carrying input fields only — it cannot see into a command string, so
+  `floored: false` on a `Bash` prompt means "no path field looked protected," not "this
+  command is safe" (`cat .env` is an ordinary, unfloored Bash call). `allow` for one of these
+  is refused with `reason: 'command_approval_disabled'` unless this MCP server was started
+  with `--allow-command-approvals` — and even then, the floored and ownership gates above
+  still apply on top; the flag only ever narrows further, it never overrides either of them.
+  A clear warning is logged to stderr at startup whenever the flag is enabled. This is off by
+  default: only enable it for a planner you trust with shell-level authority over the daemon.
+
 ## Running it
 
 ```bash
-chroxy agent-control --stdio                  # local daemon, read-write
-chroxy agent-control --stdio --read-only      # local daemon, mutation tools absent
+chroxy agent-control --stdio                        # local daemon, read-write
+chroxy agent-control --stdio --read-only            # local daemon, mutation tools absent
+chroxy agent-control --stdio --allow-command-approvals   # let the planner approve Bash/shell too (logs a startup warning)
 chroxy agent-control --stdio --url wss://your-tunnel-host --pin-identity <base64-key>
 ```
 
@@ -320,3 +342,11 @@ contract, proposed first-wave issues, and the durable coordination follow-ups.
 - The legacy permission-resolution broadcast gap (unconditional `permission_resolved` even
   on the non-SDK path) would remove the most common source of `uncertain` results from
   `chroxy_respond_permission`.
+- **Finding (#7973), daemon-side, tracked separately as #7975:** `autoAllowPending()` in
+  `permission-manager.js` does not consult `NOT_DELEGABLE_TOOLS` (or `NEVER_AUTO_ALLOW`) for
+  `request_permissions` — a pending `request_permissions` prompt carries neither
+  `protectedTarget` nor the `mcpTrust` flag `mcp_spawn` prompts carry, so it falls through
+  `autoAllowPending`'s default branch and IS folded into a bypass-mode sweep if a session
+  switches to auto/bypass mode mid-turn. This is a real gap in the daemon's own bypass-mode
+  handling, independent of agent-control; this PR does not change daemon behavior, only shares
+  the exclusion set agent-control now enforces on its own path.

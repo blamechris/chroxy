@@ -64,6 +64,16 @@ import {
 } from '@chroxy/store-core/crypto'
 import { SessionEventLog, StreamAccumulator, classifyBroadcast, DEFAULT_RETENTION, MAX_WAIT_MS } from './events.js'
 import { redactValue, SENSITIVE_KEY_NAMES } from '../redaction.js'
+// #7973 — the SAME exclusion sets the daemon defines, imported (never
+// hand-rolled as a second list) so `respondPermission` cannot drift from
+// permission-manager.js's own idea of "never auto-allow"/"carries an
+// arbitrary command". Re-exported below so a test can assert import IDENTITY
+// (not just equal values) between what this client uses and the canonical
+// export — see permission-manager.js's doc comments on both for the full
+// rationale, including the #7973 FINDING about autoAllowPending.
+import { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS } from '../permission-manager.js'
+
+export { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS }
 
 export const PROTOCOL_CAPABILITY_INPUT_CONTEXT = 'input_context_v1'
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -196,6 +206,12 @@ export function redactPublicText(text, token) {
  * @property {Set<string>} [ownedSessions] - same injection seam for the set
  *   of session ids this process created (the only sessions whose permission
  *   prompts `respondPermission` answers); defaults to a fresh Set.
+ * @property {boolean} [allowCommandApprovals] - #7973: when true, `allow` is
+ *   permitted for a command-style tool (`COMMAND_TOOLS` — Bash/shell), still
+ *   subject to the floored/ownership gates. Default false: `allow` for one of
+ *   these is refused with `reason: 'command_approval_disabled'` — the
+ *   protected-path floor cannot see through an arbitrary command string, so
+ *   `floored: false` on a Bash prompt does not mean the command is safe.
  * @property {(...args: unknown[]) => void} [log] - defaults to a stderr logger.
  * @property {typeof WebSocket} [WebSocketImpl] - injection seam for tests.
  */
@@ -271,6 +287,11 @@ export class AgentControlClient extends EventEmitter {
     // property of the planner process, not of one transport connection, so
     // ClientManager passes one Set through every reconnect.
     this._ownedSessions = opts.ownedSessions instanceof Set ? opts.ownedSessions : new Set()
+
+    // #7973 — see the typedef above. Read once at construction; the CLI's
+    // startup warning is the operator-facing signal that this is enabled, not
+    // a per-call log line.
+    this.allowCommandApprovals = opts.allowCommandApprovals === true
 
     // Handshake-phase waiters that must be aborted immediately (not left to
     // time out) if the socket closes/errors before the handshake completes.
@@ -844,6 +865,26 @@ export class AgentControlClient extends EventEmitter {
    *     ordinary one without the flag. `deny` remains permitted.
    * `deny` is never floor-gated — the floor only ever restricts `allow`.
    *
+   * #7973: two further `allow` refusals, both checked against the `tool` name
+   * observed on the SAME request (see `_trackPermissionObservation`, never
+   * re-derived):
+   *   - `NOT_DELEGABLE_TOOLS` (`mcp_spawn`, codex `request_permissions`):
+   *     refused with `reason: 'not_delegable'` WHATEVER `floored` says — these
+   *     are high-authority independent of any path field (an `mcp_spawn`
+   *     allow persists a permanent binary-trust grant; `request_permissions`
+   *     is a sandbox-scope escalation). Checked BEFORE the floored gate above,
+   *     so one of these is never merely reported as "floor_unknown".
+   *   - `COMMAND_TOOLS` (`Bash`, codex `shell`): refused with
+   *     `reason: 'command_approval_disabled'` unless this client was
+   *     constructed with `allowCommandApprovals: true` — off by default
+   *     because the protected-path floor cannot see through an arbitrary
+   *     command string (`floored: false` on a Bash prompt means no path field
+   *     looked protected, not that the command is safe). Checked AFTER the
+   *     floored/ownership gates, so the flag only ever narrows further — it
+   *     never overrides a `floored: true`/absent verdict or an unowned
+   *     session.
+   * `deny` is never gated by either of these — same as the floor.
+   *
    * @param {string} sessionId
    * @param {string} requestId
    * @param {'allow'|'deny'} decision
@@ -866,6 +907,12 @@ export class AgentControlClient extends EventEmitter {
     }
     const ownershipRejection = this._ownershipRejection(sessionId, 'have its permission prompts answered here')
     if (ownershipRejection) return { ...ownershipRejection, requestId }
+    // #7973: never delegable to an external planner, WHATEVER `floored` says
+    // — checked before the floored gate below so one of these is never
+    // merely reported as "floor_unknown" (see the doc comment above).
+    if (decision === 'allow' && NOT_DELEGABLE_TOOLS.has(observed.tool)) {
+      return { status: 'rejected', requestId, sessionId, reason: 'not_delegable', message: `'${observed.tool}' can never be approved by an external planner, regardless of the protected-path floor — mcp_spawn persists a permanent binary-trust grant (#4462) and codex's request_permissions is a sandbox-scope escalation; both require a human decision. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
+    }
     if (decision === 'allow' && observed.floored !== false) {
       // Read straight off what was OBSERVED for this requestId — never
       // re-derived — per the doc comment above.
@@ -873,6 +920,15 @@ export class AgentControlClient extends EventEmitter {
         return { status: 'rejected', requestId, sessionId, reason: 'floored', message: "This request was forced by the daemon's protected-path permission floor (floored:true) — only a human may allow it. `deny` is still permitted; the prompt stays pending for a human otherwise." }
       }
       return { status: 'rejected', requestId, sessionId, reason: 'floor_unknown', message: "This request's floored flag was not observed as an explicit `false` (absent — an older daemon that predates #7968 — or a non-boolean value) — refusing `allow` fail-closed, since this client cannot tell a floored prompt from an ordinary one without it. `deny` is still permitted." }
+    }
+    // #7973: command-style tools carry an arbitrary command/shell string the
+    // protected-path floor cannot see through — `floored: false` here means
+    // no PATH field looked protected, not that the command itself is safe.
+    // Deny-only unless the operator explicitly opted in (`--allow-command-
+    // approvals`); checked AFTER floored/ownership above, so the flag only
+    // ever narrows further and never overrides either of those gates.
+    if (decision === 'allow' && COMMAND_TOOLS.has(observed.tool) && !this.allowCommandApprovals) {
+      return { status: 'rejected', requestId, sessionId, reason: 'command_approval_disabled', message: `'${observed.tool}' carries an arbitrary command string the protected-path floor cannot inspect — approving command-tool calls through agent-control is disabled by default. Restart this MCP server with --allow-command-approvals to permit it (still subject to the floored/ownership gates). \`deny\` is still permitted.` }
     }
     // A second concurrent call for the SAME requestId must not silently
     // overwrite the first caller's pending entry — that would leak the
@@ -1233,7 +1289,11 @@ export class AgentControlClient extends EventEmitter {
       // `undefined` here — respondPermission treats that as "unknown" and
       // refuses `allow` for it, fail-closed.
       const floored = msg.floored === true ? true : msg.floored === false ? false : undefined
-      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now(), floored })
+      // #7973: the tool name is stored EXACTLY as observed (never re-derived)
+      // for the not_delegable / command-tool gates in respondPermission —
+      // same "read straight off what was observed" discipline as `floored`.
+      const tool = typeof msg.tool === 'string' ? msg.tool : undefined
+      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now(), floored, tool })
     } else if ((msg.type === 'permission_resolved' || msg.type === 'permission_expired') && typeof msg.requestId === 'string') {
       this._observedPermissions.delete(msg.requestId)
     }

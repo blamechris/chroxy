@@ -152,7 +152,7 @@ const TOOLS = {
   },
 
   chroxy_respond_permission: {
-    description: "Answer a pending permission request (e.g. a Bash tool-use approval) with 'allow' or 'deny' — NEVER 'allowAlways', which persists a durable project rule and is out of scope here. Only sessions created by chroxy_create_session in this same MCP-server process can be answered (reason 'not_owned' otherwise) — prompts in sessions someone else is driving are left for them. Refuses (before any network I/O) to answer a requestId this MCP process has not itself observed as pending for the given sessionId, via chroxy_get_events' permission_request events — an unknown, already-resolved, or sibling-session requestId is rejected, never guessed at. 'allow' is additionally refused when the observed permission_request was marked floor-forced by the daemon (docs/security/permission-floor.md — a secret read, or a write into .git/ or .claude/, that must go to a human): `floored: true` refuses with reason 'floored', and an ABSENT floored flag (an older daemon that predates this check) refuses with reason 'floor_unknown', fail-closed — only `floored: false` (an ordinary, non-floored prompt) permits 'allow'. 'deny' is never floor-gated. `status: 'uncertain'` on the result means no confirmation arrived in time; do not assume the decision was or was not applied, and do not retry automatically. Some legacy (non-SDK) daemon code paths do not broadcast a confirmation at all — 'uncertain' in that case reflects a real protocol limitation, not a client bug.",
+    description: "Answer a pending permission request (e.g. a Bash tool-use approval) with 'allow' or 'deny' — NEVER 'allowAlways', which persists a durable project rule and is out of scope here. Only sessions created by chroxy_create_session in this same MCP-server process can be answered (reason 'not_owned' otherwise) — prompts in sessions someone else is driving are left for them. Refuses (before any network I/O) to answer a requestId this MCP process has not itself observed as pending for the given sessionId, via chroxy_get_events' permission_request events — an unknown, already-resolved, or sibling-session requestId is rejected, never guessed at. 'allow' is refused unconditionally (reason 'not_delegable', whatever the floor says) for mcp_spawn (an allow persists a permanent MCP-binary trust grant) and codex's request_permissions (a sandbox-scope escalation) — both require a human. 'allow' is also refused when the observed permission_request was marked floor-forced by the daemon (docs/security/permission-floor.md — a secret read, or a write into .git/ or .claude/, that must go to a human): `floored: true` refuses with reason 'floored', and an ABSENT floored flag (an older daemon that predates this check) refuses with reason 'floor_unknown', fail-closed — only `floored: false` (an ordinary, non-floored prompt) permits 'allow'. A command-style tool (Bash, codex shell) carries an arbitrary command string the floor cannot see through, so 'allow' for one is additionally refused with reason 'command_approval_disabled' unless this MCP server was started with --allow-command-approvals (still subject to the floored/ownership gates above). 'deny' is never gated by any of the above. `status: 'uncertain'` on the result means no confirmation arrived in time; do not assume the decision was or was not applied, and do not retry automatically. Some legacy (non-SDK) daemon code paths do not broadcast a confirmation at all — 'uncertain' in that case reflects a real protocol limitation, not a client bug.",
     argsSchema: z.object({
       sessionId: SessionId,
       requestId: z.string().min(1).max(256).describe("The permission request id, from a chroxy_get_events 'permission_request' event."),
@@ -250,6 +250,7 @@ class ClientManager {
       token: target.token,
       readOnly: this._clientOpts.readOnly === true,
       identityPublicKey: this._clientOpts.identityPublicKey,
+      allowCommandApprovals: this._clientOpts.allowCommandApprovals === true,
       modelExpectations: this._modelExpectations,
       ownedSessions: this._ownedSessions,
       log: logToStderr,
@@ -338,13 +339,16 @@ function describeConnectionFailure(reason) {
  * @param {string} [opts.url] - explicit remote URL (never inferred)
  * @param {string} [opts.token] - explicit token for a remote URL
  * @param {string} [opts.identityPublicKey] - pin the daemon identity
+ * @param {boolean} [opts.allowCommandApprovals] - #7973: let chroxy_respond_permission
+ *   approve a command-style tool (Bash/shell). Default false. See client.js's
+ *   respondPermission doc comment.
  * @returns {{ mcp: Server, clientManager: ClientManager }}
  */
 export function createAgentControlMcpServer(opts = {}) {
   const readOnly = opts.readOnly === true
   const clientManager = opts.clientManager || new ClientManager(
     { explicitUrl: opts.url, explicitToken: opts.token },
-    { readOnly, identityPublicKey: opts.identityPublicKey },
+    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true },
   )
 
   const toolNames = Object.keys(TOOLS).filter((name) => readOnly ? !MUTATION_TOOL_NAMES.has(name) : true)
@@ -397,12 +401,19 @@ export async function main(options) {
         'read-only': { type: 'boolean' },
         url: { type: 'string' },
         'pin-identity': { type: 'string' },
+        'allow-command-approvals': { type: 'boolean' },
       },
     })
-    return { readOnly: values['read-only'], url: values.url, identityPublicKey: values['pin-identity'] }
+    return {
+      readOnly: values['read-only'],
+      url: values.url,
+      identityPublicKey: values['pin-identity'],
+      allowCommandApprovals: values['allow-command-approvals'],
+    }
   })()
   const readOnly = parsed.readOnly === true
   const url = parsed.url
+  const allowCommandApprovals = parsed.allowCommandApprovals === true
   // Deliberately NO --token argv flag — argv is visible to every other
   // process on the machine (`ps`), unlike an env var scoped to this
   // process's own environment block. A remote connection's token is read
@@ -410,7 +421,21 @@ export async function main(options) {
   const token = url ? process.env.CHROXY_AGENT_CONTROL_TOKEN : undefined
   const identityPublicKey = parsed.identityPublicKey ?? process.env.CHROXY_AGENT_CONTROL_PIN
 
-  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey })
+  // #7973: a clear, unambiguous operator-facing warning — printed once, at
+  // startup, not per-call — whenever this flag widens what an external
+  // planner may approve. Still says something useful in --read-only mode,
+  // where the flag is a harmless no-op (chroxy_respond_permission is absent
+  // and hard-refused entirely), so an operator who passes both doesn't
+  // wrongly conclude command approvals are live.
+  if (allowCommandApprovals) {
+    if (readOnly) {
+      logToStderr('--allow-command-approvals has no effect: this server is running --read-only, so chroxy_respond_permission (and every other mutation tool) is absent and hard-refused regardless.')
+    } else {
+      logToStderr('WARNING: --allow-command-approvals is ENABLED. An external planner connected to this MCP server may approve Bash/shell tool calls — arbitrary commands the protected-path floor cannot inspect (e.g. `cat .env` looks like an ordinary, unfloored Bash call). This is off by default; the floored/ownership gates still apply on top. Only enable this for a planner you trust with shell-level authority over this daemon.')
+    }
+  }
+
+  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey, allowCommandApprovals })
 
   let shuttingDown = false
   const shutdown = async (signal) => {
