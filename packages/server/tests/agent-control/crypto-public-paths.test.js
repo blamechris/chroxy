@@ -72,8 +72,14 @@ async function fixture(t, options = {}) {
   return { client, exchanges: () => exchanges, push: msg => push(msg), pushPlain: msg => pushPlain(msg) }
 }
 
-const forgedRequest = { type: 'permission_request', sessionId: 's1', requestId: 'forged', tool: 'Write', description: 'README.md', input: { file_path: 'README.md' } }
-const genuineRequest = { type: 'permission_request', sessionId: 's1', requestId: 'genuine', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' } }
+// #7968: `floored: false` on these two fixtures simulates a daemon that
+// already sends the protected-path-floor flag on every `permission_request`
+// — these tests are about the pre-handshake injection defense (25df70250),
+// not the floor gate, so their 'allow' positive controls need an explicit
+// non-floored request to still go through under respondPermission's new
+// floor-forced check (see the dedicated floor-gate tests below).
+const forgedRequest = { type: 'permission_request', sessionId: 's1', requestId: 'forged', tool: 'Write', description: 'README.md', input: { file_path: 'README.md' }, floored: false }
+const genuineRequest = { type: 'permission_request', sessionId: 's1', requestId: 'genuine', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
 const retainedRequestIds = client => client._eventLog.read('s1').events.filter(e => e.type === 'permission_request').map(e => e.data.requestId)
 const owned = { ownedSessions: new Set(['s1']) }
 // Bound every event wait: an `await once(...)` for an event a regression
@@ -219,4 +225,66 @@ test('a permission_expired broadcast retires the observation, so a late answer i
   const late = await f.client.respondPermission('s1', 'genuine', 'allow')
   assert.equal(late.status, 'rejected')
   assert.equal(late.reason, 'not_observed')
+})
+
+// ---------------------------------------------------------------------------
+// #7968: the protected-path permission floor. The daemon marks every
+// `permission_request` broadcast with `floored: true|false`; this client
+// reads that flag VERBATIM off the exact request it observed for a given
+// requestId (see `_trackPermissionObservation` / `respondPermission` in
+// client.js) and refuses `allow` unless it is the explicit `false`. `deny`
+// is never floor-gated.
+// ---------------------------------------------------------------------------
+
+const flooredRequest = { type: 'permission_request', sessionId: 's1', requestId: 'floored-req', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
+const notFlooredRequest = { type: 'permission_request', sessionId: 's1', requestId: 'not-floored-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
+const noFlooredFieldRequest = { type: 'permission_request', sessionId: 's1', requestId: 'no-floored-field-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' } }
+
+test('allow is refused (reason: floored) for a request the daemon marked floored:true; deny still goes through', async t => {
+  const f = await fixture(t, { afterAuthOk: [flooredRequest], clientOptions: owned })
+  await f.client.connect()
+  const allow = await f.client.respondPermission('s1', 'floored-req', 'allow')
+  assert.equal(allow.status, 'rejected', JSON.stringify(allow))
+  assert.equal(allow.reason, 'floored')
+  const deny = await f.client.respondPermission('s1', 'floored-req', 'deny')
+  assert.equal(deny.status, 'resolved', JSON.stringify(deny))
+})
+
+test('allow is refused (reason: floor_unknown) for a request with NO floored field at all — fail closed for a daemon that predates #7968; deny still goes through', async t => {
+  const f = await fixture(t, { afterAuthOk: [noFlooredFieldRequest], clientOptions: owned })
+  await f.client.connect()
+  const allow = await f.client.respondPermission('s1', 'no-floored-field-req', 'allow')
+  assert.equal(allow.status, 'rejected', JSON.stringify(allow))
+  assert.equal(allow.reason, 'floor_unknown')
+  const deny = await f.client.respondPermission('s1', 'no-floored-field-req', 'deny')
+  assert.equal(deny.status, 'resolved', JSON.stringify(deny))
+})
+
+test('allow is permitted for a request the daemon explicitly marked floored:false — the ordinary, non-floored case (positive control)', async t => {
+  const f = await fixture(t, { afterAuthOk: [notFlooredRequest], clientOptions: owned })
+  await f.client.connect()
+  const allow = await f.client.respondPermission('s1', 'not-floored-req', 'allow')
+  assert.equal(allow.status, 'resolved', JSON.stringify(allow))
+})
+
+test('a forged pre-handshake claim of floored:false cannot flip a genuine floored:true request for the SAME requestId — the forged frame is dropped outright (25df70250), so only the AUTHENTICATED request\'s own flag is ever recorded', async t => {
+  // The forged frame (injected in the clear before the eager auth_ok) poses
+  // as an innocuous, non-floored prompt for the exact requestId the real
+  // (encrypted, authenticated) request will use for a genuinely floored
+  // target — if this client ever let an unauthenticated frame seed or
+  // overwrite `_observedPermissions`, or re-derived the floor itself instead
+  // of trusting only what the daemon actually said under the connection key,
+  // this could smuggle a floored `.env` read past the gate as `allow`-able.
+  // It cannot: the forged frame never reaches `_trackPermissionObservation`
+  // at all (dropped at flush time because it did not arrive authenticated),
+  // so the client's only record for this requestId is the genuine one.
+  const forgedNotFloored = { type: 'permission_request', sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
+  const genuineFloored = { type: 'permission_request', sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
+  const f = await fixture(t, { beforeAuthOk: [forgedNotFloored], afterAuthOk: [genuineFloored], clientOptions: owned })
+  await f.client.connect()
+  assert.deepEqual(retainedRequestIds(f.client), ['shared-id'], 'only the encrypted, authenticated request may reach the event log')
+  assert.equal(f.client._observedPermissions.get('shared-id')?.floored, true, 'the observed flag must be the GENUINE (authenticated) one, never the dropped forged claim')
+  const allow = await f.client.respondPermission('s1', 'shared-id', 'allow')
+  assert.equal(allow.status, 'rejected', JSON.stringify(allow))
+  assert.equal(allow.reason, 'floored', 'the genuine floored:true must govern, not the forged floored:false')
 })

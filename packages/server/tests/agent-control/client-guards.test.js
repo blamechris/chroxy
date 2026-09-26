@@ -46,6 +46,26 @@ describe('permission routing (real server-side resolver)', () => {
       return true
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    // #7968: simulate a daemon that already sends the protected-path-floor
+    // flag on every permission_request (the parallel PR that adds this to
+    // the real broadcast has not landed on this branch yet) — this test is
+    // about ROUTING/resolution through the real server-side resolver, not
+    // the floor gate itself, so give it what a modern daemon would send.
+    // `permission_request` is delivered via `_broadcastToSession` /
+    // `WsBroadcaster`, which captured its OWN `sendFn` closure at
+    // construction (a wrapper that calls `self._send(ws, msg)` — a live
+    // property lookup, not a frozen reference) — patching
+    // `_handlerCtx.transport.send` (a separate copy of that same closure,
+    // used only for DIRECT per-connection replies like input_ack) has no
+    // effect on it; patching the instance's own `_send` does, since every
+    // send path resolves through it dynamically.
+    const originalSend = server._send.bind(server)
+    server._send = (ws, msg) => {
+      // Must forward _send's own return value (used by the eager-handshake
+      // path to confirm auth_ok actually reached the wire) — swallowing it
+      // reads as a delivery failure and aborts the handshake.
+      return originalSend(ws, msg.type === 'permission_request' ? { ...msg, floored: false } : msg)
+    }
     const port = await startServerAndGetPort(server)
     client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
@@ -116,6 +136,16 @@ describe('permission routing (real server-side resolver)', () => {
       return true
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    // #7968: see the "routes through the server resolver" test above (same
+    // `_send` vs `_handlerCtx.transport.send` reasoning) — this test is
+    // about the concurrency guard, not the floor gate.
+    const originalSend = server._send.bind(server)
+    server._send = (ws, msg) => {
+      // Must forward _send's own return value (used by the eager-handshake
+      // path to confirm auth_ok actually reached the wire) — swallowing it
+      // reads as a delivery failure and aborts the handshake.
+      return originalSend(ws, msg.type === 'permission_request' ? { ...msg, floored: false } : msg)
+    }
     const port = await startServerAndGetPort(server)
     client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
@@ -139,6 +169,93 @@ describe('permission routing (real server-side resolver)', () => {
   })
 })
 
+describe('ownership gate extends to every mutation targeting an existing session (#7968)', () => {
+  let server
+  let client
+
+  afterEach(async () => {
+    if (client) { try { await client.close() } catch { /* already closed */ } client = null }
+    if (server) { try { server.close() } catch { /* already closed */ } server = null }
+  })
+
+  it('sendInput refuses a session this process did not create (not_owned), before any network I/O', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'human-a', cwd: '/tmp', provider: 'claude-sdk' }])
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    // No ownedSessions passed — this connection did not create 'human-a'.
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true })
+    await client.connect()
+
+    const result = await client.sendInput('human-a', 'do the thing')
+    assert.equal(result.status, 'rejected', JSON.stringify(result))
+    assert.equal(result.reason, 'not_owned')
+    assert.equal(sessionsMap.get('human-a').session.sendMessage.callCount, 0, 'the provider must never see input for a session this process does not own')
+  })
+
+  it('sendInput admits a session this process DID create (positive control — the gate only narrows)', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'owned-a', cwd: '/tmp', provider: 'claude-sdk' }])
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['owned-a']) })
+    await client.connect()
+
+    const result = await client.sendInput('owned-a', 'do the thing')
+    assert.equal(result.status, 'accepted', JSON.stringify(result))
+    assert.equal(sessionsMap.get('owned-a').session.sendMessage.callCount, 1)
+  })
+
+  it('interrupt refuses a session this process did not create (not_owned), before any network I/O', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'human-a', cwd: '/tmp', provider: 'claude-sdk' }])
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true })
+    await client.connect()
+
+    const result = await client.interrupt('human-a')
+    assert.equal(result.status, 'rejected', JSON.stringify(result))
+    assert.equal(result.reason, 'not_owned')
+    assert.equal(sessionsMap.get('human-a').session.interrupt.callCount, 0, 'the provider must never see an interrupt for a session this process does not own')
+  })
+
+  it('interrupt admits a session this process DID create (positive control — the gate only narrows)', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'owned-a', cwd: '/tmp', provider: 'claude-sdk' }])
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['owned-a']) })
+    await client.connect()
+
+    const result = await client.interrupt('owned-a')
+    assert.equal(result.sent, true, JSON.stringify(result))
+    assert.equal(sessionsMap.get('owned-a').session.interrupt.callCount, 1)
+  })
+
+  it('createSession is exempt from the ownership gate (it is the ownership SOURCE, not a session-targeting mutation) and its own session is immediately owned', async () => {
+    const homeCwd = homedir()
+    const { manager, sessionsMap } = createMockSessionManager([])
+    manager.createSession = createSpy((opts) => {
+      const id = 'sess-owned-1'
+      const mockSession = createMockSession()
+      mockSession.cwd = opts.cwd || homeCwd
+      sessionsMap.set(id, { session: mockSession, name: opts.name || 'New', cwd: opts.cwd || homeCwd, type: 'cli', isBusy: false })
+      return id
+    })
+    manager.listSessions = () => [...sessionsMap.entries()].map(([sessionId, entry]) => ({
+      sessionId, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy, model: entry.session.model,
+    }))
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    await client.connect()
+
+    const created = await client.createSession({ name: 'fixture', cwd: homeCwd })
+    assert.equal(created.sessionId, 'sess-owned-1')
+
+    const sent = await client.sendInput('sess-owned-1', 'do the thing')
+    assert.equal(sent.status, 'accepted', JSON.stringify(sent))
+    assert.equal(sessionsMap.get('sess-owned-1').session.sendMessage.callCount, 1)
+  })
+})
+
 describe('model-mismatch / unknown gate', () => {
   let server
   let client
@@ -156,7 +273,7 @@ describe('model-mismatch / unknown gate', () => {
     }))
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     // Simulate having recorded a model expectation the way createSession would.
@@ -178,7 +295,7 @@ describe('model-mismatch / unknown gate', () => {
     }))
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     client._modelExpectations.set('probe-a', { requestedModel: 'claude-sonnet-5' })
 
@@ -195,7 +312,7 @@ describe('model-mismatch / unknown gate', () => {
     }))
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     client._modelExpectations.set('probe-a', { requestedModel: 'claude-sonnet-5' })
 
@@ -208,7 +325,7 @@ describe('model-mismatch / unknown gate', () => {
     const { manager, sessionsMap } = createMockSessionManager([{ id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'claude-sdk' }])
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     const result = await client.sendInput('probe-a', 'do the thing')
@@ -224,7 +341,7 @@ describe('model-mismatch / unknown gate', () => {
     }))
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     client._modelExpectations.set('probe-a', { requestedModel: 'claude-sonnet-5' })
 
@@ -327,7 +444,7 @@ describe('input_ack correlation edge cases', () => {
       originalSend(ws, msg)
     }
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1000, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1000, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     const sendPromise = client.sendInput('probe-a', 'fixture work', { clientMessageId: 'shared-id' })
@@ -359,7 +476,7 @@ describe('input_ack correlation edge cases', () => {
       originalSend(ws, msg)
     }
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1000, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1000, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     const result = await client.sendInput('probe-a', 'fixture work')
@@ -376,7 +493,7 @@ describe('input_ack correlation edge cases', () => {
       originalSend(ws, msg)
     }
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 150, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 150, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     const result = await client.sendInput('probe-a', 'fixture work')
@@ -394,7 +511,7 @@ describe('input_ack correlation edge cases', () => {
       originalSend(ws, msg)
     }
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 5000, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 5000, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     const sendPromise = client.sendInput('probe-a', 'fixture work')
@@ -419,7 +536,7 @@ describe('input_ack correlation edge cases', () => {
     // through to a real round trip instead of throwing, this keeps the test
     // failing fast and legibly rather than hanging out to the default
     // 15s requestTimeoutMs.
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     await assert.rejects(() => client.sendInput('probe-a', 'x', { clientMessageId: 'has spaces!' }))
     await assert.rejects(() => client.sendInput('probe-a', 'x', { clientMessageId: 'thinking' }), /reserved/i)
@@ -439,7 +556,7 @@ describe('input_context_v1 capability gate', () => {
     const { manager } = createMockSessionManager([{ id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'claude-cli' }])
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     // Force the daemon meta to look like it never advertised the capability.
     client._daemonMeta.capabilities.inputContextV1 = false
@@ -469,7 +586,7 @@ describe('subscription denial', () => {
       else originalSend(ws, msg)
     }
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
 
     await assert.rejects(() => client.sendInput('probe-a', 'x'), /SUBSCRIPTION_DENIED|did not grant/)

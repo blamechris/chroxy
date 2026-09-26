@@ -40,7 +40,7 @@ describe('AgentControlClient against a real encrypted WsServer', () => {
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
 
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', connectTimeoutMs: 2500, requestTimeoutMs: 1000, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', connectTimeoutMs: 2500, requestTimeoutMs: 1000, silent: true, ownedSessions: new Set(['probe-b']) })
     await client.connect()
     assert.equal(client.daemonInfo.encryption, 'required')
     assert.equal(client.daemonInfo.capabilities.inputContextV1, true)
@@ -74,7 +74,7 @@ describe('AgentControlClient against a real encrypted WsServer', () => {
     }
     const port = await startServerAndGetPort(server)
 
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', connectTimeoutMs: 2500, requestTimeoutMs: 250, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', connectTimeoutMs: 2500, requestTimeoutMs: 250, silent: true, ownedSessions: new Set(['probe-a']) })
     await client.connect()
     try {
       const results = await Promise.allSettled([

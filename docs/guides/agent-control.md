@@ -51,10 +51,19 @@ different problem this adapter deliberately does not solve:
 | `chroxy_daemon_info` | no | Safe daemon metadata (server/protocol version, encryption mode, a bounded capabilities map). Never the raw `auth_ok` frame or `connection.json`. |
 | `chroxy_list_sessions` | no | Lists ordinary sessions, each annotated with `modelStatus: { requested, observed, unknown, mismatch }`. |
 | `chroxy_create_session` | **yes** | Creates a session. Refuses `provider: 'user-shell'` and any `skipPermissions` option; always sends `skipPermissions: false` explicitly regardless of the daemon's own default. |
-| `chroxy_send_input` | **yes** | Sends text input, returns the daemon's correlated `input_ack` verbatim. Gated on a fresh model-status check when the session has a recorded model expectation (see "Model truth" below). |
-| `chroxy_get_events` | no | Bounded, cursor-based read of a session's retained, normalized event log. |
-| `chroxy_interrupt_session` | **yes** | Best-effort interrupt (the protocol has no correlated ack for this). |
-| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. |
+| `chroxy_send_input` | **yes** | Sends text input, returns the daemon's correlated `input_ack` verbatim. *Session-owned* (see below): a session this process did not create is refused with `reason: 'not_owned'`, before any network I/O. Gated on a fresh model-status check when the session has a recorded model expectation (see "Model truth" below). |
+| `chroxy_get_events` | no | Bounded, cursor-based read of a session's retained, normalized event log. Observing is unrestricted — any session this connection can subscribe to, not only ones this process created. |
+| `chroxy_interrupt_session` | **yes** | Best-effort interrupt (the protocol has no correlated ack for this). *Session-owned*: same `not_owned` refusal as `chroxy_send_input`. |
+| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. `allow` is additionally refused for a floor-forced request — see "Answering permissions is a human-level decision" below. |
+
+**Session-owned, uniformly.** `chroxy_send_input`, `chroxy_interrupt_session`, and
+`chroxy_respond_permission` all gate on the SAME ownership set (`_ownedSessions` in
+`client.js`, via one shared `_ownershipRejection` check) — only a session this MCP-server
+process created with `chroxy_create_session` may be mutated. `chroxy_create_session` itself
+is exempt (it is the ownership *source*, not a session-targeting mutation), and
+`chroxy_get_events`/`chroxy_list_sessions`/`chroxy_daemon_info` are exempt because observing
+is never restricted — a planner may always see any session it can subscribe to; it may only
+*change* one it created.
 
 Under `--read-only`, the four mutation tools (`chroxy_create_session`, `chroxy_send_input`,
 `chroxy_interrupt_session`, `chroxy_respond_permission`) are both **absent from the tool
@@ -107,21 +116,31 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
 ### Answering permissions is a human-level decision
 
 `chroxy_respond_permission` lets the planner stand where a person would stand. Two limits
-apply, and one of them is a gap:
+apply, and both are now enforced:
 
 - **Ownership (enforced).** Only sessions this MCP-server process created can be answered;
   see the tool table. The set is in memory, so after the MCP-server process restarts its
   earlier sessions become `not_owned` — their prompts time out and the daemon auto-denies,
   which fails closed.
-- **The protected-path floor is NOT distinguishable here (gap).** The
+- **The protected-path floor (enforced, #7968).** The
   [permission floor](../security/permission-floor.md) forces a *prompt* — never a deny — for
   secret reads (`.env`, key material) and for writes into config directories such as
-  `.git/` and `.claude/`, so that a person decides. The daemon's `permission_request` does
-  not currently say that a prompt was floored, so this adapter cannot tell a
-  `.git/hooks/pre-commit` write or a `.env` read from an ordinary prompt, and a planner that
-  answers `allow` approves exactly what the floor exists to put in front of a person. Until the daemon marks floored prompts, register the
-  read-write server only with planners you would trust with that decision, and use
-  `--read-only` otherwise.
+  `.git/` and `.claude/`, so that a person decides. A daemon that implements #7968 marks
+  every `permission_request` broadcast with `floored: true|false`. `chroxy_respond_permission`
+  reads that flag off exactly the request it observed (never re-derived — a second
+  implementation of the floor is exactly what `permission-floor.md` says not to build) and
+  refuses `allow` unless it is the **explicit** `false`:
+  - `floored: true` → `allow` refused with `reason: 'floored'`; `deny` still goes through.
+  - `floored` **absent** (a daemon that predates #7968) → `allow` refused with
+    `reason: 'floor_unknown'`, fail-closed — this adapter cannot tell a floored prompt from
+    an ordinary one without the flag, so it refuses rather than guess. `deny` still goes
+    through.
+  - `floored: false` → an ordinary prompt; `allow` proceeds normally.
+
+  Practically: until the daemon you're pointed at actually sends `floored`, every `allow`
+  through `chroxy_respond_permission` is refused — only `deny` and observation work. Once a
+  daemon that implements #7968 is running, `allow` works again for ordinary (non-floored)
+  prompts, and a floored prompt is left for a person exactly as the floor intends.
 
 ## Running it
 

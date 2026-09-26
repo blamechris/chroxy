@@ -16,7 +16,16 @@
  *     (`packages/server/src/handlers/settings-handlers.js`) — `respondPermission`
  *     sends only `allow`/`deny` (never `allowAlways`, which persists a durable
  *     project rule — out of scope for an external planner relay) for a
- *     permission this client has itself observed as pending and owns.
+ *     permission this client has itself observed as pending and owns, and
+ *     never `allow` for one the daemon marked (or failed to mark, #7968)
+ *     `floored: true`/absent — see `respondPermission`'s doc comment.
+ *
+ * Ownership (`_ownedSessions`, `_ownershipRejection`) gates every mutation
+ * that targets an EXISTING session — `sendInput`, `interrupt`, and
+ * `respondPermission` — the same way for all three: only a session created
+ * by THIS process via `createSession` may be mutated. Observing any session
+ * this connection is subscribed to (`getEvents`) is unrestricted; only
+ * mutating one this process did not create is refused.
  *
  * It does NOT introduce a second scheduler, task database, token class, or
  * mailbox store. Durable task/handoff identity across daemon restarts is
@@ -606,6 +615,11 @@ export class AgentControlClient extends EventEmitter {
    * to send anyway (e.g. once a human/planner has consciously decided the
    * mismatch is acceptable).
    *
+   * Owner-only, like every mutation that targets an existing session (see
+   * `_ownershipRejection`): a session this process did not create with
+   * `chroxy_create_session` refuses with `reason: 'not_owned'`, before any
+   * network I/O — observing it via `chroxy_get_events` remains unrestricted.
+   *
    * @param {string} sessionId
    * @param {string} data
    * @param {object} [opts]
@@ -620,6 +634,8 @@ export class AgentControlClient extends EventEmitter {
     this._assertReady()
     if (typeof sessionId !== 'string' || !sessionId) throw new Error('sendInput requires sessionId')
     if (typeof data !== 'string') throw new Error('sendInput requires string data')
+    const ownershipRejection = this._ownershipRejection(sessionId, 'be sent input')
+    if (ownershipRejection) return ownershipRejection
 
     // This client's whole correlated-ack contract depends on the daemon
     // actually supporting #7822's input_context_v1 negotiation (advertised,
@@ -738,11 +754,17 @@ export class AgentControlClient extends EventEmitter {
    * grace window passes with no `session_error` naming this session, or
    * immediately on such an error. It reports what was OBSERVED, not a
    * synthesized "the agent stopped".
+   *
+   * Owner-only, like every mutation that targets an existing session (see
+   * `_ownershipRejection`): a session this process did not create refuses
+   * with `reason: 'not_owned'`, before any network I/O.
    */
   async interrupt(sessionId) {
     this._assertMutationAllowed('interrupt')
     this._assertReady()
     if (typeof sessionId !== 'string' || !sessionId) throw new Error('interrupt requires sessionId')
+    const ownershipRejection = this._ownershipRejection(sessionId, 'be interrupted')
+    if (ownershipRejection) return ownershipRejection
 
     // Fatal, not logged-and-ignored — interrupt's own grace-window
     // "was there a session_error" observation depends on actually being
@@ -801,6 +823,27 @@ export class AgentControlClient extends EventEmitter {
    * server's own binding/authority checks in `handlePermissionResponse`
    * still apply on top of this; this gate only ever narrows.
    *
+   * #7968: `allow` is additionally refused when the OBSERVED request was
+   * floor-forced. The protected-path permission floor
+   * (docs/security/permission-floor.md) forces a *prompt* — never a deny —
+   * for a protected target (a secret read, a write into `.git/`/`.claude/`,
+   * …) so a PERSON decides; an external planner answering `allow` for one of
+   * these would approve exactly what the floor exists to put in front of a
+   * human. The daemon marks this on the wire as `floored: true|false` on the
+   * `permission_request` broadcast; this client reads that flag VERBATIM off
+   * the observed request (see `_trackPermissionObservation`) and never
+   * re-derives it — a second implementation of the floor is exactly what
+   * `permission-floor.md` says not to build. Three cases for `allow`:
+   *   - `floored === false` (explicit): permitted — an ordinary prompt.
+   *   - `floored === true`: refused, `reason: 'floored'` — only a human may
+   *     allow it; `deny` remains permitted, and the prompt stays pending for
+   *     a human otherwise.
+   *   - `floored` absent (an older daemon that predates #7968, or any
+   *     non-boolean value): refused, `reason: 'floor_unknown'` — fail
+   *     closed, since this client cannot tell a floored prompt from an
+   *     ordinary one without the flag. `deny` remains permitted.
+   * `deny` is never floor-gated — the floor only ever restricts `allow`.
+   *
    * @param {string} sessionId
    * @param {string} requestId
    * @param {'allow'|'deny'} decision
@@ -821,8 +864,15 @@ export class AgentControlClient extends EventEmitter {
     if (observed.sessionId !== sessionId) {
       return { status: 'rejected', requestId, reason: 'sibling_session', message: `This permission belongs to session ${observed.sessionId}, not ${sessionId} — refusing.` }
     }
-    if (!this._ownedSessions.has(sessionId)) {
-      return { status: 'rejected', requestId, sessionId, reason: 'not_owned', message: 'This session was not created by this agent-control process — its permission prompts are left for whoever is driving it. Only sessions created with chroxy_create_session in this process can be answered here.' }
+    const ownershipRejection = this._ownershipRejection(sessionId, 'have its permission prompts answered here')
+    if (ownershipRejection) return { ...ownershipRejection, requestId }
+    if (decision === 'allow' && observed.floored !== false) {
+      // Read straight off what was OBSERVED for this requestId — never
+      // re-derived — per the doc comment above.
+      if (observed.floored === true) {
+        return { status: 'rejected', requestId, sessionId, reason: 'floored', message: "This request was forced by the daemon's protected-path permission floor (floored:true) — only a human may allow it. `deny` is still permitted; the prompt stays pending for a human otherwise." }
+      }
+      return { status: 'rejected', requestId, sessionId, reason: 'floor_unknown', message: "This request's floored flag was not observed as an explicit `false` (absent — an older daemon that predates #7968 — or a non-boolean value) — refusing `allow` fail-closed, since this client cannot tell a floored prompt from an ordinary one without it. `deny` is still permitted." }
     }
     // A second concurrent call for the SAME requestId must not silently
     // overwrite the first caller's pending entry — that would leak the
@@ -906,6 +956,39 @@ export class AgentControlClient extends EventEmitter {
 
   _assertMutationAllowed(operation) {
     if (this.readOnly) throw new ReadOnlyModeError(operation)
+  }
+
+  /**
+   * Shared ownership gate for every MUTATION that targets an EXISTING
+   * session — `sendInput`, `interrupt`, and `respondPermission`. "Owned"
+   * means CREATED BY THIS PROCESS (`createSession`, tracked in
+   * `_ownedSessions`, which survives reconnects via ClientManager's injected
+   * Set) — not merely "the caller named this session". A primary-token
+   * connection can subscribe to, and so observe and target, every session on
+   * the daemon, including ones a human is driving; without this gate a
+   * planner could send input to, interrupt, or answer permissions for a
+   * session it never created. `chroxy_create_session` deliberately does NOT
+   * go through this gate — it is the ownership SOURCE, not a
+   * session-targeting mutation.
+   *
+   * Returns a structured rejection (never a silent no-op, and checked before
+   * any network I/O) when the session is not owned, or `null` when the
+   * caller may proceed. This is the ONE place that check lives — `sendInput`
+   * and `interrupt` call it directly; `respondPermission` reuses it too, so
+   * there is exactly one ownership check to keep in sync, never a second
+   * implementation that could drift from it.
+   *
+   * @param {string} sessionId
+   * @param {string} verb - describes the refused action in the message, e.g. 'be sent input'.
+   */
+  _ownershipRejection(sessionId, verb) {
+    if (this._ownedSessions.has(sessionId)) return null
+    return {
+      status: 'rejected',
+      sessionId,
+      reason: 'not_owned',
+      message: `This session was not created by this agent-control process — only a session created with chroxy_create_session in this process can ${verb}. Use chroxy_get_events to observe it instead.`,
+    }
   }
 
   /**
@@ -1141,7 +1224,16 @@ export class AgentControlClient extends EventEmitter {
    */
   _trackPermissionObservation(msg) {
     if (msg.type === 'permission_request' && typeof msg.requestId === 'string' && msg.sessionId) {
-      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now() })
+      // #7968: `floored` is stored EXACTLY as the daemon sent it on THIS
+      // observed request — never re-derived (see respondPermission's
+      // floor-forced doc comment, and permission-floor.md "the floor has
+      // exactly one implementation"). Anything other than the literal
+      // boolean `true`/`false` (an older daemon that omits the field
+      // entirely, or a malformed non-boolean value) is normalized to
+      // `undefined` here — respondPermission treats that as "unknown" and
+      // refuses `allow` for it, fail-closed.
+      const floored = msg.floored === true ? true : msg.floored === false ? false : undefined
+      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now(), floored })
     } else if ((msg.type === 'permission_resolved' || msg.type === 'permission_expired') && typeof msg.requestId === 'string') {
       this._observedPermissions.delete(msg.requestId)
     }
