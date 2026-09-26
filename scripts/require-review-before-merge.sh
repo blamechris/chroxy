@@ -25,8 +25,9 @@
 # The backstop is GitHub, which checks the merge itself rather than the
 # command that asked for it. Verified 2026-09-26 against the live settings:
 #   - branch protection on main: `enforce_admins` on (it binds the owner's
-#     token too), required conversation resolution, 16 required status
-#     checks;
+#     token too), required conversation resolution, required status checks
+#     (the roster grows; read it from `gh api .../branches/main/protection`
+#     rather than trusting a count written here);
 #   - the "Copilot review for default branch" ruleset: active, no bypass
 #     actors, requires a Copilot code review.
 # Know what that backstop does NOT give you: it requires ZERO approving
@@ -35,14 +36,22 @@
 # without /full-review. Keeping that from happening is this script's job.
 #
 # Known evasions (1-3 measured against this script, each exits 0 = allowed;
-# 4 follows from how the hook is wired):
+# 4 and 5 follow from how the hook is wired):
 #   1. Backslash-newline continuation: `gh pr \`, newline, `merge 123`.
 #      grep matches one line at a time, so the words never meet.
 #   2. A command built at run time: `a=pr; b=merge; gh $a $b 123`, or
 #      `eval "gh pr $(echo merge) 123"`. The words never appear side by side.
+#      The same goes for a GraphQL mutation name spliced from adjacent shell
+#      quotes, or spelled with a JSON `\u` escape in a `--input -` body:
+#      both decode before GitHub reads them.
 #   3. A GraphQL query read from a file (`gh api graphql -F query=@m.graphql`).
 #      The mutation name is not in the command text.
-#   4. Any merge that does not go through the Bash tool: an MCP server's
+#   4. A gh alias used in a later command: once an alias `m` expands to
+#      `pr merge`, `gh m 123` exits 0. Defining it with `gh alias set m 'pr
+#      merge'` is itself blocked (it matches and has no number), but not if
+#      the definition happens to carry some other 3-5 digit number, and not
+#      if the alias was written into gh's config file directly.
+#   5. Any merge that does not go through the Bash tool: an MCP server's
 #      merge tool, a browser, the GitHub app. The hook's matcher in
 #      .claude/settings.json is `Bash`.
 # Each of these takes a deliberate detour, and only the backstop above
@@ -61,7 +70,9 @@
 #     that names a GraphQL merge mutation is blocked whatever numbers it
 #     cites. Workaround: write such text with a file tool (Write/Edit),
 #     which this hook never sees, then pass the file (`git commit -F`,
-#     `gh pr create --body-file`).
+#     `gh pr create --body-file`). A read-only SEARCH for a mutation name
+#     (`grep -rn`, `git log -S`) is blocked the same way; use the Grep tool,
+#     or split the name in the pattern (`merge[P]ullRequest`).
 #
 # One more limit: "reviewed" means that some issue comment on the PR matches
 # the keyword test further down (Code Review|...|Approve|Verdict). That is
@@ -195,7 +206,9 @@ fi
 # mergePullRequest(...) }'`), measured as a silent bypass before this block.
 # It is not disguised, just another API, so it is closed rather than listed
 # as a known evasion. GraphQL names cannot contain escapes and an alias does
-# not remove the field name, so the literal is in any inline query.
+# not remove the field name, so a query written out plainly in the command
+# always carries the literal. Splicing it from shell quotes or a JSON `\u`
+# escape does not; those are run-time construction, evasion 2 in the header.
 #
 # Blocked OUTRIGHT, before the PR-number check below and independently of
 # it: these mutations name the PR by node id, so the number check would
