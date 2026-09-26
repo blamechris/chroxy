@@ -33,12 +33,15 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { WsServer as _WsServer } from '../../src/ws-server.js'
-import { AgentControlClient, NOT_DELEGABLE_TOOLS, COMMAND_TOOLS } from '../../src/agent-control/client.js'
+import { AgentControlClient, NOT_DELEGABLE_TOOLS, COMMAND_TOOLS, FLOOR_ALLOWLISTED_TOOLS } from '../../src/agent-control/client.js'
 import { createAgentControlMcpServer } from '../../src/agent-control/mcp-server.js'
 import {
   NOT_DELEGABLE_TOOLS as CANONICAL_NOT_DELEGABLE_TOOLS,
   COMMAND_TOOLS as CANONICAL_COMMAND_TOOLS,
+  FLOOR_ALLOWLISTED_TOOLS as CANONICAL_FLOOR_ALLOWLISTED_TOOLS,
+  ACCEPT_EDITS_TOOLS,
 } from '../../src/permission-manager.js'
+import { isFlooredTarget } from '../../src/permission-floor.js'
 import { createMockSessionManager, createMockSession, createSpy } from '../test-helpers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -105,6 +108,144 @@ describe('shared exclusion-set identity (#7973)', () => {
   it('COMMAND_TOOLS contains exactly the command-executing tool names the providers emit (Bash, PowerShell, Monitor — Claude Code / BYOK; shell — codex app-server)', () => {
     assert.deepEqual([...COMMAND_TOOLS].sort(), ['Bash', 'Monitor', 'PowerShell', 'shell'])
   })
+
+  it('agent-control/client.js re-exports the EXACT FLOOR_ALLOWLISTED_TOOLS object permission-manager.js exports — no hand-rolled second list (#7975, S3)', () => {
+    assert.equal(FLOOR_ALLOWLISTED_TOOLS, CANONICAL_FLOOR_ALLOWLISTED_TOOLS, 'FLOOR_ALLOWLISTED_TOOLS must be the SAME object (import identity), not an equal-valued copy')
+    assert.equal(CANONICAL_FLOOR_ALLOWLISTED_TOOLS, ACCEPT_EDITS_TOOLS, 'FLOOR_ALLOWLISTED_TOOLS must literally BE ACCEPT_EDITS_TOOLS (same object) — the tools whose path-carrying input the floor inspects — never a re-derived copy of that roster')
+  })
+
+  it('FLOOR_ALLOWLISTED_TOOLS contains exactly the tools whose input the protected-path floor inspects', () => {
+    assert.deepEqual([...FLOOR_ALLOWLISTED_TOOLS].sort(), ['Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'Write', 'apply_patch'])
+  })
+})
+
+/**
+ * #7975 (S3, final security review of #7854) — the allowlist's correctness is
+ * verified BEHAVIORALLY against permission-floor.js's own `isFlooredTarget`,
+ * not by comparing two hand-authored Sets. `isFlooredTarget` scans whichever
+ * of PROTECTED_PATH_INPUT_FIELDS (`file_path`/`path`/`notebook_path`) plus
+ * `changes[]` a given INPUT actually carries — it is not itself keyed by tool
+ * identity beyond the read/write floor split (SECRET_READ_FLOOR_TOOLS). The
+ * real reason an unlisted tool (Bash, WebFetch, an MCP tool, …) can never be
+ * meaningfully floored is that its REAL input, as the owning provider actually
+ * constructs it, never carries one of those fields. Each fixture below is
+ * that tool's real input shape (sourced from permission-manager.js's own doc
+ * comments on NOT_DELEGABLE_TOOLS/COMMAND_TOOLS/ACCEPT_EDITS_TOOLS and the
+ * #7854 final-review's per-provider table), with a protected `.env` path
+ * substituted into whichever field that shape carries.
+ */
+describe("FLOOR_ALLOWLISTED_TOOLS matches which tools isFlooredTarget can actually flag, derived from permission-floor.js's own behavior (#7975, S3)", () => {
+  const cwd = '/tmp/agent-control-floor-fixture'
+  const protectedPath = `${cwd}/.env`
+
+  const realisticInput = {
+    Read: () => ({ file_path: protectedPath }),
+    Write: () => ({ file_path: protectedPath, content: 'x' }),
+    Edit: () => ({ file_path: protectedPath, old_string: 'a', new_string: 'b' }),
+    NotebookEdit: () => ({ notebook_path: protectedPath, new_source: 'x' }),
+    Glob: () => ({ pattern: '*', path: protectedPath }),
+    Grep: () => ({ pattern: 'x', path: protectedPath }),
+    apply_patch: () => ({ changes: [{ path: protectedPath, kind: 'update', diff: '' }] }),
+    Bash: () => ({ command: `cat ${protectedPath}` }),
+    shell: () => ({ command: `cat ${protectedPath}` }),
+    PowerShell: () => ({ command: `Get-Content ${protectedPath}` }),
+    Monitor: () => ({ command: `tail -f ${protectedPath}` }),
+    Task: () => ({ prompt: 'investigate', subagent_type: 'general-purpose' }),
+    Agent: () => ({ prompt: 'investigate', subagent_type: 'general-purpose' }),
+    WebFetch: () => ({ url: 'https://example.com' }),
+    WebSearch: () => ({ query: 'chroxy' }),
+    mcp_spawn: () => ({ mcpServer: { name: 'x', command: 'y', args: [], envKeys: [] } }),
+    request_permissions: () => ({ justification: 'need a broader sandbox' }),
+    mcp_elicitation: () => ({ message: 'confirm connector write' }),
+    'mcp__github__create_issue': () => ({ owner: 'x', repo: 'y', title: 'z' }),
+    SomeFutureClaudeCodeTool: () => ({ someField: 'value' }),
+  }
+
+  it('every FLOOR_ALLOWLISTED_TOOLS member IS floored by isFlooredTarget for its own realistic protected-path input', () => {
+    for (const tool of FLOOR_ALLOWLISTED_TOOLS) {
+      const build = realisticInput[tool]
+      assert.ok(build, `no realistic-input fixture defined for allowlisted tool ${tool} — add one`)
+      assert.equal(isFlooredTarget(tool, build(), cwd), true, `${tool} is allowlisted but isFlooredTarget did not flag its realistic protected input — the allowlist no longer matches what the floor inspects`)
+    }
+  })
+
+  it('every OTHER known tool name (command tools, not-delegable tools, Task/Agent/WebFetch/WebSearch, mcp_elicitation, an MCP tool, a future tool) is NEVER floored by its own realistic input', () => {
+    for (const [tool, build] of Object.entries(realisticInput)) {
+      if (FLOOR_ALLOWLISTED_TOOLS.has(tool)) continue
+      assert.equal(isFlooredTarget(tool, build(), cwd), false, `${tool} was floored by its own realistic input — if the floor can now see into this tool, it may belong on the allowlist rather than being refused not_allowlisted`)
+    }
+  })
+})
+
+describe('tool allowlist (#7975, S3): chroxy_respond_permission refuses allow for anything not allowlisted, regardless of floored', () => {
+  let client
+  afterEach(async () => { if (client) { await client.close(); client = null } })
+
+  for (const tool of [...FLOOR_ALLOWLISTED_TOOLS]) {
+    it(`allows allow for ${tool} when floored:false and the session is owned (positive control)`, async () => {
+      const fixture = readyClient({ ownedSessions: new Set(['sess-a']) })
+      client = fixture.client
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(fixture.sent.length, 1, `allow for allowlisted ${tool} must reach _send`)
+      assert.equal(fixture.sent[0].decision, 'allow')
+      assert.equal(result.status, 'uncertain')
+    })
+  }
+
+  const NOT_ALLOWLISTED_EXAMPLES = ['mcp__github__create_issue', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp_elicitation', 'SomeBrandNewClaudeCodeTool']
+
+  for (const tool of NOT_ALLOWLISTED_EXAMPLES) {
+    it(`refuses allow for ${tool} (not on the allowlist) when floored:false and the session is owned — reason not_allowlisted`, async () => {
+      ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']) }))
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.status, 'rejected', JSON.stringify(result))
+      assert.equal(result.reason, 'not_allowlisted')
+    })
+
+    it(`refuses allow for ${tool} even when floored is ABSENT (not_allowlisted must win over floor_unknown too)`, async () => {
+      ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']) }))
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: undefined })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.status, 'rejected', JSON.stringify(result))
+      assert.equal(result.reason, 'not_allowlisted')
+    })
+
+    it(`refuses allow for ${tool} even when floored:true`, async () => {
+      ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']) }))
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: true })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.status, 'rejected', JSON.stringify(result))
+      assert.equal(result.reason, 'not_allowlisted')
+    })
+
+    it(`STILL refuses allow for ${tool} even when allowCommandApprovals:true — the flag only ever narrows COMMAND_TOOLS, never any other tool`, async () => {
+      ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']), allowCommandApprovals: true }))
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.status, 'rejected', JSON.stringify(result))
+      assert.equal(result.reason, 'not_allowlisted')
+    })
+
+    it(`ownership still applies first: ${tool} in a session this process did not create is refused not_owned, not not_allowlisted`, async () => {
+      ;({ client } = readyClient({})) // no ownedSessions
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.status, 'rejected', JSON.stringify(result))
+      assert.equal(result.reason, 'not_owned')
+    })
+
+    it(`deny is still permitted for ${tool} (deny is never gated)`, async () => {
+      const fixture = readyClient({ ownedSessions: new Set(['sess-a']) })
+      client = fixture.client
+      observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+      const result = await client.respondPermission('sess-a', 'r1', 'deny')
+      assert.equal(fixture.sent.length, 1, 'deny must reach _send — proves it was not refused')
+      assert.equal(fixture.sent[0].decision, 'deny')
+      void result
+    })
+  }
 })
 
 describe('not-delegable tools: mcp_spawn / request_permissions refused regardless of floored (#7973)', () => {

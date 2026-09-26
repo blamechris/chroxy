@@ -75,18 +75,20 @@ export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'Agent', 'WebFetch', 'W
 //     is rejected. This set additionally covers the ONE-SHOT external-planner
 //     `allow` path in agent-control, which NEVER_AUTO_ALLOW does not govern.
 //
-// FINDING (#7973): `autoAllowPending()` itself does not consult this set (or
-// NEVER_AUTO_ALLOW) for `request_permissions` — a pending request carries
-// neither `protectedTarget` nor `mcpTrust`, so it falls through
-// autoAllowPending's default branch and IS folded into a bypass-mode sweep if
-// the session switches to auto/bypass mode mid-turn. This PR does NOT change
-// that daemon behavior (tracked separately as #7975) — it only shares this
-// exact Set with agent-control, so the two paths cannot hand-roll
-// independent, driftable copies of "which tools are too high-authority for
-// an unattended approver to ever say yes to."
+// FIXED (#7975, was FINDING #7973): `autoAllowPending()` below now consults
+// this EXACT set (by tool name, via `_lastPermissionData`) so a pending
+// `request_permissions` prompt — which carries neither `protectedTarget` nor
+// `mcpTrust` — is left genuinely pending for a human rather than silently
+// folded into a bypass-mode sweep. `mcp_spawn`'s own `pending.mcpTrust`
+// handling (explicit deny, never silently allowed) is unchanged; the new
+// check only ever widens which tools autoAllowPending refuses to auto-allow,
+// checked after the mcpTrust branch so it never intercepts mcp_spawn's
+// existing behavior.
 //
-// Exported so agent-control/client.js imports this EXACT Set (identity, not
-// an equal-valued copy) rather than hand-rolling a second list.
+// Exported so agent-control/client.js AND autoAllowPending() below both
+// consult this EXACT Set (identity, not an equal-valued copy) rather than
+// hand-rolling independent, driftable copies of "which tools are too
+// high-authority for an unattended approver to ever say yes to."
 export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
 
 // #7973 — tools that execute an arbitrary, caller-supplied command/shell
@@ -116,6 +118,35 @@ export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
 // Exported for the same reason as NOT_DELEGABLE_TOOLS above — one shared Set,
 // imported (not copied) by agent-control/client.js.
 export const COMMAND_TOOLS = new Set(['Bash', 'shell', 'PowerShell', 'Monitor'])
+
+// #7975 (S3, final security review of #7854) — the ALLOWLIST of tools an
+// EXTERNAL PLANNER's `chroxy_respond_permission` may ever send `allow` for
+// (before the #7973 command-tool opt-in on top): exactly the tools whose
+// inputs the protected-path floor (`isFlooredTarget`, permission-floor.js)
+// actually inspects. `floored: false` is only a MEANINGFUL "no protected path
+// here" signal for a tool the floor can see into at all — Read/Write/Edit/
+// NotebookEdit/Glob/Grep (PROTECTED_PATH_INPUT_FIELDS: file_path/path/
+// notebook_path) and codex apply_patch (its `changes[]` member paths). For
+// every OTHER tool — an MCP tool (`mcp__*`), WebFetch/WebSearch, Task/Agent,
+// codex mcp_elicitation, or any future Claude Code tool — the floor has no
+// path field to look at, so `isFlooredTarget` trivially returns `false` for
+// ANY input. Under the old DENYLIST shape (only NOT_DELEGABLE_TOOLS +
+// COMMAND_TOOLS were refused), that vacuous `false` was read as "safe", so a
+// planner could `allow` an MCP tool that runs an arbitrary command, or a
+// `mcp_elicitation` connector-write confirmation, exactly the class the floor
+// exists to put in front of a person. The allowlist inverts this: a tool must
+// be affirmatively known-inspectable to ever be `allow`-able.
+//
+// SAME Set as {@link ACCEPT_EDITS_TOOLS} (identity, not a second hand-rolled
+// list) — that constant already IS "the tools whose path-carrying input the
+// floor inspects" (that's precisely why acceptEdits mode needs the floor's
+// override for exactly these tools and no others). A dedicated name here
+// documents the DISTINCT reason agent-control cares about the same roster.
+// Pinned by a test that derives the set from permission-floor.js's own
+// `isFlooredTarget` behavior (not from this list), so a future drift between
+// "tools acceptEdits auto-approves" and "tools the floor can see into" would
+// be caught rather than silently inherited.
+export const FLOOR_ALLOWLISTED_TOOLS = ACCEPT_EDITS_TOOLS
 
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since
@@ -1056,6 +1087,26 @@ export class PermissionManager extends EventEmitter {
    * binary forever." Treating mcp_spawn under auto as deny re-prompts
    * the user next start — they can explicitly approve then, when the
    * decision is in front of them.
+   *
+   * #7975: a pending `request_permissions` prompt (codex's sandbox-scope
+   * escalation) carries neither `protectedTarget` nor `mcpTrust` — before
+   * this fix it fell straight through to the default allow branch below, so
+   * a session that flipped into auto/bypass mode mid-turn silently granted a
+   * sandbox-scope escalation the user never explicitly approved. This is now
+   * checked by TOOL NAME against {@link NOT_DELEGABLE_TOOLS} — the exact same
+   * Set agent-control's `respondPermission` gate uses, so the daemon's "never
+   * approve without a human" list has one source of truth, not two that can
+   * drift — via the tool name stashed on `_lastPermissionData` (the pending
+   * entry itself carries no tool field). It is left GENUINELY PENDING, the
+   * same treatment as a protected-path prompt: the original `permission_request`
+   * broadcast already reached any connected client when the prompt was first
+   * emitted, and `resendPendingPermissions` (ws-permissions.js) replays it to
+   * a reconnecting client for as long as it stays in `_pendingPermissions` —
+   * nothing here removes it from either map, so it is neither silently
+   * granted nor silently dropped. `mcp_spawn` is ALSO in NOT_DELEGABLE_TOOLS,
+   * but this check is placed AFTER the `mcpTrust` branch below (which fires
+   * for every mcp_spawn entry) so mcp_spawn's existing explicit-deny handling
+   * is unchanged — this only widens what happens to `request_permissions`.
    */
   autoAllowPending() {
     if (this._pendingPermissions.size === 0) return
@@ -1063,6 +1114,7 @@ export class PermissionManager extends EventEmitter {
     let allowed = 0
     let deniedMcpTrust = 0
     let preservedProtected = 0
+    let preservedNotDelegable = 0
     for (const requestId of pendingIds) {
       const pending = this._pendingPermissions.get(requestId)
       if (!pending) continue
@@ -1070,10 +1122,10 @@ export class PermissionManager extends EventEmitter {
         preservedProtected += 1
         continue
       }
-      this._pendingPermissions.delete(requestId)
-      this._lastPermissionData.delete(requestId)
-      this._clearPermissionTimer(requestId)
       if (pending.mcpTrust === true) {
+        this._pendingPermissions.delete(requestId)
+        this._lastPermissionData.delete(requestId)
+        this._clearPermissionTimer(requestId)
         // Don't silently persist trust on bypass. Deny — the MCP server
         // won't spawn for this session, but no on-disk trust entry is
         // written, and the user re-prompts next start.
@@ -1085,13 +1137,24 @@ export class PermissionManager extends EventEmitter {
         deniedMcpTrust += 1
         continue
       }
+      // #7975 — same NOT_DELEGABLE_TOOLS set agent-control's respondPermission
+      // gate consults, checked by the tool name stashed alongside this
+      // requestId (the pending entry itself has no tool field). Left pending,
+      // never deleted — see the doc comment above.
+      if (NOT_DELEGABLE_TOOLS.has(this._lastPermissionData.get(requestId)?.tool)) {
+        preservedNotDelegable += 1
+        continue
+      }
+      this._pendingPermissions.delete(requestId)
+      this._lastPermissionData.delete(requestId)
+      this._clearPermissionTimer(requestId)
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
       this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
       allowed += 1
     }
-    if (deniedMcpTrust > 0 || preservedProtected > 0) {
+    if (deniedMcpTrust > 0 || preservedProtected > 0 || preservedNotDelegable > 0) {
       this._logInfo(
-        `Auto-allowed ${allowed} pending permission(s), denied ${deniedMcpTrust} MCP trust prompt(s), and preserved ${preservedProtected} protected-path prompt(s) on auto mode switch`,
+        `Auto-allowed ${allowed} pending permission(s), denied ${deniedMcpTrust} MCP trust prompt(s), preserved ${preservedProtected} protected-path prompt(s), and preserved ${preservedNotDelegable} not-delegable prompt(s) on auto mode switch`,
       )
     } else {
       this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)

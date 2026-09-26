@@ -64,16 +64,17 @@ import {
 } from '@chroxy/store-core/crypto'
 import { SessionEventLog, StreamAccumulator, classifyBroadcast, DEFAULT_RETENTION, MAX_WAIT_MS } from './events.js'
 import { redactValue, SENSITIVE_KEY_NAMES } from '../redaction.js'
-// #7973 — the SAME exclusion sets the daemon defines, imported (never
-// hand-rolled as a second list) so `respondPermission` cannot drift from
-// permission-manager.js's own idea of "never auto-allow"/"carries an
-// arbitrary command". Re-exported below so a test can assert import IDENTITY
-// (not just equal values) between what this client uses and the canonical
-// export — see permission-manager.js's doc comments on both for the full
-// rationale, including the #7973 FINDING about autoAllowPending.
-import { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS } from '../permission-manager.js'
+// #7973 / #7975 (S3) — the SAME exclusion/allow sets the daemon defines,
+// imported (never hand-rolled as a second list) so `respondPermission` cannot
+// drift from permission-manager.js's own idea of "never auto-allow"/"carries
+// an arbitrary command"/"the floor can actually see this tool's paths". Each
+// is re-exported below so a test can assert import IDENTITY (not just equal
+// values) between what this client uses and the canonical export — see
+// permission-manager.js's doc comments for the full rationale, including the
+// #7975 fix to autoAllowPending's parallel use of NOT_DELEGABLE_TOOLS.
+import { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS, FLOOR_ALLOWLISTED_TOOLS } from '../permission-manager.js'
 
-export { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS }
+export { NOT_DELEGABLE_TOOLS, COMMAND_TOOLS, FLOOR_ALLOWLISTED_TOOLS }
 
 export const PROTOCOL_CAPABILITY_INPUT_CONTEXT = 'input_context_v1'
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000
@@ -859,46 +860,52 @@ export class AgentControlClient extends EventEmitter {
    * server's own binding/authority checks in `handlePermissionResponse`
    * still apply on top of this; this gate only ever narrows.
    *
-   * #7968: `allow` is additionally refused when the OBSERVED request was
-   * floor-forced. The protected-path permission floor
-   * (docs/security/permission-floor.md) forces a *prompt* — never a deny —
-   * for a protected target (a secret read, a write into `.git/`/`.claude/`,
-   * …) so a PERSON decides; an external planner answering `allow` for one of
-   * these would approve exactly what the floor exists to put in front of a
-   * human. The daemon marks this on the wire as `floored: true|false` on the
-   * `permission_request` broadcast; this client reads that flag VERBATIM off
-   * the observed request (see `_trackPermissionObservation`) and never
-   * re-derives it — a second implementation of the floor is exactly what
-   * `permission-floor.md` says not to build. Three cases for `allow`:
-   *   - `floored === false` (explicit): permitted — an ordinary prompt.
-   *   - `floored === true`: refused, `reason: 'floored'` — only a human may
-   *     allow it; `deny` remains permitted, and the prompt stays pending for
-   *     a human otherwise.
-   *   - `floored` absent (an older daemon that predates #7968, or any
-   *     non-boolean value): refused, `reason: 'floor_unknown'` — fail
-   *     closed, since this client cannot tell a floored prompt from an
-   *     ordinary one without the flag. `deny` remains permitted.
-   * `deny` is never floor-gated — the floor only ever restricts `allow`.
+   * `allow` runs through FOUR gates, in this fixed order (every one of them
+   * only ever narrows; `deny` is never gated by any of them):
    *
-   * #7973: two further `allow` refusals, both checked against the `tool` name
-   * observed on the SAME request (see `_trackPermissionObservation`, never
-   * re-derived):
-   *   - `NOT_DELEGABLE_TOOLS` (`mcp_spawn`, codex `request_permissions`):
-   *     refused with `reason: 'not_delegable'` WHATEVER `floored` says — these
-   *     are high-authority independent of any path field (an `mcp_spawn`
-   *     allow persists a permanent binary-trust grant; `request_permissions`
-   *     is a sandbox-scope escalation). Checked BEFORE the floored gate above,
-   *     so one of these is never merely reported as "floor_unknown".
-   *   - `COMMAND_TOOLS` (`Bash`, `PowerShell`, `Monitor`, codex `shell`): refused with
-   *     `reason: 'command_approval_disabled'` unless this client was
-   *     constructed with `allowCommandApprovals: true` — off by default
-   *     because the protected-path floor cannot see through an arbitrary
-   *     command string (`floored: false` on a Bash prompt means no path field
-   *     looked protected, not that the command is safe). Checked AFTER the
-   *     floored/ownership gates, so the flag only ever narrows further — it
-   *     never overrides a `floored: true`/absent verdict or an unowned
-   *     session.
-   * `deny` is never gated by either of these — same as the floor.
+   *   1. **Ownership** (`_ownershipRejection`, above) — `reason: 'not_owned'`
+   *      for a session this process did not create.
+   *   2. **`NOT_DELEGABLE_TOOLS`** (`mcp_spawn`, codex `request_permissions`)
+   *      — `reason: 'not_delegable'` WHATEVER `floored` says. These are
+   *      high-authority independent of any path field (an `mcp_spawn` allow
+   *      persists a permanent binary-trust grant; `request_permissions` is a
+   *      sandbox-scope escalation). Checked first so one of these is never
+   *      merely reported as "floor_unknown" or "not_allowlisted".
+   *   3. **The tool ALLOWLIST** (#7975, S3 — inverted from the original
+   *      denylist shape): a tool must be one of {@link FLOOR_ALLOWLISTED_TOOLS}
+   *      (`Read`/`Write`/`Edit`/`NotebookEdit`/`Glob`/`Grep`/codex
+   *      `apply_patch` — exactly the tools whose path-carrying input the
+   *      protected-path floor actually inspects) or a {@link COMMAND_TOOLS}
+   *      member with `allowCommandApprovals: true`. Everything else — an MCP
+   *      tool (`mcp__*`), `WebFetch`/`WebSearch`, `Task`/`Agent`, codex
+   *      `mcp_elicitation`, or any future Claude Code tool this client
+   *      doesn't yet know about — is refused `reason: 'not_allowlisted'`.
+   *      This is the load-bearing fix: under the old denylist, `floored:
+   *      false` on one of these tools meant "the floor never looked at this
+   *      tool's input at all" (it has no path field to inspect), not "this
+   *      is safe" — so a planner could `allow` an MCP tool that runs an
+   *      arbitrary command, or a `mcp_elicitation` connector-write
+   *      confirmation, exactly the class of decision the floor exists to put
+   *      in front of a human. A `COMMAND_TOOLS` member without the flag is
+   *      refused `reason: 'command_approval_disabled'` (unchanged from
+   *      #7973) rather than the generic `not_allowlisted`, since that case
+   *      has its own, more specific remedy (restart with the flag).
+   *   4. **The floor** (#7968) — even for an allowlisted/flagged tool,
+   *      `allow` is refused when the OBSERVED request was floor-forced. The
+   *      protected-path permission floor (docs/security/permission-floor.md)
+   *      forces a *prompt* — never a deny — for a protected target (a secret
+   *      read, a write into `.git/`/`.claude/`, …) so a PERSON decides. The
+   *      daemon marks this on the wire as `floored: true|false` on the
+   *      `permission_request` broadcast; this client reads that flag
+   *      VERBATIM off the observed request (`_trackPermissionObservation`)
+   *      and never re-derives it — a second implementation of the floor is
+   *      exactly what `permission-floor.md` says not to build.
+   *        - `floored === false` (explicit): permitted — an ordinary prompt.
+   *        - `floored === true`: refused, `reason: 'floored'`.
+   *        - `floored` absent (an older daemon predating #7968, or any
+   *          non-boolean value): refused, `reason: 'floor_unknown'` — fail
+   *          closed, since this client cannot tell a floored prompt from an
+   *          ordinary one without the flag.
    *
    * @param {string} sessionId
    * @param {string} requestId
@@ -922,28 +929,36 @@ export class AgentControlClient extends EventEmitter {
     }
     const ownershipRejection = this._ownershipRejection(sessionId, 'have its permission prompts answered here')
     if (ownershipRejection) return { ...ownershipRejection, requestId }
-    // #7973: never delegable to an external planner, WHATEVER `floored` says
-    // — checked before the floored gate below so one of these is never
-    // merely reported as "floor_unknown" (see the doc comment above).
+    // Gate 2: never delegable to an external planner, WHATEVER `floored`
+    // says — checked before the allowlist/floor gates below so one of these
+    // is never merely reported as "not_allowlisted" or "floor_unknown" (see
+    // the doc comment above).
     if (decision === 'allow' && NOT_DELEGABLE_TOOLS.has(observed.tool)) {
       return { status: 'rejected', requestId, sessionId, reason: 'not_delegable', message: `'${observed.tool}' can never be approved by an external planner, regardless of the protected-path floor — mcp_spawn persists a permanent binary-trust grant (#4462) and codex's request_permissions is a sandbox-scope escalation; both require a human decision. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
     }
+    // Gate 3: the allowlist (#7975, S3). A tool must be affirmatively known
+    // to be one the floor can inspect (FLOOR_ALLOWLISTED_TOOLS), or a
+    // COMMAND_TOOLS member with the explicit opt-in — everything else is
+    // refused regardless of what `floored` says, since `floored: false` on a
+    // tool the floor cannot see into at all is not a safety signal.
+    if (decision === 'allow' && !FLOOR_ALLOWLISTED_TOOLS.has(observed.tool)) {
+      if (COMMAND_TOOLS.has(observed.tool)) {
+        if (!this.allowCommandApprovals) {
+          return { status: 'rejected', requestId, sessionId, reason: 'command_approval_disabled', message: `'${observed.tool}' carries an arbitrary command string the protected-path floor cannot inspect — approving command-tool calls through agent-control is disabled by default. Restart this MCP server with --allow-command-approvals to permit it (still subject to the floored/ownership gates). \`deny\` is still permitted.` }
+        }
+        // COMMAND_TOOLS + the flag: fall through to the floor gate below,
+        // same as any allowlisted file tool.
+      } else {
+        return { status: 'rejected', requestId, sessionId, reason: 'not_allowlisted', message: `'${observed.tool}' is not one of the tools an external planner may ever approve — only Read/Write/Edit/NotebookEdit/Glob/Grep/apply_patch (the tools whose paths the protected-path floor actually inspects), plus Bash/PowerShell/Monitor/shell with --allow-command-approvals, can be allowed here. An MCP tool, WebFetch/WebSearch, Task/Agent, codex mcp_elicitation, and any tool this client doesn't recognize all fail closed the same way. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
+      }
+    }
+    // Gate 4: the floor (#7968). Read straight off what was OBSERVED for
+    // this requestId — never re-derived — per the doc comment above.
     if (decision === 'allow' && observed.floored !== false) {
-      // Read straight off what was OBSERVED for this requestId — never
-      // re-derived — per the doc comment above.
       if (observed.floored === true) {
         return { status: 'rejected', requestId, sessionId, reason: 'floored', message: "This request was forced by the daemon's protected-path permission floor (floored:true) — only a human may allow it. `deny` is still permitted; the prompt stays pending for a human otherwise." }
       }
       return { status: 'rejected', requestId, sessionId, reason: 'floor_unknown', message: "This request's floored flag was not observed as an explicit `false` (absent — an older daemon that predates #7968 — or a non-boolean value) — refusing `allow` fail-closed, since this client cannot tell a floored prompt from an ordinary one without it. `deny` is still permitted." }
-    }
-    // #7973: command-style tools carry an arbitrary command/shell string the
-    // protected-path floor cannot see through — `floored: false` here means
-    // no PATH field looked protected, not that the command itself is safe.
-    // Deny-only unless the operator explicitly opted in (`--allow-command-
-    // approvals`); checked AFTER floored/ownership above, so the flag only
-    // ever narrows further and never overrides either of those gates.
-    if (decision === 'allow' && COMMAND_TOOLS.has(observed.tool) && !this.allowCommandApprovals) {
-      return { status: 'rejected', requestId, sessionId, reason: 'command_approval_disabled', message: `'${observed.tool}' carries an arbitrary command string the protected-path floor cannot inspect — approving command-tool calls through agent-control is disabled by default. Restart this MCP server with --allow-command-approvals to permit it (still subject to the floored/ownership gates). \`deny\` is still permitted.` }
     }
     // A second concurrent call for the SAME requestId must not silently
     // overwrite the first caller's pending entry — that would leak the

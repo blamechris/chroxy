@@ -54,7 +54,7 @@ different problem this adapter deliberately does not solve:
 | `chroxy_send_input` | **yes** | Sends text input, returns the daemon's correlated `input_ack` verbatim. *Session-owned* (see below): a session this process did not create is refused with `reason: 'not_owned'`, before any network I/O. Gated on a fresh model-status check when the session has a recorded model expectation (see "Model truth" below). |
 | `chroxy_get_events` | no | Bounded, cursor-based read of a session's retained, normalized event log. Observing is unrestricted — any session this connection can subscribe to, not only ones this process created. |
 | `chroxy_interrupt_session` | **yes** | Best-effort interrupt (the protocol has no correlated ack for this). *Session-owned*: same `not_owned` refusal as `chroxy_send_input`. |
-| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. `allow` is additionally refused for a floor-forced request, a never-delegable tool (`mcp_spawn`/`request_permissions`), or a command-style tool without `--allow-command-approvals` — see "Answering permissions is a human-level decision" below. |
+| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. `allow` is additionally refused for a never-delegable tool (`mcp_spawn`/`request_permissions`), a tool not on the allowlist (`reason: 'not_allowlisted'` — an MCP tool, `WebFetch`/`WebSearch`, `Task`/`Agent`, codex `mcp_elicitation`, or any tool this adapter doesn't recognize), a command-style tool without `--allow-command-approvals`, or a floor-forced request — see "Answering permissions is a human-level decision" below. |
 
 **Session-owned, uniformly.** `chroxy_send_input`, `chroxy_interrupt_session`, and
 `chroxy_respond_permission` all gate on the SAME ownership set (`_ownedSessions` in
@@ -115,63 +115,93 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
 
 ### Answering permissions is a human-level decision
 
-`chroxy_respond_permission` lets the planner stand where a person would stand. Two limits
-apply, and both are now enforced:
+`chroxy_respond_permission` lets the planner stand where a person would stand. `allow` runs
+through **four gates, in this fixed order** — every one of them only ever narrows what
+`allow` can do, and `deny` is never gated by any of them:
 
-- **Ownership (enforced).** Only sessions this MCP-server process created can be answered;
-  see the tool table. Ownership is recorded only from the reply to this process's own
-  `create_session`: a `session_switched` naming a session that already existed before the
-  create (the daemon re-homing this connection after someone deleted its active session) is
-  not taken as that reply. The set is in memory, so after the MCP-server process restarts its
-  earlier sessions become `not_owned` — their prompts time out and the daemon auto-denies,
-  which fails closed.
-- **The protected-path floor (enforced, #7968).** The
-  [permission floor](../security/permission-floor.md) forces a *prompt* — never a deny — for
-  secret reads (`.env`, key material) and for writes into config directories such as
-  `.git/` and `.claude/`, so that a person decides. A daemon that implements #7968 marks
-  every `permission_request` broadcast with `floored: true|false`. `chroxy_respond_permission`
-  reads that flag off exactly the request it observed (never re-derived — a second
-  implementation of the floor is exactly what `permission-floor.md` says not to build) and
-  refuses `allow` unless it is the **explicit** `false`:
-  - `floored: true` → `allow` refused with `reason: 'floored'`; `deny` still goes through.
-  - `floored` **absent** (a daemon that predates #7968) → `allow` refused with
-    `reason: 'floor_unknown'`, fail-closed — this adapter cannot tell a floored prompt from
-    an ordinary one without the flag, so it refuses rather than guess. `deny` still goes
-    through.
-  - `floored: false` → an ordinary prompt; `allow` proceeds normally.
+1. **Ownership (enforced).** Only sessions this MCP-server process created can be answered;
+   see the tool table. Ownership is recorded only from the reply to this process's own
+   `create_session`: a `session_switched` naming a session that already existed before the
+   create (the daemon re-homing this connection after someone deleted its active session) is
+   not taken as that reply. The set is in memory, so after the MCP-server process restarts its
+   earlier sessions become `not_owned` — their prompts time out and the daemon auto-denies,
+   which fails closed.
+2. **Never-delegable tools (enforced, #7973).** Two tools are refused `allow` **unconditionally
+   — whatever `floored` says** — because they are high-authority independent of any path field:
+   - `mcp_spawn`: an `allow` PERSISTS a permanent "trust this binary" MCP-server grant to disk
+     (#4462).
+   - `request_permissions` (codex's sandbox-scope escalation prompt).
+   These are the exact `NOT_DELEGABLE_TOOLS` set exported from `permission-manager.js` and
+   imported (never copied) by `agent-control/client.js` — `allow` refuses with
+   `reason: 'not_delegable'`; `deny` still goes through. Checked before the allowlist and floor
+   gates below, so neither of these two is ever merely reported as `not_allowlisted` or
+   `floor_unknown`. **The daemon's own bypass-mode sweep (`autoAllowPending()` in
+   `permission-manager.js`) now consults this SAME set (#7975)** — see "Bypass-mode auto-allow"
+   below; the daemon and this adapter share one "never approve without a human" list.
+3. **The tool allowlist (enforced, #7975 — inverted from an earlier denylist shape).** `allow`
+   is permitted only for a tool this adapter can affirmatively confirm the protected-path
+   floor actually inspects: `Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`, or codex
+   `apply_patch` (`FLOOR_ALLOWLISTED_TOOLS` — the SAME Set `permission-manager.js` exports as
+   `ACCEPT_EDITS_TOOLS`, reused by identity rather than re-derived), plus command-style tools
+   (`Bash`, `PowerShell`, `Monitor`, codex `shell` — `COMMAND_TOOLS`) when this MCP server was
+   started with `--allow-command-approvals`. A `COMMAND_TOOLS` member without the flag is
+   refused `reason: 'command_approval_disabled'`. **Everything else is refused
+   `reason: 'not_allowlisted'`** — an MCP tool (`mcp__<server>__<tool>`, including one that runs
+   commands), `WebFetch`/`WebSearch`, `Task`/`Agent`, codex `mcp_elicitation` (a connector-write
+   confirmation), and any future Claude Code tool this adapter does not yet recognize. This is
+   the load-bearing fix from the original design: the protected-path floor inspects
+   PATH-carrying input fields only (`file_path`/`path`/`notebook_path`, plus `apply_patch`'s
+   `changes[]`), so `floored: false` on a tool with **no such field** means "the floor never
+   looked at this tool's input at all" — not "this is safe". Under the old denylist (only
+   `NOT_DELEGABLE_TOOLS` + `COMMAND_TOOLS` refused), that vacuous `false` read as safe, so a
+   planner could `allow` an MCP tool that runs an arbitrary command, or an `mcp_elicitation`
+   connector-write confirmation — exactly the class of decision the floor exists to put in
+   front of a human.
+4. **The protected-path floor (enforced, #7968).** Even for a tool that passed gate 3, `allow`
+   is refused unless the floor verdict is the **explicit** `false`. The
+   [permission floor](../security/permission-floor.md) forces a *prompt* — never a deny — for
+   secret reads (`.env`, key material) and for writes into config directories such as
+   `.git/` and `.claude/`, so that a person decides. A daemon that implements #7968 marks
+   every `permission_request` broadcast with `floored: true|false`. `chroxy_respond_permission`
+   reads that flag off exactly the request it observed (never re-derived — a second
+   implementation of the floor is exactly what `permission-floor.md` says not to build):
+   - `floored: true` → `allow` refused with `reason: 'floored'`; `deny` still goes through.
+   - `floored` **absent** (a daemon that predates #7968) → `allow` refused with
+     `reason: 'floor_unknown'`, fail-closed — this adapter cannot tell a floored prompt from
+     an ordinary one without the flag, so it refuses rather than guess. `deny` still goes
+     through.
+   - `floored: false` → an ordinary, allowlisted (or flagged command) prompt; `allow` proceeds.
 
-  Practically: a daemon built from #7971 or later sends `floored` on every
-  `permission_request` from both pipelines (and on the reconnect resend), so `allow` works
-  for ordinary prompts and a floored prompt is left for a person exactly as the floor
-  intends. Pointed at an older daemon, every `allow` is refused — only `deny` and
-  observation work. Note that `floored: false` is only the *path* floor's verdict; the two
-  gates below exist because it says nothing about tools the path floor cannot inspect.
+   Practically: a daemon built from #7971 or later sends `floored` on every
+   `permission_request` from both pipelines (and on the reconnect resend), so `allow` works
+   for ordinary allowlisted prompts and a floored prompt is left for a person exactly as the
+   floor intends. Pointed at an older daemon, every `allow` is refused — only `deny` and
+   observation work.
 
-- **Never-delegable tools (enforced, #7973).** Two tools are refused `allow` **unconditionally
-  — whatever `floored` says** — because they are high-authority independent of any path field:
-  - `mcp_spawn`: an `allow` PERSISTS a permanent "trust this binary" MCP-server grant to disk
-    (#4462). The daemon's own bypass-mode sweep (`autoAllowPending()` in
-    `permission-manager.js`) already refuses to fold this into an auto-allow; agent-control
-    mirrors that intent for its own one-shot `allow` path.
-  - `request_permissions` (codex's sandbox-scope escalation prompt).
-  These are the exact `NOT_DELEGABLE_TOOLS` set exported from `permission-manager.js` and
-  imported (never copied) by `agent-control/client.js` — `allow` refuses with
-  `reason: 'not_delegable'`; `deny` still goes through.
-- **Command-tool approvals (deny-only by default, opt-in, #7973).** `Bash` (Claude Code and
-  BYOK), Claude Code's `PowerShell` (the Windows shell tool) and `Monitor` (a background bash
-  script), and codex's `shell` carry an arbitrary, caller-supplied command string. The protected-path
-  floor inspects PATH-carrying input fields only — it cannot see into a command string, so
-  `floored: false` on a `Bash` prompt means "no path field looked protected," not "this
-  command is safe" (`cat .env` is an ordinary, unfloored Bash call). `allow` for one of these
-  is refused with `reason: 'command_approval_disabled'` unless this MCP server was started
-  with `--allow-command-approvals` — and even then, the floored and ownership gates above
-  still apply on top; the flag only ever narrows further, it never overrides either of them.
-  A clear warning is logged to stderr at startup whenever the flag is enabled. This is off by
-  default: only enable it for a planner you trust with shell-level authority over the daemon.
-  The set is `COMMAND_TOOLS` in `permission-manager.js`, and it is a **denylist of tool
-  names**: a tool that is not on it is approvable when its prompt is `floored: false` and the
-  session is owned. That includes MCP tools (`mcp__<server>__<tool>`), whose effect this
-  adapter cannot see — an MCP server that runs commands is not covered by this flag.
+### Bypass-mode auto-allow shares the same never-delegable set (#7975)
+
+The daemon's `autoAllowPending()` (`permission-manager.js`) auto-approves every ordinary
+outstanding permission request when a session switches into auto/bypass mode mid-turn (#3729
+— the "panic button"). It already exempted `mcp_spawn` (via a per-request `mcpTrust` runtime
+flag, since an `allow` there persists a permanent binary-trust grant) and any protected-path
+prompt. It did **not** exempt a pending `request_permissions` prompt — codex's sandbox-scope
+escalation — which carries neither of those markers, so it fell straight through to the
+default allow branch: a session that flipped into bypass mode mid-turn silently granted a
+sandbox-scope escalation the user never explicitly approved.
+
+`autoAllowPending()` now consults `NOT_DELEGABLE_TOOLS` by tool name (recovered from
+`_lastPermissionData`, since the pending entry itself carries no tool field) — the exact same
+Set this adapter's `respondPermission` gate uses, so the daemon has one source of truth for
+"never approve without a human," not two that can drift. A matching pending prompt is left
+**genuinely pending** (the same treatment as a protected-path prompt): the original
+`permission_request` broadcast already reached any connected client when the prompt was first
+emitted, and `resendPendingPermissions` (`ws-permissions.js`) replays it to a reconnecting
+client for as long as it stays in `_pendingPermissions` — nothing is silently granted or
+silently dropped. `mcp_spawn` keeps its existing explicit-deny handling unchanged (its
+`mcpTrust` branch is checked first), and an ordinary tool prompt still auto-allows exactly as
+before. **This changes daemon behavior for every bypass-mode user**, not just agent-control
+callers: previously, flipping a session into auto/bypass mode while a codex `request_permissions`
+prompt was outstanding silently granted it; now it is left for a human.
 
 ## Running it
 
@@ -352,11 +382,6 @@ contract, proposed first-wave issues, and the durable coordination follow-ups.
 - The legacy permission-resolution broadcast gap (unconditional `permission_resolved` even
   on the non-SDK path) would remove the most common source of `uncertain` results from
   `chroxy_respond_permission`.
-- **Finding (#7973), daemon-side, tracked separately as #7975:** `autoAllowPending()` in
-  `permission-manager.js` does not consult `NOT_DELEGABLE_TOOLS` (or `NEVER_AUTO_ALLOW`) for
-  `request_permissions` — a pending `request_permissions` prompt carries neither
-  `protectedTarget` nor the `mcpTrust` flag `mcp_spawn` prompts carry, so it falls through
-  `autoAllowPending`'s default branch and IS folded into a bypass-mode sweep if a session
-  switches to auto/bypass mode mid-turn. This is a real gap in the daemon's own bypass-mode
-  handling, independent of agent-control; this PR does not change daemon behavior, only shares
-  the exclusion set agent-control now enforces on its own path.
+- **Fixed (#7973 finding, #7975):** `autoAllowPending()`'s bypass-mode sweep silently
+  auto-allowed a pending codex `request_permissions` prompt — see "Bypass-mode auto-allow
+  shares the same never-delegable set (#7975)" above for the fix.
