@@ -458,10 +458,14 @@ function _matchesFloor(input, cwd, secretsOnly) {
 // secrets while the floor answered "not floored", and a lenient mode then
 // auto-approved it.
 //
-// WHAT FLOORS. A glob is taken apart the way ripgrep takes it (brace
-// alternatives, `*`, `**`, `?`, `[...]` classes, `\` escapes; a pattern without
-// a `/` matches a basename at any depth) and intersected with TEMPLATES built
-// from the floor's own name sets above. It floors when it can match:
+// WHAT FLOORS. First, anything outside a small grammar floors unanalyzed:
+// ASCII letters, digits, `. _ - / !`, whitespace, `*`, `**`, `?`, and `{a,b}`
+// groups that hold at least one comma. A class, an escape, a single-alternative
+// or empty brace, or any non-ASCII character floors (GLOB_FLOOR_ANALYZABLE
+// says why). A glob inside the grammar is taken apart the way ripgrep takes it
+// (a pattern without a `/` matches a basename at any depth) and intersected with
+// TEMPLATES built from the floor's own name sets above. It floors when it can
+// match:
 //   (a) an EXACT secret path, however it gets there: `.env`, SECRET_FILE_EXACT,
 //       the CREDENTIAL_CONFIG_SEQUENCES, `.claude/settings{,.local}.json`, plus
 //       the common real-world names in the two witness lists below. `*`, `**`,
@@ -469,7 +473,7 @@ function _matchesFloor(input, cwd, secretsOnly) {
 //   (b) a member of a secret FAMILY — `.env.<tail>`, `<stem><secret ext>`,
 //       `.claude/settings<mid>.json` — PROVIDED at least one character of the
 //       family's defining part (`.env`, the extension, the settings skeleton) is
-//       matched by something other than `*`/`**`. `.[e]nv.*`, `.env.????`,
+//       matched by something other than `*`/`**`. `.e?v.*`, `.env.????`,
 //       `?.pem` and `*v.*` floor here.
 //
 // THE ONE ACCEPTED RESIDUAL, stated because (b) is where it lives. `*.ts` can
@@ -479,7 +483,9 @@ function _matchesFloor(input, cwd, secretsOnly) {
 // nearly every globbed Grep in a lenient mode. What still gets through is an
 // extension or stem filter aimed at a GITIGNORED secret whose name is none of
 // the witnesses — `*.ts` reading a gitignored `.env.ts`. The witness lists
-// exist to keep that set to unusual names.
+// exist to keep that set to unusual names. The same mechanism applies to a
+// DIRECTORY: `{*.d,*.conf}` can re-include a gitignored `.env.d/` and read its
+// `app.conf`, because `*` swallowed the `.env`.
 //
 // NOT COVERED, and not this field's job: a Grep with no glob reads every file
 // the ignore rules let through, secrets included when they are not gitignored.
@@ -587,39 +593,49 @@ function globFloorTemplates() {
   return _globFloorTemplates
 }
 
+// The only characters the analysis models (PR #7980 review). Anything else in a
+// glob — a `[...]` class, a `\` escape, any non-ASCII character
+// (ripgrep trims trailing Unicode whitespace such as U+0085 that `\s` does not
+// match) — FLOORS without analysis. Four independent mismatches with ripgrep's
+// globset were found in exactly those constructs (a class matching `/`, `\`
+// being literal inside a class, chained ranges, a `,` inside a class inside a
+// brace group), so the parser does not try to be globset: it recognizes a small
+// grammar and refuses the rest. The ordinary filters (`*.ts`, `*.{ts,tsx}`,
+// `src/**/*.py`) are all inside it.
+// A `!` past the first character is a literal to ripgrep (only a LEADING `!`
+// negates, and classes are excluded), so it is kept.
+const GLOB_FLOOR_ANALYZABLE = /^[A-Za-z0-9._/*?{},!\- \t\n\r\v\f]*$/
+// Claude Code passes each whitespace/comma piece as its own --glob; past this
+// many pieces the call floors rather than analyze each one.
+const GLOB_FLOOR_MAX_PIECES = 32
+
 /**
- * Expand `{a,b}` alternatives (nested too), the way ripgrep's globset does.
- * Returns null past {@link GLOB_FLOOR_MAX_ALTERNATIVES}, which the caller
- * treats as floored. A `{` with no matching `}` or no top-level comma is left
- * as literal text: ripgrep either treats it the same way or rejects the glob
- * and reads nothing, and literal braces can never spell a secret name.
+ * Expand `{a,b}` alternatives (nested too). Every `{` must close and hold at
+ * least one top-level comma: ripgrep treats `{x}` and `{}` as a real
+ * alternation (`{.env}` reads `.env`), so a brace this function cannot expand
+ * is not "literal text" — the caller floors it. Returns null for an unmatched
+ * or comma-less brace, a stray `}`, or past {@link GLOB_FLOOR_MAX_ALTERNATIVES}.
+ * Runs only on {@link GLOB_FLOOR_ANALYZABLE} input, so there is no `[` or `\`
+ * that could hide a brace or a comma.
  * @param {string} glob
  * @returns {string[] | null}
  */
 function expandGlobBraces(glob) {
-  let open = -1
-  for (let i = 0; i < glob.length; i++) {
-    if (glob[i] === '\\') { i++; continue }
-    if (glob[i] === '{') { open = i; break }
-  }
-  if (open === -1) return [glob]
+  const open = glob.indexOf('{')
+  if (open === -1) return glob.includes('}') ? null : [glob]
+  if (glob.slice(0, open).includes('}')) return null
   let depth = 0
   const commas = []
   let close = -1
   for (let i = open; i < glob.length; i++) {
     const ch = glob[i]
-    if (ch === '\\') { i++; continue }
     if (ch === '{') depth++
     else if (ch === '}') {
       depth--
       if (depth === 0) { close = i; break }
     } else if (ch === ',' && depth === 1) commas.push(i)
   }
-  if (close === -1 || commas.length === 0) {
-    // Literal `{`: keep it and expand whatever follows it.
-    const rest = expandGlobBraces(glob.slice(open + 1))
-    return rest === null ? null : rest.map((r) => glob.slice(0, open + 1) + r)
-  }
+  if (close === -1 || commas.length === 0) return null
   const head = glob.slice(0, open)
   const tail = glob.slice(close + 1)
   const bounds = [open, ...commas, close]
@@ -634,11 +650,10 @@ function expandGlobBraces(glob) {
 }
 
 /**
- * Tokenize one brace-free glob alternative. Where the parse is uncertain it
- * OVER-approximates — a token that admits more characters can only add floors:
- * `**` anywhere is a cross-directory wildcard (and swallows a following `/`, so
- * `a/**\/b` still matches `a/b`), and an unterminated `[` admits any character.
- * Literals keep their case; matching lowercases them (see {@link _tokenAdmits}).
+ * Tokenize one brace-free alternative of an analyzable glob: `*`, `**`, `?`
+ * and literals. `**` anywhere is a cross-directory wildcard and swallows a
+ * following `/` (so `a/**\/b` still matches `a/b`); treating a non-segment `**`
+ * that way only ever admits more, i.e. floors more.
  * @param {string} glob
  * @returns {object[]}
  */
@@ -646,27 +661,19 @@ function tokenizeGlob(glob) {
   const tokens = []
   for (let i = 0; i < glob.length; i++) {
     const ch = glob[i]
-    if (ch === '\\' && i + 1 < glob.length) {
-      tokens.push({ kind: 'lit', ch: glob[++i] })
-    } else if (ch === '*') {
+    if (ch === '*') {
       if (glob[i + 1] === '*') {
         i++
         while (glob[i + 1] === '*') i++
         if (glob[i + 1] === '/') i++
-        tokens.push({ kind: 'globstar' })
+        // `**/**/` matches exactly what `**/` does; collapsing the run keeps a
+        // 330-deep repetition from costing 20ms of search (PR #7980 review).
+        if (tokens.length === 0 || tokens[tokens.length - 1].kind !== 'globstar') tokens.push({ kind: 'globstar' })
       } else {
         tokens.push({ kind: 'star' })
       }
     } else if (ch === '?') {
       tokens.push({ kind: 'any' })
-    } else if (ch === '[') {
-      const parsed = parseGlobClass(glob, i)
-      if (parsed) {
-        tokens.push(parsed.token)
-        i = parsed.end
-      } else {
-        tokens.push({ kind: 'any' })
-      }
     } else {
       tokens.push({ kind: 'lit', ch })
     }
@@ -675,73 +682,14 @@ function tokenizeGlob(glob) {
 }
 
 /**
- * Parse a `[...]` class starting at `start`. `!` or `^` first negates; a `]`
- * first is a member; `a-z` is a range; `\x` is a member. Returns null when the
- * class never closes.
- * @returns {{ token: object, end: number } | null}
- */
-function parseGlobClass(glob, start) {
-  let i = start + 1
-  let negated = false
-  if (glob[i] === '!' || glob[i] === '^') { negated = true; i++ }
-  const ranges = []
-  let first = true
-  for (; i < glob.length; i++) {
-    let ch = glob[i]
-    if (ch === ']' && !first) return { token: { kind: 'class', negated, ranges }, end: i }
-    first = false
-    if (ch === '\\' && i + 1 < glob.length) ch = glob[++i]
-    if (glob[i + 1] === '-' && i + 2 < glob.length && glob[i + 2] !== ']') {
-      let hi = glob[i + 2]
-      i += 2
-      if (hi === '\\' && i + 1 < glob.length) hi = glob[++i]
-      ranges.push([ch, hi])
-    } else {
-      ranges.push([ch, ch])
-    }
-  }
-  return null
-}
-
-let _foldsToAscii = null
-
-/**
- * Every character a file name could carry where the floor's lowercased scan
- * sees `ch`: `ch` itself, its uppercase, and any other code unit whose
- * lowercase is `ch` (U+212A KELVIN SIGN lowercases to `k`). Built once.
- * @param {string} ch  a lowercase ASCII template character
- * @returns {string[]}
- */
-function _caseVariants(ch) {
-  if (_foldsToAscii === null) {
-    _foldsToAscii = new Map()
-    for (let cp = 0x80; cp <= 0xffff; cp++) {
-      const lower = String.fromCharCode(cp).toLowerCase()
-      if (lower.length !== 1 || lower.charCodeAt(0) >= 0x80) continue
-      if (!_foldsToAscii.has(lower)) _foldsToAscii.set(lower, [])
-      _foldsToAscii.get(lower).push(String.fromCharCode(cp))
-    }
-  }
-  return [ch, ch.toUpperCase(), ...(_foldsToAscii.get(ch) || [])]
-}
-
-/**
  * Can glob token `tok` consume the (lowercase) template character `ch`? The
- * floor lowercases names, so a secret may be spelled in any case: a literal
- * admits `ch` when it lowercases to it, and a class admits `ch` when it admits
- * any of its {@link _caseVariants} (a NEGATED class: when it excludes any).
+ * floor lowercases names, so a literal admits `ch` when it lowercases to it.
  */
 function _tokenAdmits(tok, ch) {
   switch (tok.kind) {
     case 'lit': return tok.ch.toLowerCase() === ch
     case 'any': case 'star': return ch !== '/'
     case 'globstar': return true
-    case 'class': {
-      if (ch === '/') return false
-      const inClass = (v) => tok.ranges.some(([lo, hi]) => v >= lo && v <= hi)
-      const variants = _caseVariants(ch)
-      return tok.negated ? variants.some((v) => !inClass(v)) : variants.some(inClass)
-    }
     default: return true
   }
 }
@@ -787,18 +735,22 @@ function _globMatchesTemplate(tokens, t) {
 
 /**
  * #7978 — can a single ripgrep glob select a secret file? See the section
- * comment above for exactly what floors and the one accepted residual. A
- * negated (`!`) glob only excludes, so it never floors. Too long, or too many
- * brace alternatives, and it floors without being analyzed.
+ * comment above for exactly what floors and the one accepted residual. Leading
+ * and trailing ASCII whitespace is trimmed (ripgrep trims trailing whitespace);
+ * a leading `!` only excludes, so it never floors. Outside
+ * {@link GLOB_FLOOR_ANALYZABLE}, with a brace that does not expand, or past a
+ * size cap, the glob floors without being analyzed.
  * @param {string} glob
  * @returns {boolean}
  */
 export function globSelectsSecret(glob) {
   if (typeof glob !== 'string') return true
-  if (glob.length === 0) return false
   if (glob.length > GLOB_FLOOR_MAX_LENGTH) return true
-  if (glob.startsWith('!')) return false
-  const alternatives = expandGlobBraces(glob)
+  const trimmed = glob.replace(/^[ \t\n\r\v\f]+|[ \t\n\r\v\f]+$/g, '')
+  if (trimmed.length === 0) return false
+  if (trimmed.startsWith('!')) return false
+  if (!GLOB_FLOOR_ANALYZABLE.test(trimmed)) return true
+  const alternatives = expandGlobBraces(trimmed)
   if (alternatives === null) return true
   if (alternatives.reduce((sum, alt) => sum + alt.length, 0) > GLOB_FLOOR_MAX_EXPANDED_LENGTH) return true
   const templates = globFloorTemplates()
@@ -828,7 +780,8 @@ export function globSelectsSecret(glob) {
  * group) and passes each piece as its own `--glob`; the BYOK executor passes
  * the whole string as ONE `--glob`. Both readings are checked, and either one
  * flooring floors the input. A `glob` that is present but not a string floors:
- * the floor cannot say what an executor would make of it.
+ * the floor cannot say what an executor would make of it. So does one too long
+ * to split, or one that splits into more than {@link GLOB_FLOOR_MAX_PIECES}.
  * @param {object} input
  * @returns {boolean}
  */
@@ -836,17 +789,18 @@ function grepGlobFloored(input) {
   const glob = input.glob
   if (glob === undefined || glob === null) return false
   if (typeof glob !== 'string') return true
+  if (glob.length > GLOB_FLOOR_MAX_LENGTH) return true
   const readings = new Set([glob])
   for (const piece of glob.split(/\s+/)) {
     if (piece.includes('{') && piece.includes('}')) readings.add(piece)
     else for (const part of piece.split(',')) readings.add(part)
+    if (readings.size > GLOB_FLOOR_MAX_PIECES) return true
   }
   for (const reading of readings) {
     if (globSelectsSecret(reading)) return true
   }
   return false
 }
-
 /**
  * #7004 — the floor decision for ONE (tool, input) pair: the tool-aware choice
  * between the read floor and the full write floor, plus the predicate itself.

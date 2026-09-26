@@ -46,6 +46,13 @@ describe('#7978 acceptance: a benign path + a secret-selecting glob is floored',
     '.env.????', '*.local', 'privkey*', '*test*',
     '.ENV', '*.PEM', '.[!x]nv', '.[E]NV', 'x.\u212Aey', // case variants (the floor lowercases)
     '/.env', './.env', '**/.git/config', 'config', '.config/**', '.config/**/config',
+    // PR #7980 review: each read a gitignored secret with ripgrep while an
+    // earlier revision of this floor answered false. Single-alternative and
+    // empty braces are real alternations; classes, escapes and non-ASCII are
+    // outside the analyzed grammar and floor unanalyzed.
+    '{*}', '*{}', '{**}', '{**/*}', '{.env}', '.env{}', '.e{n}v', '{.npmrc}', '{*.pem}', '{*.json}',
+    '.en[v\\]', '.[a-c-z]nv', '.claude[!x]settings.local.json', '{.git,.git[/]config}', '{.[,e]nv}',
+    '.env\u0085', '*\u0085', '*.pem\u0085', '{.env', '.env}',
   ]
   for (const glob of FLOORED) {
     it(`glob ${JSON.stringify(glob)} is floored`, () => {
@@ -94,6 +101,16 @@ describe('#7978 both glob readings are checked', () => {
 
   it('an exclusion piece next to an ordinary one stays clear', () => {
     assert.equal(grepFloored('*.ts !.env'), false)
+  })
+
+  it('a whole-tree piece next to an extension filter floors (PR #7980 review: `*.ts {*}`)', () => {
+    assert.equal(grepFloored('*.ts {*}'), true)
+  })
+
+  it('too many pieces floors without analyzing each one', () => {
+    const pieces = (n) => Array.from({ length: n }, (_, i) => `f${i}.ts`).join(' ')
+    assert.equal(grepFloored(pieces(30)), false, 'control: under the cap is analyzed')
+    assert.equal(grepFloored(pieces(40)), true)
   })
 })
 
@@ -226,12 +243,17 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
   // are EXACT templates (the floor's names and witnesses); the second are family
   // members no witness names, reachable only through rule (b).
   const EXACT_SECRETS = [
-    '.env', 'sub/.env', '.env.local', '.env.production', 'id_rsa', '.npmrc',
-    'server.pem', 'privkey.pem', 'tls.key', '.claude/settings.local.json',
+    '.env', 'sub/.env', '.env.local', '.env.production', 'id_rsa', 'id_ed25519', '.npmrc',
+    '.pgpass', '.netrc', 'server.pem', 'privkey.pem', 'tls.key', 'cert.p12',
+    '.claude/settings.local.json', '.claude/settings.json', '.config/git/credentials',
+    // Claude Code excludes `.git` first, but a later user glob that matches it
+    // re-includes the directory (the last matching glob wins).
+    '.git/config',
   ]
   const FAMILY_SECRETS = ['.env.zz9', 'q.pem']
   const BENIGN = ['a.ts', 'src/b.ts', 'README.md', 'src/c.py', 'package.json', 'sub/d.js']
   let root
+  let rgVersion = ''
 
   before((t) => {
     if (!RG_PATH) {
@@ -248,7 +270,8 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
     }
     writeFileSync(join(root, '.gitignore'), [...EXACT_SECRETS, ...FAMILY_SECRETS].join('\n') + '\n')
     // A .git DIRECTORY (not a repo) is what makes ripgrep honour .gitignore.
-    mkdirSync(join(root, '.git'))
+    mkdirSync(join(root, '.git'), { recursive: true })
+    rgVersion = spawnSync(RG_PATH, ['--version'], { encoding: 'utf8' }).stdout.split('\n')[0]
   })
 
   after(() => {
@@ -258,14 +281,23 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
   // The files ripgrep would read for `glob`, run as Claude Code runs it
   // (`--hidden`, VCS dirs excluded first) and as the BYOK executor runs it.
   function rgReads(glob) {
+    // Claude Code's reading: whitespace, then commas unless the piece holds a
+    // {...} group, each piece its own --glob after its `!.git` exclusion.
+    const pieces = []
+    for (const piece of glob.split(/\s+/)) {
+      if (piece.includes('{') && piece.includes('}')) pieces.push(piece)
+      else pieces.push(...piece.split(',').filter(Boolean))
+    }
     const styles = [
-      ['--hidden', '--glob', '!.git', '--glob', glob],
-      ['--no-config', '--glob', glob],
+      ['--hidden', '--glob', '!.git', ...pieces.flatMap((p) => ['--glob', p])],
+      ['--glob', glob],
     ]
     const read = new Set()
     for (const style of styles) {
       const r = spawnSync(RG_PATH, ['--no-config', '--files', ...style, '.'], { cwd: root, encoding: 'utf8', timeout: 10_000 })
-      // 0 = files listed, 1 = none; anything else is a broken oracle, not "none".
+      // 0 = files listed, 1 = none. 2 with a glob parse error = ripgrep refused
+      // the glob and read nothing. Anything else is a broken oracle, not "none".
+      if (r.status === 2 && /glob|brace|character class/i.test(String(r.stderr))) continue
       assert.ok(r.status === 0 || r.status === 1, `rg failed for ${JSON.stringify(glob)}: status=${r.status} ${String(r.stderr).slice(0, 200)}`)
       for (const line of r.stdout.split('\n')) if (line) read.add(line.replace(/^\.\//, ''))
     }
@@ -293,6 +325,7 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
 
   it('sound against the exact secrets, over the issue rows, measured shapes and generated variants', (t) => {
     if (!root) return t.skip('no ripgrep')
+    t.diagnostic(`oracle: ${rgVersion} at ${RG_PATH}`)
     const globs = new Set([
       '.env', '*.env', '**/.env*', '.e?v', '.[e]nv', '*', '**', '**/*', '*.*', 'sub/*',
       '*env*', '*.json', '.claude/*', '*.local', 'privkey*', '*.pem', 'id_*',
@@ -350,5 +383,70 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
     } finally {
       rmSync(join(root, '.env.ts'))
     }
+  })
+
+  it('the same residual through a DIRECTORY: `{*.d,*.conf}` re-includes a gitignored .env.d/', (t) => {
+    if (!root) return t.skip('no ripgrep')
+    mkdirSync(join(root, '.env.d'))
+    writeFileSync(join(root, '.env.d', 'app.conf'), 'KEY=1\n')
+    writeFileSync(join(root, '.gitignore'), '.env.d/\n', { flag: 'a' })
+    try {
+      assert.ok(rgReads('{*.d,*.conf}').has('.env.d/app.conf'), 'ripgrep does read it')
+      assert.equal(grepFloored('{*.d,*.conf}'), false, 'documented residual: `*` swallowed the `.env`')
+    } finally {
+      rmSync(join(root, '.env.d'), { recursive: true, force: true })
+    }
+  })
+
+  // PR #7980 review: the hand-built variants never produced the shapes that
+  // actually got through (single braces, classes matching `/`, `\` in a class,
+  // trailing U+0085). A seeded differential fuzz against ripgrep generates them
+  // without anyone having to think of them first.
+  it('seeded fuzz: no generated glob that makes ripgrep read an exact secret is left unfloored', (t) => {
+    if (!root) return t.skip('no ripgrep')
+    let seed = 0x7978
+    const rand = () => {
+      seed = (seed + 0x6D2B79F5) | 0
+      let x = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+      x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296
+    }
+    const pick = (list) => list[Math.floor(rand() * list.length)]
+    const META = ['*', '**', '?', '{', '}', ',', '[', ']', '[!x]', '[/]', '\\', '\u0085', '/', '!', '{,}', '{x}']
+    const mutate = (name) => {
+      let g = name
+      const ops = 1 + Math.floor(rand() * 3)
+      for (let k = 0; k < ops; k++) {
+        const i = Math.floor(rand() * (g.length + 1))
+        switch (Math.floor(rand() * 7)) {
+          case 0: g = g.slice(0, i) + pick(META) + g.slice(i + 1); break
+          case 1: g = g.slice(0, i) + pick(META) + g.slice(i); break
+          case 2: g = `{${g}}`; break
+          case 3: g = `{${g},${pick(['*.ts', '', 'x'])}}`; break
+          case 4: g = g.slice(0, i) + `[${g[i] ?? 'x'}]` + g.slice(i + 1); break
+          case 5: g = g + pick(['\u0085', '{}', '*', ' ']); break
+          default: g = pick(['*.ts ', '**/', '*/', '']) + g
+        }
+      }
+      return g
+    }
+    const globs = new Set()
+    while (globs.size < 300) globs.add(mutate(pick(EXACT_SECRETS)))
+    for (let n = 0; n < 60; n++) {
+      let g = ''
+      const len = 1 + Math.floor(rand() * 5)
+      for (let k = 0; k < len; k++) g += pick([...META, '.', 'e', 'n', 'v', 'env'])
+      globs.add(g)
+    }
+    const unsound = []
+    let secretReads = 0
+    for (const glob of globs) {
+      if (!EXACT_SECRETS.some((s) => rgReads(glob).has(s))) continue
+      secretReads += 1
+      if (!grepFloored(glob)) unsound.push(JSON.stringify(glob))
+    }
+    t.diagnostic(`fuzz: ${globs.size} globs, ${secretReads} read an exact secret`)
+    assert.ok(secretReads >= 60, `non-vacuity: the fuzz must hit many secret reads (got ${secretReads})`)
+    assert.deepEqual(unsound.slice(0, 20), [], `${unsound.length} unsound`)
   })
 })

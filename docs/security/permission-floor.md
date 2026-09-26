@@ -63,23 +63,44 @@ Code gitignores by default. So `Grep({ path: 'src', glob: '.env' })` read secret
 
 `isFlooredTarget` now also floors a `Grep` whose `glob` can select a secret, in either
 of the two ways executors read the field. Claude Code splits it on whitespace and
-commas; the BYOK executor passes it whole. The rule, in `permission-floor.js`:
+commas; the BYOK executor passes it whole.
+
+**Only a small grammar is analyzed; everything else floors.** The analyzed grammar is:
+- ASCII letters, digits, `. _ - / !` and whitespace;
+- `*`, `**` and `?`;
+- `{a,b}` groups that hold at least one comma.
+
+Everything else floors unanalyzed:
+- a `[...]` class;
+- a `\` escape;
+- an empty or single-alternative brace (`{.env}` is a real alternation to ripgrep);
+- a stray brace;
+- any non-ASCII character (ripgrep trims trailing U+0085, which JavaScript's `\s`
+  does not match).
+
+The first revision tried to model ripgrep's globset in full. Its review found four
+places where the two disagreed, and a fuzz against real ripgrep got about 30% of
+secret-reading globs through. So the parser recognizes a grammar instead of imitating
+one. The rule inside the grammar, in `permission-floor.js`:
 
 | A glob floors when it can match… | Examples |
 |---|---|
 | an exact secret path: the floor's names, the credential-config files, and common real-world names (`.env.local`, `server.pem`, …), however it gets there | `*`, `**`, `sub/*`, `.env`, `*env*`, `*.json`, `*test*`, `privkey*` |
-| a `.env.<tail>`, `<stem>.pem/.key/.p12/.pfx` or `.claude/settings<mid>.json` name, **if** some character of the defining part (`.env`, the extension, the skeleton) is matched by something other than `*`/`**` | `.[e]nv.*`, `.env.????`, `?.pem`, `*v.*` |
+| a `.env.<tail>`, `<stem>.pem/.key/.p12/.pfx` or `.claude/settings<mid>.json` name, **if** some character of the defining part (`.env`, the extension, the skeleton) is matched by something other than `*`/`**` | `.e?v.*`, `.env.????`, `?.pem`, `*v.*` |
 
 Not floored: `*.ts`, `*.{ts,tsx}`, `src/**/*.py`, `*.md`, and any `!`-exclusion. A
-glob over 1024 characters, or one that expands to more than 64 brace alternatives or
-4096 characters, floors without being analyzed.
+glob over 1024 characters, one that splits into more than 32 pieces, or one that expands
+to more than 64 brace alternatives or 4096 characters, floors without being analyzed.
 
 **The accepted residual:** `*.ts` can match `.env.ts`, a name this floor counts as a
 secret, but only by letting `*` absorb all of `.env`. A strictly sound rule would floor
 every extension filter and prompt on nearly every globbed Grep in a lenient mode.
 What gets through is an extension or stem filter aimed at a *gitignored* secret with an
-unusual name. `tests/permission-floor-grep-glob.test.js` pins this, and checks the
-matcher against real ripgrep on a fixture of gitignored secrets.
+unusual name. The same mechanism reaches a *directory*: `{*.d,*.conf}` re-includes a
+gitignored `.env.d/` and reads its `app.conf`. `tests/permission-floor-grep-glob.test.js`
+pins both, checks the matcher against real ripgrep on a fixture of gitignored secrets,
+and runs a seeded differential fuzz against ripgrep: any generated glob that makes
+ripgrep read one of the exact secrets must floor.
 
 Two neighbours stay unfloored, on measurement rather than oversight. Grep's `type` is
 not inspected, because ripgrep's type filters **respect** `.gitignore`: `-t sh` does not
