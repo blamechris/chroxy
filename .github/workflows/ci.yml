@@ -1411,7 +1411,15 @@ jobs:
         # recognizes the interpreter immediately followed by the suite. The TAP
         # count floor is the same guard tool-layout.test.mjs carries — a run that
         # reports zero or dropped tests must not read as green.
+        #
+        # NODE_OPTIONS forces the TAP reporter: this job runs on the self-hosted
+        # macOS pool with no setup-node, so it gets the host's system Node (26),
+        # which prints the `spec` reporter even when piped. assert-test-count then
+        # finds no TAP summary and fails. The flag rides in the ENV, not argv, so
+        # the step keeps the `node <file>` shape the registration guard credits.
         working-directory: packages/desktop
+        env:
+          NODE_OPTIONS: --test-reporter=tap
         run: |
           set -o pipefail
           node scripts/__tests__/derive-server-lockfile.test.mjs | tee /tmp/chroxy-derive-lockfile.tap
