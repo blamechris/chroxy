@@ -152,7 +152,7 @@ describe('workflow reader: step + input parsing (#7386)', () => {
   })
 
   it('reads a quoted value up to its closing quote', () => {
-    const yml = `jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/setup-node@x\n        with:\n          cache-dependency-path: '**/package-lock.json' # three lockfiles\n`
+    const yml = `jobs:\n  a:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/setup-node@x\n        with:\n          cache-dependency-path: '**/package-lock.json' # every lockfile\n`
     const [job] = parseJobs(yml, 'a.yml')
     assert.equal(stepInput(job.steps[0], 'cache-dependency-path'), '**/package-lock.json')
   })

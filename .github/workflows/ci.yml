@@ -575,6 +575,12 @@ jobs:
     # everything, twice here and once everywhere else, and container generations
     # do get recreated.
     #
+    # 2026-09-26, #7324: the premise above no longer holds. The lockfile-
+    # freshness step (the second resolve) was removed with the committed
+    # packages/server/package-lock.json, so this job now resolves npm ONCE like
+    # its neighbours. The 10 minutes is kept as headroom rather than cut back:
+    # lowering it can only add false reds to a required check.
+    #
     # The cost of the extra five minutes is that a genuinely hung job takes 10
     # minutes to fail instead of 5, and holds a slot in the shared self-hosted
     # pool that much longer while it does. That is the right trade for a
@@ -638,14 +644,6 @@ jobs:
             echo "::error::The Windows exemption manifest is stale, over-broad, or exempts a must-run suite. See packages/server/scripts/lib/windows-test-set.mjs."
             exit 1
           fi
-
-      - name: Check server lockfile freshness
-        run: |
-          npm install --package-lock-only
-          git diff --exit-code package-lock.json || {
-            echo "::error::packages/server/package-lock.json is stale. Run 'cd packages/server && npm install --package-lock-only' and commit the result."
-            exit 1
-          }
 
       - name: Check tests pass stateFilePath to SessionManager
         run: |
@@ -1401,6 +1399,32 @@ jobs:
         working-directory: packages/desktop
         run: bash scripts/bundle-server.test.sh
 
+      - name: Run derive-server-lockfile.mjs tests
+        # #7324 — covers the placement algorithm's edge cases against synthetic
+        # fixtures AND derives from this repo's own root package-lock.json +
+        # packages/server/package.json, independently re-resolving every
+        # production dependency to prove the derivation matches what npm
+        # itself already resolved.
+        #
+        # Invoked BY NAME with plain `node` (a node:test file runs standalone and
+        # exits non-zero on a failure): ci-scripts-tests-registration.test.js only
+        # recognizes the interpreter immediately followed by the suite. The TAP
+        # count floor is the same guard tool-layout.test.mjs carries — a run that
+        # reports zero or dropped tests must not read as green.
+        #
+        # NODE_OPTIONS forces the TAP reporter: this job runs on the self-hosted
+        # macOS pool with no setup-node, so it gets the host's system Node (26),
+        # which prints the `spec` reporter even when piped. assert-test-count then
+        # finds no TAP summary and fails. The flag rides in the ENV, not argv, so
+        # the step keeps the `node <file>` shape the registration guard credits.
+        working-directory: packages/desktop
+        env:
+          NODE_OPTIONS: --test-reporter=tap
+        run: |
+          set -o pipefail
+          node scripts/__tests__/derive-server-lockfile.test.mjs | tee /tmp/chroxy-derive-lockfile.tap
+          node ../../scripts/lib/assert-test-count.mjs --min 14 cat /tmp/chroxy-derive-lockfile.tap > /dev/null
+
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)
     # Per-PR Windows compile + unit tests for the Tauri desktop crate on the
@@ -1834,7 +1858,7 @@ jobs:
       # packages/server/tests/ci-npm-cache-routing.test.js pins, specifically:
       # a producer exists that is GitHub-hosted AND x86_64 (an `ubuntu-*-arm`
       # runner saves the arm64 entry, which no hosted fork job reads), carries
-      # `cache: npm` with the three-lockfile key, has no job-level `if:`, and sits
+      # `cache: npm` with the `**/package-lock.json` key, has no job-level `if:`, and sits
       # in a workflow whose `push:` names `main` with no `paths:` filter. It also
       # carries the one named exception this `cache: npm` needs.
       #
