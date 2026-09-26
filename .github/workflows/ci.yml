@@ -639,14 +639,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check server lockfile freshness
-        run: |
-          npm install --package-lock-only
-          git diff --exit-code package-lock.json || {
-            echo "::error::packages/server/package-lock.json is stale. Run 'cd packages/server && npm install --package-lock-only' and commit the result."
-            exit 1
-          }
-
       - name: Check tests pass stateFilePath to SessionManager
         run: |
           # Issue #4633 — every `new SessionManager(...)` in tests must include
@@ -1400,6 +1392,15 @@ jobs:
       - name: Run desktop server bundle tests
         working-directory: packages/desktop
         run: bash scripts/bundle-server.test.sh
+
+      - name: Run derive-server-lockfile.mjs tests
+        # #7324 — covers the placement algorithm's edge cases against synthetic
+        # fixtures AND derives from this repo's own root package-lock.json +
+        # packages/server/package.json, independently re-resolving every
+        # production dependency to prove the derivation matches what npm
+        # itself already resolved.
+        working-directory: packages/desktop
+        run: node --test scripts/__tests__/derive-server-lockfile.test.mjs
 
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)

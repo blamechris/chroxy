@@ -21,10 +21,13 @@ echo "[bundle-server] Staging server to $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING/src" "$STAGING/hooks"
 
-# package.json + lockfile for dependency installation.
-# Workspace deps (@chroxy/*) are stripped before install and copied manually after.
+# package.json for dependency installation. Workspace deps (@chroxy/*) are
+# stripped before install and copied manually after. The lockfile is DERIVED
+# below from the root package-lock.json (#7324) — packages/server has no
+# lockfile of its own: npm never regenerates one inside an npm-workspaces
+# monorepo, so a committed copy silently drifts from what `npm install`
+# actually resolves (see derive-server-lockfile.mjs's header for the history).
 cp "$SERVER_DIR/package.json" "$STAGING/package.json"
-cp "$SERVER_DIR/package-lock.json" "$STAGING/package-lock.json"
 
 # Server source (flat .js files)
 cp "$SERVER_DIR/src/"*.js "$STAGING/src/"
@@ -50,24 +53,53 @@ fi
 cp -R "$SERVER_DIR/hooks/." "$STAGING/hooks/"
 chmod +x "$STAGING/hooks/permission-hook.sh"
 
-# Remove workspace deps and postinstall script from package.json before
-# npm install. The postinstall (fix-node-pty-helper.js) lives under
-# packages/server/scripts/ which we don't stage — and we don't need it
-# anyway because build.rs handles node-pty chmod + codesign at Tauri
-# bundle time (#3902).
+# Remove workspace deps, devDependencies and the postinstall script from
+# package.json before deriving the lockfile / installing. The postinstall
+# (fix-node-pty-helper.js) lives under packages/server/scripts/ which we
+# don't stage — and we don't need it anyway because build.rs handles
+# node-pty chmod + codesign at Tauri bundle time (#3902). devDependencies
+# must go too: `npm ci` validates devDependencies against the lockfile even
+# with --omit=dev, and the derived lockfile below only covers the
+# production closure (#7324).
 cd "$STAGING"
 node -e "
 const pkg = require('./package.json');
 for (const key of Object.keys(pkg.dependencies || {})) {
   if (key.startsWith('@chroxy/')) delete pkg.dependencies[key];
 }
+delete pkg.devDependencies;
 if (pkg.scripts) delete pkg.scripts.postinstall;
 require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 
-# Install production dependencies
+# Derive a standalone lockfile covering packages/server's production
+# dependency closure from the ROOT lockfile (#7324) — see
+# derive-server-lockfile.mjs's header for why a committed
+# packages/server/package-lock.json cannot work in an npm-workspaces
+# monorepo. Failure here must stop the build: an undetected drift here is
+# exactly the stale-lockfile bug this replaces.
+#
+# Every path below is RELATIVE to $STAGING (already the cwd) rather than the
+# absolute $SCRIPT_DIR/$REPO_ROOT forms used elsewhere in this file: this
+# script also runs under Git Bash on the Windows release job, where an
+# absolute MSYS-style path (e.g. "/c/Users/...") passed as an argument to a
+# native Windows node.exe depends on MSYS's automatic argv path conversion —
+# a relative path needs no such conversion and works identically on both
+# platforms. STAGING's depth under $REPO_ROOT is fixed by its definition
+# above (packages/desktop/src-tauri/server-bundle), so the traversal depth
+# here is not a magic number independent of it.
+echo "[bundle-server] Deriving standalone server lockfile from the root lockfile..."
+node ../../scripts/derive-server-lockfile.mjs \
+  --root-lock ../../../../package-lock.json \
+  --package-json package.json \
+  --workspace packages/server \
+  --out package-lock.json
+
+# Install production dependencies. `npm ci` (not `npm install`) so the build
+# fails loudly if the derived lockfile and package.json ever disagree,
+# rather than silently reconciling and installing something unpinned.
 echo "[bundle-server] Installing production dependencies..."
-npm install --omit=dev --no-audit --no-fund 2>&1
+npm ci --omit=dev --no-audit --no-fund 2>&1
 
 # Prune Bare-runtime prebuilds.
 #
