@@ -89,8 +89,11 @@ one. The rule inside the grammar, in `permission-floor.js`:
 | a `.env.<tail>`, `<stem>.pem/.key/.p12/.pfx` or `.claude/settings<mid>.json` name, **if** some character of the defining part (`.env`, the extension, the skeleton) is matched by something other than `*`/`**` | `.e?v.*`, `.env.????`, `?.pem`, `*v.*` |
 
 Not floored: `*.ts`, `*.{ts,tsx}`, `src/**/*.py`, `*.md`, and any `!`-exclusion. A
-glob over 1024 characters, one that splits into more than 32 pieces, or one that expands
-to more than 64 brace alternatives or 4096 characters, floors without being analyzed.
+glob over 1024 characters, one that splits into more than 32 pieces, one that expands to
+more than 64 brace alternatives or 4096 characters, or one that exhausts a 1,000,000-state
+search budget (a crafted glob otherwise reached 71ms on the event loop) floors without a
+full analysis. A trailing `/` is dropped before the anchoring decision, as ripgrep drops
+it, so `.env/` is read as `**/.env` (the directory it re-includes).
 
 **The accepted residual:** `*.ts` can match `.env.ts`, a name this floor counts as a
 secret, but only by letting `*` absorb all of `.env`. A strictly sound rule would floor

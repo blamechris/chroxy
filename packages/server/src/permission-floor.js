@@ -533,11 +533,15 @@ export const FLOOR_SECRET_NAMES = Object.freeze({
 
 // Bounds on the analysis. Past any one the glob FLOORS (fail closed): a
 // pathological glob is not something to analyze at length on the hot path.
-// Measured at these caps: ~10ms for the slowest shapes tried (a 1000-character
-// run of `*a`, 64 brace alternatives), against ~0.1ms for an ordinary glob.
+// An ordinary glob visits ~10K search states (~1ms); the largest legitimate
+// shapes the caps allow visit ~450K (~9ms). A crafted glob can still multiply
+// states — `(**q)` repeated 330 times visited 5.8M (71ms, synchronous on the
+// daemon's event loop) — so one Grep call gets a shared STATE budget, and
+// running out of it floors (PR #7980 review).
 const GLOB_FLOOR_MAX_LENGTH = 1024
 const GLOB_FLOOR_MAX_ALTERNATIVES = 64
 const GLOB_FLOOR_MAX_EXPANDED_LENGTH = 4096
+const GLOB_FLOOR_MAX_STATES = 1_000_000
 
 let _globFloorTemplates = null
 
@@ -698,9 +702,11 @@ function _tokenAdmits(tok, ch) {
  * Is there a string that both the glob `tokens` and template `t` match — and,
  * when `t.requireCore`, one where some `core` character is consumed by a token
  * other than `*`/`**`? A search over (glob position, template position, core
- * seen) — at most (|tokens|+1) x (|template|+1) x 2 states.
+ * seen) — at most (|tokens|+1) x (|template|+1) x 2 states. Every state visited
+ * is charged to `budget`; past it the answer is null, which the caller floors.
+ * @returns {boolean | null}
  */
-function _globMatchesTemplate(tokens, t) {
+function _globMatchesTemplate(tokens, t, budget) {
   const elems = t.elems
   const G = tokens.length
   const T = elems.length
@@ -713,6 +719,7 @@ function _globMatchesTemplate(tokens, t) {
     const key = (gi * (T + 1) + ti) * 2 + core
     if (seen[key]) continue
     seen[key] = 1
+    if (--budget.left < 0) return null
     if (gi === G && ti === T && (core === 1 || !t.requireCore)) return true
     const g = gi < G ? tokens[gi] : null
     const e = ti < T ? elems[ti] : null
@@ -735,18 +742,20 @@ function _globMatchesTemplate(tokens, t) {
 
 /**
  * #7978 — can a single ripgrep glob select a secret file? See the section
- * comment above for exactly what floors and the one accepted residual. Leading
- * and trailing ASCII whitespace is trimmed (ripgrep trims trailing whitespace);
- * a leading `!` only excludes, so it never floors. Outside
- * {@link GLOB_FLOOR_ANALYZABLE}, with a brace that does not expand, or past a
- * size cap, the glob floors without being analyzed.
+ * comment above for exactly what floors and the one accepted residual. Trailing
+ * ASCII whitespace is trimmed, as ripgrep trims it; LEADING whitespace is kept,
+ * because ripgrep keeps it (` !x` is a literal include, not an exclusion). A
+ * leading `!` only excludes, so it never floors. Outside
+ * {@link GLOB_FLOOR_ANALYZABLE}, with a brace that does not expand, past a size
+ * cap, or once `budget` runs out, the glob floors without a full analysis.
  * @param {string} glob
+ * @param {{ left: number }} [budget]  search states left; shared across one Grep call
  * @returns {boolean}
  */
-export function globSelectsSecret(glob) {
+export function globSelectsSecret(glob, budget = { left: GLOB_FLOOR_MAX_STATES }) {
   if (typeof glob !== 'string') return true
   if (glob.length > GLOB_FLOOR_MAX_LENGTH) return true
-  const trimmed = glob.replace(/^[ \t\n\r\v\f]+|[ \t\n\r\v\f]+$/g, '')
+  const trimmed = glob.replace(/[ \t\n\r\v\f]+$/, '')
   if (trimmed.length === 0) return false
   if (trimmed.startsWith('!')) return false
   if (!GLOB_FLOOR_ANALYZABLE.test(trimmed)) return true
@@ -758,6 +767,11 @@ export function globSelectsSecret(glob) {
     // Anchors: ripgrep roots a leading `/` at the search root, and `./` names
     // the same place. Both only narrow where a match can sit; drop them.
     while (alt.startsWith('/') || alt.startsWith('./')) alt = alt.startsWith('/') ? alt.slice(1) : alt.slice(2)
+    // A trailing `/` means "directories only", and ripgrep drops it BEFORE it
+    // decides whether the glob is anchored: `.env/` behaves as `**/.env` and
+    // re-includes a gitignored `.env/` directory for another piece to read
+    // from (PR #7980 review). Drop it here too, before the same decision.
+    while (alt.endsWith('/')) alt = alt.slice(0, -1)
     if (alt.length === 0) continue
     const tokens = tokenizeGlob(alt)
     // Without a `/`, ripgrep matches the basename at any depth: try the glob
@@ -767,7 +781,8 @@ export function globSelectsSecret(glob) {
       : [tokens, [{ kind: 'globstar' }, { kind: 'lit', ch: '/' }, ...tokens]]
     for (const variant of variants) {
       for (const t of templates) {
-        if (_globMatchesTemplate(variant, t)) return true
+        const hit = _globMatchesTemplate(variant, t, budget)
+        if (hit !== false) return true
       }
     }
   }
@@ -796,8 +811,9 @@ function grepGlobFloored(input) {
     else for (const part of piece.split(',')) readings.add(part)
     if (readings.size > GLOB_FLOOR_MAX_PIECES) return true
   }
+  const budget = { left: GLOB_FLOOR_MAX_STATES }
   for (const reading of readings) {
-    if (globSelectsSecret(reading)) return true
+    if (globSelectsSecret(reading, budget)) return true
   }
   return false
 }

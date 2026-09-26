@@ -53,6 +53,9 @@ describe('#7978 acceptance: a benign path + a secret-selecting glob is floored',
     '{*}', '*{}', '{**}', '{**/*}', '{.env}', '.env{}', '.e{n}v', '{.npmrc}', '{*.pem}', '{*.json}',
     '.en[v\\]', '.[a-c-z]nv', '.claude[!x]settings.local.json', '{.git,.git[/]config}', '{.[,e]nv}',
     '.env\u0085', '*\u0085', '*.pem\u0085', '{.env', '.env}',
+    // Second review: a trailing `/` is dropped by ripgrep BEFORE it decides
+    // anchoring, so `.env/` behaves as `**/.env` and re-includes that directory.
+    '.env/', 'deploy/.env/', 'keys.pem/', '.env.d/',
   ]
   for (const glob of FLOORED) {
     it(`glob ${JSON.stringify(glob)} is floored`, () => {
@@ -67,7 +70,7 @@ describe('#7978 acceptance: a benign path + a secret-selecting glob is floored',
   // Controls: ordinary extension and directory filters stay un-prompted.
   const CLEAR = [
     '*.ts', '*.{ts,tsx}', '**/*.js', 'src/**/*.py', '*.md', '*.yml', '*.toml',
-    'src/*.ts', 'README*', '*.sh', 'env.js', '!.env', '!*.env', '!**/.env*',
+    'src/*.ts', 'README*', '*.sh', 'env.js', '!.env', '!*.env', '!**/.env*', 'src/',
   ]
   for (const glob of CLEAR) {
     it(`control: glob ${JSON.stringify(glob)} is NOT floored`, () => {
@@ -107,6 +110,18 @@ describe('#7978 both glob readings are checked', () => {
     assert.equal(grepFloored('*.ts {*}'), true)
   })
 
+  it('a secret-named directory re-included by one piece floors the call (second review, S1)', () => {
+    for (const glob of ['.env/ *.conf', '**/.env/ prod*', '{.env,x}/ {prod,y}*', '.env/,*.conf', '.env.d/ app*', 'keys.pem/ *.txt']) {
+      assert.equal(grepFloored(glob), true, glob)
+    }
+    assert.equal(grepFloored('src/ *.ts'), false, 'control: an ordinary directory piece stays clear')
+  })
+
+  it('LEADING whitespace is kept, as ripgrep keeps it: ` !y/.env` is an include, not an exclusion (second review, N1)', () => {
+    assert.equal(grepFloored(' !y/.env'), true)
+    assert.equal(grepFloored('!.env'), false, 'control: a real leading `!` still excludes')
+  })
+
   it('too many pieces floors without analyzing each one', () => {
     const pieces = (n) => Array.from({ length: n }, (_, i) => `f${i}.ts`).join(' ')
     assert.equal(grepFloored(pieces(30)), false, 'control: under the cap is analyzed')
@@ -135,6 +150,14 @@ describe('#7978 fail-closed edges', () => {
     const alternatives = (n) => '{' + Array.from({ length: n }, (_, i) => `f${i}`).join(',') + '}.ts'
     assert.equal(globSelectsSecret(alternatives(64)), false, 'control: at the cap is analyzed')
     assert.equal(globSelectsSecret(alternatives(65)), true)
+  })
+
+  it('a glob that exhausts the search-state budget floors, and quickly (second review, S2)', () => {
+    const q = '**q'.repeat(165)
+    const started = Date.now()
+    assert.equal(grepFloored(`{a,b,c,d}${q}zq ${q}zp`), true)
+    assert.ok(Date.now() - started < 1000, 'the budget must bound the time, not just the verdict')
+    assert.equal(globSelectsSecret('packages/server/src/**/*.test.js'), false, 'control: an ordinary long glob is well inside the budget')
   })
 
   it('a large expansion floors even under the alternatives cap', () => {
@@ -395,6 +418,24 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
       assert.equal(grepFloored('{*.d,*.conf}'), false, 'documented residual: `*` swallowed the `.env`')
     } finally {
       rmSync(join(root, '.env.d'), { recursive: true, force: true })
+    }
+  })
+
+  it('a trailing `/` piece that re-includes a gitignored secret-named directory is floored (second review, S1)', (t) => {
+    if (!root) return t.skip('no ripgrep')
+    mkdirSync(join(root, 'deploy', '.env'), { recursive: true })
+    writeFileSync(join(root, 'deploy', '.env', 'prod.conf'), 'KEY=1\n')
+    writeFileSync(join(root, '.gitignore'), 'deploy/.env/\n', { flag: 'a' })
+    try {
+      let secretReads = 0
+      for (const glob of ['.env/ *.conf', '**/.env/ prod*', '{.env,x}/ {prod,y}*', '.env/,*.conf']) {
+        if (!rgReads(glob).has('deploy/.env/prod.conf')) continue
+        secretReads += 1
+        assert.equal(grepFloored(glob), true, glob)
+      }
+      assert.ok(secretReads >= 3, `non-vacuity: ripgrep must read through the directory (got ${secretReads})`)
+    } finally {
+      rmSync(join(root, 'deploy'), { recursive: true, force: true })
     }
   })
 
