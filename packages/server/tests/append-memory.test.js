@@ -1,6 +1,8 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, writeFile, symlink } from 'fs/promises'
+import { openSync, closeSync, constants as fsConstants } from 'fs'
+import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -145,5 +147,29 @@ describe('appendMemory handler', () => {
 
     await rm(outsideDir, { recursive: true, force: true })
     await rm(dir, { recursive: true, force: true })
+  })
+
+  // #7938 — CLAUDE.md planted as a FIFO: the O_APPEND open goes through
+  // openNoFollow, which now ORs O_NONBLOCK in, so with no reader it fails
+  // ENXIO instead of blocking forever waiting for one.
+  it('returns an error promptly when CLAUDE.md is a FIFO instead of hanging (#7938)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    responses.length = 0
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-fifo-'))
+    const fifo = join(dir, 'CLAUDE.md')
+    execFileSync('mkfifo', [fifo])
+    try {
+      const outcome = await Promise.race([
+        fileOps.appendMemory(mockWs, 'note', dir).then(() => 'returned'),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 3000)),
+      ])
+      assert.equal(outcome, 'returned', 'appendMemory blocked opening a FIFO with no reader — openNoFollow needs O_NONBLOCK (#7938)')
+      assert.equal(responses.length, 1)
+      assert.ok(responses[0].error, 'a FIFO CLAUDE.md must produce an error, not a successful append')
+      assert.equal(responses[0].created, false)
+    } finally {
+      // Releases a write-open stranded by a regression (see write-file.test.js).
+      try { closeSync(openSync(fifo, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)) } catch { /* nothing to release */ }
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

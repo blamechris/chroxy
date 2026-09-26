@@ -182,9 +182,15 @@ export class MCPFleet {
           // (name, url) + header KEY names. Header VALUES (tokens) never
           // reach the permission payload, the trust store, or any log.
           const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+          // #7939: forward the discovery-time scope (LOCAL/PROJECT_MCP_JSON/USER
+          // — see byok-mcp-config.js's MCP_SERVER_SOURCE) so the trust prompt can
+          // show WHERE this spawn config came from. Undefined for a cfg built
+          // without going through discoverMcpServerSpecs (e.g. a bare test fixture)
+          // — requestMcpTrust treats an absent/unrecognized source as "don't show
+          // one" rather than failing, so this degrades cleanly.
           const trustReq = isRemote
-            ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
-            : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+            ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort(), source: cfg.source }
+            : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort(), source: cfg.source }
           const allowed = await this._permissionManager.requestMcpTrust(trustReq)
           if (allowed) recordTrust(cfg, this._resolvedTrustPath)
           return allowed

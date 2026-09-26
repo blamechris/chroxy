@@ -827,12 +827,40 @@ export function confinedContainerFailureMessage(label, reason, path) {
 /**
  * Derive the rg/grep flag fragments from a Grep tool input: case-insensitive
  * (`-i`), line numbers (`-n`, default on), and an optional `--glob` filter.
+ * `--glob` is ripgrep-specific and is threaded only into `buildGrepCommand`'s
+ * `rg` branch — the `grep -r` fallback (used when `rg` is absent) has no
+ * `--glob` equivalent and silently ignores `globArg` (GNU grep's nearest
+ * analog is `--include`, not implemented here); `ci`/`ln`/`pattern`/`root`
+ * apply identically on both branches.
+ *
+ * SECURITY (#7928): `glob` is model-controlled, same as `pattern`/`root`
+ * (#7295) — but unlike those two, it is bound to a NAMED flag (`--glob`)
+ * rather than a bare positional, which `argv-safety.js` documents as
+ * generally the safer shape (case 3: fuse the value into the same token as
+ * the flag, `--flag=<value>`, so it can never be split into a separate argv
+ * element). `--glob <value>` (the space-separated form this used to emit) is
+ * only as safe as `--glob`'s DECLARED ARITY, and that must be measured, not
+ * assumed — the same rule `cliHelpFlagArity`'s doc states for every other CLI
+ * in this repo. Measured against ripgrep 15.2.0 (`-g GLOB, --glob=GLOB`,
+ * required-arg): the space form already consumed a hostile next token
+ * (`--pre=<script>`, `-e`, `--files`, `-h`, `--help`, `-V`, `--version`) as
+ * the glob's own value in every case — none reached rg's own option parser as
+ * a distinct flag, so no `--pre` execution and no help/version short-circuit.
+ *
+ * That measurement is still not a fix: it is a fact about one rg build, and
+ * `--glob`'s arity is not documented as part of any argv contract this repo
+ * controls. The `--glob=<value>` JOINED form below removes the question
+ * entirely rather than resting on it — `shellQuote(input.glob)` still closes
+ * SHELL injection (unchanged), and butting it directly against `--glob=` with
+ * no space fuses both into one shell word, so word-splitting can never hand
+ * the value to rg as a second, independent argv element regardless of what
+ * `--glob` requires. Proven by `tests/built-in-tools/grep-argv-injection.test.js`.
  */
 export function buildGrepArgs(input) {
   const ci = input?.['-i'] === true ? '-i' : ''
   const ln = input?.['-n'] !== false ? '-n' : ''
   const globArg = typeof input?.glob === 'string' && input.glob.length > 0
-    ? ` --glob ${shellQuote(input.glob)}` : ''
+    ? ` --glob=${shellQuote(input.glob)}` : ''
   return { ci, ln, globArg }
 }
 
@@ -892,6 +920,15 @@ export function buildGrepArgs(input) {
  * the `--` terminator — the part that carries the #7295 property — is unchanged
  * either way, so a root that still begins with `-` cannot reach rg's own option
  * parser through this door.
+ *
+ * `globArg` (#7928) is `buildGrepArgs`'s third model-controlled interpolation,
+ * and is a THIRD, distinct case from `pattern`/`root` above: it is bound to a
+ * named flag rather than a bare positional, so `buildGrepArgs` fuses it into
+ * one token (`--glob=<value>`, argv-safety.js case 3) instead of using a `-e`-
+ * style two-token bind or a `--` terminator — either of those needs a
+ * positional slot to terminate INTO, which `--glob` does not have. See
+ * `buildGrepArgs`'s own doc for the measurement (ripgrep 15.2.0, required-arg)
+ * and why the fix does not rest on it.
  *
  * @param {{ pattern: string, root?: string, rootExpr?: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
  */

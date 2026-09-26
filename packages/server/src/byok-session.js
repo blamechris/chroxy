@@ -36,6 +36,7 @@ import {
   addMcpServerToConfig,
   defaultClaudeConfigPath,
   discoverMcpServerSpecs,
+  mcpWriteScopeToSource,
   planAddMcpServerToConfig,
   removeMcpServerFromConfig,
   toMcpServerMetadata,
@@ -795,9 +796,12 @@ export class ClaudeByokSession extends BaseSession {
       const store = loadTrustStore(trustPath, { log })
       if (isTrusted(store, cfg)) return { allowed: true, prompted: false }
       const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+      // #7939: forward the scope this add targets (see mcpWriteScopeToSource
+      // above) so the pre-write trust prompt names where the server is being
+      // configured, same as a rediscovered spec's prompt would.
       const trustReq = isRemote
-        ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
-        : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+        ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort(), source: cfg.source }
+        : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort(), source: cfg.source }
       const allowed = await pm.requestMcpTrust(trustReq)
       if (allowed) recordTrust(cfg, trustPath)
       return { allowed: allowed === true, prompted: true }
@@ -808,8 +812,15 @@ export class ClaudeByokSession extends BaseSession {
    * Build the in-memory fleet config from a normalized persisted entry, filling
    * the shape defaults (`args`/`env` for stdio, `headers` for remote) the fleet
    * and the trust key both read.
+   *
+   * #7939: optional `source` (an `MCP_SERVER_SOURCE` value) tags where this
+   * config came from — a discovered spec already carries one from
+   * `discoverMcpServerSpecs`, but a live `addMcpServer` entry has none until
+   * the caller derives it from the WRITE scope via `mcpWriteScopeToSource` and
+   * passes it here, so both paths converge on the same shape before either
+   * reaches the spawn-trust gate.
    */
-  static _mcpCfgFromEntry(name, entry) {
+  static _mcpCfgFromEntry(name, entry, { source } = {}) {
     const cfg = { name, ...entry }
     if (cfg.command !== undefined) {
       cfg.args = Array.isArray(cfg.args) ? cfg.args : []
@@ -817,6 +828,7 @@ export class ClaudeByokSession extends BaseSession {
     } else {
       cfg.headers = cfg.headers && typeof cfg.headers === 'object' ? cfg.headers : {}
     }
+    if (source !== undefined) cfg.source = source
     return cfg
   }
 
@@ -864,7 +876,12 @@ export class ClaudeByokSession extends BaseSession {
     if (!planned.ok) return { ok: false, error: planned.error, code: planned.code }
 
     // The candidate config, exactly as it would be persisted and spawned.
-    const cfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, planned.entry)
+    // #7939: tag it with the scope the user is adding it to (mapped onto the
+    // same MCP_SERVER_SOURCE vocabulary discovery uses) so the trust prompt
+    // for THIS add names its scope consistently with a rediscovered server.
+    const cfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, planned.entry, {
+      source: mcpWriteScopeToSource(planned.scope),
+    })
 
     const trust = await this._decideMcpSpawnTrust(cfg)
     if (!trust.allowed) {
@@ -904,8 +921,12 @@ export class ClaudeByokSession extends BaseSession {
     // diverge. Normalization is pure over (name, config), so this is structurally
     // identical to the `cfg` the trust decision was made against — and if it ever
     // were not, the fleet's own gate below would see an untrusted config and
-    // prompt rather than spawn.
-    const persistedCfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, written.entry)
+    // prompt rather than spawn. #7939: carries the same write-scope-derived
+    // `source` as `cfg` above, so a live-added server's fleet re-prompt (the
+    // backstop in `MCPFleet.addServer`/`_makeClient`) shows the identical scope.
+    const persistedCfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, written.entry, {
+      source: mcpWriteScopeToSource(written.scope),
+    })
     this._mcpServerConfigs = [...this._mcpServerConfigs, persistedCfg]
     this._refreshMcpServerMetadata()
 

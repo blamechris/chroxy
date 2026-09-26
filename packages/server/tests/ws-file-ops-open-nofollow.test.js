@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile, symlink } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +48,9 @@ const memorySrc = readFileSync(join(SRC, 'memory.js'), 'utf-8')
 /** A sentinel "O_NOFOLLOW" so the flag-OR assertion works on win32 too. */
 const SENTINEL_NOFOLLOW = 0x4000000
 
+/** The real O_NONBLOCK value on this platform (0 — a no-op OR — on win32). */
+const REAL_O_NONBLOCK = typeof fsConstants.O_NONBLOCK === 'number' ? fsConstants.O_NONBLOCK : 0
+
 /** Minimal FileHandle stand-in: records whether it was closed. */
 function fakeHandle(statResult) {
   return {
@@ -89,7 +93,61 @@ describe('#7280 openNoFollow — POSIX branch keeps O_NOFOLLOW', () => {
     assert.equal(calls.length, 1)
     assert.equal(calls[0].flags & SENTINEL_NOFOLLOW, SENTINEL_NOFOLLOW,
       'the POSIX branch dropped O_NOFOLLOW from the flags — the guard is a no-op')
-    assert.equal(calls[0].flags, fsConstants.O_RDONLY | SENTINEL_NOFOLLOW)
+    assert.equal(calls[0].flags, fsConstants.O_RDONLY | SENTINEL_NOFOLLOW | REAL_O_NONBLOCK)
+  })
+
+  // #7938 — a planted FIFO with no O_NONBLOCK hangs the open() itself,
+  // forever, before ANY post-open isFile() refusal can run. This is the
+  // exact defect class that hit claude-hooks resolveIngestSecret (#7923),
+  // trusted-file-read.js's credential-store read (#7924), and claude-tui's
+  // _hookReadFile (#7926) — three independent sites, one hang each, all
+  // caught only by adversarial review. openNoFollow is the ONE place that
+  // fix now lives, so every caller inherits it.
+  it('the POSIX branch ORs O_NONBLOCK into the flags it passes to open', { skip: process.platform === 'win32' ? 'covered by the forced-win32 cases below' : false }, async () => {
+    assert.notEqual(fsConstants.O_NONBLOCK, undefined,
+      'fsConstants.O_NONBLOCK is undefined on a non-win32 platform — the guard would silently no-op')
+    const calls = []
+    const fh = fakeHandle(statLike())
+    await _openNoFollowImpl('/some/path', fsConstants.O_RDONLY, undefined, {
+      hasONoFollow: true,
+      oNofollow: SENTINEL_NOFOLLOW,
+      platform: 'linux',
+      open: async (p, flags, mode) => { calls.push({ p, flags, mode }); return fh },
+      lstat: async () => { throw new Error('lstat must not be used on the POSIX branch') },
+      fstat: async () => { throw new Error('fstat must not be used on the POSIX branch') },
+    })
+    assert.equal(calls[0].flags & fsConstants.O_NONBLOCK, fsConstants.O_NONBLOCK,
+      'the POSIX branch dropped O_NONBLOCK from the flags — a planted FIFO with no writer would hang open() forever (#7938)')
+  })
+
+  it('a real FIFO planted where a regular file is expected does not hang openNoFollow (#7938)', { skip: process.platform === 'win32' ? 'no mkfifo on win32' : false }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-nofollow-fifo-'))
+    try {
+      const fifoPath = join(dir, 'evil.fifo')
+      execFileSync('mkfifo', [fifoPath])
+      const HANG_GUARD_MS = 2000
+      const start = Date.now()
+      const result = await Promise.race([
+        openNoFollow(fifoPath, fsConstants.O_RDONLY).then(
+          (fh) => ({ outcome: 'resolved', fh }),
+          (err) => ({ outcome: 'rejected', err }),
+        ),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      ])
+      const elapsed = Date.now() - start
+      assert.notEqual(result.outcome, 'hung',
+        `openNoFollow blocked for >= ${HANG_GUARD_MS}ms opening a planted FIFO — the underlying open() needs O_NONBLOCK (#7938)`)
+      assert.ok(elapsed < 1000, `openNoFollow must return promptly for a FIFO (O_NONBLOCK), not block waiting for a writer (elapsed=${elapsed}ms)`)
+      // O_NONBLOCK makes the OPEN return; it is the caller's job to then
+      // refuse a non-regular file via fstat before reading (see reader.js /
+      // memory.js's post-open isFile() checks) — openNoFollow itself has no
+      // opinion on file type, only on symlinks and (now) blocking.
+      if (result.outcome === 'resolved') {
+        await result.fh.close().catch(() => {})
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('the POSIX branch passes mode through unchanged', async () => {

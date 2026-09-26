@@ -1152,6 +1152,69 @@ describe('PermissionManager', () => {
       assert.match(events[0].description, /Spawn MCP server "github"/)
     })
 
+    // #7939: `server.source` names which of the three MCP_SERVER_SOURCE
+    // scopes the spawn config came from, so the trust prompt can distinguish
+    // "your own config" from "a repository you just cloned". It is forwarded
+    // into `input.mcpServer.source` ONLY when it matches the closed roster —
+    // an absent or unrecognized value is dropped, never passed through as
+    // free-form text (the field exists specifically so a client can render a
+    // fixed, trusted vocabulary, not whatever a caller happens to send).
+    describe('server.source forwarding (#7939)', () => {
+      it('forwards a recognized source into input.mcpServer.source (stdio)', () => {
+        const events = []
+        pm.on('permission_request', (e) => events.push(e))
+        pm.requestMcpTrust({ name: 'github', command: 'node', source: 'project-mcp-json' })
+        assert.equal(events[0].input.mcpServer.source, 'project-mcp-json')
+      })
+
+      it('forwards each of the three recognized values', () => {
+        for (const source of ['local', 'project-mcp-json', 'user']) {
+          const events = []
+          pm.on('permission_request', (e) => events.push(e))
+          pm.requestMcpTrust({ name: `x-${source}`, command: 'true', source })
+          assert.equal(events[0].input.mcpServer.source, source)
+        }
+      })
+
+      it('omits source when absent — old caller / cfg built without discovery', () => {
+        const events = []
+        pm.on('permission_request', (e) => events.push(e))
+        pm.requestMcpTrust({ name: 'github', command: 'node' })
+        assert.equal('source' in events[0].input.mcpServer, false)
+      })
+
+      it('drops an unrecognized source rather than passing it through', () => {
+        const events = []
+        pm.on('permission_request', (e) => events.push(e))
+        pm.requestMcpTrust({ name: 'github', command: 'node', source: 'some-attacker-string' })
+        assert.equal('source' in events[0].input.mcpServer, false)
+      })
+
+      it('forwards a recognized source into input.mcpServer.source (remote)', async () => {
+        // No real DNS round-trip: stub the lookup like the #6834 remote-address
+        // tests below do, so this stays fast and network-independent.
+        const pmRemote = createManager({ mcpTrustLookup: async () => [] })
+        // try/finally: destroy() resolves any still-outstanding requestMcpTrust
+        // promise (clearAll auto-denies + clears its timer) — an assertion
+        // failure above must not leave that promise pending on the manager's
+        // multi-minute permission timeout, or the test runner hangs waiting
+        // for it instead of failing fast.
+        try {
+          const events = []
+          pmRemote.on('permission_request', (e) => events.push(e))
+          const promise = pmRemote.requestMcpTrust({ name: 'remote-server', url: 'https://mcp.example.com/sse', headerKeys: [], source: 'user' })
+          // requestMcpTrust awaits DNS resolution before emitting for remote
+          // servers — let the emit land before asserting.
+          await new Promise((r) => setImmediate(r))
+          assert.equal(events[0].input.mcpServer.source, 'user')
+          pmRemote.respondToPermission(events[0].requestId, 'deny')
+          await promise
+        } finally {
+          pmRemote.destroy()
+        }
+      })
+    })
+
     it('resolves to true when respondToPermission says allow', async () => {
       const events = []
       pm.on('permission_request', (e) => events.push(e))
