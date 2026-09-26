@@ -212,6 +212,30 @@ missing/non-object `tool_input`, or an unresolvable cwd all answer `floor: true`
 is deliberately stricter than the in-process path, which receives already-typed
 inputs from the SDK rather than parsing an untrusted HTTP body.
 
+### The verdict on the wire — `permission_request.floored` (#7968)
+
+Every `permission_request` the daemon sends carries `floored: boolean`, so a client can
+tell a prompt the floor forced from an ordinary one. It is computed by the same single
+implementation, never a copy: the in-process pipeline sends the `protectedTarget` its
+short-circuits already used; the hook-routed `POST /permission` calls
+`evaluateHookFloorRequest` — the helper `POST /permission-floor` answers with — anchored
+on the owning session's cwd (an unresolvable session sends `true`). Both reconnect
+resends replay the verdict stashed at creation rather than re-deriving it.
+
+Every hop fails closed: the event normalizer and both resends send anything but an
+explicit `false` as `true`, and `buildPermissionRequestMessage` builds a missing verdict
+as `true` (its callers are plain JS, so its TS signature cannot require one).
+The schema keeps the field **optional** only so a client can parse an older daemon's
+message; a consumer must read an absent `floored` as *unknown*, never as `false`.
+
+**`floored: false` is the path floor's verdict, not a safety verdict.** It says the
+floor did not force this prompt — nothing more. Prompts the floor never inspects are
+always `false`: command-shaped tools (`Bash`, codex `shell` — which can `cat .env`),
+`WebFetch`, an MCP spawn-trust prompt (`mcp_spawn`, a persistent trust grant), and a
+codex sandbox scope escalation (`request_permissions`). Anything that
+answers prompts without a person (e.g. the agent-control MCP) needs its own policy for
+those; `floored` only guarantees it never approves one the floor reserved for a human.
+
 ## 4. Editing the floor — the anti-drift rules
 
 1. **Change `permission-floor.js` and nothing else.** Both call sites import
