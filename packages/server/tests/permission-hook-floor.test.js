@@ -1167,8 +1167,12 @@ describe('anti-drift: the floor has exactly ONE implementation (#7004)', () => {
     }
   })
 
-  it('the pre-filter can only ever OVER-probe: a path-less input is never floored', () => {
-    // The soundness premise, asserted directly against the predicate.
+  it('the pre-filter can only ever OVER-probe: an input carrying none of the floor-inspected selectors is never floored', () => {
+    // The soundness premise, asserted directly against the predicate. It is
+    // about SELECTORS, not paths: since #7978 a path-less Grep IS floorable
+    // through its `glob`, which is why the pre-filter also keys on the
+    // GLOB_SELECTOR_FLOOR_TOOLS names (asserted above). An input with no path
+    // field, no `changes[]` and no `glob` has nothing the floor reads.
     for (const tool of ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'Bash', 'FutureTool']) {
       assert.equal(isFlooredTarget(tool, { command: 'x', url: 'y', query: 'z' }, CWD), false, tool)
     }
