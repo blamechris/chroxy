@@ -1405,8 +1405,17 @@ jobs:
         # packages/server/package.json, independently re-resolving every
         # production dependency to prove the derivation matches what npm
         # itself already resolved.
+        #
+        # Invoked BY NAME with plain `node` (a node:test file runs standalone and
+        # exits non-zero on a failure): ci-scripts-tests-registration.test.js only
+        # recognizes the interpreter immediately followed by the suite. The TAP
+        # count floor is the same guard tool-layout.test.mjs carries — a run that
+        # reports zero or dropped tests must not read as green.
         working-directory: packages/desktop
-        run: node --test scripts/__tests__/derive-server-lockfile.test.mjs
+        run: |
+          set -o pipefail
+          node scripts/__tests__/derive-server-lockfile.test.mjs | tee /tmp/chroxy-derive-lockfile.tap
+          node ../../scripts/lib/assert-test-count.mjs --min 14 cat /tmp/chroxy-derive-lockfile.tap > /dev/null
 
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)
