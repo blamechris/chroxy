@@ -54,7 +54,7 @@ different problem this adapter deliberately does not solve:
 | `chroxy_send_input` | **yes** | Sends text input, returns the daemon's correlated `input_ack` verbatim. Gated on a fresh model-status check when the session has a recorded model expectation (see "Model truth" below). |
 | `chroxy_get_events` | no | Bounded, cursor-based read of a session's retained, normalized event log. |
 | `chroxy_interrupt_session` | **yes** | Best-effort interrupt (the protocol has no correlated ack for this). |
-| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. |
+| `chroxy_respond_permission` | **yes** | Answers an *observed, session-owned* pending permission request with `allow`/`deny` — never `allowAlways`. "Session-owned" means **created by `chroxy_create_session` in this same MCP-server process**; a prompt in any other session (one a human is driving, say) is refused with `reason: 'not_owned'` and left for its owner. |
 
 Under `--read-only`, the four mutation tools (`chroxy_create_session`, `chroxy_send_input`,
 `chroxy_interrupt_session`, `chroxy_respond_permission`) are both **absent from the tool
@@ -81,6 +81,47 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
   `--pin-identity <base64 key>` (or `CHROXY_AGENT_CONTROL_PIN`) refuses a handshake that
   lacks a valid signature over the offered exchange key, or that unexpectedly downgrades to
   no encryption — mirroring the daemon's own anti-downgrade behavior.
+- **A pin does not protect the token.** The bearer token travels in the very first `auth`
+  frame, before any key exchange and therefore before the pin can be checked (see
+  "Auth Token Transmitted Before Encryption" in the
+  [threat model](../security/encryption-threat-model.md)). A pin makes an impersonating
+  endpoint's handshake fail and the session is refused — but by then the impersonator has
+  the token. Only TLS keeps the token off the wire: use `wss://` for any non-loopback
+  `--url`. Over `ws://` to another host, anyone on the path can read the token.
+- **Pinning the local daemon needs `encryptLocalhost`.** A genuine loopback connection gets
+  the daemon's localhost plaintext bypass (same threat-model doc), so `auth_ok` offers no
+  encryption and a pinned client refuses with `IDENTITY_PIN_REQUIRES_ENCRYPTION`. That is
+  the pin failing closed, not a bug; set `encryptLocalhost: true` on the daemon to pin locally.
+- **The local path uses the primary token.** `connection.json` (written `0600`) carries the
+  daemon's primary API token, and this adapter authenticates with it — full host authority
+  per [`bearer-token-authority.md`](../security/bearer-token-authority.md). It does not widen
+  who can obtain that token (any process running as your user can already read the file),
+  but every MCP host you register it with is handed that authority.
+- **Frames that did not come from the authenticated daemon are discarded.** When the daemon
+  requires encryption, a plaintext application frame received during the handshake (before
+  `auth_ok`, or in the discrete key-exchange window) is dropped rather than recorded as an
+  observed permission or event — an on-path injector cannot plant a prompt for the planner
+  to answer. After the handshake, a plaintext frame closes the connection
+  (`ENCRYPTION_DOWNGRADE`).
+
+### Answering permissions is a human-level decision
+
+`chroxy_respond_permission` lets the planner stand where a person would stand. Two limits
+apply, and one of them is a gap:
+
+- **Ownership (enforced).** Only sessions this MCP-server process created can be answered;
+  see the tool table. The set is in memory, so after the MCP-server process restarts its
+  earlier sessions become `not_owned` — their prompts time out and the daemon auto-denies,
+  which fails closed.
+- **The protected-path floor is NOT distinguishable here (gap).** The
+  [permission floor](../security/permission-floor.md) forces a *prompt* — never a deny — for
+  secret reads (`.env`, key material) and for writes into config directories such as
+  `.git/` and `.claude/`, so that a person decides. The daemon's `permission_request` does
+  not currently say that a prompt was floored, so this adapter cannot tell a
+  `.git/hooks/pre-commit` write or a `.env` read from an ordinary prompt, and a planner that
+  answers `allow` approves exactly what the floor exists to put in front of a person. Until the daemon marks floored prompts, register the
+  read-write server only with planners you would trust with that decision, and use
+  `--read-only` otherwise.
 
 ## Running it
 
@@ -247,8 +288,9 @@ contract, proposed first-wave issues, and the durable coordination follow-ups.
 - **One daemon per MCP-server process.** There is no multi-daemon fan-out; running against
   several daemons means running several `chroxy agent-control --stdio` processes.
 - **Local-only by default**, by design (see Security model above).
-- **In-memory state only.** Event log, model expectations, and observed-permission tracking
-  all live in the MCP-server process's memory and are lost if it restarts.
+- **In-memory state only.** Event log, model expectations, session ownership, and
+  observed-permission tracking all live in the MCP-server process's memory and are lost if
+  it restarts.
 
 ## Follow-ups worth filing
 

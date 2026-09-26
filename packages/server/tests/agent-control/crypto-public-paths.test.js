@@ -76,6 +76,13 @@ const forgedRequest = { type: 'permission_request', sessionId: 's1', requestId: 
 const genuineRequest = { type: 'permission_request', sessionId: 's1', requestId: 'genuine', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' } }
 const retainedRequestIds = client => client._eventLog.read('s1').events.filter(e => e.type === 'permission_request').map(e => e.data.requestId)
 const owned = { ownedSessions: new Set(['s1']) }
+// Bound every event wait: an `await once(...)` for an event a regression
+// stops emitting would otherwise HANG the file (green-or-"flake", never red).
+function within(promise, ms, what) {
+  let timer
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for ${what}`)), ms) })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
+}
 test('a signed matching identity pin connects', async t => {
   const { client } = await fixture(t)
   await client.connect()
@@ -184,12 +191,21 @@ test('an unencrypted daemon (no pin) still has its pre-ready permission_request 
   assert.equal(genuine.status, 'resolved', JSON.stringify(genuine))
 })
 
+test('a request resolved inside the same pre-ready window flushes as retired, not as still pending', async t => {
+  const resolved = { type: 'permission_resolved', sessionId: 's1', requestId: 'genuine', decision: 'deny' }
+  const f = await fixture(t, { afterAuthOk: [genuineRequest, resolved], clientOptions: owned })
+  await f.client.connect()
+  assert.deepEqual(retainedRequestIds(f.client), ['genuine'], 'the request itself is still part of the retained history')
+  const late = await f.client.respondPermission('s1', 'genuine', 'allow')
+  assert.equal(late.reason, 'not_observed', 'a request already resolved before ready must not be answerable')
+})
+
 test('a plaintext frame after encryption is established closes the connection as ENCRYPTION_DOWNGRADE', async t => {
   const f = await fixture(t)
   await f.client.connect()
   const failed = once(f.client, 'error')
   f.pushPlain({ type: 'session_list', sessions: [] })
-  const [error] = await failed
+  const [error] = await within(failed, 2000, 'the ENCRYPTION_DOWNGRADE error')
   assert.equal(error.code, 'ENCRYPTION_DOWNGRADE')
   assert.equal(f.client.state, 'closed')
 })
@@ -199,7 +215,7 @@ test('a permission_expired broadcast retires the observation, so a late answer i
   await f.client.connect()
   const processed = once(f.client, 'message')
   f.push({ type: 'permission_expired', sessionId: 's1', requestId: 'genuine' })
-  await processed
+  await within(processed, 2000, 'the permission_expired frame to be processed')
   const late = await f.client.respondPermission('s1', 'genuine', 'allow')
   assert.equal(late.status, 'rejected')
   assert.equal(late.reason, 'not_observed')
