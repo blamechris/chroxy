@@ -147,8 +147,16 @@ export const COMMAND_TOOLS = new Set(['Bash', 'shell', 'PowerShell', 'Monitor'])
 // against ripgrep 15.2.0, `rg --glob=.env -e <pattern> -- <benign-dir>`
 // matches `.env` even WITHOUT `--hidden` — an explicit `--glob` overrides the
 // default hidden-file/`.gitignore` skip that would otherwise protect a
-// dotfile. So `Grep({ path: '<cwd>', glob: '.env', pattern: '.' })` returns
-// live secret bytes while `floored` reads `false`. `Glob` shares the same
+// dotfile. So `Grep({ path: '<cwd>', glob: '.env', pattern: '.' })` returned
+// live secret bytes while `floored` read `false`.
+//
+// #7978 closed that one shape: the floor now inspects Grep's `glob` and floors
+// a glob that can select a secret (permission-floor.js, "Grep's FILE-SELECTING
+// `glob` field"). Grep STAYS excluded, because the floor still cannot see the
+// other half: a Grep with NO glob reads every file under `path` that the ignore
+// rules let through, and a committed (non-gitignored) secret is one of them.
+// `floored: false` on a Grep therefore still means "the path is not a secret",
+// never "nothing this call reads is a secret". `Glob` shares the same
 // blind field but can only ever return a matched PATH NAME (see its
 // `input_schema` and description in byok-tools.js — "Returns sorted file
 // paths"), never file bytes, so it cannot leak secret VALUES; it is excluded

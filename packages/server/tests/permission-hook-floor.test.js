@@ -9,7 +9,7 @@ import { PassThrough } from 'node:stream'
 
 import { createPermissionHandler, evaluateHookFloorRequest } from '../src/ws-permissions.js'
 import { PermissionManager } from '../src/permission-manager.js'
-import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS } from '../src/permission-floor.js'
+import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS, SECRET_READ_FLOOR_TOOLS, GLOB_SELECTOR_FLOOR_TOOLS } from '../src/permission-floor.js'
 
 /**
  * #7004 — the protected-path / secret-read FLOOR on the HOOK permission path.
@@ -420,6 +420,44 @@ describe('permission-hook.sh: the floor forces a PROMPT under auto/acceptEdits (
     assert.equal(decisionOf(stdout).permissionDecision, 'allow')
     assert.equal(daemon.stats.floorRequests, 0, 'a payload with no path-naming field cannot be floored')
     assert.equal(daemon.stats.permissionRequests, 0)
+  })
+
+  // #7978 — a Grep need carry no path field (it then searches the cwd), and its
+  // `glob` is what picks the files it reads. The pre-filter must still hand it
+  // to the daemon, or the floor never sees the glob on this pipeline.
+  it('#7978: auto + a PATH-LESS Grep whose glob selects .env → PROBES and PROMPTS', async () => {
+    daemon = await startRealDaemon({ promptDecision: 'deny' })
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Grep', tool_input: { pattern: 'KEY', glob: '.env' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(daemon.stats.floorRequests, 1, 'a path-less Grep must reach the floor')
+    assert.equal(daemon.stats.permissionRequests, 1, 'its glob floored it into a real prompt')
+    assert.equal(decisionOf(stdout).permissionDecision, 'deny')
+  })
+
+  it('#7978: acceptEdits + a Grep with a benign path and a secret glob → PROMPTS', async () => {
+    daemon = await startRealDaemon({ promptDecision: 'deny' })
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Grep', tool_input: { pattern: 'KEY', path: 'src', glob: '**/.env*' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'acceptEdits',
+    })
+    assert.equal(daemon.stats.permissionRequests, 1)
+    assert.equal(decisionOf(stdout).permissionDecision, 'deny')
+  })
+
+  it('#7978: auto + a path-less Grep with an ordinary glob → probes, clears, still auto-allowed', async () => {
+    daemon = await startRealDaemon()
+    const { stdout } = await runHook({
+      payload: { tool_name: 'Grep', tool_input: { pattern: 'KEY', glob: '*.ts' }, cwd: CWD },
+      port: daemon.port,
+      mode: 'auto',
+    })
+    assert.equal(decisionOf(stdout).permissionDecision, 'allow')
+    assert.equal(daemon.stats.floorRequests, 1, 'the probe ran')
+    assert.equal(daemon.stats.permissionRequests, 0, 'and cleared')
   })
 
   // -- #7043: the pre-filter's completeness guard --
@@ -1113,6 +1151,20 @@ describe('anti-drift: the floor has exactly ONE implementation (#7004)', () => {
     }
     // Nothing else may be treated as path-shaped by the floor itself.
     assert.deepEqual(PROTECTED_PATH_INPUT_FIELDS, ['file_path', 'path', 'notebook_path'])
+  })
+
+  it('#7978: the pre-filter matches every GLOB_SELECTOR_FLOOR_TOOLS name (drift → this fails)', () => {
+    // A glob-inspected tool is floorable with NO path field, so the byte-level
+    // pre-filter must key on the tool's name or it skips the probe.
+    assert.ok(GLOB_SELECTOR_FLOOR_TOOLS.size > 0, 'premise: some tool is glob-inspected')
+    for (const tool of GLOB_SELECTOR_FLOOR_TOOLS) {
+      assert.ok(
+        hookCode.includes(`*'"${tool}"'*`),
+        `permission-hook.sh's floor pre-filter must match "${tool}" (from GLOB_SELECTOR_FLOOR_TOOLS)`,
+      )
+      assert.equal(isFlooredTarget(tool, { pattern: 'x', glob: '.env' }, CWD), true,
+        `premise: a path-less ${tool} with a secret glob IS floored, so the arm is load-bearing`)
+    }
   })
 
   it('the pre-filter can only ever OVER-probe: a path-less input is never floored', () => {

@@ -637,10 +637,21 @@ describe('#7968 WIRE PARITY: both pipelines, a matrix from permission-floor.js\'
       // codex apply_patch shape: a benign top-level file_path, the target in changes[]
       rows.push(['apply_patch', { file_path: root, changes: [{ path: 'src/a.js', kind: 'update' }, { path: target, kind: 'update' }] }])
     }
+    // #7978 — Grep's `glob`, with a benign path and with none: secret-selecting
+    // globs (including one hidden behind Claude Code's whitespace split) and
+    // ordinary extension filters.
+    for (const glob of GREP_GLOBS) {
+      rows.push(['Grep', { pattern: 'KEY', glob }], ['Grep', { pattern: 'KEY', path: 'src', glob }])
+    }
     // path-less tools: nothing the floor can match, on either pipeline
     rows.push(['Bash', { command: 'cat .env' }], ['WebFetch', { url: 'https://example.com/.env' }])
     return rows
   }
+
+  const GREP_GLOBS = [
+    '.env', '*.env', '**/.env*', '.e?v', '.[e]nv', '*', 'sub/*', '*.json', '?.pem', '*.ts .env',
+    '*.ts', '*.{ts,tsx}', '**/*.js', '*.md', '!.env',
+  ]
 
   it('in-process wire === hook-routed wire === isFlooredTarget, for every row', async () => {
     const rows = buildInputs().map(([tool, input]) => [tool, input, isFlooredTarget(tool, input, root)])
@@ -651,6 +662,11 @@ describe('#7968 WIRE PARITY: both pipelines, a matrix from permission-floor.js\'
     const clearCount = rows.filter(([, , e]) => e === false).length
     assert.ok(flooredCount >= 100, `matrix must carry many floored rows (got ${flooredCount})`)
     assert.ok(clearCount >= 100, `matrix must carry many clear rows (got ${clearCount})`)
+    // #7978: the Grep glob rows span both verdicts too, including a PATH-LESS
+    // floored one — the shape the floor used to miss entirely.
+    const grepGlobRows = rows.filter(([tool, input]) => tool === 'Grep' && 'glob' in input)
+    assert.ok(grepGlobRows.some(([, input, e]) => e === true && !('path' in input)), 'a path-less Grep glob row must floor')
+    assert.ok(grepGlobRows.some(([, , e]) => e === false), 'a Grep glob row must stay clear')
     if (withSymlinks) {
       assert.equal(isFlooredTarget('Write', { file_path: 'hookslink/../config' }, root), true,
         'fixture sanity: a `..` after a symlink into .git/hooks must floor')

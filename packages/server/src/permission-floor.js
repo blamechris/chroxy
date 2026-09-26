@@ -63,6 +63,11 @@ const SECRET_FILE_EXACT = new Set([
   '.npmrc', '.pgpass', '.netrc',                // credential dotfiles
 ])
 const SECRET_FILE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx']
+// The env-file family: exactly `.env`, or `.env.` followed by anything. Named so
+// the #7978 glob analysis below builds its templates from the same two spellings
+// isSecretFileSegment tests, rather than from a second copy of them.
+const ENV_FILE_NAME = '.env'
+const ENV_FILE_PREFIX = '.env.'
 
 // Tool-input fields that name a filesystem target. Presence of one is what
 // makes a tool "path-carrying" for the floor (Write/Edit → file_path,
@@ -89,7 +94,7 @@ export const SECRET_READ_FLOOR_TOOLS = new Set(['Read', 'Glob', 'Grep'])
  * @returns {boolean}
  */
 function isSecretFileSegment(seg) {
-  if (seg === '.env' || seg.startsWith('.env.')) return true
+  if (seg === ENV_FILE_NAME || seg.startsWith(ENV_FILE_PREFIX)) return true
   if (SECRET_FILE_EXACT.has(seg)) return true
   for (const ext of SECRET_FILE_EXTENSIONS) {
     if (seg.length > ext.length && seg.endsWith(ext)) return true
@@ -118,17 +123,27 @@ function isSecretFileSegment(seg) {
  * @returns {boolean}
  */
 function isCredentialConfigSegment(segments, i) {
-  const seg = segments[i]
-  // .git/config (PAT-embedded remote URLs) and .git/credentials (git store).
-  if (seg === '.git' && (segments[i + 1] === 'config' || segments[i + 1] === 'credentials')) return true
-  // XDG git: .config/git/config and .config/git/credentials.
-  if (seg === '.config' && segments[i + 1] === 'git' &&
-      (segments[i + 2] === 'config' || segments[i + 2] === 'credentials')) return true
+  // .git/config (PAT-embedded remote URLs), .git/credentials (git store), and
+  // the XDG equivalents under .config/git/.
+  for (const sequence of CREDENTIAL_CONFIG_SEQUENCES) {
+    if (sequence.every((name, k) => segments[i + k] === name)) return true
+  }
   // .claude/settings*.json (settings.json / settings.local.json — may hold keys).
   const child = segments[i + 1]
-  if (seg === '.claude' && typeof child === 'string' && child.startsWith('settings') && child.endsWith('.json')) return true
+  if (segments[i] === CLAUDE_SETTINGS_DIR && typeof child === 'string' &&
+      child.startsWith(CLAUDE_SETTINGS_PREFIX) && child.endsWith(CLAUDE_SETTINGS_SUFFIX)) return true
   return false
 }
+
+// The credential-dense config files above, as data (#7978) so the Grep glob
+// analysis derives its templates from the same spellings this matcher uses.
+const CREDENTIAL_CONFIG_SEQUENCES = [
+  ['.git', 'config'], ['.git', 'credentials'],
+  ['.config', 'git', 'config'], ['.config', 'git', 'credentials'],
+]
+const CLAUDE_SETTINGS_DIR = '.claude'
+const CLAUDE_SETTINGS_PREFIX = 'settings'
+const CLAUDE_SETTINGS_SUFFIX = '.json'
 
 // #6851 — depth ceiling for the sync deepest-ancestor realpath walk. Absolute
 // paths never legitimately nest this deep; the cap only guards a pathological /
@@ -426,6 +441,412 @@ function _matchesFloor(input, cwd, secretsOnly) {
   return false
 }
 
+// ---------------------------------------------------------------------------
+// #7978 — Grep's FILE-SELECTING `glob` field.
+//
+// The path fields above say WHERE a Grep searches; `glob` says WHICH FILES in
+// there it reads, and it is the stronger of the two. Every Grep implementation
+// Chroxy fronts runs ripgrep, and an include glob OVERRIDES ripgrep's ignore
+// rules: `rg --glob=.env -e X -- .` reads a gitignored `.env`, and so do `*`,
+// `**`, `sub/*`, `.e?v` and `*env*`. Claude Code's own Grep always passes
+// `--hidden`, so ripgrep's hidden-file filter is no barrier there; `.gitignore`
+// is the only one, and a glob walks straight through it. `*.json` is the
+// ordinary case, not the exotic one: it reads the `.claude/settings.local.json`
+// that Claude Code gitignores by default. Measured with ripgrep 15.2.0.
+//
+// Scanning only `path` therefore let `Grep({path: '.', glob: '.env'})` read
+// secrets while the floor answered "not floored", and a lenient mode then
+// auto-approved it.
+//
+// WHAT FLOORS. A glob is taken apart the way ripgrep takes it (brace
+// alternatives, `*`, `**`, `?`, `[...]` classes, `\` escapes; a pattern without
+// a `/` matches a basename at any depth) and intersected with TEMPLATES built
+// from the floor's own name sets above. It floors when it can match:
+//   (a) an EXACT secret path, however it gets there: `.env`, SECRET_FILE_EXACT,
+//       the CREDENTIAL_CONFIG_SEQUENCES, `.claude/settings{,.local}.json`, plus
+//       the common real-world names in the two witness lists below. `*`, `**`,
+//       `sub/*`, `*.json` and `*test*` all floor here;
+//   (b) a member of a secret FAMILY — `.env.<tail>`, `<stem><secret ext>`,
+//       `.claude/settings<mid>.json` — PROVIDED at least one character of the
+//       family's defining part (`.env`, the extension, the settings skeleton) is
+//       matched by something other than `*`/`**`. `.[e]nv.*`, `.env.????`,
+//       `?.pem` and `*v.*` floor here.
+//
+// THE ONE ACCEPTED RESIDUAL, stated because (b) is where it lives. `*.ts` can
+// match `.env.ts`, a name the floor counts as a secret. It does so only by
+// letting `*` swallow the whole of `.env`, so it does not floor: a strictly
+// sound rule would floor every extension filter (`*.ts`, `*.py`) and prompt on
+// nearly every globbed Grep in a lenient mode. What still gets through is an
+// extension or stem filter aimed at a GITIGNORED secret whose name is none of
+// the witnesses — `*.ts` reading a gitignored `.env.ts`. The witness lists
+// exist to keep that set to unusual names.
+//
+// NOT COVERED, and not this field's job: a Grep with no glob reads every file
+// the ignore rules let through, secrets included when they are not gitignored.
+// That is the directory-grep limit of a path floor, unchanged here. Grep's
+// `type` field is not inspected because ripgrep's type filters RESPECT
+// `.gitignore` (measured: `-t sh` does not read a gitignored `.env`, though the
+// `sh` type lists it), so they select nothing a plain Grep does not. Glob's
+// `pattern` is not inspected either: it returns names, never contents.
+
+/**
+ * Tools whose input carries a file-selecting `glob` the floor inspects. The
+ * shell hook's negative pre-filter keys on these NAMES (a `"Grep"` payload must
+ * reach the daemon even with no path field) — tests/permission-hook-floor.test.js
+ * asserts the hook matches every member.
+ */
+export const GLOB_SELECTOR_FLOOR_TOOLS = new Set(['Grep'])
+
+// Common real-world secret names that only a (b)-exempt glob — one that
+// constrains the tail or the stem, not the defining part — could otherwise
+// reach. Each must be a secret by the floor's OWN predicate (asserted in
+// tests/permission-floor-grep-glob.test.js), so this list can only ever add
+// floors to names the floor already protects; it cannot widen what counts as a
+// secret. Missing a name here reopens only the residual described above.
+const ENV_TAIL_WITNESSES = [
+  'local', 'development', 'production', 'test', 'staging', 'dev', 'prod',
+  'example', 'sample', 'ci', 'qa', 'uat', 'preview', 'backup', 'bak', 'old',
+  'secret', 'secrets', 'docker', 'development.local', 'production.local', 'test.local',
+]
+const KEY_STEM_WITNESSES = ['server', 'private', 'privkey', 'key', 'cert', 'fullchain', 'tls', 'client', 'ca', 'id']
+
+/**
+ * The floor's secret-name sets, read-only, so tests can derive their corpus
+ * from the floor instead of restating it (tests/permission-floor-grep-glob.test.js).
+ */
+export const FLOOR_SECRET_NAMES = Object.freeze({
+  envName: ENV_FILE_NAME,
+  envPrefix: ENV_FILE_PREFIX,
+  exact: Object.freeze([...SECRET_FILE_EXACT]),
+  extensions: Object.freeze([...SECRET_FILE_EXTENSIONS]),
+  credentialConfigPaths: Object.freeze(CREDENTIAL_CONFIG_SEQUENCES.map((sequence) => sequence.join('/'))),
+  claudeSettings: Object.freeze({ dir: CLAUDE_SETTINGS_DIR, prefix: CLAUDE_SETTINGS_PREFIX, suffix: CLAUDE_SETTINGS_SUFFIX }),
+  envTailWitnesses: Object.freeze([...ENV_TAIL_WITNESSES]),
+  keyStemWitnesses: Object.freeze([...KEY_STEM_WITNESSES]),
+})
+
+// Bounds on the analysis. Past any one the glob FLOORS (fail closed): a
+// pathological glob is not something to analyze at length on the hot path.
+// Measured at these caps: ~10ms for the slowest shapes tried (a 1000-character
+// run of `*a`, 64 brace alternatives), against ~0.1ms for an ordinary glob.
+const GLOB_FLOOR_MAX_LENGTH = 1024
+const GLOB_FLOOR_MAX_ALTERNATIVES = 64
+const GLOB_FLOOR_MAX_EXPANDED_LENGTH = 4096
+
+let _globFloorTemplates = null
+
+/**
+ * The templates a Grep glob is intersected with, built once from the floor's
+ * own sets. A template is a list of elements over a lowercased path:
+ *   { kind: 'lit', ch, core }  one fixed character (`core`: part of a family's
+ *                               defining text, see (b) above)
+ *   { kind: 'one' }            exactly one non-`/` character
+ *   { kind: 'star', slash }    any run of characters (`/` too when `slash`)
+ * Every template also gets an any-directory-prefix variant, because a secret can
+ * sit at any depth under the searched root.
+ * @returns {{ elems: object[], requireCore: boolean }[]}
+ */
+function globFloorTemplates() {
+  if (_globFloorTemplates) return _globFloorTemplates
+  const lit = (text, core) => [...text].map((ch) => ({ kind: 'lit', ch, core }))
+  const oneOrMore = [{ kind: 'one' }, { kind: 'star', slash: false }]
+  const base = []
+  const exact = (path) => base.push({ elems: lit(path, false), requireCore: false })
+
+  exact(ENV_FILE_NAME)
+  for (const name of SECRET_FILE_EXACT) exact(name)
+  for (const sequence of CREDENTIAL_CONFIG_SEQUENCES) exact(sequence.join('/'))
+  for (const name of ['', '.local']) {
+    exact(`${CLAUDE_SETTINGS_DIR}/${CLAUDE_SETTINGS_PREFIX}${name}${CLAUDE_SETTINGS_SUFFIX}`)
+  }
+  for (const tail of ENV_TAIL_WITNESSES) exact(ENV_FILE_PREFIX + tail)
+  for (const stem of KEY_STEM_WITNESSES) {
+    for (const ext of SECRET_FILE_EXTENSIONS) exact(stem + ext)
+  }
+
+  // Families. The `.` that ends ENV_FILE_PREFIX is a separator, not part of the
+  // env-ness, so it is NOT core — otherwise `*.ts` would spell it and floor.
+  base.push({
+    elems: [...lit(ENV_FILE_NAME, true), ...lit('.', false), ...oneOrMore],
+    requireCore: true,
+  })
+  for (const ext of SECRET_FILE_EXTENSIONS) {
+    base.push({ elems: [...oneOrMore, ...lit(ext, true)], requireCore: true })
+  }
+  base.push({
+    elems: [
+      ...lit(`${CLAUDE_SETTINGS_DIR}/${CLAUDE_SETTINGS_PREFIX}`, true),
+      { kind: 'star', slash: false },
+      ...lit(CLAUDE_SETTINGS_SUFFIX, true),
+    ],
+    requireCore: true,
+  })
+
+  const anyDirectory = [{ kind: 'star', slash: true }, { kind: 'lit', ch: '/', core: false }]
+  _globFloorTemplates = base.flatMap((t) => [t, { elems: [...anyDirectory, ...t.elems], requireCore: t.requireCore }])
+  return _globFloorTemplates
+}
+
+/**
+ * Expand `{a,b}` alternatives (nested too), the way ripgrep's globset does.
+ * Returns null past {@link GLOB_FLOOR_MAX_ALTERNATIVES}, which the caller
+ * treats as floored. A `{` with no matching `}` or no top-level comma is left
+ * as literal text: ripgrep either treats it the same way or rejects the glob
+ * and reads nothing, and literal braces can never spell a secret name.
+ * @param {string} glob
+ * @returns {string[] | null}
+ */
+function expandGlobBraces(glob) {
+  let open = -1
+  for (let i = 0; i < glob.length; i++) {
+    if (glob[i] === '\\') { i++; continue }
+    if (glob[i] === '{') { open = i; break }
+  }
+  if (open === -1) return [glob]
+  let depth = 0
+  const commas = []
+  let close = -1
+  for (let i = open; i < glob.length; i++) {
+    const ch = glob[i]
+    if (ch === '\\') { i++; continue }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) { close = i; break }
+    } else if (ch === ',' && depth === 1) commas.push(i)
+  }
+  if (close === -1 || commas.length === 0) {
+    // Literal `{`: keep it and expand whatever follows it.
+    const rest = expandGlobBraces(glob.slice(open + 1))
+    return rest === null ? null : rest.map((r) => glob.slice(0, open + 1) + r)
+  }
+  const head = glob.slice(0, open)
+  const tail = glob.slice(close + 1)
+  const bounds = [open, ...commas, close]
+  const out = []
+  for (let k = 0; k < bounds.length - 1; k++) {
+    const expanded = expandGlobBraces(head + glob.slice(bounds[k] + 1, bounds[k + 1]) + tail)
+    if (expanded === null) return null
+    out.push(...expanded)
+    if (out.length > GLOB_FLOOR_MAX_ALTERNATIVES) return null
+  }
+  return out
+}
+
+/**
+ * Tokenize one brace-free glob alternative. Where the parse is uncertain it
+ * OVER-approximates — a token that admits more characters can only add floors:
+ * `**` anywhere is a cross-directory wildcard (and swallows a following `/`, so
+ * `a/**\/b` still matches `a/b`), and an unterminated `[` admits any character.
+ * Literals keep their case; matching lowercases them (see {@link _tokenAdmits}).
+ * @param {string} glob
+ * @returns {object[]}
+ */
+function tokenizeGlob(glob) {
+  const tokens = []
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]
+    if (ch === '\\' && i + 1 < glob.length) {
+      tokens.push({ kind: 'lit', ch: glob[++i] })
+    } else if (ch === '*') {
+      if (glob[i + 1] === '*') {
+        i++
+        while (glob[i + 1] === '*') i++
+        if (glob[i + 1] === '/') i++
+        tokens.push({ kind: 'globstar' })
+      } else {
+        tokens.push({ kind: 'star' })
+      }
+    } else if (ch === '?') {
+      tokens.push({ kind: 'any' })
+    } else if (ch === '[') {
+      const parsed = parseGlobClass(glob, i)
+      if (parsed) {
+        tokens.push(parsed.token)
+        i = parsed.end
+      } else {
+        tokens.push({ kind: 'any' })
+      }
+    } else {
+      tokens.push({ kind: 'lit', ch })
+    }
+  }
+  return tokens
+}
+
+/**
+ * Parse a `[...]` class starting at `start`. `!` or `^` first negates; a `]`
+ * first is a member; `a-z` is a range; `\x` is a member. Returns null when the
+ * class never closes.
+ * @returns {{ token: object, end: number } | null}
+ */
+function parseGlobClass(glob, start) {
+  let i = start + 1
+  let negated = false
+  if (glob[i] === '!' || glob[i] === '^') { negated = true; i++ }
+  const ranges = []
+  let first = true
+  for (; i < glob.length; i++) {
+    let ch = glob[i]
+    if (ch === ']' && !first) return { token: { kind: 'class', negated, ranges }, end: i }
+    first = false
+    if (ch === '\\' && i + 1 < glob.length) ch = glob[++i]
+    if (glob[i + 1] === '-' && i + 2 < glob.length && glob[i + 2] !== ']') {
+      let hi = glob[i + 2]
+      i += 2
+      if (hi === '\\' && i + 1 < glob.length) hi = glob[++i]
+      ranges.push([ch, hi])
+    } else {
+      ranges.push([ch, ch])
+    }
+  }
+  return null
+}
+
+let _foldsToAscii = null
+
+/**
+ * Every character a file name could carry where the floor's lowercased scan
+ * sees `ch`: `ch` itself, its uppercase, and any other code unit whose
+ * lowercase is `ch` (U+212A KELVIN SIGN lowercases to `k`). Built once.
+ * @param {string} ch  a lowercase ASCII template character
+ * @returns {string[]}
+ */
+function _caseVariants(ch) {
+  if (_foldsToAscii === null) {
+    _foldsToAscii = new Map()
+    for (let cp = 0x80; cp <= 0xffff; cp++) {
+      const lower = String.fromCharCode(cp).toLowerCase()
+      if (lower.length !== 1 || lower.charCodeAt(0) >= 0x80) continue
+      if (!_foldsToAscii.has(lower)) _foldsToAscii.set(lower, [])
+      _foldsToAscii.get(lower).push(String.fromCharCode(cp))
+    }
+  }
+  return [ch, ch.toUpperCase(), ...(_foldsToAscii.get(ch) || [])]
+}
+
+/**
+ * Can glob token `tok` consume the (lowercase) template character `ch`? The
+ * floor lowercases names, so a secret may be spelled in any case: a literal
+ * admits `ch` when it lowercases to it, and a class admits `ch` when it admits
+ * any of its {@link _caseVariants} (a NEGATED class: when it excludes any).
+ */
+function _tokenAdmits(tok, ch) {
+  switch (tok.kind) {
+    case 'lit': return tok.ch.toLowerCase() === ch
+    case 'any': case 'star': return ch !== '/'
+    case 'globstar': return true
+    case 'class': {
+      if (ch === '/') return false
+      const inClass = (v) => tok.ranges.some(([lo, hi]) => v >= lo && v <= hi)
+      const variants = _caseVariants(ch)
+      return tok.negated ? variants.some((v) => !inClass(v)) : variants.some(inClass)
+    }
+    default: return true
+  }
+}
+
+/**
+ * Is there a string that both the glob `tokens` and template `t` match — and,
+ * when `t.requireCore`, one where some `core` character is consumed by a token
+ * other than `*`/`**`? A search over (glob position, template position, core
+ * seen) — at most (|tokens|+1) x (|template|+1) x 2 states.
+ */
+function _globMatchesTemplate(tokens, t) {
+  const elems = t.elems
+  const G = tokens.length
+  const T = elems.length
+  const seen = new Uint8Array((G + 1) * (T + 1) * 2)
+  const stack = [0, 0, 0]
+  while (stack.length > 0) {
+    const core = stack.pop()
+    const ti = stack.pop()
+    const gi = stack.pop()
+    const key = (gi * (T + 1) + ti) * 2 + core
+    if (seen[key]) continue
+    seen[key] = 1
+    if (gi === G && ti === T && (core === 1 || !t.requireCore)) return true
+    const g = gi < G ? tokens[gi] : null
+    const e = ti < T ? elems[ti] : null
+    const gRepeats = g !== null && (g.kind === 'star' || g.kind === 'globstar')
+    // A wildcard on either side may match nothing.
+    if (gRepeats) stack.push(gi + 1, ti, core)
+    if (e !== null && e.kind === 'star') stack.push(gi, ti + 1, core)
+    if (g === null || e === null) continue
+    // Or both consume one character.
+    let joint
+    if (e.kind === 'lit') joint = _tokenAdmits(g, e.ch)
+    else if (e.kind === 'star' && e.slash) joint = true
+    else joint = g.kind !== 'lit' || g.ch !== '/'
+    if (!joint) continue
+    const nextCore = (core === 1 || (e.kind === 'lit' && e.core && !gRepeats)) ? 1 : 0
+    stack.push(gRepeats ? gi : gi + 1, e.kind === 'star' ? ti : ti + 1, nextCore)
+  }
+  return false
+}
+
+/**
+ * #7978 — can a single ripgrep glob select a secret file? See the section
+ * comment above for exactly what floors and the one accepted residual. A
+ * negated (`!`) glob only excludes, so it never floors. Too long, or too many
+ * brace alternatives, and it floors without being analyzed.
+ * @param {string} glob
+ * @returns {boolean}
+ */
+export function globSelectsSecret(glob) {
+  if (typeof glob !== 'string') return true
+  if (glob.length === 0) return false
+  if (glob.length > GLOB_FLOOR_MAX_LENGTH) return true
+  if (glob.startsWith('!')) return false
+  const alternatives = expandGlobBraces(glob)
+  if (alternatives === null) return true
+  if (alternatives.reduce((sum, alt) => sum + alt.length, 0) > GLOB_FLOOR_MAX_EXPANDED_LENGTH) return true
+  const templates = globFloorTemplates()
+  for (let alt of alternatives) {
+    // Anchors: ripgrep roots a leading `/` at the search root, and `./` names
+    // the same place. Both only narrow where a match can sit; drop them.
+    while (alt.startsWith('/') || alt.startsWith('./')) alt = alt.startsWith('/') ? alt.slice(1) : alt.slice(2)
+    if (alt.length === 0) continue
+    const tokens = tokenizeGlob(alt)
+    // Without a `/`, ripgrep matches the basename at any depth: try the glob
+    // both against a top-level name and behind an arbitrary directory.
+    const variants = alt.includes('/')
+      ? [tokens]
+      : [tokens, [{ kind: 'globstar' }, { kind: 'lit', ch: '/' }, ...tokens]]
+    for (const variant of variants) {
+      for (const t of templates) {
+        if (_globMatchesTemplate(variant, t)) return true
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * #7978 — do a Grep input's `glob` values select a secret? Claude Code splits
+ * the field on whitespace and then on commas (unless the piece holds a `{...}`
+ * group) and passes each piece as its own `--glob`; the BYOK executor passes
+ * the whole string as ONE `--glob`. Both readings are checked, and either one
+ * flooring floors the input. A `glob` that is present but not a string floors:
+ * the floor cannot say what an executor would make of it.
+ * @param {object} input
+ * @returns {boolean}
+ */
+function grepGlobFloored(input) {
+  const glob = input.glob
+  if (glob === undefined || glob === null) return false
+  if (typeof glob !== 'string') return true
+  const readings = new Set([glob])
+  for (const piece of glob.split(/\s+/)) {
+    if (piece.includes('{') && piece.includes('}')) readings.add(piece)
+    else for (const part of piece.split(',')) readings.add(part)
+  }
+  for (const reading of readings) {
+    if (globSelectsSecret(reading)) return true
+  }
+  return false
+}
+
 /**
  * #7004 — the floor decision for ONE (tool, input) pair: the tool-aware choice
  * between the read floor and the full write floor, plus the predicate itself.
@@ -449,7 +870,9 @@ function _matchesFloor(input, cwd, secretsOnly) {
  * @returns {boolean} true when the target is floored (prompt required)
  */
 export function isFlooredTarget(toolName, input, cwd) {
-  return SECRET_READ_FLOOR_TOOLS.has(toolName)
-    ? isSecretReadTarget(input, cwd)
-    : isProtectedPathTarget(input, cwd)
+  if (!SECRET_READ_FLOOR_TOOLS.has(toolName)) return isProtectedPathTarget(input, cwd)
+  if (isSecretReadTarget(input, cwd)) return true
+  // #7978 — Grep's `glob` picks WHICH files it reads, overriding .gitignore.
+  return GLOB_SELECTOR_FLOOR_TOOLS.has(toolName) &&
+    input !== null && typeof input === 'object' && grepGlobFloored(input)
 }
