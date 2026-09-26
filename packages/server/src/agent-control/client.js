@@ -91,8 +91,14 @@ const SERIAL_REPLY_TYPES = {
 // `_dispatch`'s pre-ready buffer. Deliberately narrow: a `permission_request`
 // for an already-pending permission is real state this client must not lose,
 // not "login replay noise" to discard along with everything else the fence
-// exists to drain.
-const PRE_READY_BUFFERED_TYPES = new Set(['permission_request'])
+// exists to drain. Its two terminal counterparts are buffered too, so a
+// request that is resolved/expired inside the same pre-ready window is
+// replayed in order and does not flush as still-pending.
+//
+// Buffered frames are NOT trusted on arrival: each carries whether it
+// arrived under the connection key, and the flush discards the unencrypted
+// ones when the daemon turned out to require encryption (see `connect()`).
+const PRE_READY_BUFFERED_TYPES = new Set(['permission_request', 'permission_resolved', 'permission_expired'])
 const MAX_PRE_READY_BUFFER = 100
 
 /** A mutation was requested while the client is in read-only mode. */
@@ -396,9 +402,27 @@ export class AgentControlClient extends EventEmitter {
       // Flush anything the fence buffered (see PRE_READY_BUFFERED_TYPES)
       // through the SAME path a live message takes, now that `reset()` has
       // minted the fresh epoch they'll be recorded under.
+      //
+      // A daemon that requires encryption sends every application frame
+      // under the connection key (eager: from the frame after auth_ok;
+      // discrete: nothing until key_exchange_ok), so a PLAINTEXT application
+      // frame buffered during the handshake did not come from the daemon we
+      // authenticated — it is an on-path injection (the pre-auth_ok window,
+      // or the discrete key-exchange window). Identity pinning authenticates
+      // the exchange key, not frames that were never under it; recording
+      // such a frame as an observed permission would let an injector plant a
+      // request (with a description of its choosing) that this client would
+      // then answer. Drop it instead.
       const buffered = this._preReadyBuffer
       this._preReadyBuffer = []
-      for (const msg of buffered) this._processReadyMessage(msg)
+      for (const { msg, authenticated } of buffered) {
+        if (this._encryptionRequired && !authenticated) {
+          this._log(`dropping a plaintext '${msg.type}' frame received before the encrypted handshake completed — not authenticated by the daemon`)
+          continue
+        }
+        this._trackPermissionObservation(msg)
+        this._processReadyMessage(msg)
+      }
       this.emit('ready', this.daemonInfo)
     } catch (err) {
       this._state = 'error'
@@ -1053,6 +1077,9 @@ export class AgentControlClient extends EventEmitter {
     }
     if (!msg || typeof msg !== 'object') return
 
+    // True only for a frame that decrypted under the connection key — i.e.
+    // one the daemon we key-exchanged with actually sent.
+    let authenticated = false
     if (msg.type === 'encrypted') {
       if (!this._encryptionState) {
         this._log('received encrypted frame before key exchange completed — dropping')
@@ -1061,6 +1088,7 @@ export class AgentControlClient extends EventEmitter {
       try {
         msg = decrypt(msg, this._encryptionState.sharedKey, this._encryptionState.recvNonce, DIRECTION_SERVER)
         this._encryptionState.recvNonce++
+        authenticated = true
       } catch (err) {
         // Tamper or replay (Poly1305 MAC failure, or nonce mismatch) —
         // per the documented contract this is a hard failure: close the
@@ -1081,22 +1109,25 @@ export class AgentControlClient extends EventEmitter {
       return
     }
 
-    this._dispatch(msg)
+    this._dispatch(msg, authenticated)
   }
 
-  _dispatch(msg) {
-    // `permission_request` observation starts the instant we SEE it,
-    // independent of handshake state — a permission that arrived as part of
-    // the post-auth replay burst (an existing session already had one
-    // pending) is real, observed, pending state, not "login replay noise".
-    // Tracking it here (not only in `_processReadyMessage`) means it is
-    // already known by the time `respondPermission` could ever be called.
+  /**
+   * Record/retire a pending permission this client has OBSERVED. Called for
+   * every live (ready-state) message, and for each pre-ready buffered message
+   * that survives the flush's authentication filter — never directly on a
+   * pre-ready arrival, because at that point the frame's provenance is not
+   * yet known (see `connect()`'s flush).
+   */
+  _trackPermissionObservation(msg) {
     if (msg.type === 'permission_request' && typeof msg.requestId === 'string' && msg.sessionId) {
       this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now() })
     } else if ((msg.type === 'permission_resolved' || msg.type === 'permission_expired') && typeof msg.requestId === 'string') {
       this._observedPermissions.delete(msg.requestId)
     }
+  }
 
+  _dispatch(msg, authenticated = false) {
     if (this._state !== 'ready') {
       // During the handshake/startup fence, request/response correlation
       // (input acks, list/create/subscribe replies) is deliberately BLIND —
@@ -1104,17 +1135,25 @@ export class AgentControlClient extends EventEmitter {
       // broadcasts the daemon replays right after auth (most importantly
       // `permission_request` for an already-pending permission) are real and
       // must not be silently lost just because they arrived before the
-      // fence's `pong`. Buffer them (bounded) and flush through the same
-      // path a live message takes, immediately after `reset()` mints the
-      // fresh epoch they'll be recorded under.
+      // fence's `pong`. Buffer them (bounded), tagged with whether they
+      // arrived under the connection key, and flush through the same path a
+      // live message takes — observation included — immediately after
+      // `reset()` mints the fresh epoch they'll be recorded under.
+      // `respondPermission` requires the ready state, so deferring the
+      // observation to the (synchronous) flush cannot make a real pending
+      // request unanswerable.
       if (PRE_READY_BUFFERED_TYPES.has(msg.type)) {
         if (this._preReadyBuffer.length >= MAX_PRE_READY_BUFFER) this._preReadyBuffer.shift()
-        this._preReadyBuffer.push(msg)
+        this._preReadyBuffer.push({ msg, authenticated })
       }
       this.emit('_handshake', msg)
       return
     }
 
+    // Ready state: a plaintext frame on an encryption-required connection
+    // never gets here (`_onRawMessage` fails the connection first), so every
+    // message reaching this point is as authenticated as the connection is.
+    this._trackPermissionObservation(msg)
     this._processReadyMessage(msg)
   }
 
