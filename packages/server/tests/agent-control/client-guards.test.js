@@ -47,7 +47,7 @@ describe('permission routing (real server-side resolver)', () => {
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
 
     const first = await client.getEvents('perm-a')
@@ -65,6 +65,34 @@ describe('permission routing (real server-side resolver)', () => {
     const again = await client.respondPermission('perm-a', 'real-pending', 'deny')
     assert.equal(again.status, 'rejected')
     assert.equal(calls.length, 1, 'a second reply to an already-resolved requestId must never reach the provider')
+  })
+
+  it('refuses an observed permission for a session this process did not create (not_owned), leaving the prompt pending for its owner', async () => {
+    // A primary-token connection can SEE every session's prompts (it may
+    // subscribe to any of them), so "observed" alone would let a planner
+    // approve a prompt in a session a human is driving. Only sessions this
+    // process created are the planner's to answer.
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'human-a', cwd: '/tmp', provider: 'claude-sdk' }])
+    const calls = []
+    sessionsMap.get('human-a').session.respondToPermission = (requestId, decision) => {
+      calls.push([requestId, decision])
+      return true
+    }
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true })
+    await client.connect()
+
+    const first = await client.getEvents('human-a')
+    const waiting = client.getEvents('human-a', { cursor: first.cursor, waitMs: 500 })
+    manager.emit('session_event', { sessionId: 'human-a', event: 'permission_request', data: { requestId: 'human-pending', tool: 'Write', input: { file_path: '/tmp/fixture' }, remainingMs: 5000 } })
+    assert.ok((await waiting).events.some((e) => e.type === 'permission_request' && e.data.requestId === 'human-pending'), 'the request must be OBSERVED, so the refusal below is the ownership gate and not not_observed')
+
+    const result = await client.respondPermission('human-a', 'human-pending', 'allow')
+    assert.equal(result.status, 'rejected', JSON.stringify(result))
+    assert.equal(result.reason, 'not_owned')
+    assert.deepEqual(calls, [], 'the provider must never see a decision for a session this process does not own')
+    assert.equal(server._permissionSessionMap.get('human-pending'), 'human-a', 'the prompt must stay pending for its owner')
   })
 
   it('respondPermission refuses decision "allowAlways" before any network I/O', async () => {
@@ -89,7 +117,7 @@ describe('permission routing (real server-side resolver)', () => {
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
     const port = await startServerAndGetPort(server)
-    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true })
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
     try {
       const first = await client.getEvents('perm-a')
@@ -254,6 +282,23 @@ describe('createSession positive fixture (mock provider/manager — no real spaw
     assert.equal(result.modelStatus.observed, 'claude-sonnet-5')
     assert.equal(result.modelStatus.mismatch, false)
     assert.equal(result.modelStatus.unknown, false)
+
+    // A session this process CREATED is its own to answer: the ownership
+    // gate (see the not_owned test) admits it end to end, through the real
+    // server-side resolver, with no seeded ownership.
+    const calls = []
+    sessionsMap.get('sess-new-1').session.respondToPermission = (requestId, decision) => {
+      calls.push([requestId, decision])
+      manager.emit('session_event', { sessionId: 'sess-new-1', event: 'permission_resolved', data: { requestId, decision, reason: 'user' } })
+      return true
+    }
+    const before = await client.getEvents('sess-new-1')
+    const waiting = client.getEvents('sess-new-1', { cursor: before.cursor, waitMs: 500 })
+    manager.emit('session_event', { sessionId: 'sess-new-1', event: 'permission_request', data: { requestId: 'created-pending', tool: 'Read', input: { file_path: `${homeCwd}/fixture` }, remainingMs: 5000 } })
+    assert.ok((await waiting).events.some((e) => e.type === 'permission_request' && e.data.requestId === 'created-pending'))
+    const answered = await client.respondPermission('sess-new-1', 'created-pending', 'deny')
+    assert.equal(answered.status, 'resolved', JSON.stringify(answered))
+    assert.deepEqual(calls, [['created-pending', 'deny']])
   })
 })
 
@@ -533,7 +578,13 @@ describe('tamper / auth failure handling', () => {
     // this assertion directly rather than only being caught by a downstream
     // timeout on `errorSeen`.
     assert.equal(client.state, 'closed', 'state must already be closed synchronously after the tampered frame is processed')
-    const [err] = await errorSeen
+    // Bounded: a regression that closes but stops emitting 'error' must go
+    // red here, not hang the whole file on an event that never comes.
+    let deadline
+    const [err] = await Promise.race([
+      errorSeen,
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('no DECRYPTION_FAILED error event within 2000ms')), 2000) }),
+    ]).finally(() => clearTimeout(deadline))
     assert.equal(err.code, 'DECRYPTION_FAILED')
   })
 })

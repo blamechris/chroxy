@@ -184,6 +184,9 @@ export function redactPublicText(text, token) {
  * @property {Map} [modelExpectations] - injection seam so a caller managing
  *   reconnects (multiple client instances over time) can carry model
  *   expectations across them; defaults to a fresh, connection-local Map.
+ * @property {Set<string>} [ownedSessions] - same injection seam for the set
+ *   of session ids this process created (the only sessions whose permission
+ *   prompts `respondPermission` answers); defaults to a fresh Set.
  * @property {(...args: unknown[]) => void} [log] - defaults to a stderr logger.
  * @property {typeof WebSocket} [WebSocketImpl] - injection seam for tests.
  */
@@ -252,6 +255,13 @@ export class AgentControlClient extends EventEmitter {
     // evaporate just because the transport reconnected within the same
     // process; it has nothing to do with the connection's own lifetime.
     this._modelExpectations = opts.modelExpectations instanceof Map ? opts.modelExpectations : new Map()
+
+    // Session ids THIS process created via `createSession` — the only
+    // sessions whose permission prompts `respondPermission` will answer.
+    // Injectable for the same reason as `modelExpectations`: ownership is a
+    // property of the planner process, not of one transport connection, so
+    // ClientManager passes one Set through every reconnect.
+    this._ownedSessions = opts.ownedSessions instanceof Set ? opts.ownedSessions : new Set()
 
     // Handshake-phase waiters that must be aborted immediately (not left to
     // time out) if the socket closes/errors before the handshake completes.
@@ -548,6 +558,7 @@ export class AgentControlClient extends EventEmitter {
     }
 
     const sessionId = result.sessionId
+    if (typeof sessionId === 'string' && sessionId) this._ownedSessions.add(sessionId)
     if (payload.model) this._modelExpectations.set(sessionId, { requestedModel: payload.model })
     await this._ensureSubscribed(sessionId).catch((err) => this._log('createSession: subscribe failed (non-fatal):', err.message))
 
@@ -778,11 +789,17 @@ export class AgentControlClient extends EventEmitter {
    * `allow` or `deny` — never `allowAlways` (that persists a durable project
    * rule; out of scope for an external planner relay). Refuses, before any
    * network I/O, to answer a requestId this client has not itself seen as
-   * pending (via a `permission_request` event) or that it has already seen
-   * resolved/expired — "session-owned" here means owned by the CALLER's
-   * session-scoped view of what THIS connection observed, not a claim about
-   * server-side authority (the server's own binding/authority checks in
-   * `handlePermissionResponse` still apply and are the actual floor).
+   * pending (via a `permission_request` event), that it has already seen
+   * resolved/expired, or whose session this process did not create.
+   *
+   * "Session-owned" means CREATED BY THIS PROCESS (`createSession`, tracked
+   * in `_ownedSessions`, which survives reconnects via ClientManager). It is
+   * not merely "the sessionId the caller passed matches the request": a
+   * primary-token connection can subscribe to — and so observe the prompts
+   * of — every session on the daemon, including ones a human is driving, so
+   * observation alone would let a planner approve a human's prompt. The
+   * server's own binding/authority checks in `handlePermissionResponse`
+   * still apply on top of this; this gate only ever narrows.
    *
    * @param {string} sessionId
    * @param {string} requestId
@@ -803,6 +820,9 @@ export class AgentControlClient extends EventEmitter {
     }
     if (observed.sessionId !== sessionId) {
       return { status: 'rejected', requestId, reason: 'sibling_session', message: `This permission belongs to session ${observed.sessionId}, not ${sessionId} — refusing.` }
+    }
+    if (!this._ownedSessions.has(sessionId)) {
+      return { status: 'rejected', requestId, sessionId, reason: 'not_owned', message: 'This session was not created by this agent-control process — its permission prompts are left for whoever is driving it. Only sessions created with chroxy_create_session in this process can be answered here.' }
     }
     // A second concurrent call for the SAME requestId must not silently
     // overwrite the first caller's pending entry — that would leak the

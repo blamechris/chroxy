@@ -152,7 +152,7 @@ const TOOLS = {
   },
 
   chroxy_respond_permission: {
-    description: "Answer a pending permission request (e.g. a Bash tool-use approval) with 'allow' or 'deny' — NEVER 'allowAlways', which persists a durable project rule and is out of scope here. Refuses (before any network I/O) to answer a requestId this MCP process has not itself observed as pending for the given sessionId, via chroxy_get_events' permission_request events — an unknown, already-resolved, or sibling-session requestId is rejected, never guessed at. `status: 'uncertain'` on the result means no confirmation arrived in time; do not assume the decision was or was not applied, and do not retry automatically. Some legacy (non-SDK) daemon code paths do not broadcast a confirmation at all — 'uncertain' in that case reflects a real protocol limitation, not a client bug.",
+    description: "Answer a pending permission request (e.g. a Bash tool-use approval) with 'allow' or 'deny' — NEVER 'allowAlways', which persists a durable project rule and is out of scope here. Only sessions created by chroxy_create_session in this same MCP-server process can be answered (reason 'not_owned' otherwise) — prompts in sessions someone else is driving are left for them. Refuses (before any network I/O) to answer a requestId this MCP process has not itself observed as pending for the given sessionId, via chroxy_get_events' permission_request events — an unknown, already-resolved, or sibling-session requestId is rejected, never guessed at. `status: 'uncertain'` on the result means no confirmation arrived in time; do not assume the decision was or was not applied, and do not retry automatically. Some legacy (non-SDK) daemon code paths do not broadcast a confirmation at all — 'uncertain' in that case reflects a real protocol limitation, not a client bug.",
     argsSchema: z.object({
       sessionId: SessionId,
       requestId: z.string().min(1).max(256).describe("The permission request id, from a chroxy_get_events 'permission_request' event."),
@@ -210,6 +210,10 @@ class ClientManager {
     // process (the transport dropping has nothing to do with what model a
     // session was created with).
     this._modelExpectations = new Map()
+    // Same lifetime, same reason: the sessions this MCP-server process
+    // created (and therefore may answer permission prompts for) must not be
+    // forgotten because the transport reconnected.
+    this._ownedSessions = new Set()
     // Set by `close()`. Once true, `get()` refuses outright and an
     // in-flight `_connect()` self-closes its result instead of storing it —
     // without this, `close()` racing an in-flight connect would return
@@ -247,6 +251,7 @@ class ClientManager {
       readOnly: this._clientOpts.readOnly === true,
       identityPublicKey: this._clientOpts.identityPublicKey,
       modelExpectations: this._modelExpectations,
+      ownedSessions: this._ownedSessions,
       log: logToStderr,
     })
     this._connectingClient = client
@@ -429,7 +434,11 @@ export async function main(options) {
   // with no embedded credentials is still connection metadata this process
   // doesn't need to put in a log stream; "remote" vs "local" is all a reader
   // needs to know which path was taken.
-  logToStderr(`ready (readOnly=${readOnly}, target=${url ? 'remote' : 'local'})`)
+  // `CHROXY_AGENT_CONTROL_URL` selects the explicit (remote) path inside
+  // resolveConnectionTarget exactly like `--url` does, so it must count here
+  // too — otherwise an env-configured remote target is logged as 'local'.
+  const explicitTarget = url || process.env.CHROXY_AGENT_CONTROL_URL
+  logToStderr(`ready (readOnly=${readOnly}, target=${explicitTarget ? 'remote' : 'local'})`)
 }
 
 const isDirectRun = isEntryPoint(import.meta.url)
