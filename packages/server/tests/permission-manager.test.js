@@ -529,6 +529,28 @@ describe('PermissionManager', () => {
       assert.equal(pm.respondToPermission(requestId, 'deny'), true)
       await escalationPromise
     })
+
+    it('autoAllowPending() fails SAFE (leaves pending) when an entry has no recoverable _lastPermissionData, instead of silently allowing it (#7975-followup)', async () => {
+      // Every real call site (handlePermission, requestMcpTrust) sets
+      // _pendingPermissions and _lastPermissionData in the same synchronous
+      // step, so this mismatch is not reachable through this module's own
+      // API today — manufactured directly (white-box) to prove the fail-safe
+      // DEFAULT holds, since NOT_DELEGABLE_TOOLS.has(undefined) is false and
+      // would otherwise fall through to the allow branch below it.
+      const requestId = 'perm-manufactured-mismatch'
+      let resolved = null
+      pm._pendingPermissions.set(requestId, {
+        resolve: (result) => { resolved = result },
+        input: {},
+        suggestions: [],
+      })
+      assert.equal(pm._lastPermissionData.has(requestId), false, 'premise: no tool data recoverable for this entry')
+
+      pm.autoAllowPending()
+
+      assert.equal(resolved, null, 'an entry with no recoverable tool name must not be silently allowed')
+      assert.equal(pm._pendingPermissions.has(requestId), true, 'must remain pending for a human, same treatment as a known not-delegable tool')
+    })
   })
 
   // -- AskUserQuestion handling --

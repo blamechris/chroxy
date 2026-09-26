@@ -140,23 +140,36 @@ through **four gates, in this fixed order** — every one of them only ever narr
    below; the daemon and this adapter share one "never approve without a human" list.
 3. **The tool allowlist (enforced, #7975 — inverted from an earlier denylist shape).** `allow`
    is permitted only for a tool this adapter can affirmatively confirm the protected-path
-   floor actually inspects: `Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`, or codex
-   `apply_patch` (`FLOOR_ALLOWLISTED_TOOLS` — the SAME Set `permission-manager.js` exports as
-   `ACCEPT_EDITS_TOOLS`, reused by identity rather than re-derived), plus command-style tools
-   (`Bash`, `PowerShell`, `Monitor`, codex `shell` — `COMMAND_TOOLS`) when this MCP server was
-   started with `--allow-command-approvals`. A `COMMAND_TOOLS` member without the flag is
-   refused `reason: 'command_approval_disabled'`. **Everything else is refused
+   floor FULLY inspects — every field of that tool's real input which selects the file(s) it
+   reads or writes is one the floor looks at: `Read`, `Write`, `Edit`, `NotebookEdit`, or codex
+   `apply_patch` (`FLOOR_ALLOWLISTED_TOOLS` — its own literal Set in `permission-manager.js`,
+   a strict subset of `ACCEPT_EDITS_TOOLS`), plus command-style tools (`Bash`, `PowerShell`,
+   `Monitor`, codex `shell` — `COMMAND_TOOLS`) when this MCP server was started with
+   `--allow-command-approvals`. A `COMMAND_TOOLS` member without the flag is refused
+   `reason: 'command_approval_disabled'`. **Everything else is refused
    `reason: 'not_allowlisted'`** — an MCP tool (`mcp__<server>__<tool>`, including one that runs
    commands), `WebFetch`/`WebSearch`, `Task`/`Agent`, codex `mcp_elicitation` (a connector-write
-   confirmation), and any future Claude Code tool this adapter does not yet recognize. This is
-   the load-bearing fix from the original design: the protected-path floor inspects
-   PATH-carrying input fields only (`file_path`/`path`/`notebook_path`, plus `apply_patch`'s
-   `changes[]`), so `floored: false` on a tool with **no such field** means "the floor never
-   looked at this tool's input at all" — not "this is safe". Under the old denylist (only
-   `NOT_DELEGABLE_TOOLS` + `COMMAND_TOOLS` refused), that vacuous `false` read as safe, so a
-   planner could `allow` an MCP tool that runs an arbitrary command, or an `mcp_elicitation`
+   confirmation), `Glob`/`Grep` (see below), and any future Claude Code tool this adapter does
+   not yet recognize. This is the load-bearing fix from the original design: the protected-path
+   floor inspects PATH-carrying input fields only (`file_path`/`path`/`notebook_path`, plus
+   `apply_patch`'s `changes[]`), so `floored: false` on a tool with **no such field** means "the
+   floor never looked at this tool's input at all" — not "this is safe". Under the old denylist
+   (only `NOT_DELEGABLE_TOOLS` + `COMMAND_TOOLS` refused), that vacuous `false` read as safe, so
+   a planner could `allow` an MCP tool that runs an arbitrary command, or an `mcp_elicitation`
    connector-write confirmation — exactly the class of decision the floor exists to put in
    front of a human.
+
+   **`Glob` and `Grep` are excluded from the allowlist**, even though both are in
+   `ACCEPT_EDITS_TOOLS` and both carry a `path` field the floor inspects. Each ALSO carries a
+   second, file-selecting field the floor never looks at — `Grep`'s `glob`, `Glob`'s `pattern`
+   — so a caller can leave `path` pointed at a wholly benign directory and use that second field
+   to select a secret file directly. `Grep` is the sharper case: it returns the matched file's
+   CONTENT, and measured against ripgrep 15.2.0, an explicit `--glob=.env` matches the dotfile
+   even without `--hidden` (the flag that would normally be needed to search hidden files) — so
+   `Grep({ path: '<benign dir>', glob: '.env', pattern: '.' })` returns live secret bytes while
+   `isFlooredTarget` reports `floored: false`. `Glob` shares the same blind field but can only
+   ever return a matched PATH NAME, never file bytes, so it cannot leak secret values by itself
+   — it is excluded anyway for consistency with "meaningful for every allowlisted tool".
 4. **The protected-path floor (enforced, #7968).** Even for a tool that passed gate 3, `allow`
    is refused unless the floor verdict is the **explicit** `false`. The
    [permission floor](../security/permission-floor.md) forces a *prompt* — never a deny — for

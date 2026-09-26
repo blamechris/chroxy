@@ -873,23 +873,35 @@ export class AgentControlClient extends EventEmitter {
    *      merely reported as "floor_unknown" or "not_allowlisted".
    *   3. **The tool ALLOWLIST** (#7975, S3 — inverted from the original
    *      denylist shape): a tool must be one of {@link FLOOR_ALLOWLISTED_TOOLS}
-   *      (`Read`/`Write`/`Edit`/`NotebookEdit`/`Glob`/`Grep`/codex
-   *      `apply_patch` — exactly the tools whose path-carrying input the
-   *      protected-path floor actually inspects) or a {@link COMMAND_TOOLS}
-   *      member with `allowCommandApprovals: true`. Everything else — an MCP
-   *      tool (`mcp__*`), `WebFetch`/`WebSearch`, `Task`/`Agent`, codex
-   *      `mcp_elicitation`, or any future Claude Code tool this client
-   *      doesn't yet know about — is refused `reason: 'not_allowlisted'`.
-   *      This is the load-bearing fix: under the old denylist, `floored:
-   *      false` on one of these tools meant "the floor never looked at this
-   *      tool's input at all" (it has no path field to inspect), not "this
-   *      is safe" — so a planner could `allow` an MCP tool that runs an
-   *      arbitrary command, or a `mcp_elicitation` connector-write
-   *      confirmation, exactly the class of decision the floor exists to put
-   *      in front of a human. A `COMMAND_TOOLS` member without the flag is
-   *      refused `reason: 'command_approval_disabled'` (unchanged from
-   *      #7973) rather than the generic `not_allowlisted`, since that case
-   *      has its own, more specific remedy (restart with the flag).
+   *      (`Read`/`Write`/`Edit`/`NotebookEdit`/codex `apply_patch` — exactly
+   *      the tools whose ENTIRE file-selecting input the protected-path floor
+   *      inspects) or a {@link COMMAND_TOOLS} member with
+   *      `allowCommandApprovals: true`. Everything else — an MCP tool
+   *      (`mcp__*`), `WebFetch`/`WebSearch`, `Task`/`Agent`, codex
+   *      `mcp_elicitation`, `Glob`/`Grep` (see below), or any future Claude
+   *      Code tool this client doesn't yet know about — is refused
+   *      `reason: 'not_allowlisted'`. This is the load-bearing fix: under the
+   *      old denylist, `floored: false` on one of these tools meant "the
+   *      floor never looked at this tool's input at all" (it has no path
+   *      field to inspect), not "this is safe" — so a planner could `allow`
+   *      an MCP tool that runs an arbitrary command, or a `mcp_elicitation`
+   *      connector-write confirmation, exactly the class of decision the
+   *      floor exists to put in front of a human. A `COMMAND_TOOLS` member
+   *      without the flag is refused `reason: 'command_approval_disabled'`
+   *      (unchanged from #7973) rather than the generic `not_allowlisted`,
+   *      since that case has its own, more specific remedy (restart with the
+   *      flag).
+   *
+   *      `Glob` and `Grep` are deliberately NOT on this allowlist (adversarial
+   *      review of 71e78ba38, same #7975 tracking) even though both are in
+   *      {@link ACCEPT_EDITS_TOOLS} and both carry a `path` field the floor
+   *      inspects: each ALSO carries a second, file-selecting field the floor
+   *      never looks at (`Grep`'s `glob`, `Glob`'s `pattern`), so a caller can
+   *      leave `path` benign and use that field to target a secret file
+   *      directly — `floored: false` on one of these is not the complete
+   *      safety signal it is for the tools above. See
+   *      `permission-manager.js`'s doc comment on `FLOOR_ALLOWLISTED_TOOLS`
+   *      for the measured ripgrep proof.
    *   4. **The floor** (#7968) — even for an allowlisted/flagged tool,
    *      `allow` is refused when the OBSERVED request was floor-forced. The
    *      protected-path permission floor (docs/security/permission-floor.md)
@@ -949,7 +961,7 @@ export class AgentControlClient extends EventEmitter {
         // COMMAND_TOOLS + the flag: fall through to the floor gate below,
         // same as any allowlisted file tool.
       } else {
-        return { status: 'rejected', requestId, sessionId, reason: 'not_allowlisted', message: `'${observed.tool}' is not one of the tools an external planner may ever approve — only Read/Write/Edit/NotebookEdit/Glob/Grep/apply_patch (the tools whose paths the protected-path floor actually inspects), plus Bash/PowerShell/Monitor/shell with --allow-command-approvals, can be allowed here. An MCP tool, WebFetch/WebSearch, Task/Agent, codex mcp_elicitation, and any tool this client doesn't recognize all fail closed the same way. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
+        return { status: 'rejected', requestId, sessionId, reason: 'not_allowlisted', message: `'${observed.tool}' is not one of the tools an external planner may ever approve — only Read/Write/Edit/NotebookEdit/apply_patch (the tools whose ENTIRE file-selecting input the protected-path floor actually inspects), plus Bash/PowerShell/Monitor/shell with --allow-command-approvals, can be allowed here. Glob and Grep are refused too, even though the floor can see their \`path\` field: each also carries a second field the floor never inspects (Grep's \`glob\`, Glob's \`pattern\`) that independently selects which file is matched, so \`floored: false\` on either is not a complete safety signal. An MCP tool, WebFetch/WebSearch, Task/Agent, codex mcp_elicitation, and any tool this client doesn't recognize all fail closed the same way. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
       }
     }
     // Gate 4: the floor (#7968). Read straight off what was OBSERVED for

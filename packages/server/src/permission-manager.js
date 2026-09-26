@@ -123,30 +123,57 @@ export const COMMAND_TOOLS = new Set(['Bash', 'shell', 'PowerShell', 'Monitor'])
 // EXTERNAL PLANNER's `chroxy_respond_permission` may ever send `allow` for
 // (before the #7973 command-tool opt-in on top): exactly the tools whose
 // inputs the protected-path floor (`isFlooredTarget`, permission-floor.js)
-// actually inspects. `floored: false` is only a MEANINGFUL "no protected path
-// here" signal for a tool the floor can see into at all — Read/Write/Edit/
-// NotebookEdit/Glob/Grep (PROTECTED_PATH_INPUT_FIELDS: file_path/path/
-// notebook_path) and codex apply_patch (its `changes[]` member paths). For
-// every OTHER tool — an MCP tool (`mcp__*`), WebFetch/WebSearch, Task/Agent,
-// codex mcp_elicitation, or any future Claude Code tool — the floor has no
-// path field to look at, so `isFlooredTarget` trivially returns `false` for
-// ANY input. Under the old DENYLIST shape (only NOT_DELEGABLE_TOOLS +
-// COMMAND_TOOLS were refused), that vacuous `false` was read as "safe", so a
-// planner could `allow` an MCP tool that runs an arbitrary command, or a
-// `mcp_elicitation` connector-write confirmation, exactly the class the floor
-// exists to put in front of a person. The allowlist inverts this: a tool must
-// be affirmatively known-inspectable to ever be `allow`-able.
+// FULLY inspects — meaning every field of that tool's real input which
+// selects the file(s) it reads or writes is one of PROTECTED_PATH_INPUT_FIELDS
+// (`file_path`/`path`/`notebook_path`) or, for codex `apply_patch`, its
+// `changes[]` member paths. `floored: false` is only a MEANINGFUL "nothing
+// protected here" signal when that condition holds for EVERY field — not
+// merely when the floor recognizes *some* field on the tool.
 //
-// SAME Set as {@link ACCEPT_EDITS_TOOLS} (identity, not a second hand-rolled
-// list) — that constant already IS "the tools whose path-carrying input the
-// floor inspects" (that's precisely why acceptEdits mode needs the floor's
-// override for exactly these tools and no others). A dedicated name here
-// documents the DISTINCT reason agent-control cares about the same roster.
-// Pinned by a test that derives the set from permission-floor.js's own
-// `isFlooredTarget` behavior (not from this list), so a future drift between
-// "tools acceptEdits auto-approves" and "tools the floor can see into" would
-// be caught rather than silently inherited.
-export const FLOOR_ALLOWLISTED_TOOLS = ACCEPT_EDITS_TOOLS
+// Read/Write/Edit/NotebookEdit/apply_patch satisfy it: the one field the
+// floor inspects (`file_path`/`notebook_path`/`changes[].path`) is exactly the
+// field that determines what gets read or written.
+//
+// #7975-followup (adversarial review of 71e78ba38) — `Grep` and `Glob` do
+// NOT satisfy it and are deliberately EXCLUDED, even though both are in
+// {@link ACCEPT_EDITS_TOOLS} and both DO carry a `path` field the floor
+// inspects. Each also carries a SECOND, file-selecting field the floor never
+// looks at: `Grep`'s `glob` (byok-tools.js) and `Glob`'s `pattern`. A caller
+// can leave `path` pointed at a wholly benign directory and use that second
+// field to select a secret file directly — `isFlooredTarget` sees only the
+// benign `path` and reports `floored: false`, exactly the vacuous-`false`
+// failure mode #7975 was written to close, just moved one field over. Grep is
+// the sharper case because it returns the matched file's CONTENT: measured
+// against ripgrep 15.2.0, `rg --glob=.env -e <pattern> -- <benign-dir>`
+// matches `.env` even WITHOUT `--hidden` — an explicit `--glob` overrides the
+// default hidden-file/`.gitignore` skip that would otherwise protect a
+// dotfile. So `Grep({ path: '<cwd>', glob: '.env', pattern: '.' })` returns
+// live secret bytes while `floored` reads `false`. `Glob` shares the same
+// blind field but can only ever return a matched PATH NAME (see its
+// `input_schema` and description in byok-tools.js — "Returns sorted file
+// paths"), never file bytes, so it cannot leak secret VALUES; it is excluded
+// anyway for consistency with "meaningful for every allowlisted tool" and
+// because listing files (unlike reading their content) is already the
+// existing, deliberate design of the read floor itself (`isSecretReadTarget`
+// floors a config-dir READ only when the target is a specific secret FILE,
+// not merely because a directory containing one is being enumerated). See
+// `tests/agent-control/permission-policy.test.js` for the bypass proof
+// (a real `path`-benign / `glob`-malicious Grep input against
+// `isFlooredTarget`) and `tests/built-in-tools/tool-transforms.js`'s own doc
+// comment on `buildGrepCommand`, which already flagged this exact tension for
+// the acceptEdits/rule-engine surface before agent-control existed.
+//
+// Deliberately NOT the same object as {@link ACCEPT_EDITS_TOOLS} (no more
+// identity reuse): aliasing the planner's allowlist to the acceptEdits set
+// meant any FUTURE widening of acceptEdits (adding a tool there because it is
+// fine for a human clicking "accept edits" to auto-approve) would silently
+// widen what an unattended external planner may also approve — a different,
+// stronger bar. This Set is its own literal, a strict SUBSET of
+// ACCEPT_EDITS_TOOLS, pinned by a behavioral test against permission-floor.js
+// (not by comparing two hand-authored lists) that fails if a tool whose real
+// input schema carries an uninspected file-selecting field (`glob`/`pattern`)
+// is ever added back.
+export const FLOOR_ALLOWLISTED_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'apply_patch'])
 
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since
@@ -1107,6 +1134,12 @@ export class PermissionManager extends EventEmitter {
    * but this check is placed AFTER the `mcpTrust` branch below (which fires
    * for every mcp_spawn entry) so mcp_spawn's existing explicit-deny handling
    * is unchanged — this only widens what happens to `request_permissions`.
+   *
+   * #7975-followup: the tool-name lookup FAILS CLOSED — a pending entry with
+   * no recoverable `_lastPermissionData` (which every current call site sets
+   * in lockstep with `_pendingPermissions`, so this is a belt-and-braces
+   * default, not a reachable path today) is preserved genuinely pending, same
+   * as a known not-delegable tool, rather than silently allowed.
    */
   autoAllowPending() {
     if (this._pendingPermissions.size === 0) return
@@ -1141,7 +1174,20 @@ export class PermissionManager extends EventEmitter {
       // gate consults, checked by the tool name stashed alongside this
       // requestId (the pending entry itself has no tool field). Left pending,
       // never deleted — see the doc comment above.
-      if (NOT_DELEGABLE_TOOLS.has(this._lastPermissionData.get(requestId)?.tool)) {
+      //
+      // #7975-followup — every current call site sets `_lastPermissionData`
+      // in the SAME synchronous step as `_pendingPermissions` (handlePermission
+      // and requestMcpTrust both do this, and nothing else in this module ever
+      // mutates either map), so `lastData` below is not expected to be missing
+      // in practice. But `NOT_DELEGABLE_TOOLS.has(undefined)` is `false` — if
+      // that invariant were ever violated by a future change, an entry with no
+      // recoverable tool name would silently fall through to the ALLOW branch
+      // below, which is exactly the bug this fix exists to close, just for an
+      // unknown tool instead of a known one. Fail closed instead: treat a
+      // missing lookup the same as a not-delegable tool (leave it genuinely
+      // pending for a human) rather than assume it is safe to allow.
+      const lastData = this._lastPermissionData.get(requestId)
+      if (!lastData || NOT_DELEGABLE_TOOLS.has(lastData.tool)) {
         preservedNotDelegable += 1
         continue
       }

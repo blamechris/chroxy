@@ -41,7 +41,8 @@ import {
   FLOOR_ALLOWLISTED_TOOLS as CANONICAL_FLOOR_ALLOWLISTED_TOOLS,
   ACCEPT_EDITS_TOOLS,
 } from '../../src/permission-manager.js'
-import { isFlooredTarget } from '../../src/permission-floor.js'
+import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS } from '../../src/permission-floor.js'
+import { BUILTIN_TOOLS } from '../../src/byok-tools.js'
 import { createMockSessionManager, createMockSession, createSpy } from '../test-helpers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -111,11 +112,65 @@ describe('shared exclusion-set identity (#7973)', () => {
 
   it('agent-control/client.js re-exports the EXACT FLOOR_ALLOWLISTED_TOOLS object permission-manager.js exports — no hand-rolled second list (#7975, S3)', () => {
     assert.equal(FLOOR_ALLOWLISTED_TOOLS, CANONICAL_FLOOR_ALLOWLISTED_TOOLS, 'FLOOR_ALLOWLISTED_TOOLS must be the SAME object (import identity), not an equal-valued copy')
-    assert.equal(CANONICAL_FLOOR_ALLOWLISTED_TOOLS, ACCEPT_EDITS_TOOLS, 'FLOOR_ALLOWLISTED_TOOLS must literally BE ACCEPT_EDITS_TOOLS (same object) — the tools whose path-carrying input the floor inspects — never a re-derived copy of that roster')
   })
 
-  it('FLOOR_ALLOWLISTED_TOOLS contains exactly the tools whose input the protected-path floor inspects', () => {
-    assert.deepEqual([...FLOOR_ALLOWLISTED_TOOLS].sort(), ['Edit', 'Glob', 'Grep', 'NotebookEdit', 'Read', 'Write', 'apply_patch'])
+  // #7975-followup (adversarial review of 71e78ba38) — FLOOR_ALLOWLISTED_TOOLS
+  // must NOT be the same object as ACCEPT_EDITS_TOOLS any more. Aliasing the
+  // planner's allowlist to the acceptEdits set meant a future widening of
+  // acceptEdits (a bar for "fine for a human clicking accept-edits to
+  // auto-approve") would silently widen what an unattended external planner
+  // may approve too — a materially stronger bar. It must still be a SUBSET:
+  // every tool the planner may approve should also be one acceptEdits mode
+  // auto-approves for a human, so the planner is never MORE permissive than
+  // the human-mediated mode it borrows the floor from.
+  it('FLOOR_ALLOWLISTED_TOOLS is decoupled from ACCEPT_EDITS_TOOLS (a distinct object) but remains a strict subset of it', () => {
+    assert.notEqual(FLOOR_ALLOWLISTED_TOOLS, ACCEPT_EDITS_TOOLS, 'FLOOR_ALLOWLISTED_TOOLS must be its OWN object — identity reuse lets a future ACCEPT_EDITS_TOOLS widening silently widen the planner allowlist too')
+    for (const tool of FLOOR_ALLOWLISTED_TOOLS) {
+      assert.ok(ACCEPT_EDITS_TOOLS.has(tool), `${tool} is planner-allowlisted but not in ACCEPT_EDITS_TOOLS — the planner must never be more permissive than acceptEdits mode`)
+    }
+  })
+
+  // #7975-followup — Grep and Glob are deliberately EXCLUDED, even though
+  // both are in ACCEPT_EDITS_TOOLS and both carry a `path` field the floor
+  // inspects. See the dedicated "Grep/Glob excluded" describe block below for
+  // the behavioral proof of why.
+  it('FLOOR_ALLOWLISTED_TOOLS contains exactly the tools whose ENTIRE file-selecting input the protected-path floor inspects (Grep/Glob excluded — see below)', () => {
+    assert.deepEqual([...FLOOR_ALLOWLISTED_TOOLS].sort(), ['Edit', 'NotebookEdit', 'Read', 'Write', 'apply_patch'])
+  })
+
+  // Schema-derived guard (catalogue #7424 — don't hand-list an expectation
+  // that could silently drift from what it is meant to police): for every
+  // planner-allowlisted tool that byok-tools.js's BUILTIN_TOOLS defines a real
+  // input_schema for, every property that LOOKS like it selects a filesystem
+  // target (a bare `path`, anything ending `_path`, or `glob`/`pattern`) must
+  // be one of PROTECTED_PATH_INPUT_FIELDS. This is what actually catches a
+  // future re-addition of Grep or Glob to the allowlist: their real schemas
+  // (asserted below) carry `pattern`/`glob`, which this loop refuses to accept
+  // as covered.
+  it("no FLOOR_ALLOWLISTED_TOOLS member's real (byok-tools.js) schema carries a file-selecting field outside PROTECTED_PATH_INPUT_FIELDS", () => {
+    const FILE_SELECTOR_HEURISTIC = /^path$|_path$|^pattern$|^glob$/
+    const byName = new Map(BUILTIN_TOOLS.map((t) => [t.name, t]))
+    let checked = 0
+    for (const tool of FLOOR_ALLOWLISTED_TOOLS) {
+      const def = byName.get(tool)
+      if (!def) continue // not a byok-tools.js tool (e.g. codex apply_patch) — covered separately above
+      checked += 1
+      const props = Object.keys(def.input_schema?.properties || {})
+      for (const prop of props) {
+        if (!FILE_SELECTOR_HEURISTIC.test(prop)) continue
+        assert.ok(PROTECTED_PATH_INPUT_FIELDS.includes(prop), `${tool}.${prop} looks file-selecting but is not one of PROTECTED_PATH_INPUT_FIELDS — the floor cannot see it, so ${tool} should not be planner-allowlisted`)
+      }
+    }
+    assert.ok(checked > 0, 'premise: at least one allowlisted tool must be defined in byok-tools.js for this loop to exercise anything')
+  })
+
+  it('premise: Grep and Glob DO carry a file-selecting field outside PROTECTED_PATH_INPUT_FIELDS in their real schema (why they fail the guard above and must stay excluded)', () => {
+    const byName = new Map(BUILTIN_TOOLS.map((t) => [t.name, t]))
+    const grepProps = Object.keys(byName.get('Grep').input_schema.properties)
+    const globProps = Object.keys(byName.get('Glob').input_schema.properties)
+    assert.ok(grepProps.includes('glob') && !PROTECTED_PATH_INPUT_FIELDS.includes('glob'), 'premise: Grep.glob exists and is not floor-inspected')
+    assert.ok(grepProps.includes('pattern') && !PROTECTED_PATH_INPUT_FIELDS.includes('pattern'), 'premise: Grep.pattern exists and is not floor-inspected')
+    assert.ok(globProps.includes('pattern') && !PROTECTED_PATH_INPUT_FIELDS.includes('pattern'), 'premise: Glob.pattern exists and is not floor-inspected')
   })
 })
 
@@ -138,13 +193,20 @@ describe("FLOOR_ALLOWLISTED_TOOLS matches which tools isFlooredTarget can actual
   const cwd = '/tmp/agent-control-floor-fixture'
   const protectedPath = `${cwd}/.env`
 
+  // Grep/Glob are deliberately NOT in this bucketed fixture map — see the
+  // dedicated describe block below. Unlike every tool here, isFlooredTarget
+  // CAN be made to return true for them (when the secret sits in `path`
+  // itself), so they don't fit either the "always floored" or "never
+  // floored" bucket this map is built to express; folding them in here would
+  // either wrongly assert they're never floored (false — `path` alone can
+  // trigger it) or paper over the actual gap (a benign `path` + a malicious
+  // `glob`/`pattern` is what's actually excluded, not floored/not-floored by
+  // any single input).
   const realisticInput = {
     Read: () => ({ file_path: protectedPath }),
     Write: () => ({ file_path: protectedPath, content: 'x' }),
     Edit: () => ({ file_path: protectedPath, old_string: 'a', new_string: 'b' }),
     NotebookEdit: () => ({ notebook_path: protectedPath, new_source: 'x' }),
-    Glob: () => ({ pattern: '*', path: protectedPath }),
-    Grep: () => ({ pattern: 'x', path: protectedPath }),
     apply_patch: () => ({ changes: [{ path: protectedPath, kind: 'update', diff: '' }] }),
     Bash: () => ({ command: `cat ${protectedPath}` }),
     shell: () => ({ command: `cat ${protectedPath}` }),
@@ -177,6 +239,60 @@ describe("FLOOR_ALLOWLISTED_TOOLS matches which tools isFlooredTarget can actual
   })
 })
 
+/**
+ * #7975-followup (adversarial review of 71e78ba38) — Grep and Glob are
+ * excluded from FLOOR_ALLOWLISTED_TOOLS even though ACCEPT_EDITS_TOOLS
+ * carries both and the floor's SECRET_READ_FLOOR_TOOLS does inspect their
+ * `path` field. This block is the RED-FIRST proof of why: a benign `path`
+ * plus a malicious `glob`/`pattern` makes `isFlooredTarget` report
+ * `floored: false` for an input that targets a secret file directly — the
+ * exact vacuous-`false` failure #7975 was written to close, just moved from
+ * "no path field at all" (an MCP tool) to "a second, uninspected path-like
+ * field on an otherwise-inspected tool" (Grep/Glob).
+ */
+describe('Grep/Glob excluded from FLOOR_ALLOWLISTED_TOOLS: floored:false is not a complete safety signal for either (#7975-followup)', () => {
+  const cwd = '/tmp/agent-control-floor-fixture-glob-grep'
+
+  it('Grep({ path: <benign cwd>, glob: ".env" }) is reported floored:false by isFlooredTarget even though it targets a secret file by name via `glob`', () => {
+    // `path` is the cwd itself — not a protected/secret path in any segment —
+    // so the floor's only inspected field for Grep sees nothing. `glob`
+    // (uninspected) is what actually selects `.env` as the file to search.
+    const input = { pattern: '.', path: cwd, glob: '.env' }
+    assert.equal(isFlooredTarget('Grep', input, cwd), false, 'isFlooredTarget must not silently clear a Grep call whose glob field targets a secret file name — this being false is the bug this test proves, not a passing safety check')
+  })
+
+  it('Glob({ path: <benign cwd>, pattern: "**/.env" }) is reported floored:false even though `pattern` is what actually selects the secret-named file', () => {
+    const input = { pattern: '**/.env', path: cwd }
+    assert.equal(isFlooredTarget('Glob', input, cwd), false)
+  })
+
+  it('by contrast, Grep/Glob with the secret placed directly in `path` (not via glob/pattern) IS floored — proving the floor DOES look at path, just not at the field that matters for this attack', () => {
+    const protectedPath = `${cwd}/.env`
+    assert.equal(isFlooredTarget('Grep', { pattern: 'x', path: protectedPath }, cwd), true)
+    assert.equal(isFlooredTarget('Glob', { pattern: '*', path: protectedPath }, cwd), true)
+  })
+
+  it('neither Grep nor Glob is in FLOOR_ALLOWLISTED_TOOLS', () => {
+    assert.equal(FLOOR_ALLOWLISTED_TOOLS.has('Grep'), false)
+    assert.equal(FLOOR_ALLOWLISTED_TOOLS.has('Glob'), false)
+  })
+
+  for (const tool of ['Grep', 'Glob']) {
+    it(`chroxy_respond_permission refuses allow for ${tool} with reason not_allowlisted, even for the benign-path/malicious-glob shape and floored:false`, async () => {
+      const fixture = readyClient({ ownedSessions: new Set(['sess-a']) })
+      const client = fixture.client
+      try {
+        observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
+        const result = await client.respondPermission('sess-a', 'r1', 'allow')
+        assert.equal(result.status, 'rejected', JSON.stringify(result))
+        assert.equal(result.reason, 'not_allowlisted')
+      } finally {
+        await client.close()
+      }
+    })
+  }
+})
+
 describe('tool allowlist (#7975, S3): chroxy_respond_permission refuses allow for anything not allowlisted, regardless of floored', () => {
   let client
   afterEach(async () => { if (client) { await client.close(); client = null } })
@@ -193,7 +309,11 @@ describe('tool allowlist (#7975, S3): chroxy_respond_permission refuses allow fo
     })
   }
 
-  const NOT_ALLOWLISTED_EXAMPLES = ['mcp__github__create_issue', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp_elicitation', 'SomeBrandNewClaudeCodeTool']
+  // Grep/Glob included here (#7975-followup) so they get the SAME full gate
+  // coverage as every other not-allowlisted tool below (ownership-first,
+  // floored:true, floored absent, allowCommandApprovals never overriding,
+  // deny always permitted) — not just the dedicated bypass-proof block above.
+  const NOT_ALLOWLISTED_EXAMPLES = ['mcp__github__create_issue', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp_elicitation', 'SomeBrandNewClaudeCodeTool', 'Grep', 'Glob']
 
   for (const tool of NOT_ALLOWLISTED_EXAMPLES) {
     it(`refuses allow for ${tool} (not on the allowlist) when floored:false and the session is owned — reason not_allowlisted`, async () => {
