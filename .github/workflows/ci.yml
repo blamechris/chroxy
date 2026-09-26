@@ -160,8 +160,8 @@ permissions:
 
 # npm's implicit audit + funding calls are OFF for every install in this
 # workflow (#7616). npm reads any `npm_config_*` environment variable as a
-# config value, case-insensitively, so this one block covers all 15 `npm ci` /
-# `npm install --package-lock-only` sites below AND every site added later —
+# config value, case-insensitively, so this one block covers all 14 `npm ci`
+# sites below (#7324 removed the only `npm install --package-lock-only`) AND every site added later —
 # which a per-step `--no-audit` flag cannot.
 #
 # WHY: on 2026-09-03/04 registry.npmjs.org's bulk-advisory endpoint
@@ -1423,7 +1423,7 @@ jobs:
         run: |
           set -o pipefail
           node scripts/__tests__/derive-server-lockfile.test.mjs | tee /tmp/chroxy-derive-lockfile.tap
-          node ../../scripts/lib/assert-test-count.mjs --min 14 cat /tmp/chroxy-derive-lockfile.tap > /dev/null
+          node ../../scripts/lib/assert-test-count.mjs --min 19 cat /tmp/chroxy-derive-lockfile.tap > /dev/null
 
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)

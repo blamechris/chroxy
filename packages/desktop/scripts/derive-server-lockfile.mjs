@@ -298,6 +298,10 @@ function placeClosure(edgesByRequirer) {
   const newTree = new Map() // full "node_modules/..." key -> instanceKey
   const requirerLocations = new Map([[ROOT_ID, new Set([''])]])
   const locationOwner = new Map([['', ROOT_ID]])
+  // Locations whose own edges have been resolved. Only these RELY on what is
+  // already in the tree; a placed-but-unprocessed package has resolved nothing
+  // yet and will see the tree as it stands when its turn comes (PR #7982 S1).
+  const processed = new Set()
 
   function currentResolutionLoc(desc, name) {
     for (const loc of ancestors(desc)) {
@@ -307,17 +311,20 @@ function placeClosure(edgesByRequirer) {
   }
 
   // Would placing `name` at `candidateLoc` intercept an already-satisfied
-  // resolution some already-placed descendant is currently relying on
-  // (walking PAST candidateLoc, which was empty when it resolved, to a
-  // DIFFERENT instance further up)? If so this placement would silently
-  // change that descendant's dependency out from under it.
+  // resolution some already-PROCESSED package is relying on (walking PAST
+  // candidateLoc, which was empty when it resolved, to a DIFFERENT instance
+  // further up)? If so this placement would silently change that package's
+  // dependency out from under it.
+  //
+  // The package AT candidateLoc counts too (PR #7982 review, C1): Node resolves
+  // `X/node_modules/<name>` first from X itself. The first version skipped it,
+  // so a nested dependency could hoist a conflicting copy into its parent's own
+  // node_modules — `send` then loaded debug's ms@2.0.0 instead of its ms@2.1.3.
   function shadowsDescendant(candidateLoc, name, targetKey) {
-    const allLocations = new Set(['', ...[...requirerLocations.values()].flatMap((s) => [...s])])
-    for (const desc of allLocations) {
-      if (desc === candidateLoc) continue
-      const isDescendant =
-        candidateLoc === '' ? desc !== '' : desc === candidateLoc || desc.startsWith(`${candidateLoc}/${NM}`)
-      if (!isDescendant || desc === candidateLoc) continue
+    for (const desc of processed) {
+      const isAffected =
+        candidateLoc === '' || desc === candidateLoc || desc.startsWith(`${candidateLoc}/${NM}`)
+      if (!isAffected) continue
       const requirerId = locationOwner.get(desc)
       const edge = (edgesByRequirer.get(requirerId) || []).find((e) => e.name === name)
       if (!edge || edge.key === targetKey) continue
@@ -368,6 +375,7 @@ function placeClosure(edgesByRequirer) {
   const placementQueue = [{ requirerId: ROOT_ID, atLocation: '' }]
   while (placementQueue.length > 0) {
     const { requirerId, atLocation } = placementQueue.shift()
+    processed.add(atLocation)
     const edges = edgesByRequirer.get(requirerId) || []
     for (const edge of edges) {
       const newLoc = placeEdge(atLocation, edge.name, edge.key)
@@ -472,7 +480,7 @@ export function deriveServerLockfile({ rootLock, packageJson, workspace }) {
     const source = instanceEntries.get(instanceKey)
     if (!source) throw new Error(`internal error: no entry recorded for instance "${instanceKey}"`)
     const name = (source.name || '').startsWith('@chroxy/') ? source.name : undefined
-    if (name || instanceKey.startsWith('@chroxy/') || slotKey.endsWith(`${NM}@chroxy`)) {
+    if (name || instanceKey.startsWith('@chroxy/') || slotKey.includes(`${NM}@chroxy/`)) {
       throw new Error(`refusing to emit @chroxy/* entry "${slotKey}" into the derived lockfile`)
     }
     const cleaned = { ...source }

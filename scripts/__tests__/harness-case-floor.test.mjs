@@ -182,7 +182,7 @@ const EXCLUDED_HARNESSES = [
   // its TAP summary with assert-test-count.mjs (minimum 15 browser cases).
   'packages/dashboard/scripts/tool-layout.test.mjs',
   // node:test as well (#7324): ci.yml's desktop-tests job runs it by name and
-  // checks its TAP summary with assert-test-count.mjs (minimum 14 cases).
+  // checks its TAP summary with assert-test-count.mjs (minimum 19 cases).
   'packages/desktop/scripts/__tests__/derive-server-lockfile.test.mjs',
   'packages/store-core/scripts/__tests__/export-targets.test.mjs',
 ]

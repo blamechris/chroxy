@@ -41,6 +41,91 @@ function stagedPkg(overrides = {}) {
   return { name: '@chroxy/server', version: '0.11.0', license: 'MIT', ...overrides }
 }
 
+// An INDEPENDENT resolution walk, written from scratch rather than reusing
+// deriveServerLockfile's own resolveReal/ancestors — so agreement between
+// the two actually means something. Mirrors real Node module resolution:
+// walk up from `loc`, trying `<loc>/node_modules/<name>` at each level.
+function independentResolve(packages, loc, name) {
+  let cur = loc
+  for (;;) {
+    const candidate = cur === '' ? `node_modules/${name}` : `${cur}/node_modules/${name}`
+    if (Object.prototype.hasOwnProperty.call(packages, candidate)) {
+      let entry = packages[candidate]
+      let key = candidate
+      const seen = new Set()
+      while (entry && entry.link === true) {
+        if (seen.has(key)) throw new Error(`circular link at ${key}`)
+        seen.add(key)
+        key = entry.resolved
+        entry = packages[key]
+      }
+      return { key, entry }
+    }
+    if (cur === '') return null
+    // Peel the last node_modules/<segment> off `cur` to go up one level.
+    const idx = cur.lastIndexOf('node_modules/')
+    if (idx === -1) {
+      cur = ''
+    } else {
+      cur = idx === 0 ? '' : cur.slice(0, idx - 1)
+    }
+  }
+}
+
+
+// The WHOLE production closure, walked in both trees at once (PR #7982 review,
+// S2). From each paired (root-lockfile location, derived location), every
+// dependency the ROOT entry declares is resolved in both trees with
+// independentResolve, and must land on the same instance (version + integrity).
+// This checks transitive placement independently of the derivation's own
+// verifyClosure — which was the only thing catching C1.
+function depsOf(entry) {
+  const out = []
+  for (const n of Object.keys(entry.dependencies || {})) out.push([n, false])
+  for (const n of Object.keys(entry.optionalDependencies || {})) out.push([n, true])
+  const meta = entry.peerDependenciesMeta || {}
+  for (const n of Object.keys(entry.peerDependencies || {})) out.push([n, meta[n] && meta[n].optional === true])
+  return out
+}
+
+function pairedWalk(rootPackages, derivedPackages, topDeps) {
+  const mismatches = []
+  const seen = new Set()
+  const queue = [{ rootLoc: WORKSPACE, outLoc: '', deps: topDeps }]
+  let edges = 0
+  while (queue.length > 0) {
+    const { rootLoc, outLoc, deps } = queue.shift()
+    for (const [name, optional] of deps) {
+      const expected = independentResolve(rootPackages, rootLoc, name)
+      if (!expected) {
+        if (!optional) mismatches.push(`${rootLoc} -> ${name}: missing from the ROOT lockfile`)
+        continue
+      }
+      edges += 1
+      const actual = independentResolve(derivedPackages, outLoc, name)
+      const where = outLoc || '<root>'
+      if (!actual) {
+        mismatches.push(`${where} -> ${name}: does not resolve in the derived lockfile`)
+        continue
+      }
+      if (actual.entry.version !== expected.entry.version || actual.entry.integrity !== expected.entry.integrity) {
+        mismatches.push(`${where} -> ${name}: derived ${actual.entry.version}, root ${expected.entry.version}`)
+        continue
+      }
+      const pair = `${expected.key}|${actual.key}`
+      if (seen.has(pair)) continue
+      seen.add(pair)
+      queue.push({ rootLoc: expected.key, outLoc: actual.key, deps: depsOf(expected.entry) })
+    }
+  }
+  return { mismatches, edges }
+}
+
+const topDepsOf = (pkg) => [
+  ...Object.keys(pkg.dependencies || {}).map((n) => [n, false]),
+  ...Object.keys(pkg.optionalDependencies || {}).map((n) => [n, true]),
+]
+
 describe('deriveServerLockfile — hoisted-only (i)', () => {
   it('places a single direct dependency at the new root node_modules', () => {
     const lock = baseLock({
@@ -146,6 +231,30 @@ describe('deriveServerLockfile — optional platform deps (iii)', () => {
     assert.equal(out.packages['node_modules/plat-linux'].os[0], 'linux')
     assert.equal(out.packages['node_modules/plat-darwin'].optional, true)
     assert.equal(out.packages['node_modules/plat-darwin'].os[0], 'darwin')
+  })
+
+  it('derives optional:true from the EDGES, not the source flag (PR #7982 review, S4)', () => {
+    // The source entries here carry NO optional flag. If the derivation just
+    // copied the source's flag, a platform package would be emitted as REQUIRED
+    // and `npm ci` would fail EBADPLATFORM on every other OS.
+    const lock = baseLock({
+      'node_modules/opt-parent': {
+        version: '1.0.0',
+        resolved: 'https://r/opt-parent-1.0.0.tgz',
+        integrity: 'sha512-op',
+        optionalDependencies: { 'plat-win': '1.0.0' },
+      },
+      'node_modules/plat-win': {
+        version: '1.0.0',
+        resolved: 'https://r/plat-win-1.0.0.tgz',
+        integrity: 'sha512-pw',
+        os: ['win32'],
+      },
+    })
+    const pkg = stagedPkg({ dependencies: { 'opt-parent': '^1.0.0' } })
+    const out = deriveServerLockfile({ rootLock: lock, packageJson: pkg, workspace: WORKSPACE })
+    assert.equal(out.packages['node_modules/plat-win'].optional, true)
+    assert.equal(out.packages['node_modules/opt-parent'].optional, undefined)
   })
 })
 
@@ -356,6 +465,37 @@ describe('deriveServerLockfile — shadow avoidance (extra, beyond the required 
   })
 })
 
+describe('deriveServerLockfile — a nested conflict never lands in its parent\'s own node_modules (PR #7982 review, C1)', () => {
+  // The real shape from this repo's root lockfile (packages/app's closure):
+  // send@0.19.2 needs ms@2.1.3 (hoisted) and debug@2.6.9; debug@2.6.9 needs
+  // ms@2.0.0. npm nests that ms under send/node_modules/debug. The first
+  // placer hoisted it into send/node_modules/ms instead, which is the first
+  // place Node looks from send — so send loaded ms@2.0.0.
+  const e = (v) => ({ version: v, resolved: `https://registry.example/${v}.tgz`, integrity: `sha512-${v}` })
+  const rootLock = baseLock({
+    'node_modules/send': { ...e('send-0.19.2'), dependencies: { debug: '2.6.9', ms: '2.1.3' } },
+    'node_modules/ms': e('ms-2.1.3'),
+    'node_modules/debug': e('debug-4.4.0'),
+    'node_modules/send/node_modules/debug': { ...e('debug-2.6.9'), dependencies: { ms: '2.0.0' } },
+    'node_modules/send/node_modules/debug/node_modules/ms': e('ms-2.0.0'),
+  })
+  const pkg = stagedPkg({ dependencies: { send: '0.19.2', debug: '*' } })
+
+  it('send still resolves ms@2.1.3, and debug@2.6.9 gets its own ms@2.0.0', () => {
+    const out = deriveServerLockfile({ rootLock, packageJson: pkg, workspace: WORKSPACE })
+    assert.equal(independentResolve(out.packages, 'node_modules/send', 'ms').entry.version, 'ms-2.1.3')
+    assert.equal(independentResolve(out.packages, 'node_modules/send/node_modules/debug', 'ms').entry.version, 'ms-2.0.0')
+    assert.equal(out.packages['node_modules/send/node_modules/ms'], undefined, 'nothing may sit in send\'s own ms slot')
+  })
+
+  it('the whole closure matches the root lockfile edge for edge', () => {
+    const out = deriveServerLockfile({ rootLock, packageJson: pkg, workspace: WORKSPACE })
+    const { mismatches, edges } = pairedWalk(rootLock.packages, out.packages, topDepsOf(pkg))
+    assert.ok(edges >= 5, `non-vacuity: the walk must visit the fixture's edges (got ${edges})`)
+    assert.deepEqual(mismatches, [])
+  })
+})
+
 describe('deriveServerLockfile — real repo data', () => {
   const rootLock = JSON.parse(readFileSync(resolve(REPO_ROOT, 'package-lock.json'), 'utf8'))
   const serverPkgRaw = JSON.parse(readFileSync(resolve(REPO_ROOT, 'packages/server/package.json'), 'utf8'))
@@ -368,37 +508,6 @@ describe('deriveServerLockfile — real repo data', () => {
   }
   delete stagedServerPkg.devDependencies
   if (stagedServerPkg.scripts) delete stagedServerPkg.scripts.postinstall
-
-  // An INDEPENDENT resolution walk, written from scratch rather than reusing
-  // deriveServerLockfile's own resolveReal/ancestors — so agreement between
-  // the two actually means something. Mirrors real Node module resolution:
-  // walk up from `loc`, trying `<loc>/node_modules/<name>` at each level.
-  function independentResolve(packages, loc, name) {
-    let cur = loc
-    for (;;) {
-      const candidate = cur === '' ? `node_modules/${name}` : `${cur}/node_modules/${name}`
-      if (Object.prototype.hasOwnProperty.call(packages, candidate)) {
-        let entry = packages[candidate]
-        let key = candidate
-        const seen = new Set()
-        while (entry && entry.link === true) {
-          if (seen.has(key)) throw new Error(`circular link at ${key}`)
-          seen.add(key)
-          key = entry.resolved
-          entry = packages[key]
-        }
-        return { key, entry }
-      }
-      if (cur === '') return null
-      // Peel the last node_modules/<segment> off `cur` to go up one level.
-      const idx = cur.lastIndexOf('node_modules/')
-      if (idx === -1) {
-        cur = ''
-      } else {
-        cur = idx === 0 ? '' : cur.slice(0, idx - 1)
-      }
-    }
-  }
 
   it('has a workspace entry for packages/server', () => {
     assert.ok(rootLock.packages && rootLock.packages[WORKSPACE], 'root lockfile must have a packages/server entry')
@@ -434,5 +543,32 @@ describe('deriveServerLockfile — real repo data', () => {
         assert.ok(!entry.name.startsWith('@chroxy/'), `entry at "${key}" names a workspace package: ${entry.name}`)
       }
     }
+  })
+
+  it('the WHOLE production closure matches the root lockfile edge for edge (PR #7982 review, S2)', () => {
+    const out = deriveServerLockfile({ rootLock, packageJson: stagedServerPkg, workspace: WORKSPACE })
+    const { mismatches, edges } = pairedWalk(rootLock.packages, out.packages, topDepsOf(stagedServerPkg))
+    assert.ok(edges >= 100, `non-vacuity: the server closure has hundreds of edges (walked ${edges})`)
+    assert.deepEqual(mismatches.slice(0, 10), [], `${mismatches.length} edge(s) differ`)
+  })
+
+  it('an ordinary upstream bump still derives: a new major nested under claude-agent-sdk (PR #7982 review, C1)', () => {
+    // Exactly as npm records it: @anthropic-ai/claude-agent-sdk starts depending
+    // on json-schema-to-ts@^4 while @anthropic-ai/sdk stays on ^3. The first
+    // placer failed VERIFY on this — a required check blocking a Renovate PR.
+    const bumped = JSON.parse(JSON.stringify(rootLock))
+    const p = bumped.packages
+    const cas = 'node_modules/@anthropic-ai/claude-agent-sdk'
+    assert.ok(p[cas] && p['node_modules/json-schema-to-ts'], 'premise: the root lockfile carries claude-agent-sdk and a hoisted json-schema-to-ts')
+    p[cas] = { ...p[cas], dependencies: { ...p[cas].dependencies, 'json-schema-to-ts': '^4.0.0' } }
+    p[`${cas}/node_modules/json-schema-to-ts`] = {
+      version: '4.0.0',
+      resolved: 'https://registry.npmjs.org/json-schema-to-ts/-/json-schema-to-ts-4.0.0.tgz',
+      integrity: 'sha512-hypothetical',
+      license: 'MIT',
+    }
+    const out = deriveServerLockfile({ rootLock: bumped, packageJson: stagedServerPkg, workspace: WORKSPACE })
+    const { mismatches } = pairedWalk(bumped.packages, out.packages, topDepsOf(stagedServerPkg))
+    assert.deepEqual(mismatches.slice(0, 10), [], `${mismatches.length} edge(s) differ`)
   })
 })
