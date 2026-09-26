@@ -450,7 +450,7 @@ describe('#7874 openNoFollow — a volume reporting file index 0 is refused, and
       assert.equal(level, 'warn')
       assert.ok(msg.includes('C:\\ws\\noindex.txt'), 'the line does not name the path')
       assert.ok(msg.includes('file index 0'), 'the line does not name the cause')
-      assert.ok(msg.includes('NOT a symlink'), 'the line does not rule out a symlink')
+      assert.ok(msg.includes('No symlink was seen'), 'the line does not say no symlink was seen')
       assert.ok(msg.includes('dev=9'), 'the line does not name the volume')
     })
   }
@@ -463,6 +463,10 @@ describe('#7874 openNoFollow — a volume reporting file index 0 is refused, and
     ['a symlink after open', { post: statLike({ symlink: true }) }],
     ['an identity mismatch', { post: statLike({ ino: 43n }) }],
     ['a failed post-open lstat', { postThrows: Object.assign(new Error('gone'), { code: 'ENOENT' }) }],
+    // One side reports index 0, but the two stats are on DIFFERENT volumes:
+    // that proves a swap, and must not be logged as an index-less volume
+    // ("no symlink was seen, use NTFS") when it may be a live race.
+    ['index 0 on one side across two volumes', { post: statLike({ ino: 42n, dev: 10n }), onFd: statLike({ ino: 0n, dev: 9n }) }],
   ]) {
     it(`${label} is refused WITHOUT the index-0 line or reason`, async () => {
       const log = recordingLog()

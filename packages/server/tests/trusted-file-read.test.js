@@ -435,6 +435,7 @@ describe('#7874 _openTrustedFdSync — a volume reporting file index 0 is refuse
     ['a symlink after open', { post: statLike({ symlink: true }) }],
     ['an identity mismatch', { post: statLike({ ino: 43n }) }],
     ['a failed post-open lstat', { postThrows: Object.assign(new Error('gone'), { code: 'ENOENT' }) }],
+    ['index 0 on one side across two volumes', { post: statLike({ ino: 0n, dev: 10n }), onFd: statLike({ ino: 42n, dev: 9n }) }],
   ]) {
     it(`${label} is refused WITHOUT the index-0 line or reason`, () => {
       const log = recordingLog()

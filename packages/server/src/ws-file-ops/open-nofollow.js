@@ -100,6 +100,8 @@ const log = createLogger('open-nofollow')
  * names a cause that is not the cause. So this refusal, and only this one,
  * logs a warn line of its own naming the file-index cause, the path, both
  * inodes and the volume's `dev`, and tags the error `reason: 'no-file-index'`
+ * (a `dev` mismatch is checked first and refused as a swap: two volumes
+ * prove the files differ whatever index either reports)
  * ({@link NO_FILE_INDEX}). The wire contract stays `code: 'ELOOP'`, so the
  * distinction lives in the server log, where a support report can find it.
  * `trusted-file-read.js` carries the same refusal and uses the same line.
@@ -162,9 +164,11 @@ export const NO_FILE_INDEX = 'no-file-index'
 /**
  * #7874 — the one log line for an index-0 refusal, shared with
  * `trusted-file-read.js` so both refusal sites read the same in a support
- * report. It names the cause and says outright that no symlink was involved,
- * because the wire message the user saw says "access denied" and a reader of
- * the log would otherwise go looking for one.
+ * report. It names the cause and says that no symlink was seen, because the
+ * wire message the user saw says "access denied" and a reader of the log
+ * would otherwise go looking for one. Both callers compare `dev` BEFORE the
+ * index-0 check, so this line is only reached for two stats on the SAME
+ * volume; a one-sided 0 across volumes is refused as a swap instead.
  *
  * @param {string} who - The refusing function, for the log line
  * @param {string} path - The path that was refused
@@ -173,7 +177,7 @@ export const NO_FILE_INDEX = 'no-file-index'
  * @returns {string}
  */
 export function describeNoFileIndex(who, path, onFd, onPath) {
-  return `${who} refused ${path}: the volume reports file index 0 (fd ino=${onFd.ino}, path ino=${onPath.ino}, dev=${onFd.dev}), so the fd-identity check cannot run. This is NOT a symlink. The file system (FAT/exFAT, or a network or virtual volume without file indexes) cannot be opened through a symlink-refusing open; use an NTFS volume (#7874).`
+  return `${who} refused ${path}: the fd-identity check read file index 0 (fd ino=${onFd.ino}, path ino=${onPath.ino}, volume dev=${onFd.dev}), so it cannot prove the opened file is the one at the path. No symlink was seen. A volume without file indexes (FAT/exFAT, some network or virtual volumes) reports 0 for every file and cannot be opened through a symlink-refusing open; use an NTFS volume (#7874).`
 }
 
 /**
@@ -256,6 +260,12 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
   try {
     const [onFd, onPath] = await Promise.all([fstat(fh), lstat(path)])
     if (onPath.isSymbolicLink()) throw eloop(path, 'a symlink appeared at the path after open')
+    // #7874: volumes first. Two different volumes prove a swap whatever file
+    // index either reports, so a one-sided index 0 across volumes is refused
+    // as the swap it is, not logged as an index-less volume.
+    if (onFd.dev !== onPath.dev) {
+      throw eloop(path, 'the opened file is on a different volume than the file at this path — swapped between check and open')
+    }
     if (onFd.ino === 0n || onPath.ino === 0n) {
       // #7874: refused, per the module header's policy, and logged so the
       // refusal cannot be mistaken for a symlink or containment rejection.
@@ -268,7 +278,7 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
         { reason: NO_FILE_INDEX }
       )
     }
-    if (onFd.dev !== onPath.dev || onFd.ino !== onPath.ino) {
+    if (onFd.ino !== onPath.ino) {
       throw eloop(path, 'the opened file is not the file at this path — swapped between check and open')
     }
     ok = true

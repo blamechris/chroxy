@@ -189,6 +189,11 @@ export function _openTrustedFdSync(path, deps) {
     const onFd = doFstat(fd)
     const onPath = doLstat(path)
     if (onPath.isSymbolicLink()) throw refusal(path, 'a symlink appeared at the path after open')
+    // #7874: volumes first, as in open-nofollow.js. Two volumes prove a swap
+    // whatever file index either reports.
+    if (onFd.dev !== onPath.dev) {
+      throw refusal(path, 'the opened file is on a different volume than the file at this path — swapped between check and open')
+    }
     if (onFd.ino === 0n || onPath.ino === 0n) {
       // Best-effort, as in open-nofollow.js: a throwing log sink must not turn
       // this refusal into "identity check failed" and drop its reason.
@@ -198,7 +203,7 @@ export function _openTrustedFdSync(path, deps) {
         { reason: NO_FILE_INDEX },
       )
     }
-    if (onFd.dev !== onPath.dev || onFd.ino !== onPath.ino) {
+    if (onFd.ino !== onPath.ino) {
       throw refusal(path, 'the opened file is not the file at this path — swapped between check and open')
     }
     ok = true
