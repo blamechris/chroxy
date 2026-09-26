@@ -242,8 +242,23 @@ describe('buildGrepArgs', () => {
   it('honors -i, -n=false, and a glob filter', () => {
     assert.deepEqual(
       buildGrepArgs({ '-i': true, '-n': false, glob: '*.go' }),
-      { ci: '-i', ln: '', globArg: ` --glob '*.go'` },
+      { ci: '-i', ln: '', globArg: ` --glob='*.go'` },
     )
+  })
+
+  // #7928 — `--glob` is a NAMED flag, so its value must be fused into the
+  // same token (`--glob=<value>`) rather than passed as a separate argv
+  // element. A space-separated `--glob <value>` form would only be as safe
+  // as rg's declared arity for that flag, which is a per-CLI fact this
+  // builder must not assume (see the function's own doc + #7295's -e/--
+  // precedent for pattern/root). This is the command-shape half of the
+  // grep-argv-injection.test.js #7928 proof.
+  it('joins the glob value to `--glob=` rather than passing it as a separate argv element', () => {
+    const { globArg } = buildGrepArgs({ glob: '--pre=/tmp/evil.sh' })
+    assert.equal(globArg, ` --glob='--pre=/tmp/evil.sh'`)
+    // No whitespace between `--glob=` and the opening quote: a space here
+    // would let the shell hand rg two argv elements instead of one.
+    assert.doesNotMatch(globArg, /--glob\s+'/)
   })
 })
 
@@ -262,7 +277,7 @@ describe('buildGrepCommand', () => {
   })
 
   it('threads the glob arg into the rg command', () => {
-    assert.match(buildGrepCommand({ ...base, globArg: ` --glob '*.md'` }), /rg --no-config -i -n --no-heading --glob '\*\.md' -e 'TODO'/)
+    assert.match(buildGrepCommand({ ...base, globArg: ` --glob='*.md'` }), /rg --no-config -i -n --no-heading --glob='\*\.md' -e 'TODO'/)
   })
 
   it('rootExpr substitutes a shell expression for the quoted root (#7354)', () => {
