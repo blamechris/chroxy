@@ -318,30 +318,17 @@ describe('every npm resolve is paid for in the job budget (#7613, #7660, #7661)'
     assert.deepEqual(open, [], 'a run-body line ends inside a quote; maskQuotedData reads the NEXT line as code')
   })
 
-  it('server-lint resolves npm TWICE — its own error message is prose, not a third', () => {
-    // The live negative fixture, and it is not hypothetical: the first pass at
-    // the #7660 measurement counted three, because
-    //
-    //   echo "::error::… Run 'cd packages/server && npm install --package-lock-only' …"
-    //
-    // cuts at the quoted `&&` to an empty segment, which is exactly the shape a
-    // command-word test accepts. A guard that reads prose as configuration is
-    // satisfiable by prose.
+  it('server-lint resolves npm ONCE since #7324 removed the lockfile-freshness step', () => {
+    // Until #7324 this job also ran `npm install --package-lock-only` to check a
+    // committed packages/server/package-lock.json that could never drift under
+    // that check. The step and the file are gone; the one resolve left is npm ci.
     const ci = workflows.find(w => w.name === 'ci.yml')
     const serverLint = ci.jobs.find(j => j.id === 'server-lint')
-    const uses = npmUses(serverLint)
-    assert.equal(npmResolves(serverLint), 2, 'server-lint should resolve npm exactly twice')
-    const quoted = uses.filter(u => u.kind === 'quoted')
-    assert.equal(quoted.length, 1)
-    assert.match(
-      quoted[0].line,
-      /--package-lock-only/,
-      'the quoted mention should be the lockfile-staleness error message'
-    )
+    assert.equal(npmResolves(serverLint), 1, 'server-lint should resolve npm exactly once')
     assert.deepEqual(
-      uses.filter(u => u.kind === 'invocation').map(subcommandOf).sort(),
-      ['ci', 'install', 'run', 'run'],
-      'the four real npm invocations, of which two resolve'
+      npmUses(serverLint).filter(u => u.kind === 'invocation').map(subcommandOf).sort(),
+      ['ci', 'run', 'run'],
+      'the three real npm invocations, of which one resolves'
     )
   })
 
@@ -414,16 +401,33 @@ describe('the budget rule goes RED — one mutation at a time (#7661)', () => {
     ])
   })
 
-  it("server-lint's budget returned to its pre-#7660 five minutes", async () => {
+  it("server-lint's budget dropped below five minutes for its one resolve", async () => {
     const wf = await mutated([
       [
         '    # required check whose observed failure mode is a false red.\n    timeout-minutes: 10',
-        '    # required check whose observed failure mode is a false red.\n    timeout-minutes: 5',
+        '    # required check whose observed failure mode is a false red.\n    timeout-minutes: 4',
       ],
     ])
     assert.deepEqual(budgetViolations(wf), [
-      'ci.yml:server-lint resolves npm 2x on a 5-minute budget (needs >=10)',
+      'ci.yml:server-lint resolves npm 1x on a 4-minute budget (needs >=5)',
     ])
+  })
+
+  it('prose that quotes an npm command is not a resolve (the #7660 negative fixture, now synthetic)', async () => {
+    // The first pass at the #7660 measurement counted a quoted `::error::` message
+    // as a resolve, because the quoted `&&` cuts to an empty segment a command-word
+    // test accepts. That message lived in the step #7324 removed, so the fixture
+    // is injected here instead of read from the live workflow.
+    const wf = await mutated([
+      [
+        '        run: npm run lint\n',
+        '        run: |\n          npm run lint || { echo "::error::Run \'cd packages/server && npm install --package-lock-only\' and commit the result."; exit 1; }\n',
+      ],
+    ])
+    const serverLint = wf.find(w => w.name === 'ci.yml').jobs.find(j => j.id === 'server-lint')
+    assert.equal(npmResolves(serverLint), 1, 'the quoted mention must not count as a second resolve')
+    assert.equal(npmUses(serverLint).filter(u => u.kind === 'quoted').length, 1, 'fixture sanity: the mention is seen, as quoted')
+    assert.deepEqual(budgetViolations(wf), [])
   })
 
   it('a timeout nobody can parse is a violation, not a job without a budget', async () => {

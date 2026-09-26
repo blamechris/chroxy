@@ -108,8 +108,6 @@ EOF
 EOF
   printf '{"version":"%s","packages":{"":{"version":"%s"}}}\n' "$v" "$v" \
     > "$dir/package-lock.json"
-  printf '{"version":"%s","packages":{"":{"version":"%s"}}}\n' "$v" "$v" \
-    > "$dir/packages/server/package-lock.json"
 
   # Minimal Cargo.lock mirroring the shape of the real one. The decoy stanza
   # is a synthetic transitive at the same version — the lockfile-sync block

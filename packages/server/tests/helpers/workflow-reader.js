@@ -51,7 +51,7 @@ export const SETUP_NODE = 'actions/setup-node@'
 /** The cache value every runner-target-routed job must use (#7383). */
 export const ROUTED_CACHE = '${{ needs.runner-target.outputs.npmcache }}'
 
-/** The only correct `cache-dependency-path` in a repo with three lockfiles. */
+/** The only correct `cache-dependency-path` in a repo with lockfiles below the root. */
 export const LOCKFILE_GLOB = '**/package-lock.json'
 
 /** Runner-target outputs that mean "this job's runner depends on the trust predicate". */
