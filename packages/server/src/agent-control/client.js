@@ -895,11 +895,11 @@ export class AgentControlClient extends EventEmitter {
    *      `Glob` and `Grep` are deliberately NOT on this allowlist (adversarial
    *      review of 71e78ba38, same #7975 tracking) even though both are in
    *      {@link ACCEPT_EDITS_TOOLS} and both carry a `path` field the floor
-   *      inspects: each ALSO carries a second, file-selecting field the floor
-   *      never looks at (`Grep`'s `glob`, `Glob`'s `pattern`), so a caller can
-   *      leave `path` benign and use that field to target a secret file
-   *      directly — `floored: false` on one of these is not the complete
-   *      safety signal it is for the tools above. See
+   *      inspects: for neither is `floored: false` the complete safety signal
+   *      it is for the tools above. `Glob`'s `pattern` selects files the floor
+   *      never inspects (it returns names only). `Grep`'s `glob` IS inspected
+   *      since #7978, but a Grep with no glob reads every non-ignored file under
+   *      `path`, a committed secret included, and the floor sees only the path. See
    *      `permission-manager.js`'s doc comment on `FLOOR_ALLOWLISTED_TOOLS`
    *      for the measured ripgrep proof.
    *   4. **The floor** (#7968) — even for an allowlisted/flagged tool,
@@ -961,7 +961,7 @@ export class AgentControlClient extends EventEmitter {
         // COMMAND_TOOLS + the flag: fall through to the floor gate below,
         // same as any allowlisted file tool.
       } else {
-        return { status: 'rejected', requestId, sessionId, reason: 'not_allowlisted', message: `'${observed.tool}' is not one of the tools an external planner may ever approve — only Read/Write/Edit/NotebookEdit/apply_patch (the tools whose ENTIRE file-selecting input the protected-path floor actually inspects), plus Bash/PowerShell/Monitor/shell with --allow-command-approvals, can be allowed here. Glob and Grep are refused too, even though the floor can see their \`path\` field: each also carries a second field the floor never inspects (Grep's \`glob\`, Glob's \`pattern\`) that independently selects which file is matched, so \`floored: false\` on either is not a complete safety signal. An MCP tool, WebFetch/WebSearch, Task/Agent, codex mcp_elicitation, and any tool this client doesn't recognize all fail closed the same way. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
+        return { status: 'rejected', requestId, sessionId, reason: 'not_allowlisted', message: `'${observed.tool}' is not one of the tools an external planner may ever approve — only Read/Write/Edit/NotebookEdit/apply_patch (the tools whose ENTIRE file-selecting input the protected-path floor actually inspects), plus Bash/PowerShell/Monitor/shell with --allow-command-approvals, can be allowed here. Glob and Grep are refused too, even though the floor can see their \`path\` field: \`floored: false\` on either is not a complete safety signal. Glob's \`pattern\` selects files the floor never inspects, and a Grep with no \`glob\` reads every non-ignored file under its \`path\`, a committed secret included, while the floor sees only the path. An MCP tool, WebFetch/WebSearch, Task/Agent, codex mcp_elicitation, and any tool this client doesn't recognize all fail closed the same way. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
       }
     }
     // Gate 4: the floor (#7968). Read straight off what was OBSERVED for

@@ -310,6 +310,12 @@ EOF
 # PROTECTED_PATH_INPUT_FIELDS entry, so extending the floor's field list without
 # updating this line fails CI.
 #
+# #7978 — a Grep is floored on its `glob` too, and a Grep need not carry any path
+# field (`{"pattern":"KEY","glob":".env"}` searches the cwd). So the arm also
+# matches the tool NAME of every GLOB_SELECTOR_FLOOR_TOOLS member rather than a
+# `"glob"` key: the name is present on every call of that tool, whatever fields
+# it carries. The same test asserts every member is matched here.
+#
 # #7020 — the pre-filter's soundness argument ("naming no path field provably
 # cannot be floored") holds only over a COMPLETE, escape-free payload. Two guards
 # below narrow that premise before the negative filter is trusted; both resolve
@@ -348,7 +354,7 @@ EOF
 #      payload keeps the no-round-trip path.
 floor_forces_prompt() {
   case "$REQUEST" in
-    *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*) ;;
+    *'"file_path"'*|*'"path"'*|*'"notebook_path"'*|*'"changes"'*|*'"Grep"'*) ;;
     # (1) a \uXXXX escape may spell a path-naming key the byte scan cannot see.
     # Kept explicit for readability though arm (2) now subsumes it (`u` is not in
     # that arm's negated set), so a `\u` body probes either way.

@@ -52,6 +52,68 @@ searches. Containment for `Glob` therefore lives at the tool, not in the floor �
 actual boundary. When auditing whether a tool is covered, ask what the tool *reads*,
 not which of its fields the floor happens to scan.
 
+**`Grep`'s `glob` IS floored (#7978)**, because asking what `Grep` reads gives a
+different answer than it does for `Glob`. Every Grep Chroxy fronts runs ripgrep, and
+ripgrep's include globs **override its ignore rules**: `--glob=.env` reads a
+gitignored `.env`, and so do `*`, `**`, `sub/*` and `*env*`. Claude Code's Grep always
+passes `--hidden`, so `.gitignore` is the only barrier, and a glob walks through it.
+`*.json` is the everyday case: it reads the `.claude/settings.local.json` that Claude
+Code gitignores by default. So `Grep({ path: 'src', glob: '.env' })` read secret
+*contents* while the floor, scanning only `path`, answered "not floored".
+
+`isFlooredTarget` now also floors a `Grep` whose `glob` can select a secret, in either
+of the two ways executors read the field. Claude Code splits it on whitespace and
+commas; the BYOK executor passes it whole.
+
+**Only a small grammar is analyzed; everything else floors.** The analyzed grammar is:
+- ASCII letters, digits, `. _ - / !` and whitespace;
+- `*`, `**` and `?`;
+- `{a,b}` groups that hold at least one comma.
+
+Everything else floors unanalyzed:
+- a `[...]` class;
+- a `\` escape;
+- an empty or single-alternative brace (`{.env}` is a real alternation to ripgrep);
+- a stray brace;
+- any non-ASCII character (ripgrep trims trailing U+0085, which JavaScript's `\s`
+  does not match).
+
+The first revision tried to model ripgrep's globset in full. Its review found four
+places where the two disagreed, and a fuzz against real ripgrep got about 30% of
+secret-reading globs through. So the parser recognizes a grammar instead of imitating
+one. The rule inside the grammar, in `permission-floor.js`:
+
+| A glob floors when it can match… | Examples |
+|---|---|
+| an exact secret path: the floor's names, the credential-config files, and common real-world names (`.env.local`, `server.pem`, …), however it gets there | `*`, `**`, `sub/*`, `.env`, `*env*`, `*.json`, `*test*`, `privkey*` |
+| a `.env.<tail>`, `<stem>.pem/.key/.p12/.pfx` or `.claude/settings<mid>.json` name, **if** some character of the defining part (`.env`, the extension, the skeleton) is matched by something other than `*`/`**` | `.e?v.*`, `.env.????`, `?.pem`, `*v.*` |
+
+Not floored: `*.ts`, `*.{ts,tsx}`, `src/**/*.py`, `*.md`, and any `!`-exclusion. A
+glob over 1024 characters, one that splits into more than 32 pieces, one that expands to
+more than 64 brace alternatives or 4096 characters, or one that exhausts a 1,000,000-state
+search budget (a crafted glob otherwise reached 71ms on the event loop) floors without a
+full analysis. A trailing `/` is dropped before the anchoring decision, as ripgrep drops
+it, so `.env/` is read as `**/.env` (the directory it re-includes).
+
+**The accepted residual:** `*.ts` can match `.env.ts`, a name this floor counts as a
+secret, but only by letting `*` absorb all of `.env`. A strictly sound rule would floor
+every extension filter and prompt on nearly every globbed Grep in a lenient mode.
+What gets through is an extension or stem filter aimed at a *gitignored* secret with an
+unusual name. The same mechanism reaches a *directory*: `{*.d,*.conf}` re-includes a
+gitignored `.env.d/` and reads its `app.conf`. `tests/permission-floor-grep-glob.test.js`
+pins both, checks the matcher against real ripgrep on a fixture of gitignored secrets,
+and runs a seeded differential fuzz against ripgrep: any generated glob that makes
+ripgrep read one of the exact secrets must floor.
+
+Two neighbours stay unfloored, on measurement rather than oversight. Grep's `type` is
+not inspected, because ripgrep's type filters **respect** `.gitignore`: `-t sh` does not
+read a gitignored `.env`, though the `sh` type lists it. `Glob`'s `pattern` is not
+inspected either, because it returns names and never contents.
+
+The hook-routed pipeline needed its own change: a `Grep` need carry no path field, so
+`permission-hook.sh`'s byte-level pre-filter also probes on the tool name of every
+`GLOB_SELECTOR_FLOOR_TOOLS` member, and a test fails if the two drift apart.
+
 **And ask which process can see the filesystem the answer depends on** (#7354). Every
 check named above runs on the **host**, and for the container provider the paths belong
 to the **container**. A lexical rule cannot see a symlinked directory inside
@@ -295,6 +357,12 @@ those; `floored` only guarantees it never approves one the floor reserved for a 
   producer that emits a truncated or non-JSON payload, so neither is model- or
   remote-reachable; #7043 carries the candidate fixes (probe on any backslash, or a
   real structural check).
+- **A directory Grep reads what the ignore rules let through.** With no `glob`, a
+  `Grep` of a benign `path` reads every non-ignored file under it, a committed secret
+  included. The floor sees the path, not the directory's contents, which is why `Grep`
+  stays off the external-planner allowlist (`FLOOR_ALLOWLISTED_TOOLS`) even after
+  #7978. On a host with no ripgrep, BYOK's `grep -r` fallback honours neither
+  `.gitignore` nor hidden files, so there the barrier is absent entirely.
 - **Command-shaped access is out of scope.** `Bash` can read `.env` — the floor
   guards *path fields*, and `Bash` is in `NEVER_AUTO_ALLOW` (never rule-whitelisted)
   but IS auto-approved under `auto`. Flipping a session to `auto` remains a

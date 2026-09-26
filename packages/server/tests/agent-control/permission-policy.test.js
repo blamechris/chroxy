@@ -243,22 +243,30 @@ describe("FLOOR_ALLOWLISTED_TOOLS matches which tools isFlooredTarget can actual
  * #7975-followup (adversarial review of 71e78ba38) — Grep and Glob are
  * excluded from FLOOR_ALLOWLISTED_TOOLS even though ACCEPT_EDITS_TOOLS
  * carries both and the floor's SECRET_READ_FLOOR_TOOLS does inspect their
- * `path` field. This block is the RED-FIRST proof of why: a benign `path`
- * plus a malicious `glob`/`pattern` makes `isFlooredTarget` report
+ * `path` field. This block was the RED-FIRST proof of why: a benign `path`
+ * plus a malicious `glob`/`pattern` made `isFlooredTarget` report
  * `floored: false` for an input that targets a secret file directly — the
  * exact vacuous-`false` failure #7975 was written to close, just moved from
  * "no path field at all" (an MCP tool) to "a second, uninspected path-like
- * field on an otherwise-inspected tool" (Grep/Glob).
+ * field on an otherwise-inspected tool" (Grep/Glob). #7978 made the floor
+ * inspect Grep's `glob`; the exclusion stands on what is still true — Glob's
+ * `pattern` is uninspected, and a glob-less Grep reads a whole directory.
  */
 describe('Grep/Glob excluded from FLOOR_ALLOWLISTED_TOOLS: floored:false is not a complete safety signal for either (#7975-followup)', () => {
   const cwd = '/tmp/agent-control-floor-fixture-glob-grep'
 
-  it('Grep({ path: <benign cwd>, glob: ".env" }) is reported floored:false by isFlooredTarget even though it targets a secret file by name via `glob`', () => {
-    // `path` is the cwd itself — not a protected/secret path in any segment —
-    // so the floor's only inspected field for Grep sees nothing. `glob`
-    // (uninspected) is what actually selects `.env` as the file to search.
+  it('#7978: Grep({ path: <benign cwd>, glob: ".env" }) is now floored — the glob is inspected', () => {
+    // This row used to pin the bug (floored:false). #7978 made the floor read
+    // Grep's `glob`, so the shape that motivated excluding Grep now floors.
     const input = { pattern: '.', path: cwd, glob: '.env' }
-    assert.equal(isFlooredTarget('Grep', input, cwd), false, 'isFlooredTarget must not silently clear a Grep call whose glob field targets a secret file name — this being false is the bug this test proves, not a passing safety check')
+    assert.equal(isFlooredTarget('Grep', input, cwd), true)
+  })
+
+  it('but a Grep with NO glob is still floored:false for a benign path, though ripgrep reads every non-ignored file under it — so Grep stays excluded', () => {
+    // A committed (non-gitignored) `.env` under `path` is read by a plain
+    // directory Grep. The floor inspects the path, not the directory's
+    // contents, so floored:false is still not a complete safety signal.
+    assert.equal(isFlooredTarget('Grep', { pattern: 'SECRET', path: cwd }, cwd), false)
   })
 
   it('Glob({ path: <benign cwd>, pattern: "**/.env" }) is reported floored:false even though `pattern` is what actually selects the secret-named file', () => {
