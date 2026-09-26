@@ -663,6 +663,7 @@ export {
   // #4639 isBusy resync, now shared by both clients via the dispatch table.
   handleSessionActivity,
   handleThinkingLevelChanged,
+  handleThinkingLevelChangedPatch,
   handleBudgetWarning,
   handleBudgetExceeded,
   handleBudgetResumed,

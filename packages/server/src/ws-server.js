@@ -36,7 +36,7 @@ import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
-import { getProviderDataDirs } from './providers.js'
+import { getProviderDataDirs, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
 import { getLanIp } from './lan-ip.js'
@@ -374,6 +374,7 @@ function _isSecureRequest(req) {
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
  *   { type: 'model_changed', model: '...' }          — active model updated
+ *   { type: 'thinking_level_changed', level: '...', sessionId? } — #7803 active thinking/reasoning level updated (three senders: ws-history.js's reconnect/tab-switch replay, settings-handlers.js after an accepted set_thinking_level, event-normalizer.js's `ready` burst for the level a fresh codex session booted at)
  *   { type: 'available_models', models: [...], provider?, defaultModel? } — models the active provider accepts
  *   { type: 'permission_input', requestId, found, tool?, input?, error? } — #6543 (IDE P3 feature B) reply to a `get_permission_input` pull: the FULL secret-redacted tool input for a pending permission (the `permission_request` broadcast truncates `input` at ~10K), so a client can build a per-hunk pre-write diff. `found:false` (+ `error`) when the request is unknown / already resolved / owned by another session — the handler is session-bound (a client only gets input for a permission its session owns).
  *   { type: 'permission_audit_result', entries } — #6772 reply to a `query_permission_audit` pull: recent permission audit entries (mode changes / session-rule changes / allow-deny decisions) matching the query's optional sessionId/auditType/since/limit. Consumed by the dashboard's per-session "Permission history" view.
@@ -1365,8 +1366,15 @@ export class WsServer {
     this._draining = false
     this._latestVersion = null
 
-    // Background version check (non-blocking, skipped in test/CI)
-    if (process.env.NODE_ENV !== 'test') {
+    // Background version check (non-blocking, skipped in test/CI). #7265: this
+    // used to be gated on `process.env.NODE_ENV !== 'test'`, but nothing in this
+    // repo's harness or CI ever sets NODE_ENV=test, so the skip never fired and
+    // every WsServer construction in the test suite made a real outbound request
+    // to registry.npmjs.org. Gate on an explicit, harness-set switch instead —
+    // matches the CHROXY_DISABLE_KEYCHAIN / CHROXY_CRED_DISABLE_KEYCHAIN pattern
+    // in tests/_setup.mjs — so this changes exactly one behaviour and can't
+    // re-arm (or fail to arm) any other NODE_ENV gate.
+    if (process.env.CHROXY_DISABLE_UPDATE_CHECK !== '1') {
       checkLatestVersion(packageJson.name).then((v) => { this._latestVersion = v }).catch((err) => {
         log.warn(`Failed to check latest npm version: ${err.message} (non-critical, update check skipped)`)
       })
@@ -2418,6 +2426,14 @@ export class WsServer {
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
+      // #7895 — the daemon's resolved default provider, fed to
+      // `broadcastRosterPerRecipient`/`resolveRosterProvider` so the two
+      // `available_models` send sites in ws-forwarding.js tag a no-session (or
+      // legacy single-session) roster identically to `ws-history.js`'s connect
+      // path and `createOverlayReloadBroadcaster`'s overlay-reload path — the
+      // SAME resolution (#7932: `resolveDaemonDefaultProvider`, ./providers.js)
+      // `billingCanaryMonitor`'s `getDefaultProvider` uses.
+      defaultProvider: resolveDaemonDefaultProvider(this.config),
       // #4788 Wave 2: hand the question-route registration through a helper so
       // dispatch and routing-guard stay symmetric. When a question is
       // registered for session S, every currently-connected client that's

@@ -35,7 +35,8 @@ import { executeBuiltinTool } from './byok-tool-executor.js'
 import {
   addMcpServerToConfig,
   defaultClaudeConfigPath,
-  loadClaudeMcpConfig,
+  discoverMcpServerSpecs,
+  mcpWriteScopeToSource,
   planAddMcpServerToConfig,
   removeMcpServerFromConfig,
   toMcpServerMetadata,
@@ -469,7 +470,19 @@ export class ClaudeByokSession extends BaseSession {
     // writes back to the SAME file this session read from (a test override or
     // $CHROXY_CLAUDE_CONFIG must not be bypassed on the write half).
     this._mcpConfigPath = opts.mcpConfigPath || defaultClaudeConfigPath()
-    const mcpConfig = loadClaudeMcpConfig(opts.mcpConfigPath)
+    // #7112: `opts.mcpConfigPath === null` (a Task subagent, see
+    // `_executeTaskTool`) explicitly SKIPS discovery — the child does not
+    // parse a second copy of ~/.claude.json / <cwd>/.mcp.json and does not
+    // spawn its own fleet. `this.cwd` is set by the BaseSession super() call
+    // above, so it is available here. Resolves project scope
+    // (`projects[<realpath(cwd)>].mcpServers`), repo-local `.mcp.json`, and
+    // user root — the same three sources, in the same precedence order,
+    // `discoverConfiguredMcpServers` reads via the shared
+    // `readMcpSourcesInPrecedenceOrder` helper — instead of only ever
+    // reading the config's root `mcpServers` block.
+    const mcpConfig = opts.mcpConfigPath === null
+      ? { servers: [], warnings: [] }
+      : discoverMcpServerSpecs(this.cwd, { configPath: this._mcpConfigPath })
     for (const warning of mcpConfig.warnings) {
       log.warn(`BYOK MCP config: ${warning}`)
     }
@@ -543,6 +556,57 @@ export class ClaudeByokSession extends BaseSession {
     return getModelPricing(model)
   }
 
+  /**
+   * #7012: lazily construct + start the MCP fleet from whatever is currently in
+   * `_mcpServerConfigs`, exactly once. Extracted out of `start()` (which was the
+   * ONLY caller pre-#7012) so `addMcpServer` can reach the same construction path:
+   * a session that started with zero configured MCP servers never created a
+   * fleet, so `addMcpServer`'s old `if (this._mcpFleet)` gate skipped the
+   * fleet-attach step entirely — the server was persisted but stayed
+   * unconnected until a restart. `addMcpServer` appends the new entry to
+   * `_mcpServerConfigs` BEFORE calling this, so the fleet's constructor (which
+   * spawns one client per config) picks the new server up directly; no separate
+   * `fleet.addServer()` call is needed on that path.
+   *
+   * Single-flight without extra bookkeeping: `this._mcpFleet` is assigned
+   * SYNCHRONOUSLY, before the `await fleet.start()` below — the same
+   * synchronous stretch that reads `_mcpServerConfigs` and decides whether to
+   * call this method (see `addMcpServer`). JS never preempts mid-synchronous-
+   * stretch, so two concurrent `addMcpServer` calls can never both observe
+   * `_mcpFleet` as null: whichever runs first sets it before yielding on the
+   * `await`, and the other sees it already set and falls through to the
+   * existing-fleet `fleet.addServer()` branch instead of racing a second
+   * `new MCPFleet(...)`.
+   *
+   * Guards:
+   *  - zero configured servers → no fleet (mirrors the pre-#7012 `start()`
+   *    guard — nothing to spawn).
+   *  - `_destroying` → no fleet (a session torn down mid-add must not spawn a
+   *    new MCP child that `destroy()` has already finished looking for).
+   */
+  async _ensureMcpFleet() {
+    if (this._mcpFleet) return this._mcpFleet
+    if (this._destroying || this._mcpServerConfigs.length === 0) return null
+    // #4457: pass the session's PermissionManager so the fleet can
+    // emit a trust prompt for a not-yet-trusted spawn config (#7001: name +
+    // command + the full args + env).
+    // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
+    // with no prompt; denied tuples set state=DEAD without spawning.
+    // #4456: forward startCapMs override so operators can tune the
+    // session-start wall-clock cap. Passing undefined lets the fleet's
+    // constructor default (DEFAULT_FLEET_START_CAP_MS) win — exactly
+    // what we want when no override is in play.
+    const fleetOpts = { log, permissionManager: this._permissions }
+    if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
+    // #6824: seed the fleet with the persisted parked set so a respawn skips
+    // starting servers the operator disabled before the restart.
+    fleetOpts.disabledServers = [...this._disabledMcpServers]
+    const fleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
+    this._mcpFleet = fleet
+    await fleet.start()
+    return fleet
+  }
+
   async start() {
     if (this._client === null) {
       // Spike (BYOK direct) confirmed the SDK's standard constructor
@@ -573,24 +637,10 @@ export class ClaudeByokSession extends BaseSession {
     // tools, identical to a server missing from config. We deliberately
     // wait for fleet.start() so this.mcpServers + tools list are stable
     // by the time we emit 'ready'.
-    if (this._mcpServerConfigs.length > 0 && this._mcpFleet === null) {
-      // #4457: pass the session's PermissionManager so the fleet can
-      // emit a trust prompt for a not-yet-trusted spawn config (#7001: name +
-      // command + the full args + env).
-      // Tuples already trusted in ~/.chroxy/mcp-trust.json spawn directly
-      // with no prompt; denied tuples set state=DEAD without spawning.
-      // #4456: forward startCapMs override so operators can tune the
-      // session-start wall-clock cap. Passing undefined lets the fleet's
-      // constructor default (DEFAULT_FLEET_START_CAP_MS) win — exactly
-      // what we want when no override is in play.
-      const fleetOpts = { log, permissionManager: this._permissions }
-      if (this._mcpStartCapMs !== null) fleetOpts.startCapMs = this._mcpStartCapMs
-      // #6824: seed the fleet with the persisted parked set so a respawn skips
-      // starting servers the operator disabled before the restart.
-      fleetOpts.disabledServers = [...this._disabledMcpServers]
-      this._mcpFleet = new MCPFleet(this._mcpServerConfigs, fleetOpts)
-      await this._mcpFleet.start()
-    }
+    // #7012: extracted into _ensureMcpFleet so addMcpServer can reach the
+    // SAME construction path for a session that started with zero MCP
+    // servers configured (previously only start() ever created a fleet).
+    await this._ensureMcpFleet()
 
     this._processReady = true
     this.emit('ready', { sessionId: null, model: this.model, tools: [] })
@@ -746,9 +796,12 @@ export class ClaudeByokSession extends BaseSession {
       const store = loadTrustStore(trustPath, { log })
       if (isTrusted(store, cfg)) return { allowed: true, prompted: false }
       const isRemote = typeof cfg.url === 'string' && cfg.url.length > 0
+      // #7939: forward the scope this add targets (see mcpWriteScopeToSource
+      // above) so the pre-write trust prompt names where the server is being
+      // configured, same as a rediscovered spec's prompt would.
       const trustReq = isRemote
-        ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort() }
-        : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort() }
+        ? { name: cfg.name, url: cfg.url, headerKeys: Object.keys(cfg.headers || {}).sort(), source: cfg.source }
+        : { name: cfg.name, command: cfg.command, args: cfg.args, envKeys: Object.keys(cfg.env || {}).sort(), source: cfg.source }
       const allowed = await pm.requestMcpTrust(trustReq)
       if (allowed) recordTrust(cfg, trustPath)
       return { allowed: allowed === true, prompted: true }
@@ -759,8 +812,15 @@ export class ClaudeByokSession extends BaseSession {
    * Build the in-memory fleet config from a normalized persisted entry, filling
    * the shape defaults (`args`/`env` for stdio, `headers` for remote) the fleet
    * and the trust key both read.
+   *
+   * #7939: optional `source` (an `MCP_SERVER_SOURCE` value) tags where this
+   * config came from — a discovered spec already carries one from
+   * `discoverMcpServerSpecs`, but a live `addMcpServer` entry has none until
+   * the caller derives it from the WRITE scope via `mcpWriteScopeToSource` and
+   * passes it here, so both paths converge on the same shape before either
+   * reaches the spawn-trust gate.
    */
-  static _mcpCfgFromEntry(name, entry) {
+  static _mcpCfgFromEntry(name, entry, { source } = {}) {
     const cfg = { name, ...entry }
     if (cfg.command !== undefined) {
       cfg.args = Array.isArray(cfg.args) ? cfg.args : []
@@ -768,6 +828,7 @@ export class ClaudeByokSession extends BaseSession {
     } else {
       cfg.headers = cfg.headers && typeof cfg.headers === 'object' ? cfg.headers : {}
     }
+    if (source !== undefined) cfg.source = source
     return cfg
   }
 
@@ -815,7 +876,12 @@ export class ClaudeByokSession extends BaseSession {
     if (!planned.ok) return { ok: false, error: planned.error, code: planned.code }
 
     // The candidate config, exactly as it would be persisted and spawned.
-    const cfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, planned.entry)
+    // #7939: tag it with the scope the user is adding it to (mapped onto the
+    // same MCP_SERVER_SOURCE vocabulary discovery uses) so the trust prompt
+    // for THIS add names its scope consistently with a rediscovered server.
+    const cfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, planned.entry, {
+      source: mcpWriteScopeToSource(planned.scope),
+    })
 
     const trust = await this._decideMcpSpawnTrust(cfg)
     if (!trust.allowed) {
@@ -855,8 +921,12 @@ export class ClaudeByokSession extends BaseSession {
     // diverge. Normalization is pure over (name, config), so this is structurally
     // identical to the `cfg` the trust decision was made against — and if it ever
     // were not, the fleet's own gate below would see an untrusted config and
-    // prompt rather than spawn.
-    const persistedCfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, written.entry)
+    // prompt rather than spawn. #7939: carries the same write-scope-derived
+    // `source` as `cfg` above, so a live-added server's fleet re-prompt (the
+    // backstop in `MCPFleet.addServer`/`_makeClient`) shows the identical scope.
+    const persistedCfg = ClaudeByokSession._mcpCfgFromEntry(valid.name, written.entry, {
+      source: mcpWriteScopeToSource(written.scope),
+    })
     this._mcpServerConfigs = [...this._mcpServerConfigs, persistedCfg]
     this._refreshMcpServerMetadata()
 
@@ -864,10 +934,23 @@ export class ClaudeByokSession extends BaseSession {
     if (this._mcpFleet) {
       const result = await this._mcpFleet.addServer(persistedCfg)
       if (result.status) status = result.status
+    } else if (this._processReady) {
+      // #7012: no fleet exists yet — either this is the session's first-ever
+      // MCP server, or start() never spun one up because zero servers were
+      // configured at start. `_mcpServerConfigs` already carries this server
+      // (appended above), so `_ensureMcpFleet`'s constructor picks it up
+      // directly; `fleet.addServer()` is not called on this path — see that
+      // method's docstring for why.
+      const fleet = await this._ensureMcpFleet()
+      if (fleet) {
+        const entry = fleet.getServerStatuses().find((s) => s.name === persistedCfg.name)
+        if (entry?.status) status = entry.status
+      }
     }
-    // No fleet yet (nothing was configured at start, so it was never created):
-    // the entry is persisted and `start()` will pick it up. Spinning a fleet up
-    // here would duplicate start()'s wiring for no gain.
+    // else: addMcpServer was called before start() (production only ever
+    // reaches a started session — the WS handler requires one). Leave status
+    // 'configured' and let start() pick the persisted entry up normally,
+    // rather than spawning an MCP child ahead of `_processReady`.
     this._emitMcpServers()
     const result = { ok: true, status }
     if (written.warning) result.warning = written.warning

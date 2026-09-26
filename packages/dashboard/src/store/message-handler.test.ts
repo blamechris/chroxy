@@ -913,6 +913,64 @@ describe('dashboard message-handler dispatch', () => {
       })
     })
 
+    // #7807 — thinking_level_changed migrated from a dashboard-local
+    // HANDLERS-map entry into the shared store-core dispatch table
+    // (handleThinkingLevelChangedPatch, mirroring model_changed's
+    // sessionPatchDispatcher). Nothing above exercises the SUCCESS path —
+    // the THINKING_LEVEL_NOT_APPLIED block only drives the `error` revert —
+    // so this pins that the migration preserved the dashboard's own
+    // resolveSessionId + updateSession behavior it used to do by hand.
+    describe('thinking_level_changed dispatch (#7807 — migrated to the shared dispatch table)', () => {
+      it('sets the TARGETED session thinkingLevel from an explicit sessionId, not the active one', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: {
+              s1: { ...createEmptySessionState(), thinkingLevel: 'default' },
+              s2: { ...createEmptySessionState(), thinkingLevel: 'default' },
+            },
+          }),
+        )
+        setStore(store)
+
+        handleMessage({ type: 'thinking_level_changed', sessionId: 's2', level: 'xhigh' }, ctx() as any)
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s2.thinkingLevel).toBe('xhigh')
+        expect(state.sessionStates.s1.thinkingLevel).toBe('default')
+      })
+
+      it('falls back to the active session when sessionId is absent', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), thinkingLevel: 'default' } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage({ type: 'thinking_level_changed', level: 'high' }, ctx() as any)
+
+        expect((store.getState() as any).sessionStates.s1.thinkingLevel).toBe('high')
+      })
+
+      it('is a no-op for an unknown session', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), thinkingLevel: 'default' } },
+          }),
+        )
+        setStore(store)
+
+        handleMessage({ type: 'thinking_level_changed', sessionId: 'nope', level: 'xhigh' }, ctx() as any)
+
+        const state = store.getState() as any
+        expect(state.sessionStates.nope).toBeUndefined()
+        expect(state.sessionStates.s1.thinkingLevel).toBe('default')
+      })
+    })
+
     // #3570: INVALID_AUTHOR error from skill_trust_grant carries the
     // structured `actualAuthor` field (#3568,
     // ServerSkillTrustGrantInvalidAuthorSchema). The dashboard surfaces

@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'fs'
 import { resolve, normalize, extname } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
+import { GET_DIFF_BASE_MAX_LENGTH } from '@chroxy/protocol'
 import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
@@ -16,11 +17,19 @@ const log = createLogger('ws')
 /**
  * Longest `base` getDiff will hand to git. A revision is short — a full OID is
  * 40 characters and a ref name far less — so this rejects nothing legitimate,
- * and it bounds what an unconstrained wire field (`GetDiffSchema` is
- * `.passthrough()`, #7870) can spend: two `rev-parse` argvs per request, plus
- * whatever git echoes back into an error message.
+ * and it bounds what could otherwise be spent per request: two `rev-parse`
+ * argvs, plus whatever git echoes back into an error message.
+ *
+ * #7870 — imported rather than redeclared: `GetDiffSchema` (packages/protocol)
+ * now rejects a `base` over this same length AT THE WIRE, before getDiff ever
+ * runs. This constant is the single source both layers read, so the two
+ * cannot drift the way a hand-copied number could. This gate stays anyway —
+ * it is the server's OWN, independent defense-in-depth boundary, correct even
+ * for a future caller that reaches getDiff by a path that skips schema
+ * validation (see packages/server/tests/ws-server-file-ops.test.js's direct
+ * `createReaderOps` calls, which exercise it without going over the wire).
  */
-const MAX_DIFF_BASE_LENGTH = 256
+const MAX_DIFF_BASE_LENGTH = GET_DIFF_BASE_MAX_LENGTH
 
 /** Longest error detail written to the server log in one line (#7298). */
 const MAX_LOGGED_ERROR_LENGTH = 500
@@ -58,9 +67,15 @@ const IMAGE_MIME = {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {Function} [execImpl] - injectable promisified execFile seam (defaults to the
+ *   real one; matches createGitOps' 5th arg, #7871). Every git invocation inside
+ *   getDiff routes through this — `rev-parse --git-dir`, both `rev-parse --verify`
+ *   calls, both `diff` calls, and `ls-files` — so the preflight failure branch
+ *   (and the exit-128 classification, #7877) can be driven by tests without a
+ *   real non-repo/permission-denied/timeout condition on the host.
  * @returns {Object} reader operation methods
  */
-export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd, execImpl = execFileAsync) {
 
   /**
    * Read file content at a given path within the session CWD.
@@ -198,6 +213,17 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         let fh
         try {
           fh = await openNoFollow(resolvedAbsPath, fsConstants.O_RDONLY)
+          // #7938 — `fileStat` above was taken BEFORE this open, so it can't
+          // see a FIFO/device swapped in during the TOCTOU window between
+          // that stat and this open. openNoFollow's O_NONBLOCK keeps the
+          // open from hanging on a planted FIFO with no writer, but the
+          // content must still not be read from anything but a regular file
+          // — re-check on the OPENED fd, which can't be raced the same way.
+          const fhStat = await fh.stat()
+          if (!fhStat.isFile()) {
+            // No path in the text: this reaches the client verbatim.
+            throw new Error('Not a regular file')
+          }
           buf = await fh.readFile()
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
@@ -514,6 +540,14 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           if (st.size > 0) {
             let rfh
             try {
+              // #7938 — openNoFollow's O_NONBLOCK keeps a FIFO raced in at this
+              // path from hanging the open. No post-open isFile() check here,
+              // deliberately: the read below is a positioned read (pread), and
+              // pread on a FIFO fails ESPIPE and on a directory EISDIR, both
+              // landing in the advisory catch exactly as a refusal would. A
+              // check could not change any outcome (a mutation deleting one
+              // survived every test for that reason), and the one byte read is
+              // never returned to the client — it only picks the separator.
               rfh = await openNoFollow(absPath, fsConstants.O_RDONLY)
               const tail = Buffer.alloc(1)
               await rfh.read(tail, 0, 1, st.size - 1)
@@ -581,27 +615,50 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // Check if the directory is a git repository before running git commands
       try {
-        await execFileAsync(GIT, ['rev-parse', '--git-dir'], {
+        // #7877 — LC_ALL/LANG=C: the classification below reads git's stderr
+        // for an English substring. Left to the daemon host's own locale, a
+        // translated "not a git repository" message would silently miss that
+        // substring and fall into the "other exit-128" branch on EVERY
+        // request from that host — exactly the per-request log spam #7862's
+        // review downgrade was trying to avoid. Forcing C here makes the
+        // classification locale-independent without touching any other git
+        // invocation in this function (none of the others string-match stderr).
+        await execImpl(GIT, ['rev-parse', '--git-dir'], {
           cwd: cwdReal,
           timeout: 5000,
+          env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
         })
       } catch (revParseErr) {
         const stderr = (revParseErr.stderr || revParseErr.message || '').toLowerCase()
-        const isNotGitRepo = stderr.includes('not a git repository') ||
-          revParseErr.code === 128
-        // #7298 — half 2 is a property of getDiff's WHOLE reply surface, not
-        // of the one branch the issue measured. This branch forwarded
-        // `revParseErr.message`, which carries git's own stderr plus the
-        // resolved git binary path, for every non-128 failure (git missing,
-        // timeout, EACCES). 'Not a git repository' stays: it is a fixed
-        // classification, not a forwarded message.
+        // #7877 — git exits 128 for MANY fatals, not only "not a git
+        // repository": `fatal: detected dubious ownership in repository at
+        // '<path>'` (mounted volumes, container/worktree setups) is the one
+        // chroxy actually hits. The old `stderr.includes(...) || code === 128`
+        // OR'd every other 128 into the same bucket, so a dubious-ownership
+        // session was misreported to the client AND logged nowhere — the
+        // operator had no trace of the real cause.
         //
-        // Only the UNEXPECTED failure is logged. "Not a git repository" is the
-        // ordinary state of a session whose cwd is not a checkout, and it
-        // arrives on every `get_diff` that session sends — logging it at error
-        // level buries the failures worth reading, which is the same defect as
-        // not logging at all (Copilot review of #7862).
-        if (!isNotGitRepo) {
+        // The client-facing contract is UNCHANGED here on purpose (still a
+        // fixed 'Not a git repository' for any exit-128, never raw stderr —
+        // #7298 must hold): the fix is that an "other 128" is now visible to
+        // the operator. `isOtherExit128Fatal` is exactly the case the old
+        // predicate swallowed: an exit-128 whose stderr, in the forced C
+        // locale above, does NOT actually say "not a git repository".
+        const isGenuineNotGitRepo = stderr.includes('not a git repository')
+        const isOtherExit128Fatal = !isGenuineNotGitRepo && revParseErr.code === 128
+        const isNotGitRepo = isGenuineNotGitRepo || isOtherExit128Fatal
+
+        if (isOtherExit128Fatal) {
+          // Routine-ish (dubious ownership, etc.) but worth an operator's
+          // attention — warn, not error, and not silence (#7877).
+          log.warn(`git rev-parse --git-dir exited 128 without a "not a git repository" message — classified as non-repo anyway: ${truncateForLog(revParseErr.message)}`)
+        } else if (!isNotGitRepo) {
+          // Only the genuinely UNEXPECTED failure (git missing, timeout,
+          // EACCES) logs at error level. "Not a git repository" is the
+          // ordinary state of a session whose cwd is not a checkout, and it
+          // arrives on every `get_diff` that session sends — logging it at
+          // error level buries the failures worth reading, which is the same
+          // defect as not logging at all (Copilot review of #7862).
           log.error(`git rev-parse --git-dir failed: ${truncateForLog(revParseErr.message)}`)
         }
         sendFn(ws, {
@@ -677,7 +734,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       /** Resolve a revision to a commit OID, or null when it names no commit. */
       const resolveCommit = async (rev) => {
         try {
-          const { stdout } = await execFileAsync(
+          const { stdout } = await execImpl(
             GIT, ['rev-parse', '--verify', '--quiet', `${rev}^{commit}`],
             { cwd: cwdReal, timeout: 5000 }
           )
@@ -699,7 +756,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execFileAsync(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
+        const { stdout } = await execImpl(GIT, baseOid ? ['diff', baseOid] : ['diff'], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -724,7 +781,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execFileAsync(GIT, ['diff', '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -754,7 +811,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       // Discover untracked files (new files not yet staged)
       try {
-        const { stdout: untrackedOutput } = await execFileAsync(
+        const { stdout: untrackedOutput } = await execImpl(
           GIT, ['ls-files', '--others', '--exclude-standard'],
           { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
         )

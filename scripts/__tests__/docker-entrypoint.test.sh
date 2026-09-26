@@ -25,6 +25,15 @@
 #
 set -uo pipefail
 
+# Size of a padding value passed as ONE argv/env string. Linux caps any single
+# argument or environment string at MAX_ARG_STRLEN (32 pages = 131072 bytes),
+# so a 400KB value fails exec with E2BIG ("Argument list too long") before the
+# script under test even runs. 100000 bytes stays under that cap and is still
+# larger than Linux's 64KiB default pipe buffer, so the SIGPIPE race remains
+# reachable; macOS has no per-string cap and needs the larger value to beat
+# XNU's pipe-buffer growth. File-based paddings are unaffected.
+ARG_PAD_BYTES=$([ "$(uname -s)" = Linux ] && echo 100000 || echo 400000)
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ENTRYPOINT="$REPO_ROOT/scripts/docker-entrypoint.sh"
 
@@ -33,7 +42,7 @@ ENTRYPOINT="$REPO_ROOT/scripts/docker-entrypoint.sh"
 # executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=5
+EXPECTED_CASES=7
 
 PASS=0
 FAIL=0
@@ -153,6 +162,65 @@ if [ "$mode" = "600" ]; then
   pass "the relocated config.json is chmod 600"
 else
   fail "the relocated config.json is chmod 600" "got mode '$mode'"
+fi
+rm -rf "$tmp"
+
+# --- 5. WORKSPACE_PATH containment: a system-directory path is blocked -----
+# Baseline positive control for the #7907 fix below — no prior case in this
+# harness exercised the WORKSPACE_PATH containment check at all.
+tmp="$(mktemp -d)"
+out=$(
+  export HOME="$tmp/home"
+  mkdir -p "$HOME"
+  export ANTHROPIC_API_KEY="sk-ant-test"
+  export WORKSPACE_PATH="/etc/foo"
+  bash "$ENTRYPOINT" start 2>&1
+)
+if grep -qF "resolves to a system directory" <<<"$out"; then
+  pass "WORKSPACE_PATH under /etc is blocked"
+else
+  fail "WORKSPACE_PATH under /etc is blocked" "output: $out"
+fi
+rm -rf "$tmp"
+
+# --- 6. #7907 — the containment check survives pipefail+SIGPIPE ------------
+# scripts/docker-entrypoint.sh runs under `set -euo pipefail` (line 2). The
+# containment check used to be
+#   echo "$resolved_path" | grep -q "^${prefix}/"
+# grep -q exits the instant it finds a match, without draining the rest of
+# its stdin; if the producer (echo) is still writing when that happens,
+# SIGPIPE hits it, and pipefail promotes that broken-pipe write error into
+# the whole pipeline's exit status — even though grep itself matched. For an
+# ordinary short WORKSPACE_PATH this can't race (the whole write fits in one
+# syscall), but a value with an embedded newline followed by a large amount
+# of trailing data reproduces it reliably: the first LINE is a genuine match
+# ("/etc/x"), grep matches and exits immediately, and the shell is still
+# mid-write on the remaining ~400KB when the pipe closes. Reproduced 5/5
+# against the pre-fix script (see the PR body for the transcript); the fix
+# (`grep -q "^${prefix}/" <<<"$resolved_path"`) hands grep the data directly,
+# so there is no separate writer process for SIGPIPE to land on.
+tmp="$(mktemp -d)"
+# Generated via python3 (matches the sibling >390KB-padding cases in
+# bump-version.test.sh / require-review-before-merge.test.sh /
+# lint-no-raw-color-literals.test.sh / verify-entitlements.test.sh) rather
+# than `printf 'p%.0s' $(seq 1 400000)`: the latter word-splits `seq`'s
+# 400,000-line output into 400,000 unquoted shell words, which is needless
+# arg-count blowup for a single padding string (flagged in review).
+pad="$(python3 -c "import sys; sys.stdout.write('p' * int(sys.argv[1]))" "$ARG_PAD_BYTES")"
+workspace_path="/etc/x
+$pad"
+out=$(
+  export HOME="$tmp/home"
+  mkdir -p "$HOME"
+  export ANTHROPIC_API_KEY="sk-ant-test"
+  export WORKSPACE_PATH="$workspace_path"
+  bash "$ENTRYPOINT" start 2>&1
+)
+if grep -qF "resolves to a system directory" <<<"$out"; then
+  pass "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >64KB value"
+else
+  fail "#7907 — WORKSPACE_PATH containment survives pipefail+SIGPIPE on a >64KB value" \
+       "the system-directory path was NOT blocked — guard silently skipped"
 fi
 rm -rf "$tmp"
 

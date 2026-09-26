@@ -37,6 +37,24 @@ import { getChroxyHostEnv } from '../chroxy-host-metadata.js'
 export const STANDARD_ALLOWLIST = [
   'PATH',
   'HOME',
+  // Windows home/profile identity (#7948). Node's os.homedir() checks
+  // USERPROFILE first and only falls back to the Win32
+  // GetUserProfileDirectoryW API when it's unset — but allowlist-mode
+  // providers are third-party binaries, not guaranteed to go through
+  // os.homedir()'s fallback at all: codex (a Rust binary) documents its own
+  // home as %USERPROFILE%\.codex (a direct env read), and gemini's Node
+  // dependency google-auth-library-nodejs resolves its ADC well-known file at
+  // %APPDATA%\gcloud\application_default_credentials.json — unrelated to
+  // home-dir resolution entirely. HOMEDRIVE/HOMEPATH is the classic fallback
+  // pair some tools use when USERPROFILE itself is absent; LOCALAPPDATA is
+  // APPDATA's machine-local sibling used for cache/local config by the same
+  // class of Windows tooling. All five are no-ops on POSIX (unset in
+  // process.env there), so listing them unconditionally is harmless.
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
   'USER',
   'LOGNAME',
   'SHELL',

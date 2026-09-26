@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
 import {
   CONTEXT_WINDOW_HEADROOM,
   getRatchetCap,
@@ -325,6 +326,22 @@ export function buildCodexArgs(text, model, threadId = null, sandboxOverride = u
   // resume SESSION_ID, itself a positional — is emitted BEFORE it, and why
   // `text` must stay the LAST element. Appending a flag after it would silently
   // turn that flag into part of the prompt.
+  //
+  // #7868 — unlike `text`, `threadId` can never LEGITIMATELY start with `-`:
+  // it is chroxy's own identifier (a codex `thread_id`, or a client-supplied
+  // resume target already required to be a canonical UUID at the WS layer —
+  // see handlers/conversation-handlers.js's CONVERSATION_ID_RE), never free-
+  // form chat text. So the correct shape here is case 1 (reject), not a `--`
+  // terminator — which would not even help, since the SESSION_ID positional
+  // must stay BEFORE the separator (INVARIANT above). Before this, nothing in
+  // buildCodexArgs itself constrained threadId's shape: safety depended
+  // entirely on every external producer already happening to constrain it,
+  // which is the exact "someone remembers to sweep" pattern this issue's own
+  // lint exists to close. `resume` declares
+  // --dangerously-bypass-approvals-and-sandbox, so a producer that ever
+  // relaxed that external constraint would have reopened a sandbox-escape
+  // primitive, not just a parse nuisance.
+  if (threadId) assertSafeArgvValue(threadId, 'threadId')
   const sandbox = resolveCodexSandbox(sandboxOverride)
   const args = threadId
     ? ['exec', '--sandbox', sandbox, 'resume', '--json', '--skip-git-repo-check']

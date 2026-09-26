@@ -234,6 +234,111 @@ export function globPatternEscapeMessage(reason) {
   return `EINVAL: glob pattern escapes the workspace root (${reason}). Patterns are relative to the workspace; use the "path" argument to search a subdirectory.`
 }
 
+/**
+ * SECURITY (#7898 round 4) — hard ceilings on `pattern` BEFORE it reaches
+ * either backend's matcher: the host's hand-written case-check parser
+ * (`compileCaseCheck`/`parseSegmentTokens`/`advanceToken` in
+ * byok-tool-executor.js) and the container's bash brace expansion
+ * (`buildConfinedGlobBody`). Nothing upstream of this point bounds `pattern`
+ * at all — not the tool's JSON-schema `input_schema` (a bare `{ type:
+ * 'string' }`, no `maxLength`), not {@link GLOB_PATTERN_SHELL_METACHARS}, not
+ * {@link globPatternEscapeReason} (both are fixed-cost linear scans that
+ * don't look at length or nesting). This is the first and only place either
+ * is checked, which is why both backends call it.
+ *
+ * Two independent, cheap (each a single linear scan, no recursion) checks:
+ *
+ * - **Length.** Every cost this file's review history has found in the host
+ *   matcher is polynomial in `pattern.length` (P) for a BOUNDED P — see the
+ *   worst-case bound written above {@link compileCaseCheck} — so bounding P
+ *   bounds all of them at once, including constructs no round has found yet.
+ *   2,000 characters is generous: the longest pattern in this file's own test
+ *   suite, deliberately adversarial (`'{*a,*b}'.repeat(30)`), is 210; a real
+ *   pattern is rarely more than a few dozen.
+ *
+ * - **Brace nesting depth.** #7898 round 4 — chain-nested braces
+ *   (`{a,{b,{c,d}}}`, extended: `{x1,{x2,{x3,...}}}`) are the one construct
+ *   round 3's "self-limiting" dismissal ("depth d needs ~2^d characters",
+ *   true only for a BALANCED binary tree of alternatives) got wrong: a
+ *   right-leaning CHAIN needs only ~4 characters per extra level, so nesting
+ *   depth is near-linear in pattern length, not exponential. Two independent
+ *   defects follow, both measured directly against `compileCaseCheck`/
+ *   `caseCheckPasses` on this machine:
+ *     1. `parseSegmentTokens` re-scans the shrinking remainder at every
+ *        nesting level (`findMatchingBrace` + `splitTopLevelCommas`, each
+ *        O(remaining length)), so PARSE time alone is O(depth²): 0.16ms at
+ *        depth 10 (48 chars), 18.72ms at depth 1000 (6,890 chars), 301.88ms
+ *        at depth 4000 (30,890 chars) — quadratic scaling confirmed (~4x
+ *        time per ~2x length). This runs UNCONDITIONALLY per Glob call, in
+ *        `confineGlobMatches`, before a single match is even checked.
+ *     2. Both `parseSegmentTokens` (parse) and `advanceToken`/`advanceTokens`
+ *        (match, the `alt` branch recursing into nested options) are
+ *        RECURSIVE with one JS call frame per nesting level, and neither has
+ *        a depth check — a pattern nested deep enough throws an uncaught
+ *        `RangeError: Maximum call stack size exceeded`. Measured on Node
+ *        22.23.2: parsing survives to ~depth 5,505 (~38,000 chars) before
+ *        overflowing; MATCHING overflows far sooner, at ~depth 2,000 (~14,500
+ *        chars), because `advanceToken`/`advanceTokens` mutually recurse with
+ *        a shallower frame budget than `parseSegmentTokens`'s single
+ *        self-recursion. `executeBuiltinTool`'s outer try/catch turns this
+ *        into a caught `Tool Glob failed: Maximum call stack size exceeded`
+ *        rather than crashing the daemon — but the exact depth that overflows
+ *        depends on how much OTHER stack is already in use by the async call
+ *        chain when a real Glob call runs, which is neither deterministic nor
+ *        portable, so it cannot be treated as an implicit safety bound.
+ *   32 levels is far above anything a legitimate pattern needs (the task's
+ *   own `{a,{b,{c,d}}}` example is depth 3) and leaves a >60x margin below
+ *   the measured match-time overflow point, so the ceiling is reached and
+ *   refused long before either the quadratic parse cost or the recursion
+ *   depth becomes a problem — regardless of how much stack the caller has
+ *   already used.
+ *
+ * FAIL CLOSED: this runs BEFORE `fs.glob`'s own walk starts (host) and before
+ * the container `docker exec` is issued, so an over-budget pattern costs
+ * nothing beyond this scan — no walk, no case-check compile, no container
+ * round-trip.
+ *
+ * @param {string} pattern
+ * @returns {string|null} A reason string when the pattern is too complex.
+ */
+export const GLOB_PATTERN_MAX_LENGTH = 2_000
+export const GLOB_PATTERN_MAX_BRACE_DEPTH = 32
+
+export function globPatternComplexityReason(pattern) {
+  if (typeof pattern !== 'string') return 'not a string'
+  if (pattern.length > GLOB_PATTERN_MAX_LENGTH) {
+    return `longer than ${GLOB_PATTERN_MAX_LENGTH} characters (${pattern.length})`
+  }
+  // A plain linear scan, no recursion — and a SAFE upper bound on the real
+  // parser's recursion depth even though it does not distinguish a bracket
+  // expression's literal '{'/'}' members from real brace syntax: every
+  // recursion `parseSegmentTokens` actually performs happens on a MATCHED
+  // '{'...'}' pair, which this counter always sees too (an unmatched '{' —
+  // what `findMatchingBrace` treats as a literal and never recurses into —
+  // can only make this counter's depth reading HIGHER than the true parse
+  // depth, never lower). Over-rejecting a pattern that merely contains many
+  // literal, unmatched '{' characters is an acceptable false positive for a
+  // guard whose only job is to never under-count real recursion.
+  let depth = 0
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '{') {
+      depth++
+      if (depth > GLOB_PATTERN_MAX_BRACE_DEPTH) {
+        return `"{" nesting deeper than ${GLOB_PATTERN_MAX_BRACE_DEPTH} levels`
+      }
+    } else if (c === '}' && depth > 0) {
+      depth--
+    }
+  }
+  return null
+}
+
+/** The tool_result message for a pattern rejected by {@link globPatternComplexityReason}. */
+export function globPatternComplexityMessage(reason) {
+  return `EINVAL: glob pattern is too complex (${reason}). Narrow the search with "path", or split it into more than one simpler Glob call.`
+}
+
 // ---------------------------------------------------------------------------
 // Container path confinement (#7354) — resolve INSIDE the container
 // ---------------------------------------------------------------------------
@@ -272,6 +377,12 @@ export const CONTAINER_CONFINE_ERROR = '__chroxy_confine_error__'
  *
  * The count is a count, never a path: the names and link targets of what was
  * withheld would put the very thing containment refused into the daemon log.
+ *
+ * #7357 — this line is STILL `\n`-terminated (unlike the matches above it,
+ * which are NUL-delimited): it is host-authored fixed text, never a filename,
+ * so it cannot itself contain a stray delimiter, and keeping it human-legible
+ * on its own line is what let {@link splitWithheldTrailer} stay a boundary
+ * split rather than a scan.
  */
 export const CONTAINER_CONFINE_WITHHELD = '__chroxy_confine_withheld__'
 
@@ -316,15 +427,46 @@ const CONTAINER_RESOLVE_MAX_HOPS = 40
  * reporting the tool's own "No such file", not a containment error. A missing
  * or unreadable PARENT is a failure, which is correct for these three tools:
  * Read/Glob/Grep only ever name a path that must already exist.
+ *
+ * OPTIONAL SECOND ARG (#7897) — `$2`, non-empty to opt in, empty/absent (every
+ * pre-#7897 caller) to keep the contract above byte-for-byte. It widens
+ * exactly one case: a missing PARENT hit while resolving a FOLLOWED SYMLINK's
+ * TARGET (`$__n -gt 0` — at least one `readlink` hop already happened), never
+ * the original `$1`'s own first-hop parent, which stays a hard failure
+ * regardless of this flag. The host's component-wise resolver
+ * (`resolveTargetComponentwiseAsync`, utils/componentwise-resolver.js) hits
+ * ENOENT and switches to a purely lexical tail-append with no further
+ * filesystem access; `__cx_resolve` had no equivalent, so a dangling symlink
+ * whose target's own parent is ALSO missing (`sub/target.ts -> ./gone/x.ts`,
+ * `gone` not just `x.ts` absent) failed the `cd -P` on that missing parent and
+ * the whole match was withheld — a real undermatch against the host for a
+ * shape #7355/#7357's single-level fixture never exercised. `__cx_resolve_new`
+ * (below) already implements exactly this "peel trailing components until one
+ * exists, resolve that prefix physically, re-append the rest lexically"
+ * walk for CREATE-mode paths, so the fallback reuses it rather than growing a
+ * second copy (`__cx_resolve_new`'s own doc: "reused, not reimplemented — a
+ * second resolution loop is a second thing to drift") — at the point of
+ * failure `$__p` is always already absolute (built from a prior hop's
+ * `pwd -P`), which is exactly what `__cx_resolve_new` requires. Gated to
+ * `$__n -gt 0` rather than applied unconditionally so the original path's own
+ * missing-parent case — Read/Grep naming a path with no such directory at
+ * all — keeps failing exactly as before; only Glob's per-match symlink
+ * resolution ({@link buildConfinedGlobBody}) passes the flag.
  */
 const CONTAINER_RESOLVE_FN = [
   '__cx_resolve() {',
-  '  local __p=$1 __d __b __t __n=0',
+  '  local __p=$1 __cx_lenient=${2:-} __d __b __t __cd __n=0',
   `  while [ "$__n" -lt ${CONTAINER_RESOLVE_MAX_HOPS} ]; do`,
   '    if [ -d "$__p" ]; then ( unset CDPATH; cd -P -- "$__p" 2>/dev/null && pwd -P ) || return 1; return 0; fi',
   '    case $__p in */*) __d=${__p%/*}; __b=${__p##*/} ;; *) __d=.; __b=$__p ;; esac',
   '    [ -n "$__d" ] || __d=/',
-  '    __d=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ) || return 1',
+  '    if ! __cd=$( unset CDPATH; cd -P -- "$__d" 2>/dev/null && pwd -P ); then',
+  // #7897 — only past the first hop (already inside a followed symlink's
+  // target, never the original `$1`) and only when the caller opted in.
+  '      if [ "$__n" -gt 0 ] && [ -n "$__cx_lenient" ]; then __cx_resolve_new "$__p" && return 0; fi',
+  '      return 1',
+  '    fi',
+  '    __d=$__cd',
   '    __p=$__d/$__b',
   '    if [ -L "$__p" ]; then',
   // The `--` first, then WITHOUT it (Copilot, PR #7867): the image is a user
@@ -403,9 +545,19 @@ const CONTAINER_RESOLVE_NEW_FN = [
   '}',
 ].join('\n')
 
-/** Resolver per confinement mode — see {@link buildConfinedContainerCommand}. */
+/**
+ * Resolver per confinement mode — see {@link buildConfinedContainerCommand}.
+ *
+ * `'read'` now carries `CONTAINER_RESOLVE_NEW_FN` too (#7897): `__cx_resolve`'s
+ * optional lenient fallback calls `__cx_resolve_new`, and Glob
+ * ({@link buildConfinedGlobBody}) — the only caller that opts in — runs in
+ * 'read' mode. The top-level `__cx_ws`/`__cx_target` resolution in `'read'`
+ * mode is unaffected: neither call passes the lenient flag, so `__cx_resolve`
+ * behaves exactly as before for them, and `__cx_resolve_new` being merely
+ * DEFINED (not called) costs nothing.
+ */
 const CONFINE_MODES = new Map([
-  ['read', { fns: [CONTAINER_RESOLVE_FN], resolver: '__cx_resolve' }],
+  ['read', { fns: [CONTAINER_RESOLVE_FN, CONTAINER_RESOLVE_NEW_FN], resolver: '__cx_resolve' }],
   ['create', { fns: [CONTAINER_RESOLVE_FN, CONTAINER_RESOLVE_NEW_FN], resolver: '__cx_resolve_new' }],
 ])
 
@@ -498,6 +650,39 @@ export function buildConfinedContainerCommand({ target, body, setup = '', worksp
  * deleted rather than left beside it: an exported "same thing, no resolution"
  * variant is how a guard comes to be wired to only some of its callers
  * (`docs/false-safety-guards.md`, #7262), and it had exactly one caller.
+ *
+ * #7357 — matches are NUL-delimited (`printf '%s\0'`), not `\n`-delimited. A
+ * filename may legally contain a newline; a `\n`-joined stream can't tell "one
+ * match with an embedded newline" apart from "two matches", so the HOST's
+ * parser ({@link splitWithheldTrailer}, then the caller's `split('\0')`) would
+ * silently turn one real match into two lines — one of them a path that does
+ * not exist as spelled. NUL is the one byte a POSIX filename cannot contain,
+ * so it is the only delimiter that is unambiguous for every legal match. The
+ * withheld-count TRAILER stays `\n`-terminated (see {@link CONTAINER_CONFINE_WITHHELD}) —
+ * it is fixed host-authored text, not a filename, so it carries no ambiguity
+ * and is the one line the host can split on safely.
+ *
+ * #7896 — a purely LITERAL match (no `*`/`?`/`[`/`{`) must be existence-checked
+ * too. `nullglob` only suppresses a pattern that CONTAINS a wildcard
+ * metacharacter and fails to expand; a fully literal `pattern` is never
+ * subject to pathname expansion at all, so bash hands the `for` loop the
+ * literal word verbatim whether or not anything on disk matches it. The host
+ * (`fs.glob`, via `byok-tool-executor.js`'s `runGlob`) always verifies
+ * existence, so a literal pattern with no real match must be withheld here the
+ * same way — `[ -e "$f" ]`, skipped for a symlink entry since the `-L` branch
+ * below already existence-checks (and resolves) it, including the dangling
+ * case that legitimately has no target.
+ *
+ * #7897 — resolving a symlink MATCH now passes `__cx_resolve`'s lenient flag
+ * (`"$f" 1`), so a dangling symlink whose target's own parent is also missing
+ * (`deep/x.ts -> ./gone/y.ts`, `gone` absent, not just `y.ts`) resolves
+ * lexically past that point instead of failing outright — the same "ENOENT
+ * stops filesystem access, lexically append the rest" rule the host's
+ * `resolveTargetComponentwiseAsync` already applies (see `__cx_resolve`'s doc).
+ * The containment check on the next line is UNCHANGED and still the only
+ * thing that decides keep-vs-withhold: a lenient resolution that lands outside
+ * `$__cx_target` is withheld exactly like any other escaping symlink target,
+ * so this only closes an undermatch, never opens an escape.
  */
 export function buildConfinedGlobBody(pattern) {
   return [
@@ -527,10 +712,17 @@ export function buildConfinedGlobBody(pattern) {
     '  fi',
     '  if [ "$__cx_lastv" != y ]; then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '  if [ -L "$f" ]; then',
-    '    if ! __cx_r=$(__cx_resolve "$f"); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
+    '    if ! __cx_r=$(__cx_resolve "$f" 1); then __cx_withheld=$((__cx_withheld+1)); continue; fi',
     '    case $__cx_r in "$__cx_target"|"$__cx_target"/*) ;; *) __cx_withheld=$((__cx_withheld+1)); continue ;; esac',
+    // #7896 — nullglob only suppresses a WILDCARD pattern that fails to
+    // expand; a purely literal `pattern` reaches this loop verbatim even when
+    // nothing on disk matches it. A symlink entry (handled above, including
+    // dangling) is excluded here since it is not `-e`-testable by definition
+    // when dangling and was already existence-checked (via resolution) above.
+    '  elif [ ! -e "$f" ]; then',
+    '    __cx_withheld=$((__cx_withheld+1)); continue',
     '  fi',
-    '  printf \'%s\\n\' "$f"',
+    '  printf \'%s\\0\' "$f"',
     'done',
     // The operator's trace. Always emitted, including as `... 0`, so the host
     // can tell "nothing was withheld" from "the trailer never arrived" — the
@@ -569,9 +761,18 @@ export function parseConfinedContainerStdout(stdout) {
  *
  * The trailer NEVER reaches the model: stripping it here is what keeps the
  * no-oracle rule while still giving the daemon log a count. It is always the
- * last line, so it is matched positionally rather than by scanning — a file
- * literally named `__chroxy_confine_withheld__ 3` in the middle of the results
- * cannot be mistaken for it.
+ * last thing in the body, so it is matched positionally rather than by
+ * scanning — a file literally named `__chroxy_confine_withheld__ 3` in the
+ * middle of the results cannot be mistaken for it.
+ *
+ * #7357 — matches above the trailer are NUL-delimited (see
+ * {@link buildConfinedGlobBody}), so the trailer is found by locating the
+ * LAST `\0` rather than the last `\n`: everything before and including it is
+ * the (still NUL-delimited) match stream, untouched; everything after it is
+ * the trailer's own `\n`-terminated line. When there are zero matches the
+ * body is just the trailer line with no NUL at all, which the `lastIndexOf`
+ * fallback (`-1` → treat the whole body as the trailer candidate) handles the
+ * same way.
  *
  * `withheld: null` means the trailer was absent, which is reported as "unknown"
  * rather than as zero. The count is observability, not containment (the
@@ -584,13 +785,13 @@ export function parseConfinedContainerStdout(stdout) {
  */
 export function splitWithheldTrailer(body) {
   if (typeof body !== 'string') return { body: '', withheld: null }
-  const trailing = body.endsWith('\n') ? '\n' : ''
-  const lines = body.split('\n')
-  if (trailing) lines.pop()
-  const match = lines.length > 0 ? WITHHELD_TRAILER_RE.exec(lines[lines.length - 1]) : null
+  const lastNul = body.lastIndexOf('\0')
+  const matches = lastNul === -1 ? '' : body.slice(0, lastNul + 1)
+  const trailerPart = lastNul === -1 ? body : body.slice(lastNul + 1)
+  const trailerLine = trailerPart.endsWith('\n') ? trailerPart.slice(0, -1) : trailerPart
+  const match = WITHHELD_TRAILER_RE.exec(trailerLine)
   if (!match) return { body, withheld: null }
-  lines.pop()
-  return { body: lines.length > 0 ? lines.join('\n') + trailing : '', withheld: Number(match[1]) }
+  return { body: matches, withheld: Number(match[1]) }
 }
 
 /**
@@ -618,12 +819,40 @@ export function confinedContainerFailureMessage(label, reason, path) {
 /**
  * Derive the rg/grep flag fragments from a Grep tool input: case-insensitive
  * (`-i`), line numbers (`-n`, default on), and an optional `--glob` filter.
+ * `--glob` is ripgrep-specific and is threaded only into `buildGrepCommand`'s
+ * `rg` branch — the `grep -r` fallback (used when `rg` is absent) has no
+ * `--glob` equivalent and silently ignores `globArg` (GNU grep's nearest
+ * analog is `--include`, not implemented here); `ci`/`ln`/`pattern`/`root`
+ * apply identically on both branches.
+ *
+ * SECURITY (#7928): `glob` is model-controlled, same as `pattern`/`root`
+ * (#7295) — but unlike those two, it is bound to a NAMED flag (`--glob`)
+ * rather than a bare positional, which `argv-safety.js` documents as
+ * generally the safer shape (case 3: fuse the value into the same token as
+ * the flag, `--flag=<value>`, so it can never be split into a separate argv
+ * element). `--glob <value>` (the space-separated form this used to emit) is
+ * only as safe as `--glob`'s DECLARED ARITY, and that must be measured, not
+ * assumed — the same rule `cliHelpFlagArity`'s doc states for every other CLI
+ * in this repo. Measured against ripgrep 15.2.0 (`-g GLOB, --glob=GLOB`,
+ * required-arg): the space form already consumed a hostile next token
+ * (`--pre=<script>`, `-e`, `--files`, `-h`, `--help`, `-V`, `--version`) as
+ * the glob's own value in every case — none reached rg's own option parser as
+ * a distinct flag, so no `--pre` execution and no help/version short-circuit.
+ *
+ * That measurement is still not a fix: it is a fact about one rg build, and
+ * `--glob`'s arity is not documented as part of any argv contract this repo
+ * controls. The `--glob=<value>` JOINED form below removes the question
+ * entirely rather than resting on it — `shellQuote(input.glob)` still closes
+ * SHELL injection (unchanged), and butting it directly against `--glob=` with
+ * no space fuses both into one shell word, so word-splitting can never hand
+ * the value to rg as a second, independent argv element regardless of what
+ * `--glob` requires. Proven by `tests/built-in-tools/grep-argv-injection.test.js`.
  */
 export function buildGrepArgs(input) {
   const ci = input?.['-i'] === true ? '-i' : ''
   const ln = input?.['-n'] !== false ? '-n' : ''
   const globArg = typeof input?.glob === 'string' && input.glob.length > 0
-    ? ` --glob ${shellQuote(input.glob)}` : ''
+    ? ` --glob=${shellQuote(input.glob)}` : ''
   return { ci, ln, globArg }
 }
 
@@ -683,6 +912,15 @@ export function buildGrepArgs(input) {
  * the `--` terminator — the part that carries the #7295 property — is unchanged
  * either way, so a root that still begins with `-` cannot reach rg's own option
  * parser through this door.
+ *
+ * `globArg` (#7928) is `buildGrepArgs`'s third model-controlled interpolation,
+ * and is a THIRD, distinct case from `pattern`/`root` above: it is bound to a
+ * named flag rather than a bare positional, so `buildGrepArgs` fuses it into
+ * one token (`--glob=<value>`, argv-safety.js case 3) instead of using a `-e`-
+ * style two-token bind or a `--` terminator — either of those needs a
+ * positional slot to terminate INTO, which `--glob` does not have. See
+ * `buildGrepArgs`'s own doc for the measurement (ripgrep 15.2.0, required-arg)
+ * and why the fix does not rest on it.
  *
  * @param {{ pattern: string, root?: string, rootExpr?: string, ci: string, ln: string, globArg: string, maskExit?: boolean }} opts
  */

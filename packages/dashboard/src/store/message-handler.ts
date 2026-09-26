@@ -22,7 +22,9 @@ import {
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
-  handleThinkingLevelChanged as sharedThinkingLevelChanged,
+  // thinking_level_changed migrated to the shared dispatch table (#7807;
+  // runDispatch) — was a dashboard-local HANDLERS-map entry calling this same
+  // shared parser by hand.
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
@@ -1956,13 +1958,10 @@ function handleFileList(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, 
 // entries — server sends model_changed XOR error per requestId) still holds: the
 // shared handler likewise only writes activeModel and never touches reverts.
 
-function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const { level } = sharedThinkingLevelChanged(msg);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => ({ thinkingLevel: level }));
-  }
-}
+// #7807 — thinking_level_changed migrated to the shared store-core dispatch
+// table (runDispatch handles it before the HANDLERS map). Removed from here;
+// the shared handleThinkingLevelChangedPatch does the same resolveSessionId +
+// updateSession this used to do by hand, and the mobile app now gets it too.
 
 // #3185: per-session promptEvaluator toggle changed. Update the
 // `sessions` array entry for the affected session so the UI reflects
@@ -4230,7 +4229,7 @@ const HANDLERS: Record<string, Handler> = {
   // web_feature_status / web_task_list migrated to the shared dispatch table
   // (#5556 slice 2)
   // conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
-  thinking_level_changed: handleThinkingLevelChanged,
+  // thinking_level_changed — migrated to the shared dispatch table (#7807; runDispatch).
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   chroxy_context_hint_changed: handleChroxyContextHintChanged,
   session_preamble_changed: handleSessionPreambleChanged,

@@ -230,6 +230,65 @@ describe('buildSpawnEnv', () => {
     })
   })
 
+  // #7948: allowlist mode forwarded HOME but not USERPROFILE, so an
+  // allowlist-mode provider (codex, gemini) spawned on a real Windows host got
+  // no USERPROFILE. codex resolves its config/credentials at
+  // %USERPROFILE%\.codex (OpenAI's own Windows docs), and gemini's Node
+  // dependency google-auth-library-nodejs resolves its ADC well-known file at
+  // %APPDATA%\gcloud\application_default_credentials.json — neither is a
+  // os.homedir()-mediated lookup with a Win32-API fallback, so a missing env
+  // var is a hard miss, not a graceful fallback.
+  describe('Windows home vars (#7948)', () => {
+    const winHomeVars = ['USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA']
+
+    for (const winVar of winHomeVars) {
+      it(`forwards ${winVar} to codex child env when the parent has it`, () => {
+        withEnv({ [winVar]: 'C:\\Users\\tester', OPENAI_API_KEY: 'sk' }, () => {
+          const env = buildSpawnEnv('codex')
+          assert.equal(env[winVar], 'C:\\Users\\tester',
+            `${winVar} must be forwarded so codex resolves its home/config dir on Windows`)
+        })
+      })
+
+      it(`forwards ${winVar} to gemini child env when the parent has it`, () => {
+        withEnv({ [winVar]: 'C:\\Users\\tester', GEMINI_API_KEY: 'g' }, () => {
+          const env = buildSpawnEnv('gemini')
+          assert.equal(env[winVar], 'C:\\Users\\tester',
+            `${winVar} must be forwarded so gemini resolves its home/config dir on Windows`)
+        })
+      })
+    }
+
+    it('does not forward Windows home vars the parent never had (no spurious keys)', () => {
+      withEnv({
+        OPENAI_API_KEY: 'sk',
+        USERPROFILE: undefined,
+        HOMEDRIVE: undefined,
+        HOMEPATH: undefined,
+        APPDATA: undefined,
+        LOCALAPPDATA: undefined,
+      }, () => {
+        const env = buildSpawnEnv('codex')
+        for (const winVar of winHomeVars) {
+          assert.equal(env[winVar], undefined, `${winVar} must not appear when the parent never had it`)
+        }
+      })
+    })
+
+    it('still excludes an unrelated secret alongside the new Windows vars (allowlist stays scoped)', () => {
+      withEnv({
+        OPENAI_API_KEY: 'sk',
+        USERPROFILE: 'C:\\Users\\tester',
+        ANTHROPIC_API_KEY: 'sk-ant-canary',
+      }, () => {
+        const env = buildSpawnEnv('codex')
+        assert.equal(env.USERPROFILE, 'C:\\Users\\tester', 'the fix itself must still work')
+        assert.equal(env.ANTHROPIC_API_KEY, undefined,
+          'adding Windows home vars must not widen the allowlist to unrelated secrets (canary)')
+      })
+    })
+  })
+
   describe('unknown provider', () => {
     it('throws for unknown provider', () => {
       assert.throws(

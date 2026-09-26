@@ -127,11 +127,13 @@ export const BUILTIN_TOOLS = [
       'and any match resolving outside the workspace is withheld (#7341). Use `path` to search a subdirectory; ' +
       '`**/*.pdf` still reaches into directories whose names contain spaces. Naming a directory that resolves ' +
       'outside the workspace (a symlink to a shared store, for example) is an error rather than an empty result. ' +
-      'Very large results are truncated to a sorted prefix with an explicit trailing marker.',
+      'Very large results are truncated to a sorted prefix with an explicit trailing marker. `pattern` is capped ' +
+      'at 2000 characters and 32 levels of "{...}" brace nesting — an oversized or overly-nested pattern is ' +
+      'refused with EINVAL rather than run.',
     input_schema: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: 'Glob pattern (supports ** for recursive match).' },
+        pattern: { type: 'string', description: 'Glob pattern (supports ** for recursive match). Max 2000 characters, max 32 levels of nested "{...}".' },
         path: { type: 'string', description: 'Optional search root. Defaults to workspace cwd.' },
       },
       required: ['pattern'],

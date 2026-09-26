@@ -107,6 +107,7 @@ import {
   handleSessionContext,
   handleStatuslineOutput,
   handleModelChangedPatch,
+  handleThinkingLevelChangedPatch,
   handleSessionCostThresholdCrossed,
   handleDevPreview,
   handleDevPreviewStopped,
@@ -851,6 +852,11 @@ export interface DispatchMessageMap {
     type: 'model_changed'
     sessionId?: string
     model?: string
+  }
+  thinking_level_changed: {
+    type: 'thinking_level_changed'
+    sessionId?: string
+    level?: string
   }
   session_cost_threshold_crossed: {
     type: 'session_cost_threshold_crossed'
@@ -2297,6 +2303,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     statusline_output: sessionPatchDispatcher<S>(handleStatuslineOutput),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
+    // #7807 — migrated from the dashboard's dashboard-local HANDLERS-map entry;
+    // the app gains coverage via runDispatch for free.
+    thinking_level_changed: sessionPatchDispatcher<S>(handleThinkingLevelChangedPatch),
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
     dev_preview: dispatchDevPreview,
     dev_preview_stopped: dispatchDevPreviewStopped,
@@ -2432,6 +2441,11 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'input_ack',
   // --- reconciled divergent case (#5618) ---
   'model_changed',
+  // --- reconciled divergent case (#7803/#7807) — dashboard had a local
+  // HANDLERS-map entry, the app had a dangling unused import and no case at
+  // all; migrating both into the shared table gives the app coverage for free
+  // and removes the stale SYNTHETIC_TYPES / DASHBOARD_ONLY declarations.
+  'thinking_level_changed',
   // --- user_question (#5618) — byte-identical append + notify ---
   'user_question',
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---

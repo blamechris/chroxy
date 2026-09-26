@@ -936,8 +936,11 @@ export declare const RequestSessionContextSchema: z.ZodObject<{
     type: z.ZodLiteral<"request_session_context">;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const GET_DIFF_BASE_MAX_LENGTH = 256;
 export declare const GetDiffSchema: z.ZodObject<{
     type: z.ZodLiteral<"get_diff">;
+    base: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const GitStatusSchema: z.ZodObject<{
     type: z.ZodLiteral<"git_status">;
@@ -1799,6 +1802,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_diff">;
+    base: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"git_status">;
 }, z.core.$loose>, z.ZodObject<{

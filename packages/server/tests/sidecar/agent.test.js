@@ -525,15 +525,10 @@ describe('PodAgent', () => {
       // After the fix the post-flush callback for the exit frame must call
       // ws.resume() (and clear session._stdinDraining) BEFORE ws.close(1000).
       const ws = connect(port, TOKEN)
-      const realMsgs = []
-      ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
       await waitOpen(ws)
+      const startedPromise = waitForSessionStarted(ws)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-
-      await new Promise((r) => setTimeout(r, 20))
-      const started = realMsgs.find((m) => m.type === 'session_started')
-      assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
-      const sessionId = started.sessionId
+      const sessionId = await startedPromise
 
       // Replace activeWs with an instrumented fake. Defer the send callback
       // by a macrotask so we can observe the post-flush close-cleanup callback
@@ -562,8 +557,12 @@ describe('PodAgent', () => {
       // Trigger natural exit.
       controller.exit(0)
 
-      // Wait long enough for the deferred send cb (5ms) plus close to run.
-      await new Promise((r) => setTimeout(r, 30))
+      // Wait for the deferred send cb (5ms) and the close it gates — resume
+      // runs synchronously before close in the same callback, so waiting on
+      // close is sufficient for both.
+      await waitFor(() => callLog.some((e) => e.op === 'close'), {
+        label: 'close logged after deferred send callback',
+      })
 
       const resumeIdx = callLog.findIndex((e) => e.op === 'resume')
       const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1000)
@@ -811,13 +810,19 @@ describe('PodAgent', () => {
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
 
+      const startedPromise = waitForSessionStarted(ws)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      // Yield so _handleSpawn has run and the session is registered.
-      await new Promise((r) => setTimeout(r, 10))
+      const sessionId = await startedPromise
 
+      // Disconnect and wait for the server-side cleanup path to finish
+      // (_cleanupConnection — the exact code that decides whether to kill the
+      // child) rather than betting a fixed sleep covers it.
+      const wsClosed = once(ws, 'close')
       ws.close()
-      // Wait for the close event to propagate server-side.
-      await new Promise((r) => setTimeout(r, 30))
+      await wsClosed
+      await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session cleanup ran after disconnect',
+      })
 
       // With resume semantics, the child should NOT be killed on WS disconnect —
       // it stays alive so a reconnecting client can resume the session.
@@ -832,7 +837,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      await waitForSessionStarted(ws)
 
       await agent.close()
 
@@ -848,7 +853,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      await waitForSessionStarted(ws)
 
       // Natural exit — agent should send 'exit' frame and close WS without
       // ever calling kill().
@@ -864,6 +869,10 @@ describe('PodAgent', () => {
     let agent, port, capturedEnv
 
     beforeEach(async () => {
+      // Reset between tests — without this, waitFor(() => capturedEnv !==
+      // undefined) below resolves instantly on the PREVIOUS test's stale
+      // value instead of the current spawn actually running.
+      capturedEnv = undefined
       const child = new EventEmitter()
       child.stdout = new PassThrough()
       child.stderr = new PassThrough()
@@ -888,7 +897,7 @@ describe('PodAgent', () => {
         await waitOpen(ws)
 
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitFor(() => capturedEnv !== undefined, { label: 'spawn invoked with env' })
 
         assert.ok(capturedEnv, 'spawn should have been called with env')
         assert.equal(
@@ -914,7 +923,7 @@ describe('PodAgent', () => {
         args: [],
         env: { MY_CUSTOM_VAR: 'hello' },
       }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedEnv !== undefined, { label: 'spawn invoked with env' })
 
       assert.ok(capturedEnv, 'spawn should have been called with env')
       assert.equal(capturedEnv.MY_CUSTOM_VAR, 'hello', 'per-spawn env must be forwarded')
@@ -1028,15 +1037,19 @@ describe('PodAgent', () => {
 
     it('adds seq to event, stderr, and exit frames', async () => {
       const ws = connect(port, TOKEN)
+      const liveMsgs = []
+      ws.on('message', (d) => { try { liveMsgs.push(JSON.parse(d.toString())) } catch {} })
       const donePromise = collectUntilClose(ws)
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      await waitForSessionStarted(ws)
 
       controller.writeStdout(JSON.stringify({ type: 'assistant' }))
       controller.writeStderr('err\n')
-      await new Promise((r) => setTimeout(r, 10))
+      await waitFor(() => liveMsgs.filter((m) => m.type !== 'session_started').length >= 2, {
+        label: 'event + stderr frames forwarded before exit',
+      })
       controller.exit(0)
 
       const { messages } = await donePromise
@@ -1079,19 +1092,17 @@ describe('PodAgent', () => {
         try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
+      const startedPromise = waitForSessionStarted(ws1)
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      const sessionId = await startedPromise
 
       // Emit 3 stdout events
       controller.writeStdout(JSON.stringify({ type: 'a' }))
       controller.writeStdout(JSON.stringify({ type: 'b' }))
       controller.writeStdout(JSON.stringify({ type: 'c' }))
-      await new Promise((r) => setTimeout(r, 20))
-
-      // Extract sessionId and seq from what ws1 received
-      const startedFrame = ws1Msgs.find((m) => m.type === 'session_started')
-      assert.ok(startedFrame, 'must have received session_started')
-      const sessionId = startedFrame.sessionId
+      await waitFor(() => ws1Msgs.filter((m) => m.type === 'event').length >= 2, {
+        label: 'at least 2 event frames forwarded',
+      })
 
       const eventFrames = ws1Msgs.filter((m) => m.type === 'event')
       assert.ok(eventFrames.length >= 2, `expected at least 2 event frames, got ${eventFrames.length}`)
@@ -1100,8 +1111,12 @@ describe('PodAgent', () => {
       const resumeAfterSeq = eventFrames[1].seq
 
       // ── Disconnect ws1 ────────────────────────────────────────────────────
+      const ws1Closed = once(ws1, 'close')
       ws1.close()
-      await new Promise((r) => setTimeout(r, 20))
+      await ws1Closed
+      await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session idle after disconnect',
+      })
 
       // ── Second connection: resume ─────────────────────────────────────────
       const ws2 = connect(port, TOKEN)
@@ -1113,7 +1128,9 @@ describe('PodAgent', () => {
       })
 
       ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: resumeAfterSeq }))
-      await new Promise((r) => setTimeout(r, 20))
+      const resumed = await waitFor(() => ws2Msgs.find((m) => m.type === 'resumed'), {
+        label: 'resumed frame after replay',
+      })
 
       // Should have replayed only frames with seq > resumeAfterSeq
       const replayed = ws2Msgs.filter((m) => m.seq !== undefined)
@@ -1124,8 +1141,6 @@ describe('PodAgent', () => {
       // The resume MUST be acknowledged by an explicit `resumed` frame after
       // the replay (#3348). Without it, clients cannot reset their per-blip
       // retry budget and `maxRetries` becomes a session-lifetime budget.
-      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
-      assert.ok(resumed, `expected a resumed frame after replay, got ${JSON.stringify(ws2Msgs)}`)
       assert.equal(resumed.sessionId, sessionId)
       assert.equal(resumed.lastSeq, resumeAfterSeq)
       assert.ok(typeof resumed.replayedCount === 'number' && resumed.replayedCount >= 1,
@@ -1143,17 +1158,23 @@ describe('PodAgent', () => {
         try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
+      const startedPromise = waitForSessionStarted(ws1)
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      const sessionId = await startedPromise
 
       controller.writeStdout(JSON.stringify({ type: 'a' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => ws1Msgs.filter((m) => m.type === 'event').length >= 1, {
+        label: 'event frame forwarded',
+      })
 
-      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
       const lastSeq = Math.max(...ws1Msgs.filter((m) => typeof m.seq === 'number').map((m) => m.seq))
 
+      const ws1Closed = once(ws1, 'close')
       ws1.close()
-      await new Promise((r) => setTimeout(r, 20))
+      await ws1Closed
+      await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session idle after disconnect',
+      })
 
       const ws2 = connect(port, TOKEN)
       await waitOpen(ws2)
@@ -1166,10 +1187,9 @@ describe('PodAgent', () => {
       // Resume already at the latest seq — replayedCount must be 0 but the
       // resumed frame is still required so the client can ack the success.
       ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq }))
-      await new Promise((r) => setTimeout(r, 20))
-
-      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
-      assert.ok(resumed, 'resumed frame must be sent even when nothing replayed')
+      const resumed = await waitFor(() => ws2Msgs.find((m) => m.type === 'resumed'), {
+        label: 'resumed frame after resume',
+      })
       assert.equal(resumed.replayedCount, 0)
 
       ws2.close()
@@ -1195,17 +1215,10 @@ describe('PodAgent', () => {
       const ws1 = connect(port, TOKEN)
       await waitOpen(ws1)
 
-      const ws1Msgs = []
-      ws1.on('message', (d) => {
-        try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
-      })
-
+      const startedPromise = waitForSessionStarted(ws1)
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
-
-      const startedFrame = ws1Msgs.find((m) => m.type === 'session_started')
-      assert.ok(startedFrame)
-      assert.ok(startedFrame.sessionId)
+      const sessionId = await startedPromise
+      assert.ok(sessionId)
 
       // ws1 is still open. Try to resume from a second connection — should be
       // rejected because ws1 is the active client (enforced by the single-client
@@ -1248,15 +1261,18 @@ describe('PodAgent', () => {
         try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
+      const startedPromise = waitForSessionStarted(ws1)
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      const sessionId = await startedPromise
 
       // Push 5 events into a buffer of size 3; sentinel (seq=1) + oldest 2
       // events (seq=2, seq=3) are evicted — 3 frames total, leaving seq=4,5,6.
       for (let i = 0; i < 5; i++) {
         controller.writeStdout(JSON.stringify({ idx: i }))
       }
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => ws1Msgs.filter((m) => m.type === 'event').length === 5, {
+        label: 'all 5 events forwarded live',
+      })
 
       const allEvents = ws1Msgs.filter((m) => m.type === 'event')
       assert.ok(allEvents.length === 5, `ws1 should see all 5 events live (got ${allEvents.length})`)
@@ -1265,9 +1281,12 @@ describe('PodAgent', () => {
       // Per #3347 this used to silently replay only what was still buffered;
       // the corrected behaviour is to surface a session_lost(buffer_overflow)
       // so the client never sees a partial NDJSON stream.
-      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+      const ws1Closed = once(ws1, 'close')
       ws1.close()
-      await new Promise((r) => setTimeout(r, 20))
+      await ws1Closed
+      await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session idle after disconnect',
+      })
 
       const ws2 = connect(port, TOKEN)
       const ws2Done = collectUntilClose(ws2)
@@ -1303,8 +1322,9 @@ describe('PodAgent', () => {
         try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
       })
 
+      const startedPromise = waitForSessionStarted(ws1)
       ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 10))
+      const sessionId = await startedPromise
 
       // Push exactly bufferSize - 1 events. The sentinel occupies seq=1, so
       // the 2 events are seq=2 and seq=3. With bufferSize=3 the buffer holds
@@ -1312,11 +1332,16 @@ describe('PodAgent', () => {
       for (let i = 0; i < 2; i++) {
         controller.writeStdout(JSON.stringify({ idx: i }))
       }
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => ws1Msgs.filter((m) => m.type === 'event').length >= 2, {
+        label: '2 events buffered before disconnect',
+      })
 
-      const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+      const ws1Closed = once(ws1, 'close')
       ws1.close()
-      await new Promise((r) => setTimeout(r, 20))
+      await ws1Closed
+      await waitFor(() => agent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session idle after disconnect',
+      })
 
       const ws2 = connect(port, TOKEN)
       await waitOpen(ws2)
@@ -1329,13 +1354,13 @@ describe('PodAgent', () => {
       // lastSeq=0 with no eviction (buffer starts at seq=1) must succeed and
       // replay all 3 buffered frames (sentinel + 2 events).
       ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
-      await new Promise((r) => setTimeout(r, 20))
+      const resumed = await waitFor(() => ws2Msgs.find((m) => m.type === 'resumed'), {
+        label: 'resumed frame after replay',
+      })
 
       const replayed = ws2Msgs.filter((m) => m.type === 'event')
       assert.equal(replayed.length, 2, 'all 2 buffered events must replay when no gap')
 
-      const resumed = ws2Msgs.find((m) => m.type === 'resumed')
-      assert.ok(resumed, 'resumed frame required on successful resume')
       // sentinel (seq=1) + 2 events (seq=2, seq=3) = 3 replayed frames total.
       assert.equal(resumed.replayedCount, 3)
 
@@ -1484,7 +1509,7 @@ describe('PodAgent', () => {
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
 
         // Wait for session_started then push an oversized line (no newline).
-        await new Promise((r) => setTimeout(r, 10))
+        await waitForSessionStarted(ws)
         // 17 bytes, no newline — exceeds the 16-byte cap.
         mock.child.stdout.write(Buffer.from('A'.repeat(17)))
 
@@ -1511,7 +1536,7 @@ describe('PodAgent', () => {
 
         await waitOpen(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 10))
+        await waitForSessionStarted(ws)
 
         mock.child.stdout.write(Buffer.from('B'.repeat(17)))
 
@@ -1539,7 +1564,7 @@ describe('PodAgent', () => {
 
         await waitOpen(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 10))
+        await waitForSessionStarted(ws)
 
         mock.child.stdout.write(Buffer.from('C'.repeat(17)))
 
@@ -1605,14 +1630,20 @@ describe('PodAgent', () => {
         const donePromise = collectUntilClose(ws, 3000)
 
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 10))
+        const sessionId = await startedPromise
 
         // Trigger the line cap.
         mock.child.stdout.write(Buffer.from('X'.repeat(17)))
 
-        // Let the child 'close' event fire (simulates SIGTERM completing).
-        await new Promise((r) => setTimeout(r, 30))
+        // Wait for the synchronous portion of the oversized-line handler to
+        // run (kill + terminal-error flag) before simulating the child's
+        // 'close' event — deterministic in place of racing a fixed sleep
+        // against the transform's 'oversized_line' event.
+        await waitFor(() => agent._sessions.get(sessionId)?._terminalErrorSent === true, {
+          label: 'oversized-line terminal error flag set',
+        })
         mock.child.emit('close', -15)
 
         const { messages, closeCode } = await donePromise
@@ -1648,16 +1679,10 @@ describe('PodAgent', () => {
 
       try {
         const ws = connect(port, TOKEN)
-        const realMsgs = []
-        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-
-        // Wait for session_started so we know the session exists.
-        await new Promise((r) => setTimeout(r, 20))
-        const started = realMsgs.find((m) => m.type === 'session_started')
-        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
-        const sessionId = started.sessionId
+        const sessionId = await startedPromise
 
         // Replace the session's activeWs with an instrumented fake that defers
         // its send callback by one macrotask and records every operation.
@@ -1684,8 +1709,10 @@ describe('PodAgent', () => {
         // path entirely, so we can deterministically assert ordering.
         mock.child.stdout.write(Buffer.from('Z'.repeat(17)))
 
-        // Wait long enough for the deferred send cb (5ms) plus close to run.
-        await new Promise((r) => setTimeout(r, 30))
+        // Wait for the deferred send cb (5ms) and the close it gates.
+        await waitFor(() => callLog.some((e) => e.op === 'close'), {
+          label: 'close logged after deferred send callback',
+        })
 
         const sendIdx = callLog.findIndex((e) => e.op === 'send' && e.code === 'line_too_long')
         const cbIdx = callLog.findIndex((e) => e.op === 'send_cb_fired')
@@ -1723,14 +1750,10 @@ describe('PodAgent', () => {
 
       try {
         const ws = connect(port, TOKEN)
-        const realMsgs = []
-        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-        const started = realMsgs.find((m) => m.type === 'session_started')
-        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
-        const sessionId = started.sessionId
+        const sessionId = await startedPromise
 
         const callLog = []
         const fakeWs = {
@@ -1743,17 +1766,15 @@ describe('PodAgent', () => {
         session.activeWs = fakeWs
 
         mock.child.stdout.write(Buffer.from('Q'.repeat(17)))
-        await new Promise((r) => setTimeout(r, 20))
 
         // Even though send threw, the close-after-flush callback must still
         // run so the session is evicted and the WS is closed.
+        await waitFor(() => !agent._sessions.has(sessionId), {
+          label: 'session deleted after line_too_long cleanup',
+        })
         assert.ok(
           callLog.some((e) => e.op === 'close' && e.code === 1008),
           `close(1008) must run even when send throws; log=${JSON.stringify(callLog)}`,
-        )
-        assert.ok(
-          !agent._sessions.has(sessionId),
-          'session should be deleted after line_too_long cleanup',
         )
 
         try { ws.close() } catch {}
@@ -1780,15 +1801,10 @@ describe('PodAgent', () => {
 
       try {
         const ws = connect(port, TOKEN)
-        const realMsgs = []
-        ws.on('message', (d) => { try { realMsgs.push(JSON.parse(d.toString())) } catch {} })
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-
-        await new Promise((r) => setTimeout(r, 20))
-        const started = realMsgs.find((m) => m.type === 'session_started')
-        assert.ok(started, `expected session_started, got: ${JSON.stringify(realMsgs)}`)
-        const sessionId = started.sessionId
+        const sessionId = await startedPromise
 
         // Replace activeWs with an instrumented fake that records pause/resume/
         // close ordering. Defer the send callback by a macrotask so we can
@@ -1817,8 +1833,10 @@ describe('PodAgent', () => {
         // Trigger the line cap.
         mock.child.stdout.write(Buffer.from('Z'.repeat(17)))
 
-        // Wait long enough for the deferred send cb (5ms) plus close to run.
-        await new Promise((r) => setTimeout(r, 30))
+        // Wait for the deferred send cb (5ms) and the close(1008) it gates.
+        await waitFor(() => callLog.some((e) => e.op === 'close' && e.code === 1008), {
+          label: 'close(1008) logged after deferred send callback',
+        })
 
         const resumeIdx = callLog.findIndex((e) => e.op === 'resume')
         const closeIdx = callLog.findIndex((e) => e.op === 'close' && e.code === 1008)
@@ -1869,10 +1887,10 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       ws.send(JSON.stringify({ type: 'stdin', data: '{"prompt":"hello"}\n' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedStdin.length > 0, { label: 'stdin forwarded to child' })
 
       assert.ok(capturedStdin.length > 0, 'expected at least one stdin chunk')
       assert.ok(
@@ -1888,12 +1906,14 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       ws.send(JSON.stringify({ type: 'stdin', data: 'line1\n' }))
       ws.send(JSON.stringify({ type: 'stdin', data: 'line2\n' }))
       ws.send(JSON.stringify({ type: 'stdin', data: 'line3\n' }))
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => capturedStdin.join('').includes('line3\n'), {
+        label: 'all 3 stdin lines forwarded',
+      })
 
       const received = capturedStdin.join('')
       const idx1 = received.indexOf('line1\n')
@@ -1913,14 +1933,14 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       let stdinEnded = false
       child.stdin.once('finish', () => { stdinEnded = true })
 
       ws.send(JSON.stringify({ type: 'stdin', data: 'some input\n' }))
       ws.send(JSON.stringify({ type: 'stdin_end' }))
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => stdinEnded, { label: 'child.stdin ended after stdin_end' })
 
       assert.ok(stdinEnded, 'child.stdin should have ended after stdin_end frame')
       assert.ok(child.stdin.writableEnded, 'child.stdin.writableEnded should be true')
@@ -2025,7 +2045,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       // Locate the server-side ws so we can assert pause/resume on it. The
       // test client's WebSocket is the *connecting* end; the agent receives
@@ -2042,7 +2062,7 @@ describe('PodAgent', () => {
       // First write returns false → agent should pause and arm a drain listener.
       fakeStdin.nextWriteOk = false
       ws.send(JSON.stringify({ type: 'stdin', data: 'first chunk\n' }))
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => calls.includes('pause'), { label: 'ws paused after backpressured write' })
 
       assert.equal(fakeStdin.writes.length, 1, 'first write should reach stdin')
       assert.deepEqual(calls, ['pause'], 'ws should be paused after write returned false')
@@ -2051,7 +2071,7 @@ describe('PodAgent', () => {
 
       // Drain emits → agent resumes the WS and clears the flag.
       fakeStdin.emit('drain')
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => calls.includes('resume'), { label: 'ws resumed after drain' })
 
       assert.deepEqual(calls, ['pause', 'resume'], 'ws should resume on drain')
       assert.equal(session._stdinDraining, false, 'draining flag should clear on drain')
@@ -2064,7 +2084,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       const serverWs = agent._activeWs
       let pauseCount = 0
@@ -2077,7 +2097,7 @@ describe('PodAgent', () => {
       fakeStdin.nextWriteOk = false
       ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
       ws.send(JSON.stringify({ type: 'stdin', data: 'b\n' }))
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => fakeStdin.writes.length >= 2, { label: '2 stdin writes reached child' })
 
       assert.equal(fakeStdin.writes.length, 2, 'both writes should reach stdin')
       assert.equal(pauseCount, 1, 'ws.pause should be called only once while draining')
@@ -2091,7 +2111,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       const serverWs = agent._activeWs
       let pauseCalls = 0
@@ -2100,7 +2120,7 @@ describe('PodAgent', () => {
 
       fakeStdin.nextWriteOk = true
       ws.send(JSON.stringify({ type: 'stdin', data: 'happy\n' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => fakeStdin.writes.length >= 1, { label: 'stdin write reached child' })
 
       assert.equal(fakeStdin.writes.length, 1)
       assert.equal(pauseCalls, 0, 'ws.pause should not be called when write returns true')
@@ -2115,7 +2135,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitForSessionStarted(ws)
 
       const serverWs = agent._activeWs
       let resumeCalls = 0
@@ -2124,7 +2144,9 @@ describe('PodAgent', () => {
       // Trigger the backpressure path.
       fakeStdin.nextWriteOk = false
       ws.send(JSON.stringify({ type: 'stdin', data: 'x\n' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => agent._sessions.get(serverWs._sessionId)?._stdinDraining === true, {
+        label: 'stdin draining flag set',
+      })
 
       const session = agent._sessions.get(serverWs._sessionId)
       assert.ok(session._stdinDraining)
@@ -2132,10 +2154,18 @@ describe('PodAgent', () => {
       // Detach the WS as the cleanup path would on disconnect.
       session.activeWs = null
 
-      // Drain fires after the WS is gone — the listener must clear the flag
-      // but skip resume() on the now-null activeWs.
+      // Drain fires after the WS is gone — wait for the drain handler's own
+      // deterministic completion signal (the draining flag clearing). In
+      // agent.js the flag clears, the timer is cancelled, and the
+      // resume-skip check runs, all synchronously in the same 'drain'
+      // listener invocation — so by the time this predicate can observe the
+      // flag as false, the resume-skip check has already run too. That
+      // makes this a genuine positive control, not a blind timing bet, for
+      // the absence assertion below.
       fakeStdin.emit('drain')
-      await new Promise((r) => setTimeout(r, 10))
+      await waitFor(() => session._stdinDraining === false, {
+        label: 'draining flag cleared after drain (stale ws)',
+      })
 
       assert.equal(resumeCalls, 0, 'resume must not run when activeWs is null')
       assert.equal(session._stdinDraining, false, 'draining flag should clear even without ws')
@@ -2199,15 +2229,16 @@ describe('PodAgent', () => {
         const collected = collectUntilClose(ws, 3000)
         await waitOpen(ws)
 
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await startedPromise
+        const session = agent._sessions.get(agent._activeWs._sessionId)
 
         // Trigger backpressure path — write returns false so drain timer arms.
         fakeStdin.nextWriteOk = false
         ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitFor(() => session._stdinDrainTimer, { label: 'drain timer armed' })
 
-        const session = agent._sessions.get(agent._activeWs._sessionId)
         assert.ok(session._stdinDraining, 'session must be flagged as draining')
         assert.ok(session._stdinDrainTimer, 'drain timer must be armed once draining')
 
@@ -2259,19 +2290,20 @@ describe('PodAgent', () => {
       try {
         const ws = connect(port, TOKEN)
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await startedPromise
+        const session = agent._sessions.get(agent._activeWs._sessionId)
 
         fakeStdin.nextWriteOk = false
         ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitFor(() => session._stdinDrainTimer, { label: 'drain timer armed' })
 
-        const session = agent._sessions.get(agent._activeWs._sessionId)
         assert.ok(session._stdinDrainTimer, 'drain timer must be armed')
 
         // Drain arrives before the timeout — timer must be cancelled.
         fakeStdin.emit('drain')
-        await new Promise((r) => setTimeout(r, 10))
+        await waitFor(() => session._stdinDraining === false, { label: 'draining flag cleared on drain' })
 
         assert.equal(session._stdinDrainTimer, null, 'drain timer must be cleared on drain')
         assert.equal(session._stdinDraining, false, 'draining flag must clear on drain')
@@ -2305,15 +2337,16 @@ describe('PodAgent', () => {
       try {
         const ws = connect(port, TOKEN)
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await startedPromise
+        const session = agent._sessions.get(agent._activeWs._sessionId)
 
         fakeStdin.nextWriteOk = false
         ws.send(JSON.stringify({ type: 'stdin', data: 'a\n' }))
         ws.send(JSON.stringify({ type: 'stdin', data: 'b\n' }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitFor(() => session._stdinDrainTimer, { label: 'drain timer armed' })
 
-        const session = agent._sessions.get(agent._activeWs._sessionId)
         const initialHandle = session._stdinDrainTimer
         assert.ok(initialHandle, 'first backpressured write must arm a drain timer')
 
@@ -2356,16 +2389,17 @@ describe('PodAgent', () => {
 
       const ws = connect(port, TOKEN)
       await waitOpen(ws)
+      const startedPromise = waitForSessionStarted(ws)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await startedPromise
+      const session = agent._sessions.get(agent._activeWs._sessionId)
 
       fakeStdin.nextWriteOk = false
       ws.send(JSON.stringify({ type: 'stdin', data: 'x\n' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => session._stdinDrainTimer, { label: 'drain timer armed' })
 
       // Snapshot the live drain-timer handle BEFORE close — agent.close()
       // clears _sessions, after which there is no way to read it back.
-      const session = agent._sessions.get(agent._activeWs._sessionId)
       const drainTimer = session._stdinDrainTimer
       assert.ok(drainTimer, 'backpressured write must arm a drain timer before close')
       assert.equal(drainTimer._cancelled, false, 'timer must be live before close')
@@ -2424,7 +2458,7 @@ describe('PodAgent', () => {
         await waitOpen(ws)
 
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitForSessionStarted(ws)
 
         // Replace session.activeWs with an instrumented fake that defers send
         // callbacks. Forces the close-after-flush callback to run AFTER the
@@ -2450,7 +2484,9 @@ describe('PodAgent', () => {
         // Trigger backpressure path so the drain timer arms.
         fakeStdin.nextWriteOk = false
         ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
-        await new Promise((r) => setTimeout(r, 20))
+        await waitFor(() => session._stdinDraining === true, {
+          label: 'stdin draining flag set for wedge write',
+        })
 
         // Cross the drain timeout — _handleStdinDrainStalled fires synchronously
         // on the fake clock: queues the error frame on fake send (cb deferred
@@ -2468,7 +2504,9 @@ describe('PodAgent', () => {
 
         // Now wait for the deferred error-frame send callback to fire and
         // run the close(1011) path.
-        await new Promise((r) => setTimeout(r, 60))
+        await waitFor(() => callLog.some((e) => e.op === 'close'), {
+          label: 'close logged after deferred send callback',
+        })
 
         // The error frame must be present.
         const errSend = callLog.find((e) => e.op === 'send' && e.code === 'stdin_drain_stalled')
@@ -2576,8 +2614,9 @@ describe('PodAgent', () => {
         })
         const ws = connect(port, TOKEN)
         await waitOpen(ws)
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        await startedPromise
 
         const session = agent._sessions.get(agent._activeWs._sessionId)
         assert.ok(session, 'session must be registered after spawn')
@@ -2668,10 +2707,9 @@ describe('PodAgent', () => {
           // refuse to process the subsequent close frame.
           const ws1 = connect(port, TOKEN)
           await waitOpen(ws1)
+          const startedPromise = waitForSessionStarted(ws1)
           ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-          await new Promise((r) => setTimeout(r, 20))
-
-          const firstSessionId = agent._activeWs._sessionId
+          const firstSessionId = await startedPromise
           const firstSession = agent._sessions.get(firstSessionId)
           firstSession._stdinDraining = true
           agent._armStdinDrainTimer(firstSession)
@@ -2762,13 +2800,16 @@ describe('PodAgent', () => {
         try {
           const ws = connect(port, TOKEN)
           await waitOpen(ws)
+          const startedPromise = waitForSessionStarted(ws)
           ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-          await new Promise((r) => setTimeout(r, 20))
+          await startedPromise
+          const session = agent._sessions.get(agent._activeWs._sessionId)
 
           ws.send(JSON.stringify({ type: 'stdin', data: 'wedge\n' }))
-          await new Promise((r) => setTimeout(r, 20))
+          await waitFor(() => session._stdinDrainTimer, {
+            label: 'drain timer armed before oversized line',
+          })
 
-          const session = agent._sessions.get(agent._activeWs._sessionId)
           assert.ok(session._stdinDrainTimer, 'drain timer must be armed before oversized line')
           const drainHandle = session._stdinDrainTimer
 
@@ -2890,12 +2931,17 @@ describe('PodAgent', () => {
         const ws = connect(ttlPort, TOKEN)
         await waitOpen(ws)
 
+        const startedPromise = waitForSessionStarted(ws)
         ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        const sessionId = await startedPromise
 
         // Disconnect — should arm the idle timer.
+        const wsClosed = once(ws, 'close')
         ws.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await wsClosed
+        await waitFor(() => ttlAgent._sessions.get(sessionId)?.activeWs === null, {
+          label: 'session idle after disconnect',
+        })
 
         // Verify session is still in the map (timer hasn't fired yet).
         assert.equal(ttlAgent._sessions.size, 1, 'session must still exist before TTL expires')
@@ -2930,19 +2976,17 @@ describe('PodAgent', () => {
         const ws1 = connect(ttlPort, TOKEN)
         await waitOpen(ws1)
 
-        const ws1Msgs = []
-        ws1.on('message', (d) => {
-          try { ws1Msgs.push(JSON.parse(d.toString())) } catch {}
-        })
-
+        const startedPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
-
-        const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const sessionId = await startedPromise
 
         // Disconnect — idle timer is now armed.
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => ttlAgent._sessions.get(sessionId)?.activeWs === null, {
+          label: 'session idle after disconnect',
+        })
 
         // Advance time partially (within TTL window).
         clock.advance(TTL / 2)
@@ -2955,10 +2999,11 @@ describe('PodAgent', () => {
           try { ws2Msgs.push(JSON.parse(d.toString())) } catch {}
         })
         ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
-        await new Promise((r) => setTimeout(r, 20))
+        const resumed = await waitFor(() => ws2Msgs.find((m) => m.type === 'resumed'), {
+          label: 'resumed frame after resume',
+        })
 
         // Confirm resumed.
-        const resumed = ws2Msgs.find((m) => m.type === 'resumed')
         assert.ok(resumed, 'resumed frame must be received')
 
         // Session must have no idle timer after cancel.
@@ -2991,12 +3036,17 @@ describe('PodAgent', () => {
 
       const ws = connect(ttlPort, TOKEN)
       await waitOpen(ws)
+      const startedPromise = waitForSessionStarted(ws)
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      const sessionId = await startedPromise
 
       // Disconnect — idle timer is armed.
+      const wsClosed = once(ws, 'close')
       ws.close()
-      await new Promise((r) => setTimeout(r, 30))
+      await wsClosed
+      await waitFor(() => ttlAgent._sessions.get(sessionId)?.activeWs === null, {
+        label: 'session idle after disconnect',
+      })
 
       assert.equal(ttlAgent._sessions.size, 1)
 
@@ -3028,14 +3078,16 @@ describe('PodAgent', () => {
       try {
         const ws1 = connect(ttlPort, TOKEN)
         await waitOpen(ws1)
-        const ws1Msgs = []
-        ws1.on('message', (d) => { try { ws1Msgs.push(JSON.parse(d.toString())) } catch {} })
+        const startedPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-        await new Promise((r) => setTimeout(r, 20))
+        const sessionId = await startedPromise
 
-        const sessionId = ws1Msgs.find((m) => m.type === 'session_started').sessionId
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => ttlAgent._sessions.get(sessionId)?.activeWs === null, {
+          label: 'session idle after disconnect',
+        })
 
         // Advance past TTL — session is evicted.
         clock.advance(TTL + 1)
@@ -3048,10 +3100,9 @@ describe('PodAgent', () => {
         ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
 
         ws2.send(JSON.stringify({ type: 'resume', sessionId, lastSeq: 0 }))
-        await new Promise((r) => setTimeout(r, 20))
-
-        const lost = ws2Msgs.find((m) => m.type === 'session_lost')
-        assert.ok(lost, `expected session_lost frame, got ${JSON.stringify(ws2Msgs)}`)
+        const lost = await waitFor(() => ws2Msgs.find((m) => m.type === 'session_lost'), {
+          label: `session_lost frame for ${sessionId}`,
+        })
         assert.equal(lost.sessionId, sessionId)
         assert.equal(lost.reason, 'unknown_session',
           'evicted sessions look the same as unknown ones to clients')
@@ -3113,13 +3164,18 @@ describe('PodAgent', () => {
         // Wait deterministically for the spawn hook to fire — confirms the
         // child is registered before we disconnect and arm the idle timer.
         await spawnedPromise
+        const sessionId = ttlAgent._activeWs._sessionId
 
-        // Disconnect — arms the idle eviction timer. The 30ms wait gives the
-        // server's WS 'close' handler time to run and arm the idle timer; the
-        // critical ordering (stdin-then-SIGTERM) is asserted via the fake
-        // clock below, not via wall-clock sleeps.
+        // Disconnect — arms the idle eviction timer. The critical ordering
+        // (stdin-then-SIGTERM) is asserted via the fake clock below, not via
+        // wall-clock sleeps; this only waits for the server's WS 'close'
+        // handler to have run and armed the idle timer.
+        const wsClosed = once(ws, 'close')
         ws.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await wsClosed
+        await waitFor(() => ttlAgent._sessions.get(sessionId)?.activeWs === null, {
+          label: 'session idle after disconnect',
+        })
 
         // Sanity: stdin is open before eviction fires.
         assert.equal(child.stdin.writableEnded, false, 'stdin must be open before eviction')
@@ -3280,8 +3336,12 @@ describe('PodAgent', () => {
         const sid1Promise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sid1 = await sid1Promise
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => capAgent._sessions.get(sid1)?.activeWs === null, {
+          label: 'session 1 idle after disconnect',
+        })
 
         assert.equal(capAgent._sessions.size, 1, 'one idle session after first spawn')
 
@@ -3291,8 +3351,12 @@ describe('PodAgent', () => {
         const sid2Promise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sid2 = await sid2Promise
+        const ws2Closed = once(ws2, 'close')
         ws2.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws2Closed
+        await waitFor(() => capAgent._sessions.get(sid2)?.activeWs === null, {
+          label: 'session 2 idle after disconnect',
+        })
 
         assert.equal(capAgent._sessions.size, 2, 'two idle sessions before cap eviction')
 
@@ -3353,8 +3417,12 @@ describe('PodAgent', () => {
         const sid1Promise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sid1 = await sid1Promise
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => capAgent._sessions.get(sid1)?.activeWs === null, {
+          label: 'session 1 idle after disconnect',
+        })
 
         assert.equal(capAgent._sessions.size, 1, 'one idle session before the failing spawn')
 
@@ -3367,11 +3435,11 @@ describe('PodAgent', () => {
         ws2.on('message', (d) => { try { ws2Msgs.push(JSON.parse(d.toString())) } catch {} })
 
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'missing-bin', args: [] }))
-        await new Promise((r) => setTimeout(r, 30))
 
         // The client must receive an error frame describing the spawn failure.
-        const errFrame = ws2Msgs.find((m) => m.type === 'error')
-        assert.ok(errFrame, 'expected an error frame for the failed spawn')
+        const errFrame = await waitFor(() => ws2Msgs.find((m) => m.type === 'error'), {
+          label: 'error frame for failed spawn',
+        })
         assert.match(errFrame.message, /spawn failed/)
 
         // The original session must still be alive -- no eviction occurred.
@@ -3566,8 +3634,12 @@ describe('PodAgent', () => {
         const sidAPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sidA = await sidAPromise
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => capAgent._sessions.get(sidA)?.activeWs === null, {
+          label: 'session A idle after disconnect',
+        })
 
         // --- Session B (spawned after A so its lastActiveAt is naturally newer) ---
         const ws2 = connect(capPort, TOKEN)
@@ -3575,8 +3647,12 @@ describe('PodAgent', () => {
         const sidBPromise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sidB = await sidBPromise
+        const ws2Closed = once(ws2, 'close')
         ws2.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws2Closed
+        await waitFor(() => capAgent._sessions.get(sidB)?.activeWs === null, {
+          label: 'session B idle after disconnect',
+        })
 
         assert.equal(capAgent._sessions.size, 2, 'two sessions present before patching')
 
@@ -3661,8 +3737,12 @@ describe('PodAgent', () => {
         const sidAPromise = waitForSessionStarted(ws1)
         ws1.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sidA = await sidAPromise
+        const ws1Closed = once(ws1, 'close')
         ws1.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws1Closed
+        await waitFor(() => capAgent._sessions.get(sidA)?.activeWs === null, {
+          label: 'session A idle after disconnect',
+        })
 
         // --- Session B (newer) ---
         const ws2 = connect(capPort, TOKEN)
@@ -3670,8 +3750,12 @@ describe('PodAgent', () => {
         const sidBPromise = waitForSessionStarted(ws2)
         ws2.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
         const sidB = await sidBPromise
+        const ws2Closed = once(ws2, 'close')
         ws2.close()
-        await new Promise((r) => setTimeout(r, 30))
+        await ws2Closed
+        await waitFor(() => capAgent._sessions.get(sidB)?.activeWs === null, {
+          label: 'session B idle after disconnect',
+        })
 
         // Patch both sessions with fake WS instances so the cap enforcer sees
         // no idle sessions and must fall back to evicting the oldest active one.
@@ -3744,6 +3828,10 @@ describe('PodAgent', () => {
     let agent, port, capturedOpts
 
     beforeEach(async () => {
+      // Reset between tests — without this, waitFor(() => capturedOpts !==
+      // undefined) below resolves instantly on the PREVIOUS test's stale
+      // value instead of the current spawn actually running.
+      capturedOpts = undefined
       const child = new EventEmitter()
       child.stdout = new PassThrough()
       child.stderr = new PassThrough()
@@ -3764,7 +3852,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [] }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedOpts !== undefined, { label: 'spawn invoked with opts' })
 
       assert.ok(capturedOpts, 'spawn should have been called')
       assert.equal(capturedOpts.stdio[0], 'pipe', 'default stdin mode must be "pipe"')
@@ -3777,7 +3865,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'pipe' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedOpts !== undefined, { label: 'spawn invoked with opts' })
 
       assert.ok(capturedOpts, 'spawn should have been called')
       assert.equal(capturedOpts.stdio[0], 'pipe', 'explicit stdin: pipe must be forwarded')
@@ -3790,7 +3878,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'ignore' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedOpts !== undefined, { label: 'spawn invoked with opts' })
 
       assert.ok(capturedOpts, 'spawn should have been called')
       assert.equal(capturedOpts.stdio[0], 'ignore', 'stdin stdio entry must be "ignore"')
@@ -3816,7 +3904,7 @@ describe('PodAgent', () => {
       await waitOpen(ws)
 
       ws.send(JSON.stringify({ type: 'spawn', cmd: 'claude', args: [], stdin: 'ignore' }))
-      await new Promise((r) => setTimeout(r, 20))
+      await waitFor(() => capturedOpts !== undefined, { label: 'spawn invoked with opts' })
 
       // Send stdin frame -- should be silently dropped (no error frame).
       let gotError = false
@@ -3828,7 +3916,14 @@ describe('PodAgent', () => {
       })
 
       ws.send(JSON.stringify({ type: 'stdin', data: 'test\n' }))
-      await new Promise((r) => setTimeout(r, 50))
+
+      // Positive control: a ping sent right after the (silently-dropped)
+      // stdin frame must still get a pong, proving the connection is alive
+      // and still processing messages — so the absence of an error frame
+      // below is not just an artifact of a dead socket.
+      const pongPromise = waitForMessageOfType(ws, 'pong')
+      ws.send(JSON.stringify({ type: 'ping' }))
+      await pongPromise
 
       assert.equal(gotError, false, 'must not send error frame for stdin on no-stdin child')
 

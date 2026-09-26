@@ -69,6 +69,43 @@ function scriptKindFor(fileName) {
   return ts.ScriptKind.JS
 }
 
+const STRING_LITERAL_KINDS = new Set([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateHead,
+  ts.SyntaxKind.TemplateMiddle,
+  ts.SyntaxKind.TemplateTail,
+])
+
+/**
+ * Every string/template-literal-BODY range in `text`: whole `StringLiteral`
+ * and `NoSubstitutionTemplateLiteral` tokens, plus just the literal spans of a
+ * template expression — `TemplateHead`, `TemplateMiddle`, `TemplateTail`. A
+ * `${...}` substitution is ordinary code sitting between those tokens and is
+ * deliberately NOT included: text inside it (e.g. `` `${process.argv[1]}` ``)
+ * is a real expression, not prose, and a caller telling code from string
+ * content apart must keep seeing it as code.
+ *
+ * Built for lint-entry-point-guard.mjs (#7279), which needs to tell a banned
+ * shape spelled in prose from the same shape actually read as code, without
+ * changing which shapes it matches — only how a hit inside one of these
+ * ranges is reported.
+ */
+export function stringLiteralRanges(text, fileName = 'input.js') {
+  const sourceFile = ts.createSourceFile(
+    fileName, text, ts.ScriptTarget.Latest, /* setParentNodes */ true, scriptKindFor(fileName),
+  )
+  const ranges = []
+  const walk = (node) => {
+    if (STRING_LITERAL_KINDS.has(node.kind)) {
+      ranges.push({ pos: node.getStart(sourceFile), end: node.getEnd() })
+    }
+    for (const child of node.getChildren(sourceFile)) walk(child)
+  }
+  walk(sourceFile)
+  return ranges.sort((a, b) => a.pos - b.pos)
+}
+
 /**
  * Every comment range in `text`.
  *

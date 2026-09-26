@@ -74,6 +74,24 @@
  *   - Anything inside a `//` or block comment. This matters — every copy of the
  *     guard, and this file, discuss the banned shapes in prose.
  *
+ * ## String literals are still matched, but the finding says so (#7279)
+ *
+ * Unlike comments, string and template-literal bodies are NOT stripped before
+ * matching — a fixture string embedding a banned shape as text is a legitimate
+ * thing for a test file to contain, and blanking it would let the lint miss a
+ * hand-rolled guard hidden inside a template literal built at runtime. So the
+ * REACH here is unchanged from before #7279: a rule matching inside a string
+ * still counts as an offender and still fails the run.
+ *
+ * What changes is the message. A hit whose site falls inside a `StringLiteral`
+ * or the literal (non-`${...}`) spans of a template expression is reported
+ * with a note that it matched inside a string literal, rather than presented
+ * identically to a real hand-rolled guard. A `${...}` substitution is ordinary
+ * code and is NOT treated as string content — `` `${process.argv[1]}` `` is
+ * still reported as code, unannotated, because the expression inside the
+ * braces really does read the script slot. See `stringLiteralRanges` in
+ * `./lib/strip-comments.mjs`.
+ *
  * ## Exemptions
  *
  * `SANCTIONED` is the three guard copies — imported from
@@ -189,8 +207,9 @@ function usageError(message) {
 // caught, and an uncaught ESM resolution error exits 1 — which the CI step would
 // report as dirty code.
 let stripComments
+let stringLiteralRanges
 try {
-  ({ stripComments } = await import('./lib/strip-comments.mjs'))
+  ({ stripComments, stringLiteralRanges } = await import('./lib/strip-comments.mjs'))
 } catch (err) {
   usageError(`cannot load the comment stripper: ${err.message}`)
 }
@@ -389,6 +408,22 @@ function lineOf(text, index) {
   return line
 }
 
+/**
+ * Is `index` inside one of `ranges` (each `{pos, end}`, sorted, from
+ * stringLiteralRanges)? Used to tell a match that is prose *about* a banned
+ * shape — sitting inside a string or template-literal body — from the same
+ * text actually read as code (#7279). It does not change which sites match;
+ * it only changes how the hit is reported, so REACH stays exactly what it was
+ * before this existed.
+ */
+function isInsideRange(index, ranges) {
+  for (const { pos, end } of ranges) {
+    if (index < pos) break
+    if (index < end) return true
+  }
+  return false
+}
+
 function findInFile(file, rel) {
   let raw
   try {
@@ -407,6 +442,18 @@ function findInFile(file, rel) {
     usageError(`cannot strip comments from ${rel}: ${err.message}`)
   }
 
+  // Computed on `code`, not `raw`: blanking comments to spaces never moves a
+  // string literal's boundaries (a `//` inside a string is not a comment, so
+  // stripComments already leaves it alone), and every match index below is
+  // itself an offset into `code` — comparing the two only works when both are
+  // measured against the same text.
+  let strRanges
+  try {
+    strRanges = stringLiteralRanges(code, file)
+  } catch (err) {
+    usageError(`cannot find string literals in ${rel}: ${err.message}`)
+  }
+
   const rawLines = raw.split('\n')
   const codeLines = code.split('\n')
   const hits = []
@@ -421,7 +468,12 @@ function findInFile(file, rel) {
     // The marker sits on the line ABOVE the offending site, matching the
     // convention the other lints use.
     if (line > 1 && isIgnoreDirective(rawLines[line - 2], codeLines[line - 2])) return
-    hits.push({ file: rel, line, kind, hint, text: (rawLines[line - 1] || '').trim() })
+    // Still an offender either way (#7279 keeps the walk's REACH unchanged) —
+    // this only tells the printed diagnostic that the match sits inside a
+    // string or template-literal body, so a reworded false positive is not
+    // read as a hand-rolled guard hiding in real code.
+    const inString = isInsideRange(index, strRanges)
+    hits.push({ file: rel, line, kind, hint, inString, text: (rawLines[line - 1] || '').trim() })
   }
 
   for (const { kind, re, hint } of RULES) {
@@ -539,7 +591,14 @@ const countMismatch = guardCounts.length > 1
 const staleAllowlist = sanctioned.filter((rel) => !guardedSanctioned.has(rel))
 
 for (const o of offenders) {
-  console.error(`${o.file}:${o.line}  [${o.kind}]  ${o.text}`)
+  // Note left BARE of the banned shapes' own spelling — see "A note on this
+  // file's own text" above: a string in this file describing them would match
+  // its own rule the next time the repo-wide walk reaches lint-entry-point-guard.mjs.
+  const note = o.inString
+    ? '  (matched inside a string literal — if this is prose, reword it or add'
+      + ` \`// ${IGNORE_MARKER}\` on the line above it)`
+    : ''
+  console.error(`${o.file}:${o.line}  [${o.kind}]  ${o.text}${note}`)
 }
 if (offenders.length) {
   console.error('')

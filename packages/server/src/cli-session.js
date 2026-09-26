@@ -20,6 +20,7 @@ import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { createLogger, loggerForSession } from './logger.js'
@@ -170,7 +171,26 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
   // the model retains the full prior transcript. Only emitted when a non-empty
   // string is known; a brand-new session (first start()) leaves this off so
   // claude CLI mints a fresh conversation id on its `system.init` line.
+  //
+  // #7868 — REJECTED, not merely passed through, because `-r, --resume` is
+  // declared with an OPTIONAL argument (`[value]`), not a required one.
+  // Measured against the installed claude CLI (2.1.282):
+  //
+  //   claude -p --resume --this-is-not-a-real-flag-xyz --output-format ...
+  //     → error: unknown option '--this-is-not-a-real-flag-xyz'   (exit 1)
+  //
+  // — i.e. the two-token form INJECTS for an optional-arg flag (the opposite
+  // of `--model <model>` / `--append-system-prompt <prompt>` above, both
+  // declared REQUIRED and measured swallowed-as-value). `resumeSessionId` can
+  // never legitimately start with `-`: it is either this file's own
+  // CLI-emitted `system.init` session_id, or a client-supplied resume target
+  // already required to be a canonical UUID by
+  // handlers/conversation-handlers.js's CONVERSATION_ID_RE before it reaches
+  // here — but relying on every current and future caller to keep that
+  // constraint is the exact "someone remembers to sweep" gap #7868 exists to
+  // close, so it is asserted here too (case 1: reject).
   if (typeof resumeSessionId === 'string' && resumeSessionId.length > 0) {
+    assertSafeArgvValue(resumeSessionId, 'resumeSessionId')
     args.push('--resume', resumeSessionId)
   }
 
