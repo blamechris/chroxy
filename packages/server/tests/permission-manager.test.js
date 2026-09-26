@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { PermissionManager, wirePermissionManager, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW } from '../src/permission-manager.js'
+import { PermissionManager, wirePermissionManager, ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW, NOT_DELEGABLE_TOOLS } from '../src/permission-manager.js'
 
 /**
  * Tests for PermissionManager — permission request lifecycle,
@@ -458,6 +458,98 @@ describe('PermissionManager', () => {
       assert.equal(bashRes.behavior, 'allow', 'tool prompt must auto-allow')
       assert.equal(trusted, false, 'MCP trust prompt must auto-deny')
       assert.equal(pm._pendingPermissions.size, 0)
+    })
+
+    it('autoAllowPending() leaves a pending codex request_permissions prompt for a human, and does not silently allow it (#7975)', async () => {
+      // request_permissions carries neither protectedTarget (no path field)
+      // nor mcpTrust — before the #7975 fix it fell straight through to the
+      // default allow branch on a bypass-mode switch, silently granting a
+      // codex sandbox-scope escalation the user never approved.
+      const ordinaryPromise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const escalationPromise = pm.handlePermission('request_permissions', { justification: 'need a broader sandbox' }, null, 'approve')
+      assert.equal(pm._pendingPermissions.size, 2)
+
+      const resolvedEvents = []
+      pm.on('permission_resolved', (e) => resolvedEvents.push(e))
+
+      pm.autoAllowPending()
+
+      const ordinaryResult = await ordinaryPromise
+      assert.equal(ordinaryResult.behavior, 'allow', 'an ordinary tool prompt must still auto-allow (positive control)')
+      assert.equal(pm._pendingPermissions.size, 1, 'the request_permissions prompt must remain pending, not resolved either way')
+      assert.equal(resolvedEvents.length, 1, 'only the ordinary prompt resolves — request_permissions emits no permission_resolved yet')
+      assert.equal(resolvedEvents[0].reason, 'auto_mode')
+
+      // Still genuinely pending — resolvable by a human explicitly, not
+      // silently applied.
+      const stillPendingId = [...pm._pendingPermissions.keys()][0]
+      assert.equal(pm.respondToPermission(stillPendingId, 'deny'), true)
+      const escalationResult = await escalationPromise
+      assert.equal(escalationResult.behavior, 'deny')
+    })
+
+    it('autoAllowPending() keeps mcp_spawn behaviour unchanged (explicit deny, not left pending) even though it is ALSO in NOT_DELEGABLE_TOOLS (#7975)', async () => {
+      // mcp_spawn is in NOT_DELEGABLE_TOOLS too, but its own mcpTrust branch
+      // must still run first — an allow here would persist a permanent
+      // binary-trust grant, so it stays an explicit deny, not "left pending".
+      assert.ok(NOT_DELEGABLE_TOOLS.has('mcp_spawn'))
+      const trustPromise = pm.requestMcpTrust({ name: 'mcp1', command: 'node', args: ['mcp.js'], envKeys: [] })
+      assert.equal(pm._pendingPermissions.size, 1)
+
+      const resolvedEvents = []
+      pm.on('permission_resolved', (e) => resolvedEvents.push(e))
+
+      pm.autoAllowPending()
+
+      const allowed = await trustPromise
+      assert.equal(allowed, false, 'mcp_spawn must still be actively denied, not left pending')
+      assert.equal(pm._pendingPermissions.size, 0, 'mcp_spawn entry must be removed (denied), not preserved as pending')
+      assert.equal(resolvedEvents.length, 1)
+      assert.equal(resolvedEvents[0].reason, 'auto_mode_mcp_trust_bypass')
+    })
+
+    it('a swept request_permissions prompt is still reachable by a reconnecting client — nothing is deleted from _lastPermissionData (#7975)', async () => {
+      // resendPendingPermissions (ws-permissions.js) replays every entry
+      // still present in _pendingPermissions/_lastPermissionData to a
+      // reconnecting client. Proving both maps still hold the entry after
+      // autoAllowPending is the load-bearing "still reaches a client" property
+      // — the original permission_request broadcast already went out when
+      // the prompt was first created, and this is what makes it replayable.
+      const requests = []
+      pm.on('permission_request', (r) => requests.push(r))
+      const escalationPromise = pm.handlePermission('request_permissions', { justification: 'x' }, null, 'approve')
+      const requestId = requests[requests.length - 1].requestId
+
+      pm.autoAllowPending()
+
+      assert.ok(pm._pendingPermissions.has(requestId), 'still pending, so resendPendingPermissions will replay it on reconnect')
+      assert.ok(pm._lastPermissionData.has(requestId), 'still present, so the resend path finds its tool/floored/description')
+      assert.equal(pm._lastPermissionData.get(requestId).tool, 'request_permissions')
+
+      assert.equal(pm.respondToPermission(requestId, 'deny'), true)
+      await escalationPromise
+    })
+
+    it('autoAllowPending() fails SAFE (leaves pending) when an entry has no recoverable _lastPermissionData, instead of silently allowing it (#7975-followup)', async () => {
+      // Every real call site (handlePermission, requestMcpTrust) sets
+      // _pendingPermissions and _lastPermissionData in the same synchronous
+      // step, so this mismatch is not reachable through this module's own
+      // API today — manufactured directly (white-box) to prove the fail-safe
+      // DEFAULT holds, since NOT_DELEGABLE_TOOLS.has(undefined) is false and
+      // would otherwise fall through to the allow branch below it.
+      const requestId = 'perm-manufactured-mismatch'
+      let resolved = null
+      pm._pendingPermissions.set(requestId, {
+        resolve: (result) => { resolved = result },
+        input: {},
+        suggestions: [],
+      })
+      assert.equal(pm._lastPermissionData.has(requestId), false, 'premise: no tool data recoverable for this entry')
+
+      pm.autoAllowPending()
+
+      assert.equal(resolved, null, 'an entry with no recoverable tool name must not be silently allowed')
+      assert.equal(pm._pendingPermissions.has(requestId), true, 'must remain pending for a human, same treatment as a known not-delegable tool')
     })
   })
 

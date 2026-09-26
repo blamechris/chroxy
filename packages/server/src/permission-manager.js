@@ -58,6 +58,123 @@ export const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 
 // stronger check than its code performs.
 export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'Agent', 'WebFetch', 'WebSearch', 'shell', 'request_permissions', 'mcp_elicitation'])
 
+// #7973 — tools an EXTERNAL PLANNER (agent-control's `chroxy_respond_permission`,
+// packages/server/src/agent-control/client.js) may never approve with `allow`,
+// WHATEVER the protected-path floor's `floored` verdict says about the request
+// — these are high-authority independent of any path field:
+//   - `mcp_spawn` (#4462): an `allow` PERSISTS a permanent "trust this binary"
+//     grant to disk (byok-mcp-fleet's recordTrust). `autoAllowPending()` below
+//     already refuses to fold this into a bypass-mode sweep, via the
+//     `pending.mcpTrust` flag it sets on the pending entry — a per-REQUEST
+//     runtime marker, not a tool-name membership check. `mcp_spawn` was never
+//     added to NEVER_AUTO_ALLOW above because that set gates PERSISTED
+//     permission RULES, a mechanism `requestMcpTrust` never consults in the
+//     first place (it skips `_matchesRule` entirely).
+//   - `request_permissions` (codex's sandbox-scope escalation prompt) is
+//     already in NEVER_AUTO_ALLOW, so a persisted "always allow" RULE for it
+//     is rejected. This set additionally covers the ONE-SHOT external-planner
+//     `allow` path in agent-control, which NEVER_AUTO_ALLOW does not govern.
+//
+// FIXED (#7975, was FINDING #7973): `autoAllowPending()` below now consults
+// this EXACT set (by tool name, via `_lastPermissionData`) so a pending
+// `request_permissions` prompt — which carries neither `protectedTarget` nor
+// `mcpTrust` — is left genuinely pending for a human rather than silently
+// folded into a bypass-mode sweep. `mcp_spawn`'s own `pending.mcpTrust`
+// handling (explicit deny, never silently allowed) is unchanged; the new
+// check only ever widens which tools autoAllowPending refuses to auto-allow,
+// checked after the mcpTrust branch so it never intercepts mcp_spawn's
+// existing behavior.
+//
+// Exported so agent-control/client.js AND autoAllowPending() below both
+// consult this EXACT Set (identity, not an equal-valued copy) rather than
+// hand-rolling independent, driftable copies of "which tools are too
+// high-authority for an unattended approver to ever say yes to."
+export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
+
+// #7973 — tools that execute an arbitrary, caller-supplied command/shell
+// string. The protected-path floor (`isFlooredTarget`, permission-floor.js)
+// inspects PATH-carrying input fields only — it is fundamentally unable to
+// see a command string, so `floored: false` on one of these tools means "no
+// path field looked protected," not "this command is safe" (`cat .env` is an
+// ordinary, unfloored Bash invocation). Names are sourced from what each
+// provider actually hands `handlePermission` or `POST /permission` — never
+// guessed:
+//   - `Bash` — Claude Code (the Agent SDK's bundled binary for sdk-session.js,
+//     and the installed CLI behind the hook-routed claude-cli / claude-tui /
+//     claude-channel providers) and BYOK's built-in tool executor
+//     (byok-tool-executor.js, which dispatches by exact, case-sensitive name).
+//   - `PowerShell` — Claude Code's Windows shell tool, and the ONLY shell tool
+//     on a Windows host without Git Bash. Permission-checked with Bash's rules.
+//   - `Monitor` — Claude Code's background-script tool: its input is a bash
+//     `command`, permission-checked by the same function as Bash.
+//   - `shell` — codex's app-server driver (codex-app-server-session.js).
+// Gemini sessions (gemini-session.js) declare `permissions: false` and never
+// call `handlePermission` at all; ACP-backed providers (acp-session.js) deny
+// every permission request outright without reaching this module either.
+// This is a DENYLIST beside a tool roster that grows with every Claude Code
+// release (PowerShell and Monitor were missed when it was first written) — a
+// new command-executing tool is approvable until its name is added here.
+//
+// Exported for the same reason as NOT_DELEGABLE_TOOLS above — one shared Set,
+// imported (not copied) by agent-control/client.js.
+export const COMMAND_TOOLS = new Set(['Bash', 'shell', 'PowerShell', 'Monitor'])
+
+// #7975 (S3, final security review of #7854) — the ALLOWLIST of tools an
+// EXTERNAL PLANNER's `chroxy_respond_permission` may ever send `allow` for
+// (before the #7973 command-tool opt-in on top): exactly the tools whose
+// inputs the protected-path floor (`isFlooredTarget`, permission-floor.js)
+// FULLY inspects — meaning every field of that tool's real input which
+// selects the file(s) it reads or writes is one of PROTECTED_PATH_INPUT_FIELDS
+// (`file_path`/`path`/`notebook_path`) or, for codex `apply_patch`, its
+// `changes[]` member paths. `floored: false` is only a MEANINGFUL "nothing
+// protected here" signal when that condition holds for EVERY field — not
+// merely when the floor recognizes *some* field on the tool.
+//
+// Read/Write/Edit/NotebookEdit/apply_patch satisfy it: the one field the
+// floor inspects (`file_path`/`notebook_path`/`changes[].path`) is exactly the
+// field that determines what gets read or written.
+//
+// #7975-followup (adversarial review of 71e78ba38) — `Grep` and `Glob` do
+// NOT satisfy it and are deliberately EXCLUDED, even though both are in
+// {@link ACCEPT_EDITS_TOOLS} and both DO carry a `path` field the floor
+// inspects. Each also carries a SECOND, file-selecting field the floor never
+// looks at: `Grep`'s `glob` (byok-tools.js) and `Glob`'s `pattern`. A caller
+// can leave `path` pointed at a wholly benign directory and use that second
+// field to select a secret file directly — `isFlooredTarget` sees only the
+// benign `path` and reports `floored: false`, exactly the vacuous-`false`
+// failure mode #7975 was written to close, just moved one field over. Grep is
+// the sharper case because it returns the matched file's CONTENT: measured
+// against ripgrep 15.2.0, `rg --glob=.env -e <pattern> -- <benign-dir>`
+// matches `.env` even WITHOUT `--hidden` — an explicit `--glob` overrides the
+// default hidden-file/`.gitignore` skip that would otherwise protect a
+// dotfile. So `Grep({ path: '<cwd>', glob: '.env', pattern: '.' })` returns
+// live secret bytes while `floored` reads `false`. `Glob` shares the same
+// blind field but can only ever return a matched PATH NAME (see its
+// `input_schema` and description in byok-tools.js — "Returns sorted file
+// paths"), never file bytes, so it cannot leak secret VALUES; it is excluded
+// anyway for consistency with "meaningful for every allowlisted tool" and
+// because listing files (unlike reading their content) is already the
+// existing, deliberate design of the read floor itself (`isSecretReadTarget`
+// floors a config-dir READ only when the target is a specific secret FILE,
+// not merely because a directory containing one is being enumerated). See
+// `tests/agent-control/permission-policy.test.js` for the bypass proof
+// (a real `path`-benign / `glob`-malicious Grep input against
+// `isFlooredTarget`) and `tests/built-in-tools/tool-transforms.js`'s own doc
+// comment on `buildGrepCommand`, which already flagged this exact tension for
+// the acceptEdits/rule-engine surface before agent-control existed.
+//
+// Deliberately NOT the same object as {@link ACCEPT_EDITS_TOOLS} (no more
+// identity reuse): aliasing the planner's allowlist to the acceptEdits set
+// meant any FUTURE widening of acceptEdits (adding a tool there because it is
+// fine for a human clicking "accept edits" to auto-approve) would silently
+// widen what an unattended external planner may also approve — a different,
+// stronger bar. This Set is its own literal, a strict SUBSET of
+// ACCEPT_EDITS_TOOLS, pinned by a behavioral test against permission-floor.js
+// (not by comparing two hand-authored lists) that fails if a tool whose real
+// input schema carries an uninspected file-selecting field (`glob`/`pattern`)
+// is ever added back.
+export const FLOOR_ALLOWLISTED_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'apply_patch'])
+
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since
 // #6794/#6803, so keep them resolvable from this module for existing importers.
@@ -997,6 +1114,32 @@ export class PermissionManager extends EventEmitter {
    * binary forever." Treating mcp_spawn under auto as deny re-prompts
    * the user next start — they can explicitly approve then, when the
    * decision is in front of them.
+   *
+   * #7975: a pending `request_permissions` prompt (codex's sandbox-scope
+   * escalation) carries neither `protectedTarget` nor `mcpTrust` — before
+   * this fix it fell straight through to the default allow branch below, so
+   * a session that flipped into auto/bypass mode mid-turn silently granted a
+   * sandbox-scope escalation the user never explicitly approved. This is now
+   * checked by TOOL NAME against {@link NOT_DELEGABLE_TOOLS} — the exact same
+   * Set agent-control's `respondPermission` gate uses, so the daemon's "never
+   * approve without a human" list has one source of truth, not two that can
+   * drift — via the tool name stashed on `_lastPermissionData` (the pending
+   * entry itself carries no tool field). It is left GENUINELY PENDING, the
+   * same treatment as a protected-path prompt: the original `permission_request`
+   * broadcast already reached any connected client when the prompt was first
+   * emitted, and `resendPendingPermissions` (ws-permissions.js) replays it to
+   * a reconnecting client for as long as it stays in `_pendingPermissions` —
+   * nothing here removes it from either map, so it is neither silently
+   * granted nor silently dropped. `mcp_spawn` is ALSO in NOT_DELEGABLE_TOOLS,
+   * but this check is placed AFTER the `mcpTrust` branch below (which fires
+   * for every mcp_spawn entry) so mcp_spawn's existing explicit-deny handling
+   * is unchanged — this only widens what happens to `request_permissions`.
+   *
+   * #7975-followup: the tool-name lookup FAILS CLOSED — a pending entry with
+   * no recoverable `_lastPermissionData` (which every current call site sets
+   * in lockstep with `_pendingPermissions`, so this is a belt-and-braces
+   * default, not a reachable path today) is preserved genuinely pending, same
+   * as a known not-delegable tool, rather than silently allowed.
    */
   autoAllowPending() {
     if (this._pendingPermissions.size === 0) return
@@ -1004,6 +1147,7 @@ export class PermissionManager extends EventEmitter {
     let allowed = 0
     let deniedMcpTrust = 0
     let preservedProtected = 0
+    let preservedNotDelegable = 0
     for (const requestId of pendingIds) {
       const pending = this._pendingPermissions.get(requestId)
       if (!pending) continue
@@ -1011,10 +1155,10 @@ export class PermissionManager extends EventEmitter {
         preservedProtected += 1
         continue
       }
-      this._pendingPermissions.delete(requestId)
-      this._lastPermissionData.delete(requestId)
-      this._clearPermissionTimer(requestId)
       if (pending.mcpTrust === true) {
+        this._pendingPermissions.delete(requestId)
+        this._lastPermissionData.delete(requestId)
+        this._clearPermissionTimer(requestId)
         // Don't silently persist trust on bypass. Deny — the MCP server
         // won't spawn for this session, but no on-disk trust entry is
         // written, and the user re-prompts next start.
@@ -1026,13 +1170,37 @@ export class PermissionManager extends EventEmitter {
         deniedMcpTrust += 1
         continue
       }
+      // #7975 — same NOT_DELEGABLE_TOOLS set agent-control's respondPermission
+      // gate consults, checked by the tool name stashed alongside this
+      // requestId (the pending entry itself has no tool field). Left pending,
+      // never deleted — see the doc comment above.
+      //
+      // #7975-followup — every current call site sets `_lastPermissionData`
+      // in the SAME synchronous step as `_pendingPermissions` (handlePermission
+      // and requestMcpTrust both do this, and nothing else in this module ever
+      // mutates either map), so `lastData` below is not expected to be missing
+      // in practice. But `NOT_DELEGABLE_TOOLS.has(undefined)` is `false` — if
+      // that invariant were ever violated by a future change, an entry with no
+      // recoverable tool name would silently fall through to the ALLOW branch
+      // below, which is exactly the bug this fix exists to close, just for an
+      // unknown tool instead of a known one. Fail closed instead: treat a
+      // missing lookup the same as a not-delegable tool (leave it genuinely
+      // pending for a human) rather than assume it is safe to allow.
+      const lastData = this._lastPermissionData.get(requestId)
+      if (!lastData || NOT_DELEGABLE_TOOLS.has(lastData.tool)) {
+        preservedNotDelegable += 1
+        continue
+      }
+      this._pendingPermissions.delete(requestId)
+      this._lastPermissionData.delete(requestId)
+      this._clearPermissionTimer(requestId)
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
       this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
       allowed += 1
     }
-    if (deniedMcpTrust > 0 || preservedProtected > 0) {
+    if (deniedMcpTrust > 0 || preservedProtected > 0 || preservedNotDelegable > 0) {
       this._logInfo(
-        `Auto-allowed ${allowed} pending permission(s), denied ${deniedMcpTrust} MCP trust prompt(s), and preserved ${preservedProtected} protected-path prompt(s) on auto mode switch`,
+        `Auto-allowed ${allowed} pending permission(s), denied ${deniedMcpTrust} MCP trust prompt(s), preserved ${preservedProtected} protected-path prompt(s), and preserved ${preservedNotDelegable} not-delegable prompt(s) on auto mode switch`,
       )
     } else {
       this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)

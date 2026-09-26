@@ -30,6 +30,7 @@ import { registerShellApprovalCommand } from './cli/shell-cmd.js'
 import { registerIdentityCommand } from './cli/identity-cmd.js'
 import { registerTokensCommand } from './cli/tokens-cmd.js'
 import { registerScheduleCommands } from './cli/schedule-cmd.js'
+import { registerAgentControlCommand } from './cli/agent-control-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -62,5 +63,6 @@ registerShellApprovalCommand(program)
 registerIdentityCommand(program)
 registerTokensCommand(program)
 registerScheduleCommands(program)
+registerAgentControlCommand(program)
 
 program.parse()
