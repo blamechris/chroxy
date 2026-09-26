@@ -46,33 +46,17 @@ describe('permission routing (real server-side resolver)', () => {
       return true
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
-    // #7968: simulate a daemon that already sends the protected-path-floor
-    // flag on every permission_request (the parallel PR that adds this to
-    // the real broadcast has not landed on this branch yet) — this test is
-    // about ROUTING/resolution through the real server-side resolver, not
-    // the floor gate itself, so give it what a modern daemon would send.
-    // `permission_request` is delivered via `_broadcastToSession` /
-    // `WsBroadcaster`, which captured its OWN `sendFn` closure at
-    // construction (a wrapper that calls `self._send(ws, msg)` — a live
-    // property lookup, not a frozen reference) — patching
-    // `_handlerCtx.transport.send` (a separate copy of that same closure,
-    // used only for DIRECT per-connection replies like input_ack) has no
-    // effect on it; patching the instance's own `_send` does, since every
-    // send path resolves through it dynamically.
-    const originalSend = server._send.bind(server)
-    server._send = (ws, msg) => {
-      // Must forward _send's own return value (used by the eager-handshake
-      // path to confirm auth_ok actually reached the wire) — swallowing it
-      // reads as a delivery failure and aborts the handshake.
-      return originalSend(ws, msg.type === 'permission_request' ? { ...msg, floored: false } : msg)
-    }
     const port = await startServerAndGetPort(server)
     client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
 
     const first = await client.getEvents('perm-a')
     const waiting = client.getEvents('perm-a', { cursor: first.cursor, waitMs: 500 })
-    manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'real-pending', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000 } })
+    // `floored: false` is what PermissionManager puts on an ordinary prompt's
+    // event (#7968); the real normalizer carries it onto the wire. This test is
+    // about routing through the server resolver, so it emits an ordinary one —
+    // floored-e2e.test.js drives the verdict from a real PermissionManager.
+    manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'real-pending', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false } })
     const seen = await waiting
     assert.ok(seen.events.some((e) => e.type === 'permission_request' && e.data.requestId === 'real-pending'))
     assert.equal(server._permissionSessionMap.get('real-pending'), 'perm-a')
@@ -136,23 +120,13 @@ describe('permission routing (real server-side resolver)', () => {
       return true
     }
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
-    // #7968: see the "routes through the server resolver" test above (same
-    // `_send` vs `_handlerCtx.transport.send` reasoning) — this test is
-    // about the concurrency guard, not the floor gate.
-    const originalSend = server._send.bind(server)
-    server._send = (ws, msg) => {
-      // Must forward _send's own return value (used by the eager-handshake
-      // path to confirm auth_ok actually reached the wire) — swallowing it
-      // reads as a delivery failure and aborts the handshake.
-      return originalSend(ws, msg.type === 'permission_request' ? { ...msg, floored: false } : msg)
-    }
     const port = await startServerAndGetPort(server)
     client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 250, silent: true, ownedSessions: new Set(['perm-a']) })
     await client.connect()
     try {
       const first = await client.getEvents('perm-a')
       const waiting = client.getEvents('perm-a', { cursor: first.cursor, waitMs: 500 })
-      manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'same-request', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000 } })
+      manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'same-request', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false } })
       assert.ok((await waiting).events.some((e) => e.type === 'permission_request'))
 
       const responses = await Promise.all([
@@ -739,6 +713,9 @@ describe('create_session serial-op correlation scoping', () => {
     const client = new AgentControlClient({ url: 'ws://127.0.0.1:1', token: 'fixture-token-only', silent: true })
     client._state = 'ready'
     client._send = () => {}
+    // createSession's pre-create snapshot (the re-home filter) — stubbed like
+    // the sibling test above, so the op under test is create_session itself.
+    client.listSessions = async () => ({ sessions: [] })
     const creating = client.createSession({ name: 'fixture' })
     const assertion = assert.rejects(creating, /creation failed/)
     try {
@@ -748,5 +725,83 @@ describe('create_session serial-op correlation scoping', () => {
     } finally {
       await client.close()
     }
+  })
+})
+
+describe('ownership source integrity: only a genuine create reply may mint ownership', () => {
+  let server
+  let planner
+  let human
+
+  afterEach(async () => {
+    for (const c of [planner, human]) { if (c) { try { await c.close() } catch { /* already closed */ } } }
+    planner = null
+    human = null
+    if (server) { try { server.close() } catch { /* already closed */ } server = null }
+  })
+
+  it('a destroy re-home session_switched for a HUMAN session, arriving while create_session is pending, is not taken as the create reply', async () => {
+    // create_session has no requestId on the wire, and the daemon sends
+    // `session_switched` for two unrelated reasons: the reply to OUR create,
+    // and handleDestroySession re-homing every client whose active session was
+    // just destroyed onto `firstSessionId` — someone else's session. A planner
+    // connects with the daemon's default session as its active one, so a
+    // human deleting that session while the planner's create is in flight
+    // re-homes the planner onto a human session. Taking that frame as the
+    // create reply would record the HUMAN session as owned: input, interrupt
+    // and allow on a session the planner never created.
+    const homeCwd = homedir()
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'human-a', name: 'Human A', cwd: homeCwd, provider: 'claude-sdk' },
+      { id: 'human-b', name: 'Human B', cwd: homeCwd, provider: 'claude-sdk' },
+    ])
+    manager.createSession = createSpy((opts) => {
+      const mockSession = createMockSession()
+      mockSession.cwd = opts.cwd || homeCwd
+      mockSession.resumeSessionId = null
+      sessionsMap.set('planner-new', { session: mockSession, name: opts.name || 'New', cwd: opts.cwd || homeCwd, type: 'cli', isBusy: false })
+      return 'planner-new'
+    })
+    manager.destroySession = (id) => {
+      sessionsMap.delete(id)
+      manager.emit('session_destroyed', { sessionId: id })
+      return true
+    }
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    planner = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1500, silent: true })
+    human = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 1500, silent: true })
+    await planner.connect()
+    await human.connect()
+
+    // Hold the planner's create on its way out until the human's destroy of
+    // the planner's active session (human-a) has re-homed the planner onto
+    // human-b — the interleaving a real network produces whenever the destroy
+    // reaches the daemon first. Only the planner's OWN send ordering is
+    // staged; every daemon frame below is the real handler's.
+    const realSend = planner._send.bind(planner)
+    let rehomed = false
+    planner._send = (payload) => {
+      if (payload.type !== 'create_session') return realSend(payload)
+      const onMsg = (m) => {
+        if (m.type === 'session_switched' && m.sessionId === 'human-b') {
+          rehomed = true
+          planner.off('message', onMsg)
+          realSend(payload)
+        }
+      }
+      planner.on('message', onMsg)
+      human._send({ type: 'destroy_session', sessionId: 'human-a' })
+    }
+
+    const created = await planner.createSession({ name: 'mine', cwd: homeCwd })
+    assert.equal(rehomed, true, 'the re-home frame must actually have reached the planner, or this test proves nothing')
+    assert.equal(created.sessionId, 'planner-new', 'the create must resolve with the session it created, not the re-home target')
+    assert.equal(planner._ownedSessions.has('human-b'), false, 'a re-home onto a human session must never mint ownership of it')
+    assert.equal(planner._ownedSessions.has('planner-new'), true)
+
+    const refused = await planner.sendInput('human-b', 'not yours')
+    assert.equal(refused.reason, 'not_owned', JSON.stringify(refused))
+    assert.equal(sessionsMap.get('human-b').session.sendMessage.callCount, 0)
   })
 })

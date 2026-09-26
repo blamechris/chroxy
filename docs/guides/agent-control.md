@@ -119,7 +119,10 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
 apply, and both are now enforced:
 
 - **Ownership (enforced).** Only sessions this MCP-server process created can be answered;
-  see the tool table. The set is in memory, so after the MCP-server process restarts its
+  see the tool table. Ownership is recorded only from the reply to this process's own
+  `create_session`: a `session_switched` naming a session that already existed before the
+  create (the daemon re-homing this connection after someone deleted its active session) is
+  not taken as that reply. The set is in memory, so after the MCP-server process restarts its
   earlier sessions become `not_owned` — their prompts time out and the daemon auto-denies,
   which fails closed.
 - **The protected-path floor (enforced, #7968).** The
@@ -137,10 +140,12 @@ apply, and both are now enforced:
     through.
   - `floored: false` → an ordinary prompt; `allow` proceeds normally.
 
-  Practically: until the daemon you're pointed at actually sends `floored`, every `allow`
-  through `chroxy_respond_permission` is refused — only `deny` and observation work. Once a
-  daemon that implements #7968 is running, `allow` works again for ordinary (non-floored)
-  prompts, and a floored prompt is left for a person exactly as the floor intends.
+  Practically: a daemon built from #7971 or later sends `floored` on every
+  `permission_request` from both pipelines (and on the reconnect resend), so `allow` works
+  for ordinary prompts and a floored prompt is left for a person exactly as the floor
+  intends. Pointed at an older daemon, every `allow` is refused — only `deny` and
+  observation work. Note that `floored: false` is only the *path* floor's verdict; the two
+  gates below exist because it says nothing about tools the path floor cannot inspect.
 
 - **Never-delegable tools (enforced, #7973).** Two tools are refused `allow` **unconditionally
   — whatever `floored` says** — because they are high-authority independent of any path field:
@@ -152,8 +157,9 @@ apply, and both are now enforced:
   These are the exact `NOT_DELEGABLE_TOOLS` set exported from `permission-manager.js` and
   imported (never copied) by `agent-control/client.js` — `allow` refuses with
   `reason: 'not_delegable'`; `deny` still goes through.
-- **Command-tool approvals (deny-only by default, opt-in, #7973).** `Bash` (Claude SDK / BYOK)
-  and codex's `shell` carry an arbitrary, caller-supplied command string. The protected-path
+- **Command-tool approvals (deny-only by default, opt-in, #7973).** `Bash` (Claude Code and
+  BYOK), Claude Code's `PowerShell` (the Windows shell tool) and `Monitor` (a background bash
+  script), and codex's `shell` carry an arbitrary, caller-supplied command string. The protected-path
   floor inspects PATH-carrying input fields only — it cannot see into a command string, so
   `floored: false` on a `Bash` prompt means "no path field looked protected," not "this
   command is safe" (`cat .env` is an ordinary, unfloored Bash call). `allow` for one of these
@@ -162,13 +168,17 @@ apply, and both are now enforced:
   still apply on top; the flag only ever narrows further, it never overrides either of them.
   A clear warning is logged to stderr at startup whenever the flag is enabled. This is off by
   default: only enable it for a planner you trust with shell-level authority over the daemon.
+  The set is `COMMAND_TOOLS` in `permission-manager.js`, and it is a **denylist of tool
+  names**: a tool that is not on it is approvable when its prompt is `floored: false` and the
+  session is owned. That includes MCP tools (`mcp__<server>__<tool>`), whose effect this
+  adapter cannot see — an MCP server that runs commands is not covered by this flag.
 
 ## Running it
 
 ```bash
 chroxy agent-control --stdio                        # local daemon, read-write
 chroxy agent-control --stdio --read-only            # local daemon, mutation tools absent
-chroxy agent-control --stdio --allow-command-approvals   # let the planner approve Bash/shell too (logs a startup warning)
+chroxy agent-control --stdio --allow-command-approvals   # let the planner approve Bash/PowerShell/Monitor/codex shell too (logs a startup warning)
 chroxy agent-control --stdio --url wss://your-tunnel-host --pin-identity <base64-key>
 ```
 

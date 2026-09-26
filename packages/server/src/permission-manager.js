@@ -94,20 +94,28 @@ export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
 // inspects PATH-carrying input fields only — it is fundamentally unable to
 // see a command string, so `floored: false` on one of these tools means "no
 // path field looked protected," not "this command is safe" (`cat .env` is an
-// ordinary, unfloored Bash invocation). Names are sourced from the actual
-// providers that call `handlePermission` with a real tool name — never
+// ordinary, unfloored Bash invocation). Names are sourced from what each
+// provider actually hands `handlePermission` or `POST /permission` — never
 // guessed:
-//   - `Bash` — the Claude Agent SDK (sdk-session.js) and BYOK's built-in tool
-//     executor (byok-tool-executor.js) both use this exact name.
+//   - `Bash` — Claude Code (the Agent SDK's bundled binary for sdk-session.js,
+//     and the installed CLI behind the hook-routed claude-cli / claude-tui /
+//     claude-channel providers) and BYOK's built-in tool executor
+//     (byok-tool-executor.js, which dispatches by exact, case-sensitive name).
+//   - `PowerShell` — Claude Code's Windows shell tool, and the ONLY shell tool
+//     on a Windows host without Git Bash. Permission-checked with Bash's rules.
+//   - `Monitor` — Claude Code's background-script tool: its input is a bash
+//     `command`, permission-checked by the same function as Bash.
 //   - `shell` — codex's app-server driver (codex-app-server-session.js).
 // Gemini sessions (gemini-session.js) declare `permissions: false` and never
 // call `handlePermission` at all; ACP-backed providers (acp-session.js) deny
-// every permission request outright without reaching this module either — so
-// there is no third command-tool name to add today.
+// every permission request outright without reaching this module either.
+// This is a DENYLIST beside a tool roster that grows with every Claude Code
+// release (PowerShell and Monitor were missed when it was first written) — a
+// new command-executing tool is approvable until its name is added here.
 //
 // Exported for the same reason as NOT_DELEGABLE_TOOLS above — one shared Set,
 // imported (not copied) by agent-control/client.js.
-export const COMMAND_TOOLS = new Set(['Bash', 'shell'])
+export const COMMAND_TOOLS = new Set(['Bash', 'shell', 'PowerShell', 'Monitor'])
 
 // #7004 — back-compat re-exports. The floor moved to permission-floor.js (the
 // single source both pipelines import); these names were exported from here since

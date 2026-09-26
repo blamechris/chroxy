@@ -28,7 +28,7 @@ export function registerAgentControlCommand(program) {
     .option('--read-only', 'Disable mutation tools (create/send-input/interrupt/respond-permission)')
     .option('--url <url>', 'Explicit remote daemon URL (ws:// or wss://) — never inferred; token via CHROXY_AGENT_CONTROL_TOKEN')
     .option('--pin-identity <key>', "Pin the daemon's Ed25519 identity public key (base64) — or set CHROXY_AGENT_CONTROL_PIN")
-    .option('--allow-command-approvals', "Let the connected planner approve command-style tool calls (Bash, codex shell) via chroxy_respond_permission — off by default because the protected-path floor cannot see through an arbitrary command string (e.g. `cat .env` looks like an ordinary, unfloored Bash call). Still subject to the floored/ownership gates. Logs a startup warning when enabled.")
+    .option('--allow-command-approvals', "Let the connected planner approve command-style tool calls (Bash, PowerShell, Monitor, codex shell) via chroxy_respond_permission — off by default because the protected-path floor cannot see through an arbitrary command string (e.g. `cat .env` looks like an ordinary, unfloored Bash call). Still subject to the floored/ownership gates. Logs a startup warning when enabled.")
     .action(async (options) => {
       if (!options.stdio) {
         process.stderr.write('chroxy agent-control requires --stdio (the only supported mode).\n')

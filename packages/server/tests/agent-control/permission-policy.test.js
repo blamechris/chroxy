@@ -92,8 +92,18 @@ describe('shared exclusion-set identity (#7973)', () => {
     assert.deepEqual([...NOT_DELEGABLE_TOOLS].sort(), ['mcp_spawn', 'request_permissions'])
   })
 
-  it('COMMAND_TOOLS contains exactly the two observed command-executing tool names (Bash — Claude SDK / BYOK; shell — codex app-server)', () => {
-    assert.deepEqual([...COMMAND_TOOLS].sort(), ['Bash', 'shell'])
+  // The roster is sourced from what each provider actually hands
+  // handlePermission / POST /permission, not from a guess:
+  //   - Bash: Claude Code (SDK, CLI, TUI, channel) and BYOK's executor;
+  //   - PowerShell: Claude Code's Windows shell tool (the ONLY shell tool on a
+  //     Windows host without Git Bash), checked with Bash's rules;
+  //   - Monitor: Claude Code's background-script tool — its input is a bash
+  //     `command`, permission-checked by the same function as Bash;
+  //   - shell: codex app-server's commandExecution approval.
+  // PowerShell and Monitor were missing, so a planner could approve an
+  // arbitrary command without --allow-command-approvals.
+  it('COMMAND_TOOLS contains exactly the command-executing tool names the providers emit (Bash, PowerShell, Monitor — Claude Code / BYOK; shell — codex app-server)', () => {
+    assert.deepEqual([...COMMAND_TOOLS].sort(), ['Bash', 'Monitor', 'PowerShell', 'shell'])
   })
 })
 
@@ -142,7 +152,7 @@ describe('command-tool policy: deny-only by default, opt-in via allowCommandAppr
   let client
   afterEach(async () => { if (client) { await client.close(); client = null } })
 
-  for (const tool of ['Bash', 'shell']) {
+  for (const tool of ['Bash', 'shell', 'PowerShell', 'Monitor']) {
     it(`refuses allow for ${tool} by default (floored:false, owned) — reason command_approval_disabled`, async () => {
       ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']) }))
       observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
@@ -254,12 +264,6 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
       sessionId, name: entry.name, cwd: entry.cwd, type: entry.type, isBusy: entry.isBusy, model: entry.session.model,
     }))
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
-    // #7968 has not landed on this branch yet — simulate a daemon that
-    // already marks every permission_request `floored:false`, same as
-    // client-guards.test.js's routing tests, so this is genuinely testing
-    // the command-tool gate and not incidentally testing floor_unknown.
-    const originalSend = server._send.bind(server)
-    server._send = (ws, msg) => originalSend(ws, msg.type === 'permission_request' ? { ...msg, floored: false } : msg)
     port = await startServerAndGetPort(server)
   })
 
@@ -312,7 +316,7 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
       const first = await client.callTool({ name: 'chroxy_get_events', arguments: { sessionId } })
       const cursor = first.structuredContent.cursor
       const waitingPromise = client.callTool({ name: 'chroxy_get_events', arguments: { sessionId, cursor, waitMs: 1000 } })
-      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending-default', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000 } })
+      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending-default', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false } })
       const seen = await waitingPromise
       assert.ok(JSON.stringify(seen.structuredContent).includes('bash-pending-default'))
 
@@ -347,7 +351,7 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
       const first = await client.callTool({ name: 'chroxy_get_events', arguments: { sessionId } })
       const cursor = first.structuredContent.cursor
       const waitingPromise = client.callTool({ name: 'chroxy_get_events', arguments: { sessionId, cursor, waitMs: 1000 } })
-      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000 } })
+      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false } })
       const seen = await waitingPromise
       assert.ok(JSON.stringify(seen.structuredContent).includes('bash-pending'))
 

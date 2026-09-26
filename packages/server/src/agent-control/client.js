@@ -207,7 +207,7 @@ export function redactPublicText(text, token) {
  *   of session ids this process created (the only sessions whose permission
  *   prompts `respondPermission` answers); defaults to a fresh Set.
  * @property {boolean} [allowCommandApprovals] - #7973: when true, `allow` is
- *   permitted for a command-style tool (`COMMAND_TOOLS` — Bash/shell), still
+ *   permitted for a command-style tool (`COMMAND_TOOLS` — Bash, PowerShell, Monitor, codex shell), still
  *   subject to the floored/ownership gates. Default false: `allow` for one of
  *   these is refused with `reason: 'command_approval_disabled'` — the
  *   protected-path floor cannot see through an arbitrary command string, so
@@ -577,9 +577,24 @@ export class AgentControlClient extends EventEmitter {
     if (typeof opts.model === 'string' && opts.model.trim()) payload.model = opts.model.trim()
     if (opts.worktree === true) payload.worktree = true
 
+    // create_session carries no requestId, and `session_switched` is ALSO what
+    // the daemon sends when it re-homes a client whose active session was
+    // destroyed (handleDestroySession -> `firstSessionId`, someone else's
+    // session). A planner starts out active on the daemon's default session,
+    // so a human deleting that session while this create is in flight would
+    // otherwise resolve the create with the HUMAN session's id — and
+    // `_ownedSessions` would then admit input, interrupt and `allow` on it.
+    // A session that already existed before this create cannot be the one it
+    // made, so a `session_switched` naming one is not taken as the reply; the
+    // wait continues for the real one. Residual (not closable client-side
+    // without a correlation id on the wire): a session created by someone
+    // else AFTER this snapshot that is also `firstSessionId` when a re-home
+    // fires, i.e. every older session gone within the same round trip.
+    const { sessions: before } = await this.listSessions()
+    const preexisting = new Set(before.map((s) => s.sessionId))
     const result = await this._runSerial('create_session', this._requestTimeoutMs, () => {
       this._send(payload)
-    })
+    }, { accept: (msg) => !(msg.type === 'session_switched' && preexisting.has(msg.sessionId)) })
 
     if (result.type === 'session_error') {
       const err = new Error(result.message || 'create_session failed')
@@ -874,7 +889,7 @@ export class AgentControlClient extends EventEmitter {
    *     allow persists a permanent binary-trust grant; `request_permissions`
    *     is a sandbox-scope escalation). Checked BEFORE the floored gate above,
    *     so one of these is never merely reported as "floor_unknown".
-   *   - `COMMAND_TOOLS` (`Bash`, codex `shell`): refused with
+   *   - `COMMAND_TOOLS` (`Bash`, `PowerShell`, `Monitor`, codex `shell`): refused with
    *     `reason: 'command_approval_disabled'` unless this client was
    *     constructed with `allowCommandApprovals: true` — off by default
    *     because the protected-path floor cannot see through an arbitrary
@@ -1176,7 +1191,15 @@ export class AgentControlClient extends EventEmitter {
     for (const onAbort of listeners) onAbort(err)
   }
 
-  _runSerial(kind, timeoutMs, sendFn) {
+  /**
+   * @param {string} kind - a SERIAL_REPLY_TYPES key
+   * @param {number} timeoutMs
+   * @param {() => void} sendFn
+   * @param {{ accept?: (msg: object) => boolean }} [opts] - `accept` narrows
+   *   which reply of an accepted TYPE may settle this op (see createSession's
+   *   re-home filter); a frame it rejects is left for the op to keep waiting.
+   */
+  _runSerial(kind, timeoutMs, sendFn, { accept } = {}) {
     const run = () => new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._pendingSerialOp = null
@@ -1189,7 +1212,7 @@ export class AgentControlClient extends EventEmitter {
         this._failConnection(new TimeoutError(kind, timeoutMs))
         reject(new TimeoutError(kind, timeoutMs))
       }, timeoutMs)
-      this._pendingSerialOp = { kind, resolve, reject, timer }
+      this._pendingSerialOp = { kind, resolve, reject, timer, accept }
       try {
         sendFn()
       } catch (err) {
@@ -1406,6 +1429,7 @@ export class AgentControlClient extends EventEmitter {
       // settle) a create that is actually still pending or already succeeded.
       const matchesKind = acceptTypes && acceptTypes.includes(msg.type)
         && !(this._pendingSerialOp.kind === 'create_session' && msg.type === 'session_error' && msg.sessionId != null)
+        && (typeof this._pendingSerialOp.accept !== 'function' || this._pendingSerialOp.accept(msg))
       if (matchesKind) {
         const op = this._pendingSerialOp
         this._pendingSerialOp = null
