@@ -22,13 +22,21 @@ import { resolveBinary } from './resolve-binary.js'
 
 // Well-known fallback locations for the `claude` binary. Under a GUI launch
 // (e.g. Tauri on macOS) PATH is minimal and may exclude the user's install dir.
-export const CLAUDE_BINARY_CANDIDATES = [
+//
+// Frozen (#7986 review N9): this ONE array is now shared BY REFERENCE across
+// every claude-family provider's `preflight.binary.candidates` (see
+// claude-binary-candidate-parity in providers.test.js) — before this module,
+// each preflight getter returned a fresh array, so nothing could mutate a
+// shared instance. A future `.push()`/`.sort()`/similar on any one consumer
+// would now silently corrupt every OTHER provider's candidate list. Freezing
+// makes that TypeError loudly at the mutation site instead.
+export const CLAUDE_BINARY_CANDIDATES = Object.freeze([
   join(homedir(), '.local/bin/claude'),
   '/opt/homebrew/bin/claude',
   '/usr/local/bin/claude',
   join(homedir(), '.claude/local/node_modules/.bin/claude'),
   join(homedir(), '.npm-global/bin/claude'),
-]
+])
 
 export function resolveClaudeBinary() {
   return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
