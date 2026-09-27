@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, symlinkSync } from 'node
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { validateAttachments, resolveFileRefAttachments } from '../src/handler-utils.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // Create a temp dir for test files
 let testDir
@@ -115,16 +116,28 @@ describe('resolveFileRefAttachments', () => {
     assert.match(decoded, /too large/)
   })
 
-  it('returns error for symlink escaping project directory', () => {
-    const linkPath = join(testDir, 'src', 'escape-link')
-    try { symlinkSync('/etc/hosts', linkPath) } catch { return }
-    const result = resolveFileRefAttachments(
-      [{ type: 'file_ref', path: 'src/escape-link' }],
-      testDir
-    )
-    assert.strictEqual(result[0].type, 'document')
-    const decoded = Buffer.from(result[0].data, 'base64').toString('utf-8')
-    assert.match(decoded, /cannot read file outside project/)
+  it('returns error for symlink escaping project directory', { skip: SKIP_NO_SYMLINK }, () => {
+    // The link must point at a file that EXISTS outside the project. This used
+    // to link to '/etc/hosts', which on Windows is a dangling link to
+    // <drive>:\etc\hosts: the resolver then reports "file not found", never
+    // reaching the containment check this test is about (#7288). It also sat
+    // behind a silent `catch { return }`, which reported a PASS on any host
+    // that could not create the link — SKIP_NO_SYMLINK says so out loud.
+    const outsideDir = mkdtempSync(join(tmpdir(), 'chroxy-fileref-outside-'))
+    try {
+      const outsideFile = join(outsideDir, 'secret.txt')
+      writeFileSync(outsideFile, 'outside the project\n')
+      symlinkSync(outsideFile, join(testDir, 'src', 'escape-link'))
+      const result = resolveFileRefAttachments(
+        [{ type: 'file_ref', path: 'src/escape-link' }],
+        testDir
+      )
+      assert.strictEqual(result[0].type, 'document')
+      const decoded = Buffer.from(result[0].data, 'base64').toString('utf-8')
+      assert.match(decoded, /cannot read file outside project/)
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true })
+    }
   })
 
   it('passes through non-file_ref attachments unchanged', () => {
