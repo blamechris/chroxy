@@ -15,20 +15,36 @@
  * malformed `found` or `required` can never silently satisfy a minimum-version
  * gate.
  *
- * `probeBinaryVersion` execs the resolved binary with a short timeout and
+ * `probeBinaryVersion` runs the resolved binary with a short timeout and
  * caches the result by **stat identity** (path + dev + ino + size + mtimeMs,
  * following symlinks) so a binary replaced in place (e.g. `claude update`) is
  * re-probed on its next use, while repeated session-creates against an
  * unchanged binary hit the cache instead of re-spawning it. Every fs/exec
  * touchpoint is an injectable seam, matching verify-binary.js's style.
+ *
+ * The probe uses `spawnSync`, not `execFileSync`, and accepts output ONLY
+ * from a run that both spawned successfully (`result.error` unset) AND
+ * exited zero (`result.status === 0`) — a non-zero exit, a null status (a
+ * signal or a timeout), or a spawn error are all treated as "unreadable" and
+ * are never cached. `execFileSync` throws on a non-zero exit but still
+ * attaches the captured stdout/stderr to the thrown error, which is exactly
+ * the trap this fixes (#7986 review C1): a `claude` that crashes on
+ * `--version` prints Node's own crash footer (e.g. `Node.js v22.23.2`) to
+ * stderr, and the old fallback-to-stderr-on-any-throw path handed that banner
+ * straight to `parseSemver`, which happily extracted `22.23.2` and let a
+ * broken install satisfy the version floor. Only a clean, successful run's
+ * stdout (falling back to stderr when stdout carries no version — some CLIs
+ * print their banner there even on exit 0) is ever parsed.
  */
 
-import { execFileSync } from 'child_process'
+import { spawnSync } from 'child_process'
 import { statSync as fsStatSync } from 'fs'
 
 // Generous enough for a slow-starting binary under load, short enough that a
-// hung/misbehaving binary can't stall session creation indefinitely.
-const PROBE_TIMEOUT_MS = 10_000
+// hung/misbehaving binary can't stall session creation indefinitely. Matches
+// doctor.js's checkBinary probe (#7986 review N5 — was 10s, doctor uses 5s;
+// no observed need for a longer window on this path).
+const PROBE_TIMEOUT_MS = 5_000
 
 // stat-identity string (`path:dev:ino:size:mtimeMs`, see statIdentity) ->
 // parsed version string. Only successful reads are stored. Module-level so it
@@ -118,7 +134,14 @@ function statIdentity(path, statFn) {
 /**
  * Probe a binary's version by running it with `args` (typically `['--version']`)
  * and parsing the first leading semver out of its output (stdout, falling back
- * to stderr — some CLIs print version banners to stderr).
+ * to stderr — some CLIs print version banners to stderr even on a clean exit).
+ *
+ * Output is accepted ONLY from a run that spawned successfully AND exited
+ * zero. A non-zero exit, a null `status` (killed by a signal or by the
+ * timeout), or a spawn error (`result.error` set — e.g. ENOENT) are all
+ * "unreadable" and return null — they are never cached (see the C1 fix in
+ * this module's docblock: the previous fallback-to-stderr-on-any-throw
+ * behaviour let a crashing binary's crash output satisfy the version gate).
  *
  * Cached by stat identity: an unchanged binary at an unchanged path is not
  * re-spawned on every call. When the identity can't be determined (stat
@@ -130,13 +153,13 @@ function statIdentity(path, statFn) {
  * @param {string} path - resolved absolute binary path (already verified).
  * @param {string[]} [args] - args to invoke, default `['--version']`.
  * @param {object} [seams]
- * @param {Function} [seams.execFileSync] - injected in tests.
+ * @param {Function} [seams.spawnSync] - injected in tests.
  * @param {Function} [seams.statSync] - injected in tests.
  * @returns {string|null} the parsed version string, or null when the probe
  *   failed to run or produced no parseable version ("unreadable").
  */
 export function probeBinaryVersion(path, args = ['--version'], {
-  execFileSync: execFn = execFileSync,
+  spawnSync: spawnFn = spawnSync,
   statSync: statFn = fsStatSync,
 } = {}) {
   const identity = statIdentity(path, statFn)
@@ -144,26 +167,30 @@ export function probeBinaryVersion(path, args = ['--version'], {
     return versionCache.get(identity)
   }
 
+  const result = spawnFn(path, args, {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: PROBE_TIMEOUT_MS,
+    windowsHide: true,
+  })
+
+  // Accept output ONLY from a run that both spawned (no `result.error`, e.g.
+  // no ENOENT) and exited zero. A null `status` means the process was killed
+  // by a signal or by the `timeout` option above, and a non-zero status means
+  // the binary itself failed — in both cases whatever landed on stdout/stderr
+  // (a crash banner, a partial write) must not be treated as an authoritative
+  // version string.
   let stdout = null
-  try {
-    stdout = execFn(path, args, {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: PROBE_TIMEOUT_MS,
-      windowsHide: true,
-    })
-  } catch (err) {
-    // Some CLIs write their version banner to stderr and/or exit non-zero for
-    // `--version` — execFileSync still attaches captured output to the error.
-    stdout = typeof err?.stdout === 'string' ? err.stdout : null
-    if (!stdout && typeof err?.stderr === 'string') stdout = err.stderr
+  if (!result.error && result.status === 0) {
+    stdout = typeof result.stdout === 'string' && result.stdout.length > 0 ? result.stdout : null
+    if (!stdout && typeof result.stderr === 'string') stdout = result.stderr
   }
 
   const version = stdout ? parseSemver(stdout) : null
   // Only a successful read is cached. A failed probe (a timeout under load, a
-  // transient exec error) would otherwise pin "unreadable" to this identity and
-  // refuse every later session-create until the binary changed or the daemon
-  // restarted.
+  // transient exec error, a non-zero exit) would otherwise pin "unreadable" to
+  // this identity and refuse every later session-create until the binary
+  // changed or the daemon restarted.
   if (identity && version) versionCache.set(identity, version)
   return version
 }

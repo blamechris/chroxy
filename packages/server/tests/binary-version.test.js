@@ -89,24 +89,30 @@ describe('probeBinaryVersion', () => {
     return () => ({ dev, ino, size, mtimeMs })
   }
 
+  // A clean, successful spawnSync result — the only shape output is ever
+  // accepted from (see the C1 fix: `result.error` unset AND `status === 0`).
+  function ok({ stdout = '', stderr = '' } = {}) {
+    return () => ({ error: undefined, status: 0, signal: null, stdout, stderr })
+  }
+
   beforeEach(() => {
     _resetProbeCacheForTest()
   })
 
   it('parses the version out of stdout', () => {
     const version = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync: () => '2.1.283 (Claude Code)\n',
+      spawnSync: ok({ stdout: '2.1.283 (Claude Code)\n' }),
       statSync: statOf(),
     })
     assert.equal(version, '2.1.283')
   })
 
-  it('passes the given args through to execFileSync', () => {
+  it('passes the given args through to spawnSync', () => {
     let seenArgs = null
     probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync: (_path, args) => {
+      spawnSync: (_path, args) => {
         seenArgs = args
-        return '2.1.283\n'
+        return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
       },
       statSync: statOf(),
     })
@@ -116,48 +122,72 @@ describe('probeBinaryVersion', () => {
   it('defaults args to ["--version"] when omitted', () => {
     let seenArgs = null
     probeBinaryVersion('/fake/claude', undefined, {
-      execFileSync: (_path, args) => {
+      spawnSync: (_path, args) => {
         seenArgs = args
-        return '2.1.283\n'
+        return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
       },
       statSync: statOf(),
     })
     assert.deepEqual(seenArgs, ['--version'])
   })
 
-  it('returns null ("unreadable") when execFileSync throws with no captured output', () => {
+  it('returns null ("unreadable") when spawnSync reports a spawn error (e.g. ENOENT)', () => {
     const version = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync: () => { throw new Error('boom') },
+      spawnSync: () => ({ error: new Error('ENOENT'), status: null, stdout: null, stderr: null }),
       statSync: statOf(),
     })
     assert.equal(version, null)
   })
 
-  it('falls back to stderr on a non-zero exit that still printed a version', () => {
+  it('returns null when output has no parseable version', () => {
     const version = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync: () => {
-        const err = new Error('exit 1')
-        err.stdout = ''
-        err.stderr = '2.1.283 (Claude Code)\n'
-        throw err
-      },
+      spawnSync: ok({ stdout: 'garbage, no version here\n' }),
+      statSync: statOf(),
+    })
+    assert.equal(version, null)
+  })
+
+  it('exit 0 with the version only on stderr is still parsed (some CLIs print their banner there)', () => {
+    const version = probeBinaryVersion('/fake/claude', ['--version'], {
+      spawnSync: ok({ stdout: '', stderr: '2.1.283 (Claude Code)\n' }),
       statSync: statOf(),
     })
     assert.equal(version, '2.1.283')
   })
 
-  it('returns null when output has no parseable version', () => {
+  // #7986 review C1: previously, a non-zero exit fell back to reading
+  // stdout/stderr off the thrown error and parsed ANY leading semver found
+  // there — including Node's own crash-footer version. A `claude` that
+  // crashes on `--version` (e.g. a broken npm/JS shim) prints exactly that
+  // shape to stderr, and the old code accepted it as claude's own version,
+  // letting a broken install satisfy the minimum-version floor. This is the
+  // regression test: it must return null, not "22.23.2".
+  it('a non-zero exit with a Node.js crash footer on stderr is "unreadable", NOT parsed as the version (C1)', () => {
     const version = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync: () => 'garbage, no version here\n',
+      spawnSync: () => ({
+        error: undefined,
+        status: 1,
+        signal: null,
+        stdout: '',
+        stderr: 'Uncaught Error: broken install\n    at Object.<anonymous> (/fake/claude:1:1)\nNode.js v22.23.2\n',
+      }),
       statSync: statOf(),
     })
     assert.equal(version, null)
   })
 
-  it('caches a hit for the SAME stat identity — execFileSync is not called twice', () => {
+  it('a signal or timeout (null status) is "unreadable", even with output captured', () => {
+    const version = probeBinaryVersion('/fake/claude', ['--version'], {
+      spawnSync: () => ({ error: undefined, status: null, signal: 'SIGTERM', stdout: '2.1.283\n', stderr: '' }),
+      statSync: statOf(),
+    })
+    assert.equal(version, null)
+  })
+
+  it('caches a hit for the SAME stat identity — spawnSync is not called twice', () => {
     let calls = 0
     const seams = {
-      execFileSync: () => { calls += 1; return '2.1.283\n' },
+      spawnSync: () => { calls += 1; return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' } },
       statSync: statOf({ ino: 42, mtimeMs: 555 }),
     }
     const first = probeBinaryVersion('/fake/claude', ['--version'], seams)
@@ -169,14 +199,17 @@ describe('probeBinaryVersion', () => {
 
   it('re-probes when the stat identity changes (e.g. `claude update` replaced the file)', () => {
     let calls = 0
-    const execFileSync = () => { calls += 1; return calls === 1 ? '2.1.100\n' : '2.1.283\n' }
+    const spawnSync = () => {
+      calls += 1
+      return { error: undefined, status: 0, stdout: calls === 1 ? '2.1.100\n' : '2.1.283\n', stderr: '' }
+    }
 
     const before = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync,
+      spawnSync,
       statSync: statOf({ ino: 7, mtimeMs: 1000, size: 500 }),
     })
     const after = probeBinaryVersion('/fake/claude', ['--version'], {
-      execFileSync,
+      spawnSync,
       // Same path, different inode/mtime/size — an in-place binary swap.
       statSync: statOf({ ino: 7, mtimeMs: 2000, size: 600 }),
     })
@@ -189,10 +222,10 @@ describe('probeBinaryVersion', () => {
   it('does not cache a FAILED probe — a transient timeout must not pin "unreadable"', () => {
     let calls = 0
     const seams = {
-      execFileSync: () => {
+      spawnSync: () => {
         calls += 1
-        if (calls === 1) throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' })
-        return '2.1.283\n'
+        if (calls === 1) return { error: undefined, status: null, signal: 'SIGTERM', stdout: '', stderr: '' }
+        return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
       },
       statSync: statOf({ ino: 9, mtimeMs: 3000 }),
     }
@@ -203,10 +236,27 @@ describe('probeBinaryVersion', () => {
     assert.equal(calls, 2)
   })
 
+  it('does not cache a NON-ZERO exit — a retried probe re-runs, not pinned "unreadable" (C1)', () => {
+    let calls = 0
+    const seams = {
+      spawnSync: () => {
+        calls += 1
+        if (calls === 1) return { error: undefined, status: 1, stdout: '', stderr: 'Node.js v22.23.2\n' }
+        return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' }
+      },
+      statSync: statOf({ ino: 11, mtimeMs: 4000 }),
+    }
+    const first = probeBinaryVersion('/fake/claude', ['--version'], seams)
+    const second = probeBinaryVersion('/fake/claude', ['--version'], seams)
+    assert.equal(first, null)
+    assert.equal(second, '2.1.283')
+    assert.equal(calls, 2, 'a non-zero exit must never be cached as "unreadable"')
+  })
+
   it('does not cache (and does not throw) when stat fails — probes fresh every call', () => {
     let calls = 0
     const version = probeBinaryVersion('/vanished/claude', ['--version'], {
-      execFileSync: () => { calls += 1; return '2.1.283\n' },
+      spawnSync: () => { calls += 1; return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' } },
       statSync: () => { throw new Error('ENOENT') },
     })
     assert.equal(version, '2.1.283')
