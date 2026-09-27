@@ -8,6 +8,7 @@ import { createFileOps } from '../src/ws-file-ops/index.js'
 import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
 import { encodeProjectPath } from '../src/jsonl-reader.js'
 import { resolveSessionCwd } from '../src/ws-file-ops/common.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -382,6 +383,64 @@ describe('memory_read (readMemory) handler', () => {
     assert.equal(importEntry.skipped, true)
     assert.equal(importEntry.content, null)
     assert.equal(JSON.stringify(responses[0]).includes('"private":"value"'), false)
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // #8017 — the markdown gate used to check only the path AS WRITTEN in the
+  // import. A `.md`-named symlink therefore imported whatever it pointed at,
+  // as long as that resolved inside an allowed root: the exact class the gate
+  // exists to close. The gate now applies to the RESOLVED path as well.
+  it('skips a .md-named symlink to a non-markdown file in the project (#8017)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-mdlink-'))
+    const secret = 'SECRET-NON-MARKDOWN-8017'
+    await writeFile(join(dir, 'secret.json'), JSON.stringify({ token: secret }), 'utf-8')
+    await symlink(join(dir, 'secret.json'), join(dir, 'evil.md'), 'file')
+    await writeFile(join(dir, 'CLAUDE.md'), 'See @evil.md now.', 'utf-8')
+
+    await fileOps.readMemory(mockWs, dir)
+
+    const importEntry = responses[0].entries.find((e) => e.scope === 'import')
+    assert.ok(importEntry, 'the import must still be reported for provenance')
+    assert.equal(importEntry.skipped, true)
+    assert.equal(importEntry.error, 'Outside allowed memory roots — read skipped')
+    assert.equal(importEntry.content, null)
+    assert.equal(JSON.stringify(responses[0]).includes(secret), false, 'secret leaked into the response')
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('skips a .md-named symlink to ~/.claude/.credentials.json (#8017)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-mdlink-cred-'))
+    const secret = 'SUPER-SECRET-OAUTH-TOKEN-8017'
+    await mkdir(join(fakeHome, '.claude'), { recursive: true })
+    await writeFile(join(fakeHome, '.claude', '.credentials.json'), JSON.stringify({ token: secret }), 'utf-8')
+    await symlink(join(fakeHome, '.claude', '.credentials.json'), join(dir, 'notes.md'), 'file')
+    await writeFile(join(dir, 'CLAUDE.md'), 'See @notes.md for details.', 'utf-8')
+
+    await fileOps.readMemory(mockWs, dir)
+
+    const importEntry = responses[0].entries.find((e) => e.scope === 'import')
+    assert.ok(importEntry)
+    assert.equal(importEntry.skipped, true)
+    assert.equal(importEntry.content, null)
+    assert.equal(JSON.stringify(responses[0]).includes(secret), false, 'secret leaked into the response')
+
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  it('CONTRAST: a .md-named symlink to a real markdown file still imports (#8017)', { skip: SKIP_NO_SYMLINK }, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-mdlink-ok-'))
+    await writeFile(join(dir, 'real.md'), 'linked markdown notes', 'utf-8')
+    await symlink(join(dir, 'real.md'), join(dir, 'alias.md'), 'file')
+    await writeFile(join(dir, 'CLAUDE.md'), 'See @alias.md here.', 'utf-8')
+
+    await fileOps.readMemory(mockWs, dir)
+
+    const importEntry = responses[0].entries.find((e) => e.scope === 'import')
+    assert.ok(importEntry)
+    assert.equal(importEntry.skipped, false)
+    assert.equal(importEntry.content, 'linked markdown notes')
 
     await rm(dir, { recursive: true, force: true })
   })
