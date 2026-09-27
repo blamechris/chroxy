@@ -246,7 +246,7 @@ export class SdkSession extends BaseSession {
         args: ['--version'],
         candidates: CLAUDE_BINARY_CANDIDATES,
         minVersion: () => sdkClaudeCodeVersion(),
-        installHint: 'install Claude Code CLI — the SDK provider runs your installed Claude Code',
+        installHint: 'install Claude Code, or run `claude update` if it is installed — the SDK provider runs your installed claude',
       },
       credentials: {
         envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
