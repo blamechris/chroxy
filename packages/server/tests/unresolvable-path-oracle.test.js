@@ -7,12 +7,14 @@ import { createReaderOps } from '../src/ws-file-ops/reader.js'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
 import {
   isUnresolvablePathWithin,
+  realpathOfDeepestAncestor,
   resolveSessionCwd,
   validatePathWithinCwd,
 } from '../src/ws-file-ops/common.js'
 import { isPathWithin } from '../src/utils/path-containment.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { OUTSIDE_HOME_DIR } from './helpers/outside-home.js'
+import { POSIX_PERM_SKIP } from './test-helpers.js'
 
 /**
  * #8012 — a `realpath()` failure other than ENOENT must not tell the client
@@ -34,12 +36,8 @@ import { OUTSIDE_HOME_DIR } from './helpers/outside-home.js'
  * there. Raw error text is never sent for these cases.
  */
 
-const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
-const SKIP_NO_CHMOD_DENY = process.platform === 'win32'
-  ? 'chmod cannot deny directory search on win32'
-  : IS_ROOT
-    ? 'root bypasses directory permission bits'
-    : false
+// chmod cannot deny directory search on win32, and root bypasses it.
+const SKIP_NO_CHMOD_DENY = POSIX_PERM_SKIP
 
 function readerFor(sent) {
   return createReaderOps(
@@ -253,5 +251,36 @@ describe('list_directory: non-ENOENT realpath failures (#8012)', { skip: SKIP_NO
     chmodSync(join(base, 'locked-in'), 0o000)
     const reply = await listReply(join(base, 'locked-in', 'x'))
     assert.equal(reply.error, 'Permission denied')
+  })
+})
+
+describe('realpathOfDeepestAncestor stays fail-closed: only the error-text classifier steps over (#8012)', () => {
+  // The walk that GRANTS access (validatePathWithinCwd) must keep throwing on
+  // anything but ENOENT; stepping over EACCES / ENOTDIR is for choosing error
+  // text only. Handing the wider set to the granting walk would leave every
+  // handler test above green, since the next syscall fails anyway — so pin it
+  // here (PR review on #8012).
+  let dir
+
+  beforeEach(() => {
+    dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-8012-fc-')))
+    writeFileSync(join(dir, 'present.txt'), 'hello\n')
+  })
+
+  afterEach(() => {
+    try { chmodSync(join(dir, 'locked'), 0o755) } catch { /* not created by this test */ }
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('a path through a FILE rejects with ENOTDIR', {
+    skip: process.platform === 'win32' ? 'win32 realpath reports ENOENT through a file' : false,
+  }, async () => {
+    await assert.rejects(realpathOfDeepestAncestor(join(dir, 'present.txt', 'x')), (err) => err.code === 'ENOTDIR')
+  })
+
+  it('a path under an unsearchable directory rejects with EACCES', { skip: SKIP_NO_CHMOD_DENY }, async () => {
+    mkdirSync(join(dir, 'locked'))
+    chmodSync(join(dir, 'locked'), 0o000)
+    await assert.rejects(realpathOfDeepestAncestor(join(dir, 'locked', 'sub', 'x')), (err) => err.code === 'EACCES')
   })
 })
