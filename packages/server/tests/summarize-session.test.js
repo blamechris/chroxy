@@ -5,6 +5,7 @@ import {
   windowTranscript,
   buildSummaryPrompt,
   summarizeSession,
+  defaultRunOneShot,
   MAX_SUMMARIZE_CHARS,
   HEAD_SAMPLE_CHARS,
 } from '../src/summarize-session.js'
@@ -169,5 +170,60 @@ describe('summarizeSession orchestration', () => {
       runOneShot: async () => 'brief',
     })
     assert.equal(truncated, true)
+  })
+})
+
+// #7986 — defaultRunOneShot must point the SDK at the installed `claude`
+// binary via pathToClaudeCodeExecutable (the SDK no longer ships/resolves its
+// own bundled platform binary and throws query() if this is unset). Both the
+// SDK's `query` and the binary resolver are injectable seams so this asserts
+// the built options without module-mocking @anthropic-ai/claude-agent-sdk.
+describe('defaultRunOneShot — pathToClaudeCodeExecutable (#7986)', () => {
+  function fakeStream(text = 'brief') {
+    return (async function* () {
+      yield { type: 'assistant', message: { content: [{ type: 'text', text }] } }
+    })()
+  }
+
+  it('sets options.pathToClaudeCodeExecutable from the injected resolveExecutable seam', async () => {
+    const captured = []
+    const queryFn = (args) => { captured.push(args); return fakeStream() }
+    const resolveExecutable = () => '/fake/resolved/claude'
+
+    const result = await defaultRunOneShot({ prompt: 'summarize this', queryFn, resolveExecutable })
+
+    assert.equal(result, 'brief')
+    assert.equal(captured.length, 1)
+    assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/fake/resolved/claude')
+  })
+
+  it('defaults resolveExecutable to resolveClaudeBinary() when not injected', async () => {
+    const { resolveClaudeBinary } = await import('../src/utils/claude-binary.js')
+    const captured = []
+    const queryFn = (args) => { captured.push(args); return fakeStream() }
+
+    await defaultRunOneShot({ prompt: 'summarize this', queryFn })
+
+    assert.equal(captured[0].options.pathToClaudeCodeExecutable, resolveClaudeBinary())
+  })
+
+  it('still sets model/cwd/maxTurns/tools alongside pathToClaudeCodeExecutable', async () => {
+    const captured = []
+    const queryFn = (args) => { captured.push(args); return fakeStream() }
+
+    await defaultRunOneShot({
+      prompt: 'summarize this',
+      model: 'claude-cheap',
+      cwd: '/tmp/proj',
+      queryFn,
+      resolveExecutable: () => '/fake/claude',
+    })
+
+    const { options } = captured[0]
+    assert.equal(options.pathToClaudeCodeExecutable, '/fake/claude')
+    assert.equal(options.model, 'claude-cheap')
+    assert.equal(options.cwd, '/tmp/proj')
+    assert.equal(options.maxTurns, 1)
+    assert.deepEqual(options.tools, { type: 'preset', preset: 'empty' })
   })
 })

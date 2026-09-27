@@ -4,6 +4,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { CLAUDE_BINARY_CANDIDATES } from './utils/claude-binary.js'
 
 // Minimum `claude` CLI version that ships the `--channels` MCP transport.
 // Verified present in v2.1.163 (the locally-installed CLI) and documented
@@ -90,13 +91,7 @@ export class ClaudeChannelSession extends BaseSession {
         // comparator parses the leading semver out of `claude --version`
         // (e.g. "2.1.163 (Claude Code)") and fails below this.
         minVersion: CLAUDE_CHANNEL_MIN_VERSION,
-        candidates: [
-          join(homedir(), '.local/bin/claude'),
-          '/opt/homebrew/bin/claude',
-          '/usr/local/bin/claude',
-          join(homedir(), '.claude/local/node_modules/.bin/claude'),
-          join(homedir(), '.npm-global/bin/claude'),
-        ],
+        candidates: CLAUDE_BINARY_CANDIDATES,
         installHint: `install Claude Code CLI ≥ ${CLAUDE_CHANNEL_MIN_VERSION} (research preview — channels)`,
       },
       credentials: {

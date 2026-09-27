@@ -12,7 +12,10 @@ import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 
 import { homedir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { resolveBinary } from '../utils/resolve-binary.js'
+// #7986 — the shared candidate list + resolver moved to utils/claude-binary.js
+// (the ONE copy). Re-exported below for back-compat: claude-tui-session.js and
+// others still import CLAUDE_BINARY_CANDIDATES/resolveClaudeBinary from here.
+import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from '../utils/claude-binary.js'
 import { createLogger } from '../logger.js'
 // #7002/#7046 — the ONE writer for `~/.claude.json`. Deliberately shared with the
 // BYOK MCP add/remove path rather than re-implemented here: a second hand-rolled
@@ -106,22 +109,9 @@ export function formatHexDump(input, maxBytes) {
   return `${header}\n${lines.join('\n')}`
 }
 
-// Well-known fallback locations for the `claude` binary. Under a GUI launch
-// (e.g. Tauri on macOS) PATH is minimal and may exclude the user's install dir.
-export const CLAUDE_BINARY_CANDIDATES = [
-  join(homedir(), '.local/bin/claude'),
-  '/opt/homebrew/bin/claude',
-  '/usr/local/bin/claude',
-  join(homedir(), '.claude/local/node_modules/.bin/claude'),
-  join(homedir(), '.npm-global/bin/claude'),
-]
-
-// Re-resolve fresh on each call (NOT a frozen module-load const) so a binary
-// quarantined / moved / reinstalled after daemon start is spawned from its
-// CURRENT path — and matches what preflight verified (#6708 defect #3).
-export function resolveClaudeBinary() {
-  return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
-}
+// Re-export: back-compat for consumers that import the candidate list or the
+// resolver from this module. See utils/claude-binary.js for the one definition.
+export { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary }
 
 // Back-compat: kept as a lazy-resolved snapshot for any consumer that still
 // imports the constant. Prefer `resolveClaudeBinary()` at spawn time.

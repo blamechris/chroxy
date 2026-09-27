@@ -2,6 +2,8 @@ import { query, forkSession } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { performance } from 'node:perf_hooks'
+import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
+import { sdkClaudeCodeVersion } from './utils/agent-sdk-version.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
@@ -208,10 +210,32 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * #7986 — the exact path `query()` will spawn via `pathToClaudeCodeExecutable`
+   * (see the per-turn options builder below). Preflight prefers this over a
+   * fresh candidate resolve when a provider exposes it (#6708 defect #3), so
+   * the existence/quarantine/provenance/version gates and the real spawn can
+   * never diverge onto different binaries. Re-resolves fresh on every access —
+   * NOT a frozen module-load const — so a `claude update` after daemon start
+   * is picked up on the next session-create.
+   */
+  static get resolvedBinary() {
+    return resolveClaudeBinary()
+  }
+
+  /**
    * Preflight dependency spec used by `chroxy doctor`.
-   * SDK mode spawns the `claude` binary under the hood, so the same
-   * binary check applies. Credentials can come from ANTHROPIC_API_KEY,
-   * CLAUDE_CODE_OAUTH_TOKEN, or a prior `claude login` subscription.
+   *
+   * SDK mode spawns the user's INSTALLED `claude` binary under the hood via
+   * `pathToClaudeCodeExecutable` (#7986) — the Agent SDK's own platform
+   * binary is no longer bundled, and `query()` throws if neither is set. So
+   * the same binary check every other claude-family provider runs applies
+   * here too, using the shared candidate list. `minVersion` is derived from
+   * the installed SDK's own `claudeCodeVersion` field (no hand-kept
+   * constant to drift): a `claude` older than what this SDK build was
+   * tested against fails preflight with a `claude update` remediation
+   * instead of an opaque mid-turn spawn error. Credentials can come from
+   * ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or a prior `claude login`
+   * subscription.
    */
   static get preflight() {
     return {
@@ -219,11 +243,9 @@ export class SdkSession extends BaseSession {
       binary: {
         name: 'claude',
         args: ['--version'],
-        candidates: [
-          '/opt/homebrew/bin/claude',
-          '/usr/local/bin/claude',
-        ],
-        installHint: 'install Claude Code CLI (required by the Agent SDK)',
+        candidates: CLAUDE_BINARY_CANDIDATES,
+        minVersion: () => sdkClaudeCodeVersion(),
+        installHint: 'install Claude Code CLI — the SDK provider runs your installed Claude Code',
       },
       credentials: {
         envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
@@ -851,6 +873,13 @@ export class SdkSession extends BaseSession {
     resetResultTimeout()
 
     try {
+      // #7986: point the SDK at the installed `claude` binary — the SDK's own
+      // bundled platform binary is no longer shipped, and query() throws
+      // ("Native CLI binary ... not found") if this is unset, even when a
+      // subclass supplies spawnClaudeCodeProcess. Set BEFORE
+      // _augmentQueryOptions so a subclass override can see/override it.
+      options.pathToClaudeCodeExecutable = this.constructor.resolvedBinary
+
       // Allow subclasses to augment query options (e.g. DockerSdkSession
       // injects spawnClaudeCodeProcess here)
       this._augmentQueryOptions(options)

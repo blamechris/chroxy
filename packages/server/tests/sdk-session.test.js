@@ -1407,6 +1407,107 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- #7986: pathToClaudeCodeExecutable --
+
+  describe('pathToClaudeCodeExecutable (#7986)', () => {
+    it('sets options.pathToClaudeCodeExecutable to SdkSession.resolvedBinary on every turn', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-path-1', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(captured.length, 1)
+      assert.equal(typeof captured[0].options.pathToClaudeCodeExecutable, 'string')
+      assert.ok(captured[0].options.pathToClaudeCodeExecutable.length > 0)
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+    })
+
+    it('is set on every turn, not just the first (re-resolved per call, not cached on the instance)', async () => {
+      const s = createSession()
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: `test-path-${captured.length}`, total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('first')
+      await s.sendMessage('second')
+      s.destroy()
+
+      assert.equal(captured.length, 2)
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+      assert.equal(captured[1].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+    })
+
+    it('is set BEFORE _augmentQueryOptions runs — a subclass override can observe it', async () => {
+      class ObservingSdkSession extends SdkSession {
+        _augmentQueryOptions(options) {
+          this._observedPath = options.pathToClaudeCodeExecutable
+          options.spawnClaudeCodeProcess = 'marker-to-prove-augment-ran'
+        }
+      }
+      const stateFilePath = tmpStateFile()
+      const s = new ObservingSdkSession({ cwd: '/tmp', stateFilePath })
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-path-order', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(s._observedPath, SdkSession.resolvedBinary,
+        '_augmentQueryOptions must see pathToClaudeCodeExecutable already set')
+      // Confirm _augmentQueryOptions actually ran (and could have overridden it).
+      assert.equal(captured[0].options.spawnClaudeCodeProcess, 'marker-to-prove-augment-ran')
+      // And its own write to pathToClaudeCodeExecutable (if any) would win —
+      // here it didn't touch it, so the resolved path survives through.
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+    })
+
+    it('a subclass _augmentQueryOptions CAN override pathToClaudeCodeExecutable after the fact', async () => {
+      class OverridingSdkSession extends SdkSession {
+        _augmentQueryOptions(options) {
+          options.pathToClaudeCodeExecutable = '/custom/override/claude'
+        }
+      }
+      const stateFilePath = tmpStateFile()
+      const s = new OverridingSdkSession({ cwd: '/tmp', stateFilePath })
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test-path-override', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/custom/override/claude')
+    })
+  })
+
   // -- #6769: end-of-turn occupancy snapshot via getContextUsage() --
 
   describe('context-usage occupancy snapshot (#6769)', () => {

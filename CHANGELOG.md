@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Server: the `claude-sdk` provider now spawns your installed `claude`, matching preflight (#7986).**
+  The Agent SDK's `query()` resolves and spawns its own bundled platform
+  binary unless told otherwise; preflight, meanwhile, verified a different,
+  installed `claude`. Chroxy no longer bundles the SDK's platform binary, so
+  `SdkSession` now sets `pathToClaudeCodeExecutable` to the same path
+  preflight verified, on every turn. Preflight also gates on a minimum
+  `claude` version — derived from the installed SDK package's own
+  `claudeCodeVersion` field, not a hand-kept constant — with a `claude
+  update` remediation when the installed CLI is too old. The `claude`
+  binary-candidate list (previously copied across five modules) is now a
+  single shared list.
+
 - **Desktop: the tray app now honours `CHROXY_CONFIG_DIR` (#7241).** `config.rs`,
   `settings.rs`, `qrcode.rs` and the "Reveal in Finder" action each resolved
   `~/.chroxy` from `dirs::home_dir()` and never read the override, so a relocated

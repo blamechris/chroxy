@@ -76,7 +76,7 @@ The Claude Code providers are the primary, most-featured backends. All three use
 claude --version
 ```
 
-The SDK provider (`claude-sdk`) does not shell out to the `claude` binary for message handling — it imports `@anthropic-ai/claude-agent-sdk` directly. However, `claude doctor`'s CLI still needs to be installed (the `chroxy doctor` preflight checks for it), and many users authenticate via `claude login`, which the SDK then inherits.
+The SDK provider (`claude-sdk`) imports `@anthropic-ai/claude-agent-sdk` directly, but the SDK itself spawns your **installed** `claude` binary under the hood (`pathToClaudeCodeExecutable`, #7986) — Chroxy no longer bundles the SDK's own platform binary, so `claude` must be installed and on one of the paths listed above regardless of which Claude Code provider you use. `chroxy doctor`'s preflight checks for it and additionally enforces a **minimum version**: the installed `claude` must be at least as new as the version the installed SDK package was built against (its `claudeCodeVersion` field) — an older CLI fails preflight with a `claude update` remediation instead of an opaque mid-turn spawn error. Many users authenticate via `claude login`, which the SDK then inherits.
 
 ### Where to get an API key
 

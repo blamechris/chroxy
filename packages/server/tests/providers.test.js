@@ -10,6 +10,7 @@ import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
+import { CLAUDE_BINARY_CANDIDATES } from '../src/utils/claude-binary.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -1821,5 +1822,72 @@ describe('codex provider default — app-server (#6616)', () => {
 
   it('the opt-out never affects non-codex providers', () => {
     withEnv('0', () => assert.equal(getProvider('claude-cli'), CliSession))
+  })
+})
+
+// #7986 — the claude `claude` binary candidate list used to be copied across
+// five modules (cli-session.js x2, claude-tui-session.js, claude-channel-
+// session.js, claude-tui/pty-driver.js, plus the SDK's own 2-entry subset).
+// It is now the ONE list in utils/claude-binary.js, imported everywhere.
+// This test enumerates the REGISTRY (not a hand-typed provider list) and
+// checks parity in both directions: every provider whose preflight declares
+// it spawns the `claude` binary must reference the exact shared array
+// (reference equality, not just deep-equal — a provider that still literally
+// re-typed the array would fail this even if the values happened to match),
+// AND the known claude-family providers must actually be discovered that
+// way (so a broken predicate — e.g. a renamed `binary.name` — can't silently
+// shrink the checked set to zero).
+describe('claude binary candidate-list parity (#7986)', () => {
+  function discoverClaudeFamilyProviders() {
+    const found = []
+    for (const name of getRegisteredProviderNames()) {
+      let ProviderClass
+      try {
+        ProviderClass = getProvider(name)
+      } catch {
+        continue
+      }
+      const spec = ProviderClass.preflight
+      if (spec?.binary?.name === 'claude') {
+        found.push({ name, ProviderClass })
+      }
+    }
+    return found
+  }
+
+  it('discovers at least one claude-family provider via the registry', () => {
+    const found = discoverClaudeFamilyProviders()
+    assert.ok(found.length > 0, 'expected at least one provider with preflight.binary.name === "claude"')
+  })
+
+  it('every discovered claude-family provider uses the exact shared candidate array (no re-typed copy)', () => {
+    const found = discoverClaudeFamilyProviders()
+    for (const { name, ProviderClass } of found) {
+      const candidates = ProviderClass.preflight.binary.candidates
+      assert.equal(
+        candidates, CLAUDE_BINARY_CANDIDATES,
+        `${name}'s preflight.binary.candidates must be the SAME array reference as CLAUDE_BINARY_CANDIDATES (a deep-equal-but-separate array is exactly the drift-prone copy this replaced)`,
+      )
+    }
+  })
+
+  it('no known claude-family provider was missed by the discovery predicate', () => {
+    // Direction 2: the registry-derived set above must not have silently
+    // shrunk (e.g. a typo in binary.name on one provider would make it
+    // vanish from `discoverClaudeFamilyProviders()` without failing the
+    // "every discovered provider matches" assertion above, since a provider
+    // that isn't discovered is never checked at all).
+    const discoveredNames = new Set(discoverClaudeFamilyProviders().map((p) => p.name))
+    for (const expected of ['claude-cli', 'claude-sdk', 'claude-tui', 'claude-channel']) {
+      assert.ok(
+        discoveredNames.has(expected),
+        `expected "${expected}" to be discovered as claude-family (preflight.binary.name === "claude") — it either lost that preflight shape or was dropped from the registry`,
+      )
+    }
+  })
+
+  it('non-claude-family providers are excluded (byok has no claude binary spawn)', () => {
+    const discoveredNames = new Set(discoverClaudeFamilyProviders().map((p) => p.name))
+    assert.equal(discoveredNames.has('claude-byok'), false, 'claude-byok drives the Messages API directly — it must not appear as claude-family')
   })
 })

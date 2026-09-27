@@ -62,6 +62,7 @@ import {
 import {
   ANSI_STRIP,
   formatHexDump,
+  CLAUDE_BINARY_CANDIDATES,
   resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
   AUTH_REQUIRED_CODE,
@@ -251,13 +252,7 @@ export class ClaudeTuiSession extends BaseSession {
       binary: {
         name: 'claude',
         args: ['--version'],
-        candidates: [
-          join(homedir(), '.local/bin/claude'),
-          '/opt/homebrew/bin/claude',
-          '/usr/local/bin/claude',
-          join(homedir(), '.claude/local/node_modules/.bin/claude'),
-          join(homedir(), '.npm-global/bin/claude'),
-        ],
+        candidates: CLAUDE_BINARY_CANDIDATES,
         installHint: 'install Claude Code CLI',
       },
       credentials: {
