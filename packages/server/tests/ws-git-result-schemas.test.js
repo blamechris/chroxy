@@ -48,9 +48,10 @@ const SCHEMAS = {
  */
 const EXPECTED_EMIT_SITES = {
   git_commit_result: 4,
-  // 6 since #7281 added the empty-pathspec rejection to gitStage and gitUnstage.
-  git_stage_result: 6,
-  git_unstage_result: 6,
+  // 6 since #7281 added the empty-pathspec rejection to gitStage and gitUnstage;
+  // 7 since #8016 added the reply for a path that cannot be resolved.
+  git_stage_result: 7,
+  git_unstage_result: 7,
 }
 
 /** Every response the handlers produced, so one fixture covers all three types. */
@@ -99,6 +100,11 @@ describe('#7085 git write-op result schemas', () => {
     // one above: it fires before containment is consulted at all.
     await fileOps.gitStage(mockWs, [''], tmpDir)
     await fileOps.gitUnstage(mockWs, [''], tmpDir)
+    // #8016 — a path that cannot be resolved: realpath fails ENOTDIR through a
+    // file on POSIX (win32 reports ENOENT and git rejects the pathspec instead;
+    // both reply with the same shape).
+    await fileOps.gitStage(mockWs, ['README.md/x'], tmpDir)
+    await fileOps.gitUnstage(mockWs, ['README.md/x'], tmpDir)
 
     await rm(join(tmpDir, 'new.txt'), { force: true })
   })

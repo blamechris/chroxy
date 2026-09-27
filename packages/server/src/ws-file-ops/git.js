@@ -5,7 +5,7 @@ import { writeFile, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { randomBytes } from 'crypto'
 import { GIT } from '../git.js'
-import { validateGitPath } from './common.js'
+import { validateGitPath, unresolvablePathError } from './common.js'
 import { isPathWithin } from '../utils/path-containment.js'
 
 const execFileAsync = promisify(execFileCb)
@@ -208,6 +208,21 @@ function toLiteralPathspec(cwdReal, absPath, realPath) {
 }
 
 /**
+ * #8016 — the in-project reason git_stage / git_unstage send when resolving
+ * `file` failed with one of these codes. Any other code, or a path outside the
+ * project, gets the usual "Access denied: path outside project directory".
+ * @param {string} file - the client's path, echoed as the denial already does
+ * @returns {Record<string, string>}
+ */
+function gitUnresolvableReasons(file) {
+  return {
+    EACCES: `Permission denied — ${file}`,
+    EPERM: `Permission denied — ${file}`,
+    ENOTDIR: `Not a directory — ${file}`,
+  }
+}
+
+/**
  * Git operations: status, branches, stage, unstage, commit, create PR.
  *
  * @param {Function} sendFn - (ws, message) => void
@@ -404,10 +419,24 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
-        const { valid, realPath } = await validatePathWithinCwd(absPath, sessionCwd)
+        const denial = `Access denied: path outside project directory — ${file}`
+        let validation
+        try {
+          validation = await validatePathWithinCwd(absPath, sessionCwd)
+        } catch (err) {
+          // #8016 — a failure resolving the path used to reach the catch below
+          // and send Node's raw message (server path included), even for a
+          // path outside the project. Outside is the denial; inside, a reason.
+          sendFn(ws, {
+            type: 'git_stage_result',
+            error: await unresolvablePathError(err, absPath, cwdReal, gitUnresolvableReasons(file), denial),
+          })
+          return
+        }
+        const { valid, realPath } = validation
         const pathspec = valid ? toLiteralPathspec(cwdReal, absPath, realPath) : null
         if (!valid || pathspec === null) {
-          sendFn(ws, { type: 'git_stage_result', error: `Access denied: path outside project directory — ${file}` })
+          sendFn(ws, { type: 'git_stage_result', error: denial })
           return
         }
         // #7281 — what git receives is the path we validated, not the client's string.
@@ -450,10 +479,24 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           return
         }
         const absPath = normalize(resolve(cwdReal, file))
-        const { valid, realPath } = await validatePathWithinCwd(absPath, sessionCwd)
+        const denial = `Access denied: path outside project directory — ${file}`
+        let validation
+        try {
+          validation = await validatePathWithinCwd(absPath, sessionCwd)
+        } catch (err) {
+          // #8016 — a failure resolving the path used to reach the catch below
+          // and send Node's raw message (server path included), even for a
+          // path outside the project. Outside is the denial; inside, a reason.
+          sendFn(ws, {
+            type: 'git_unstage_result',
+            error: await unresolvablePathError(err, absPath, cwdReal, gitUnresolvableReasons(file), denial),
+          })
+          return
+        }
+        const { valid, realPath } = validation
         const pathspec = valid ? toLiteralPathspec(cwdReal, absPath, realPath) : null
         if (!valid || pathspec === null) {
-          sendFn(ws, { type: 'git_unstage_result', error: `Access denied: path outside project directory — ${file}` })
+          sendFn(ws, { type: 'git_unstage_result', error: denial })
           return
         }
         // #7281 — what git receives is the path we validated, not the client's string.
