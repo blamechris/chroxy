@@ -98,11 +98,18 @@ function classify(value, file) {
     return file === 'ci.yml' ? { kind: 'routed' } : { kind: 'unknown' }
   }
   if (value.startsWith('[') && value.endsWith(']')) {
-    const labels = value.slice(1, -1).split(',').map(l => l.trim().replace(/^(['"])(.*)\1$/, '$2')).filter(Boolean)
-    return classifyLabels(labels)
+    return classifyLabels(value.slice(1, -1).split(',').map(unquote).filter(Boolean))
   }
-  if (/^[A-Za-z0-9._-]+$/.test(value)) return { kind: 'hosted', label: value }
+  // A scalar is ONE label: `self-hosted` alone is valid (and unbilled), and a
+  // quoted `"ubuntu-24.04"` is the same label as the bare one.
+  const label = unquote(value)
+  if (/^[A-Za-z0-9._-]+$/.test(label)) return classifyLabels([label])
   return { kind: 'unknown' }
+}
+
+/** `"x"` or `'x'` -> `x`; anything else unchanged (trimmed). */
+function unquote(s) {
+  return s.trim().replace(/^(['"])(.*)\1$/, '$2')
 }
 
 /** Classify an echoed JSON value: a string label or an array of labels. */
@@ -330,6 +337,11 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
     assert.equal(classifyJson('["windows-latest-8-cores"]').kind, 'hosted')
     assert.equal(classifyJson('not json').kind, 'unknown')
     assert.equal(classify('["self-hosted", "linux"]', 'ci.yml').kind, 'self-hosted')
+    // Copilot review on #8025: legitimate spellings must not fail the build.
+    assert.equal(classify('self-hosted', 'ci.yml').kind, 'self-hosted')
+    assert.deepEqual(classify('"ubuntu-24.04"', 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04' })
+    assert.deepEqual(classify("'ubuntu-24.04-16core'", 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04-16core' })
+    assert.equal(classify('"ubuntu-24.04', 'ci.yml').kind, 'unknown')
     assert.deepEqual(classify("['ubuntu-24.04']", 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04' })
   })
 
