@@ -14,6 +14,70 @@
 # shown in transcript mode). Every block message below therefore goes to
 # `>&2`, not plain `echo`.
 #
+# WHAT THIS IS, AND WHAT IT IS NOT (#7922, owner decision 2026-09-26)
+# ------------------------------------------------------------------
+# The POLICY is absolute: no PR merges without /full-review. This script's
+# ENFORCEMENT of it is a speed bump. It stops an agent from merging an
+# unreviewed PR by accident. It is NOT a security boundary, because it
+# matches text in a shell command, and predicting what a shell command will
+# do from its text is unwinnable (#7341, docs/false-safety-guards.md).
+#
+# The backstop is GitHub, which checks the merge itself rather than the
+# command that asked for it. Verified 2026-09-26 against the live settings:
+#   - branch protection on main: `enforce_admins` on (it binds the owner's
+#     token too), required conversation resolution, required status checks
+#     (the roster grows; read it from `gh api .../branches/main/protection`
+#     rather than trusting a count written here);
+#   - the "Copilot review for default branch" ruleset: active, no bypass
+#     actors, requires a Copilot code review.
+# Know what that backstop does NOT give you: it requires ZERO approving
+# reviews and never looks for the agent-review comment. A PR that slips past
+# this hook still cannot merge with red CI or open threads, but it CAN merge
+# without /full-review. Keeping that from happening is this script's job.
+#
+# Known evasions (1-3 measured against this script, each exits 0 = allowed;
+# 4 and 5 follow from how the hook is wired):
+#   1. Backslash-newline continuation: `gh pr \`, newline, `merge 123`.
+#      grep matches one line at a time, so the words never meet.
+#   2. A command built at run time: `a=pr; b=merge; gh $a $b 123`, or
+#      `eval "gh pr $(echo merge) 123"`. The words never appear side by side.
+#      The same goes for a GraphQL mutation name spliced from adjacent shell
+#      quotes, or spelled with a JSON `\u` escape in a `--input -` body:
+#      both decode before GitHub reads them.
+#   3. A GraphQL query read from a file (`gh api graphql -F query=@m.graphql`).
+#      The mutation name is not in the command text.
+#   4. A gh alias used in a later command: once an alias `m` expands to
+#      `pr merge`, `gh m 123` exits 0. Defining it with `gh alias set m 'pr
+#      merge'` is itself blocked (it matches and has no number), but not if
+#      the definition happens to carry some other 3-5 digit number, and not
+#      if the alias was written into gh's config file directly.
+#   5. Any merge that does not go through the Bash tool: an MCP server's
+#      merge tool, a browser, the GitHub app. The hook's matcher in
+#      .claude/settings.json is `Bash`.
+# Each of these takes a deliberate detour, and only the backstop above
+# stands in the way of one.
+#
+# Known conservative blocks (fail closed; exit 2 even when nothing is wrong):
+#   - A merge whose PR number is not 3-5 digits (`gh pr merge 42`,
+#     `gh pr merge 123456`) or is not in the command at all (`gh pr merge
+#     feat/x`). Widen the extractor below before this repo passes PR #99999.
+#   - Every GraphQL merge mutation, reviewed or not (see the #7922 note at
+#     the match below).
+#   - PROSE. A heredoc, `echo` or `-m` message that only MENTIONS the merge
+#     command, next to the number of an open PR that has no review comment,
+#     is blocked like a real merge. Example: a handoff note saying the gate
+#     "blocks `gh pr merge` without review" and citing an open PR. Prose
+#     that names a GraphQL merge mutation is blocked whatever numbers it
+#     cites. Workaround: write such text with a file tool (Write/Edit),
+#     which this hook never sees, then pass the file (`git commit -F`,
+#     `gh pr create --body-file`). A read-only SEARCH for a mutation name
+#     (`grep -rn`, `git log -S`) is blocked the same way; use the Grep tool,
+#     or split the name in the pattern (`merge[P]ullRequest`).
+#
+# One more limit: "reviewed" means that some issue comment on the PR matches
+# the keyword test further down (Code Review|...|Approve|Verdict). That is
+# evidence that /full-review ran, not proof of it.
+#
 # #7914: Claude Code delivers PreToolUse hook input as JSON on STDIN —
 #   {"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"..."},...}
 # — never as TOOL_NAME/TOOL_INPUT environment variables. This script used to
@@ -137,6 +201,27 @@ if [ "$TOOL_NAME" != "Bash" ]; then
   exit 0
 fi
 
+# #7922: `mergePullRequest` and `enablePullRequestAutoMerge` are the GraphQL
+# form of the same two operations (`gh api graphql -f query='mutation {
+# mergePullRequest(...) }'`), measured as a silent bypass before this block.
+# It is not disguised, just another API, so it is closed rather than listed
+# as a known evasion. GraphQL names cannot contain escapes and an alias does
+# not remove the field name, so a query written out plainly in the command
+# always carries the literal. Splicing it from shell quotes or a JSON `\u`
+# escape does not; those are run-time construction, evasion 2 in the header.
+#
+# Blocked OUTRIGHT, before the PR-number check below and independently of
+# it: these mutations name the PR by node id, so the number check would
+# never see the PR being merged. ANY other 3-5 digit number in the same
+# command (`| head -100`, a port, a reviewed PR merged alongside with
+# `gh pr merge`) would be checked in its place and let the merge through.
+if grep -qE 'mergePullRequest|enablePullRequestAutoMerge' <<<"$COMMAND"; then
+  echo "BLOCKED: a GraphQL merge mutation (mergePullRequest / enablePullRequestAutoMerge)." >&2
+  echo "It names the PR by node id, which this gate cannot check for a review." >&2
+  echo "Run /full-review, then merge with 'gh pr merge <number>'." >&2
+  exit 2
+fi
+
 # Does the command contain `gh pr merge` ANYWHERE, or the equivalent GitHub
 # REST call (`gh api ... pulls/<n>/merge`, the same operation `gh pr merge`
 # performs under the hood)? A here-string, not a pipe from echo/printf/cat —
@@ -155,7 +240,8 @@ fi
 #     backslash-newline continuation anyway — that shape is recorded as a
 #     FOLLOW-UP, not fixed here (matches this repo's own precedent that
 #     predicting arbitrary shell composition against a substring/regex match
-#     is unwinnable; see docs/false-safety-guards.md and #7341).
+#     is unwinnable; see docs/false-safety-guards.md and #7341). #7922
+#     decided to leave it open; see "Known evasions" in the header.
 #   - `pulls/[0-9]+/merge` catches `gh api -X PUT repos/OWNER/REPO/pulls/N/merge`
 #     — the direct REST call that merges a PR without ever containing the
 #     text "pr merge" — verified as a silent bypass of the pre-fix pattern.

@@ -50,7 +50,7 @@ HOOK="$REPO_ROOT/scripts/require-review-before-merge.sh"
 # "no case executed" are the same observable outcome, the second recurring
 # cause in docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so
 # removing a case is as loud as skipping one.
-EXPECTED_CASES=20
+EXPECTED_CASES=24
 
 PASS=0
 FAIL=0
@@ -350,6 +350,36 @@ check "#7921 — 'gh  pr   merge' (repeated spaces) referencing an unreviewed PR
 # generated or hand-edited command could take.
 check "#7921 — a TAB between 'pr' and 'merge' referencing an unreviewed PR is BLOCKED (exit 2)" \
   2 "$(run_hook_stdin "$(build_payload Bash "$(printf 'gh pr\tmerge 12345 --squash')")" "0")"
+
+# --- Case 21 — #7922: the GraphQL `mergePullRequest` mutation merges a PR
+# without containing "pr merge" or "pulls/<n>/merge". Before #7922 this
+# payload exited 0 (measured). The review count is 1 on purpose: the block
+# is unconditional, so a review must not open it. Goes red (exit 0) if
+# `mergePullRequest` is dropped from the match.
+check "#7922 — a GraphQL 'mergePullRequest' mutation is BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kwDOtest\"}) { clientMutationId } }'")" "1")"
+
+# --- Case 22 — #7922: `enablePullRequestAutoMerge` is the GraphQL form of
+# `gh pr merge --auto`, which would merge the PR later with no command left
+# for this hook to see. Same shape and same red-proof as case 21.
+check "#7922 — a GraphQL 'enablePullRequestAutoMerge' mutation is BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh api graphql -f query='mutation { enablePullRequestAutoMerge(input: {pullRequestId: \"PR_kwDOtest\"}) { clientMutationId } }'")" "1")"
+
+# --- Case 23 — #7922: the GraphQL block must run BEFORE the PR-number check,
+# not inside it. The mutation names its PR by node id, so a number check can
+# only ever see SOME OTHER number in the command. Here that is `head -100`,
+# and the stub reports every number as an open, reviewed PR. Routed through
+# the number check, this merge would be allowed (exit 0); blocked outright,
+# it is not.
+check "#7922 — a GraphQL merge with an incidental reviewed number (head -100) is still BLOCKED" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kwDOtest\"}) { clientMutationId } }' | head -100")" "1")"
+
+# --- Case 24 — #7922: same property, reached from the other side. A command
+# that ALSO runs `gh pr merge` on a reviewed PR matches the `pr merge` path,
+# so a GraphQL check nested inside the no-`pr merge` branch would never run
+# and the node-id merge would ride through on the reviewed PR's number.
+check "#7922 — a GraphQL merge alongside 'gh pr merge <reviewed>' is still BLOCKED" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 12345 --squash && gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kwDOother\"}) { clientMutationId } }'")" "1")"
 
 echo "----"
 BROKEN=0
