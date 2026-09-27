@@ -9,12 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The `claude-sdk` provider now spawns your installed `claude`, the same binary preflight verified (#7986).**
+- **The `claude-sdk` provider now spawns your installed `claude`, resolved through
+  the same candidate list preflight verifies at session create (#7986).**
   The Agent SDK's `query()` spawns its own bundled platform binary unless told
   otherwise, while preflight, including the opt-in provenance gate, verified
   the installed `claude`. So the binary that was checked was not the binary
-  that ran. `SdkSession`, and the session summarizer, now pass
-  `pathToClaudeCodeExecutable` set to the verified path on every turn.
+  that ran. `SdkSession` now sets `pathToClaudeCodeExecutable`, re-resolved
+  through the shared resolver on every turn — the same resolver preflight used
+  at session create, but each turn's resolve is not itself re-verified, so a
+  binary swapped in place mid-session spawns unchecked until the next session
+  create. The session summarizer's one-shot `query()` sets the same resolved
+  path but is not preflighted or provenance-checked at all. See #8030.
 
   Preflight also enforces a minimum `claude` version for the SDK provider:
   the installed SDK's own `claudeCodeVersion`, not a hand-kept constant.

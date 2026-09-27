@@ -258,17 +258,30 @@ otherwise — resolved and spawned its OWN bundled platform binary
 real spawn checked two different files. Chroxy no longer bundles that
 platform package (removed from the desktop build), so `SdkSession` now sets
 `pathToClaudeCodeExecutable` to `resolveClaudeBinary()` on every turn, before
-any subclass hook (`_augmentQueryOptions`) runs — the exact same path
-`static get resolvedBinary` hands to preflight. Verify-path and spawn-path are
-now the same file for `claude-sdk`, same as every other claude-family
-provider (§2's fresh-re-resolution list above).
+any subclass hook (`_augmentQueryOptions`) runs — the SAME resolver
+`static get resolvedBinary` hands to preflight, so both read the shared
+candidate list rather than two independently-maintained ones.
+
+**This closes the "checked one file, ran another" gap, but it is a
+resolver-parity fix, not a per-turn re-verification.** Preflight's
+quarantine/provenance/version gates run ONCE, at session create, against
+whatever `resolveClaudeBinary()` returns at that moment. Every subsequent
+turn calls the same resolver again — not the cached, already-verified path —
+so if the binary at that path is swapped, quarantined, or hash-mismatched
+*between* session create and a later turn, that turn spawns it unverified;
+the next session create is what re-checks. The session summarizer's one-shot
+`query()` (`defaultRunOneShot` in `summarize-session.js`) sets the same
+resolved path but has no session-create step at all — it is never preflighted
+or provenance-checked, in any mode. Both gaps are pre-existing (the summarizer
+already ran an unverified bundled binary before this PR) and are tracked in
+#8030, not fixed here.
 
 This closes the gap but also means `claude-sdk` inherits the SAME exposure
 P1/P2 already cover for `claude-cli`/`claude-tui`/`claude-channel`: quarantine
-detection, and (opt-in) the SHA-256 pin ledger + signature gate. Nothing
-provider-specific was added for the version gate below — it is generic
-`runProviderPreflight` machinery any provider can opt into via
-`spec.binary.minVersion`.
+detection, and (opt-in) the SHA-256 pin ledger + signature gate, both checked
+at session create. Nothing provider-specific was added for the version gate
+below — it is generic `runProviderPreflight` machinery any provider can opt
+into via `spec.binary.minVersion`.
 
 **Version gate, and where it sits relative to the other gates.** `claude-sdk`
 declares `minVersion: () => sdkClaudeCodeVersion()` — the installed
