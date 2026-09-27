@@ -62,8 +62,19 @@ export class DockerSdkSession extends SdkSession {
    */
   static get preflight() {
     const parent = SdkSession.preflight
+    // #7986 review S4: `minVersion`, `requiresDirectExec` and `updateHint` are
+    // all about the HOST `claude` binary that SdkSession's version/shim gates
+    // enforce — docker-sdk never spawns that binary at all; the container
+    // runs its own installed `claude` (see #8027). runProviderPreflight
+    // itself skips containerised providers entirely, but `doctor.js`'s
+    // `checkProvider` does not, so inheriting these via a wholesale
+    // `...parent.binary` spread would make `chroxy doctor` / `chroxy start`
+    // fail a docker-sdk install over an old or shimmed HOST claude that this
+    // provider never touches.
+    const { minVersion: _minVersion, requiresDirectExec: _requiresDirectExec, updateHint: _updateHint, ...binary } = parent.binary
     return {
       ...parent,
+      binary,
       credentials: {
         envVars: ['ANTHROPIC_API_KEY'],
         hint: 'set ANTHROPIC_API_KEY on the host so it is forwarded into the container (no OAuth fallback inside the container — the container has no ~/.claude state)',
