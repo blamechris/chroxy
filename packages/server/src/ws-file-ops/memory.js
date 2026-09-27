@@ -128,8 +128,9 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
   // `~/.claude/settings.json`, an identity key, a `.jsonl` transcript, an
   // extensionless file — is rejected with the SAME shape an out-of-bounds path
   // gets, so there's no distinguishing oracle between "out of bounds", "not
-  // markdown", and "doesn't exist". Purely LEXICAL and BEFORE any realpath/stat,
-  // so a non-markdown import never even touches the filesystem. (#6971)
+  // markdown", and "doesn't exist". This LEXICAL check runs BEFORE any
+  // realpath/stat, so a non-markdown import never touches the filesystem; the
+  // resolved target is checked again below (#8017). (#6971)
   if (requireMarkdownExt && !hasMarkdownExt(lexicalAbsPath)) {
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
@@ -141,6 +142,14 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
     // Resolution failed (EACCES on an ancestor dir, symlink-depth ceiling, …).
     // Normalize to the identical clean-skip shape rather than echoing the raw
     // error message — no error-string oracle, no content leak. (#6971)
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
+  }
+
+  // #8017 — the lexical check above only sees the path AS WRITTEN. A `.md`-named
+  // symlink (`notes.md -> ~/.claude/.credentials.json`) passes it and resolves
+  // in-bounds, so the allowlist must hold for the RESOLVED target too — the
+  // path phase 2 actually opens. Same skip shape: no oracle.
+  if (requireMarkdownExt && !hasMarkdownExt(resolvedPath)) {
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 
