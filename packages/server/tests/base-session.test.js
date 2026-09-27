@@ -564,21 +564,16 @@ describe('BaseSession', () => {
           'cache must invalidate on mtime change so the new body is in the prompt')
       })
 
-      // #3248 acceptance criterion 4: 100-skill toggle should
-      // complete in <10ms. Measures the cached toggle path — first
-      // toggle warms, second toggle is the steady-state target.
-      // Loose threshold (50ms) for CI variance — the goal is to
-      // catch order-of-magnitude regressions, not micro-benchmark.
-      // Skipped on Windows (#7270): this is a WALL-CLOCK assertion, and the
-      // Windows job runs ~480 files concurrently on a single self-hosted box.
-      // Measured there at 154ms against the 50ms threshold — which is CI
-      // variance on a loaded machine, not the order-of-magnitude regression
-      // this test exists to catch (its own comment above says so). The ubuntu
-      // job remains the enforcing one. Same idiom as service.test.js's
-      // skipRealPortOnWin (#6651).
-      it('100-skill toggle stays well under regression threshold', {
-        skip: process.platform === 'win32',
-      }, () => {
+      // #3248 acceptance criterion 4: a 100-skill toggle must be served from
+      // the parse cache. This used to assert WALL-CLOCK time (`< 50ms`), which
+      // failed a required check at 60.8ms on a saturated runner (#7041) and had
+      // to be skipped on Windows outright (#7270, measured at 154ms there),
+      // while a regression that merely doubled the work would still pass.
+      // Assert the WORK instead: instrument the session's own parse-cache Map
+      // and require that the steady-state toggle consults it for every skill,
+      // hits every time, and re-parses nothing. Measured: 200 lookups, 200
+      // hits, 0 re-parses. Deterministic, so it runs on Windows too.
+      it('100-skill toggle is served entirely from the parse cache', () => {
         const big = mkdtempSync(join(tmpdir(), 'chroxy-3248-big-'))
         try {
           // Create 100 manual skills (off by default).
@@ -589,20 +584,33 @@ describe('BaseSession', () => {
             )
           }
           const s = new BaseSession({ cwd: '/tmp', skillsDir: big, repoSkillsDir: null })
-          // Warm: first activate populates the cache for any
-          // file the constructor scan didn't see (in this setup
-          // they're all seen, so the warm-up just exercises the
-          // hot path once).
+          // Warm: the first toggle exercises the hot path once.
           s.activateSkill('manual-0')
           s.deactivateSkill('manual-0')
 
-          const start = process.hrtime.bigint()
+          const cache = s._skillsParseCache
+          let lookups = 0
+          let hits = 0
+          let reparses = 0
+          const realGet = cache.get.bind(cache)
+          const realSet = cache.set.bind(cache)
+          cache.get = (key) => {
+            lookups++
+            const entry = realGet(key)
+            if (entry) hits++
+            return entry
+          }
+          cache.set = (key, value) => {
+            reparses++
+            return realSet(key, value)
+          }
+
           s.activateSkill('manual-50')
           s.deactivateSkill('manual-50')
-          const elapsedMs = Number(process.hrtime.bigint() - start) / 1_000_000
 
-          assert.ok(elapsedMs < 50,
-            `100-skill toggle took ${elapsedMs.toFixed(2)}ms — expected <50ms with cache (issue target: <10ms)`)
+          assert.equal(reparses, 0, 'a steady-state toggle must not re-parse any skill')
+          assert.ok(hits >= 100, `every one of the 100 skills must be served from the cache (hits: ${hits})`)
+          assert.equal(hits, lookups, `every cache lookup must hit (lookups: ${lookups}, hits: ${hits})`)
         } finally {
           rmSync(big, { recursive: true, force: true })
         }
