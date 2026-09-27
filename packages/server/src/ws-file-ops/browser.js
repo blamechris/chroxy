@@ -5,6 +5,7 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
+import { realpathOfDeepestAncestor } from './common.js'
 
 const log = createLogger('ws')
 
@@ -34,18 +35,27 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       absPath = normalize(absPath)
 
       let realAbsPath
+      let containmentUnknown = false
       try {
         realAbsPath = await realpath(absPath)
       } catch (err) {
-        if (err.code === 'ENOENT') {
-          realAbsPath = absPath
-        } else {
-          throw err
+        if (err.code !== 'ENOENT') throw err
+        // #8011 — a MISSING target is contained canonically too: realpath
+        // its deepest existing ancestor. This used to fall back to the raw
+        // lexical `absPath`, so `~/link-to-outside/missing` looked like a
+        // path inside home and answered "Directory not found", while an
+        // EXISTING subdirectory out there answered "Access denied" — two
+        // answers keyed on whether something outside home exists.
+        // A walk that cannot finish denies; it never reads as "not found".
+        try {
+          realAbsPath = await realpathOfDeepestAncestor(absPath)
+        } catch {
+          containmentUnknown = true
         }
       }
       const homeReal = await realpath(home)
 
-      if (!isPathWithin(realAbsPath, homeReal)) {
+      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
