@@ -50,7 +50,7 @@ HOOK="$REPO_ROOT/scripts/require-review-before-merge.sh"
 # "no case executed" are the same observable outcome, the second recurring
 # cause in docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so
 # removing a case is as loud as skipping one.
-EXPECTED_CASES=37
+EXPECTED_CASES=88
 
 PASS=0
 FAIL=0
@@ -381,91 +381,292 @@ check "#7922 — a GraphQL merge with an incidental reviewed number (head -100) 
 check "#7922 — a GraphQL merge alongside 'gh pr merge <reviewed>' is still BLOCKED" \
   2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 12345 --squash && gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_kwDOother\"}) { clientMutationId } }'")" "1")"
 
-# --- Case 25 — #7991: a cross-repo merge with an explicit --repo naming a
-# repo other than blamechris/chroxy is allowed immediately. PR number "8" is
-# deliberately a single digit (not 3-5 digits), and the review count is "0"
-# (unreviewed) — if the new early-allow path did not fire, the old gate would
-# still see "gh pr merge" text, extract NO PR number at all (single digits
-# don't match \b[0-9]{3,5}\b) and BLOCK with "could not extract PR numbers",
-# so an exit-0 result here is proof the cross-repo path actually ran.
-check "#7991 — 'gh pr merge 8 --repo blamechris/github-runners' (long --repo) is ALLOWED (exit 0)" \
-  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash --delete-branch")" "0")"
+# #7991 regression suite. The first ALLOW implementation modeled shell
+# parsing (python3 shlex over segments); a review found 30+ constructs where
+# that model and the real shell disagreed and reworked it into a raw-text
+# allowlist (see the ALLOWLIST comment in require-review-before-merge.sh).
+# Every case below is one bypass class from that review, sourced from its
+# case list so the literal command text matches what was actually probed
+# against `gh`. Cases are labeled to match that list; "killer" cases are
+# aimed at specific mutations of the allowlist implementation (see the PR
+# description for the mutation-testing results).
 
-# --- Case 26 — #7991: same, using the '-R <value>' short form.
-check "#7991 — 'gh pr merge 8 -R blamechris/github-runners' (short -R, spaced) is ALLOWED (exit 0)" \
-  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 -R blamechris/github-runners --squash")" "0")"
-
-# --- Case 27 — #7991: same, using '--repo=<value>' with the flag BEFORE the
-# PR number, proving the tokenizer isn't position-dependent.
-check "#7991 — 'gh pr merge --repo=blamechris/github-runners 8' (--repo= before the number) is ALLOWED (exit 0)" \
-  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge --repo=blamechris/github-runners 8 --squash")" "0")"
-
-# --- Case 28 — #7991 negative control: no --repo at all still requires the
-# review comment exactly as before the fix.
-check "#7991 — 'gh pr merge 7990' with no --repo, unreviewed, is still BLOCKED (exit 2)" \
+# --- Case 25 — #7991 [A4]: no --repo at all still requires the review comment
+check "#7991 [A4] — is still BLOCKED (exit 2)" \
   2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash")" "0")"
 
-# --- Case 29 — #7991 negative control: an explicit --repo naming THIS repo
-# (blamechris/chroxy) must not short-circuit the review check.
-check "#7991 — 'gh pr merge 7990 --repo blamechris/chroxy', unreviewed, is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/chroxy --squash")" "0")"
+# --- Case 26 — #7991 [B1]: a PR URL selector beats --repo (gh takes the repo from the URL)
+check "#7991 [B1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge https://github.com/blamechris/chroxy/pull/7990 --repo blamechris/github-runners --squash")" "0")"
 
-# --- Case 30 — #7991: the chroxy comparison is case-insensitive, so a
-# differently-cased --repo naming chroxy is still evaluated as chroxy.
-check "#7991 — 'gh pr merge 7990 -R BlameChris/Chroxy' (case-insensitive) is still BLOCKED (exit 2)" \
+# --- Case 27 — #7991 [B2]: -R=value (gh's pflag strips the '=', this hook does not recognize it as a repo flag)
+check "#7991 [B2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 -R=blamechris/chroxy --squash")" "0")"
+
+# --- Case 28 — #7991 [B3]: an scp-style git@ URL naming chroxy
+check "#7991 [B3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo git@github.com:blamechris/chroxy.git --squash")" "0")"
+
+# --- Case 29 — #7991 [B4]: an https URL with a trailing .git/
+check "#7991 [B4] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo https://github.com/blamechris/chroxy.git/ --squash")" "0")"
+
+# --- Case 30 — #7991 [B5]: an unset parameter expansion glued to the repo value
+# shellcheck disable=SC2016 # single-quoted on purpose: $x must reach the hook
+# as literal text, not be expanded by this test script's own shell.
+check "#7991 [B5] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo blamechris/chroxy$x --squash')" "0")"
+
+# --- Case 31 — #7991 [B6]: a ${var} expansion glued to the repo value
+# shellcheck disable=SC2016 # single-quoted on purpose: ${x} must reach the
+# hook as literal text, not be expanded by this test script's own shell.
+check "#7991 [B6] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo blamechris/chroxy${x} --squash')" "0")"
+
+# --- Case 32 — #7991 [B7]: an ANSI-C quoted repo value
+check "#7991 [B7] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo $'\''blamechris/chroxy'\'' --squash')" "0")"
+
+# --- Case 33 — #7991 [B8]: a locale-quoted repo value
+check "#7991 [B8] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo $"blamechris/chroxy" --squash')" "0")"
+
+# --- Case 34 — #7991 [B9]: brace expansion in the repo value (gh would use the
+# last alternative). Single-quoted deliberately: a DOUBLE-quoted argument
+# containing this exact {,X} shape gets brace-expanded by bash specifically
+# when nested two command-substitution levels deep — the same
+# run_hook_stdin "$(build_payload ...)" shape every case in this file uses —
+# even though the argument is fully quoted (verified empirically; see the PR
+# description). Single-quoting avoids it, since bash never performs brace
+# expansion inside single quotes regardless of nesting depth.
+check "#7991 [B9] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo=blamechris/{,chroxy} --squash')" "0")"
+
+# --- Case 35 — #7991 [C1]: --repo is actually the VALUE of --body, which takes an argument in real gh
+check "#7991 [C1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash --body --repo=blamechris/github-runners")" "0")"
+
+# --- Case 36 — #7991 [C2]: a glued -R value is actually the VALUE of -t/--subject
+check "#7991 [C2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash -t -Rblamechris/github-runners")" "0")"
+
+# --- Case 37 — #7991 [D1]: a mid-word # followed by ';' and a second merge
+check "#7991 [D1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash --body=a#; gh pr merge 7990 --squash")" "0")"
+
+# --- Case 38 — #7991 [D2]: a comment on one line, a qualifying cross-repo merge on the next
+check "#7991 [D2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash # merge the chroxy one first
+gh pr merge 8 --repo blamechris/github-runners --squash")" "0")"
+
+# --- Case 39 — #7991 [D3]: a real trailing comment only (negative control)
+check "#7991 [D3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash # -R blamechris/github-runners")" "0")"
+
+# --- Case 40 — #7991 [E1]: a here-string glued to --repo=
+check "#7991 [E1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash <<<--repo=blamechris/github-runners")" "0")"
+
+# --- Case 41 — #7991 [E2]: a here-string glued to -R
+check "#7991 [E2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash <<< -Rblamechris/github-runners")" "0")"
+
+# --- Case 42 — #7991 [E3]: process substitution on stdin
+check "#7991 [E3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --squash < <(echo --repo=blamechris/github-runners)")" "0")"
+
+# --- Case 43 — #7991 [E4]: |& is not a recognized separator
+check "#7991 [E4] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "echo -R blamechris/github-runners |& gh pr merge 7990 --squash")" "0")"
+
+# --- Case 44 — #7991 [E5]: a case/esac construct joins its branches
+check "#7991 [E5] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "case 1 in 0) echo -R blamechris/github-runners;; 1) gh pr merge 7990 --squash;; esac")" "0")"
+
+# --- Case 45 — #7991 [E6]: an &> redirect that looks like a repo flag
+check "#7991 [E6] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "mkdir -p -- --repo=blamechris && gh pr merge 7990 --squash &>--repo=blamechris/github-runners")" "0")"
+
+# --- Case 46 — #7991 [F1]: xargs appends a second -R (real gh would use the last one)
+check "#7991 [F1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "echo -R blamechris/chroxy | xargs gh pr merge 7990 --squash -R blamechris/github-runners")" "0")"
+
+# --- Case 47 — #7991 [F2]: xargs supplies a chroxy PR URL as the selector
+check "#7991 [F2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "echo https://github.com/blamechris/chroxy/pull/7990 | xargs gh pr merge --squash -R blamechris/github-runners")" "0")"
+
+# --- Case 48 — #7991 [G1]: a second merge via the full path to gh
+check "#7991 [G1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash && /opt/homebrew/bin/gh pr merge 7990 --squash")" "0")"
+
+# --- Case 49 — #7991 [G2]: a second merge inside python3 -c
+check "#7991 [G2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; python3 -c 'import os; os.system(\"gh pr merge 7990 --squash\")'")" "0")"
+
+# --- Case 50 — #7991 [G3]: a second merge inside bash -lc
+check "#7991 [G3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; bash -lc \"gh pr merge 7990 --squash\"")" "0")"
+
+# --- Case 51 — #7991 [G4]: a second merge inside watch
+check "#7991 [G4] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; watch -n 60 'gh pr merge 7990 --squash'")" "0")"
+
+# --- Case 52 — #7991 [G5]: a second merge via timeout (negative control: already detected)
+check "#7991 [G5] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; timeout 60 gh pr merge 7990 --squash")" "0")"
+
+# --- Case 53 — #7991 [G6]: a second merge via command \gh (negative control: already detected)
+check "#7991 [G6] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; command \\gh pr merge 7990 --squash")" "0")"
+
+# --- Case 54 — #7991 [G7]: a second merge inside a bash heredoc (negative control: already detected)
+check "#7991 [G7] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; bash <<'EOF'
+gh pr merge 7990 --squash
+EOF")" "0")"
+
+# --- Case 55 — #7991 [G8]: a second merge inside ssh
+check "#7991 [G8] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; ssh localhost 'cd ~/Projects/chroxy && gh pr merge 7990 --squash'")" "0")"
+
+# --- Case 56 — #7991 [G9]: a second merge via bash  -c (double space)
+check "#7991 [G9] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash; bash  -c \"gh pr merge 7990 --squash\"")" "0")"
+
+# --- Case 57 — #7991 [H1]: GH_REPO env pointing at chroxy plus a --repo flag (gh: the flag wins; this hook: not recognized as 'gh pr merge')
+check "#7991 [H1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "GH_REPO=blamechris/chroxy gh pr merge 7990 --repo blamechris/github-runners --squash")" "0")"
+
+# --- Case 58 — #7991 [H2]: an empty --repo= value
+check "#7991 [H2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo= --squash")" "0")"
+
+# --- Case 59 — #7991 [H3]: a --repo VALUE that is itself a chroxy PR URL with a path
+check "#7991 [H3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo https://github.com/blamechris/chroxy/pull/7990 --squash")" "0")"
+
+# --- Case 60 — #7991 [H4]: case-insensitive chroxy match
+check "#7991 [H4] — is still BLOCKED (exit 2)" \
   2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 -R BlameChris/Chroxy")" "0")"
 
-# --- Case 31 — #7991: a full https://github.com/... URL with a trailing
-# .git, once normalized, still resolves to blamechris/chroxy.
-check "#7991 — 'gh pr merge 7990 --repo https://github.com/blamechris/chroxy.git' is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo https://github.com/blamechris/chroxy.git")" "0")"
+# --- Case 61 — #7991 [H5]: an uppercase github.com/ host prefix (two slashes, not owner/name)
+check "#7991 [H5] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo GITHUB.COM/blamechris/chroxy")" "0")"
 
-# --- Case 32 — #7991: a --repo flag that appears in a DIFFERENT segment than
-# the merge invocation must not count — the merge segment itself has none, so
-# this falls through to the existing (blocking) gate.
-check "#7991 — a --repo in a different segment ('echo ...; gh pr merge 7990') is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash "echo --repo blamechris/x; gh pr merge 7990")" "0")"
+# --- Case 62 — #7991 [H6]: backslash-newline continuation inside the cross-repo merge
+check "#7991 [H6] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 8 \
+  --repo blamechris/github-runners --squash')" "0")"
 
-# --- Case 33 — #7991: two merge invocations, only one of which targets a
-# different repo — EVERY merge invocation must qualify, so this must still be
-# evaluated (and blocked) as a chroxy merge.
-check "#7991 — one of two merges targets chroxy ('gh pr merge 8 --repo ... && gh pr merge 7990') is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners && gh pr merge 7990")" "0")"
+# --- Case 63 — #7991 [H7]: a find -exec \; terminator
+check "#7991 [H7] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "find . -maxdepth 0 -exec gh pr merge 7990 --squash \\; -o -name --repo=blamechris/x")" "0")"
 
-# --- Case 34 — #7991: the REST 'pulls/<n>/merge' form stays fully gated no
-# matter what --repo appears elsewhere in the command — this is the exact
-# shape #7991's acceptance criteria calls out ("a command that ... sets
-# --repo and also contains a chroxy pulls/N/merge path must still be
-# evaluated as chroxy").
-check "#7991 — a cross-repo merge alongside a chroxy 'pulls/N/merge' REST call is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners; gh api -X PUT repos/blamechris/chroxy/pulls/7990/merge")" "0")"
+# --- Case 64 — #7991 [H8]: a newline embedded inside a quoted --body value
+check "#7991 [H8] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash --body \"line1
+gh pr merge 7990\"")" "0")"
 
-# --- Case 35 — #7991 design decision: 'blamechris/chroxy-other' is a
-# genuinely different repo (not a prefix/substring collision) and this hook
-# has no way to evaluate it, so it is ALLOWED — same as any other repo that
-# isn't blamechris/chroxy. Matching by exact (case-insensitive) equality
-# rather than substring/prefix is what makes this the correct call: a
-# prefix/substring match would have incorrectly treated it as chroxy. See the
-# mutation proof in this file's companion notes (and the PR description) for
-# the substring-match mutation that turns this test red.
-check "#7991 — 'gh pr merge 7990 --repo blamechris/chroxy-other' (different repo, not a substring match) is ALLOWED (exit 0)" \
+# --- Case 65 — #7991 [H9]: two repo flags on one merge
+check "#7991 [H9] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/github-runners -R blamechris/chroxy")" "0")"
+
+# --- Case 66 — #7991 [W2]: an uppercase .GIT suffix
+check "#7991 [W2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/chroxy.GIT --squash")" "0")"
+
+# --- Case 67 — #7991 [W3]: an https URL with an uppercase .GIT suffix
+check "#7991 [W3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo https://github.com/blamechris/chroxy.GIT --squash")" "0")"
+
+# --- Case 68 — #7991 [W4]: a quoted repo value with a trailing newline
+check "#7991 [W4] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo \"blamechris/chroxy
+\" --squash")" "0")"
+
+# --- Case 69 — #7991 [W5]: an uppercase scheme and host
+check "#7991 [W5] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo HTTPS://GITHUB.COM/blamechris/chroxy --squash")" "0")"
+
+# --- Case 70 — #7991 [W6]: a bare host + .git, no scheme (two slashes, not owner/name)
+check "#7991 [W6] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo github.com/blamechris/chroxy.git --squash")" "0")"
+
+# --- Case 71 — #7991 [W7]: an ssh:// URL that gh resolves to chroxy
+check "#7991 [W7] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo ssh://git@github.com/blamechris/chroxy --squash")" "0")"
+
+# --- Case 72 — #7991 [W8]: a www host that gh resolves to chroxy (two slashes, not owner/name)
+check "#7991 [W8] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo www.github.com/blamechris/chroxy --squash")" "0")"
+
+# --- Case 73 — #7991 [K1]: an unquoted $(...) glued to a chroxy repo value
+# shellcheck disable=SC2016 # single-quoted on purpose: $(true) must reach the
+# hook as literal text, not be executed by this test script's own shell.
+check "#7991 [K1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo blamechris/chroxy$(true) --squash')" "0")"
+
+# --- Case 74 — #7991 [Q1]: a GraphQL merge mutation alongside a qualifying cross-repo merge (GraphQL block runs first, unconditional)
+check "#7991 [Q1] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash && gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"PR_x\"}) { clientMutationId } }'")" "0")"
+
+# --- Case 75 — #7991 [Q2]: a REST pulls/N/merge call alongside a qualifying cross-repo merge
+check "#7991 [Q2] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash && gh api -X PUT repos/blamechris/chroxy/pulls/7990/merge")" "0")"
+
+# --- Case 76 — #7991 [Q3]: an http:// (not https) PR URL selector
+check "#7991 [Q3] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge http://github.com/blamechris/chroxy/pull/7990 -R blamechris/github-runners --squash")" "0")"
+
+# --- Case 77 — #7991 [Q4]: two cross-repo merges chained in one command (documented trade-off: each needs its own call)
+check "#7991 [Q4] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash && gh pr merge 5 -R blamechris/github-runners --squash")" "0")"
+
+# --- Case 78 — #7991 [chroxy-exact]: an explicit --repo naming this repo, exactly, must not short-circuit the review check
+check "#7991 [chroxy-exact] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/chroxy --squash")" "0")"
+
+# --- Case 79 — #7991 [two-repo-flags-killer]: MUTATION KILLER for 'len(repos) != 1' -> '< 1': two repo flags, chroxy last — gh would use the last one
+check "#7991 [two-repo-flags-killer] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/github-runners -R blamechris/chroxy --squash")" "0")"
+
+# --- Case 80 — #7991 [ssh-malformed-killer]: MUTATION KILLER for dropping the NAME/NAME fullmatch: an ssh:// value gh resolves to chroxy
+check "#7991 [ssh-malformed-killer] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo ssh://git@github.com/blamechris/chroxy")" "0")"
+
+# --- Case 81 — #7991 [www-malformed-killer]: MUTATION KILLER for dropping the NAME/NAME fullmatch: a www host gh resolves to chroxy
+check "#7991 [www-malformed-killer] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo www.github.com/blamechris/chroxy")" "0")"
+
+# --- Case 82 — #7991 [dollar-paren-killer]: MUTATION KILLER (K1, restated standalone): $(...) glued to the repo value, no --squash
+# shellcheck disable=SC2016 # single-quoted on purpose: $(true) must reach the
+# hook as literal text, not be executed by this test script's own shell.
+check "#7991 [dollar-paren-killer] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo blamechris/chroxy$(true) --squash')" "0")"
+
+# --- Case 83 — #7991 [auto-falls-through]: gh pr merge --auto is dropped from the boolean-flag allowlist on purpose (repo policy: never auto-merge) and falls through; it has no 3-5 digit number, so the existing gate blocks it
+check "#7991 [auto-falls-through] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --auto")" "0")"
+
+# --- Case 84 — #7991 [selector-mutation-killer]: MUTATION KILLER for 'accept any word as a selector': a branch name is not a valid PR-number selector
+check "#7991 [selector-mutation-killer] — is still BLOCKED (exit 2)" \
+  2 "$(run_hook_stdin "$(build_payload Bash "gh pr merge feat/x --repo blamechris/github-runners --squash")" "0")"
+
+# --- Case 85 — #7991 [A1]: the long --repo form
+check "#7991 [A1] — is ALLOWED (exit 0)" \
+  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 --repo blamechris/github-runners --squash --delete-branch")" "0")"
+
+# --- Case 86 — #7991 [A2]: the short -R (spaced) form
+check "#7991 [A2] — is ALLOWED (exit 0)" \
+  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 8 -R blamechris/github-runners --squash")" "0")"
+
+# --- Case 87 — #7991 [A3]: the --repo= form, flag before the number
+check "#7991 [A3] — is ALLOWED (exit 0)" \
+  0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge --repo=blamechris/github-runners 8 --squash")" "0")"
+
+# --- Case 88 — #7991 [chroxy-other]: a genuinely different repo, not a substring/prefix match — MUTATION KILLER for '==' -> 'startswith' on the chroxy comparison
+check "#7991 [chroxy-other] — is ALLOWED (exit 0)" \
   0 "$(run_hook_stdin "$(build_payload Bash "gh pr merge 7990 --repo blamechris/chroxy-other")" "0")"
-
-# --- Case 36 — #7991: a shlex parse failure (unbalanced quote) must fall
-# through to the existing gate, never allow. The old gate still matches
-# 'pr merge' via plain regex (which doesn't care about quote balance) and
-# still extracts 7990, so this blocks exactly as it did before #7991.
-check "#7991 — an unbalanced-quote command falls through and is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 7990 --repo "unbalanced')" "0")"
-
-# --- Case 37 — #7991: a command substitution in the --repo value ($(...)) is
-# treated as unparseable and falls through rather than allow. The old gate
-# still matches 'pr merge' but extracts NO PR number (only the single digit
-# "8" appears), so this blocks with "could not extract PR numbers" — same
-# behavior as before #7991, since this shape was already in the pre-fix
-# "known conservative blocks" list.
-check "#7991 — a --repo value built from \$(...) command substitution falls through and is still BLOCKED (exit 2)" \
-  2 "$(run_hook_stdin "$(build_payload Bash 'gh pr merge 8 --repo "$(echo blamechris/github-runners)"')" "0")"
 
 echo "----"
 BROKEN=0
