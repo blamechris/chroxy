@@ -120,6 +120,30 @@ echo "[bundle-server] Pruning Bare-runtime prebuilds (unused under Node.js)..."
 PRUNED_COUNT=$(find "$STAGING/node_modules" -type d -name prebuilds -path "*/bare-*/prebuilds" -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
 echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 
+# Prune the SDK's bundled platform-specific `claude` binary (#7986, every host).
+#
+# @anthropic-ai/claude-agent-sdk-{darwin,linux,win32}-<arch> each ship a
+# platform-specific `claude` executable that the Agent SDK's `query()` spawns
+# only when `pathToClaudeCodeExecutable` is left unset. The server now always
+# passes the user's INSTALLED `claude` (#7986), so this binary is never
+# spawned and is pure dead weight — on macOS specifically it is also an
+# unsigned ~207 MB extension-less Mach-O executable that would otherwise trip
+# (or worse, silently evade — see the guard below) Apple notarization. Pruned
+# on EVERY host, not just Darwin, because it is unused regardless of platform.
+#
+# `@anthropic-ai/claude-agent-sdk` itself (the JS package, which the server
+# still imports) is untouched — only its platform-specific siblings match
+# the `-darwin-`/`-linux-`/`-win32-` suffix patterns below. Nested copies
+# (a transitive dep pulling in its own copy) are pruned too: `find` is not
+# rooted to a single `@anthropic-ai/` directory.
+echo "[bundle-server] Pruning SDK platform packages (unused — #7986)..."
+SDK_PLATFORM_PRUNED=$(find "$STAGING/node_modules" -type d \( \
+    -name "claude-agent-sdk-darwin-*" -o \
+    -name "claude-agent-sdk-linux-*" -o \
+    -name "claude-agent-sdk-win32-*" \
+  \) -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
+echo "[bundle-server] Pruned $SDK_PLATFORM_PRUNED SDK platform package dir(s)"
+
 # Prune node-pty's foreign-platform prebuilds (macOS host only).
 #
 # node-pty ships prebuilt `.node` binaries for darwin-arm64, darwin-x64,
@@ -174,8 +198,15 @@ fi
 # Scope: macOS notarization-relevant formats. `.so` / `.so.N` is included
 # defensively in case the bundle is ever staged on Linux; Apple itself only
 # cares about `.dylib` / `.node` / `.bare` and Mach-O directory bundles.
-# Extensionless Mach-O files (rare) are not covered — would require `file`
-# magic detection, which we'd add only if a real case surfaced.
+# Extension-less Mach-O files ARE covered, by a separate detector: the SDK's
+# platform `claude` binary (before the prune above existed) is exactly such a
+# file, and a real case surfacing is what #7986 was. `find-macho.mjs` reads
+# each file's leading bytes and flags anything with a Mach-O magic number
+# (thin or fat, both byte orders — see that file's header), independent of
+# its name. It scans the WHOLE staged tree, not just node_modules, and its own
+# failure (a bad root, a scan error) must fail the build rather than silently
+# report nothing — no `|| true` on that call, unlike the extension/dir finds
+# below, whose stray permission errors are tolerated.
 #
 # IMPORTANT: this check runs AFTER the workspace package copies above, so
 # the workspace dist/ trees are also covered if anyone ever lands a native
@@ -213,7 +244,18 @@ NATIVE_BIN_DIRS=$(find "$STAGING/node_modules" \
     -name "*.framework" -o \
     -name "*.bundle" \
   \) -print 2>/dev/null || true)
-NATIVE_BINS=$(printf '%s\n%s' "$NATIVE_BIN_FILES" "$NATIVE_BIN_DIRS" | sed '/^$/d')
+
+# Extension-less Mach-O scan (#7986) — see the comment block above this guard.
+# node-pty's darwin prebuilds are exempt for the same reason the extension
+# scan above prunes them: pty.node and spawn-helper are signed by build.rs at
+# Tauri bundle time (#3902), not shipped unsigned. No `|| true` here: a scan
+# failure (bad root, mid-walk error, a malformed exclude pattern) must fail
+# the build rather than silently report a clean tree.
+echo "[bundle-server] Scanning for extension-less Mach-O binaries..."
+MACHO_FILES=$(node "$SCRIPT_DIR/find-macho.mjs" "$STAGING" \
+  --exclude-regex '/node-pty/prebuilds/darwin-')
+
+NATIVE_BINS=$(printf '%s\n%s\n%s' "$NATIVE_BIN_FILES" "$NATIVE_BIN_DIRS" "$MACHO_FILES" | sed '/^$/d')
 if [ -n "$NATIVE_BINS" ]; then
   echo "[bundle-server] ERROR: server bundle contains unsigned native binaries" >&2
   echo "[bundle-server] These will be rejected by Apple notarization (Tauri only" >&2
