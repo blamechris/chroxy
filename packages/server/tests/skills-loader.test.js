@@ -15,6 +15,7 @@ import {
 } from '../src/skills-loader.js'
 import { _compareByPriorityThenName } from '../src/skills-budget.js'
 import { _readFrontmatterOnly } from '../src/skills-frontmatter.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 describe('skills-loader', () => {
   let dir
@@ -474,7 +475,7 @@ describe('skills-loader', () => {
   // they land under an explicit allowlist root.
   // -----------------------------------------------------------------------
 
-  describe('symlink defense (#3201)', () => {
+  describe('symlink defense (#3201)', { skip: SKIP_NO_SYMLINK }, () => {
     let outsideDir
     beforeEach(() => {
       outsideDir = mkdtempSync(join(tmpdir(), 'chroxy-skills-outside-'))
@@ -483,17 +484,18 @@ describe('skills-loader', () => {
       rmSync(outsideDir, { recursive: true, force: true })
     })
 
-    // Note: each test wraps `symlinkSync` in a try/catch + early-return so the
-    // test silently skips on platforms where symlink creation is disallowed
-    // (Windows CI without Developer Mode / admin). Repo precedent — see e.g.
-    // packages/server/tests/file-ref-attachments.test.js:120.
+    // Every test here needs a real symlink, so the whole block is skipped —
+    // out loud, as `# SKIP` — on a host whose account cannot create one. It
+    // used to wrap each `symlinkSync` in `try { … } catch { return }`, which
+    // reported a PASS having asserted nothing (#7288; see
+    // tests/helpers/symlink-support.js).
 
     it('rejects a skill that is a symlink to a file outside the skills root', () => {
       const evilSource = join(outsideDir, 'evil.md')
       writeFileSync(evilSource, '# Evil\n\nLeaked from outside.\n')
 
       const linkPath = join(dir, 'evil.md')
-      try { symlinkSync(evilSource, linkPath) } catch { return }
+      symlinkSync(evilSource, linkPath)
 
       const skills = loadActiveSkills(dir)
       assert.equal(skills.length, 0, 'symlink to outside should be rejected')
@@ -505,7 +507,7 @@ describe('skills-loader', () => {
       writeFileSync(realPath, '# Real\n\nbody\n')
 
       const linkPath = join(dir, 'link.md')
-      try { symlinkSync(realPath, linkPath) } catch { return }
+      symlinkSync(realPath, linkPath)
 
       const skills = loadActiveSkills(dir)
       const names = skills.map((s) => s.name).sort()
@@ -519,7 +521,7 @@ describe('skills-loader', () => {
         writeFileSync(sharedSkill, '# Community skill\n\nshared body\n')
 
         const linkPath = join(dir, 'community.md')
-        try { symlinkSync(sharedSkill, linkPath) } catch { return }
+        symlinkSync(sharedSkill, linkPath)
 
         // Without the allowlist, the symlink is rejected.
         const rejected = loadActiveSkills(dir)
@@ -539,7 +541,7 @@ describe('skills-loader', () => {
       const evilSource = join(outsideDir, 'gone.md')
       writeFileSync(evilSource, 'temp')
       const linkPath = join(dir, 'gone.md')
-      try { symlinkSync(evilSource, linkPath) } catch { return }
+      symlinkSync(evilSource, linkPath)
       rmSync(evilSource)
 
       const skills = loadActiveSkills(dir)
@@ -1971,7 +1973,7 @@ describe('skills-loader', () => {
       assert.equal(skill.body, 'pinned-body\n')
     })
 
-    it('still loads skill content correctly through a symlink (fd opens the resolved inode)', () => {
+    it('still loads skill content correctly through a symlink (fd opens the resolved inode)', { skip: SKIP_NO_SYMLINK }, () => {
       // Set up: real skill at /real/x.md; symlinked into /skills/x.md.
       // The fd-based read opens the symlink target's inode and reads
       // bytes from that fd, regardless of any path-side races.
@@ -1980,10 +1982,7 @@ describe('skills-loader', () => {
       mkdirSync(realDir, { recursive: true })
       mkdirSync(skillsDir, { recursive: true })
       writeFileSync(join(realDir, 'x.md'), 'symlinked-body\n')
-      // Match the existing "symlink defense" tests: skip silently on
-      // platforms (Windows / restricted CI) where symlinkSync isn't
-      // permitted, rather than failing the suite.
-      try { symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md')) } catch { return }
+      symlinkSync(join(realDir, 'x.md'), join(skillsDir, 'x.md'))
 
       const [skill] = loadActiveSkills(skillsDir, {
         allowedRoots: [realDir, skillsDir],

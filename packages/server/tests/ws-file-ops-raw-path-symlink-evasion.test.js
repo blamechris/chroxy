@@ -2,9 +2,10 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { validateRawPathWithinCwd, resolveTargetComponentwiseAsync } from '../src/ws-file-ops/common.js'
 import { executeBuiltinTool } from '../src/byok-tool-executor.js'
+import { SKIP_WIN32_LEXICAL_DOTDOT } from './helpers/symlink-support.js'
 
 /**
  * #6923 — async parity for the `..`-after-symlink evasion, on the BYOK file-ops
@@ -21,6 +22,15 @@ import { executeBuiltinTool } from '../src/byok-tool-executor.js'
  * destination and rejected. Both PoCs below build the exact issue topologies on
  * REAL disk and PROVE (a) the raw path physically lands on the protected file, and
  * (b) the async confinement now FLAGS it (valid=false / the BYOK executor errors).
+ *
+ * (a) and (b) are separate tests (#7288). (a) is POSIX-only: on Windows Node
+ * collapses the `..` as text before any syscall, so the raw write lands on the
+ * lexical target and the attack does not exist there — see
+ * SKIP_WIN32_LEXICAL_DOTDOT. (b) runs everywhere. On Windows the walker still
+ * reports the POSIX destination and flags it, which is the conservative
+ * direction, and the executor writes to that validated `realPath`, never to the
+ * raw path, so the two platforms' semantics cannot disagree about where a write
+ * lands.
  */
 describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   let root
@@ -30,7 +40,15 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   beforeEach(() => {
     // realpath so the temp root has no symlink prefix of its own (macOS /tmp ->
     // /private/tmp) that would confuse the startsWith() containment assertions.
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-raw-evasion-')))
+    //
+    // The NATIVE realpath, not the JS one (#7288). The CI runner's account gets
+    // an 8.3 short tmpdir (C:\WINDOWS\SERVIC~1\NETWOR~1\...), and only
+    // `.native` expands short names. The code under test canonicalizes the cwd
+    // with fs/promises `realpath` — native — so a root built with the JS
+    // realpath kept its short form, the expected paths never matched, and every
+    // symlink this suite wrote stored a short-form target the walker then
+    // compared against the long-form cwd.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-raw-evasion-')))
   })
   afterEach(() => {
     if (root) rmSync(root, { recursive: true, force: true })
@@ -43,17 +61,12 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   // (a plausible convenience symlink inside the worktree) plus a trailing `..`
   // climbs back up into the parent .claude, escaping the worktree cwd.
   // ==========================================================================
-  it('PoC 1: `work/agent-x/../../settings.local.json` (work -> .claude/worktrees) resolves to the REAL .claude/settings.local.json and is flagged', async () => {
+  it('PoC 1 premise: a raw write through `work/agent-x/../../settings.local.json` (work -> .claude/worktrees) lands on the REAL .claude/settings.local.json', { skip: SKIP_WIN32_LEXICAL_DOTDOT }, () => {
     mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
     writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
     const cwd = join(root, '.claude/worktrees/agent-x') // session cwd = the worktree
     symlinkSync(join(root, '.claude/worktrees'), join(cwd, 'work'))
     const evasion = 'work/agent-x/../../settings.local.json'
-
-    // path.resolve() LEXICALLY collapses the `..`s to a benign IN-cwd target —
-    // exactly why the pre-fix (pre-`resolve()` + realpath) confinement missed it.
-    assert.equal(resolve(cwd, evasion), join(cwd, 'settings.local.json'))
-    assert.ok(resolve(cwd, evasion).startsWith(cwd + '/'), 'lexical resolve stays inside the worktree — the blind spot')
 
     // PROOF the target is genuinely dangerous: a raw open(2)-style write through
     // the exact path physically clobbers the REAL .claude/settings.local.json
@@ -66,7 +79,19 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
       'PWNED',
       'the raw write really lands on the protected .claude/settings.local.json',
     )
-    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL') // reset
+  })
+
+  it('PoC 1: `work/agent-x/../../settings.local.json` (work -> .claude/worktrees) resolves to the REAL .claude/settings.local.json and is flagged', async () => {
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    const cwd = join(root, '.claude/worktrees/agent-x')
+    symlinkSync(join(root, '.claude/worktrees'), join(cwd, 'work'))
+    const evasion = 'work/agent-x/../../settings.local.json'
+
+    // path.resolve() LEXICALLY collapses the `..`s to a benign IN-cwd target —
+    // exactly why the pre-fix (pre-`resolve()` + realpath) confinement missed it.
+    assert.equal(resolve(cwd, evasion), join(cwd, 'settings.local.json'))
+    assert.ok(resolve(cwd, evasion).startsWith(cwd + sep), 'lexical resolve stays inside the worktree — the blind spot')
 
     // The async confinement now resolves the RAW path open(2)-faithfully to the
     // real protected file (ABOVE the worktree cwd) and FLAGS it as an escape.
@@ -99,7 +124,7 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   // landing on .git/config (a credential file — a remote URL can embed a PAT),
   // which sits ABOVE the session cwd (repo/work).
   // ==========================================================================
-  it('PoC 2: `glink/../config` (glink -> .git/hooks) resolves to the REAL .git/config and is flagged', async () => {
+  it('PoC 2 premise: a raw write through `glink/../config` (glink -> .git/hooks) lands on the REAL .git/config', { skip: SKIP_WIN32_LEXICAL_DOTDOT }, () => {
     mkdirSync(join(root, 'repo/.git/hooks'), { recursive: true })
     mkdirSync(join(root, 'repo/work'), { recursive: true })
     writeFileSync(join(root, 'repo/.git/config'), '[core]\n')
@@ -107,12 +132,21 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
     symlinkSync(join(root, 'repo/.git/hooks'), join(cwd, 'glink'))
     const evasion = 'glink/../config'
 
-    // Lexically benign (glink/.. cancels) and IN-cwd — the old confinement missed it.
-    assert.equal(resolve(cwd, evasion), join(cwd, 'config'))
-
     // PROOF: a raw write (STRING concat, not path.join) lands on the real .git/config.
     writeFileSync(`${cwd}/${evasion}`, 'PWNED')
     assert.equal(readFileSync(join(root, 'repo/.git/config'), 'utf8'), 'PWNED', 'the raw write really lands on .git/config')
+  })
+
+  it('PoC 2: `glink/../config` (glink -> .git/hooks) resolves to the REAL .git/config and is flagged', async () => {
+    mkdirSync(join(root, 'repo/.git/hooks'), { recursive: true })
+    mkdirSync(join(root, 'repo/work'), { recursive: true })
+    writeFileSync(join(root, 'repo/.git/config'), '[core]\n')
+    const cwd = join(root, 'repo/work')
+    symlinkSync(join(root, 'repo/.git/hooks'), join(cwd, 'glink'))
+    const evasion = 'glink/../config'
+
+    // Lexically benign (glink/.. cancels) and IN-cwd — the old confinement missed it.
+    assert.equal(resolve(cwd, evasion), join(cwd, 'config'))
 
     const { valid, realPath } = await validateRawPathWithinCwd(evasion, cwd, cwdRealCache(), cwdCacheTtl)
     assert.equal(valid, false, 'the glink+`..` escape must be flagged')
@@ -178,12 +212,12 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   // original realpath-of-deepest-ancestor guard already caught stays rejected.
   // ==========================================================================
   it('still rejects the classic symlinked-parent escape (`.venv -> /outside`, `.venv/bin/evil.sh`)', async () => {
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-raw-outside-')))
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-raw-outside-')))
     try {
       symlinkSync(outside, join(root, '.venv'))
       const { valid, realPath } = await validateRawPathWithinCwd('.venv/bin/evil.sh', root, cwdRealCache(), cwdCacheTtl)
       assert.equal(valid, false, 'a symlinked parent pointing out of the workspace must be flagged')
-      assert.ok(realPath.startsWith(outside + '/'), 'the walk chases the symlink to the outside location')
+      assert.ok(realPath.startsWith(outside + sep), 'the walk chases the symlink to the outside location')
     } finally {
       rmSync(outside, { recursive: true, force: true })
     }

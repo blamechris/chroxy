@@ -95,7 +95,7 @@ export const EXEMPT_REASONS = {
   },
   'symlink-create': {
     kind: 'permanent',
-    why: 'fs.symlinkSync needs SeCreateSymbolicLinkPrivilege or Developer Mode; unprivileged CI gets EPERM. Mostly path-traversal and floor-evasion security tests.',
+    why: 'fs.symlinkSync needs SeCreateSymbolicLinkPrivilege or Developer Mode; unprivileged CI gets EPERM. Mostly path-traversal and floor-evasion security tests. Classifies zero rows since #7288: chroxy-win-01 holds the privilege, and a test that needs a symlink takes `{ skip: SKIP_NO_SYMLINK }` (tests/helpers/symlink-support.js) so a host without it skips out loud rather than exempting the whole file.',
   },
   'launchd-systemd': {
     kind: 'permanent',
@@ -131,9 +131,10 @@ export const EXEMPT_SYMPTOMS = new Set(['fail', 'timeout', 'load-error'])
 // Ceiling on how much of the suite may be exempt. Exempting in BULK is how
 // #7270 happened in the first place, and no per-row check can see it: every
 // individual row can be impeccable while the aggregate quietly becomes "most of
-// the suite". Measured at 13.5% (75 of 555) when this landed, and 11.8%
-// (66 of 557) after #7273 un-exempted nine files; the ceiling is set with
-// headroom for honest growth and nowhere near a doubling.
+// the suite". Measured at 13.5% (75 of 555) when this landed, 11.8%
+// (66 of 557) after #7273 un-exempted nine files, and 9.6% (63 of 657) after
+// #7288 un-exempted three; the ceiling is set with headroom for honest growth
+// and nowhere near a doubling.
 export const MAX_EXEMPT_RATIO = 0.20
 
 // ── The manifest ────────────────────────────────────────────────────────────
@@ -142,13 +143,15 @@ export const MAX_EXEMPT_RATIO = 0.20
 // survey in docs/records/windows-test-coverage-7270.md, which ran all 553 files
 // of that commit in isolation on a real Windows host with the flags the CI job
 // uses — 481 passed unmodified. #7273 then re-measured the 15 rows it owned and
-// removed nine (docs/records/windows-path-containment-7273.md), so the survey no
-// longer accounts for every row one-to-one; read the two records together. The
-// windows-slow rows
-// came later and from the CI runner itself: they PASS in isolation and in a
-// full concurrent run on a different clone, and are cancelled only in the
-// runner's own working directory. Both are measurements; they are not the SAME
-// measurement, which is why the record's totals and this file's differ.
+// removed nine (docs/records/windows-path-containment-7273.md), and #7288
+// re-measured the three symlink-create rows once the runner held the symlink
+// privilege and removed all three (docs/records/windows-symlink-grant-7288.md),
+// so the survey no longer accounts for every row one-to-one; read the records
+// together. The windows-slow rows came later and from the CI runner itself:
+// they PASS in isolation and in a full concurrent run on a different clone, and
+// are cancelled only in the runner's own working directory. Both are
+// measurements; they are not the SAME measurement, which is why the record's
+// totals and this file's differ.
 //
 // A category may currently classify zero rows. That is not dead weight, but the
 // reason varies and it is worth being exact: either the file guards its
@@ -359,25 +362,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'stages an unreadable file to prove the lint exits 2 rather than 1; Windows reads it and the fail-closed path is never taken',
   },
-  // ── needs symlink creation privilege (3)
-  {
-    file: 'tests/file-ref-attachments.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'asserts an error for a symlink escaping the project directory; the link cannot be created so the file is merely not found',
-  },
-  {
-    file: 'tests/permission-manager-floor-symlink-evasion.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'the #6921 PoC needs a real symlink to prove the floor blocks the escape; without it the raw write lands on the fixture, not the target',
-  },
-  {
-    file: 'tests/ws-file-ops-raw-path-symlink-evasion.test.js',
-    reason: 'symlink-create',
-    symptom: 'fail',
-    note: 'the raw-path PoC needs work -> .claude/worktrees to be a real symlink to resolve out of the project',
-  },
   // ── hardcodes a rooted POSIX path as the expected value (6)
   {
     file: 'tests/config-dir.test.js',
@@ -437,7 +421,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (23)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (22)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -458,13 +442,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'the runner survey groups nothing (expected 4, measured 0) and gh enrichment does not run',
     issue: 7274,
-  },
-  {
-    file: 'tests/handlers/checkpoint-handlers.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is the core.autocrlf setting in git handing back state-A\r\n where the fixture wrote state-A\n',
-    issue: 7285,
   },
   {
     file: 'tests/list-files.test.js',
@@ -596,8 +573,8 @@ export const WINDOWS_EXEMPT = [
     file: 'tests/ws-server-file-ops.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'the containment seam is fixed (#7273) — 17 of 18 failures gone; the last one is the premise of the fixture itself: os.tmpdir() is INSIDE os.homedir() on Windows, so its outside-home symlink target is not outside home',
-    issue: 7285,
+    note: 'the #7285 fixture premise is fixed (its outside-home target is now %SystemRoot%); what remains is read_file on a MISSING file under the CI account 8.3 short tmpdir: the ENOENT branch compares the lexical path against the native-realpath cwd and answers Access denied instead of File not found',
+    issue: 8000,
   },
 ]
 

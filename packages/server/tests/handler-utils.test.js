@@ -42,25 +42,7 @@ import {
   isSessionViewer,
   terminalMirrorRecipient,
 } from '../src/handler-utils.js'
-
-// #7273 — a directory, and a file, that are genuinely OUTSIDE $HOME on THIS
-// platform. Both of the obvious POSIX choices are wrong on Windows: `/etc` does
-// not exist at all, and `os.tmpdir()` is INSIDE the user profile there
-// (`C:\\Users\\x\\AppData\\Local\\Temp`), so a fixture built on either tests
-// nothing — it fails on a missing path rather than on the containment rule it
-// means to exercise. %SystemRoot% is outside the profile on every Windows
-// install, and ships the hosts file at a stable location.
-//
-// Using a real out-of-home path rather than skipping keeps these assertions
-// LOAD-BEARING on Windows, which is the point: three of them previously passed
-// on Windows only because the containment check denied everything, and would
-// have kept passing had the check been removed entirely.
-const OUTSIDE_HOME_DIR = process.platform === 'win32'
-  ? (process.env.SystemRoot || 'C:\\Windows')
-  : '/etc'
-const OUTSIDE_HOME_FILE = process.platform === 'win32'
-  ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
-  : '/etc/hosts'
+import { OUTSIDE_HOME_DIR, OUTSIDE_HOME_FILE } from './helpers/outside-home.js'
 
 // audit P1-2: the live-terminal mirror recipient predicate. The delivery filter
 // (ws-forwarding) and the coalescer gate (ws-server) must use this same function

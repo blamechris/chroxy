@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSyn
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { PermissionManager, isProtectedPathTarget, isSecretReadTarget } from '../src/permission-manager.js'
+import { SKIP_WIN32_LEXICAL_DOTDOT } from './helpers/symlink-support.js'
 
 /**
  * #6851 — the protected-path floor resolves SYMLINKS before the segment scan.
@@ -210,19 +211,21 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
   // below build the exact topologies from the issue and PROVE, with real
   // on-disk writes, that (a) the raw path physically lands on the protected
   // file, and (b) the floor now FLAGS it — closing the gap.
+  //
+  // (a) and (b) are separate tests (#7288). (a) is POSIX-only: on Windows Node
+  // collapses the `..` as text before any syscall, so the raw write lands on
+  // the lexical target and the attack does not exist there — see
+  // SKIP_WIN32_LEXICAL_DOTDOT. (b) runs everywhere; on Windows the floor still
+  // flags the path, which is the conservative direction.
   // ==========================================================================
 
-  it('PoC #6921/1: `work/agent-x/../../settings.local.json` from repo root is floored, and a raw write proves it lands on the REAL .claude/settings.local.json', () => {
+  it('PoC #6921/1 premise: a raw write through `work/agent-x/../../settings.local.json` lands on the REAL .claude/settings.local.json', { skip: SKIP_WIN32_LEXICAL_DOTDOT }, () => {
     // The REAL chroxy topology — no attacker-planted symlink: work -> .claude/worktrees.
     mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
     writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
     symlinkSync(join(root, '.claude/worktrees'), join(root, 'work'))
     const cwd = root // session runs at the repo root
     const evasion = 'work/agent-x/../../settings.local.json'
-
-    // path.resolve() still LEXICALLY collapses the `..`s to a benign target —
-    // this is exactly why the pre-#6921 (lexical + realpath) floor missed it.
-    assert.equal(resolve(cwd, evasion), join(root, 'settings.local.json'))
 
     // PROOF the target is genuinely dangerous: a raw open(2)-style write through
     // the exact path physically clobbers the REAL .claude/settings.local.json
@@ -235,6 +238,18 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
       'PWNED',
       'the raw write really lands on the protected .claude/settings.local.json',
     )
+  })
+
+  it('PoC #6921/1: `work/agent-x/../../settings.local.json` from repo root is floored', () => {
+    mkdirSync(join(root, '.claude/worktrees/agent-x'), { recursive: true })
+    writeFileSync(join(root, '.claude/settings.local.json'), 'ORIGINAL')
+    symlinkSync(join(root, '.claude/worktrees'), join(root, 'work'))
+    const cwd = root
+    const evasion = 'work/agent-x/../../settings.local.json'
+
+    // path.resolve() still LEXICALLY collapses the `..`s to a benign target —
+    // this is exactly why the pre-#6921 (lexical + realpath) floor missed it.
+    assert.equal(resolve(cwd, evasion), join(root, 'settings.local.json'))
 
     // The floor now FLAGS it — under BOTH the write floor and the read/credential
     // floor (settings*.json is credential-dense: may hold ANTHROPIC_API_KEY).
@@ -242,7 +257,7 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
     assert.equal(isSecretReadTarget({ file_path: evasion }, cwd), true, 'read/credential floor must flag settings.local.json')
   })
 
-  it('PoC #6921/2: `glink/../config` where glink -> .git/hooks is floored under BOTH floors, and a raw write proves it lands on the REAL .git/config', () => {
+  it('PoC #6921/2 premise: a raw write through `glink/../config` (glink -> .git/hooks) lands on the REAL .git/config', { skip: SKIP_WIN32_LEXICAL_DOTDOT }, () => {
     // glink -> repo/.git/hooks ; `glink/../config` follows glink into .git/hooks,
     // then `..` climbs to .git, landing on .git/config — a credential file (a
     // remote URL can embed a PAT).
@@ -252,13 +267,21 @@ describe('protected-path floor resolves symlinks (#6851)', () => {
     const cwd = join(root, 'repo')
     const evasion = 'glink/../config'
 
-    // Lexically benign (glink/.. cancels to nothing) — the old floor missed it.
-    assert.equal(resolve(cwd, evasion), join(root, 'repo/config'))
-
     // PROOF: a raw write really lands on the real .git/config (STRING concat, not
     // path.join — join would collapse `glink/..` lexically and miss the symlink).
     writeFileSync(`${cwd}/${evasion}`, 'PWNED')
     assert.equal(readFileSync(join(root, 'repo/.git/config'), 'utf8'), 'PWNED', 'the raw write really lands on .git/config')
+  })
+
+  it('PoC #6921/2: `glink/../config` where glink -> .git/hooks is floored under BOTH floors', () => {
+    mkdirSync(join(root, 'repo/.git/hooks'), { recursive: true })
+    writeFileSync(join(root, 'repo/.git/config'), '[core]\n')
+    symlinkSync(join(root, 'repo/.git/hooks'), join(root, 'repo/glink'))
+    const cwd = join(root, 'repo')
+    const evasion = 'glink/../config'
+
+    // Lexically benign (glink/.. cancels to nothing) — the old floor missed it.
+    assert.equal(resolve(cwd, evasion), join(root, 'repo/config'))
 
     // Floored under BOTH the write floor and the read/credential floor.
     assert.equal(isProtectedPathTarget({ file_path: evasion }, cwd), true, 'write floor')
