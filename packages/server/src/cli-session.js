@@ -15,7 +15,7 @@ import { forceKill, killProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent } from './claude-stream-parser.js'
-import { resolveBinary } from './utils/resolve-binary.js'
+import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
@@ -28,24 +28,6 @@ import { formatIdleDuration } from './session-timeout-manager.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('cli-session')
-
-// Well-known fallback locations. Under a GUI launch (e.g. Tauri on macOS) PATH
-// is minimal and may exclude the user's install dir — fall through to these so
-// `spawn()` succeeds.
-const CLAUDE_BINARY_CANDIDATES = [
-  join(homedir(), '.local/bin/claude'),
-  '/opt/homebrew/bin/claude',
-  '/usr/local/bin/claude',
-  join(homedir(), '.claude/local/node_modules/.bin/claude'),
-  join(homedir(), '.npm-global/bin/claude'),
-]
-
-// Re-resolve fresh on every spawn (NOT a frozen module-load const) so a binary
-// quarantined / moved / reinstalled after daemon start is spawned from its
-// CURRENT path — and matches what preflight verified (#6708 defect #3).
-function resolveClaudeBinary() {
-  return resolveBinary('claude', CLAUDE_BINARY_CANDIDATES)
-}
 
 // Default max accumulated size for tool_use input_json_delta chunks (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
@@ -318,13 +300,7 @@ export class CliSession extends BaseSession {
       binary: {
         name: 'claude',
         args: ['--version'],
-        candidates: [
-          join(homedir(), '.local/bin/claude'),
-          '/opt/homebrew/bin/claude',
-          '/usr/local/bin/claude',
-          join(homedir(), '.claude/local/node_modules/.bin/claude'),
-          join(homedir(), '.npm-global/bin/claude'),
-        ],
+        candidates: CLAUDE_BINARY_CANDIDATES,
         installHint: 'install Claude Code CLI',
       },
       credentials: {

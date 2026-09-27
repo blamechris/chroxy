@@ -8,7 +8,7 @@ import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
-import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError } from './utils/preflight.js'
+import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
@@ -195,9 +195,9 @@ export { formatIdleDuration }
 
 // Re-export preflight errors so call sites that catch createSession() failures
 // can detect/branch on PROVIDER_BINARY_NOT_FOUND / PROVIDER_BINARY_QUARANTINED /
-// PROVIDER_BINARY_PROVENANCE / PROVIDER_CREDENTIAL_MISSING without taking a
-// separate dependency on utils/preflight.js.
-export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderCredentialMissingError }
+// PROVIDER_BINARY_PROVENANCE / PROVIDER_BINARY_UNSUPPORTED / PROVIDER_BINARY_VERSION /
+// PROVIDER_CREDENTIAL_MISSING without taking a separate dependency on utils/preflight.js.
+export { ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError }
 export { UnsupportedPermissionModeError }
 
 /**

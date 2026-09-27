@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `claude-sdk` provider now spawns your installed `claude`, resolved through
+  the same candidate list preflight verifies at session create (#7986).**
+  The Agent SDK's `query()` spawns its own bundled platform binary unless told
+  otherwise, while preflight, including the opt-in provenance gate, verified
+  the installed `claude`. So the binary that was checked was not the binary
+  that ran. `SdkSession` now sets `pathToClaudeCodeExecutable`, re-resolved
+  through the shared resolver on every turn — the same resolver preflight used
+  at session create, but each turn's resolve is not itself re-verified, so a
+  binary swapped in place mid-session spawns unchecked until the next session
+  create. The session summarizer's one-shot `query()`, which semantic session
+  titles also use, sets the same resolved path but is not preflighted or
+  provenance-checked at all. See #8030.
+
+  Preflight also enforces a minimum `claude` version for the SDK provider:
+  the installed SDK's own `claudeCodeVersion`, not a hand-kept constant.
+  A binary below it gets a `claude update` remediation instead of a mid-turn
+  failure. On Windows, the SDK spawns without a shell, so it needs the native
+  `claude.exe`; an npm `.cmd` shim is refused before any probe with its own
+  error, `PROVIDER_BINARY_UNSUPPORTED`, and `chroxy doctor` fails it the same way.
+  `chroxy doctor` resolves the same derived minimum.
+
+  The generic minimum-version gate also makes preflight enforce
+  `claude-channel`'s existing `claude >= 2.1.80` floor at session creation.
+  That floor was previously checked only by `chroxy doctor`. The `claude`
+  binary-candidate list, which was copied across five modules and missed
+  `~/.local/bin/claude` in the SDK's copy, is now a single shared list.
+
+- **Desktop: the app bundle drops the Agent SDK's ~207 MB unsigned `claude`
+  binary, and the notarization guard now catches extension-less Mach-O files (#7986).**
+  `bundle-server.sh` prunes the `@anthropic-ai/claude-agent-sdk-<platform>`
+  packages on every host. The server no longer spawns them, and on macOS the
+  unsigned binary was invisible to the extension-based native-binary guard.
+  The guard now also scans the staged tree by Mach-O magic bytes, covering
+  thin and fat binaries in both byte orders and telling Java class files
+  apart. The universal macOS app no longer carries an arm64-only SDK binary,
+  since each user's own `claude` matches their architecture.
+
 - **Desktop: the tray app now honours `CHROXY_CONFIG_DIR` (#7241).** `config.rs`,
   `settings.rs`, `qrcode.rs` and the "Reveal in Finder" action each resolved
   `~/.chroxy` from `dirs::home_dir()` and never read the override, so a relocated

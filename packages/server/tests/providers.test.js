@@ -10,6 +10,7 @@ import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
+import { CLAUDE_BINARY_CANDIDATES } from '../src/utils/claude-binary.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -1821,5 +1822,94 @@ describe('codex provider default — app-server (#6616)', () => {
 
   it('the opt-out never affects non-codex providers', () => {
     withEnv('0', () => assert.equal(getProvider('claude-cli'), CliSession))
+  })
+})
+
+// #7986 — the claude `claude` binary candidate list used to be copied across
+// five modules (cli-session.js x2, claude-tui-session.js, claude-channel-
+// session.js, claude-tui/pty-driver.js, plus the SDK's own 2-entry subset).
+// It is now the ONE list in utils/claude-binary.js, imported everywhere.
+// This test enumerates the REGISTRY (not a hand-typed provider list) and
+// checks parity in both directions: every provider whose preflight declares
+// it spawns the `claude` binary must reference the exact shared array
+// (reference equality, not just deep-equal — a provider that still literally
+// re-typed the array would fail this even if the values happened to match),
+// AND the known claude-family providers must actually be discovered that
+// way (so a broken predicate — e.g. a renamed `binary.name` — can't silently
+// shrink the checked set to zero).
+describe('claude binary candidate-list parity (#7986)', () => {
+  function discoverClaudeFamilyProviders() {
+    const found = []
+    for (const name of getRegisteredProviderNames()) {
+      let ProviderClass
+      try {
+        ProviderClass = getProvider(name)
+      } catch {
+        continue
+      }
+      const spec = ProviderClass.preflight
+      if (spec?.binary?.name === 'claude') {
+        found.push({ name, ProviderClass })
+      }
+    }
+    return found
+  }
+
+  it('discovers at least one claude-family provider via the registry', () => {
+    const found = discoverClaudeFamilyProviders()
+    assert.ok(found.length > 0, 'expected at least one provider with preflight.binary.name === "claude"')
+  })
+
+  it('every discovered claude-family provider uses the exact shared candidate array (no re-typed copy)', () => {
+    const found = discoverClaudeFamilyProviders()
+    for (const { name, ProviderClass } of found) {
+      const candidates = ProviderClass.preflight.binary.candidates
+      assert.equal(
+        candidates, CLAUDE_BINARY_CANDIDATES,
+        `${name}'s preflight.binary.candidates must be the SAME array reference as CLAUDE_BINARY_CANDIDATES (a deep-equal-but-separate array is exactly the drift-prone copy this replaced)`,
+      )
+    }
+  })
+
+  it('no known claude-family provider was missed by the discovery predicate', () => {
+    // Direction 2: the registry-derived set above must not have silently
+    // shrunk (e.g. a typo in binary.name on one provider would make it
+    // vanish from `discoverClaudeFamilyProviders()` without failing the
+    // "every discovered provider matches" assertion above, since a provider
+    // that isn't discovered is never checked at all).
+    //
+    // #7986 review N8: the "should have been discovered" roster is derived
+    // from the registry's OWN `claudeFamily === true` classification (the
+    // same flag models.js's isClaudeProvider() uses) rather than a
+    // hand-typed name list, minus an explicit exemption for providers that
+    // ARE claude-family but drive an API directly instead of spawning the
+    // `claude` binary — so a FIFTH claude-family provider is forced into
+    // this comparison automatically instead of needing a line added here.
+    const NON_BINARY_CLAUDE_FAMILY = new Set(['claude-byok', 'docker-byok'])
+    const expectedNames = []
+    for (const name of getRegisteredProviderNames()) {
+      if (NON_BINARY_CLAUDE_FAMILY.has(name)) continue
+      let ProviderClass
+      try {
+        ProviderClass = getProvider(name)
+      } catch {
+        continue
+      }
+      if (ProviderClass.claudeFamily === true) expectedNames.push(name)
+    }
+    assert.ok(expectedNames.length > 0, 'expected at least one claudeFamily===true provider in the registry')
+
+    const discoveredNames = new Set(discoverClaudeFamilyProviders().map((p) => p.name))
+    for (const expected of expectedNames) {
+      assert.ok(
+        discoveredNames.has(expected),
+        `expected "${expected}" (claudeFamily===true) to be discovered as claude-family (preflight.binary.name === "claude") — it lost that preflight shape`,
+      )
+    }
+  })
+
+  it('non-claude-family providers are excluded (byok has no claude binary spawn)', () => {
+    const discoveredNames = new Set(discoverClaudeFamilyProviders().map((p) => p.name))
+    assert.equal(discoveredNames.has('claude-byok'), false, 'claude-byok drives the Messages API directly — it must not appear as claude-family')
   })
 })

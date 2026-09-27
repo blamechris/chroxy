@@ -5,10 +5,13 @@ import {
   ProviderBinaryNotFoundError,
   ProviderBinaryQuarantinedError,
   ProviderBinaryProvenanceError,
+  ProviderBinaryUnsupportedError,
+  ProviderBinaryVersionError,
   ProviderCredentialMissingError,
 } from '../src/utils/preflight.js'
 import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
+import { SdkSession } from '../src/sdk-session.js'
 
 /**
  * Tests for runProviderPreflight — verifies binary + credential checks
@@ -306,6 +309,408 @@ describe('runProviderPreflight — opt-in provenance gate (#6858)', () => {
   })
 })
 
+describe('runProviderPreflight — minimum version gate (#7986)', () => {
+  // A healthy, non-quarantined, provenance-agnostic binary so every test in
+  // this block reaches the version gate.
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+
+  function makeVersionedProvider(minVersion) {
+    return makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: { name: 'claude', args: ['--version'], candidates: [], minVersion },
+      },
+    })
+  }
+
+  it('throws ProviderBinaryVersionError with found/required when the installed binary is too old', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryVersionError, `got ${err?.name}`)
+        assert.equal(err.code, 'PROVIDER_BINARY_VERSION')
+        assert.equal(err.reason, 'too_old')
+        assert.equal(err.found, '2.1.80')
+        assert.equal(err.required, '2.1.141')
+        // makeVersionedProvider declares no updateHint/installHint, so the
+        // remediation falls back to the generic `update <name>` (#7986 review S2).
+        assert.match(err.message, /update claude/)
+        return true
+      },
+    )
+  })
+
+  it('passes when the installed version equals the required minimum exactly', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.141' }),
+    )
+  })
+
+  it('passes when the installed version is newer than the required minimum', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.283' }),
+    )
+  })
+
+  it('throws with reason "unreadable" when the probe cannot determine a version', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.throws(
+      () => runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => null }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryVersionError, `got ${err?.name}`)
+        assert.equal(err.reason, 'unreadable')
+        assert.equal(err.found, null)
+        return true
+      },
+    )
+  })
+
+  it('a null minVersion (thunk) skips the check without throwing', () => {
+    const Provider = makeVersionedProvider(() => null)
+    let probeCalled = false
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+    )
+    assert.equal(probeCalled, false, 'the probe must not run when minVersion resolves to null')
+  })
+
+  it('an invalid (unparseable) minVersion string skips the check without throwing', () => {
+    const Provider = makeVersionedProvider('not-a-real-version')
+    let probeCalled = false
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+    )
+    assert.equal(probeCalled, false)
+  })
+
+  it('a provider with no minVersion key at all never calls the probe', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'X', binary: { name: 'node', candidates: [] } },
+    })
+    let probeCalled = false
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        probeVersion: () => { probeCalled = true; return '1.0.0' },
+      }),
+    )
+    assert.equal(probeCalled, false, 'minVersion is optional — no key means no probe at all')
+  })
+
+  it('resolves a thunk minVersion once per call (e.g. sdkClaudeCodeVersion())', () => {
+    let thunkCalls = 0
+    const Provider = makeVersionedProvider(() => { thunkCalls += 1; return '2.1.141' })
+    runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.200' })
+    assert.equal(thunkCalls, 1)
+  })
+
+  it('the probe is NOT called when the binary is not found', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probeCalled = false
+    const notFound = () => ({ ok: false, status: BINARY_STATUS.NOT_FOUND, path: 'claude', quarantine: null })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: notFound,
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+      ProviderBinaryNotFoundError,
+    )
+    assert.equal(probeCalled, false, 'a missing binary must never reach the version probe')
+  })
+
+  it('the probe is NOT called when the binary is quarantined', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probeCalled = false
+    const quarantined = (path) => ({ ok: false, status: BINARY_STATUS.QUARANTINED, path, quarantine: '0081;x;x;x' })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: quarantined,
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+      ProviderBinaryQuarantinedError,
+    )
+    assert.equal(probeCalled, false, 'a quarantined binary must never reach the version probe')
+  })
+
+  it('the probe is NOT called when block-mode provenance fails', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probeCalled = false
+    const blockedVerdict = () => ({
+      ok: false,
+      status: PROVENANCE_STATUS.HASH_MISMATCH,
+      blocked: true,
+      path: '/fake/claude',
+      hash: 'b'.repeat(64),
+      pinnedHash: 'a'.repeat(64),
+      message: 'binary hash changed since it was pinned',
+      remediation: 're-approve it',
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        verifyProvenance: blockedVerdict,
+        provenance: { mode: 'block', signatureGate: false, ledger: {} },
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+      ProviderBinaryProvenanceError,
+    )
+    assert.equal(probeCalled, false, 'a block-mode provenance failure must never reach the version probe')
+  })
+
+  it('the probe IS called after a warn-mode provenance issue (that gate does not block)', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probeCalled = false
+    const warnVerdict = () => ({
+      ok: true,
+      status: PROVENANCE_STATUS.HASH_MISMATCH,
+      blocked: false,
+      path: '/fake/claude',
+      hash: 'b'.repeat(64),
+      pinnedHash: 'a'.repeat(64),
+      message: 'hash changed',
+    })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        verifyProvenance: warnVerdict,
+        provenance: { mode: 'warn', signatureGate: false, ledger: {} },
+        probeVersion: () => { probeCalled = true; return '2.1.200' },
+      }),
+    )
+    assert.equal(probeCalled, true, 'warn-mode does not block, so the version gate still runs')
+  })
+
+  it('passes the healthy verified path (not a stale candidate) to the probe', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probedPath = null
+    runProviderPreflight(Provider, {
+      env: {},
+      verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: '/verified/claude', quarantine: null }),
+      probeVersion: (path) => { probedPath = path; return '2.1.200' },
+    })
+    assert.equal(probedPath, '/verified/claude')
+  })
+
+  it('passes spec.binary.args through to the probe', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: { name: 'claude', args: ['version', '--json'], candidates: [], minVersion: '2.1.141' },
+      },
+    })
+    let probedArgs = null
+    runProviderPreflight(Provider, {
+      env: {},
+      verifyBinary: okVerify,
+      probeVersion: (_path, args) => { probedArgs = args; return '2.1.200' },
+    })
+    assert.deepEqual(probedArgs, ['version', '--json'])
+  })
+
+  it('defaults probe args to ["--version"] when spec.binary.args is absent', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    let probedArgs = null
+    runProviderPreflight(Provider, {
+      env: {},
+      verifyBinary: okVerify,
+      probeVersion: (_path, args) => { probedArgs = args; return '2.1.200' },
+    })
+    assert.deepEqual(probedArgs, ['--version'])
+  })
+
+  it('with no updateHint/installHint declared, the remediation falls back to `update <name>`', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.match(err.remediation, /update claude/)
+        return true
+      },
+    )
+  })
+
+  it('prefers the provider-declared updateHint over installHint and the generic fallback', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: {
+          name: 'claude',
+          candidates: [],
+          minVersion: '2.1.141',
+          installHint: 'install Claude Code',
+          updateHint: 'run `claude update`',
+        },
+      },
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.match(err.remediation, /claude update/)
+        return true
+      },
+    )
+  })
+
+  it('falls back to installHint when updateHint is absent', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Codex',
+        binary: {
+          name: 'codex',
+          candidates: [],
+          minVersion: '2.1.141',
+          installHint: 'install Codex CLI',
+        },
+      },
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.equal(err.remediation, 'install Codex CLI')
+        return true
+      },
+    )
+  })
+})
+
+describe('runProviderPreflight — direct-exec shim refusal (#7986 review S2)', () => {
+  function makeDirectExecProvider({ requiresDirectExec = true, minVersion } = {}) {
+    return makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: {
+          name: 'claude',
+          candidates: [],
+          requiresDirectExec,
+          ...(minVersion !== undefined ? { minVersion } : {}),
+        },
+      },
+    })
+  }
+
+  it('on win32, a .cmd path throws ProviderBinaryUnsupportedError, and neither probeVersion nor provenance runs', () => {
+    const Provider = makeDirectExecProvider({ minVersion: '2.1.141' })
+    let probeCalled = false
+    let provenanceCalled = false
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '2.1.200' },
+        verifyProvenance: () => { provenanceCalled = true; return { ok: true, blocked: false, status: PROVENANCE_STATUS.PINNED } },
+        provenance: { mode: 'block', signatureGate: false, ledger: {} },
+      }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryUnsupportedError, `got ${err?.name}`)
+        assert.equal(err.code, 'PROVIDER_BINARY_UNSUPPORTED')
+        assert.equal(err.binary, 'claude')
+        assert.equal(err.path, 'C:\\npm\\claude.cmd')
+        assert.match(err.remediation, /without a shell/)
+        assert.match(err.remediation, /native/)
+        assert.match(err.remediation, /claude\.exe/)
+        return true
+      },
+    )
+    assert.equal(probeCalled, false, 'a shim refusal must never reach the version probe')
+    assert.equal(provenanceCalled, false, 'a shim refusal must never reach the provenance gate')
+  })
+
+  it('a bare .bat path on win32 is refused the same way', () => {
+    const Provider = makeDirectExecProvider()
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.bat', quarantine: null }),
+      }),
+      ProviderBinaryUnsupportedError,
+    )
+  })
+
+  it('on darwin (or any non-win32), a .cmd-suffixed path is NOT refused', () => {
+    const Provider = makeDirectExecProvider()
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'darwin',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: '/weird/but/darwin/claude.cmd', quarantine: null }),
+      }),
+    )
+  })
+
+  it('a provider WITHOUT requiresDirectExec is not refused on win32 with a .cmd path', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'Claude Channel', binary: { name: 'claude', candidates: [] } },
+    })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+      }),
+    )
+  })
+
+  it('the shim refusal fires even when minVersion resolves to null (the version gate alone would have skipped)', () => {
+    const Provider = makeDirectExecProvider({ minVersion: () => null })
+    let probeCalled = false
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '2.1.200' },
+      }),
+      ProviderBinaryUnsupportedError,
+    )
+    assert.equal(probeCalled, false)
+  })
+
+  it('a healthy native .exe path on win32 is not refused', () => {
+    const Provider = makeDirectExecProvider({ minVersion: '2.1.141' })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\Users\\chris\\.local\\bin\\claude.exe', quarantine: null }),
+        probeVersion: () => '2.1.200',
+      }),
+    )
+  })
+})
+
 describe('runProviderPreflight — credential checks', () => {
   it('throws ProviderCredentialMissingError when required env var is absent', () => {
     const Provider = makeProvider({
@@ -417,5 +822,28 @@ describe('runProviderPreflight — opt-out cases', () => {
   it('does nothing when ProviderClass is null/undefined', () => {
     assert.doesNotThrow(() => runProviderPreflight(null))
     assert.doesNotThrow(() => runProviderPreflight(undefined))
+  })
+})
+
+// #7986 round-2 review S-B: the shim refusal is only as good as the flag on the
+// provider that needs it. Without these, flipping SdkSession's
+// requiresDirectExec to false left every suite green.
+describe('SdkSession declares and enforces requiresDirectExec (#7986)', () => {
+  it('its preflight spec sets requiresDirectExec: true', () => {
+    assert.equal(SdkSession.preflight.binary.requiresDirectExec, true)
+  })
+
+  it('the real SdkSession spec refuses a Windows .cmd shim before the version probe runs', () => {
+    let probeCalled = false
+    assert.throws(
+      () => runProviderPreflight(SdkSession, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+      (err) => err instanceof ProviderBinaryUnsupportedError && err.code === 'PROVIDER_BINARY_UNSUPPORTED',
+    )
+    assert.equal(probeCalled, false)
   })
 })

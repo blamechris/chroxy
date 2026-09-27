@@ -56,9 +56,10 @@ unverified-binaries gap it exposed is real regardless.)
   WS layer surfaces as a `session_error` with that code (see
   [error-taxonomy.md](../error-taxonomy.md)).
 - **Fresh re-resolution (no stale const).** The `resolvedBinary` accessors for
-  `codex`, `gemini`, `claude-cli`, and `claude-tui` re-resolve on every access
-  instead of returning a frozen import-time `const`, so a binary that changed
-  after boot is spawned from its current path.
+  `codex`, `gemini`, `claude-cli`, `claude-tui`, and (since #7986) `claude-sdk`
+  re-resolve on every access instead of returning a frozen import-time
+  `const`, so a binary that changed after boot is spawned from its current
+  path.
 - **Spawn-time backstop.** If a spawn still fails after preflight passed (the
   binary changed between create and turn), the subprocess catch re-verifies and
   labels the error (quarantine vs vanished) instead of an opaque `ENOENT`.
@@ -248,7 +249,70 @@ it fails open to empty and re-pins every binary on next spawn). A programmatic
 `revoke(path)` / `approve(path, hash)` API exists on the ledger for a future CLI /
 dashboard surface.
 
-## 5. Operator remediation quick reference
+## 5. The `claude-sdk` provider spawns the installed `claude` (#7986)
+
+Before #7986, `claude-sdk` was the odd one out: its `preflight` verified an
+installed `claude` binary, but the Agent SDK's `query()` — unless told
+otherwise — resolved and spawned its OWN bundled platform binary
+(`@anthropic-ai/claude-agent-sdk-<platform>-<arch>/claude`). Preflight and the
+real spawn checked two different files. Chroxy no longer bundles that
+platform package (removed from the desktop build), so `SdkSession` now sets
+`pathToClaudeCodeExecutable` to `resolveClaudeBinary()` on every turn, before
+any subclass hook (`_augmentQueryOptions`) runs — the SAME resolver
+`static get resolvedBinary` hands to preflight, so both read the shared
+candidate list rather than two independently-maintained ones.
+
+**This closes the "checked one file, ran another" gap, but it is a
+resolver-parity fix, not a per-turn re-verification.** Preflight's
+quarantine/provenance/version gates run ONCE, at session create, against
+whatever `resolveClaudeBinary()` returns at that moment. Every subsequent
+turn calls the same resolver again — not the cached, already-verified path —
+so if the binary at that path is swapped, quarantined, or hash-mismatched
+*between* session create and a later turn, that turn spawns it unverified;
+the next session create is what re-checks. The session summarizer's one-shot
+`query()` (`defaultRunOneShot` in `summarize-session.js`) sets the same
+resolved path but has no session-create step at all — it is never preflighted
+or provenance-checked, in any mode. Both gaps are pre-existing (the summarizer
+already ran an unverified bundled binary before this PR) and are tracked in
+#8030, not fixed here.
+
+This closes the gap but also means `claude-sdk` inherits the SAME exposure
+P1/P2 already cover for `claude-cli`/`claude-tui`/`claude-channel`: quarantine
+detection, and (opt-in) the SHA-256 pin ledger + signature gate, both checked
+at session create. Nothing provider-specific was added for the version gate
+below — it is generic `runProviderPreflight` machinery any provider can opt
+into via `spec.binary.minVersion`.
+
+**Version gate, and where it sits relative to the other gates.** `claude-sdk`
+declares `minVersion: () => sdkClaudeCodeVersion()` — the installed
+`@anthropic-ai/claude-agent-sdk` package's own `claudeCodeVersion` field (the
+`claude` version that SDK build was tested against), read fresh from
+`node_modules` rather than hand-kept as a constant that could drift on an SDK
+bump. `runProviderPreflight` runs this probe **strictly after** verifyBinary
+and the provenance gate both pass: a binary that's missing, quarantined, or
+blocked by `block`-mode provenance is never exec'd for a `--version` probe.
+An installed `claude` older than the required floor throws
+`ProviderBinaryVersionError` (`code: PROVIDER_BINARY_VERSION`) with a
+`claude update` remediation — this is a version-skew problem, not a
+"reinstall from scratch" one. Before either gate, a provider that declares
+`binary.requiresDirectExec` (the SDK provider does, because the Agent SDK
+spawns `claude` with no shell) refuses a Windows `.cmd`/`.bat` npm shim with
+`ProviderBinaryUnsupportedError` (`code: PROVIDER_BINARY_UNSUPPORTED`): such a
+shim can never be spawned that way, and it is never exec'd. The probe itself
+(`utils/binary-version.js#probeBinaryVersion`) is cached by stat identity
+(path + dev + ino + size + mtimeMs) so a `claude update` invalidates the
+cache and repeated session-creates against an unchanged binary don't.
+
+**The desktop bundle no longer ships the SDK platform binary.** The prior
+model bundled `@anthropic-ai/claude-agent-sdk-darwin-arm64` (and friends) so
+`claude-sdk` worked without a separate `claude` install; that package is now
+pruned from `packages/desktop`'s staged server, and the Mach-O bundle guard
+(`scripts/find-macho.mjs`) checks for it by magic bytes, not just by
+extension, so an unpruned platform binary fails the build rather than
+shipping silently. Every Claude Code provider — SDK included — now requires
+the same installed `claude` on the end user's machine.
+
+## 6. Operator remediation quick reference
 
 When `chroxy doctor` or a session error reports a **quarantined** binary:
 

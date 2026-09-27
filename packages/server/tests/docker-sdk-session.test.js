@@ -1139,6 +1139,34 @@ describe('DockerSdkSession real import (capabilities only)', () => {
     assert.equal(typeof mod.DEFAULT_CONTAINER_CLI_PATH, 'string')
   })
 
+  // #7986 review S4: DockerSdkSession.preflight used to spread SdkSession's
+  // `binary` spec WHOLESALE, so it carried the host claude version floor
+  // (minVersion), the direct-exec shim refusal (requiresDirectExec) and its
+  // updateHint — all of which are about the HOST claude binary that this
+  // provider never spawns (the container runs its OWN installed claude, see
+  // #8027). runProviderPreflight itself skips containerised providers, but
+  // `doctor.js`'s checkProvider does not, so an unstripped spec would make
+  // `chroxy doctor` / `chroxy start` fail a docker-sdk install over an old or
+  // shimmed HOST claude this provider is entirely indifferent to.
+  it('DockerSdkSession.preflight.binary has none of minVersion / requiresDirectExec / updateHint (#7986 S4)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    const { SdkSession } = await import('../src/sdk-session.js')
+    const binary = DockerSdkSession.preflight.binary
+    assert.ok(binary, 'preflight.binary must still be present')
+    assert.equal('minVersion' in binary, false, 'minVersion must not be inherited — the host floor does not apply in-container')
+    assert.equal('requiresDirectExec' in binary, false, 'requiresDirectExec must not be inherited — docker-sdk never spawns the host binary directly')
+    assert.equal('updateHint' in binary, false, 'updateHint must not be inherited — it is host-claude-specific remediation')
+    // Sanity: SdkSession itself DOES declare all three, so this is a real
+    // strip, not an accident of the parent spec never having them.
+    assert.ok('minVersion' in SdkSession.preflight.binary)
+    assert.ok('requiresDirectExec' in SdkSession.preflight.binary)
+    assert.ok('updateHint' in SdkSession.preflight.binary)
+    // The rest of the binary spec (name/candidates/args) is still inherited —
+    // this is a targeted strip, not a wholesale replacement.
+    assert.equal(binary.name, SdkSession.preflight.binary.name)
+    assert.equal(binary.candidates, SdkSession.preflight.binary.candidates)
+  })
+
   // #6766: the SDK provider forks conversations, but a containerized session's
   // transcript lives inside the container where the host-side fork can't reach
   // it — so DockerSdkSession must opt out and let restore degrade to files-only.

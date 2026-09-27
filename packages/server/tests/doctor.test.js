@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
+import { registerProvider } from '../src/providers.js'
+import { SdkSession } from '../src/sdk-session.js'
+import { sdkClaudeCodeVersion } from '../src/utils/agent-sdk-version.js'
+import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
 
 /**
  * Integration tests for doctor.js.
@@ -364,6 +368,132 @@ describe('checkBinary minVersion gate (#3953)', () => {
       installHint: 'install node',
     })
     assert.equal(result.status, 'pass')
+  })
+})
+
+// #7986 — `preflight.binary.minVersion` may be a THUNK (claude-sdk derives its
+// floor from the installed SDK's claudeCodeVersion). doctor read the field raw
+// and handed the function itself to compareSemver, so every claude-sdk install
+// failed `chroxy doctor` — and `chroxy start`, which runs the same checks — with
+// "requires claude ≥ () => sdkClaudeCodeVersion()". These drive the real
+// runDoctorChecks → checkProvider path with `node` standing in for the binary.
+describe('provider minVersion declared as a thunk (#7986)', () => {
+  function registerThunkFloorProvider(name, floor) {
+    class ThunkFloorSession extends SdkSession {
+      static get preflight() {
+        return {
+          label: name,
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath], minVersion: () => floor },
+        }
+      }
+    }
+    registerProvider(name, ThunkFloorSession)
+  }
+
+  function binaryRow(checks, provider) {
+    return checks.find((c) => c.provider === provider && c.name === 'node')
+  }
+
+  it('passes when the thunk resolves to a floor the binary meets', async () => {
+    registerThunkFloorProvider('test-7986-thunk-floor-ok', '18.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-thunk-floor-ok'] })
+    const row = binaryRow(checks, 'test-7986-thunk-floor-ok')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
+  })
+
+  it('fails naming the RESOLVED floor, not the function source, when the binary is older', async () => {
+    registerThunkFloorProvider('test-7986-thunk-floor-high', '999.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-thunk-floor-high'] })
+    const row = binaryRow(checks, 'test-7986-thunk-floor-high')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'fail')
+    assert.ok(row.message.includes('requires node ≥ 999.0.0'), row.message)
+    assert.ok(!row.message.includes('=>'), `the thunk's source leaked into the message: ${row.message}`)
+  })
+
+  it("claude-sdk's declared floor resolves to the installed SDK's claudeCodeVersion", () => {
+    const floor = resolveDeclaredMinVersion(SdkSession.preflight.binary.minVersion)
+    assert.equal(floor, sdkClaudeCodeVersion())
+    assert.ok(/^\d+\.\d+\.\d+/.test(floor || ''), `expected a semver floor, got ${JSON.stringify(floor)}`)
+  })
+})
+
+// #7986 review S2 — `chroxy start`'s preflight refuses a `requiresDirectExec`
+// provider's Windows npm shim via ProviderBinaryUnsupportedError, but doctor
+// runs its own binary check (checkBinary) rather than runProviderPreflight —
+// without a matching guard here, `chroxy doctor` would report a `.cmd` shim
+// as a healthy "pass" while `chroxy start` refuses to boot on the same binary.
+describe('doctor requiresDirectExec shim refusal (#7986 review S2)', () => {
+  // Named "node" (not "claude"), with process.execPath as the sole candidate,
+  // matching the thunk-floor fixtures above — deterministic regardless of
+  // whether a real `claude` happens to be on this test host's PATH.
+  function registerDirectExecProvider(name, resolvedBinary) {
+    class DirectExecSession extends SdkSession {
+      static get resolvedBinary() { return resolvedBinary }
+      static get preflight() {
+        return {
+          label: name,
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath], requiresDirectExec: true },
+        }
+      }
+    }
+    registerProvider(name, DirectExecSession)
+  }
+
+  function binaryRow(checks, provider) {
+    return checks.find((c) => c.provider === provider && c.name === 'node')
+  }
+
+  it('fails the binary row on win32 when the resolved path is a .cmd shim, without exec-ing it', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-cmd', 'C:\\npm\\node.cmd')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-cmd'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-cmd')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'fail')
+    assert.match(row.message, /node\.cmd/)
+    assert.match(row.message, /without a shell/)
+  })
+
+  it('passes on win32 when the resolved path is the native executable, not a shim', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-exe', process.execPath)
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-exe'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-exe')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
+  })
+
+  it('off win32 (the default platform), a .cmd-suffixed resolved path is not refused', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-darwin', 'C:\\npm\\node.cmd')
+    // resolvedBinary is a .cmd path (as it might be, hypothetically, on a
+    // non-Windows host), but the resolved value is only ever a REAL shim
+    // concern on win32 — off win32, isShellShim is false regardless of
+    // suffix, so this must fall through to the real checkBinary exec, which
+    // resolves 'node' via the candidate (process.execPath) and passes.
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-darwin'], platform: 'darwin' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-darwin')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass')
+  })
+
+  it('a provider without requiresDirectExec is unaffected on win32', async () => {
+    class NoDirectExecSession extends SdkSession {
+      static get resolvedBinary() { return 'C:\\npm\\node.cmd' }
+      static get preflight() {
+        return {
+          label: 'no-direct-exec',
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath] },
+        }
+      }
+    }
+    registerProvider('test-7986-no-direct-exec', NoDirectExecSession)
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-no-direct-exec'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-no-direct-exec')
+    assert.ok(row, 'the provider binary row must be present')
+    // Falls through to the real checkBinary exec (which ignores
+    // resolvedBinary and resolves via name+candidates) — not a shim
+    // refusal, so it must NOT carry the shim-specific wording.
+    assert.doesNotMatch(row.message, /without a shell/)
   })
 })
 

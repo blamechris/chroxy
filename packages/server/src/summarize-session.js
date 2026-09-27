@@ -22,6 +22,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { extractSearchableText } from './conversation-search.js'
+import { resolveClaudeBinary } from './utils/claude-binary.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('summarize')
@@ -178,14 +179,21 @@ export function buildSummaryPrompt({ transcript, truncated, sessionName }) {
  * user prompt, and the result text collected from assistant content blocks.
  * Used when the caller doesn't inject a `runOneShot` seam.
  *
+ * `queryFn` / `resolveExecutable` are injectable seams (default to the real
+ * SDK `query` and `resolveClaudeBinary`) so a test can assert on the built
+ * options — including `pathToClaudeCodeExecutable` (#7986) — without module-
+ * mocking `@anthropic-ai/claude-agent-sdk`.
+ *
  * @param {object} args
  * @param {string} args.prompt
  * @param {string} [args.model] - model id; omitted lets the SDK pick its default.
  * @param {string} [args.cwd]
  * @param {AbortSignal} [args.signal]
+ * @param {Function} [args.queryFn] - injected in tests; defaults to the SDK's `query`.
+ * @param {Function} [args.resolveExecutable] - injected in tests; defaults to `resolveClaudeBinary`.
  * @returns {Promise<string>} the model's text reply.
  */
-export async function defaultRunOneShot({ prompt, model, cwd, signal }) {
+export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = query, resolveExecutable = resolveClaudeBinary }) {
   const options = {
     // No tools — a pure text summarization turn. The session must not be able
     // to read/write files or run commands during summarization.
@@ -194,13 +202,18 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal }) {
     allowDangerouslySkipPermissions: true,
     includePartialMessages: false,
     maxTurns: 1,
+    // #7986: the desktop bundle does not ship the Agent SDK's platform binary,
+    // and query() throws if pathToClaudeCodeExecutable is unset and that
+    // binary is absent — point it at the installed CLI, same as the chat-turn
+    // SDK provider, on every install.
+    pathToClaudeCodeExecutable: resolveExecutable(),
   }
   if (typeof cwd === 'string' && cwd) options.cwd = cwd
   if (typeof model === 'string' && model) options.model = model
   if (signal) options.abortController = abortControllerFromSignal(signal)
 
   const parts = []
-  const stream = query({ prompt, options })
+  const stream = queryFn({ prompt, options })
   for await (const msg of stream) {
     if (msg?.type === 'assistant' && Array.isArray(msg.message?.content)) {
       for (const block of msg.message.content) {
