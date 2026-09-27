@@ -93,6 +93,9 @@ export class ClaudeChannelSession extends BaseSession {
         minVersion: CLAUDE_CHANNEL_MIN_VERSION,
         candidates: CLAUDE_BINARY_CANDIDATES,
         installHint: `install Claude Code CLI ≥ ${CLAUDE_CHANNEL_MIN_VERSION} (research preview — channels)`,
+        // #7986 review S2: an old/unreadable claude on this floor is a
+        // version-skew problem, not a fresh install — `claude update` fixes it.
+        updateHint: 'run `claude update`',
       },
       credentials: {
         envVars: [],

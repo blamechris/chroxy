@@ -246,7 +246,15 @@ export class SdkSession extends BaseSession {
         args: ['--version'],
         candidates: CLAUDE_BINARY_CANDIDATES,
         minVersion: () => sdkClaudeCodeVersion(),
+        // #7986 review S2: the Agent SDK spawns `pathToClaudeCodeExecutable`
+        // directly via `child_process.spawn`, no shell — a Windows npm shim
+        // (`claude.cmd`/`claude.bat`) can never actually run under that. This
+        // makes the refusal explicit and unconditional (see isShellShim +
+        // ProviderBinaryUnsupportedError in utils/preflight.js) instead of
+        // relying on it falling out of the version probe's EINVAL.
+        requiresDirectExec: true,
         installHint: 'install Claude Code, or run `claude update` if it is installed — the SDK provider runs your installed claude',
+        updateHint: 'run `claude update`',
       },
       credentials: {
         envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],

@@ -419,6 +419,84 @@ describe('provider minVersion declared as a thunk (#7986)', () => {
   })
 })
 
+// #7986 review S2 — `chroxy start`'s preflight refuses a `requiresDirectExec`
+// provider's Windows npm shim via ProviderBinaryUnsupportedError, but doctor
+// runs its own binary check (checkBinary) rather than runProviderPreflight —
+// without a matching guard here, `chroxy doctor` would report a `.cmd` shim
+// as a healthy "pass" while `chroxy start` refuses to boot on the same binary.
+describe('doctor requiresDirectExec shim refusal (#7986 review S2)', () => {
+  // Named "node" (not "claude"), with process.execPath as the sole candidate,
+  // matching the thunk-floor fixtures above — deterministic regardless of
+  // whether a real `claude` happens to be on this test host's PATH.
+  function registerDirectExecProvider(name, resolvedBinary) {
+    class DirectExecSession extends SdkSession {
+      static get resolvedBinary() { return resolvedBinary }
+      static get preflight() {
+        return {
+          label: name,
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath], requiresDirectExec: true },
+        }
+      }
+    }
+    registerProvider(name, DirectExecSession)
+  }
+
+  function binaryRow(checks, provider) {
+    return checks.find((c) => c.provider === provider && c.name === 'node')
+  }
+
+  it('fails the binary row on win32 when the resolved path is a .cmd shim, without exec-ing it', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-cmd', 'C:\\npm\\node.cmd')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-cmd'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-cmd')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'fail')
+    assert.match(row.message, /node\.cmd/)
+    assert.match(row.message, /without a shell/)
+  })
+
+  it('passes on win32 when the resolved path is the native executable, not a shim', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-exe', process.execPath)
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-exe'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-exe')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
+  })
+
+  it('off win32 (the default platform), a .cmd-suffixed resolved path is not refused', async () => {
+    registerDirectExecProvider('test-7986-direct-exec-darwin', 'C:\\npm\\node.cmd')
+    // resolvedBinary is a .cmd path (as it might be, hypothetically, on a
+    // non-Windows host), but the resolved value is only ever a REAL shim
+    // concern on win32 — off win32, isShellShim is false regardless of
+    // suffix, so this must fall through to the real checkBinary exec, which
+    // resolves 'node' via the candidate (process.execPath) and passes.
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-direct-exec-darwin'], platform: 'darwin' })
+    const row = binaryRow(checks, 'test-7986-direct-exec-darwin')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass')
+  })
+
+  it('a provider without requiresDirectExec is unaffected on win32', async () => {
+    class NoDirectExecSession extends SdkSession {
+      static get resolvedBinary() { return 'C:\\npm\\node.cmd' }
+      static get preflight() {
+        return {
+          label: 'no-direct-exec',
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath] },
+        }
+      }
+    }
+    registerProvider('test-7986-no-direct-exec', NoDirectExecSession)
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-no-direct-exec'], platform: 'win32' })
+    const row = binaryRow(checks, 'test-7986-no-direct-exec')
+    assert.ok(row, 'the provider binary row must be present')
+    // Falls through to the real checkBinary exec (which ignores
+    // resolvedBinary and resolves via name+candidates) — not a shim
+    // refusal, so it must NOT carry the shim-specific wording.
+    assert.doesNotMatch(row.message, /without a shell/)
+  })
+})
+
 // #6708 — doctor must distinguish "quarantined/blocked by Gatekeeper" from
 // "not installed" so an operator can preflight the exact failure XProtect
 // caused. The verify seam is injected so no real quarantined binary is needed.

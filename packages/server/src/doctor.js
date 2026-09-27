@@ -8,6 +8,7 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
 import { resolveDeclaredMinVersion } from './utils/binary-version.js'
+import { isShellShim } from './utils/preflight.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
@@ -297,7 +298,7 @@ export async function checkTunnelRoutability(deps = {}) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe, detectStranded = detectStrandedState } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe, detectStranded = detectStrandedState, platform = process.platform } = {}) {
   const checks = []
 
   // 1. Node.js version
@@ -436,7 +437,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // `claude` is missing (#2951).
   const resolvedProviders = resolveProviders({ providers, configProvider })
   for (const providerName of resolvedProviders) {
-    const providerChecks = checkProvider(providerName)
+    const providerChecks = checkProvider(providerName, { platform })
     for (const c of providerChecks) checks.push(c)
   }
 
@@ -591,9 +592,12 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
  * bad config is reported rather than silently ignored.
  *
  * @param {string} providerName
+ * @param {object} [opts]
+ * @param {string} [opts.platform] - defaults to `process.platform`; injectable
+ *   for tests exercising the `requiresDirectExec` shim refusal (#7986 review S2)
  * @returns {Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider: string }>}
  */
-function checkProvider(providerName) {
+function checkProvider(providerName, { platform = process.platform } = {}) {
   let ProviderClass
   try {
     ProviderClass = getProvider(providerName)
@@ -616,21 +620,48 @@ function checkProvider(providerName) {
 
   const out = []
   if (spec.binary) {
-    const bin = checkBinary(spec.binary.name, spec.binary.args || ['--version'], {
-      parseVersion: spec.binary.parseVersion || ((out) => out.trim().split('\n')[0]),
-      required: true,
-      candidates: spec.binary.candidates || [],
-      installHint: spec.binary.installHint || `install ${spec.binary.name}`,
-      // #3953: providers may declare a minimum binary version (e.g.
-      // claude-channel needs `claude` ≥ 2.1.80 for the --channels MCP
-      // transport). checkBinary parses the leading semver out of the
-      // version output and fails when it's below the floor. The field may be
-      // a thunk (claude-sdk derives its floor from the SDK, #7986), so it is
-      // resolved through the same helper preflight uses, never read raw.
-      minVersion: resolveDeclaredMinVersion(spec.binary.minVersion),
-    })
-    bin.provider = providerName
-    out.push(bin)
+    // #7986 review S2: a provider that declares `requiresDirectExec: true`
+    // (the Agent SDK spawns its binary with no shell) can never run a
+    // Windows npm shim (`claude.cmd`/`claude.bat`) — `chroxy start`'s own
+    // preflight refuses it via ProviderBinaryUnsupportedError, but `doctor`
+    // runs its OWN binary check (checkBinary, below) rather than
+    // runProviderPreflight, so it needs the same refusal or it would report
+    // a shim as a healthy "pass". Checked BEFORE the exec-for-version probe:
+    // resolve the exact path the real spawn would use (the provider's live
+    // `resolvedBinary` when it exposes one, else a fresh candidate resolve —
+    // same preference order runProviderPreflight uses) and fail the row
+    // outright when that path is a shell shim, without ever exec'ing it.
+    let shimResolvedPath = null
+    if (spec.binary.requiresDirectExec === true) {
+      shimResolvedPath = ProviderClass.resolvedBinary
+      if (typeof shimResolvedPath !== 'string' || shimResolvedPath.length === 0) {
+        shimResolvedPath = resolveBinary(spec.binary.name, spec.binary.candidates || [])
+      }
+    }
+    if (shimResolvedPath !== null && isShellShim(shimResolvedPath, platform)) {
+      out.push({
+        name: spec.binary.name,
+        status: 'fail',
+        message: `${shimResolvedPath} — the ${spec.label || providerName} provider spawns ${spec.binary.name} directly without a shell, so it needs the native executable (for claude, \`claude.exe\` from the native installer), not an npm shim`,
+        provider: providerName,
+      })
+    } else {
+      const bin = checkBinary(spec.binary.name, spec.binary.args || ['--version'], {
+        parseVersion: spec.binary.parseVersion || ((out) => out.trim().split('\n')[0]),
+        required: true,
+        candidates: spec.binary.candidates || [],
+        installHint: spec.binary.installHint || `install ${spec.binary.name}`,
+        // #3953: providers may declare a minimum binary version (e.g.
+        // claude-channel needs `claude` ≥ 2.1.80 for the --channels MCP
+        // transport). checkBinary parses the leading semver out of the
+        // version output and fails when it's below the floor. The field may be
+        // a thunk (claude-sdk derives its floor from the SDK, #7986), so it is
+        // resolved through the same helper preflight uses, never read raw.
+        minVersion: resolveDeclaredMinVersion(spec.binary.minVersion),
+      })
+      bin.provider = providerName
+      out.push(bin)
+    }
   }
 
   if (spec.credentials && Array.isArray(spec.credentials.envVars) && spec.credentials.envVars.length > 0) {

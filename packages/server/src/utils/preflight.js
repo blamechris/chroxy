@@ -42,6 +42,20 @@
  * blocking — an SDK field that goes missing on a dependency bump must not
  * silently disable the gate, but it also must not turn into a hard failure
  * for something the operator can't fix by reinstalling a binary.
+ *
+ * ## Direct-exec refusal (#7986 review S2)
+ *
+ * `spec.binary.requiresDirectExec: true` declares that the provider spawns its
+ * binary directly with no shell (e.g. the Agent SDK's `pathToClaudeCodeExecutable`
+ * — see sdk-session.js), so a Windows npm shim (`claude.cmd`/`claude.bat`) can
+ * never actually run: `child_process.spawn` on a `.cmd`/`.bat` with no shell
+ * throws `EINVAL`. This used to surface only as a SIDE EFFECT of the version
+ * probe failing in a confusing way, and only when a `minVersion` was also
+ * declared and resolved to a real value. Declaring the flag makes it an
+ * explicit, unconditional check: it runs right after `verifyBinary` passes,
+ * BEFORE provenance and the version probe (a shim is refused before it is
+ * ever exec'd for anything), and throws `ProviderBinaryUnsupportedError`
+ * regardless of whether the provider declares a `minVersion` at all.
  */
 
 import { resolveBinary } from './resolve-binary.js'
@@ -144,6 +158,56 @@ export class ProviderBinaryVersionError extends Error {
 }
 
 /**
+ * True when `path` is an npm shim that a no-shell `spawn` can't run directly:
+ * Windows, and the path ends in `.cmd` or `.bat` (case-insensitive — Windows
+ * paths are case-insensitive and `resolveBinary`/`where` output isn't
+ * normalized to one case). Off-Windows this is always false: on POSIX an npm
+ * shim IS the real executable (a shebang script), so there is nothing to
+ * refuse there.
+ *
+ * @param {string} path
+ * @param {string} [platform] - defaults to `process.platform`; injectable for tests.
+ * @returns {boolean}
+ */
+export function isShellShim(path, platform = process.platform) {
+  return platform === 'win32' && typeof path === 'string' && /\.(cmd|bat)$/i.test(path)
+}
+
+/**
+ * Thrown when a provider declares `binary.requiresDirectExec: true` and its
+ * resolved binary is a shell shim (a Windows npm `.cmd`/`.bat`) that a no-shell
+ * spawn can never actually run. Distinct code so the client / doctor can
+ * render a shim-specific remediation ("install the native executable")
+ * instead of a version or not-found message. (#7986 review S2)
+ */
+export class ProviderBinaryUnsupportedError extends Error {
+  constructor({ provider, binary, path, remediation }) {
+    super(`${provider}: "${binary}" at ${path} cannot be spawned — ${remediation}`)
+    this.name = 'ProviderBinaryUnsupportedError'
+    this.code = 'PROVIDER_BINARY_UNSUPPORTED'
+    this.provider = provider
+    this.binary = binary
+    this.path = path
+    this.remediation = remediation || null
+  }
+}
+
+/**
+ * Remediation text for `ProviderBinaryUnsupportedError`: the provider spawns
+ * its binary directly (no shell), so an npm shim can't satisfy it — only the
+ * platform's native executable can. Names `claude.exe` specifically for the
+ * `claude` binary since that's the concrete fix an operator needs; every
+ * other binary gets the generic phrasing.
+ *
+ * @param {string} binaryName
+ * @returns {string}
+ */
+function shimRemediation(binaryName) {
+  const example = binaryName === 'claude' ? ' (for claude, `claude.exe` from the native installer)' : ''
+  return `spawns the binary directly without a shell, so it needs the native executable${example}, not an npm shim`
+}
+
+/**
  * Thrown when none of a provider's required credential env vars are present.
  */
 export class ProviderCredentialMissingError extends Error {
@@ -160,21 +224,21 @@ export class ProviderCredentialMissingError extends Error {
 }
 
 /**
- * Remediation text for a `ProviderBinaryVersionError`. On Windows, an npm
- * shim (`.cmd`/`.bat`) can't satisfy the Agent SDK's native
- * `pathToClaudeCodeExecutable` spawn (no shell — see sdk-session.js #7986),
- * so an old/unreadable version at one of those extensions means "wrong kind
- * of install", not "run an updater". Every other case points at `claude
- * update`, which is the one command that fixes a stale native binary.
+ * Remediation text for a `ProviderBinaryVersionError`. Generic across every
+ * provider that declares a `minVersion` — the Windows shell-shim case is no
+ * longer special-cased here (#7986 review S2): a provider that declares
+ * `requiresDirectExec: true` now refuses a `.cmd`/`.bat` outright, before the
+ * version probe ever runs (see `isShellShim` + the check in
+ * `runProviderPreflight`), so this function never has to guess "wrong kind of
+ * install" from a path suffix. Preference order: the provider's own
+ * `updateHint` (e.g. claude-sdk's `` run `claude update` ``), else its
+ * `installHint`, else a generic `update <name>`.
  *
- * @param {string} path
+ * @param {object} binarySpec - `spec.binary`.
  * @returns {string}
  */
-function versionRemediation(path) {
-  if (process.platform === 'win32' && typeof path === 'string' && /\.(cmd|bat)$/i.test(path)) {
-    return 'the Agent SDK spawns claude directly with no shell, so it needs the native claude.exe from the native installer, not this npm shim'
-  }
-  return 'run `claude update`'
+function versionRemediation(binarySpec) {
+  return binarySpec.updateHint || binarySpec.installHint || `update ${binarySpec.name}`
 }
 
 /**
@@ -213,8 +277,10 @@ function versionRemediation(path) {
  * @param {Function} [options.probeVersion] - `(path, args) => string|null` version
  *   prober (injected in tests); only called when `spec.binary.minVersion` resolves
  *   to a valid version, and only after verifyBinary + provenance both pass (#7986)
+ * @param {string} [options.platform] - defaults to `process.platform`; injectable
+ *   for tests exercising the `requiresDirectExec` shim refusal (#7986 review S2)
  * @returns {{ binaryPath: string|null }} exact healthy path allowed by all enabled gates
- * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderBinaryProvenanceError|ProviderBinaryVersionError|ProviderCredentialMissingError}
+ * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderBinaryProvenanceError|ProviderBinaryUnsupportedError|ProviderBinaryVersionError|ProviderCredentialMissingError}
  */
 export function runProviderPreflight(ProviderClass, {
   env = process.env,
@@ -222,6 +288,7 @@ export function runProviderPreflight(ProviderClass, {
   provenance = null,
   verifyProvenance = defaultVerifyProvenance,
   probeVersion = defaultProbeBinaryVersion,
+  platform = process.platform,
 } = {}) {
   if (!ProviderClass) return { binaryPath: null }
 
@@ -270,6 +337,23 @@ export function runProviderPreflight(ProviderClass, {
       })
     }
     binaryPath = health.path
+
+    // #7986 review S2: an explicit, unconditional refusal for a provider that
+    // spawns its binary directly (no shell) — runs BEFORE provenance and the
+    // version probe, right after the binary is confirmed to exist/be
+    // executable/not-quarantined. Previously this only surfaced as a side
+    // effect of the version probe's EINVAL, which meant: (1) it vanished
+    // whenever minVersion resolved to null (the .cmd passed preflight and
+    // failed mid-turn instead), and (2) it never ran at all for a provider
+    // with no minVersion declared.
+    if (spec.binary.requiresDirectExec === true && isShellShim(binaryPath, platform)) {
+      throw new ProviderBinaryUnsupportedError({
+        provider: providerLabel,
+        binary: spec.binary.name,
+        path: binaryPath,
+        remediation: shimRemediation(spec.binary.name),
+      })
+    }
 
     // #6858: opt-in provenance gate on the SAME healthy path the spawn will use.
     // Skipped entirely unless the operator opted in (mode warn/block or the
@@ -329,7 +413,7 @@ export function runProviderPreflight(ProviderClass, {
             found: null,
             required: rawMinVersion,
             reason: 'unreadable',
-            remediation: versionRemediation(binaryPath),
+            remediation: versionRemediation(spec.binary),
           })
         }
         if (compareSemver(found, required) < 0) {
@@ -340,7 +424,7 @@ export function runProviderPreflight(ProviderClass, {
             found,
             required: rawMinVersion,
             reason: 'too_old',
-            remediation: versionRemediation(binaryPath),
+            remediation: versionRemediation(spec.binary),
           })
         }
       }

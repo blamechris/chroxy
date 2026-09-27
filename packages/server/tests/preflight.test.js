@@ -5,6 +5,7 @@ import {
   ProviderBinaryNotFoundError,
   ProviderBinaryQuarantinedError,
   ProviderBinaryProvenanceError,
+  ProviderBinaryUnsupportedError,
   ProviderBinaryVersionError,
   ProviderCredentialMissingError,
 } from '../src/utils/preflight.js'
@@ -335,7 +336,9 @@ describe('runProviderPreflight — minimum version gate (#7986)', () => {
         assert.equal(err.reason, 'too_old')
         assert.equal(err.found, '2.1.80')
         assert.equal(err.required, '2.1.141')
-        assert.match(err.message, /claude update/)
+        // makeVersionedProvider declares no updateHint/installHint, so the
+        // remediation falls back to the generic `update <name>` (#7986 review S2).
+        assert.match(err.message, /update claude/)
         return true
       },
     )
@@ -533,32 +536,34 @@ describe('runProviderPreflight — minimum version gate (#7986)', () => {
     assert.deepEqual(probedArgs, ['--version'])
   })
 
-  it('on win32, an old/unreadable version at a .cmd path explains the native-binary requirement instead of "claude update"', () => {
-    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
-    Object.defineProperty(process, 'platform', { value: 'win32' })
-    try {
-      const Provider = makeVersionedProvider('2.1.141')
-      assert.throws(
-        () => runProviderPreflight(Provider, {
-          env: {},
-          verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
-          probeVersion: () => '2.1.80',
-        }),
-        (err) => {
-          assert.ok(err instanceof ProviderBinaryVersionError)
-          assert.match(err.remediation, /no shell/)
-          assert.match(err.remediation, /native/)
-          assert.doesNotMatch(err.remediation, /claude update/)
-          return true
-        },
-      )
-    } finally {
-      Object.defineProperty(process, 'platform', originalPlatform)
-    }
+  it('with no updateHint/installHint declared, the remediation falls back to `update <name>`', () => {
+    const Provider = makeVersionedProvider('2.1.141')
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.match(err.remediation, /update claude/)
+        return true
+      },
+    )
   })
 
-  it('off win32 (or a non-.cmd/.bat path), the remediation is `claude update`', () => {
-    const Provider = makeVersionedProvider('2.1.141')
+  it('prefers the provider-declared updateHint over installHint and the generic fallback', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: {
+          name: 'claude',
+          candidates: [],
+          minVersion: '2.1.141',
+          installHint: 'install Claude Code',
+          updateHint: 'run `claude update`',
+        },
+      },
+    })
     assert.throws(
       () => runProviderPreflight(Provider, {
         env: {},
@@ -569,6 +574,140 @@ describe('runProviderPreflight — minimum version gate (#7986)', () => {
         assert.match(err.remediation, /claude update/)
         return true
       },
+    )
+  })
+
+  it('falls back to installHint when updateHint is absent', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Codex',
+        binary: {
+          name: 'codex',
+          candidates: [],
+          minVersion: '2.1.141',
+          installHint: 'install Codex CLI',
+        },
+      },
+    })
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.80',
+      }),
+      (err) => {
+        assert.equal(err.remediation, 'install Codex CLI')
+        return true
+      },
+    )
+  })
+})
+
+describe('runProviderPreflight — direct-exec shim refusal (#7986 review S2)', () => {
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+
+  function makeDirectExecProvider({ requiresDirectExec = true, minVersion } = {}) {
+    return makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: {
+          name: 'claude',
+          candidates: [],
+          requiresDirectExec,
+          ...(minVersion !== undefined ? { minVersion } : {}),
+        },
+      },
+    })
+  }
+
+  it('on win32, a .cmd path throws ProviderBinaryUnsupportedError, and neither probeVersion nor provenance runs', () => {
+    const Provider = makeDirectExecProvider({ minVersion: '2.1.141' })
+    let probeCalled = false
+    let provenanceCalled = false
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '2.1.200' },
+        verifyProvenance: () => { provenanceCalled = true; return { ok: true, blocked: false, status: PROVENANCE_STATUS.PINNED } },
+        provenance: { mode: 'block', signatureGate: false, ledger: {} },
+      }),
+      (err) => {
+        assert.ok(err instanceof ProviderBinaryUnsupportedError, `got ${err?.name}`)
+        assert.equal(err.code, 'PROVIDER_BINARY_UNSUPPORTED')
+        assert.equal(err.binary, 'claude')
+        assert.equal(err.path, 'C:\\npm\\claude.cmd')
+        assert.match(err.remediation, /without a shell/)
+        assert.match(err.remediation, /native/)
+        assert.match(err.remediation, /claude\.exe/)
+        return true
+      },
+    )
+    assert.equal(probeCalled, false, 'a shim refusal must never reach the version probe')
+    assert.equal(provenanceCalled, false, 'a shim refusal must never reach the provenance gate')
+  })
+
+  it('a bare .bat path on win32 is refused the same way', () => {
+    const Provider = makeDirectExecProvider()
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.bat', quarantine: null }),
+      }),
+      ProviderBinaryUnsupportedError,
+    )
+  })
+
+  it('on darwin (or any non-win32), a .cmd-suffixed path is NOT refused', () => {
+    const Provider = makeDirectExecProvider()
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'darwin',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: '/weird/but/darwin/claude.cmd', quarantine: null }),
+      }),
+    )
+  })
+
+  it('a provider WITHOUT requiresDirectExec is not refused on win32 with a .cmd path', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'Claude Channel', binary: { name: 'claude', candidates: [] } },
+    })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+      }),
+    )
+  })
+
+  it('the shim refusal fires even when minVersion resolves to null (the version gate alone would have skipped)', () => {
+    const Provider = makeDirectExecProvider({ minVersion: () => null })
+    let probeCalled = false
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '2.1.200' },
+      }),
+      ProviderBinaryUnsupportedError,
+    )
+    assert.equal(probeCalled, false)
+  })
+
+  it('a healthy native .exe path on win32 is not refused', () => {
+    const Provider = makeDirectExecProvider({ minVersion: '2.1.141' })
+    assert.doesNotThrow(() =>
+      runProviderPreflight(Provider, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\Users\\chris\\.local\\bin\\claude.exe', quarantine: null }),
+        probeVersion: () => '2.1.200',
+      }),
     )
   })
 })
