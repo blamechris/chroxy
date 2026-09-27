@@ -19,7 +19,8 @@ on:
 # therefore got its own group, so no queued `main` run could ever supersede an
 # older one. On 2026-09-24 an autonomous wave merged 7 PRs in ~3 hours: 7
 # independent `main` CI runs queued up behind the three long jobs pinned to the
-# single `chroxy-linux-winbox-01` runner (LONG-JOB PINNING, below); one PR's
+# single `chroxy-linux-winbox-01` runner (the #7471 pin, since replaced — see
+# LONG JOBS ON GITHUB-HOSTED RUNNERS, below); one PR's
 # jobs sat QUEUED 4+ hours with every other runner idle, and 6 of the 7 `main`
 # runs had to be cancelled by hand.
 #
@@ -144,7 +145,9 @@ permissions:
 # npm-ci/transform OOM, not arch). Server Tests moved too once #6075 made the
 # suite container-portable (the 9 ARM64-container failures were genuine env
 # differences — root-bypassed fs perms, $HOME assumptions, a uuidgen dependency —
-# not RAM); see the server-tests job comment.
+# not RAM); see the server-tests job comment. (Server Tests has since moved to
+# GitHub-hosted with the other two long jobs — LONG JOBS ON GITHUB-HOSTED
+# RUNNERS, above.)
 
 # npm's implicit audit + funding calls are OFF for every install in this
 # workflow (#7616). npm reads any `npm_config_*` environment variable as a
@@ -259,14 +262,13 @@ jobs:
           fi
   server-tests:
     name: Server Tests
-    # Moved to the self-hosted Linux pool (#6075). #6046 left this GitHub-hosted
-    # because 9 tests failed on the ARM64 Linux container from genuine env
-    # differences; #6075 made the suite container-portable (root bypasses POSIX
-    # perm bits → skip those asserts; tests that assumed the repo lives under
-    # $HOME now use $HOME-relative paths; the per-turn hook filenames fall back
-    # to /proc/sys/kernel/random/uuid when uuidgen is absent). Verified 0-fail
-    # on node:22-bookworm as root. Fork PRs still route to ubuntu-24.04 via
-    # runner-target (untrusted code never runs on the self-hosted machine).
+    # GitHub-hosted `ubuntu-24.04` for every event since 2026-09-27 (LONG JOBS
+    # ON GITHUB-HOSTED RUNNERS in the header). History: #6075 moved it to the
+    # self-hosted Linux pool after making the suite container-portable (root
+    # bypasses POSIX perm bits → skip those asserts; tests that assumed the repo
+    # lives under $HOME now use $HOME-relative paths; the per-turn hook filenames
+    # fall back to /proc/sys/kernel/random/uuid when uuidgen is absent) — those
+    # portability fixes still hold and still matter for local container runs.
     #
     # RUNNER CONTRACT (#6094): this job has NO `container:` key and runs on the
     # GitHub-hosted `ubuntu-24.04` image, whose job user is the non-root
@@ -276,10 +278,12 @@ jobs:
     # this job moved to hosted. If they ever fail, check the runner's uid/image
     # and filesystem first, not the tests.
     runs-on: ubuntu-24.04  # always GitHub-hosted — see LONG JOBS ON GITHUB-HOSTED RUNNERS (header)
-    # 15, not 10: winbox green durations ran 6.5-8.5 min with a 9m42s observed
-    # peak. Queue wait does NOT count toward timeout-minutes; only execution
-    # time does.
-    timeout-minutes: 15
+    # 20: the first hosted run took 10m09s end to end (tests 8m56s) on the
+    # standard 4-vCPU runner; the winbox VM peaked at 9m42s. 15 would leave one
+    # sample's worth of ~5 min of slack on a REQUIRED check, and a timeout reads
+    # as red. 20 still catches a hang. Queue wait does NOT count toward
+    # timeout-minutes; only execution time does.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: packages/server
@@ -307,8 +311,10 @@ jobs:
       # test FAILS (not skips) when rg is missing and CI is set, so this step is what
       # keeps that from reddening the job: absent it, "cannot check" and "checked"
       # were the same green, which is the second recurring cause in
-      # docs/false-safety-guards.md. Heterogeneous pool: node:22-bookworm as root has
-      # no sudo, the winbox VM is non-root and has it.
+      # docs/false-safety-guards.md. The hosted ubuntu-24.04 image runs the job as a
+      # non-root user with passwordless sudo, so the sudo branch is the one taken
+      # there; the no-sudo branch covers a root/container runner (a local `act`
+      # run, or a return to the self-hosted pool).
       - name: Ensure ripgrep is installed (required by the #7295 execution proof)
         run: |
           if command -v rg >/dev/null 2>&1; then rg --version | head -1; exit 0; fi
