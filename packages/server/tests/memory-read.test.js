@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:t
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile, symlink, realpath } from 'fs/promises'
 import { execFileSync } from 'child_process'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { readResolvedMemoryFile } from '../src/ws-file-ops/memory.js'
@@ -30,6 +30,7 @@ const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 describe('memory_read (readMemory) handler', () => {
   let fileOps
   let originalHome
+  let originalUserProfile
   let fakeHome
   const responses = []
   const mockSend = (_ws, msg) => responses.push(msg)
@@ -38,17 +39,22 @@ describe('memory_read (readMemory) handler', () => {
   before(() => {
     fileOps = createFileOps(mockSend)
     originalHome = process.env.HOME
+    originalUserProfile = process.env.USERPROFILE
   })
 
   after(() => {
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE
+    else process.env.USERPROFILE = originalUserProfile
     process.env.CHROXY_CONFIG_DIR = __sandboxConfigDir
   })
 
   beforeEach(async () => {
     fakeHome = await mkdtemp(join(tmpdir(), 'chroxy-memhome-'))
+    // os.homedir() reads $HOME on POSIX and %USERPROFILE% on Windows (#7283).
     process.env.HOME = fakeHome
+    process.env.USERPROFILE = fakeHome
     process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
     responses.length = 0
   })
@@ -430,7 +436,10 @@ describe('memory_read (readMemory) handler', () => {
     await writeFile(join(fakeHome, '.claude', '.credentials.json'), '{"t":"x"}', 'utf-8')
     await writeFile(
       join(dir, 'CLAUDE.md'),
-      `Out-of-bounds @${join(outsideDir, 'secret.md')} and non-md @~/.claude/.credentials.json.`,
+      // A relative escape rather than an absolute path: IMPORT_RE matches
+      // `[\w./~-]`, so a win32 absolute path (`C:\…`) is never an import there.
+      // `dir` and `outsideDir` are siblings under tmpdir(). (#7283)
+      `Out-of-bounds @../${basename(outsideDir)}/secret.md and non-md @~/.claude/.credentials.json.`,
       'utf-8',
     )
 
@@ -466,7 +475,7 @@ describe('memory_read (readMemory) handler', () => {
     const { memoryFile } = responses[0]
     assert.equal(memoryFile.exists, true)
     assert.equal(memoryFile.content, '# Project Memory\nsome learned fact')
-    assert.match(memoryFile.path, /projects.*memory\/MEMORY\.md$/)
+    assert.ok(/projects.*memory[\\/]MEMORY\.md$/.test(memoryFile.path), `unexpected MEMORY.md path: ${memoryFile.path}`)
 
     await rm(dir, { recursive: true, force: true })
   })

@@ -21,18 +21,37 @@ export const MAX_MESSAGES = 500
 export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
 
 /**
- * Encode a filesystem path the same way Claude Code does for its project directories.
- * Replaces all `/` with `-`.
- * e.g. '/Users/alice/projects/myrepo' -> '-Users-alice-projects-myrepo'
+ * Encode a cwd into the directory name Claude Code uses under
+ * `~/.claude/projects/` — the ONE implementation of this mapping (#7283).
+ *
+ * Every non-alphanumeric character becomes `-`, which is what Claude Code
+ * writes: 88 project directories on a macOS host contained nothing outside
+ * `[A-Za-z0-9-]` (`~/.codex/sessions` -> `-Users-<u>--codex-sessions`), and the
+ * Windows host's `A:\tmp` became `A--tmp`. This used to replace only `/`,
+ * which produced a directory that cannot exist for any cwd with a dot,
+ * underscore, space, drive letter or backslash — every `.claude/worktrees/*`
+ * session among them — so transcript reads silently found nothing. A second
+ * encoder (`slugifyCwd` in transcript-tasks.js) had the right rule; the two
+ * are now this one function.
+ *
+ * Not verified: whether Claude Code shortens very long keys. The longest key
+ * observed on disk was 120 characters.
+ *
+ * e.g. '/Users/alice/projects/my.repo' -> '-Users-alice-projects-my-repo'
+ * @param {string} cwd
+ * @returns {string}
  */
 export function encodeProjectPath(cwd) {
-  return cwd.replace(/\//g, '-')
+  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 /**
- * Decode an encoded project directory name back to a filesystem path.
- * Claude Code encodes paths by replacing all `/` with `-`.
- * Falls back to null if the decoded path doesn't exist on disk.
+ * Best-effort decode of a project directory name back to a filesystem path.
+ * LOSSY: `-` stands for any non-alphanumeric character (see encodeProjectPath),
+ * so this only tries the all-slashes reading and returns it when that
+ * directory exists — `-Users-x-my-repo` decodes to `/Users/x/my/repo`, never
+ * `/Users/x/my-repo`. Callers prefer the `cwd` recorded in the transcript and
+ * use this only as a fallback label. Returns null when the guess does not exist.
  */
 export function decodeProjectPath(encoded) {
   const decoded = encoded.replace(/-/g, '/')

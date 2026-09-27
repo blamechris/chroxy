@@ -49,6 +49,7 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { createLogger } from './logger.js'
+import { encodeProjectPath } from './jsonl-reader.js'
 
 const log = createLogger('transcript-tasks')
 
@@ -71,21 +72,6 @@ export const MAX_SCAN_BYTES = 16 * 1024 * 1024
 const PROMPT_DESCRIPTION_MAX = 80
 
 /**
- * Slugify a cwd into the directory name Claude Code uses under
- * `~/.claude/projects/`. Verified against real project dirs on disk:
- * every non-alphanumeric character (slashes, dots, spaces, …) becomes `-`,
- * e.g. `/Users/blamechris/Projects/repo-relay` →
- * `-Users-blamechris-Projects-repo-relay` and
- * `/Users/x/Downloads/Mom Hospitalization Files` →
- * `-Users-x-Downloads-Mom-Hospitalization-Files`.
- * @param {string} cwd
- * @returns {string}
- */
-export function slugifyCwd(cwd) {
-  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-')
-}
-
-/**
  * Derive the transcript path for a per-PID session file
  * (`~/.claude/sessions/<pid>.json`, which carries `sessionId` + `cwd`).
  * Returns null on any failure (missing file, bad JSON, missing fields) —
@@ -102,7 +88,7 @@ export function transcriptPathForSessionFile(sessionFilePath) {
     // Defence-in-depth: the sessionId becomes a path segment. Real ids are
     // UUIDs; reject anything that could traverse out of the projects dir.
     if (!/^[A-Za-z0-9-]+$/.test(sessionId)) return null
-    return join(homedir(), '.claude', 'projects', slugifyCwd(cwd), `${sessionId}.jsonl`)
+    return join(homedir(), '.claude', 'projects', encodeProjectPath(cwd), `${sessionId}.jsonl`)
   } catch (err) {
     log.debug?.(`transcriptPathForSessionFile failed for ${sessionFilePath}: ${err.message}`)
     return null
