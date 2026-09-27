@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
+import { OUTSIDE_HOME_DIR } from './helpers/outside-home.js'
 import { setLogListener, addLogListener, removeLogListener } from '../src/logger.js'
 import { truncateForLog, createReaderOps } from '../src/ws-file-ops/reader.js'
 import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
@@ -362,15 +363,20 @@ describe('directory listing', () => {
   })
 
   it('rejects symlink inside home that points outside home (#662)', async () => {
-    // Create a temp directory inside home with a symlink escaping to /tmp
+    // A temp directory inside home, holding a symlink that escapes home.
+    //
+    // The target must be GENUINELY outside home (#7285). It used to be a
+    // mkdtemp under os.tmpdir(), which on Windows is INSIDE the profile, so the
+    // daemon correctly allowed the listing and the test failed on its own
+    // premise. Before #7273 it passed there anyway, only because the check
+    // denied everything. OUTSIDE_HOME_DIR is /etc on POSIX and %SystemRoot% on
+    // Windows: both are non-empty, so a listing that got through would fail the
+    // `entries` assertion below rather than pass it vacuously.
     const home = homedir()
     const testDir = mkdtempSync(join(home, '.chroxy-test-symlink-'))
-    const outsideTarget = mkdtempSync(join(tmpdir(), 'chroxy-test-outside-'))
-    writeFileSync(join(outsideTarget, 'leaked.txt'), 'should not see this')
-    mkdirSync(join(outsideTarget, 'leaked-dir'))
 
     try {
-      symlinkSync(outsideTarget, join(testDir, 'escape-link'))
+      symlinkSync(OUTSIDE_HOME_DIR, join(testDir, 'escape-link'))
 
       server = new WsServer({
         port: 0,
@@ -396,7 +402,6 @@ describe('directory listing', () => {
       ws.close()
     } finally {
       rmSync(testDir, { recursive: true, force: true })
-      rmSync(outsideTarget, { recursive: true, force: true })
     }
   })
 
