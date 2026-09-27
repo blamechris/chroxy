@@ -32,7 +32,9 @@ describe('sdkClaudeCodeVersion', () => {
       },
     })
     assert.equal(resolvedRequest, '@anthropic-ai/claude-agent-sdk')
-    assert.equal(readPath, '/fake/node_modules/@anthropic-ai/claude-agent-sdk/package.json')
+    // path.join speaks the host's separator (backslashes on the Windows runner),
+    // so compare with separators normalized rather than against the host form.
+    assert.equal(readPath.replace(/\\/g, '/'), '/fake/node_modules/@anthropic-ai/claude-agent-sdk/package.json')
     assert.equal(version, '2.1.141')
   })
 
