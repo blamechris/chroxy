@@ -1,6 +1,6 @@
 import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { homedir } from 'os'
-import { join, resolve, normalize, relative } from 'path'
+import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
@@ -319,7 +319,14 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           if (d.name === 'node_modules') continue
 
           const absPath = join(dir, d.name)
-          const relPath = relative(cwdReal, absPath)
+          // POSIX separators, always (#7282). This string goes onto the wire
+          // as `file_list.files[].path`, and a client must not have to know
+          // which OS the daemon runs on — on Windows `relative()` yields
+          // `src\app.js`. It also feeds `isIgnored` below, whose matcher
+          // splits on '/' and builds `[^/]` classes: fed a backslash path it
+          // saw one segment, so directory-scoped .gitignore rules silently
+          // stopped hiding files on Windows. Same idiom as ide/search.js.
+          const relPath = relative(cwdReal, absPath).split(sep).join('/')
 
           // Validate symlinks stay within CWD boundary
           if (d.isSymbolicLink()) {
