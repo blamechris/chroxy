@@ -1,4 +1,4 @@
-import { realpath } from 'fs/promises'
+import { realpath, lstat, readlink } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
@@ -65,6 +65,19 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * containment check only asks "does it escape the workspace?", and the common
  * chroxy topology (`.claude`/`.git` under the workspace) stays inside it.
  *
+ * #8013 — a DANGLING symlink is followed, not walked past. `realpath()` throws
+ * ENOENT at a dangling link as well as at a missing name, and stepping up past
+ * the link re-appended its NAME lexically, so `project/link -> /outside/missing`
+ * was judged a missing file inside the project until `/outside/missing` was
+ * created — an existence oracle keyed on the outside. On ENOENT the walk now
+ * `lstat`s the cursor; a symlink there restarts the walk at the link's target
+ * (a relative target resolves against the link's real parent directory, as the
+ * kernel does), keeping the tail stripped so far. Every restart spends one of
+ * the same MAX_DEPTH steps as a step up, so no set of links can keep the walk
+ * alive. The target text is joined with `resolve()`, so a `..` INSIDE the link
+ * text that follows a symlinked component is the same lexical residual as
+ * #6921/#6923 above.
+ *
  * @param {string} absPath - Absolute path to resolve (may not exist)
  * @returns {Promise<string>} Real path with all symlink ancestors resolved
  */
@@ -84,7 +97,8 @@ export async function realpathOfDeepestAncestor(absPath) {
   const segments = []
   let cursor = absPath
   // Safety ceiling — absolute paths should never nest more than a few
-  // dozen components, but guard against pathological inputs.
+  // dozen components, but guard against pathological inputs. A restart
+  // through a dangling link (#8013) spends a step too.
   const MAX_DEPTH = 256
   for (let i = 0; i < MAX_DEPTH; i++) {
     try {
@@ -96,6 +110,13 @@ export async function realpathOfDeepestAncestor(absPath) {
       return join(realAncestor, ...segments.slice().reverse())
     } catch (err) {
       if (err.code !== 'ENOENT') throw err
+      // #8013 — ENOENT AT a dangling symlink: follow the link rather than
+      // treating its name as a missing in-place segment.
+      const linkTarget = await danglingLinkTarget(cursor)
+      if (linkTarget !== null) {
+        cursor = linkTarget
+        continue
+      }
       const parent = dirname(cursor)
       if (parent === cursor) {
         // Reached the filesystem root without finding any existing
@@ -122,6 +143,30 @@ export async function realpathOfDeepestAncestor(absPath) {
     new Error(`realpathOfDeepestAncestor: path depth exceeds ${MAX_DEPTH} (got ${absPath.split('/').length} components)`),
     { code: 'ENAMETOOLONG' }
   )
+}
+
+/**
+ * #8013 — after `realpath(cursor)` threw ENOENT: if `cursor` is itself a
+ * symlink (so the ENOENT came from its missing TARGET, not from a missing
+ * name), return the absolute path the link points at; otherwise `null`.
+ * A relative link text resolves against the link's REAL parent directory,
+ * which exists because `lstat` just found the link in it. Any error other than
+ * ENOENT from `lstat` means the path changed under us: it propagates, and the
+ * caller fails closed.
+ * @param {string} cursor
+ * @returns {Promise<string|null>}
+ */
+async function danglingLinkTarget(cursor) {
+  let st
+  try {
+    st = await lstat(cursor)
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+  if (!st.isSymbolicLink()) return null
+  const link = await readlink(cursor)
+  return resolve(await realpath(dirname(cursor)), link)
 }
 
 // #6923/#6928 — the async component-wise resolver (and its separator-agnostic
