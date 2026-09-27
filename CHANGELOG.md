@@ -18,14 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the shared resolver on every turn — the same resolver preflight used
   at session create, but each turn's resolve is not itself re-verified, so a
   binary swapped in place mid-session spawns unchecked until the next session
-  create. The session summarizer's one-shot `query()` sets the same resolved
-  path but is not preflighted or provenance-checked at all. See #8030.
+  create. The session summarizer's one-shot `query()`, which semantic session
+  titles also use, sets the same resolved path but is not preflighted or
+  provenance-checked at all. See #8030.
 
   Preflight also enforces a minimum `claude` version for the SDK provider:
   the installed SDK's own `claudeCodeVersion`, not a hand-kept constant.
   A binary below it gets a `claude update` remediation instead of a mid-turn
   failure. On Windows, the SDK spawns without a shell, so it needs the native
-  `claude.exe`; an npm `.cmd` shim is refused with that explanation.
+  `claude.exe`; an npm `.cmd` shim is refused before any probe with its own
+  error, `PROVIDER_BINARY_UNSUPPORTED`, and `chroxy doctor` fails it the same way.
   `chroxy doctor` resolves the same derived minimum.
 
   The generic minimum-version gate also makes preflight enforce

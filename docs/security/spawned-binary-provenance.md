@@ -294,7 +294,11 @@ blocked by `block`-mode provenance is never exec'd for a `--version` probe.
 An installed `claude` older than the required floor throws
 `ProviderBinaryVersionError` (`code: PROVIDER_BINARY_VERSION`) with a
 `claude update` remediation — this is a version-skew problem, not a
-"reinstall from scratch" one. The probe itself
+"reinstall from scratch" one. Before either gate, a provider that declares
+`binary.requiresDirectExec` (the SDK provider does, because the Agent SDK
+spawns `claude` with no shell) refuses a Windows `.cmd`/`.bat` npm shim with
+`ProviderBinaryUnsupportedError` (`code: PROVIDER_BINARY_UNSUPPORTED`): such a
+shim can never be spawned that way, and it is never exec'd. The probe itself
 (`utils/binary-version.js#probeBinaryVersion`) is cached by stat identity
 (path + dev + ino + size + mtimeMs) so a `claude update` invalidates the
 cache and repeated session-creates against an unchanged binary don't.
