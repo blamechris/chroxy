@@ -1118,15 +1118,20 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * the SAME `openNoFollow`-based verified-open below — there is exactly one
  * implementation of "open and verify", not two.
  *
- * `__testSeam(target, phase)`, if given, is awaited at THREE points — the
- * ONLY way to hit any of these windows deterministically in a test; a real
- * concurrent race is flaky by construction (see the test file): `'before-open'`
- * immediately before the `openNoFollow` call (the pre-open check-to-open
- * window); `'after-open'` (new, #7910 review round 3) immediately after
- * `openNoFollow` + the fstat-identity check have PASSED and before entries
- * are read — proving a swap landing AFTER a successful, verified open does
- * not retroactively corrupt what was already opened; and `'after-verify'`
- * immediately before the already-open `Dir` is returned to `walk`.
+ * `__testSeam(target, phase, names?)`, if given, is the ONLY way to hit any of
+ * these windows deterministically in a test; a real concurrent race is flaky
+ * by construction (see the test file). On every platform it is awaited at
+ * three points: `'before-open'` immediately before the `openNoFollow` call
+ * (the pre-open check-to-open window); `'after-open'` (#7910 review round 3)
+ * immediately after `openNoFollow` + the fstat-identity check have PASSED and
+ * before entries are read — proving a swap landing AFTER a successful,
+ * verified open does not retroactively corrupt what was already opened; and
+ * `'after-verify'` immediately before the already-open `Dir` is returned to
+ * `walk`. The path-based fallback (#7919) adds three more: `'after-opendir'`,
+ * between its `opendir(target)` and the lstat re-check that follows it, and,
+ * once per verification round inside {@link verifyEntriesUnderParent},
+ * `'before-entry-verify'` and `'after-entry-lstat'` — those two also receive
+ * the round's entry names as the third argument.
  *
  * SECURITY/DoS (#7910 review round 2) — `visitedDirs`/`dirKey` add a SECOND,
  * independent check alongside the identity one above: once the open is
@@ -1387,7 +1392,8 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
           }
         }
       } finally {
-        await it.return?.()
+        // Closes `dh` on an early exit; a no-op once it is exhausted.
+        try { await it.return?.() } catch { /* already closed */ }
       }
     },
     close: () => dh.close(),
