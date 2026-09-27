@@ -1432,7 +1432,24 @@ describe('SdkSession', () => {
     })
 
     it('is set on every turn, not just the first (re-resolved per call, not cached on the instance)', async () => {
-      const s = createSession()
+      // A comparison against `SdkSession.resolvedBinary` on an unchanged
+      // machine can't distinguish "re-resolved every call" from "resolved
+      // once and cached" — both turns would read the SAME live value either
+      // way. Use a subclass whose `static get resolvedBinary` returns a
+      // FRESH, distinct value on each access (a counter), so two turns
+      // receiving DIFFERENT values is only possible if sendMessage reads
+      // `this.constructor.resolvedBinary` again on turn 2, rather than
+      // reusing whatever it read (and possibly cached on the instance) on
+      // turn 1 (#7986 review S3).
+      let resolveCount = 0
+      class CountingResolvedBinarySdkSession extends SdkSession {
+        static get resolvedBinary() {
+          resolveCount += 1
+          return `/fake/claude-${resolveCount}`
+        }
+      }
+      const stateFilePath = tmpStateFile()
+      const s = new CountingResolvedBinarySdkSession({ cwd: '/tmp', stateFilePath })
       s._processReady = true
 
       const captured = []
@@ -1448,8 +1465,17 @@ describe('SdkSession', () => {
       s.destroy()
 
       assert.equal(captured.length, 2)
-      assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
-      assert.equal(captured[1].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/fake/claude-1')
+      assert.equal(captured[1].options.pathToClaudeCodeExecutable, '/fake/claude-2')
+      assert.notEqual(
+        captured[0].options.pathToClaudeCodeExecutable,
+        captured[1].options.pathToClaudeCodeExecutable,
+        'each turn must re-resolve — a cached value would repeat claude-1 on turn 2',
+      )
+      // Also proves the `this.constructor` dispatch: a base-class-bound
+      // `SdkSession.resolvedBinary` read would never see this subclass's
+      // counting getter at all.
+      assert.equal(resolveCount, 2, 'resolvedBinary must be accessed exactly once per turn, not memoized')
     })
 
     it('is set BEFORE _augmentQueryOptions runs — a subclass override can observe it', async () => {
