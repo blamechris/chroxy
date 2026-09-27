@@ -1,5 +1,8 @@
 import { open as fsOpen, lstat as fsLstat } from 'fs/promises'
 import { constants as fsConstants } from 'fs'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('open-nofollow')
 
 /**
  * #7280 — the ONE symlink-refusing `open()` for the whole file-ops surface.
@@ -78,6 +81,35 @@ import { constants as fsConstants } from 'fs'
  * `realpathOfDeepestAncestor` note), which is why the callers here run that
  * first and this second.
  *
+ * ── #7874 — a volume with no file index is REFUSED, and says so ────────────
+ *
+ * Policy, decided by the owner on 2026-09-26: when either inode in step 3 is
+ * `0`, the open is refused. It does not degrade.
+ *
+ * libuv fills a win32 `st_ino` from `FILE_INTERNAL_INFORMATION.IndexNumber`.
+ * NTFS supplies a real index; FAT/exFAT and some network redirectors and
+ * virtual file systems report `0`. On such a volume `dev` + `ino` equality is
+ * true for ANY two files, so the step-3 comparison would pass whatever the fd
+ * points at. The alternative was to skip step 3 there and keep only step 1's
+ * pre-open lstat. That drops the half of this guard that catches a swap
+ * between check and open, and it drops it on exactly the volumes nobody
+ * tests. A Windows workspace on such a volume is rare, so it is refused.
+ *
+ * The cost is that every file-ops open on that volume fails, and the caller's
+ * wire message ("Access denied: … restricted to the project directory")
+ * names a cause that is not the cause. So this refusal, and only this one,
+ * logs a warn line of its own naming the file-index cause, the path, both
+ * inodes and the volume's `dev`, and tags the error `reason: 'no-file-index'`
+ * (a `dev` mismatch is checked first and refused as a swap: two volumes
+ * prove the files differ whatever index either reports)
+ * ({@link NO_FILE_INDEX}). The wire contract stays `code: 'ELOOP'`, so the
+ * distinction lives in the server log, where a support report can find it.
+ * `trusted-file-read.js` carries the same refusal and uses the same line.
+ *
+ * Revisit if a Windows Dev Drive (ReFS) user reports this line. If ReFS
+ * reports index `0` through libuv, the affected set is a common developer
+ * setup rather than a rare one, and the trade-off above changes.
+ *
  * ── #7938 — O_NONBLOCK, so a planted FIFO can't hang the open() itself ─────
  *
  * `O_NOFOLLOW` refuses a symlink; it says nothing about a FIFO, character
@@ -124,6 +156,31 @@ export const defaultOpenNoFollowDeps = Object.freeze({
 })
 
 /**
+ * #7874 — the `reason` on a refusal caused by a volume that reports file
+ * index 0. See the module header for the policy.
+ */
+export const NO_FILE_INDEX = 'no-file-index'
+
+/**
+ * #7874 — the one log line for an index-0 refusal, shared with
+ * `trusted-file-read.js` so both refusal sites read the same in a support
+ * report. It names the cause and says that no symlink was seen, because the
+ * wire message the user saw says "access denied" and a reader of the log
+ * would otherwise go looking for one. Both callers compare `dev` BEFORE the
+ * index-0 check, so this line is only reached for two stats on the SAME
+ * volume; a one-sided 0 across volumes is refused as a swap instead.
+ *
+ * @param {string} who - The refusing function, for the log line
+ * @param {string} path - The path that was refused
+ * @param {{ dev: bigint, ino: bigint }} onFd - fstat of the opened fd
+ * @param {{ dev: bigint, ino: bigint }} onPath - lstat of the path after open
+ * @returns {string}
+ */
+export function describeNoFileIndex(who, path, onFd, onPath) {
+  return `${who} refused ${path}: the fd-identity check read file index 0 (fd ino=${onFd.ino}, path ino=${onPath.ino}, volume dev=${onFd.dev}), so it cannot prove the opened file is the one at the path. No symlink was seen. A volume without file indexes (FAT/exFAT, some network or virtual volumes) reports 0 for every file and cannot be opened through a symlink-refusing open; use an NTFS volume (#7874).`
+}
+
+/**
  * The one refusal. `code: 'ELOOP'` is the WIRE contract — every caller keys on
  * it and maps it to "access denied" — but the MESSAGE must not claim more than
  * the refusal knows. Only some of these refusals saw a symlink; the rest are
@@ -148,11 +205,14 @@ function eloop(path, detail) {
  * @param {string} path - Absolute path to open
  * @param {number} flags - Caller's open flags, WITHOUT O_NOFOLLOW
  * @param {number} [mode] - Creation mode, forwarded unchanged
- * @param {object} deps - `{ hasONoFollow, oNofollow, platform, open, lstat, fstat }`
+ * @param {object} deps - `{ hasONoFollow, oNofollow, platform, open, lstat, fstat, log? }`.
+ *   `log` defaults to this module's logger, so a test that injects only the
+ *   fs seam still reaches the real log sink.
  * @returns {Promise<import('fs/promises').FileHandle>}
  */
 export async function _openNoFollowImpl(path, flags, mode, deps) {
   const { hasONoFollow, oNofollow, platform, open, lstat, fstat } = deps
+  const logger = deps.log || log
 
   if (hasONoFollow) {
     // POSIX: one atomic, kernel-enforced decision for the symlink refusal,
@@ -200,10 +260,25 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
   try {
     const [onFd, onPath] = await Promise.all([fstat(fh), lstat(path)])
     if (onPath.isSymbolicLink()) throw eloop(path, 'a symlink appeared at the path after open')
-    if (onFd.ino === 0n || onPath.ino === 0n) {
-      throw eloop(path, 'no usable file index — the identity check would be vacuous')
+    // #7874: volumes first. Two different volumes prove a swap whatever file
+    // index either reports, so a one-sided index 0 across volumes is refused
+    // as the swap it is, not logged as an index-less volume.
+    if (onFd.dev !== onPath.dev) {
+      throw eloop(path, 'the opened file is on a different volume than the file at this path — swapped between check and open')
     }
-    if (onFd.dev !== onPath.dev || onFd.ino !== onPath.ino) {
+    if (onFd.ino === 0n || onPath.ino === 0n) {
+      // #7874: refused, per the module header's policy, and logged so the
+      // refusal cannot be mistaken for a symlink or containment rejection.
+      // Best-effort: this line sits inside the try below, so a throwing log
+      // sink would otherwise be rethrown as "identity check failed" and lose
+      // both the reason and the diagnostic.
+      try { logger.warn(describeNoFileIndex('openNoFollow', path, onFd, onPath)) } catch { /* best-effort */ }
+      throw Object.assign(
+        eloop(path, 'no usable file index — the identity check would be vacuous'),
+        { reason: NO_FILE_INDEX }
+      )
+    }
+    if (onFd.ino !== onPath.ino) {
       throw eloop(path, 'the opened file is not the file at this path — swapped between check and open')
     }
     ok = true

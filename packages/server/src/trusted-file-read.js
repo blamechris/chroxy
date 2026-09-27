@@ -68,8 +68,17 @@
  *    file that also passes the exact-0600-mode + owner-uid checks could
  *    otherwise plant an arbitrarily large one and force the daemon to
  *    allocate it wholesale on every read.
+ *
+ * A volume that reports file index 0 is refused, not degraded, under the
+ * same policy as `ws-file-ops/open-nofollow.js` (#7874; see its header). The
+ * refusal logs that file's `describeNoFileIndex` line, so a credential file
+ * on such a volume is diagnosable from the server log.
  */
 import { openSync, closeSync, fstatSync, lstatSync, readFileSync, constants as fsConstants } from 'node:fs'
+import { createLogger } from './logger.js'
+import { NO_FILE_INDEX, describeNoFileIndex } from './ws-file-ops/open-nofollow.js'
+
+const log = createLogger('trusted-file-read')
 
 /** True when this platform's Node exports a usable `O_NOFOLLOW`. */
 const HAS_O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' && fsConstants.O_NOFOLLOW !== 0
@@ -123,7 +132,8 @@ function refusal(path, detail) {
  * per-platform reasoning — ported to the synchronous fs surface.
  *
  * @param {string} path
- * @param {object} deps - `{ hasONoFollow, oNofollow, platform, openSync, closeSync, fstatSync, lstatSync }`
+ * @param {object} deps - `{ hasONoFollow, oNofollow, platform, openSync, closeSync, fstatSync, lstatSync, log? }`.
+ *   `log` defaults to this module's logger.
  * @returns {{ fd: number, stat: import('fs').BigIntStats }}
  * @throws {Error} ENOENT (absent), ELOOP (symlink refused, or the identity
  *   check failed), ENOSYS (a platform with neither a real nor an emulated
@@ -131,6 +141,7 @@ function refusal(path, detail) {
  */
 export function _openTrustedFdSync(path, deps) {
   const { hasONoFollow, oNofollow, platform, openSync: doOpen, closeSync: doClose, fstatSync: doFstat, lstatSync: doLstat } = deps
+  const logger = deps.log || log
   const O_RDONLY = fsConstants.O_RDONLY
 
   if (hasONoFollow) {
@@ -178,10 +189,21 @@ export function _openTrustedFdSync(path, deps) {
     const onFd = doFstat(fd)
     const onPath = doLstat(path)
     if (onPath.isSymbolicLink()) throw refusal(path, 'a symlink appeared at the path after open')
-    if (onFd.ino === 0n || onPath.ino === 0n) {
-      throw refusal(path, 'no usable file index — the identity check would be vacuous')
+    // #7874: volumes first, as in open-nofollow.js. Two volumes prove a swap
+    // whatever file index either reports.
+    if (onFd.dev !== onPath.dev) {
+      throw refusal(path, 'the opened file is on a different volume than the file at this path — swapped between check and open')
     }
-    if (onFd.dev !== onPath.dev || onFd.ino !== onPath.ino) {
+    if (onFd.ino === 0n || onPath.ino === 0n) {
+      // Best-effort, as in open-nofollow.js: a throwing log sink must not turn
+      // this refusal into "identity check failed" and drop its reason.
+      try { logger.warn(describeNoFileIndex('readTrustedSecretFile', path, onFd, onPath)) } catch { /* best-effort */ }
+      throw Object.assign(
+        refusal(path, 'no usable file index — the identity check would be vacuous'),
+        { reason: NO_FILE_INDEX },
+      )
+    }
+    if (onFd.ino !== onPath.ino) {
       throw refusal(path, 'the opened file is not the file at this path — swapped between check and open')
     }
     ok = true
