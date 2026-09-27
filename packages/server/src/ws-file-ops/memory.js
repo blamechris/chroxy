@@ -111,16 +111,26 @@ function hasMarkdownExt(p) {
  * IMPORT_ALLOWED_EXTS is rejected up front — same skip shape as out-of-bounds —
  * closing the "@import a non-markdown sensitive file under ~/.claude" class (#6971).
  *
+ * With `{ markdownOutside: projectReal }` (the three fixed root files pass this,
+ * #8021), the target may resolve anywhere INSIDE `projectReal` — the dashboard's
+ * file viewer can already open every file there, so a `CLAUDE.md` symlinked to
+ * an extensionless `.cursorrules` keeps working — but a target OUTSIDE it (i.e.
+ * under ~/.claude) must be markdown. That closes `CLAUDE.md ->
+ * ~/.claude/.credentials.json`, which the fixed roots' exemption from the
+ * `@import` gate had left open.
+ *
  * Never throws — every failure mode folds into a ready-to-push `skipEntry`
  * (byte-identical MEMORY_SKIP_ERROR shape, echoing the LEXICAL request path —
  * no distinguishing oracle) instead of a resolved path.
  *
  * @param {string} lexicalAbsPath - Absolute LEXICAL (pre-realpath) target path
  * @param {string[]} allowedRoots - Real-path roots the target must resolve within
- * @param {{requireMarkdownExt?: boolean}} [opts] - `@import`-only markdown-extension gate
+ * @param {{requireMarkdownExt?: boolean, markdownOutside?: string}} [opts] - `requireMarkdownExt`:
+ *   the `@import` markdown gate; `markdownOutside`: the project's real path, outside of
+ *   which the target must be markdown (fixed root files, #8021)
  * @returns {Promise<{resolvedPath: string|null, skipEntry: object|null}>}
  */
-async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { requireMarkdownExt = false } = {}) {
+async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { requireMarkdownExt = false, markdownOutside = null } = {}) {
   const base = { path: lexicalAbsPath, exists: false, content: null, truncated: false, skipped: false, error: null }
 
   // `@import` markdown allowlist (import path ONLY; the fixed root files are
@@ -150,6 +160,12 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
   // in-bounds, so the allowlist must hold for the RESOLVED target too — the
   // path phase 2 actually opens. Same skip shape: no oracle.
   if (requireMarkdownExt && !hasMarkdownExt(resolvedPath)) {
+    return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
+  }
+
+  // #8021 — a fixed root may point anywhere in the project, but outside it
+  // (under ~/.claude) only at markdown. Same skip shape: no oracle.
+  if (markdownOutside && !isPathWithin(resolvedPath, markdownOutside) && !hasMarkdownExt(resolvedPath)) {
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
 
@@ -247,7 +263,7 @@ export async function readResolvedMemoryFile(resolvedPath, __testBetweenStatAndO
  *
  * @param {string} lexicalAbsPath - Absolute LEXICAL (pre-realpath) target path
  * @param {string[]} allowedRoots - Real-path roots the target must resolve within
- * @param {{requireMarkdownExt?: boolean}} [opts] - `@import`-only markdown-extension gate
+ * @param {{requireMarkdownExt?: boolean, markdownOutside?: string}} [opts] - see resolveConfinedMemoryPath
  * @returns {Promise<{path: string|null, exists: boolean, content: string|null, truncated: boolean, skipped: boolean, error: string|null}>}
  */
 async function readConfinedMemoryFile(lexicalAbsPath, allowedRoots, opts = {}) {
@@ -366,7 +382,7 @@ export function createMemoryOps(sendFn, resolveSessionCwd) {
     ]
 
     for (const { scope, lexicalPath } of roots) {
-      const entry = await readConfinedMemoryFile(lexicalPath, allowedRoots)
+      const entry = await readConfinedMemoryFile(lexicalPath, allowedRoots, { markdownOutside: cwdReal })
       visited.add(entry.path || lexicalPath)
       entries.push({ ...entry, scope, importedFrom: null })
       if (entry.exists && entry.content && !entry.skipped && !entry.error) {
