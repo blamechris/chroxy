@@ -134,13 +134,25 @@ echo "[bundle-server] Pruned $PRUNED_COUNT bare-runtime prebuilds dir(s)"
 # `@anthropic-ai/claude-agent-sdk` itself (the JS package, which the server
 # still imports) is untouched — only its platform-specific siblings match
 # the `-darwin-`/`-linux-`/`-win32-` suffix patterns below. Nested copies
-# (a transitive dep pulling in its own copy) are pruned too: `find` is not
-# rooted to a single `@anthropic-ai/` directory.
+# (a transitive dep pulling in its own copy under its OWN `@anthropic-ai/`
+# scope directory) are pruned too: `find` is not rooted to a single
+# `@anthropic-ai/` directory.
+#
+# Scoped with `-path '*/@anthropic-ai/claude-agent-sdk-<platform>-*'`, NOT a
+# bare `-name` match (#7986 review N3): `-name` matches the leaf directory
+# name regardless of its PARENT, so it would also prune an unrelated
+# `claude-agent-sdk-darwin-arm64` directory living outside `@anthropic-ai/`
+# (a differently-scoped or vendored package that happens to share the SDK's
+# platform-package naming convention) — dead weight this repo doesn't ship
+# today, but not a pattern this prune should reach for on a name coincidence
+# alone. A sibling, non-platform package under the SAME scope (e.g.
+# `@anthropic-ai/claude-agent-sdk-tools`) is untouched either way — its name
+# doesn't match the `-darwin-*`/`-linux-*`/`-win32-*` suffix.
 echo "[bundle-server] Pruning SDK platform packages (unused — #7986)..."
 SDK_PLATFORM_PRUNED=$(find "$STAGING/node_modules" -type d \( \
-    -name "claude-agent-sdk-darwin-*" -o \
-    -name "claude-agent-sdk-linux-*" -o \
-    -name "claude-agent-sdk-win32-*" \
+    -path "*/@anthropic-ai/claude-agent-sdk-darwin-*" -o \
+    -path "*/@anthropic-ai/claude-agent-sdk-linux-*" -o \
+    -path "*/@anthropic-ai/claude-agent-sdk-win32-*" \
   \) -prune -print -exec rm -rf {} + | wc -l | tr -d ' ')
 echo "[bundle-server] Pruned $SDK_PLATFORM_PRUNED SDK platform package dir(s)"
 

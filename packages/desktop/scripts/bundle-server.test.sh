@@ -139,13 +139,31 @@ case "${BUNDLE_MACHO_CASE:-none}" in
   sdk-platform)
     # The SDK's platform-specific `claude` binaries (#7986) — pruned on every
     # host regardless of Mach-O detection — plus the JS entrypoint that must
-    # survive the prune.
+    # survive the prune. Covers all three platform suffixes (darwin/linux/
+    # win32, #7986 review N3 — the prior fixture only planted darwin-*, so
+    # the linux-*/win32-* patterns, the win32 one load-bearing on the Windows
+    # release job, were never exercised).
     mkdir -p node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64
     printf '\xfe\xed\xfa\xcf\x00\x00\x00\x0c' > node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude
     mkdir -p node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64
     printf '\xfe\xed\xfa\xcf\x00\x00\x00\x0c' > node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/claude
+    mkdir -p node_modules/@anthropic-ai/claude-agent-sdk-linux-x64
+    printf '\x7fELF\x02\x01\x01\x00' > node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude
+    mkdir -p node_modules/@anthropic-ai/claude-agent-sdk-win32-x64
+    printf 'MZ\x90\x00\x03\x00\x00\x00' > node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe
     mkdir -p node_modules/@anthropic-ai/claude-agent-sdk
     printf '%s\n' '// fixture sdk entry' > node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+    # A non-platform sibling under the SAME @anthropic-ai scope — must
+    # SURVIVE (#7986 review N3): its name doesn't match the
+    # -darwin-*/-linux-*/-win32-* suffix the prune targets.
+    mkdir -p node_modules/@anthropic-ai/claude-agent-sdk-tools
+    printf '%s\n' '// fixture sdk-tools entry' > node_modules/@anthropic-ai/claude-agent-sdk-tools/index.js
+    # A same-named directory OUTSIDE @anthropic-ai — must SURVIVE (#7986
+    # review N3): the prune is now scoped by parent path (-path), not a bare
+    # -name match, so an unrelated package sharing the SDK's platform-package
+    # naming convention is not swept up on a name coincidence alone.
+    mkdir -p node_modules/other/claude-agent-sdk-darwin-arm64
+    printf '%s\n' 'not a binary, just a name collision' > node_modules/other/claude-agent-sdk-darwin-arm64/readme.txt
     ;;
   node-pty-exempt)
     # node-pty's darwin spawn-helper: a real extension-less Mach-O that MUST
@@ -166,9 +184,18 @@ chmod +x "$TMP_DIR/bin/npm"
 
 # uname stub: forces the Darwin-only guard to run on ANY host, so this suite
 # is not silently skipped when run on non-macOS CI or a developer's Linux box.
+# Restricted to exactly `-s` (#7986 review N11) — bundle-server.sh only ever
+# calls `uname -s`, but a future call with a different flag (e.g. `uname -m`
+# for an arch check) must not silently read "Darwin" from this stub; it execs
+# the REAL uname instead, so such a call gets the test host's true answer
+# rather than a value this stub never claimed to fake.
 cat > "$TMP_DIR/bin/uname" <<'EOF'
 #!/usr/bin/env bash
-echo "Darwin"
+if [ "$#" -eq 1 ] && [ "$1" = "-s" ]; then
+    echo "Darwin"
+else
+    exec /usr/bin/uname "$@"
+fi
 EOF
 chmod +x "$TMP_DIR/bin/uname"
 
@@ -204,6 +231,10 @@ for probe_case in extensionless sdk-platform node-pty-exempt java-class; do
                 "$MACHO_PROBE_DIR/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude" "feedfacf"
             verify_magic_bytes "sdk-platform darwin-x64 fixture" \
                 "$MACHO_PROBE_DIR/node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/claude" "feedfacf"
+            verify_magic_bytes "sdk-platform linux-x64 fixture" \
+                "$MACHO_PROBE_DIR/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/claude" "7f454c4602010100"
+            verify_magic_bytes "sdk-platform win32-x64 fixture" \
+                "$MACHO_PROBE_DIR/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe" "4d5a900003000000"
             ;;
         node-pty-exempt)
             verify_magic_bytes "node-pty spawn-helper fixture" \
@@ -267,20 +298,30 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# (b) The SDK's darwin platform packages are pruned on every host; the SDK's
-# own JS entrypoint (sdk.mjs) survives; the build succeeds.
+# (b) The SDK's platform packages (darwin/linux/win32) are pruned on every
+# host; the SDK's own JS entrypoint (sdk.mjs) survives; a same-named
+# directory OUTSIDE @anthropic-ai and a non-platform sibling INSIDE
+# @anthropic-ai both survive (#7986 review N3 — the prune is scoped by
+# parent path, not a bare -name match); the build succeeds.
 run_bundle_case sdk-platform
 SDK_DARWIN_ARM64="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64"
 SDK_DARWIN_X64="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64"
+SDK_LINUX_X64="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64"
+SDK_WIN32_X64="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64"
 SDK_ENTRYPOINT="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs"
-if [ "$BUNDLE_CASE_RC" -eq 0 ] && [ ! -e "$SDK_DARWIN_ARM64" ] && [ ! -e "$SDK_DARWIN_X64" ] \
-    && [ -f "$SDK_ENTRYPOINT" ]; then
-    echo "ok   - prunes the SDK's darwin platform packages, keeps sdk.mjs, and the build succeeds (#7986)"
+SDK_TOOLS_SURVIVOR="$STAGED/node_modules/@anthropic-ai/claude-agent-sdk-tools/index.js"
+OUTSIDE_SCOPE_SURVIVOR="$STAGED/node_modules/other/claude-agent-sdk-darwin-arm64/readme.txt"
+if [ "$BUNDLE_CASE_RC" -eq 0 ] \
+    && [ ! -e "$SDK_DARWIN_ARM64" ] && [ ! -e "$SDK_DARWIN_X64" ] \
+    && [ ! -e "$SDK_LINUX_X64" ] && [ ! -e "$SDK_WIN32_X64" ] \
+    && [ -f "$SDK_ENTRYPOINT" ] && [ -f "$SDK_TOOLS_SURVIVOR" ] && [ -f "$OUTSIDE_SCOPE_SURVIVOR" ]; then
+    echo "ok   - prunes the SDK's platform packages on every suffix, keeps sdk.mjs + non-platform/out-of-scope siblings, and the build succeeds (#7986)"
     PASS=$((PASS + 1))
 else
-    echo "FAIL - prunes the SDK's darwin platform packages, keeps sdk.mjs, and the build succeeds (#7986)" >&2
+    echo "FAIL - prunes the SDK's platform packages on every suffix, keeps sdk.mjs + non-platform/out-of-scope siblings, and the build succeeds (#7986)" >&2
     echo "  exit code: $BUNDLE_CASE_RC" >&2
     ls -la "$STAGED/node_modules/@anthropic-ai" >&2 2>/dev/null || true
+    ls -la "$STAGED/node_modules/other" >&2 2>/dev/null || true
     cat "$BUNDLE_CASE_STDERR" >&2
     FAIL=$((FAIL + 1))
 fi
