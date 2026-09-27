@@ -421,7 +421,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (22)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (21)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -568,13 +568,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'the fixture never produces a commit, so its own CONTROL assertion fails before any schema is checked',
     issue: 7274,
-  },
-  {
-    file: 'tests/ws-server-file-ops.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the #7285 fixture premise is fixed (its outside-home target is now %SystemRoot%); what remains is read_file on a MISSING file under the CI account 8.3 short tmpdir: the ENOENT branch compares the lexical path against the native-realpath cwd and answers Access denied instead of File not found',
-    issue: 8000,
   },
 ]
 
