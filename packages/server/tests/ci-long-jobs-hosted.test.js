@@ -40,6 +40,12 @@ const routedExpression = name => `\${{ fromJSON(needs.runner-target.outputs.${na
 // The ONE spelling of a resolve-step output write this file can read.
 const CANONICAL_ECHO = /^\s*echo '([a-z]+)=(.*)' >> "\$GITHUB_OUTPUT"\s*$/
 
+// The trust predicate that selects the self-hosted branch: push events and
+// same-repo PRs only. Pinned EXACTLY — inverting or widening it would route
+// fork-PR code onto the self-hosted branch while every branch check still passed.
+const TRUST_CONDITION =
+  'if [ "${{ github.event_name == \'push\' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then'
+
 const stripComment = s => s.replace(/\s+#.*$/, '')
 
 /**
@@ -92,7 +98,8 @@ function classify(value, file) {
     return file === 'ci.yml' ? { kind: 'routed' } : { kind: 'unknown' }
   }
   if (value.startsWith('[') && value.endsWith(']')) {
-    return classifyLabels(value.slice(1, -1).split(',').map(l => l.trim()).filter(Boolean))
+    const labels = value.slice(1, -1).split(',').map(l => l.trim().replace(/^(['"])(.*)\1$/, '$2')).filter(Boolean)
+    return classifyLabels(labels)
   }
   if (/^[A-Za-z0-9._-]+$/.test(value)) return { kind: 'hosted', label: value }
   return { kind: 'unknown' }
@@ -227,6 +234,27 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
     assert.deepEqual(offenders, [], `non-canonical output writes in the resolve step:\n  ${offenders.join('\n  ')}`)
   })
 
+  it('the resolve step has one if/else/fi, guarded by the exact trust condition', () => {
+    const count = re => resolveLines.filter(l => re.test(l)).length
+    assert.equal(count(/^\s*if\b/), 1, 'expected exactly one `if` in the resolve step')
+    assert.equal(count(/^\s*else\s*$/), 1, 'expected exactly one `else` in the resolve step')
+    assert.equal(count(/^\s*fi\s*$/), 1, 'expected exactly one `fi` in the resolve step')
+    assert.equal(count(/^\s*elif\b/), 0, 'no `elif` — each branch must be exactly trusted or fork')
+    const ifLine = resolveLines.find(l => /^\s*if\b/.test(l)).trim()
+    assert.equal(ifLine, TRUST_CONDITION,
+      'the self-hosted branch must be selected by the push / same-repo-PR predicate, exactly')
+  })
+
+  it('every routed write sits inside the if/else (none before `if` or after `fi`)', () => {
+    // A write outside both branches runs on EVERY event and, written after the
+    // branch, wins — overriding both of the per-branch checks above.
+    const all = resolveLines
+      .map(l => CANONICAL_ECHO.exec(l))
+      .filter(m => m && ROUTED_OUTPUTS.includes(m[1]))
+    assert.equal(all.length, trusted.length + fork.length,
+      `routed writes outside the if/else: ${all.length - trusted.length - fork.length}`)
+  })
+
   it('runner-target passes each routed output straight through from the resolve step', () => {
     // A literal in the outputs map would bypass the resolve step entirely.
     const lines = code(target.body)
@@ -301,6 +329,8 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
     assert.equal(STANDARD_HOSTED_LABELS.has('ubuntu-24.04-16core'), false)
     assert.equal(classifyJson('["windows-latest-8-cores"]').kind, 'hosted')
     assert.equal(classifyJson('not json').kind, 'unknown')
+    assert.equal(classify('["self-hosted", "linux"]', 'ci.yml').kind, 'self-hosted')
+    assert.deepEqual(classify("['ubuntu-24.04']", 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04' })
   })
 
   it('jobLevelRunsOn reads only the job-level key, in every form', () => {
