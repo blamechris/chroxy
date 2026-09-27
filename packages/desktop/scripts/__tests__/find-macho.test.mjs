@@ -270,11 +270,18 @@ describe('CLI — node find-macho.mjs <root> [--exclude-regex <re>]', () => {
     assert.deepEqual(result.stdout.split('\n').filter(Boolean), [kept])
   })
 
+  // #7986 review N6: `status !== 0` also accepts `null` (the process crashed
+  // or was killed by a signal rather than exiting cleanly) — every real
+  // failure path in find-macho.mjs calls `process.exit(1)` after printing a
+  // `[find-macho] ...` line to stderr, so asserting the exact status AND the
+  // stderr prefix distinguishes "the guard refused, as designed" from "the
+  // guard's own process died" (which would read as red too, but for the
+  // wrong reason).
   it('exits NON-ZERO when the root does not exist', () => {
     const root = join(tmpDir('cli-missing'), 'does-not-exist')
     const result = spawnSync(process.execPath, [CLI_PATH, root], { encoding: 'utf8' })
-    assert.notEqual(result.status, 0)
-    assert.match(result.stderr, /find-macho/)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /^\[find-macho\]/)
   })
 
   it('exits NON-ZERO when the root is a file, not a directory', () => {
@@ -282,18 +289,21 @@ describe('CLI — node find-macho.mjs <root> [--exclude-regex <re>]', () => {
     const file = join(root, 'a-file')
     writeFileSync(file, 'not a directory\n')
     const result = spawnSync(process.execPath, [CLI_PATH, file], { encoding: 'utf8' })
-    assert.notEqual(result.status, 0)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /^\[find-macho\]/)
   })
 
   it('exits NON-ZERO on an invalid --exclude-regex', () => {
     const root = tmpDir('cli-bad-regex')
     const result = spawnSync(process.execPath, [CLI_PATH, root, '--exclude-regex', '('], { encoding: 'utf8' })
-    assert.notEqual(result.status, 0)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /^\[find-macho\]/)
   })
 
   it('exits NON-ZERO with no arguments at all', () => {
     const result = spawnSync(process.execPath, [CLI_PATH], { encoding: 'utf8' })
-    assert.notEqual(result.status, 0)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /^\[find-macho\]/)
   })
 
   it(
