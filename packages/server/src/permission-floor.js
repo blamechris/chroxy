@@ -541,7 +541,7 @@ export const FLOOR_SECRET_NAMES = Object.freeze({
 const GLOB_FLOOR_MAX_LENGTH = 1024
 const GLOB_FLOOR_MAX_ALTERNATIVES = 64
 const GLOB_FLOOR_MAX_EXPANDED_LENGTH = 4096
-const GLOB_FLOOR_MAX_STATES = 1_000_000
+export const GLOB_FLOOR_MAX_STATES = 1_000_000
 
 let _globFloorTemplates = null
 

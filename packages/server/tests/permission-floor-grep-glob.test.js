@@ -9,6 +9,7 @@ import {
   isSecretReadTarget,
   globSelectsSecret,
   GLOB_SELECTOR_FLOOR_TOOLS,
+  GLOB_FLOOR_MAX_STATES,
   FLOOR_SECRET_NAMES,
 } from '../src/permission-floor.js'
 
@@ -152,11 +153,42 @@ describe('#7978 fail-closed edges', () => {
     assert.equal(globSelectsSecret(alternatives(65)), true)
   })
 
-  it('a glob that exhausts the search-state budget floors, and quickly (second review, S2)', () => {
+  it('a glob that exhausts the search-state budget floors, and the search STOPS at the budget (second review, S2)', () => {
     const q = '**q'.repeat(165)
-    const started = Date.now()
     assert.equal(grepFloored(`{a,b,c,d}${q}zq ${q}zp`), true)
-    assert.ok(Date.now() - started < 1000, 'the budget must bound the time, not just the verdict')
+
+    // The budget must bound the WORK, not just the verdict. This used to be a
+    // wall-clock bound (`< 1000ms`), which failed a required check at 1366ms on
+    // a saturated runner for a case that takes ~25ms on an idle one, and which
+    // a real 10x regression would still have passed (#7990). Count the search
+    // states charged instead: a budget whose setter trips one state past the
+    // cap. With the budget check removed, this reading charges ~2.9M states and
+    // answers `false` — measured, so the mutation goes red on both assertions,
+    // fast, rather than hanging.
+    let charged = 0
+    let tripped = false
+    const budget = {
+      remaining: GLOB_FLOOR_MAX_STATES,
+      get left() { return this.remaining },
+      set left(v) {
+        charged++
+        if (charged > GLOB_FLOOR_MAX_STATES + 1) {
+          tripped = true
+          throw new Error('tripwire: the search ran past the state budget')
+        }
+        this.remaining = v
+      },
+    }
+    let verdict
+    try {
+      verdict = globSelectsSecret(`{a,b,c,d}${q}zq`, budget)
+    } catch {
+      // only the tripwire throws; reported by the assertion below
+    }
+    assert.equal(tripped, false, `the search must stop at the budget; it charged past ${GLOB_FLOOR_MAX_STATES + 1} states`)
+    assert.ok(budget.left < 0, `the budget must actually be exhausted for this case to exercise the cap (charged ${charged})`)
+    assert.equal(verdict, true, 'an exhausted budget floors')
+
     assert.equal(globSelectsSecret('packages/server/src/**/*.test.js'), false, 'control: an ordinary long glob is well inside the budget')
   })
 
