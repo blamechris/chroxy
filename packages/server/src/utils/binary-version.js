@@ -30,10 +30,11 @@ import { statSync as fsStatSync } from 'fs'
 // hung/misbehaving binary can't stall session creation indefinitely.
 const PROBE_TIMEOUT_MS = 10_000
 
-// path -> { identity: string|null, version: string|null }. Module-level so it
-// survives across preflight calls within one daemon process; keyed by the
-// RESOLVED path (not the binary name) since different providers can resolve
-// different paths for the "same" binary name.
+// stat-identity string (`path:dev:ino:size:mtimeMs`, see statIdentity) ->
+// parsed version string. Only successful reads are stored. Module-level so it
+// survives across preflight calls within one daemon process. The identity
+// starts with the RESOLVED path (not the binary name), since different
+// providers can resolve different paths for the "same" binary name.
 const versionCache = new Map()
 
 /**

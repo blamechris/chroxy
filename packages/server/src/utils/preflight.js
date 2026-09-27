@@ -318,7 +318,7 @@ export function runProviderPreflight(ProviderClass, {
         // went missing on a dependency bump) or a malformed string must not
         // silently disable the gate NOR hard-fail a session the operator has
         // no way to fix — surfaced loudly, then skipped.
-        log.warn(`Provider "${spec.binary.name}" declared an invalid/empty minVersion (${JSON.stringify(rawMinVersion)}) — skipping the version check`)
+        log.warn(`Provider "${providerLabel}" (binary "${spec.binary.name}") declared an invalid/empty minVersion (${JSON.stringify(rawMinVersion)}) — skipping the version check`)
       } else {
         const found = probeVersion(binaryPath, spec.binary.args || ['--version'])
         if (!found) {
