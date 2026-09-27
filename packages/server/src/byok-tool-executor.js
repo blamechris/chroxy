@@ -704,12 +704,21 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  * BOUNDS — the caller's deadline/abort race is checked (`state.stop`) at the
  * top of every directory and before every entry, so an `opendir` read (a
  * real, yielding async op) is never more than one entry away from noticing a
- * stop. `GLOB_COLLECT_CEILING` bounds MATCHES the same way the old walk did;
+ * stop. On the macOS/win32 path-based fallback (#7919) entries arrive in
+ * verification rounds of up to FALLBACK_VERIFY_BATCH, so a stop can wait for
+ * the round in progress to finish (at most one round's concurrent lstats plus
+ * one parent re-check) before the next per-entry check sees it.
+ * `GLOB_COLLECT_CEILING` bounds MATCHES the same way the old walk did;
  * `maxEntries` (`globMaxEntriesVisited()`) additionally bounds total entries
  * VISITED regardless of match count, for the #7356 shape (an enormous tree, almost no
  * matches) where the collect ceiling never engages.
  *
- * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number, directoryOnly?: boolean}} args
+ * `__testDescendSeam` and `__testForcePathFallback` are TEST-ONLY: the seam is
+ * awaited at the phases listed on openVerifiedDirForDescend, and the flag
+ * routes Linux through the macOS/win32 fallback so its tests bite on Linux CI.
+ * The production caller (runGlob) passes neither.
+ *
+ * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number, directoryOnly?: boolean, __testDescendSeam?: (target: string, phase: string, names?: string[]) => Promise<void>, __testForcePathFallback?: boolean}} args
  */
 async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries, directoryOnly, __testDescendSeam, __testForcePathFallback = false }) {
   const m = matchers.length
