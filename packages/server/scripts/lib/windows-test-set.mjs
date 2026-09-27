@@ -421,7 +421,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (20)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (19)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -449,13 +449,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'truncate-in-place while a writer holds the handle is not permitted on Windows',
     issue: 7274,
-  },
-  {
-    file: 'tests/memory-read.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is encodeProjectPath leaving backslashes and the drive letter in the projects-dir key, plus global CLAUDE.md discovery under USERPROFILE',
-    issue: 7283,
   },
   {
     file: 'tests/node-version-check.test.js',

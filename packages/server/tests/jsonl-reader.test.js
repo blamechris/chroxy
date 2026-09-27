@@ -12,6 +12,7 @@ import {
   MAX_TRANSCRIPT_BYTES,
   MAX_MESSAGES,
 } from '../src/jsonl-reader.js'
+import { transcriptPathForSessionFile } from '../src/transcript-tasks.js'
 
 describe('encodeProjectPath', () => {
   it('replaces slashes with dashes', async () => {
@@ -27,6 +28,55 @@ describe('encodeProjectPath', () => {
 
   it('handles path without leading slash', async () => {
     assert.equal(encodeProjectPath('foo/bar'), 'foo-bar')
+  })
+
+  // #7283 — the key must MATCH the directory Claude Code itself writes, so these
+  // expectations are copied from real ~/.claude/projects names on disk, not
+  // derived from the implementation. Every non-alphanumeric character becomes
+  // `-`: 88 directories on a macOS host held nothing outside [A-Za-z0-9-], and
+  // the Windows host's one directory was `A--tmp` for `A:\tmp`.
+  it('flattens a dot, so a worktree under .claude/ gets the key Claude Code writes (#7283)', async () => {
+    assert.equal(
+      encodeProjectPath('/Users/blamechris/Projects/chroxy/.claude/worktrees/prime-directive-readiness-54b6c2'),
+      '-Users-blamechris-Projects-chroxy--claude-worktrees-prime-directive-readiness-54b6c2',
+    )
+    assert.equal(encodeProjectPath('/Users/blamechris/.codex/sessions'), '-Users-blamechris--codex-sessions')
+  })
+
+  it('flattens spaces and underscores (#7283)', async () => {
+    assert.equal(
+      encodeProjectPath('/Users/x/Downloads/Mom Hospitalization Files'),
+      '-Users-x-Downloads-Mom-Hospitalization-Files',
+    )
+    assert.equal(encodeProjectPath('/private/tmp/my.dotted_dir'), '-private-tmp-my-dotted-dir')
+  })
+
+  it('flattens a Windows drive letter and backslashes (#7283)', async () => {
+    assert.equal(encodeProjectPath('A:\\tmp'), 'A--tmp')
+    assert.equal(encodeProjectPath('C:\\Users\\chris\\proj'), 'C--Users-chris-proj')
+  })
+
+  it('throws on a non-string cwd rather than inventing a `null` key (#7283 review)', async () => {
+    // session-manager-history-error.test.js depends on this: a null cwd must
+    // reach getFullHistoryAsync's catch (and its log line), not read
+    // ~/.claude/projects/null/<id>.jsonl and fall back silently.
+    assert.throws(() => encodeProjectPath(null), TypeError)
+    assert.throws(() => resolveJsonlPath(undefined, 'abc-123'), TypeError)
+  })
+
+  it('agrees with the transcript path transcript-tasks derives from a session file (#7283)', async () => {
+    // The two call sites used to carry separate encoders that disagreed on any
+    // cwd with a dot. Pin them to one answer.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-7283-'))
+    try {
+      const cwd = '/Users/x/Projects/repo/.claude/worktrees/wt_1'
+      const sessionId = '34b3489f-d698-43af-a02e-b4be0c679e42'
+      const sessFile = join(dir, '123.json')
+      writeFileSync(sessFile, JSON.stringify({ pid: 123, sessionId, cwd }))
+      assert.equal(transcriptPathForSessionFile(sessFile), resolveJsonlPath(cwd, sessionId))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 

@@ -17,7 +17,6 @@ import { join } from 'path'
 import {
   TranscriptTaskScanner,
   transcriptPathForSessionFile,
-  slugifyCwd,
   MAX_SCAN_BYTES,
 } from '../src/transcript-tasks.js'
 
@@ -71,16 +70,9 @@ function writeTranscript(lines, name = 'session.jsonl') {
 }
 
 // ---------------------------------------------------------------------------
-// slugifyCwd / transcriptPathForSessionFile
+// transcriptPathForSessionFile (the key encoding itself is tested with
+// encodeProjectPath in jsonl-reader.test.js, #7283)
 // ---------------------------------------------------------------------------
-
-describe('slugifyCwd', () => {
-  it('replaces every non-alphanumeric character with a dash (verified rule)', () => {
-    assert.equal(slugifyCwd('/Users/blamechris/Projects/repo-relay'), '-Users-blamechris-Projects-repo-relay')
-    assert.equal(slugifyCwd('/Users/x/Downloads/Mom Hospitalization Files'), '-Users-x-Downloads-Mom-Hospitalization-Files')
-    assert.equal(slugifyCwd('/private/tmp/my.dotted_dir'), '-private-tmp-my-dotted-dir')
-  })
-})
 
 describe('transcriptPathForSessionFile', () => {
   it('derives the projects-dir transcript path from sessionId + cwd', () => {
