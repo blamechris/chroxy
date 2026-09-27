@@ -226,8 +226,8 @@ describe('CI npm cache routing (#7383)', () => {
     // re-adds the 521 MB per-job download on the self-hosted pool, and an
     // unrouted one is worth a deliberate look rather than a copy-paste.
     //
-    // #7386 added the first — and so far only — legitimate hardcode, so this is
-    // an ALLOWLIST OF ONE rather than a relaxed rule. `dashboard-smoke` is
+    // #7386 added the first legitimate hardcode, so this is a NAMED ALLOWLIST
+    // rather than a relaxed rule — each entry carries its own reason. `dashboard-smoke` is
     // GitHub-hosted, x86_64, unconditional, on push-to-main, and already ran a
     // root `npm ci` with no cache: it cold-installed every run and saved nothing.
     // Caching it produces the entry fork PRs restore, at ~zero net cost to the
@@ -238,7 +238,16 @@ describe('CI npm cache routing (#7383)', () => {
     // Keep this list exact. Widening it to "any hosted job may hardcode" would
     // give back the copy-paste this guard exists to catch, and #7383's cost was
     // nine cancelled jobs across four PRs.
-    const ALLOWED_HARDCODED_CACHE = new Set(['dashboard-smoke'])
+    //
+    // `server-tests` and `dashboard-tests` (2026-09-27) are the second and third
+    // entries, for the reason the rule itself names: they are UNROUTED and
+    // GitHub-hosted for every event (the LONG JOBS ON GITHUB-HOSTED RUNNERS note
+    // in ci.yml), so each run starts on a fresh VM with an empty ~/.npm and the
+    // restore is the only warm source. They never touch the self-hosted pool,
+    // where the 521 MB download was the #7383 cost. ci-long-jobs-hosted.test.js
+    // holds them on `ubuntu-24.04`; if they ever route back through runner-target,
+    // the routed-cache rule above takes over and these entries must go.
+    const ALLOWED_HARDCODED_CACHE = new Set(['dashboard-smoke', 'server-tests', 'dashboard-tests'])
 
     const offenders = setupNodeSteps
       .filter(({ job, step }) => stepInput(step, 'cache') === 'npm' && !ALLOWED_HARDCODED_CACHE.has(job.id))
