@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   parseSemver,
   compareSemver,
+  resolveDeclaredMinVersion,
   probeBinaryVersion,
   _resetProbeCacheForTest,
 } from '../src/utils/binary-version.js'
@@ -185,6 +186,23 @@ describe('probeBinaryVersion', () => {
     assert.equal(calls, 2, 'a changed stat identity must trigger a fresh probe')
   })
 
+  it('does not cache a FAILED probe — a transient timeout must not pin "unreadable"', () => {
+    let calls = 0
+    const seams = {
+      execFileSync: () => {
+        calls += 1
+        if (calls === 1) throw Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' })
+        return '2.1.283\n'
+      },
+      statSync: statOf({ ino: 9, mtimeMs: 3000 }),
+    }
+    const first = probeBinaryVersion('/fake/claude', ['--version'], seams)
+    const second = probeBinaryVersion('/fake/claude', ['--version'], seams)
+    assert.equal(first, null)
+    assert.equal(second, '2.1.283', 'the unchanged binary must be re-probed after a failed read')
+    assert.equal(calls, 2)
+  })
+
   it('does not cache (and does not throw) when stat fails — probes fresh every call', () => {
     let calls = 0
     const version = probeBinaryVersion('/vanished/claude', ['--version'], {
@@ -193,5 +211,30 @@ describe('probeBinaryVersion', () => {
     })
     assert.equal(version, '2.1.283')
     assert.equal(calls, 1)
+  })
+})
+
+describe('resolveDeclaredMinVersion', () => {
+  it('passes a plain version string through', () => {
+    assert.equal(resolveDeclaredMinVersion('2.1.80'), '2.1.80')
+  })
+
+  it('calls a thunk and returns its string', () => {
+    assert.equal(resolveDeclaredMinVersion(() => '2.1.141'), '2.1.141')
+  })
+
+  it('returns null for a thunk that returns null or an empty string', () => {
+    assert.equal(resolveDeclaredMinVersion(() => null), null)
+    assert.equal(resolveDeclaredMinVersion(() => ''), null)
+  })
+
+  it('returns null for a thunk that throws, rather than propagating', () => {
+    assert.equal(resolveDeclaredMinVersion(() => { throw new Error('boom') }), null)
+  })
+
+  it('returns null for undefined, null, empty and non-string values', () => {
+    for (const v of [undefined, null, '', 2, {}, []]) {
+      assert.equal(resolveDeclaredMinVersion(v), null, `for ${JSON.stringify(v)}`)
+    }
   })
 })

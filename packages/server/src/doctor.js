@@ -7,6 +7,7 @@ import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
+import { resolveDeclaredMinVersion } from './utils/binary-version.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
@@ -623,8 +624,10 @@ function checkProvider(providerName) {
       // #3953: providers may declare a minimum binary version (e.g.
       // claude-channel needs `claude` ≥ 2.1.80 for the --channels MCP
       // transport). checkBinary parses the leading semver out of the
-      // version output and fails when it's below the floor.
-      minVersion: spec.binary.minVersion || null,
+      // version output and fails when it's below the floor. The field may be
+      // a thunk (claude-sdk derives its floor from the SDK, #7986), so it is
+      // resolved through the same helper preflight uses, never read raw.
+      minVersion: resolveDeclaredMinVersion(spec.binary.minVersion),
     })
     bin.provider = providerName
     out.push(bin)

@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
+import { registerProvider } from '../src/providers.js'
+import { SdkSession } from '../src/sdk-session.js'
+import { sdkClaudeCodeVersion } from '../src/utils/agent-sdk-version.js'
+import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
 
 /**
  * Integration tests for doctor.js.
@@ -364,6 +368,54 @@ describe('checkBinary minVersion gate (#3953)', () => {
       installHint: 'install node',
     })
     assert.equal(result.status, 'pass')
+  })
+})
+
+// #7986 — `preflight.binary.minVersion` may be a THUNK (claude-sdk derives its
+// floor from the installed SDK's claudeCodeVersion). doctor read the field raw
+// and handed the function itself to compareSemver, so every claude-sdk install
+// failed `chroxy doctor` — and `chroxy start`, which runs the same checks — with
+// "requires claude ≥ () => sdkClaudeCodeVersion()". These drive the real
+// runDoctorChecks → checkProvider path with `node` standing in for the binary.
+describe('provider minVersion declared as a thunk (#7986)', () => {
+  function registerThunkFloorProvider(name, floor) {
+    class ThunkFloorSession extends SdkSession {
+      static get preflight() {
+        return {
+          label: name,
+          binary: { name: 'node', args: ['--version'], candidates: [process.execPath], minVersion: () => floor },
+        }
+      }
+    }
+    registerProvider(name, ThunkFloorSession)
+  }
+
+  function binaryRow(checks, provider) {
+    return checks.find((c) => c.provider === provider && c.name === 'node')
+  }
+
+  it('passes when the thunk resolves to a floor the binary meets', async () => {
+    registerThunkFloorProvider('test-7986-thunk-floor-ok', '18.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-thunk-floor-ok'] })
+    const row = binaryRow(checks, 'test-7986-thunk-floor-ok')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
+  })
+
+  it('fails naming the RESOLVED floor, not the function source, when the binary is older', async () => {
+    registerThunkFloorProvider('test-7986-thunk-floor-high', '999.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-7986-thunk-floor-high'] })
+    const row = binaryRow(checks, 'test-7986-thunk-floor-high')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'fail')
+    assert.ok(row.message.includes('requires node ≥ 999.0.0'), row.message)
+    assert.ok(!row.message.includes('=>'), `the thunk's source leaked into the message: ${row.message}`)
+  })
+
+  it("claude-sdk's declared floor resolves to the installed SDK's claudeCodeVersion", () => {
+    const floor = resolveDeclaredMinVersion(SdkSession.preflight.binary.minVersion)
+    assert.equal(floor, sdkClaudeCodeVersion())
+    assert.ok(/^\d+\.\d+\.\d+/.test(floor || ''), `expected a semver floor, got ${JSON.stringify(floor)}`)
   })
 })
 

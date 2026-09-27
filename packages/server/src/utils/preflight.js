@@ -47,7 +47,7 @@
 import { resolveBinary } from './resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './verify-binary.js'
 import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './verify-provenance.js'
-import { parseSemver, compareSemver, probeBinaryVersion as defaultProbeBinaryVersion } from './binary-version.js'
+import { parseSemver, compareSemver, resolveDeclaredMinVersion, probeBinaryVersion as defaultProbeBinaryVersion } from './binary-version.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('preflight')
@@ -311,9 +311,7 @@ export function runProviderPreflight(ProviderClass, {
     // provenance-cleared path the spawn will use, so this never execs a
     // binary that failed either gate.
     if (Object.prototype.hasOwnProperty.call(spec.binary, 'minVersion')) {
-      const rawMinVersion = typeof spec.binary.minVersion === 'function'
-        ? spec.binary.minVersion()
-        : spec.binary.minVersion
+      const rawMinVersion = resolveDeclaredMinVersion(spec.binary.minVersion)
       const required = parseSemver(rawMinVersion)
       if (!required) {
         // A thunk that returns null (e.g. the SDK's claudeCodeVersion field

@@ -78,6 +78,33 @@ export function compareSemver(a, b) {
   return 0
 }
 
+/**
+ * Resolve a provider's declared `preflight.binary.minVersion` — a version
+ * string, or a thunk returning one (e.g. `() => sdkClaudeCodeVersion()`) — to
+ * a non-empty string, or null when there is no usable floor.
+ *
+ * Preflight AND doctor read that one field, so both resolve it here: a second
+ * reader that assumed a plain string handed the thunk itself to a semver
+ * comparator, and `chroxy doctor` / `chroxy start` then failed every claude-sdk
+ * install with "requires claude ≥ () => sdkClaudeCodeVersion()" (#7986). A
+ * thunk that throws resolves to null, the same "no usable floor" outcome as a
+ * thunk that returns null.
+ *
+ * @param {string|(() => string|null)|null|undefined} declared
+ * @returns {string|null}
+ */
+export function resolveDeclaredMinVersion(declared) {
+  let raw = declared
+  if (typeof declared === 'function') {
+    try {
+      raw = declared()
+    } catch {
+      return null
+    }
+  }
+  return typeof raw === 'string' && raw.length > 0 ? raw : null
+}
+
 function statIdentity(path, statFn) {
   try {
     const st = statFn(path)
@@ -96,7 +123,8 @@ function statIdentity(path, statFn) {
  * re-spawned on every call. When the identity can't be determined (stat
  * fails — e.g. the path vanished between preflight's verifyBinary check and
  * this probe), the result is neither read from nor written to the cache, so a
- * transient stat failure can't poison future calls.
+ * transient stat failure can't poison future calls. A probe that produced no
+ * version is never cached either, for the same reason.
  *
  * @param {string} path - resolved absolute binary path (already verified).
  * @param {string[]} [args] - args to invoke, default `['--version']`.
@@ -131,7 +159,11 @@ export function probeBinaryVersion(path, args = ['--version'], {
   }
 
   const version = stdout ? parseSemver(stdout) : null
-  if (identity) versionCache.set(identity, version)
+  // Only a successful read is cached. A failed probe (a timeout under load, a
+  // transient exec error) would otherwise pin "unreadable" to this identity and
+  // refuse every later session-create until the binary changed or the daemon
+  // restarted.
+  if (identity && version) versionCache.set(identity, version)
   return version
 }
 
