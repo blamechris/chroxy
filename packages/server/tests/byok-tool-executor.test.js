@@ -2471,6 +2471,98 @@ describe('executeBuiltinTool', () => {
         }
       })
 
+      // #7919 — the macOS/win32 fallback's residual. On those platforms the
+      // entries are read through a SECOND, path-based `opendir(target)`, so a
+      // swap to an outside symlink AFTER the verified open and a swap back
+      // BEFORE the post-opendir lstat handed `walk` a Dir open on the OUTSIDE
+      // directory. `__testForcePathFallback` routes Linux through the same
+      // fallback, so this runs — and bites — on every CI platform, not only
+      // on a macOS dev box.
+      describe('path-based fallback: per-entry post-verification (#7919)', () => {
+        function setupSwapFixture() {
+          const outer = mkdtempSync(join(tmpdir(), 'chroxy-7919-outer-'))
+          writeFileSync(join(outer, 'SECRETMARKER.txt'), 'top secret')
+          mkdirSync(join(dir, 'subtree'))
+          const targetAbs = join(dir, 'subtree', 'target')
+          mkdirSync(targetAbs)
+          writeFileSync(join(targetAbs, 'innocent.ts'), '1')
+          // Moved ASIDE, never deleted, so the SAME inode comes back and the
+          // dev/ino identity checks see "unchanged".
+          const realAside = join(dir, 'subtree', 'target-real-aside')
+          const swapOut = async () => { await renameAsync(targetAbs, realAside); await symlinkAsync(outer, targetAbs) }
+          const swapBack = async () => { await rmAsync(targetAbs, { force: true }); await renameAsync(realAside, targetAbs) }
+          return { outer, targetAbs, swapOut, swapBack }
+        }
+
+        async function runWalk(seam) {
+          const { matchers } = compileCaseCheck('subtree/**')
+          const state = { stop: null, visited: 0 }
+          const results = []
+          await walkGlob({
+            realRoot: dir, matchers, cwdRealCache: new Map(), cwdCacheTtl: 30_000,
+            state, results, maxEntries: 10_000_000,
+            __testDescendSeam: seam, __testForcePathFallback: true,
+          })
+          return results
+        }
+
+        it('a swap-out after the verified open and a swap-back after the path-based opendir discloses no outside name', async () => {
+          const { outer, targetAbs, swapOut, swapBack } = setupSwapFixture()
+          try {
+            let swappedOut = false
+            let swappedBack = false
+            const results = await runWalk(async (target, phase) => {
+              if (target !== targetAbs) return
+              if (phase === 'after-open') { await swapOut(); swappedOut = true }
+              else if (phase === 'after-opendir') { await swapBack(); swappedBack = true }
+            })
+            assert.ok(swappedOut && swappedBack, 'both halves of the double swap must have run for this to test anything')
+            assert.equal(results.some((r) => r.includes('SECRETMARKER')), false,
+              'a name read from the outside directory must never reach the results')
+          } finally {
+            rmSync(outer, { recursive: true, force: true })
+          }
+        })
+
+        it('holding the swap through a round\'s entry lstats is caught by the parent re-check that follows them', async () => {
+          const { outer, targetAbs, swapOut, swapBack } = setupSwapFixture()
+          try {
+            let held = false
+            const results = await runWalk(async (target, phase) => {
+              if (target !== targetAbs) return
+              if (phase === 'after-open') await swapOut()
+              else if (phase === 'after-opendir') await swapBack()
+              else if (phase === 'before-entry-verify' && !held) { held = true; await swapOut() }
+            })
+            assert.ok(held, 'the per-entry swap must have run')
+            assert.equal(results.some((r) => r.includes('SECRETMARKER')), false,
+              'an entry whose parent is a symlink at re-check time must be withheld')
+            await swapBack().catch(() => {})
+          } finally {
+            rmSync(outer, { recursive: true, force: true })
+          }
+        })
+
+        it('positive control: with nothing swapped, the fallback still yields every real entry, across several verify rounds', async () => {
+          mkdirSync(join(dir, 'subtree', 'target', 'deep'), { recursive: true })
+          // 70 files: more than two FALLBACK_VERIFY_BATCH (32) rounds in one
+          // directory, so a round boundary that dropped or repeated entries
+          // would show up here.
+          const names = Array.from({ length: 70 }, (_, i) => `f${i}.ts`)
+          for (const n of names) writeFileSync(join(dir, 'subtree', 'target', n), '1')
+          writeFileSync(join(dir, 'subtree', 'target', 'deep', 'd.ts'), '1')
+          let rounds = 0
+          const results = await runWalk(async (_target, phase) => { if (phase === 'before-entry-verify') rounds++ })
+          assert.ok(rounds >= 3, `the verification must have run in several rounds on the fallback path, ran ${rounds}`)
+          // Glob results carry native separators (as fs.glob's do), so compare
+          // the basename-bearing tail with either separator.
+          const posix = results.map((r) => r.replace(/\\/g, '/'))
+          for (const n of [...names, 'd.ts']) {
+            assert.equal(posix.filter((r) => r.endsWith(`/${n}`)).length, 1, `${n} must be found exactly once through the verified fallback`)
+          }
+        })
+      })
+
       // #7910 review round 2 — the mirror image of the test above: the seam
       // fires but does NOT swap anything, proving the new pre-open/post-open
       // identity check does not reject a legitimate, un-tampered directory

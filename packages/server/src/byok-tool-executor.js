@@ -711,7 +711,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
  *
  * @param {{realRoot: string, matchers: Array, cwdRealCache: Map, cwdCacheTtl: number, state: {stop: string|null, visited: number}, results: string[], maxEntries: number, directoryOnly?: boolean}} args
  */
-async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries, directoryOnly, __testDescendSeam }) {
+async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results, maxEntries, directoryOnly, __testDescendSeam, __testForcePathFallback = false }) {
   const m = matchers.length
   // SECURITY/DoS (#7910 review round 2) — real directories on the CURRENT
   // descent path (root down to here), keyed by `dev:ino`. A plain filesystem
@@ -1001,7 +1001,7 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
           // check that vouches for it are inseparable — no path is ever
           // handed back for a caller to re-resolve blind.
           const descend = await openVerifiedDirForDescend(
-            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, hasGlobstar, __testDescendSeam,
+            childAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isSymlink, visitedDirs, dirKey, hasGlobstar, __testDescendSeam, __testForcePathFallback,
           )
           if (descend) await walk(descend.path, relPath, next, { dh: descend.dh, key: descend.key, fh: descend.fh })
         }
@@ -1174,8 +1174,14 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
+// #7919 — entries the fallback verifies per round (see verifyEntriesUnderParent),
+// which is also the most names one timed double swap can disclose. Measured on
+// macOS, `**/*` over 5,050 entries (median of 5): 15ms with no verification,
+// 117ms verifying one entry at a time (two serial lstats each), 41ms at 8,
+// 33ms at 32, 31ms at 128.
+const FALLBACK_VERIFY_BATCH = 32
 
-async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, enforceCycleGuard, __testSeam) {
+async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRealCache, cwdCacheTtl, isKnownSymlink, visitedDirs, dirKey, enforceCycleGuard, __testSeam, __testForcePathFallback = false) {
   let target = candidateAbs
   let preStat = null
   if (!isKnownSymlink) {
@@ -1258,7 +1264,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
 
-  if (DIR_FD_REOPEN_SUPPORTED) {
+  if (DIR_FD_REOPEN_SUPPORTED && !__testForcePathFallback) {
     // Linux: read entries from the SAME open file description — no further
     // path lookup, no further race, ever. See the doc above for the direct
     // verification that this survives the original path being swapped away.
@@ -1284,6 +1290,7 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     await fh.close().catch(() => {})
     return null
   }
+  if (__testSeam) await __testSeam(target, 'after-opendir')
   let postStat
   try {
     postStat = await lstat(target, { bigint: true })
@@ -1303,7 +1310,102 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
     return null
   }
   if (__testSeam) await __testSeam(target, 'after-verify')
-  return { dh, path: target, key, fh: null }
+  return { dh: verifyEntriesUnderParent(dh, target, preStat, __testSeam), path: target, key, fh: null }
+}
+
+/**
+ * #7919 — per-entry post-verification for the path-based fallback above
+ * (macOS / win32: no fd-bound directory read). Owner decision recorded on
+ * #7919: option 1, pure JS; a native `fdopendir` helper was rejected because
+ * `bundle-server.sh` refuses native binaries in the bundle.
+ *
+ * `dh` came from `opendir(target)` BY PATH, so it is bound to whatever
+ * directory `target` named at that instant. The lstat-compare right after it
+ * proves `target` is the verified directory AGAIN, not that it was the
+ * verified directory WHEN `opendir` ran: a swap to a symlink before
+ * `opendir` and a swap back before that lstat hands `walk` a `Dir` open on
+ * the OUTSIDE directory, whose entry NAMES would then appear in results.
+ *
+ * So entries are read in rounds of up to FALLBACK_VERIFY_BATCH, and none
+ * reaches `walk` unless, for its round:
+ *   1. every name exists under `parentPath` (`lstat(parentPath/name)`, run
+ *      concurrently across the round), and THEN
+ *   2. `parentPath` is still the verified directory (same dev/ino, not a
+ *      symlink).
+ * A name read from an outside directory fails step 1 once the real
+ * directory is back in place; keeping the swap in place for step 1 fails
+ * step 2. Beating both needs the attacker to swap out and back again for
+ * EVERY round, landing each restore in the gap between that round's lstats
+ * and its parent check — a multi-race that discloses at most one round of
+ * names per success, where the unfixed path needed one double swap for the
+ * whole directory. A name that exists in BOTH directories discloses
+ * nothing: it is a real entry of the verified one.
+ *
+ * Step 2 failing means the directory was swapped at some point; the rest of
+ * it is abandoned (fail closed). Step 1 answering ENOENT with the parent
+ * intact is an ordinary concurrent delete; that entry is dropped. Any other
+ * lstat error fails closed for the rest of the directory.
+ *
+ * RESIDUAL (not closed): the per-round timed double swap above, bounded to
+ * FALLBACK_VERIFY_BATCH names each. Cost: about one lstat per entry plus one
+ * per round, on macOS/win32 only — Linux reads through the verified fd and
+ * never reaches this wrapper. See FALLBACK_VERIFY_BATCH for the measurement.
+ *
+ * Returns a `Dir`-shaped object: async-iterable, with `close()`. `walk`
+ * consumes it with `for await` and closes it in its `finally`; breaking out
+ * of the loop closes `dh` through the generator's own `return`, and the
+ * later explicit `close()` rejection is already swallowed there.
+ */
+function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
+  return {
+    async * [Symbol.asyncIterator]() {
+      const it = dh[Symbol.asyncIterator]()
+      try {
+        let exhausted = false
+        while (!exhausted) {
+          const batch = []
+          while (batch.length < FALLBACK_VERIFY_BATCH) {
+            const { value, done } = await it.next()
+            if (done) { exhausted = true; break }
+            batch.push(value)
+          }
+          if (batch.length === 0) return
+          if (__testSeam) await __testSeam(parentPath, 'before-entry-verify', batch.map((d) => d.name))
+          // Step 1, concurrently for the whole batch: does each name exist
+          // under the parent PATH right now?
+          const outcomes = await Promise.all(batch.map((d) =>
+            lstat(join(parentPath, d.name)).then(
+              () => 'ok',
+              (err) => (err && err.code === 'ENOENT' ? 'gone' : 'error'),
+            )))
+          if (outcomes.includes('error')) return // could not answer — FAIL CLOSED for the rest
+          if (__testSeam) await __testSeam(parentPath, 'after-entry-lstat', batch.map((d) => d.name))
+          // Step 2, AFTER step 1: is the parent still the verified directory?
+          if (!(await isStillVerifiedDir(parentPath, parentStat))) return
+          for (let i = 0; i < batch.length; i++) {
+            if (outcomes[i] === 'ok') yield batch[i] // 'gone' — deleted concurrently, parent intact
+          }
+        }
+      } finally {
+        await it.return?.()
+      }
+    },
+    close: () => dh.close(),
+  }
+}
+
+async function isStillVerifiedDir(path, verifiedStat) {
+  let st
+  try {
+    st = await lstat(path, { bigint: true })
+  } catch {
+    return false
+  }
+  return !st.isSymbolicLink() &&
+    st.isDirectory() &&
+    st.ino !== 0n &&
+    st.dev === verifiedStat.dev &&
+    st.ino === verifiedStat.ino
 }
 
 /**
