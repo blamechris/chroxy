@@ -434,35 +434,24 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         }
       }
 
-      if (fileExists) {
-        // Existing file: validate the resolved (symlink-followed) path
-        const { valid: writeValid } = await validatePathWithinCwd(resolvedTarget, sessionCwd)
-        if (!writeValid) {
-          sendFn(ws, {
-            type: 'write_file_result',
-            path: requestedPath,
-            error: 'Access denied: file writing is restricted to the project directory',
-          })
-          return
-        }
-      } else {
-        // New file: validate the lexical path is within CWD. A check that
-        // cannot be answered (a self-referential link's ELOOP, the depth
-        // ceiling) denies rather than sending the helper's own text (#8016).
-        let writeValid = false
-        try {
-          ({ valid: writeValid } = await validatePathWithinCwd(absInCwd, sessionCwd))
-        } catch {
-          writeValid = false
-        }
-        if (!writeValid) {
-          sendFn(ws, {
-            type: 'write_file_result',
-            path: requestedPath,
-            error: 'Access denied: file writing is restricted to the project directory',
-          })
-          return
-        }
+      // Existing file: validate the resolved (symlink-followed) path. New file:
+      // validate the lexical path. A check that cannot be answered (a
+      // self-referential link's ELOOP, the depth ceiling, a file swapped
+      // between the two resolutions) denies rather than sending the helper's
+      // own text (#8016).
+      let writeValid = false
+      try {
+        ({ valid: writeValid } = await validatePathWithinCwd(fileExists ? resolvedTarget : absInCwd, sessionCwd))
+      } catch {
+        writeValid = false
+      }
+      if (!writeValid) {
+        sendFn(ws, {
+          type: 'write_file_result',
+          path: requestedPath,
+          error: 'Access denied: file writing is restricted to the project directory',
+        })
+        return
       }
       absPath = fileExists ? resolvedTarget : absInCwd
 

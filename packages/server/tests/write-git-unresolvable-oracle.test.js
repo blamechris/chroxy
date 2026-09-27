@@ -63,7 +63,7 @@ describe('write_file / append_memory / git_stage / git_unstage: non-ENOENT realp
   })
 
   afterEach(() => {
-    for (const dir of [join(outside, 'locked'), join(project, 'locked-in')]) {
+    for (const dir of [project, join(outside, 'locked'), join(project, 'locked-in')]) {
       try { chmodSync(dir, 0o755) } catch { /* not created by this test */ }
     }
     rmSync(root, { recursive: true, force: true })
@@ -87,7 +87,7 @@ describe('write_file / append_memory / git_stage / git_unstage: non-ENOENT realp
     assertNoRawError(msg)
   })
 
-  it('write_file: a path through a FILE outside the project answers "Access denied" and writes nothing', async () => {
+  it('write_file: a path through a FILE outside the project answers "Access denied"', async () => {
     const msg = await reply(() => ops.writeFile(null, join('escape', 'secret.txt', 'x'), 'x', project))
     assert.match(msg.error, /^Access denied/)
     assertNoRawError(msg)
@@ -144,6 +144,14 @@ describe('write_file / append_memory / git_stage / git_unstage: non-ENOENT realp
     const msg = await reply(() => ops.appendMemory(null, 'note', project))
     assert.match(msg.error, /^Access denied/)
     assert.ok(!msg.error.includes('realpathOfDeepestAncestor'), `no helper text: ${msg.error}`)
+  })
+
+  it('CONTRAST append_memory: a project directory that cannot be searched keeps "Permission denied"', { skip: SKIP_NO_CHMOD_DENY }, async () => {
+    // realpath(project/CLAUDE.md) fails EACCES, but the project itself is the
+    // deepest ancestor that resolves, so the path is inside: the reason stays.
+    chmodSync(project, 0o000)
+    const msg = await reply(() => ops.appendMemory(null, 'note', project))
+    assert.equal(msg.error, 'Permission denied')
   })
 
   it('append_memory: CLAUDE.md linked into an EACCES-blocked OUTSIDE dir answers "Access denied"', { skip: SKIP_NO_CHMOD_DENY }, async () => {
