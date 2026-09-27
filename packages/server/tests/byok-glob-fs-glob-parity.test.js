@@ -664,8 +664,16 @@ describe('walkGlob/runGlob vs raw fs.glob — permanent differential parity (#79
         assert.equal(actual.error, undefined, `tool errored for ${JSON.stringify(pattern)}: ${actual.error}`)
         const actualSet = new Set(actual.list)
         const expectedSet = new Set(expected)
-        const missing = expected.filter((p) => !actualSet.has(p))
-        const extra = actual.list.filter((p) => !expectedSet.has(p))
+        // Both sides report host-native separators, so the set difference
+        // above is taken in them. The buckets record their shapes in POSIX
+        // form ('src-link/', 'bracequirk/a'), so convert only the
+        // DIFFERENCE before comparing it to a bucket. On win32 the lists
+        // come back as 'bracequirk\\a'; that was the whole of every bucket
+        // failure the first Windows run with symlink privilege showed
+        // (#7288). This is a no-op on POSIX.
+        const toPosix = (p) => (process.platform === 'win32' ? p.replaceAll('\\', '/') : p)
+        const missing = expected.filter((p) => !actualSet.has(p)).map(toPosix)
+        const extra = actual.list.filter((p) => !expectedSet.has(p)).map(toPosix)
         if (exact) {
           // A bucket that knows its rows exactly asserts them exactly — in
           // both directions, sorted, so neither a new divergence nor a

@@ -589,14 +589,23 @@ describe('resolveFileRefAttachments — symlink escape detection', () => {
   it('blocks chain of symlinks that eventually escape', { skip: SKIP_NO_SYMLINK }, () => {
     const link1 = join(testDir, 'link-chain-1')
     const link2 = join(testDir, 'link-chain-2')
-    symlinkSync('/tmp', link1)
-    symlinkSync(link1, link2)
+    // #7288: the chain ends at a real FILE outside the project, with an
+    // explicit 'file' type. The old target, '/tmp', was a POSIX-only
+    // directory. On Windows it resolved to a drive-root path, and
+    // symlinkSync's type auto-detect stat-ed through the chain and failed
+    // with EPERM before the containment check was ever reached. A directory
+    // target also let the assertion accept any read error, which is why it
+    // was hedged with `|Error`. A file target reaches the check
+    // deterministically, so the assertion names the refusal exactly.
+    symlinkSync(OUTSIDE_HOME_FILE, link1, 'file')
+    symlinkSync(link1, link2, 'file')
     const result = resolveFileRefAttachments(
       [{ type: 'file_ref', path: 'link-chain-2' }],
       testDir
     )
     const decoded = Buffer.from(result[0].data, 'base64').toString('utf-8')
-    assert.match(decoded, /cannot read file outside project|Error/)
+    assert.ok(/cannot read file outside project/.test(decoded),
+      `a symlink chain ending outside the project must be refused, got: ${decoded.slice(0, 200)}`)
   })
 })
 
