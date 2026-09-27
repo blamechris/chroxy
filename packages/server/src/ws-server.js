@@ -443,7 +443,9 @@ function _isSecureRequest(req) {
  *   { type: 'web_task_list', tasks }                    — response to list_web_tasks
  *   { type: 'diff_result', diff, error? }              — git diff result
  *   { type: 'error', message }                          — general error message
- *   { type: 'file_list', path, files, error? }          — file listing response
+ *   { type: 'file_list', files, resources, error, sessionId? } — file listing response;
+ *                                                        files[].path is cwd-relative
+ *                                                        and '/'-separated on every OS (#7282)
  *   { type: 'git_branches_result', branches, current, error? } — git branches result
  *   { type: 'git_commit_result', hash, message, error }  — git commit result
  *   { type: 'git_create_pr_result', url, number, branch, base, error } — in-app PR creation result (#6876; dashboard-only v1)

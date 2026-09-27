@@ -444,13 +444,6 @@ export const WINDOWS_EXEMPT = [
     issue: 7274,
   },
   {
-    file: 'tests/list-files.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is listFiles emitting backslash-separated relative paths on the wire, which also stops the gitignore matcher from splitting them into segments',
-    issue: 7282,
-  },
-  {
     file: 'tests/logger-audit-retention.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
