@@ -226,8 +226,9 @@ export class SdkSession extends BaseSession {
    * Preflight dependency spec used by `chroxy doctor`.
    *
    * SDK mode spawns the user's INSTALLED `claude` binary under the hood via
-   * `pathToClaudeCodeExecutable` (#7986) — the Agent SDK's own platform
-   * binary is no longer bundled, and `query()` throws if neither is set. So
+   * `pathToClaudeCodeExecutable` (#7986) — the desktop bundle does not ship
+   * the Agent SDK's own platform binary, and `query()` throws if neither is
+   * available. So
    * the same binary check every other claude-family provider runs applies
    * here too, using the shared candidate list. `minVersion` is derived from
    * the installed SDK's own `claudeCodeVersion` field (no hand-kept
@@ -873,8 +874,9 @@ export class SdkSession extends BaseSession {
     resetResultTimeout()
 
     try {
-      // #7986: point the SDK at the installed `claude` binary — the SDK's own
-      // bundled platform binary is no longer shipped, and query() throws
+      // #7986: point the SDK at the installed `claude` binary on every
+      // install. The desktop bundle does not ship the SDK's own platform
+      // binary, and without it query() throws
       // ("Native CLI binary ... not found") if this is unset, even when a
       // subclass supplies spawnClaudeCodeProcess. Set BEFORE
       // _augmentQueryOptions so a subclass override can see/override it.

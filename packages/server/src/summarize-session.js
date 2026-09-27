@@ -202,9 +202,10 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
     allowDangerouslySkipPermissions: true,
     includePartialMessages: false,
     maxTurns: 1,
-    // #7986: the Agent SDK no longer ships a bundled platform binary and
-    // throws if pathToClaudeCodeExecutable is unset — point it at the
-    // installed CLI, same as the chat-turn SDK provider.
+    // #7986: the desktop bundle does not ship the Agent SDK's platform binary,
+    // and query() throws if pathToClaudeCodeExecutable is unset and that
+    // binary is absent — point it at the installed CLI, same as the chat-turn
+    // SDK provider, on every install.
     pathToClaudeCodeExecutable: resolveExecutable(),
   }
   if (typeof cwd === 'string' && cwd) options.cwd = cwd
