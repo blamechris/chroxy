@@ -1386,10 +1386,11 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
           if (batch.length === 0) return
           if (__testSeam) await __testSeam(parentPath, 'before-entry-verify', batch.map((d) => d.name))
           // Step 1, concurrently for the whole batch: does each name exist
-          // under the parent PATH right now?
+          // under the parent PATH right now? Keep the lstat result — it is
+          // the verified directory's own view of the entry.
           const outcomes = await Promise.all(batch.map((d) =>
             lstat(join(parentPath, d.name)).then(
-              () => 'ok',
+              (st) => st,
               (err) => (err && err.code === 'ENOENT' ? 'gone' : 'error'),
             )))
           if (outcomes.includes('error')) return // could not answer — FAIL CLOSED for the rest
@@ -1397,7 +1398,20 @@ function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
           // Step 2, AFTER step 1: is the parent still the verified directory?
           if (!(await isStillVerifiedDir(parentPath, parentStat))) return
           for (let i = 0; i < batch.length; i++) {
-            if (outcomes[i] === 'ok') yield batch[i] // 'gone' — deleted concurrently, parent intact
+            const st = outcomes[i]
+            if (st === 'gone') continue // deleted concurrently, parent intact
+            // Yield the entry's TYPE from the step-1 lstat, never from the
+            // Dirent: `dh` may be bound to a swapped-in outside directory, and
+            // a name both directories share would otherwise carry the OUTSIDE
+            // entry's isDirectory()/isSymbolicLink() into walk's descend and
+            // symlink decisions. `name`, `isDirectory()` and `isSymbolicLink()`
+            // are all walk reads.
+            yield {
+              name: batch[i].name,
+              isDirectory: () => st.isDirectory(),
+              isSymbolicLink: () => st.isSymbolicLink(),
+              isFile: () => st.isFile(),
+            }
           }
         }
       } finally {

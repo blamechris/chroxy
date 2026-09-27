@@ -2520,6 +2520,7 @@ describe('executeBuiltinTool', () => {
             assert.equal(results.some((r) => r.includes('SECRETMARKER')), false,
               'a name read from the outside directory must never reach the results')
           } finally {
+            await swapBack().catch(() => {}) // best effort: never leave the fixture swapped for later tests
             rmSync(outer, { recursive: true, force: true })
           }
         })
@@ -2537,8 +2538,34 @@ describe('executeBuiltinTool', () => {
             assert.ok(held, 'the per-entry swap must have run')
             assert.equal(results.some((r) => r.includes('SECRETMARKER')), false,
               'an entry whose parent is a symlink at re-check time must be withheld')
-            await swapBack().catch(() => {})
           } finally {
+            await swapBack().catch(() => {}) // best effort: never leave the fixture swapped for later tests
+            rmSync(outer, { recursive: true, force: true })
+          }
+        })
+
+        it('an entry\'s TYPE comes from the verified directory, not from the swapped-in Dirent', async () => {
+          // `shared` is a DIRECTORY in the real target and a FILE in the
+          // outside directory. Under the swap, walk reads the outside Dirents;
+          // if it trusted their types it would see `shared` as a file and
+          // never descend into the real `shared/` to find inner.ts.
+          const { outer, targetAbs, swapOut, swapBack } = setupSwapFixture()
+          try {
+            writeFileSync(join(outer, 'shared'), 'a file out here')
+            mkdirSync(join(targetAbs, 'shared'))
+            writeFileSync(join(targetAbs, 'shared', 'inner.ts'), '1')
+            let swapped = false
+            const results = await runWalk(async (target, phase) => {
+              if (target !== targetAbs) return
+              if (phase === 'after-open') await swapOut()
+              else if (phase === 'after-opendir') { await swapBack(); swapped = true }
+            })
+            assert.ok(swapped, 'the double swap must have run')
+            const posix = results.map((r) => r.replace(/\\/g, '/'))
+            assert.ok(posix.some((r) => r.endsWith('shared/inner.ts')),
+              'walk must descend into the real shared/ directory, typed by the verified lstat')
+          } finally {
+            await swapBack().catch(() => {})
             rmSync(outer, { recursive: true, force: true })
           }
         })
