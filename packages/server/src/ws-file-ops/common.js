@@ -1,6 +1,6 @@
-import { realpath } from 'fs/promises'
+import { realpath, lstat, readlink } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
-import { resolveTargetComponentwiseAsync } from '../utils/componentwise-resolver.js'
+import { resolveTargetComponentwiseAsync, COMPONENTWISE_MAX_SYMLINKS } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
 
 /**
@@ -65,6 +65,21 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * containment check only asks "does it escape the workspace?", and the common
  * chroxy topology (`.claude`/`.git` under the workspace) stays inside it.
  *
+ * #8013 — a DANGLING symlink is followed, not walked past. `realpath()` throws
+ * ENOENT at a dangling link as well as at a missing name, and stepping up past
+ * the link re-appended its NAME lexically, so `project/link -> /outside/missing`
+ * was judged a missing file inside the project until `/outside/missing` was
+ * created — an existence oracle keyed on the outside. On ENOENT the walk now
+ * `lstat`s the cursor; a symlink there restarts the walk at the link's target,
+ * keeping the tail stripped so far. The link TEXT is resolved with
+ * {@link resolveTargetComponentwiseAsync} from the link's real parent directory,
+ * so a `..` in it is applied after the symlinks before it, as the kernel does:
+ * link text is not normalized by any caller, so the lexical residual above
+ * would otherwise reach the dashboard through it (`dangling -> sub/../probe`
+ * with `sub` pointing outside). More than COMPONENTWISE_MAX_SYMLINKS restarts
+ * throws ELOOP: text can lead straight back to its own link
+ * (`self -> missing/../self`), which the kernel reports as ENOENT, not a loop.
+ *
  * @param {string} absPath - Absolute path to resolve (may not exist)
  * @returns {Promise<string>} Real path with all symlink ancestors resolved
  */
@@ -84,8 +99,10 @@ export async function realpathOfDeepestAncestor(absPath) {
   const segments = []
   let cursor = absPath
   // Safety ceiling — absolute paths should never nest more than a few
-  // dozen components, but guard against pathological inputs.
+  // dozen components, but guard against pathological inputs. A restart
+  // through a dangling link (#8013) spends a step too.
   const MAX_DEPTH = 256
+  let restarts = 0
   for (let i = 0; i < MAX_DEPTH; i++) {
     try {
       const realAncestor = await realpath(cursor)
@@ -96,6 +113,19 @@ export async function realpathOfDeepestAncestor(absPath) {
       return join(realAncestor, ...segments.slice().reverse())
     } catch (err) {
       if (err.code !== 'ENOENT') throw err
+      // #8013 — ENOENT AT a dangling symlink: follow the link rather than
+      // treating its name as a missing in-place segment.
+      const linkTarget = await danglingLinkTarget(cursor)
+      if (linkTarget !== null) {
+        if (++restarts > COMPONENTWISE_MAX_SYMLINKS) {
+          throw Object.assign(
+            new Error(`realpathOfDeepestAncestor: more than ${COMPONENTWISE_MAX_SYMLINKS} dangling symlinks followed`),
+            { code: 'ELOOP' }
+          )
+        }
+        cursor = linkTarget
+        continue
+      }
       const parent = dirname(cursor)
       if (parent === cursor) {
         // Reached the filesystem root without finding any existing
@@ -122,6 +152,31 @@ export async function realpathOfDeepestAncestor(absPath) {
     new Error(`realpathOfDeepestAncestor: path depth exceeds ${MAX_DEPTH} (got ${absPath.split('/').length} components)`),
     { code: 'ENAMETOOLONG' }
   )
+}
+
+/**
+ * #8013 — after `realpath(cursor)` threw ENOENT: if `cursor` is itself a
+ * symlink (so the ENOENT came from its missing TARGET, not from a missing
+ * name), return the absolute path the link points at; otherwise `null`.
+ * The link text is walked component by component from the link's REAL parent
+ * directory, which exists because `lstat` just found the link in it, so a `..`
+ * in the text follows the symlinks before it. Any other error — from `lstat`
+ * (the path changed under us) or from the walk (EACCES, ELOOP) — propagates,
+ * and the caller fails closed.
+ * @param {string} cursor
+ * @returns {Promise<string|null>}
+ */
+async function danglingLinkTarget(cursor) {
+  let st
+  try {
+    st = await lstat(cursor)
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+  if (!st.isSymbolicLink()) return null
+  const link = await readlink(cursor)
+  return resolveTargetComponentwiseAsync(await realpath(dirname(cursor)), link)
 }
 
 // #6923/#6928 — the async component-wise resolver (and its separator-agnostic
