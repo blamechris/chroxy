@@ -20,7 +20,7 @@ node --import ./tests/_setup.mjs --experimental-test-module-mocks --test <one fi
 | host | the physical box that runs `chroxy-win-01` |
 | node | 22.23.1 (the runner tool-cache build) |
 | base commit | `9126d5aa1`, a fresh worktree with its own `npm ci` |
-| account | `chris` over SSH. It holds the privilege, as the runner's service SID now does, so for symlink creation the two accounts agree. The authoritative run is this change's `Server Windows Tests`, which executes as the runner account. |
+| account | `chris` over SSH. It holds the privilege, as the runner's service SID now does, so for symlink creation the two accounts agree. They do NOT agree on `os.tmpdir()`. See "The account difference SSH could not see" below. The authoritative run is this change's `Server Windows Tests`, which executes as the runner account. |
 
 ## Result
 
@@ -84,6 +84,37 @@ platforms cannot disagree about where the write lands. On Windows the walker
 still reports the POSIX destination and flags it. That is the conservative
 direction: at worst an extra prompt or rejection, never a missed escape.
 
+## The account difference SSH could not see
+
+The first `Server Windows Tests` run of this change failed 2 tests in
+`ws-file-ops-raw-path-symlink-evasion`. Both passed over SSH. The difference is
+the tmpdir, not the privilege:
+
+| account | `os.tmpdir()` |
+|---|---|
+| `chris` (SSH) | `C:\Users\chris\AppData\Local\Temp` (no component has a short form) |
+| NETWORK SERVICE (the runner) | `C:\WINDOWS\SERVIC~1\NETWOR~1\AppData\Local\Temp` (8.3 short names) |
+
+The suite built its root with `realpathSync`, the JS realpath, which keeps short
+names. The code under test canonicalizes the cwd with fs/promises `realpath`,
+which is native and expands them. So:
+
+- *accepts an ordinary relative new-file target* compared a short-form expected
+  path against a long-form result;
+- *does NOT over-flag a benign `link/..`* wrote its symlink with a short-form
+  target, and the walker splices raw `readlink` text, so it returned a
+  short-form destination that could not prefix-match the long-form cwd, and
+  reported an in-workspace path as outside.
+
+Both were reproduced on the same host by pointing `TMP` at an 8.3 path
+(`...\Temp\CHROXY~1`). The fixture now uses `realpathSync.native`; under the 8.3
+`TMP` the suite passes 13, skips 2 (the premises), and fails none. The walker's own
+behaviour, which over-flags and never under-flags, is #7999.
+
+The same 8.3 re-run is how the next un-exemption should be measured. Setting
+`TMP` and `TEMP` to a short path reproduces the runner's tmpdir from an
+interactive session.
+
 ## Proof the split tests still bite
 
 Mutations on macOS, restored with `cp` from a backup:
@@ -101,3 +132,7 @@ Mutations on macOS, restored with `cp` from a backup:
 The five silent `catch { return }` symlink sites in `tests/skills-loader.test.js`
 now use `SKIP_NO_SYMLINK`. Their comment cited the file-ref line above as
 precedent for the pattern.
+
+The same `startsWith(x + '/')` separator shape was fixed in three sibling files:
+`componentwise-resolver`, `claude-tui-session` and `byok-tool-executor`. All
+three are Windows-exempt for unrelated reasons today, so the bug was dormant.

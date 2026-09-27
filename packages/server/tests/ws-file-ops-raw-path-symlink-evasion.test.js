@@ -40,7 +40,15 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   beforeEach(() => {
     // realpath so the temp root has no symlink prefix of its own (macOS /tmp ->
     // /private/tmp) that would confuse the startsWith() containment assertions.
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-raw-evasion-')))
+    //
+    // The NATIVE realpath, not the JS one (#7288). The CI runner's account gets
+    // an 8.3 short tmpdir (C:\WINDOWS\SERVIC~1\NETWOR~1\...), and only
+    // `.native` expands short names. The code under test canonicalizes the cwd
+    // with fs/promises `realpath` — native — so a root built with the JS
+    // realpath kept its short form, the expected paths never matched, and every
+    // symlink this suite wrote stored a short-form target the walker then
+    // compared against the long-form cwd.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-raw-evasion-')))
   })
   afterEach(() => {
     if (root) rmSync(root, { recursive: true, force: true })
@@ -204,7 +212,7 @@ describe('BYOK raw-path symlink-`..` evasion (#6923)', () => {
   // original realpath-of-deepest-ancestor guard already caught stays rejected.
   // ==========================================================================
   it('still rejects the classic symlinked-parent escape (`.venv -> /outside`, `.venv/bin/evil.sh`)', async () => {
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-raw-outside-')))
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-raw-outside-')))
     try {
       symlinkSync(outside, join(root, '.venv'))
       const { valid, realPath } = await validateRawPathWithinCwd('.venv/bin/evil.sh', root, cwdRealCache(), cwdCacheTtl)

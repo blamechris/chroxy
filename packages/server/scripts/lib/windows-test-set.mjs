@@ -147,10 +147,11 @@ export const MAX_EXEMPT_RATIO = 0.20
 // re-measured the three symlink-create rows once the runner held the symlink
 // privilege and removed all three (docs/records/windows-symlink-grant-7288.md),
 // so the survey no longer accounts for every row one-to-one; read the records
-// together. The windows-slow rows came later and from the CI runner itself: they PASS in isolation and in a
-// full concurrent run on a different clone, and are cancelled only in the
-// runner's own working directory. Both are measurements; they are not the SAME
-// measurement, which is why the record's totals and this file's differ.
+// together. The windows-slow rows came later and from the CI runner itself:
+// they PASS in isolation and in a full concurrent run on a different clone, and
+// are cancelled only in the runner's own working directory. Both are
+// measurements; they are not the SAME measurement, which is why the record's
+// totals and this file's differ.
 //
 // A category may currently classify zero rows. That is not dead weight, but the
 // reason varies and it is worth being exact: either the file guards its

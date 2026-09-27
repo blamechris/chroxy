@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import {
   resolveTargetComponentwiseSync,
   resolveTargetComponentwiseAsync,
@@ -63,7 +63,7 @@ describe('componentwise-resolver: sync ≡ async parity (#6923/#6928)', () => {
     try {
       symlinkSync(outside, join(root, '.venv')) // .venv -> /outside
       const resolved = await assertParity(root, '.venv/bin/evil.sh')
-      assert.ok(resolved.startsWith(outside + '/'), 'both chase the symlink to the outside location')
+      assert.ok(resolved.startsWith(outside + sep), 'both chase the symlink to the outside location')
     } finally {
       rmSync(outside, { recursive: true, force: true })
     }
