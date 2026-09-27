@@ -421,7 +421,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (22)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (21)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -442,13 +442,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'the runner survey groups nothing (expected 4, measured 0) and gh enrichment does not run',
     issue: 7274,
-  },
-  {
-    file: 'tests/list-files.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is listFiles emitting backslash-separated relative paths on the wire, which also stops the gitignore matcher from splitting them into segments',
-    issue: 7282,
   },
   {
     file: 'tests/logger-audit-retention.test.js',
