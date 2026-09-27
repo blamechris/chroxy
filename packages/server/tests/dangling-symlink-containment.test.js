@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, existsSync, readlinkSync } from 'node:fs'
+import { join, sep } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { createReaderOps } from '../src/ws-file-ops/reader.js'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
@@ -12,6 +12,7 @@ import {
 } from '../src/ws-file-ops/common.js'
 import { isPathWithin } from '../src/utils/path-containment.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { OUTSIDE_HOME_DIR } from './helpers/outside-home.js'
 
 /**
  * #8013 — a DANGLING symlink is a symlink, not a missing file.
@@ -70,6 +71,41 @@ describe('realpathOfDeepestAncestor follows a dangling symlink to its target (#8
     symlinkSync(join('..', 'x'), join(outside, 'dir', 'rel'), 'dir')
     const resolved = await realpathOfDeepestAncestor(join(project, 'via', 'rel'))
     assert.equal(resolved, join(outside, 'x'))
+  })
+
+  it('a `..` in the link text that follows a symlink is applied AFTER the symlink, as the kernel does', async () => {
+    // project/sub -> outside/a/b, and project/dangling -> sub/../probe. The
+    // kernel follows `sub` to outside/a/b and THEN applies `..`, so the target
+    // is outside/a/probe. Collapsing `sub/..` in the text first gives
+    // project/probe — inside — and the answer would again depend on whether
+    // outside/a/probe exists (PR #8015 review).
+    mkdirSync(join(outside, 'a', 'b'), { recursive: true })
+    symlinkSync(join(outside, 'a', 'b'), join(project, 'sub'), 'dir')
+    symlinkSync(['sub', '..', 'probe'].join(sep), join(project, 'dangling'), 'dir')
+    assert.equal(await realpathOfDeepestAncestor(join(project, 'dangling')), join(outside, 'a', 'probe'))
+  })
+
+  it('the same `..`-after-symlink spelled as ABSOLUTE link text also resolves outside', async (t) => {
+    mkdirSync(join(outside, 'a', 'b'), { recursive: true })
+    symlinkSync(join(outside, 'a', 'b'), join(project, 'sub'), 'dir')
+    // Built by hand: join() would collapse the `..` before it reached the link.
+    symlinkSync([project, 'sub', '..', 'probe'].join(sep), join(project, 'dangling-abs'), 'dir')
+    if (!readlinkSync(join(project, 'dangling-abs')).includes('..')) {
+      // Node's win32 symlink() writes an absolute target through
+      // toNamespacedPath(), which collapses the `..` before the link exists.
+      t.skip('this platform normalizes absolute link text, so the fixture cannot exist')
+      return
+    }
+    assert.equal(await realpathOfDeepestAncestor(join(project, 'dangling-abs')), join(outside, 'a', 'probe'))
+  })
+
+  it('a link whose text leads back to itself (self -> missing/../self) is rejected with ELOOP, never resolved', async () => {
+    // The kernel answers ENOENT (at `missing`), so realpath() does not report
+    // a loop. Following the text lands on the link again, every time: only
+    // the restart budget stops it.
+    symlinkSync(['missing', '..', 'self'].join(sep), join(project, 'self'), 'dir')
+    await assert.rejects(realpathOfDeepestAncestor(join(project, 'self')), (err) => err.code === 'ELOOP')
+    await assert.rejects(realpathOfDeepestAncestor(join(project, 'self', 'leaf.txt')), (err) => err.code === 'ELOOP')
   })
 
   it('the tail BELOW a dangling link is re-appended under the link target', async () => {
@@ -142,6 +178,19 @@ describe('the dashboard handlers give one answer for a dangling link to outside 
     assert.match(second.sent[0].error, /^Access denied/)
   })
 
+  it('read_file through a `..`-after-symlink link answers "Access denied" before AND after the target exists', async () => {
+    mkdirSync(join(outside, 'a', 'b'), { recursive: true })
+    symlinkSync(join(outside, 'a', 'b'), join(project, 'sub'), 'dir')
+    symlinkSync(['sub', '..', 'probe'].join(sep), join(project, 'dotdot'), 'dir')
+    const first = reader()
+    await first.ops.readFile(null, 'dotdot', project)
+    mkdirSync(join(outside, 'a', 'probe'))
+    const second = reader()
+    await second.ops.readFile(null, 'dotdot', project)
+    assert.match(first.sent[0].error, /^Access denied/, 'target missing: no "File not found" oracle')
+    assert.match(second.sent[0].error, /^Access denied/)
+  })
+
   it('read_file of a path BELOW the dangling link answers "Access denied"', async () => {
     const { ops, sent } = reader()
     await ops.readFile(null, join('dangling', 'leaf.txt'), project)
@@ -203,6 +252,15 @@ describe('list_directory gives one answer for a dangling in-home link to outside
   afterEach(() => {
     rmSync(base, { recursive: true, force: true })
     rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('a dangling link to a MISSING path outside home answers "Access denied", not "Directory not found"', async () => {
+    // Runs everywhere, Windows included: nothing is written outside home.
+    // OUTSIDE_HOME_DIR is /etc on POSIX and %SystemRoot% on Windows.
+    const missing = join(OUTSIDE_HOME_DIR, `chroxy-8013-missing-${process.pid}-${Date.now()}`)
+    symlinkSync(missing, join(base, 'dangling-sys'), 'dir')
+    const reply = await list(join(base, 'dangling-sys'))
+    assert.match(reply.error, /^Access denied/)
   })
 
   it('answers "Access denied" before AND after the outside target is created', async (t) => {
