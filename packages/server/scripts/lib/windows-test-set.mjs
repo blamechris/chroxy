@@ -421,7 +421,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (21)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (20)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
