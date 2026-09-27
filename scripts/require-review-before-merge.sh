@@ -35,6 +35,21 @@
 # this hook still cannot merge with red CI or open threads, but it CAN merge
 # without /full-review. Keeping that from happening is this script's job.
 #
+# SCOPE: blamechris/chroxy only (#7991)
+# --------------------------------------
+# This hook's review check is chroxy-specific: it resolves the current repo
+# with `gh repo view` and looks for a review comment on THAT repo's PR. It
+# has no way to evaluate a PR in a different repo, so failing closed on one
+# adds no protection — it just forces a hand-merge in the GitHub web UI
+# (measured twice: sessions 47e7c037 and 64ff67a7, both owner-approved, green
+# CI, no open threads). When every `gh pr merge` invocation in the command
+# carries an explicit --repo/-R naming a repo other than blamechris/chroxy,
+# the hook exits 0 immediately, before the PR-number extraction below. See
+# the CROSS_REPO_ALLOW block further down for the exact conditions — it is
+# conservative on purpose: an unparseable command, an ambiguous or missing
+# --repo, or the REST `pulls/<n>/merge` form anywhere in the command all fall
+# through to the checks below rather than allow.
+#
 # Known evasions (1-3 measured against this script, each exits 0 = allowed;
 # 4 and 5 follow from how the hook is wired):
 #   1. Backslash-newline continuation: `gh pr \`, newline, `merge 123`.
@@ -220,6 +235,172 @@ if grep -qE 'mergePullRequest|enablePullRequestAutoMerge' <<<"$COMMAND"; then
   echo "It names the PR by node id, which this gate cannot check for a review." >&2
   echo "Run /full-review, then merge with 'gh pr merge <number>'." >&2
   exit 2
+fi
+
+# #7991: a `gh pr merge` that explicitly targets a repo other than
+# blamechris/chroxy is a PR this gate cannot evaluate at all. The review
+# check below only ever looks for a comment on a CHROXY PR (REPO, resolved
+# further down, is always THIS repo's own nameWithOwner via `gh repo view`)
+# — it has no way to check a review comment on some other repo's PR. Failing
+# closed there adds no protection, and cost a hand-merge in the GitHub web UI
+# twice (sessions 47e7c037 and 64ff67a7, both owner-approved/green/clean).
+#
+# When EVERY `gh pr merge` invocation in the command carries an explicit
+# --repo/-R naming a repo other than blamechris/chroxy, allow immediately —
+# before the PR-number extraction and `gh repo view`/`gh pr view` calls
+# below, all of which assume the current repo. Tokenized with python3's
+# shlex (already a dependency above), not a grep substring match, so a
+# `--repo` that merely appears somewhere in the command (a different segment,
+# an unrelated echo) does not count — see CROSS_REPO_ALLOW's per-segment
+# scoping below.
+#
+# This is deliberately narrow:
+#   - the GraphQL block above always runs first and is completely unaffected;
+#   - the REST `pulls/<n>/merge` form stays fully gated regardless of
+#     --repo — CROSS_REPO_ALLOW falls through unconditionally whenever that
+#     pattern appears anywhere in the command, even in some other segment;
+#   - `$(`, a backtick, `eval`, `bash -c`/`sh -c`/`zsh -c`, more than one
+#     --repo/-R on a single merge invocation, or a shlex parse failure
+#     (unbalanced quotes) are all treated as unparseable and fall through to
+#     the existing gate below rather than allow — never fail open on these;
+#   - a merge invocation with no --repo at all, or one whose value equals
+#     blamechris/chroxy after stripping an optional `https://github.com/` /
+#     `github.com/` prefix and a trailing `.git`/`/` and comparing
+#     case-insensitively, falls through too, so the existing checks still run.
+# The chroxy comparison is an exact (case-insensitive) equality check, never
+# a substring or prefix match: `blamechris/chroxy-other` names a genuinely
+# different repo and is out of scope for this hook, so it is allowed — a
+# prefix match that treated it as chroxy would be the wrong kind of
+# conservative (see scripts/__tests__/require-review-before-merge.test.sh for
+# the mutation that must catch a regression to substring matching).
+# shellcheck disable=SC2016 # single-quoted on purpose: this is a python3
+# program, not a bash string — $( and ` inside it must stay literal, not be
+# shell-expanded before python3 ever sees them.
+CROSS_REPO_ALLOW=$(printf '%s' "$COMMAND" | python3 -c '
+import re, shlex, sys
+
+command = sys.stdin.read()
+
+
+def fall_through():
+    print("NO_ALLOW")
+    sys.exit(0)
+
+
+# Unparseable constructs: never fail open on these. Fall through to the
+# existing gate, which evaluates the command as if it targets this repo.
+for marker in ("$(", "`", "eval", "bash -c", "sh -c", "zsh -c"):
+    if marker in command:
+        fall_through()
+
+# The REST merge form stays fully gated no matter what --repo says, and
+# regardless of which segment it appears in relative to a merge invocation.
+if re.search(r"pulls/[0-9]+/merge", command):
+    fall_through()
+
+try:
+    lex = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lex.whitespace_split = True
+    lex.whitespace = lex.whitespace.replace("\n", "")
+    tokens = list(lex)
+except ValueError:
+    fall_through()
+
+SEPARATORS = {";", "&&", "||", "|", "&"}
+
+
+def is_separator(tok):
+    if tok in SEPARATORS:
+        return True
+    return bool(tok) and set(tok) == {"\n"}
+
+
+segments = []
+current = []
+for tok in tokens:
+    if is_separator(tok):
+        if current:
+            segments.append(current)
+        current = []
+    else:
+        current.append(tok)
+if current:
+    segments.append(current)
+
+
+def is_merge_invocation(seg):
+    try:
+        i = seg.index("gh")
+        j = seg.index("pr", i + 1)
+        seg.index("merge", j + 1)
+        return True
+    except ValueError:
+        return False
+
+
+merge_segments = [seg for seg in segments if is_merge_invocation(seg)]
+if not merge_segments:
+    fall_through()
+
+
+def repo_values(seg):
+    # Scoped to THIS segment only — a --repo in a different segment (an
+    # unrelated echo, a different merge invocation) must never count.
+    values = []
+    i = 0
+    while i < len(seg):
+        tok = seg[i]
+        if tok in ("--repo", "-R"):
+            if i + 1 < len(seg):
+                values.append(seg[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--repo="):
+            values.append(tok[len("--repo="):])
+            i += 1
+            continue
+        if tok.startswith("-R") and tok != "-R" and len(tok) > 2:
+            values.append(tok[2:])
+            i += 1
+            continue
+        i += 1
+    return values
+
+
+def normalize(value):
+    v = value
+    lower = v.lower()
+    for prefix in ("https://github.com/", "github.com/"):
+        if lower.startswith(prefix):
+            v = v[len(prefix):]
+            break
+    if v.endswith(".git"):
+        v = v[:-4]
+    elif v.endswith("/"):
+        v = v[:-1]
+    return v
+
+
+WELL_FORMED = re.compile(r"^[^/\s]+/[^/\s]+$")
+
+for seg in merge_segments:
+    values = repo_values(seg)
+    if len(values) != 1:
+        fall_through()
+    normalized = normalize(values[0])
+    if not WELL_FORMED.match(normalized):
+        fall_through()
+    # Exact (case-insensitive) equality — never substring/prefix. See the
+    # header comment above CROSS_REPO_ALLOW for why that distinction matters.
+    if normalized.lower() == "blamechris/chroxy":
+        fall_through()
+
+print("ALLOW")
+')
+
+if [ "$CROSS_REPO_ALLOW" = "ALLOW" ]; then
+  echo "ALLOWED: this hook only evaluates blamechris/chroxy PRs — every 'gh pr merge' in this command explicitly targets a different repo." >&2
+  exit 0
 fi
 
 # Does the command contain `gh pr merge` ANYWHERE, or the equivalent GitHub
