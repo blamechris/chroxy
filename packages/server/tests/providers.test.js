@@ -1877,11 +1877,33 @@ describe('claude binary candidate-list parity (#7986)', () => {
     // vanish from `discoverClaudeFamilyProviders()` without failing the
     // "every discovered provider matches" assertion above, since a provider
     // that isn't discovered is never checked at all).
+    //
+    // #7986 review N8: the "should have been discovered" roster is derived
+    // from the registry's OWN `claudeFamily === true` classification (the
+    // same flag models.js's isClaudeProvider() uses) rather than a
+    // hand-typed name list, minus an explicit exemption for providers that
+    // ARE claude-family but drive an API directly instead of spawning the
+    // `claude` binary — so a FIFTH claude-family provider is forced into
+    // this comparison automatically instead of needing a line added here.
+    const NON_BINARY_CLAUDE_FAMILY = new Set(['claude-byok', 'docker-byok'])
+    const expectedNames = []
+    for (const name of getRegisteredProviderNames()) {
+      if (NON_BINARY_CLAUDE_FAMILY.has(name)) continue
+      let ProviderClass
+      try {
+        ProviderClass = getProvider(name)
+      } catch {
+        continue
+      }
+      if (ProviderClass.claudeFamily === true) expectedNames.push(name)
+    }
+    assert.ok(expectedNames.length > 0, 'expected at least one claudeFamily===true provider in the registry')
+
     const discoveredNames = new Set(discoverClaudeFamilyProviders().map((p) => p.name))
-    for (const expected of ['claude-cli', 'claude-sdk', 'claude-tui', 'claude-channel']) {
+    for (const expected of expectedNames) {
       assert.ok(
         discoveredNames.has(expected),
-        `expected "${expected}" to be discovered as claude-family (preflight.binary.name === "claude") — it either lost that preflight shape or was dropped from the registry`,
+        `expected "${expected}" (claudeFamily===true) to be discovered as claude-family (preflight.binary.name === "claude") — it either lost that preflight shape or was dropped from the registry`,
       )
     }
   })
