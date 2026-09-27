@@ -182,8 +182,8 @@ describe('#7978 fail-closed edges', () => {
     let verdict
     try {
       verdict = globSelectsSecret(`{a,b,c,d}${q}zq`, budget)
-    } catch {
-      // only the tripwire throws; reported by the assertion below
+    } catch (err) {
+      if (!tripped) throw err // anything but the tripwire is a real failure — surface it
     }
     assert.equal(tripped, false, `the search must stop at the budget; it charged past ${GLOB_FLOOR_MAX_STATES + 1} states`)
     assert.ok(budget.left < 0, `the budget must actually be exhausted for this case to exercise the cap (charged ${charged})`)
