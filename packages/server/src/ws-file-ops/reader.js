@@ -8,7 +8,6 @@ import { parseDiff } from '../diff-parser.js'
 import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
-import { isPathWithin } from '../utils/path-containment.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
 
 const execFileAsync = promisify(execFileCb)
@@ -132,9 +131,27 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           // Before surfacing "File not found", enforce workspace boundary.
           // A nonexistent path outside the root must return Access denied to
           // avoid leaking filesystem existence information as an oracle.
-          const cwdReal = await resolveSessionCwd(sessionCwd)
-          const lexicallyWithinCwd = isPathWithin(absPath, cwdReal)
-          if (!lexicallyWithinCwd) {
+          //
+          // #8000 — decide it with the SAME canonical check the existing-file
+          // path uses below: realpath the deepest existing ancestor, compare
+          // against the realpath'd cwd. This used to be a LEXICAL compare of
+          // `absPath` (built from the cwd as given) against the realpath'd cwd,
+          // which was wrong both ways:
+          //   - a cwd spelled non-canonically (through a symlink on POSIX, as an
+          //     8.3 short name on Windows) made a missing file INSIDE the
+          //     project answer "Access denied";
+          //   - `<cwd>/link-to-outside/missing` looked lexically inside and
+          //     answered "File not found" — an existence oracle for the
+          //     outside directory, through the link.
+          // A check that cannot be answered (ELOOP, EACCES on an ancestor)
+          // denies: "could not check" must never read as "not found".
+          let withinCwd = false
+          try {
+            ({ valid: withinCwd } = await validatePathWithinCwd(absPath, sessionCwd))
+          } catch {
+            withinCwd = false
+          }
+          if (!withinCwd) {
             send({
               type: 'file_content',
               path: absPath,
