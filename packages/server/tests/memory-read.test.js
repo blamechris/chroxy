@@ -509,6 +509,39 @@ describe('memory_read (readMemory) handler', () => {
     await rm(dir, { recursive: true, force: true })
   })
 
+  it('exposes a ~/.claude file through a fixed root exactly when read_file would (#8021 review)', { skip: SKIP_NO_SYMLINK }, async () => {
+    // The #8021 carve-out rests on one invariant: the memory panel never shows
+    // what the dashboard's file viewer would refuse. Check it in both nestings.
+    // With an ordinary project, both refuse ~/.claude/.credentials.json; with the
+    // session cwd AT home, ~/.claude is inside the project and both allow it. If
+    // read_file is ever tightened for ~/.claude, this goes red until the memory
+    // panel follows.
+    const secret = 'NESTED-ROOT-8021'
+    await mkdir(join(fakeHome, '.claude'), { recursive: true })
+    await writeFile(join(fakeHome, '.claude', '.credentials.json'), JSON.stringify({ token: secret }), 'utf-8')
+    await symlink(join(fakeHome, '.claude', '.credentials.json'), join(fakeHome, '.claude', 'CLAUDE.md'), 'file')
+    const project = await mkdtemp(join(tmpdir(), 'chroxy-mem-nested-'))
+    try {
+      for (const cwd of [project, fakeHome]) {
+        responses.length = 0
+        await fileOps.readMemory(mockWs, cwd)
+        const memoryExposes = JSON.stringify(responses[0]).includes(secret)
+        responses.length = 0
+        await fileOps.readFile(mockWs, join(fakeHome, '.claude', '.credentials.json'), cwd)
+        const readFileExposes = JSON.stringify(responses[0]).includes(secret)
+        assert.equal(memoryExposes, readFileExposes,
+          `cwd=${cwd === fakeHome ? 'home' : 'project'}: memory panel ${memoryExposes ? 'exposes' : 'hides'} the file but read_file ${readFileExposes ? 'exposes' : 'refuses'} it`)
+        // Positive control: the two nestings must really differ, or equality
+        // above holds trivially (both refusing everywhere).
+        assert.equal(readFileExposes, cwd === fakeHome,
+          'fixture: read_file should refuse ~/.claude from a project and allow it from cwd=home — ' +
+            'if read_file was tightened, update this test together with the #8021 carve-out')
+      }
+    } finally {
+      await rm(project, { recursive: true, force: true })
+    }
+  })
+
   it('CONTRAST: a project CLAUDE.md symlinked to an extensionless rules file IN the project still reads (#8021)', { skip: SKIP_NO_SYMLINK }, async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-mem-root-rules-'))
     await writeFile(join(dir, '.cursorrules'), 'shared rules for every agent', 'utf-8')

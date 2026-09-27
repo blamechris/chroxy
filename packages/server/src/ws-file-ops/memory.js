@@ -165,6 +165,10 @@ async function resolveConfinedMemoryPath(lexicalAbsPath, allowedRoots, { require
 
   // #8021 — a fixed root may point anywhere in the project, but outside it
   // (under ~/.claude) only at markdown. Same skip shape: no oracle.
+  // Nested roots, on purpose: when the session cwd is home (or above), ~/.claude
+  // is INSIDE the project, so this never fires — and `read_file` can then open
+  // ~/.claude/.credentials.json directly too. The invariant is "the memory panel
+  // exposes nothing the file viewer would refuse", pinned by memory-read.test.js.
   if (markdownOutside && !isPathWithin(resolvedPath, markdownOutside) && !hasMarkdownExt(resolvedPath)) {
     return { resolvedPath: null, skipEntry: { ...base, skipped: true, error: MEMORY_SKIP_ERROR } }
   }
