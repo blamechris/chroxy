@@ -57,11 +57,9 @@ export const LOCKFILE_GLOB = '**/package-lock.json'
 /** Runner-target outputs that mean "this job's runner depends on the trust predicate". */
 export const ROUTED_RUNNER_OUTPUTS = [
   'needs.runner-target.outputs.runner',
-  // #7471 long-job pin: the three long Linux jobs route through `longrunner`.
-  // Omitting it here would silently drop them out of every guard that
-  // quantifies over "routed" jobs (the npm-cache rules chief among them) —
-  // the guard-wired-to-some-of-its-callers class.
-  'needs.runner-target.outputs.longrunner',
+  // (The three long Linux jobs used to route through a `longrunner` output — the
+  // #7471 X64 pin. They are GitHub-hosted for every event now and do not route;
+  // ci-long-jobs-hosted.test.js holds them there.)
   'needs.runner-target.outputs.winrunner',
 ]
 
