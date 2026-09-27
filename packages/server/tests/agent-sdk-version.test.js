@@ -104,6 +104,43 @@ describe('sdkClaudeCodeVersion', () => {
     assert.equal(first, '2.1.141')
     assert.equal(second, '9.9.9')
   })
+
+  // #7986 review N4: the old code memoized `null` too, so a single transient
+  // read failure (an ENOENT racing a Renovate bump, a mid-reinstall race)
+  // disabled the version gate for the rest of the daemon's process lifetime.
+  it('does NOT memoize a null result — a failed read is retried on the next call', () => {
+    let calls = 0
+    const version1 = sdkClaudeCodeVersion({
+      requireFn: { resolve: () => { calls += 1; throw new Error('transient') } },
+      readFileSync: () => { throw new Error('unreachable') },
+    })
+    assert.equal(version1, null)
+    assert.equal(calls, 1)
+
+    // Same function, now succeeding — must NOT be short-circuited by a
+    // memoized null from the failed call above.
+    const version2 = sdkClaudeCodeVersion({
+      requireFn: { resolve: () => { calls += 1; return '/fake/sdk.mjs' } },
+      readFileSync: () => JSON.stringify({ claudeCodeVersion: '2.1.141' }),
+    })
+    assert.equal(version2, '2.1.141')
+    assert.equal(calls, 2, 'the second call must re-invoke the seams — a memoized null would skip them')
+  })
+
+  it('once a real version is memoized, it is never overwritten by a later call\'s (different) seams', () => {
+    const first = sdkClaudeCodeVersion({
+      requireFn: { resolve: () => '/fake/sdk.mjs' },
+      readFileSync: () => JSON.stringify({ claudeCodeVersion: '2.1.141' }),
+    })
+    let calls = 0
+    const second = sdkClaudeCodeVersion({
+      requireFn: { resolve: () => { calls += 1; return '/fake/sdk.mjs' } },
+      readFileSync: () => JSON.stringify({ claudeCodeVersion: '9.9.9' }),
+    })
+    assert.equal(first, '2.1.141')
+    assert.equal(second, '2.1.141', 'a real cached version must not be replaced by a later call')
+    assert.equal(calls, 0, 'the seams must not even be consulted once a real version is memoized')
+  })
 })
 
 // #7986 — a PIN test against the REAL installed SDK (no injected seams). This

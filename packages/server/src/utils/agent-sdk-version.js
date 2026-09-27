@@ -20,9 +20,13 @@ import { readFileSync } from 'fs'
 
 const requireFromHere = createRequire(import.meta.url)
 
-// Memoized: undefined = not yet computed. The result (a version string or
-// null) is cached after the first call — the installed SDK's version doesn't
-// change within a running daemon process.
+// Memoized: undefined = not yet computed. ONLY a non-empty string result is
+// ever cached (#7986 review N4) — a transient read failure (an ENOENT racing
+// a Renovate bump, a mid-reinstall race) must not memoize `null` for the rest
+// of the daemon's process lifetime and silently disable the version gate
+// until restart; it is retried on every call instead. Once a real version is
+// read it doesn't change within a running daemon process, so that result is
+// cached for good.
 let cached
 
 /**
@@ -34,18 +38,19 @@ let cached
  *   gate treats a null minimum as "skip the check, log a warning").
  */
 export function sdkClaudeCodeVersion({ requireFn = requireFromHere, readFileSync: readFileSyncFn = readFileSync } = {}) {
-  if (cached !== undefined) return cached
+  if (typeof cached === 'string' && cached.length > 0) return cached
   try {
     const entry = requireFn.resolve('@anthropic-ai/claude-agent-sdk')
     const pkgPath = join(dirname(entry), 'package.json')
     const pkg = JSON.parse(readFileSyncFn(pkgPath, 'utf-8'))
-    cached = typeof pkg.claudeCodeVersion === 'string' && pkg.claudeCodeVersion.length > 0
+    const version = typeof pkg.claudeCodeVersion === 'string' && pkg.claudeCodeVersion.length > 0
       ? pkg.claudeCodeVersion
       : null
+    if (version) cached = version
+    return version
   } catch {
-    cached = null
+    return null
   }
-  return cached
 }
 
 /**
