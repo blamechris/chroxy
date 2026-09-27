@@ -155,6 +155,22 @@ describe('probeBinaryVersion', () => {
     assert.equal(version, '2.1.283')
   })
 
+  it('exit 0 with a versionless stdout falls back to a version on stderr', () => {
+    const version = probeBinaryVersion('/fake/claude', ['--version'], {
+      spawnSync: ok({ stdout: 'Claude Code\n', stderr: '2.1.283\n' }),
+      statSync: statOf(),
+    })
+    assert.equal(version, '2.1.283')
+  })
+
+  it('a spawnSync that THROWS is "unreadable", not an untyped error escaping preflight', () => {
+    const version = probeBinaryVersion('/fake/claude', ['--version'], {
+      spawnSync: () => { throw new TypeError('bad argument') },
+      statSync: statOf(),
+    })
+    assert.equal(version, null)
+  })
+
   // #7986 review C1: previously, a non-zero exit fell back to reading
   // stdout/stderr off the thrown error and parsed ANY leading semver found
   // there — including Node's own crash-footer version. A `claude` that

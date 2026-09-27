@@ -11,6 +11,7 @@ import {
 } from '../src/utils/preflight.js'
 import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
+import { SdkSession } from '../src/sdk-session.js'
 
 /**
  * Tests for runProviderPreflight — verifies binary + credential checks
@@ -821,5 +822,28 @@ describe('runProviderPreflight — opt-out cases', () => {
   it('does nothing when ProviderClass is null/undefined', () => {
     assert.doesNotThrow(() => runProviderPreflight(null))
     assert.doesNotThrow(() => runProviderPreflight(undefined))
+  })
+})
+
+// #7986 round-2 review S-B: the shim refusal is only as good as the flag on the
+// provider that needs it. Without these, flipping SdkSession's
+// requiresDirectExec to false left every suite green.
+describe('SdkSession declares and enforces requiresDirectExec (#7986)', () => {
+  it('its preflight spec sets requiresDirectExec: true', () => {
+    assert.equal(SdkSession.preflight.binary.requiresDirectExec, true)
+  })
+
+  it('the real SdkSession spec refuses a Windows .cmd shim before the version probe runs', () => {
+    let probeCalled = false
+    assert.throws(
+      () => runProviderPreflight(SdkSession, {
+        env: {},
+        platform: 'win32',
+        verifyBinary: () => ({ ok: true, status: BINARY_STATUS.OK, path: 'C:\\npm\\claude.cmd', quarantine: null }),
+        probeVersion: () => { probeCalled = true; return '9.9.9' },
+      }),
+      (err) => err instanceof ProviderBinaryUnsupportedError && err.code === 'PROVIDER_BINARY_UNSUPPORTED',
+    )
+    assert.equal(probeCalled, false)
   })
 })

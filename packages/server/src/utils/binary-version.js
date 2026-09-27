@@ -167,12 +167,19 @@ export function probeBinaryVersion(path, args = ['--version'], {
     return versionCache.get(identity)
   }
 
-  const result = spawnFn(path, args, {
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: PROBE_TIMEOUT_MS,
-    windowsHide: true,
-  })
+  let result
+  try {
+    result = spawnFn(path, args, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: PROBE_TIMEOUT_MS,
+      windowsHide: true,
+    })
+  } catch (err) {
+    // spawnSync reports most failures on `result.error`, but it can still
+    // throw synchronously (e.g. an invalid argument). Same outcome: unreadable.
+    result = { error: err, status: null }
+  }
 
   // Accept output ONLY from a run that both spawned (no `result.error`, e.g.
   // no ENOENT) and exited zero. A null `status` means the process was killed
@@ -180,13 +187,12 @@ export function probeBinaryVersion(path, args = ['--version'], {
   // the binary itself failed — in both cases whatever landed on stdout/stderr
   // (a crash banner, a partial write) must not be treated as an authoritative
   // version string.
-  let stdout = null
-  if (!result.error && result.status === 0) {
-    stdout = typeof result.stdout === 'string' && result.stdout.length > 0 ? result.stdout : null
-    if (!stdout && typeof result.stderr === 'string') stdout = result.stderr
-  }
-
-  const version = stdout ? parseSemver(stdout) : null
+  // stdout first; stderr only when stdout carries no version (some CLIs print
+  // their banner to stderr even on a clean exit). parseSemver returns null for
+  // a missing or non-string stream.
+  const version = !result.error && result.status === 0
+    ? parseSemver(result.stdout) ?? parseSemver(result.stderr)
+    : null
   // Only a successful read is cached. A failed probe (a timeout under load, a
   // transient exec error, a non-zero exit) would otherwise pin "unreadable" to
   // this identity and refuse every later session-create until the binary

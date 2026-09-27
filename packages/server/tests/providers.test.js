@@ -1903,7 +1903,7 @@ describe('claude binary candidate-list parity (#7986)', () => {
     for (const expected of expectedNames) {
       assert.ok(
         discoveredNames.has(expected),
-        `expected "${expected}" (claudeFamily===true) to be discovered as claude-family (preflight.binary.name === "claude") — it either lost that preflight shape or was dropped from the registry`,
+        `expected "${expected}" (claudeFamily===true) to be discovered as claude-family (preflight.binary.name === "claude") — it lost that preflight shape`,
       )
     }
   })

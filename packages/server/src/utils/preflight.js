@@ -59,6 +59,7 @@
  */
 
 import { resolveBinary } from './resolve-binary.js'
+import { isBatchShim } from './win-spawn.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './verify-binary.js'
 import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './verify-provenance.js'
 import { parseSemver, compareSemver, resolveDeclaredMinVersion, probeBinaryVersion as defaultProbeBinaryVersion } from './binary-version.js'
@@ -170,7 +171,7 @@ export class ProviderBinaryVersionError extends Error {
  * @returns {boolean}
  */
 export function isShellShim(path, platform = process.platform) {
-  return platform === 'win32' && typeof path === 'string' && /\.(cmd|bat)$/i.test(path)
+  return platform === 'win32' && isBatchShim(path)
 }
 
 /**

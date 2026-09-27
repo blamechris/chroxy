@@ -633,7 +633,10 @@ function checkProvider(providerName, { platform = process.platform } = {}) {
     // outright when that path is a shell shim, without ever exec'ing it.
     let shimResolvedPath = null
     if (spec.binary.requiresDirectExec === true) {
-      shimResolvedPath = ProviderClass.resolvedBinary
+      // Same guard runProviderPreflight uses: a subclass getter may throw.
+      try {
+        shimResolvedPath = ProviderClass.resolvedBinary
+      } catch { /* fall through to a fresh candidate resolve */ }
       if (typeof shimResolvedPath !== 'string' || shimResolvedPath.length === 0) {
         shimResolvedPath = resolveBinary(spec.binary.name, spec.binary.candidates || [])
       }
