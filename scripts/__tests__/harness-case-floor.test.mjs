@@ -185,7 +185,8 @@ const EXCLUDED_HARNESSES = [
   // checks its TAP summary with assert-test-count.mjs (minimum 19 cases).
   'packages/desktop/scripts/__tests__/derive-server-lockfile.test.mjs',
   // node:test too (#7986): the same desktop-tests job runs it by name and
-  // checks its TAP summary with assert-test-count.mjs (minimum 28 cases).
+  // checks its TAP summary with assert-test-count.mjs (exact floor: 36 cases,
+  // the real non-root suite count — #7986 review N7).
   'packages/desktop/scripts/__tests__/find-macho.test.mjs',
   'packages/store-core/scripts/__tests__/export-targets.test.mjs',
 ]

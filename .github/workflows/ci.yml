@@ -1419,13 +1419,21 @@ jobs:
         # ci-scripts-tests-registration.test.js sees it wired, NODE_OPTIONS
         # forces the TAP reporter on this job's unmanaged system Node, and the
         # count floor is the guard against a run that silently drops tests.
+        #
+        # #7986 review N7: --min matches the sibling derive-server-lockfile.mjs
+        # step's convention of an EXACT floor (19/19) rather than a loose lower
+        # bound — 36 is the real non-root suite's full count (verified via
+        # `node --test-reporter=tap scripts/__tests__/find-macho.test.mjs`),
+        # not a rounded-down approximation. A looser floor here previously let
+        # 8 tests of headroom (the symlink-avoidance and excludeRegex-pruning
+        # blocks, 5 of the 8) disappear silently.
         working-directory: packages/desktop
         env:
           NODE_OPTIONS: --test-reporter=tap
         run: |
           set -o pipefail
           node scripts/__tests__/find-macho.test.mjs | tee /tmp/chroxy-find-macho.tap
-          node ../../scripts/lib/assert-test-count.mjs --min 28 cat /tmp/chroxy-find-macho.tap > /dev/null
+          node ../../scripts/lib/assert-test-count.mjs --min 36 cat /tmp/chroxy-find-macho.tap > /dev/null
 
   desktop-tests-windows:
     name: Desktop Rust Tests (Windows)
