@@ -1185,7 +1185,12 @@ async function walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, 
  * this same re-entry (`sub/selfloop/selfloop/**`) — both stay refused,
  * unchanged, and #7916 stays open for them.
  *
- * @returns {Promise<{dh: import('fs/promises').Dir, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
+ * `dh` is a real `fs.Dir` on Linux, and on the macOS/win32 fallback the
+ * Dir-shaped verifyEntriesUnderParent wrapper: async-iterable, `close()`,
+ * yielding `{ name, isDirectory(), isSymbolicLink(), isFile() }` typed from the
+ * verified lstat. `walk` uses only that shared surface.
+ *
+ * @returns {Promise<{dh: import('fs/promises').Dir | VerifiedDirLike, path: string, key: string, fh: import('fs/promises').FileHandle|null}|null>}
  */
 const DIR_FD_REOPEN_SUPPORTED = process.platform === 'linux'
 // #7919 — entries the fallback verifies per round (see verifyEntriesUnderParent),
@@ -1369,6 +1374,10 @@ async function openVerifiedDirForDescend(candidateAbs, relPath, realRoot, cwdRea
  * consumes it with `for await` and closes it in its `finally`; breaking out
  * of the loop closes `dh` through the generator's own `return`, and the
  * later explicit `close()` rejection is already swallowed there.
+ */
+/**
+ * @typedef {{ name: string, isDirectory: () => boolean, isSymbolicLink: () => boolean, isFile: () => boolean }} VerifiedEntry
+ * @typedef {{ [Symbol.asyncIterator]: () => AsyncGenerator<VerifiedEntry>, close: () => Promise<void> }} VerifiedDirLike
  */
 function verifyEntriesUnderParent(dh, parentPath, parentStat, __testSeam) {
   return {
