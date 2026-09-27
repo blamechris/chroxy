@@ -84,6 +84,20 @@ export async function resolveSessionCwd(sessionCwd, cwdRealCache, cwdCacheTtl) {
  * @returns {Promise<string>} Real path with all symlink ancestors resolved
  */
 export async function realpathOfDeepestAncestor(absPath) {
+  return deepestAncestorWalk(absPath, STEP_OVER_MISSING)
+}
+
+// The ONLY code `realpathOfDeepestAncestor` steps over. Anything else — EACCES
+// on an ancestor, ELOOP on a cycle — propagates so the caller fails closed.
+const STEP_OVER_MISSING = new Set(['ENOENT'])
+
+// #8012 — the codes `isUnresolvablePathWithin` steps over as well: each one
+// means "the server cannot see below here", and the answer it feeds is only
+// which error message to send. ELOOP is absent: a cycle has no visible end, so
+// it is answered at once instead of after spending the whole step budget.
+const STEP_OVER_UNSEEABLE = new Set(['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR'])
+
+async function deepestAncestorWalk(absPath, stepOver) {
   // Defensive: require an absolute path. If a caller accidentally passes
   // a relative path, node's realpath() would resolve it against
   // process.cwd() — which is the SERVER process's cwd, not the session
@@ -112,10 +126,10 @@ export async function realpathOfDeepestAncestor(absPath) {
       // reverse to get ancestor→leaf order for join().
       return join(realAncestor, ...segments.slice().reverse())
     } catch (err) {
-      if (err.code !== 'ENOENT') throw err
-      // #8013 — ENOENT AT a dangling symlink: follow the link rather than
-      // treating its name as a missing in-place segment.
-      const linkTarget = await danglingLinkTarget(cursor)
+      if (!stepOver.has(err.code)) throw err
+      // #8013 — a failure AT a symlink (dangling, or its target unseeable):
+      // follow the link rather than treating its name as an in-place segment.
+      const linkTarget = await unresolvedLinkTarget(cursor, stepOver)
       if (linkTarget !== null) {
         if (++restarts > COMPONENTWISE_MAX_SYMLINKS) {
           throw Object.assign(
@@ -155,28 +169,80 @@ export async function realpathOfDeepestAncestor(absPath) {
 }
 
 /**
- * #8013 — after `realpath(cursor)` threw ENOENT: if `cursor` is itself a
- * symlink (so the ENOENT came from its missing TARGET, not from a missing
- * name), return the absolute path the link points at; otherwise `null`.
+ * #8013 — after `realpath(cursor)` threw a code the walk steps over: if
+ * `cursor` is itself a symlink (so the failure came from its TARGET, not from
+ * its own name), return the absolute path the link points at; otherwise `null`.
  * The link text is walked component by component from the link's REAL parent
  * directory, which exists because `lstat` just found the link in it, so a `..`
- * in the text follows the symlinks before it. Any other error — from `lstat`
- * (the path changed under us) or from the walk (EACCES, ELOOP) — propagates,
- * and the caller fails closed.
+ * in the text follows the symlinks before it. An `lstat` error the walk would
+ * not step over (the path changed under us), or any error from the text walk
+ * itself (EACCES, ELOOP), propagates, and the caller fails closed.
  * @param {string} cursor
+ * @param {Set<string>} stepOver
  * @returns {Promise<string|null>}
  */
-async function danglingLinkTarget(cursor) {
+async function unresolvedLinkTarget(cursor, stepOver) {
   let st
   try {
     st = await lstat(cursor)
   } catch (err) {
-    if (err.code === 'ENOENT') return null
+    if (stepOver.has(err.code)) return null
     throw err
   }
   if (!st.isSymbolicLink()) return null
   const link = await readlink(cursor)
   return resolveTargetComponentwiseAsync(await realpath(dirname(cursor)), link)
+}
+
+/**
+ * #8012 — FOR CHOOSING AN ERROR MESSAGE ONLY; never for granting access.
+ *
+ * `realpath(absPath)` failed with something other than ENOENT (EACCES, EPERM,
+ * ENOTDIR, ELOOP, …). Before a handler sends a specific message such as
+ * "Permission denied", it must know the path is inside its boundary: for a
+ * path outside it, telling "blocked" apart from "readable" or "missing" is an
+ * existence oracle. This answers whether the part of the path the server CAN
+ * see lies within `rootReal`: it walks up to the deepest ancestor `realpath()`
+ * resolves, stepping over any component it cannot see into, and follows a
+ * symlink at the stopping point to its target, exactly as
+ * {@link realpathOfDeepestAncestor} follows a dangling one.
+ *
+ * Whatever lies below the stopping point is invisible to the server as well,
+ * so the answer can only depend on state the boundary already exposes. A
+ * cycle (ELOOP), or any walk that cannot finish, answers `false`.
+ *
+ * @param {string} absPath - Absolute path whose `realpath()` failed
+ * @param {string|null} rootReal - The boundary, already a real path; `null`
+ *   (it could not be resolved) is never "within"
+ * @returns {Promise<boolean>}
+ */
+export async function isUnresolvablePathWithin(absPath, rootReal) {
+  if (!rootReal) return false
+  try {
+    return isPathWithin(await deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE), rootReal)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * #8012 — the error text a handler sends when `realpath(absPath)` failed with
+ * `err` (not ENOENT). Inside the boundary it is the handler's short reason for
+ * `err.code`, when it has one; anywhere else — outside, a cycle, a check that
+ * cannot finish, a code with no reason — it is `denial`, the same text every
+ * outside path gets. `err.message` is never used: it carries Node's code and
+ * the server's absolute path.
+ *
+ * @param {NodeJS.ErrnoException} err - The failure from the first `realpath()`
+ * @param {string} absPath - The path that failed to resolve
+ * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @param {Record<string, string>} reasons - In-boundary text by error code
+ * @param {string} denial - The handler's usual "Access denied: …" text
+ * @returns {Promise<string>}
+ */
+export async function unresolvablePathError(err, absPath, rootReal, reasons, denial) {
+  if (!Object.hasOwn(reasons, err?.code)) return denial
+  return (await isUnresolvablePathWithin(absPath, rootReal)) ? reasons[err.code] : denial
 }
 
 // #6923/#6928 — the async component-wise resolver (and its separator-agnostic

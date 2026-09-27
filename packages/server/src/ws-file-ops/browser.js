@@ -5,9 +5,19 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor } from './common.js'
+import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
+
+// #8012 — the message list_directory / browse_files send when `realpath()`
+// failed with one of these codes for a path INSIDE their boundary. Any other
+// code, or any path outside it, gets the handler's generic denial instead
+// (see unresolvablePathError).
+const LISTING_UNRESOLVABLE_REASONS = {
+  EACCES: 'Permission denied',
+  EPERM: 'Permission denied',
+  ENOTDIR: 'Not a directory',
+}
 
 /**
  * Directory browsing, file listing, slash commands, and agent listing.
@@ -39,7 +49,24 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       try {
         realAbsPath = await realpath(absPath)
       } catch (err) {
-        if (err.code !== 'ENOENT') throw err
+        if (err.code !== 'ENOENT') {
+          // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
+          // to skip the containment check: the outer catch answered
+          // "Permission denied" / "Not a directory" for a path outside home,
+          // where a readable one answers "Access denied", and sent ELOOP's
+          // raw message with the server path in it. Only a path inside home
+          // keeps a specific message now; everything else is the denial.
+          const homeReal = await realpath(home).catch(() => null)
+          sendFn(ws, {
+            type: 'directory_listing',
+            path: absPath,
+            parentPath: null,
+            entries: [],
+            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
+              'Access denied: directory listing is restricted to the home directory'),
+          })
+          return
+        }
         // #8011 — a MISSING target is contained canonically too: realpath
         // its deepest existing ancestor. This used to fall back to the raw
         // lexical `absPath`, so `~/link-to-outside/missing` looked like a
@@ -120,7 +147,26 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       }
       absPath = normalize(absPath)
 
-      const { valid, realPath: realAbsPath, cwdReal } = await validatePathWithinCwd(absPath, sessionCwd)
+      // A session cwd that cannot be resolved keeps the outer catch's answer.
+      const sessionCwdReal = await resolveSessionCwd(sessionCwd)
+      let validation
+      try {
+        validation = await validatePathWithinCwd(absPath, sessionCwd)
+      } catch (err) {
+        // #8012 — same residual as list_directory above: a non-ENOENT
+        // failure resolving the target skipped containment and reached the
+        // outer catch. Outside the project, or a cycle, is the denial.
+        sendFn(ws, {
+          type: 'file_listing',
+          path: absPath,
+          parentPath: null,
+          entries: [],
+          error: await unresolvablePathError(err, absPath, sessionCwdReal, LISTING_UNRESOLVABLE_REASONS,
+            'Access denied: browsing is restricted to the project directory'),
+        })
+        return
+      }
+      const { valid, realPath: realAbsPath, cwdReal } = validation
       if (!valid) {
         sendFn(ws, {
           type: 'file_listing',

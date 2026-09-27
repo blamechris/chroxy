@@ -9,8 +9,18 @@ import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
+import { unresolvablePathError } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
+
+// #8012 — the message read_file sends when the first `realpath()` failed with
+// one of these codes for a path INSIDE the project. Any other code, or any
+// path outside it, gets the generic denial instead (see unresolvablePathError).
+const READ_UNRESOLVABLE_REASONS = {
+  EACCES: 'Permission denied',
+  EPERM: 'Permission denied',
+  ENOTDIR: 'File not found',
+}
 const log = createLogger('ws')
 
 /**
@@ -174,7 +184,26 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           })
           return
         }
-        throw err
+        // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used to
+        // skip the containment check and reach the outer catch, which sent
+        // "Permission denied" for EACCES and Node's raw message — server path
+        // included — for the rest. For a path outside the project that told
+        // "blocked" apart from "readable" and "missing". Outside, or when the
+        // check cannot be answered (a cycle), the answer is now the same denial
+        // every outside path gets; only an in-project path keeps a specific
+        // message, and never the raw text.
+        const cwdReal = await resolveSessionCwd(sessionCwd).catch(() => null)
+        send({
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: null,
+          truncated: false,
+          error: await unresolvablePathError(err, absPath, cwdReal, READ_UNRESOLVABLE_REASONS,
+            'Access denied: file reading is restricted to the project directory'),
+        })
+        return
       }
 
       const { valid } = await validatePathWithinCwd(resolvedAbsPath, sessionCwd)
