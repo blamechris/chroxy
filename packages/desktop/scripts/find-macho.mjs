@@ -221,8 +221,12 @@ function main() {
 
   try {
     const found = findMachOFiles(args.root, { excludeRegex })
-    for (const path of found) console.log(path)
-    process.exit(0)
+    // One write and a natural exit, never process.exit(): stdout to a pipe is
+    // asynchronous on macOS (the only host the guard runs on), so exiting
+    // straight after a burst of console.log calls can drop the queued tail of
+    // the listing bundle-server.sh prints as its error report.
+    if (found.length > 0) process.stdout.write(found.map((p) => `${p}\n`).join(''))
+    process.exitCode = 0
   } catch (err) {
     console.error(`[find-macho] scan failed: ${err.message}`)
     process.exit(1)

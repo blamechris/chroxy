@@ -300,15 +300,15 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# (d) An extension-less Java class file shares cafebabe with FAT_MAGIC but is
+# (d) A Java class file (Fixture.class) shares cafebabe with FAT_MAGIC but is
 # correctly disambiguated by nfat_arch, and is not flagged.
 run_bundle_case java-class
 JAVA_CLASS_FILE="$STAGED/node_modules/some-pkg/Fixture.class"
 if [ "$BUNDLE_CASE_RC" -eq 0 ] && [ -f "$JAVA_CLASS_FILE" ]; then
-    echo "ok   - does not flag an extension-less Java class file sharing cafebabe's magic (#7986)"
+    echo "ok   - does not flag a Java class file sharing cafebabe's magic (#7986)"
     PASS=$((PASS + 1))
 else
-    echo "FAIL - does not flag an extension-less Java class file sharing cafebabe's magic (#7986)" >&2
+    echo "FAIL - does not flag a Java class file sharing cafebabe's magic (#7986)" >&2
     echo "  exit code: $BUNDLE_CASE_RC" >&2
     cat "$BUNDLE_CASE_STDERR" >&2
     FAIL=$((FAIL + 1))
