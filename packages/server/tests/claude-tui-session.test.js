@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
 import { chmodSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, sep } from 'path'
 import { fileURLToPath } from 'url'
 import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -1167,7 +1167,7 @@ describe('ClaudeTuiSession', () => {
 
         assert.equal(readys.length, 1, 'a clean base must still start the session')
         assert.equal(session._processReady, true, 'ready')
-        assert.ok(session._sinkDir.startsWith(clean + '/'), 'the sink dir lives under the pinned base')
+        assert.ok(session._sinkDir.startsWith(clean + sep), 'the sink dir lives under the pinned base')
         assert.ok(existsSync(session._settingsPath), 'settings.json written into it')
         if (process.platform !== 'win32') {
           assert.equal(statSync(clean).mode & 0o777, 0o700,
