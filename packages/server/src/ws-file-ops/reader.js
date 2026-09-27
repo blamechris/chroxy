@@ -21,6 +21,13 @@ const READ_UNRESOLVABLE_REASONS = {
   EPERM: 'Permission denied',
   ENOTDIR: 'File not found',
 }
+
+// #8016 — the same, for write_file and append_memory.
+const WRITE_UNRESOLVABLE_REASONS = {
+  EACCES: 'Permission denied',
+  EPERM: 'Permission denied',
+  ENOTDIR: 'Not a directory',
+}
 const log = createLogger('ws')
 
 /**
@@ -414,32 +421,37 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           // Use the lexical path for the new-file case.
           resolvedTarget = absInCwd
         } else {
-          throw err
+          // #8016 — any other failure used to reach the outer catch, which
+          // answered "Permission denied" (EACCES) or the raw Node message,
+          // server path included, even for a target outside the project.
+          sendFn(ws, {
+            type: 'write_file_result',
+            path: requestedPath,
+            error: await unresolvablePathError(err, absInCwd, cwdReal, WRITE_UNRESOLVABLE_REASONS,
+              'Access denied: file writing is restricted to the project directory'),
+          })
+          return
         }
       }
 
-      if (fileExists) {
-        // Existing file: validate the resolved (symlink-followed) path
-        const { valid: writeValid } = await validatePathWithinCwd(resolvedTarget, sessionCwd)
-        if (!writeValid) {
-          sendFn(ws, {
-            type: 'write_file_result',
-            path: requestedPath,
-            error: 'Access denied: file writing is restricted to the project directory',
-          })
-          return
-        }
-      } else {
-        // New file: validate the lexical path is within CWD
-        const { valid: writeValid } = await validatePathWithinCwd(absInCwd, sessionCwd)
-        if (!writeValid) {
-          sendFn(ws, {
-            type: 'write_file_result',
-            path: requestedPath,
-            error: 'Access denied: file writing is restricted to the project directory',
-          })
-          return
-        }
+      // Existing file: validate the resolved (symlink-followed) path. New file:
+      // validate the lexical path. A check that cannot be answered (a
+      // self-referential link's ELOOP, the depth ceiling, a file swapped
+      // between the two resolutions) denies rather than sending the helper's
+      // own text (#8016).
+      let writeValid = false
+      try {
+        ({ valid: writeValid } = await validatePathWithinCwd(fileExists ? resolvedTarget : absInCwd, sessionCwd))
+      } catch {
+        writeValid = false
+      }
+      if (!writeValid) {
+        sendFn(ws, {
+          type: 'write_file_result',
+          path: requestedPath,
+          error: 'Access denied: file writing is restricted to the project directory',
+        })
+        return
       }
       absPath = fileExists ? resolvedTarget : absInCwd
 
@@ -560,11 +572,29 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         resolvedTarget = await realpath(target)
         fileExists = true
       } catch (err) {
-        if (err.code === 'ENOENT') resolvedTarget = target
-        else throw err
+        if (err.code === 'ENOENT') {
+          resolvedTarget = target
+        } else {
+          // #8016 — a CLAUDE.md link whose target cannot be resolved: same
+          // answer as a target outside the project, never the raw text.
+          sendFn(ws, {
+            type: 'append_memory_result',
+            path: null,
+            created: false,
+            error: await unresolvablePathError(err, target, cwdReal, WRITE_UNRESOLVABLE_REASONS,
+              'Access denied: memory is restricted to the project directory'),
+          })
+          return
+        }
       }
 
-      const { valid } = await validatePathWithinCwd(fileExists ? resolvedTarget : target, sessionCwd)
+      // A check that cannot be answered denies (#8016).
+      let valid = false
+      try {
+        ({ valid } = await validatePathWithinCwd(fileExists ? resolvedTarget : target, sessionCwd))
+      } catch {
+        valid = false
+      }
       if (!valid) {
         sendFn(ws, {
           type: 'append_memory_result',
