@@ -42,7 +42,10 @@ export const MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
  * @returns {string}
  */
 export function encodeProjectPath(cwd) {
-  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-')
+  // No String() coercion: a non-string cwd must THROW, not become a
+  // `projects/null` key. getFullHistoryAsync relies on that throw to log the
+  // failure before it falls back to the ring buffer.
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 /**

@@ -56,6 +56,14 @@ describe('encodeProjectPath', () => {
     assert.equal(encodeProjectPath('C:\\Users\\chris\\proj'), 'C--Users-chris-proj')
   })
 
+  it('throws on a non-string cwd rather than inventing a `null` key (#7283 review)', async () => {
+    // session-manager-history-error.test.js depends on this: a null cwd must
+    // reach getFullHistoryAsync's catch (and its log line), not read
+    // ~/.claude/projects/null/<id>.jsonl and fall back silently.
+    assert.throws(() => encodeProjectPath(null), TypeError)
+    assert.throws(() => resolveJsonlPath(undefined, 'abc-123'), TypeError)
+  })
+
   it('agrees with the transcript path transcript-tasks derives from a session file (#7283)', async () => {
     // The two call sites used to carry separate encoders that disagreed on any
     // cwd with a dot. Pin them to one answer.
