@@ -5,6 +5,7 @@ import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { POSIX_PERM_SKIP } from './test-helpers.js'
 
 /**
  * #8016 — the write-side and git handlers had the #8012 residual: a
@@ -19,12 +20,8 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
  * and no reply carries raw error text or a server path for these cases.
  */
 
-const IS_ROOT = typeof process.getuid === 'function' && process.getuid() === 0
-const SKIP_NO_CHMOD_DENY = process.platform === 'win32'
-  ? 'chmod cannot deny directory search on win32'
-  : IS_ROOT
-    ? 'root bypasses directory permission bits'
-    : false
+// chmod cannot deny directory search on win32, and root bypasses it.
+const SKIP_NO_CHMOD_DENY = POSIX_PERM_SKIP
 
 describe('write_file / append_memory / git_stage / git_unstage: non-ENOENT realpath failures (#8016)', { skip: SKIP_NO_SYMLINK }, () => {
   let root
