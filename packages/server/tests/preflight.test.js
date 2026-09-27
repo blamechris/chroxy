@@ -604,8 +604,6 @@ describe('runProviderPreflight — minimum version gate (#7986)', () => {
 })
 
 describe('runProviderPreflight — direct-exec shim refusal (#7986 review S2)', () => {
-  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
-
   function makeDirectExecProvider({ requiresDirectExec = true, minVersion } = {}) {
     return makeProvider({
       preflight: {
