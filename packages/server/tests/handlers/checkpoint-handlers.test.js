@@ -505,6 +505,7 @@ describe('checkpoint-handlers', () => {
           git('init', '-q')
           git('config', 'user.email', 'test@example.com')
           git('config', 'user.name', 'Test')
+          git('config', 'core.autocrlf', 'false') // see the 'files' test below (#7285)
           writeFileSync(join(repo, 'file.txt'), 'state-A\n')
           git('add', '-A')
           git('commit', '-q', '-m', 'init')
@@ -553,6 +554,14 @@ describe('checkpoint-handlers', () => {
           git('init', '-q')
           git('config', 'user.email', 'test@example.com')
           git('config', 'user.name', 'Test')
+          // Pin line endings for THIS repo (#7285). Git for Windows ships
+          // core.autocrlf=true in its system config, so the restore's
+          // `git checkout <sha> -- .` handed back 'state-A\r\n' for the
+          // 'state-A\n' this fixture committed. That is git honouring the host's
+          // policy, which is what it should do in a user's repo; this test is
+          // about WHICH state comes back, not about line-ending policy, so the
+          // fixture opts out rather than assert a platform-specific byte string.
+          git('config', 'core.autocrlf', 'false')
           writeFileSync(join(repo, 'file.txt'), 'state-A\n')
           git('add', '-A')
           git('commit', '-q', '-m', 'init')

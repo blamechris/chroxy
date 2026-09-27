@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, symlinkSync, realpathSync } from 'node:fs'
 import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renameAsync } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { createServer } from 'node:http'
 import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
@@ -716,7 +716,7 @@ describe('executeBuiltinTool', () => {
           for (const line of r.content.split('\n')) {
             const resolved = realpathSync(resolve(realWs, line))
             assert.ok(
-              resolved === realWs || resolved.startsWith(realWs + '/'),
+              resolved === realWs || resolved.startsWith(realWs + sep),
               `pattern ${JSON.stringify(pattern)} returned ${line} -> ${resolved}, outside ${realWs}`,
             )
           }
@@ -754,7 +754,7 @@ describe('executeBuiltinTool', () => {
         const escapes = (rel) => {
           let real
           try { real = realpathSync(resolve(ws, rel)) } catch { return false }
-          return !(real === ws || real.startsWith(ws + '/'))
+          return !(real === ws || real.startsWith(ws + sep))
         }
         // [pattern, the in-workspace match it must STILL return] — the second
         // column proves the expansion and the walk really ran, so an empty
