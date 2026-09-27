@@ -13,11 +13,16 @@ import { readWorkflows, assertEveryFileParsed, code, stepInput } from './helpers
  * "are always charged for, even when used by public repositories". A larger
  * runner is selected by a custom label, so this file fails the build on any
  * GitHub-hosted label, in any workflow, outside the standard allowlist below —
- * including the labels the runner-target `resolve` step emits on BOTH of its
- * branches, and any job whose runner this file cannot see (a remote reusable
- * workflow). Visibility itself is not checkable offline: if the repository ever
- * goes private, hosted minutes are billed regardless of label. Full rationale:
- * the LONG JOBS ON GITHUB-HOSTED RUNNERS note in ci.yml's header.
+ * including every value the runner-target `resolve` step can emit, and any job
+ * whose runner this file cannot see (a remote reusable workflow). Visibility
+ * itself is not checkable offline: if the repository ever goes private, hosted
+ * minutes are billed regardless of label. Full rationale: the LONG JOBS ON
+ * GITHUB-HOSTED RUNNERS note in ci.yml's header.
+ *
+ * It also holds the TRUST half of runner-target: the trusted branch of the
+ * resolve step may only name self-hosted runners, and the fork branch only
+ * standard hosted ones, so untrusted fork-PR code can never be routed onto a
+ * self-hosted machine.
  */
 
 const LONG_JOBS = ['server-tests', 'dashboard-tests', 'scripts-tests']
@@ -28,20 +33,44 @@ const LONG_JOBS = ['server-tests', 'dashboard-tests', 'scripts-tests']
 // Adding a label is a deliberate edit: confirm it is a standard runner first.
 const STANDARD_HOSTED_LABELS = new Set(['ubuntu-24.04', 'ubuntu-latest', 'windows-latest', 'macos-latest'])
 
-// runner-target outputs that jobs consume as `runs-on`. Their values are the
-// JSON literals the `resolve` step echoes, and those are classified below.
+// runner-target outputs that jobs consume as `runs-on`, in ci.yml ONLY.
 const ROUTED_OUTPUTS = ['runner', 'winrunner']
 const routedExpression = name => `\${{ fromJSON(needs.runner-target.outputs.${name}) }}`
 
-/** `runs-on: X  # why` (flow or block form) -> `X`, whitespace-collapsed. */
-function runsOnValue(raw) {
-  // A YAML comment needs whitespace before `#`; no runs-on value here contains
-  // ` #`, so everything from the first ` #` on is the comment.
-  return raw
-    .replace(/^\s*runs-on:\s*/, '')
-    .replace(/\s+#.*$/, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+// The ONE spelling of a resolve-step output write this file can read.
+const CANONICAL_ECHO = /^\s*echo '([a-z]+)=(.*)' >> "\$GITHUB_OUTPUT"\s*$/
+
+const stripComment = s => s.replace(/\s+#.*$/, '')
+
+/**
+ * A job's JOB-LEVEL `runs-on` value (a key at exactly four spaces, the repo's
+ * convention — see assertEveryFileParsed), as a flow value: `x`, `[a, b]`, or
+ * `{block}` for a mapping form. `null` when there is no such key; `{duplicate}`
+ * when there are two. Text nested deeper — a `with:` block scalar, a heredoc in
+ * a step — is never read as the job's runner.
+ */
+function jobLevelRunsOn(body) {
+  const at = body.map((l, i) => (/^ {4}runs-on:/.test(l) ? i : -1)).filter(i => i !== -1)
+  if (at.length === 0) return null
+  if (at.length > 1) return '{duplicate}'
+  const inline = stripComment(body[at[0]].replace(/^ {4}runs-on:\s*/, '')).trim()
+  if (inline) return inline.replace(/\s+/g, ' ')
+  const items = []
+  for (let i = at[0] + 1; i < body.length; i++) {
+    const l = body[i]
+    if (/^\s*$/.test(l) || /^\s*#/.test(l)) continue
+    if (!/^ {5,}/.test(l)) break
+    const m = /^\s*-\s+(.*)$/.exec(stripComment(l))
+    if (!m) return '{block}'
+    items.push(m[1].trim())
+  }
+  return `[${items.join(', ')}]`
+}
+
+/** A job's JOB-LEVEL `uses:` target (a reusable-workflow call), or null. */
+function jobLevelUses(body) {
+  const line = body.find(l => /^ {4}uses:\s*\S/.test(l))
+  return line ? stripComment(line.replace(/^ {4}uses:\s*/, '')).trim() : null
 }
 
 /** Labels of a runner: a flow list `[a, b]`, a JSON array, or one plain label. */
@@ -52,11 +81,16 @@ function classifyLabels(labels) {
 }
 
 /**
- * Classify one `runs-on` value. Anything this cannot positively identify is
- * an error — "could not check" must never read as "nothing to check".
+ * Classify one job-level `runs-on` value in `file`. Anything this cannot
+ * positively identify is an error — "could not check" must never read as
+ * "nothing to check".
  */
-function classify(value) {
-  if (ROUTED_OUTPUTS.some(name => value === routedExpression(name))) return { kind: 'routed' }
+function classify(value, file) {
+  if (ROUTED_OUTPUTS.some(name => value === routedExpression(name))) {
+    // Only ci.yml's runner-target is resolved and checked below; the same
+    // expression in another workflow reads an unchecked job of that name.
+    return file === 'ci.yml' ? { kind: 'routed' } : { kind: 'unknown' }
+  }
   if (value.startsWith('[') && value.endsWith(']')) {
     return classifyLabels(value.slice(1, -1).split(',').map(l => l.trim()).filter(Boolean))
   }
@@ -64,28 +98,44 @@ function classify(value) {
   return { kind: 'unknown' }
 }
 
-/** A job-level `uses:` (a reusable-workflow call) and its target, or null. */
-function reusableCall(job) {
-  const line = code(job.body).find(l => /^ {4}uses:\s*\S/.test(l))
-  return line ? line.replace(/^ {4}uses:\s*/, '').replace(/\s+#.*$/, '').trim() : null
+/** Classify an echoed JSON value: a string label or an array of labels. */
+function classifyJson(raw) {
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { kind: 'unknown' }
+  }
+  const labels = Array.isArray(parsed) ? parsed : [parsed]
+  return labels.every(l => typeof l === 'string') ? classifyLabels(labels) : { kind: 'unknown' }
 }
 
 describe('long Linux jobs run on standard GitHub-hosted runners', () => {
   let workflows
   let ciJobs
   let allJobs // [{ file, job }]
-  let resolveValues // [{ name, raw }]
+  let target // the runner-target job
+  let resolveLines // code lines of the resolve step
+  let trusted // [{ name, raw }] written on the trusted (if) branch
+  let fork // [{ name, raw }] written on the fork (else) branch
 
   before(async () => {
     workflows = await readWorkflows()
     ciJobs = workflows.find(w => w.name === 'ci.yml').jobs
     allJobs = workflows.flatMap(w => w.jobs.map(job => ({ file: w.name, job })))
-    const target = ciJobs.find(j => j.id === 'runner-target')
+    target = ciJobs.find(j => j.id === 'runner-target')
     const resolveStep = target?.steps.find(s => s.some(l => /^\s*(- )?id: resolve\s*$/.test(l)))
-    const text = resolveStep ? code(resolveStep).join('\n') : ''
-    resolveValues = [...text.matchAll(/echo '([a-z]+)=(.*)' >> "\$GITHUB_OUTPUT"/g)]
+    resolveLines = resolveStep ? code(resolveStep) : []
+    const ifAt = resolveLines.findIndex(l => /^\s*if \[/.test(l))
+    const elseAt = resolveLines.findIndex(l => /^\s*else\s*$/.test(l))
+    const fiAt = resolveLines.findIndex(l => /^\s*fi\s*$/.test(l))
+    const writes = lines => lines
+      .map(l => CANONICAL_ECHO.exec(l))
+      .filter(Boolean)
       .map(m => ({ name: m[1], raw: m[2] }))
       .filter(v => ROUTED_OUTPUTS.includes(v.name))
+    trusted = ifAt !== -1 && elseAt > ifAt ? writes(resolveLines.slice(ifAt + 1, elseAt)) : []
+    fork = elseAt !== -1 && fiAt > elseAt ? writes(resolveLines.slice(elseAt + 1, fiAt)) : []
   })
 
   // ---- positive controls ----------------------------------------------------
@@ -102,22 +152,18 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
     }
   })
 
-  it('finds both branches of every routed runner output in the resolve step', () => {
-    // One value per branch per output: the trusted (self-hosted) branch AND the
-    // fork (hosted) branch. The first version of this guard read only the fork
-    // branch's strings, so a larger-runner array on the trusted branch passed.
-    assert.deepEqual(
-      resolveValues.map(v => v.name).sort(),
-      ['runner', 'runner', 'winrunner', 'winrunner'],
-      `expected two echoes each for ${ROUTED_OUTPUTS.join('/')}, found: ${resolveValues.map(v => v.name).join(', ')}`
-    )
+  it('finds exactly one write per routed output on EACH branch of the resolve step', () => {
+    assert.deepEqual(trusted.map(v => v.name).sort(), [...ROUTED_OUTPUTS].sort(),
+      `trusted (if) branch writes: ${trusted.map(v => v.name).join(', ') || 'none'}`)
+    assert.deepEqual(fork.map(v => v.name).sort(), [...ROUTED_OUTPUTS].sort(),
+      `fork (else) branch writes: ${fork.map(v => v.name).join(', ') || 'none'}`)
   })
 
   // ---- the move -------------------------------------------------------------
   it('each long job runs on the standard ubuntu-24.04 label for every event', () => {
     for (const id of LONG_JOBS) {
       const job = ciJobs.find(j => j.id === id)
-      assert.equal(runsOnValue(job.runsOn), 'ubuntu-24.04', `${id} must run on ubuntu-24.04 — got: ${job.runsOn}`)
+      assert.equal(jobLevelRunsOn(job.body), 'ubuntu-24.04', `${id} must run on ubuntu-24.04 — got: ${job.runsOn}`)
     }
   })
 
@@ -147,45 +193,76 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
   })
 
   it('runner-target no longer exposes a longrunner output', () => {
-    const target = ciJobs.find(j => j.id === 'runner-target')
     const refs = code(target.body).filter(l => l.includes('longrunner'))
     assert.deepEqual(refs, [], `stale longrunner routing left in runner-target: ${refs.join(' | ')}`)
   })
 
-  // ---- the cost guard ---------------------------------------------------------
-  it('every GitHub-hosted runner in every workflow is a standard (free) label', () => {
+  // ---- runner-target: trust and cost -------------------------------------------
+  it('the trusted branch routes only to self-hosted runners and the fork branch only to standard hosted ones', () => {
     const offenders = []
-    const check = (where, c) => {
-      if (c.kind === 'unknown') offenders.push(`${where} — cannot verify the runner`)
+    for (const { name, raw } of trusted) {
+      const c = classifyJson(raw)
+      if (c.kind !== 'self-hosted') offenders.push(`trusted branch ${name}=${raw} is not a self-hosted label set`)
+    }
+    for (const { name, raw } of fork) {
+      const c = classifyJson(raw)
+      if (c.kind !== 'hosted') {
+        offenders.push(`fork branch ${name}=${raw} is not a single hosted label — fork-PR code must never reach a self-hosted machine`)
+      } else if (!STANDARD_HOSTED_LABELS.has(c.label)) {
+        offenders.push(`fork branch ${name}=${raw} — '${c.label}' is not a known standard label`)
+      }
+    }
+    assert.deepEqual(offenders, [], offenders.join('\n'))
+  })
+
+  it('the resolve step writes its outputs only in the one spelling this file reads', () => {
+    // A second write in another spelling — `echo "runner=[…]"`, `tee -a`, an
+    // unquoted redirect, the old `::set-output` — would be invisible to the
+    // checks above while still setting the output GitHub uses.
+    const routedMention = new RegExp(`\\b(${ROUTED_OUTPUTS.join('|')})=`)
+    const offenders = resolveLines
+      .filter(l => /GITHUB_OUTPUT|set-output/.test(l) || routedMention.test(l))
+      .filter(l => !CANONICAL_ECHO.test(l))
+      .map(l => l.trim())
+    assert.deepEqual(offenders, [], `non-canonical output writes in the resolve step:\n  ${offenders.join('\n  ')}`)
+  })
+
+  it('runner-target passes each routed output straight through from the resolve step', () => {
+    // A literal in the outputs map would bypass the resolve step entirely.
+    const lines = code(target.body)
+    for (const name of ROUTED_OUTPUTS) {
+      const keyed = lines.filter(l => new RegExp(`^ {6}${name}:`).test(l))
+      assert.equal(keyed.length, 1, `expected one '${name}:' in runner-target's outputs, found ${keyed.length}`)
+      assert.ok(
+        new RegExp(`^ {6}${name}:\\s*\\$\\{\\{\\s*steps\\.resolve\\.outputs\\.${name}\\s*\\}\\}\\s*$`).test(keyed[0]),
+        `runner-target must expose '${name}: \${{ steps.resolve.outputs.${name} }}' — got: ${keyed[0].trim()}`
+      )
+    }
+  })
+
+  // ---- the cost guard, every workflow -------------------------------------------
+  it('every job-level GitHub-hosted runner in every workflow is a standard (free) label', () => {
+    const offenders = []
+    for (const { file, job } of allJobs) {
+      const where = `${file}:${job.line} ${job.id}`
+      const uses = jobLevelUses(job.body)
+      if (uses !== null) {
+        // A reusable-workflow call runs wherever the CALLED workflow says. Only a
+        // local one is visible here — its jobs are in this directory and are
+        // checked in their own right. A remote one is billed to this repository.
+        if (!uses.startsWith('./.github/workflows/')) offenders.push(`${where} — remote reusable workflow ${uses}`)
+        continue
+      }
+      const value = jobLevelRunsOn(job.body)
+      if (value === null) {
+        offenders.push(`${where} — no job-level runs-on and no reusable-workflow call`)
+        continue
+      }
+      const c = classify(value, file)
+      if (c.kind === 'unknown') offenders.push(`${where} — cannot verify runs-on: ${value}`)
       else if (c.kind === 'hosted' && !STANDARD_HOSTED_LABELS.has(c.label)) {
         offenders.push(`${where} — '${c.label}' is not a known standard label`)
       }
-    }
-    for (const { file, job } of allJobs) {
-      const value = runsOnValue(job.runsOn)
-      if (value === '') {
-        // No runs-on: only a LOCAL reusable-workflow call is fine — its jobs are
-        // in this same directory and are checked in their own right. A remote
-        // one runs on whatever that repository chose, billed to this one.
-        const target = reusableCall(job)
-        if (!target || !target.startsWith('./.github/workflows/')) {
-          offenders.push(`${file}:${job.line} ${job.id} — no runs-on and no local reusable workflow (${target ?? 'none'})`)
-        }
-        continue
-      }
-      check(`${file}:${job.line} ${job.id} runs-on: ${value}`, classify(value))
-    }
-    for (const { name, raw } of resolveValues) {
-      let parsed
-      try {
-        parsed = JSON.parse(raw)
-      } catch {
-        offenders.push(`ci.yml runner-target resolve step — ${name}=${raw} is not JSON`)
-        continue
-      }
-      const labels = Array.isArray(parsed) ? parsed : [parsed]
-      check(`ci.yml runner-target resolve step ${name}=${raw}`,
-        labels.every(l => typeof l === 'string') ? classifyLabels(labels) : { kind: 'unknown' })
     }
     assert.deepEqual(
       offenders,
@@ -198,31 +275,40 @@ describe('long Linux jobs run on standard GitHub-hosted runners', () => {
 
   it('every allowlisted standard label is actually used (the allowlist cannot go stale)', () => {
     const used = new Set()
-    for (const { raw } of resolveValues) {
-      try {
-        const parsed = JSON.parse(raw)
-        if (typeof parsed === 'string') used.add(parsed)
-      } catch { /* reported by the cost guard */ }
+    for (const { raw } of fork) {
+      const c = classifyJson(raw)
+      if (c.kind === 'hosted') used.add(c.label)
     }
-    for (const { job } of allJobs) {
-      const c = classify(runsOnValue(job.runsOn))
+    for (const { file, job } of allJobs) {
+      const value = jobLevelRunsOn(job.body)
+      const c = value === null ? { kind: 'none' } : classify(value, file)
       if (c.kind === 'hosted') used.add(c.label)
     }
     const stale = [...STANDARD_HOSTED_LABELS].filter(l => !used.has(l))
     assert.deepEqual(stale, [], `STANDARD_HOSTED_LABELS entries no workflow uses: ${stale.join(', ')}`)
   })
 
-  // ---- the classifier itself ---------------------------------------------------
+  // ---- the readers themselves ---------------------------------------------------
   it('classify fails closed on forms it cannot verify', () => {
-    assert.equal(classify('${{ matrix.os }}').kind, 'unknown')
-    assert.equal(classify('{ group: big-runners }').kind, 'unknown')
-    assert.equal(classify('[ubuntu-24.04, gpu]').kind, 'unknown')
-    assert.equal(classify('[self-hosted, Linux, X64]').kind, 'self-hosted')
-    assert.equal(classify(routedExpression('runner')).kind, 'routed')
-    assert.equal(classify('${{ fromJSON(needs.runner-target.outputs.bigrunner) }}').kind, 'unknown')
-    assert.deepEqual(classify('ubuntu-24.04-16core'), { kind: 'hosted', label: 'ubuntu-24.04-16core' })
+    assert.equal(classify('${{ matrix.os }}', 'ci.yml').kind, 'unknown')
+    assert.equal(classify('{ group: big-runners }', 'ci.yml').kind, 'unknown')
+    assert.equal(classify('[ubuntu-24.04, gpu]', 'ci.yml').kind, 'unknown')
+    assert.equal(classify('[self-hosted, Linux, X64]', 'ci.yml').kind, 'self-hosted')
+    assert.equal(classify(routedExpression('runner'), 'ci.yml').kind, 'routed')
+    assert.equal(classify(routedExpression('runner'), 'release.yml').kind, 'unknown')
+    assert.equal(classify('${{ fromJSON(needs.runner-target.outputs.bigrunner) }}', 'ci.yml').kind, 'unknown')
+    assert.deepEqual(classify('ubuntu-24.04-16core', 'ci.yml'), { kind: 'hosted', label: 'ubuntu-24.04-16core' })
     assert.equal(STANDARD_HOSTED_LABELS.has('ubuntu-24.04-16core'), false)
-    assert.deepEqual(classifyLabels(['windows-latest-8-cores']), { kind: 'hosted', label: 'windows-latest-8-cores' })
-    assert.equal(runsOnValue("    runs-on: ubuntu-24.04  # don't route"), 'ubuntu-24.04')
+    assert.equal(classifyJson('["windows-latest-8-cores"]').kind, 'hosted')
+    assert.equal(classifyJson('not json').kind, 'unknown')
+  })
+
+  it('jobLevelRunsOn reads only the job-level key, in every form', () => {
+    assert.equal(jobLevelRunsOn(["    runs-on: ubuntu-24.04  # don't route"]), 'ubuntu-24.04')
+    assert.equal(jobLevelRunsOn(['    runs-on:', '      - self-hosted', '      - Linux']), '[self-hosted, Linux]')
+    assert.equal(jobLevelRunsOn(['    runs-on:', '      group: big']), '{block}')
+    assert.equal(jobLevelRunsOn(['    runs-on: a', '    runs-on: b']), '{duplicate}')
+    // Nested text is not the job's runner: a decoy inside a step body is ignored.
+    assert.equal(jobLevelRunsOn(['    steps:', '      - run: |', '          runs-on: ubuntu-latest']), null)
   })
 })
