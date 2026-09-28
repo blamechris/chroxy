@@ -10,9 +10,13 @@ import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from '
 
 const log = createLogger('tunnel')
 
-// Well-known cloudflared install locations (mirrors doctor.js) so provenance can
-// resolve the SAME absolute path the spawn will use even under a minimal PATH.
-const CLOUDFLARED_CANDIDATES = [
+// Well-known cloudflared install locations so provenance can resolve the SAME
+// absolute path the spawn will use even under a minimal PATH. #8074 review
+// S2: exported (not just module-local) so `doctor.js`'s `runDoctorChecks()`
+// imports THIS list for its own cloudflared check, rather than keeping a
+// second copy that could silently drift from the one that decides which
+// path the tunnel adapter actually gates and spawns.
+export const CLOUDFLARED_CANDIDATES = [
   '/opt/homebrew/bin/cloudflared',
   '/usr/local/bin/cloudflared',
   join(homedir(), '.local/bin/cloudflared'),

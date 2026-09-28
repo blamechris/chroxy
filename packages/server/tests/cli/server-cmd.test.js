@@ -7,6 +7,9 @@
  */
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, delimiter } from 'node:path'
 import { runCli, makeTempHome } from './__helpers/spawn-cli.js'
 
 describe('chroxy start / dev', () => {
@@ -46,5 +49,97 @@ describe('chroxy start / dev', () => {
     )
     assert.equal(r.code, 1)
     assert.match(r.stderr, /Config file not found/)
+  })
+})
+
+/**
+ * #8074 review C1 — `chroxy start -c <path>` used to gate its dependency
+ * checks' binary-provenance mode from the DEFAULT config file
+ * (`<configDir>/config.json`), never the merged config `-c <path>` actually
+ * points at — the same file `startCliServer`/`startSupervisor` are about to
+ * launch the daemon from. Mirrors the #8065 review S4 fix for `chroxy resume
+ * -c`. Own describe block with its own temp HOME (rather than sharing the
+ * block above): this test writes a REAL `binary-trust.json` and a REAL
+ * config file, which the "no config exists" test above must never see.
+ */
+describe('chroxy start -c <path> gates from the merged config (#8074 review C1)', () => {
+  const { home, cleanup } = makeTempHome()
+  after(cleanup)
+
+  // An extensionless shebang shim named `claude` is never resolved on
+  // Windows (binary lookup there requires a PATHEXT extension), so the check
+  // reports "Not found" before the gate is consulted. The C1 fix — which
+  // config file the gate mode is read from — is platform-independent and is
+  // proven on the POSIX legs.
+  const C1_SHIM_SKIP = process.platform === 'win32'
+    ? 'an extensionless shebang shim is not resolvable as `claude` on Windows (PATHEXT); the config-source fix is platform-independent'
+    : false
+
+  it('a block-mode "-c" config with a mismatched pin refuses — the shim binary is never exec\'d', { skip: C1_SHIM_SKIP }, async () => {
+    // A real, tiny executable masquerading as `claude` (cli-session.js's
+    // provider binary name), written to a directory prepended onto PATH for
+    // this one child process — so `which claude` finds THIS shim first,
+    // regardless of what else is installed on the host running the suite.
+    const shimDir = mkdtempSync(join(tmpdir(), 'chroxy-c1-shim-'))
+    const shimPath = join(shimDir, 'claude')
+    const markerPath = join(shimDir, 'marker.txt')
+    writeFileSync(shimPath, [
+      `#!${process.execPath}`,
+      `import { writeFileSync } from 'node:fs'`,
+      `writeFileSync(${JSON.stringify(markerPath)}, 'ran')`,
+      `console.log('2.1.999 (chroxy-c1-shim)')`,
+      'process.exit(0)',
+    ].join('\n'))
+    chmodSync(shimPath, 0o755)
+
+    // The ledger `chroxy start` will read from is at the SANDBOXED default
+    // path spawn-cli.js's `runCli` already points CHROXY_CONFIG_DIR at
+    // (`<home>/.chroxy`) — seeded with a hash that can never match the shim,
+    // so a correctly-wired block-mode gate refuses it. Key casing doesn't
+    // matter: `PathHashTrustLedger._normalizeKey` re-normalizes on load.
+    const chroxyDir = join(home, '.chroxy')
+    mkdirSync(chroxyDir, { recursive: true })
+    writeFileSync(join(chroxyDir, 'binary-trust.json'), JSON.stringify({
+      binaries: {
+        [shimPath]: { sha256: 'f'.repeat(64), firstSeen: '2020-01-01T00:00:00.000Z' },
+      },
+    }))
+
+    // Doctor's PROVIDER resolution (unlike the binary-provenance gate C1
+    // fixes) still reads its own default config file regardless of `-c`
+    // (#8075, filed separately and explicitly out of scope here). Left
+    // alone, a fresh HOME with no default config.json at all falls through
+    // to DEFAULT_PROVIDER (`claude-tui`, @chroxy/protocol) instead of THIS
+    // test's `claude-cli` — which also runs the SEPARATE claude-tui-driving
+    // version probe against the same shimmed `claude`, entangling this test
+    // with an unrelated code path. Writing a default config.json that
+    // agrees on `provider: 'claude-cli'` (with no `binaryProvenance` of its
+    // own, so a C1 regression that reads THIS file instead would resolve
+    // mode 'off' and expose itself) neutralizes #8075's gap for this test's
+    // purposes without fixing it.
+    writeFileSync(join(chroxyDir, 'config.json'), JSON.stringify({ provider: 'claude-cli' }))
+
+    // The config `-c` points at — deliberately NOT the default
+    // `<home>/.chroxy/config.json` above, reproducing the exact review
+    // repro: "chroxy start -c other.json" must gate from `other.json`'s
+    // `binaryProvenance`, not from the default file's (absent) one.
+    const otherConfigPath = join(home, 'other.json')
+    writeFileSync(otherConfigPath, JSON.stringify({
+      provider: 'claude-cli',
+      noAuth: true, // disables the tunnel requirement, so cloudflared's own health can't confound this assertion
+      binaryProvenance: { mode: 'block' },
+    }))
+
+    const r = await runCli(
+      ['start', '-c', otherConfigPath],
+      { home, timeoutMs: 15000, env: { PATH: `${shimDir}${delimiter}${process.env.PATH}` } },
+    )
+    try {
+      assert.equal(r.code, 1, `expected a non-zero exit, got ${r.code}. stdout: ${r.stdout} stderr: ${r.stderr}`)
+      assert.match(r.stderr, /hash_mismatch/, `expected the provenance refusal in stderr, got stdout: ${r.stdout} stderr: ${r.stderr}`)
+      assert.equal(existsSync(markerPath), false, 'the shim must never have been exec\'d — this is the test that goes red under C1\'s defect (gating from the wrong/default config file, which has no binaryProvenance set, so the mismatch is never even checked)')
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true })
+    }
   })
 })
