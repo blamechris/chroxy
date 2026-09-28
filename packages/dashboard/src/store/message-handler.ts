@@ -198,6 +198,7 @@ import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-pr
 import { unwrapToolResultText } from '../lib/tool-result-text';
 import { compositeKey } from '../utils/compositeKey';
 import type {
+  BillingClass,
   ChatMessage,
   ConnectionContext,
   ConnectionState,
@@ -5197,6 +5198,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           v === null ? null : typeof v === 'number' && Number.isFinite(v) ? v : null;
         const spentUsd = num(msg.spentUsd);
         const budgetUsd = numOrNull(msg.budgetUsd);
+        // #7377: the wire billing class, defensively narrowed — an older
+        // server omits the field (or a malformed payload sends garbage),
+        // and either way the meter must fall back to a neutral label rather
+        // than assume a class it was never told.
+        const billingClass: BillingClass | undefined =
+          msg.billingClass === 'api-key' ||
+          msg.billingClass === 'subscription' ||
+          msg.billingClass === 'programmatic-credit'
+            ? msg.billingClass
+            : undefined;
         getStore().setState({
           monthlyBudget: {
             month,
@@ -5207,6 +5218,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             percent: numOrNull(msg.percent),
             warning: msg.warning === true,
             exceeded: msg.exceeded === true,
+            billingClass,
           },
         });
         const cap = budgetUsd != null ? `$${budgetUsd.toFixed(2)}` : '';
