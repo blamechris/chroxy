@@ -510,8 +510,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   larger than the binary ledger's two processes) gets the same treatment
   for its `communityTrust` sibling index. `SessionPresetTrustStore` and
   `BinaryProvenanceLedger` inherit the fix with no changes of their own.
-  Atomicity, mode `0600`, and the existing fail-open handling of a
-  corrupt/missing ledger file are all unchanged.
+  Atomicity and mode `0600` are unchanged. A genuinely missing file (an
+  operator deleting the ledger to reset it) still resets to empty, but a
+  file that exists and merely fails to re-read at flush time (malformed
+  JSON, wrong shape, unreadable) now falls back to this instance's own
+  in-memory records instead of wiping every pin it didn't touch this
+  flush. Only an explicit `approve`/`revoke`/`acceptHash`/
+  `grantCommunityTrust` is last-writer-wins; a trust-on-first-use
+  first-sight pin or a `lastVerified` bump is never allowed to override a
+  pin or decision this instance never saw.
 
 ### Changed
 

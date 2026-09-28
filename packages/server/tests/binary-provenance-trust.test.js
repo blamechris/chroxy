@@ -132,4 +132,34 @@ describe('BinaryProvenanceLedger (#6858)', () => {
       assert.ok(onDisk.binaries['/opt/homebrew/bin/codex'], 'the daemon\'s own pin is still there too')
     })
   })
+
+  // #8072 review C3: `verifyProvenance` calls `approve(path, hash,
+  // { firstSight: true })` for its trust-on-first-use pin — a write from a
+  // possibly-stale in-memory snapshot, not an operator decision. A stale
+  // daemon (constructed before, or simply never having reloaded since, the
+  // CLI's genuine pin landed) must not be able to overwrite that pin with
+  // its own first-sight read of a swapped binary.
+  describe('a stale TOFU write never overrides another process\'s genuine pin (#8072 review C3)', () => {
+    it('the daemon\'s stale first-sight pin of a swapped binary does not overwrite the CLI\'s genuine pin', () => {
+      const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first, sees nothing
+      const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
+
+      // CLI's own first sight of the real binary — nothing on disk yet to
+      // conflict with, so this TOFU write applies.
+      cli.approve('/usr/local/bin/claude', HASH_A, { firstSight: true })
+
+      // The daemon's stale snapshot (constructed before the CLI's pin
+      // landed, never reloaded) now "first sees" a swapped binary and
+      // writes its own TOFU pin of the swapped hash.
+      daemon.approve('/usr/local/bin/claude', HASH_B, { firstSight: true })
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.binaries['/usr/local/bin/claude'].sha256, HASH_A,
+        'the CLI\'s genuine pin must survive the daemon\'s stale TOFU write')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', HASH_B), false,
+        'the daemon\'s own in-memory state must self-heal to the genuine pin after its flush')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', HASH_A), true,
+        'so the NEXT verifyProvenance call in the daemon correctly blocks the swapped binary')
+    })
+  })
 })

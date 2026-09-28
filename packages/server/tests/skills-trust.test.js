@@ -17,6 +17,25 @@ import {
  * `~/.chroxy/skills-trust.json` is never touched.
  */
 
+// #8072 review S1: a SkillsTrustStore whose `_serialize()` throws exactly
+// once, so a test can force ONE failed flush and verify the retry recovers
+// every pending grant. Skills re-throws (`throwOnFlushError: true`), so the
+// failure surfaces to the caller instead of being swallowed.
+class FlakySkillsTrustStore extends SkillsTrustStore {
+  constructor(opts) {
+    super(opts)
+    this._failNextSerialize = false
+  }
+
+  _serialize() {
+    if (this._failNextSerialize) {
+      this._failNextSerialize = false
+      throw new Error('boom (forced failure)')
+    }
+    return super._serialize()
+  }
+}
+
 describe('skills-trust', () => {
   let dir
   let trustPath
@@ -887,6 +906,145 @@ describe('skills-trust', () => {
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       assert.ok(persisted.skills['/abs/a.md'], 'storeA\'s record must survive storeB\'s flush')
       assert.ok(persisted.skills['/abs/b.md'], 'storeB\'s record is still there too')
+    })
+  })
+
+  // #8072 review C1: a plain-object merge target (`{ ...spread }`) lets an
+  // author/path named `constructor`/`toString`/`valueOf`/`__proto__` resolve
+  // through the prototype chain to a truthy value in `isCommunityTrusted`'s
+  // bracket-key check — a repo-local `community/constructor/*.md` would be
+  // trusted without ever being granted.
+  describe('the merge stays null-prototype (#8072 review C1)', () => {
+    it('does not trust prototype-named authors/paths after a flush', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Any flush at all must exercise the merge path — a plain skill
+      // record is enough to dirty the store.
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+        assert.equal(store.isCommunityTrusted('/x', name), false, `author "${name}" must not be trusted`)
+        assert.equal(store.isCommunityTrusted(name, 'nobody'), false, `path "${name}" must not be trusted`)
+      }
+      assert.equal(Object.getPrototypeOf(store._records), null,
+        '_records must stay null-prototype after a flush')
+      assert.equal(Object.getPrototypeOf(store.communityTrust.byAuthor), null,
+        'communityTrust.byAuthor must stay null-prototype after a flush')
+      assert.equal(Object.getPrototypeOf(store.communityTrust.byPath), null,
+        'communityTrust.byPath must stay null-prototype after a flush')
+    })
+  })
+
+  // #8072 review S1: mutant m3 ("clear the change-set before the write")
+  // killed by this test for skills' OWN `_changedAuthors`/`_changedByPaths`
+  // tracking — the base-class `_changedKeys` retention is covered in
+  // path-hash-trust-ledger.test.js, but `communityTrust` is skills-specific
+  // state the base's retry guarantee doesn't reach on its own.
+  describe('_changedAuthors/_changedByPaths retention across a failed write (#8072 review S1)', () => {
+    it('retains every pending grant across a failed write, so the next flush retries them all', () => {
+      const store = new FlakySkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' }) // succeeds
+
+      store._failNextSerialize = true
+      // Skills re-throws on a failed flush (throwOnFlushError: true).
+      assert.throws(() => store.grantCommunityTrust('bob', { realPath: '/community/bob/skill.md' }), /boom/)
+
+      store.grantCommunityTrust('carol', { realPath: '/community/carol/skill.md' }) // retries
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust['by-author']['alice'])
+      assert.ok(persisted.communityTrust['by-author']['bob'],
+        'bob must land on the retry — _changedAuthors must not have been cleared before the failed write')
+      assert.ok(persisted.communityTrust['by-author']['carol'])
+      assert.ok(persisted.communityTrust['by-path']['/community/bob/skill.md'],
+        '_changedByPaths must also survive the failed write')
+    })
+  })
+
+  // #8072 review C3: TOFU first-sight pins (`inspect()`'s `recorded` branch)
+  // and `lastVerified` bumps (`inspect()`'s `verified` branch) are not
+  // operator decisions — they're written from a possibly-stale snapshot, so
+  // the merge must not let them override a pin/decision this instance never
+  // saw. Only `acceptHash`/`grantCommunityTrust` (explicit operator actions)
+  // are last-writer-wins.
+  describe('implicit writes never override an explicit decision (#8072 review C3)', () => {
+    it('a stale instance\'s TOFU of a tampered hash does not overwrite another instance\'s real pin (block mode)', () => {
+      // 1. A is constructed — before B's pin exists on disk.
+      const a = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
+      // 2. B pins s.md = v1 and flushes it.
+      const b = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
+      const v1 = 'v1 body'
+      assert.equal(b.inspect('/abs/s.md', v1).status, 'recorded')
+      b.flush()
+
+      // 3. s.md is tampered with (simulated: a different body from here on).
+      const tampered = 'tampered body'
+
+      // 4. A inspect()s the tampered body. A never loaded b's pin (it was
+      //    constructed before b flushed), so this looks like first sight to
+      //    A too — a TOFU record of the TAMPERED hash.
+      assert.equal(a.inspect('/abs/s.md', tampered).status, 'recorded')
+
+      // 5. B inspect()s the tampered body — B DOES have the v1 record, so
+      //    this is a genuine mismatch/blocked detection.
+      const bMismatch = b.inspect('/abs/s.md', tampered)
+      assert.equal(bMismatch.status, 'mismatch')
+      assert.equal(bMismatch.blocked, true)
+
+      // A's stale TOFU pin of the tampered hash reaches disk here — it must
+      // not override b's genuine v1 pin.
+      a.flush()
+
+      // 6. B flushes for an unrelated first-seen skill.
+      b.inspect('/abs/unrelated.md', 'unrelated body')
+      b.flush()
+
+      // 7. B inspect()s again — must still detect the mismatch, not
+      //    silently "verify" against whatever a's flush might have written.
+      const finalResult = b.inspect('/abs/s.md', tampered)
+      assert.equal(finalResult.status, 'mismatch', 'b must still detect the tampered content, not adopt it')
+      assert.equal(finalResult.blocked, true)
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'].sha256, sha256Hex(v1),
+        'disk must still hold the genuine v1 pin, not the tampered hash')
+    })
+
+    it('a lastVerified touch bump does not revert another session\'s acceptHash', () => {
+      const a = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      const original = 'original body'
+      assert.equal(a.inspect('/abs/s.md', original).status, 'recorded')
+      a.flush()
+
+      // b loads the same original hash (sees a's pin).
+      const b = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      assert.equal(b.getRecord('/abs/s.md').sha256, sha256Hex(original))
+
+      // An operator (via a's session) explicitly accepts a NEW hash for
+      // this path.
+      const accepted = 'accepted new body'
+      a.acceptHash('/abs/s.md', accepted)
+      a.flush()
+
+      // b, still holding the OLD hash in memory, re-inspects with the OLD
+      // body (its own copy of the skill hasn't been re-read from disk) and
+      // gets a "verified" bump against its own now-superseded hash — that
+      // bump must not revert a's explicit acceptHash on disk.
+      const bResult = b.inspect('/abs/s.md', original)
+      assert.equal(bResult.status, 'verified', 'b still thinks its own copy matches — expected, not the bug')
+      b.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'].sha256, sha256Hex(accepted),
+        'b\'s touch bump must not revert a\'s explicit acceptHash')
+    })
+
+    it('a TOFU record DOES apply when nobody else holds a record for that path', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.inspect('/abs/new.md', 'body').status, 'recorded')
+      store.flush()
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/new.md'].sha256, sha256Hex('body'))
     })
   })
 })

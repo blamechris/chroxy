@@ -55,6 +55,28 @@
  * load" — see `skills-trust.js`. A subclass with its own sibling on-disk
  * index (skills' `communityTrust`) overrides `_mergeExtra`/
  * `_onFlushCommitted` to merge that index the same way.
+ *
+ * Merge safety, three properties (#8072 review):
+ *   - every map the merge builds is created with `Object.assign(Object.
+ *     create(null), …)`, never `{ ...spread }` — a plain object silently
+ *     resurrects `constructor`/`toString`/`__proto__` as truthy prototype
+ *     lookups the moment anything does a bracket-key membership check
+ *     (`isCommunityTrusted`), which a repo-local `community/constructor/*.md`
+ *     can reach.
+ *   - a failed re-read (anything but ENOENT — malformed JSON, wrong shape,
+ *     unreadable file) is NOT treated as "the ledger is empty": `flush()`
+ *     falls back to THIS instance's own in-memory `_records` as the merge
+ *     base, so a transient read failure can't drop every pin this instance
+ *     didn't touch this flush. Only ENOENT (no file at all) is a real reset.
+ *   - a change is tagged with WHY it happened, not just that it happened.
+ *     `approve`/`revoke`/`acceptHash`/`grantCommunityTrust` are operator
+ *     DECISIONS (`'set'`/`'delete'`) and always win. A trust-on-first-use
+ *     first-sight pin (`'tofu'`) or a `lastVerified` bump (`'touch'`) are
+ *     written from a possibly-stale snapshot, not decisions — the merge
+ *     skips a `'tofu'` write when disk already has ANY record for that key,
+ *     and skips a `'touch'` write when disk's hash no longer matches the one
+ *     this instance verified against, so a stale instance can never overwrite
+ *     a pin/decision it never saw. See `flush()`.
  */
 import { readFileSync } from 'fs'
 import { randomBytes } from 'crypto'
@@ -68,6 +90,16 @@ import { HEX64 } from './utils/validation-patterns.js'
  * @property {string} firstSeen    ISO timestamp of first sight
  * @property {string} [approvalTs] The third timestamp (named per subclass)
  */
+
+/**
+ * Priority of a tracked change, high to low: an explicit operator decision
+ * (`set`/`delete`) always outranks an implicit write (`tofu`/`touch`).
+ * `_recordChange` uses this so a key's tracked op can only ever be UPGRADED
+ * before the next flush, never downgraded (#8072 review C3) — e.g. once a
+ * key is tracked `'set'`, a later same-window `'touch'` on that key must not
+ * quietly demote it back to an implicit write.
+ */
+const CHANGE_OP_PRIORITY = { touch: 1, tofu: 2, set: 3, delete: 3 }
 
 export class PathHashTrustLedger {
   /**
@@ -113,11 +145,18 @@ export class PathHashTrustLedger {
    *
    * @param {string} key  Already-normalised key.
    * @param {TrustRecord} record
+   * @param {'set'|'tofu'|'touch'} [op='set']  Why this key changed (#8072
+   *   review C3) — `'set'` for an explicit operator decision (default;
+   *   always wins the merge), `'tofu'` for a trust-on-first-use first-sight
+   *   pin (merge skips it if disk already has ANY record for this key —
+   *   never overwrite a pin/decision this instance never saw), `'touch'`
+   *   for an informational `lastVerified` bump (merge skips it if disk's
+   *   hash no longer matches the one this instance verified against).
    * @protected
    */
-  _setRecord(key, record) {
+  _setRecord(key, record, op = 'set') {
     this._records[key] = record
-    this._changedKeys.set(key, 'set')
+    this._recordChange(key, op)
     this._dirty = true
   }
 
@@ -125,14 +164,32 @@ export class PathHashTrustLedger {
    * Delete `_records[key]` and mark the deletion as a change THIS instance
    * made since the last flush, so flush()'s merge keeps it removed instead
    * of resurrecting whatever another process's flush wrote for that key.
+   * Always an explicit operator decision — there is no implicit delete.
    *
    * @param {string} key  Already-normalised key.
    * @protected
    */
   _deleteRecord(key) {
     delete this._records[key]
-    this._changedKeys.set(key, 'delete')
+    this._recordChange(key, 'delete')
     this._dirty = true
+  }
+
+  /**
+   * Track that THIS instance changed `key` via `op`, upgrading but never
+   * downgrading a key already tracked this window (#8072 review C3) — e.g.
+   * a `'touch'` bump must not demote a key already tracked `'set'` back to
+   * an implicit write that the merge would then treat as skippable.
+   *
+   * @param {string} key
+   * @param {'set'|'delete'|'tofu'|'touch'} op
+   * @private
+   */
+  _recordChange(key, op) {
+    const existing = this._changedKeys.get(key)
+    if (!existing || CHANGE_OP_PRIORITY[op] >= CHANGE_OP_PRIORITY[existing]) {
+      this._changedKeys.set(key, op)
+    }
   }
 
   /**
@@ -167,43 +224,62 @@ export class PathHashTrustLedger {
 
   /**
    * Read + parse the ledger's records map, failing open to empty on any error.
-   * Returns `{ records, parsed, migratedLegacy }` where:
-   *   - `records` is the validated, key-normalised path → record map
+   * Returns `{ records, parsed, migratedLegacy, readFailed }` where:
+   *   - `records` is the validated, key-normalised path → record map (always
+   *     a null-prototype object — see `flush()`/#8072 review C1)
    *   - `parsed` is the raw parsed JSON object (so a subclass can pull sibling
    *     indexes like communityTrust out of it) or null on a read/parse failure
    *   - `migratedLegacy` is whether a subclass legacy-shape hook claimed the file
+   *   - `readFailed` (#8072 review C2) is true when the file exists but could
+   *     not be read/parsed/recognised — malformed JSON, a non-object root, an
+   *     unreadable file (EACCES etc.), or an unrecognised shape. `false` for a
+   *     genuinely EMPTY ledger: no file at all (ENOENT — ordinary first run,
+   *     or an operator deleting the file to reset it), or a file that parses
+   *     to `{}`. `flush()` uses this to tell "the file was reset" from "the
+   *     re-read just failed" — the latter must NOT be treated as an empty
+   *     merge base, or a transient read failure drops every pin this
+   *     instance holds but didn't touch this flush.
    *
    * The records map is sourced from `parsed[wrapperKey]` (v2-style nesting). A
    * subclass that supports a legacy flat-root format overrides `_extractLegacy`
    * to detect + return it (skills v1).
    *
-   * @returns {{ records: object, parsed: object|null, migratedLegacy: boolean }}
+   * @param {{ atFlush?: boolean }} [opts]  `atFlush: true` only changes the
+   *   WARN wording on a failure (#8072 review N1) — at flush time this
+   *   instance's own in-memory records are what actually gets kept (see
+   *   `readFailed` above), so "starting fresh" would describe the wrong
+   *   outcome. At construction (the default) there is nothing in memory yet,
+   *   so "starting fresh" is accurate.
+   * @returns {{ records: object, parsed: object|null, migratedLegacy: boolean, readFailed: boolean }}
    * @protected
    */
-  _loadRecords() {
-    const empty = { records: Object.create(null), parsed: null, migratedLegacy: false }
+  _loadRecords({ atFlush = false } = {}) {
+    const outcome = atFlush ? 'keeping this instance\'s own records' : 'starting fresh'
+    const empty = (readFailed) => ({ records: Object.create(null), parsed: null, migratedLegacy: false, readFailed })
 
     let raw
     try {
       raw = readFileSync(this._filePath, 'utf8')
     } catch (err) {
       if (err && err.code !== 'ENOENT') {
-        this._log.warn(`Could not read trust file (${err.code || err.message}); starting fresh`)
+        this._log.warn(`Could not read trust file (${err.code || err.message}); ${outcome}`)
+        return empty(true)
       }
-      return empty
+      // ENOENT: no file at all — a genuine empty ledger, not a failure.
+      return empty(false)
     }
 
     let parsed
     try {
       parsed = JSON.parse(raw)
     } catch (err) {
-      this._log.warn(`Trust file is malformed JSON (${getErrorMessage(err, err)}); starting fresh`)
-      return empty
+      this._log.warn(`Trust file is malformed JSON (${getErrorMessage(err, err)}); ${outcome}`)
+      return empty(true)
     }
 
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      this._log.warn('Trust file root is not an object; starting fresh')
-      return empty
+      this._log.warn(`Trust file root is not an object; ${outcome}`)
+      return empty(true)
     }
 
     // Locate the records map. v2 nesting under the wrapper key wins; otherwise
@@ -219,11 +295,11 @@ export class PathHashTrustLedger {
         rawMap = legacy.rawMap
         migratedLegacy = legacy.migratedLegacy === true
       } else if (Object.keys(parsed).length === 0) {
-        // Empty object — treat as an empty ledger (fresh).
+        // Empty object — treat as an empty ledger (fresh, not a failure).
         rawMap = {}
       } else {
-        this._log.warn('Trust file has unrecognised shape; starting fresh')
-        return empty
+        this._log.warn(`Trust file has unrecognised shape; ${outcome}`)
+        return empty(true)
       }
     }
 
@@ -236,7 +312,7 @@ export class PathHashTrustLedger {
         records[this._normalizeKey(key)] = rec
       }
     }
-    return { records, parsed, migratedLegacy }
+    return { records, parsed, migratedLegacy, readFailed: false }
   }
 
   /**
@@ -317,9 +393,16 @@ export class PathHashTrustLedger {
    *
    * @param {string} absPath
    * @param {string} hash
+   * @param {{ firstSight?: boolean }} [opts]  `firstSight: true` (#8072
+   *   review C3) marks this as a trust-on-first-use pin rather than an
+   *   explicit operator decision — `verify-provenance.js`'s TOFU binary pin
+   *   passes this so a stale instance's first-sight write of a possibly
+   *   tampered hash can never override a pin/decision another process made
+   *   that this instance never saw (see `flush()`'s merge). Omit for an
+   *   operator-driven approval (default) — always wins the merge.
    * @returns {boolean} true when the grant was recorded
    */
-  approve(absPath, hash) {
+  approve(absPath, hash, { firstSight = false } = {}) {
     if (typeof absPath !== 'string' || !absPath) return false
     if (typeof hash !== 'string' || !HEX64.test(hash)) return false
     const key = this._normalizeKey(absPath)
@@ -329,7 +412,7 @@ export class PathHashTrustLedger {
       sha256: hash,
       firstSeen: existing && typeof existing.firstSeen === 'string' ? existing.firstSeen : now,
       [this._approvalField]: now,
-    })
+    }, firstSight ? 'tofu' : 'set')
     this.flush()
     return true
   }
@@ -398,6 +481,42 @@ export class PathHashTrustLedger {
    * `getRecord` in this same process sees the other writer's pins too — not
    * only the file.
    *
+   * Three refinements on top of the base rule (#8072 review):
+   *
+   *   - **Null-prototype merge (C1).** The merge target is built with
+   *     `Object.assign(Object.create(null), base)`, never `{ ...base }`. A
+   *     plain object silently resurrects `constructor`/`toString`/
+   *     `__proto__` as truthy prototype lookups — a real security bypass
+   *     for `SkillsTrustStore.isCommunityTrusted()`'s bracket-key check.
+   *   - **A failed re-read is not "empty" (C2).** `_loadRecords` distinguishes
+   *     "no file" (ENOENT — a genuine reset) from "the file exists but the
+   *     re-read failed" (`readFailed: true` — malformed JSON, wrong shape,
+   *     unreadable). Only the former resets the merge base to empty; the
+   *     latter falls back to THIS instance's own current `_records` (and
+   *     skips `_mergeExtra`) — the exact pre-#8072 "write my snapshot"
+   *     behaviour, scoped to the one flush that hit the failure.
+   *   - **Implicit writes never outrank a decision this instance never saw
+   *     (C3).** A change is tracked with WHY it happened (see `_setRecord`).
+   *     `'set'`/`'delete'` are operator decisions and always win. `'tofu'`
+   *     (a trust-on-first-use first-sight pin) is skipped when disk already
+   *     has ANY record for that key — a stale instance's first sight of a
+   *     possibly-tampered hash must not override a pin/decision it never
+   *     saw. `'touch'` (a `lastVerified` bump) is skipped when disk's hash no
+   *     longer matches the one this instance verified against — an
+   *     informational timestamp bump must not revert a real approval.
+   *
+   * Conflict rule for an explicit ('set'/'delete') change:
+   *
+   *   - a path THIS instance changed: this instance's value wins (a revoke
+   *     stays removed — it's a tracked deletion, not merely "absent from
+   *     this instance's map")
+   *   - a path this instance did NOT change: whatever is on disk right now
+   *     wins, including a pin/grant a different process wrote after this
+   *     instance's own last load
+   *   - the SAME path changed by two processes: the LATER flush wins,
+   *     because it re-reads first (picking up the earlier flush's value)
+   *     and then re-applies its own change on top of that
+   *
    * Known remaining window: the re-read and the eventual rename are not one
    * atomic step, so two processes can both re-read the same pre-flush file,
    * each merge their own change on top, and then race the rename — the
@@ -406,7 +525,7 @@ export class PathHashTrustLedger {
    * narrower than the bug this fixes — it needs two flushes inside the same
    * read-to-rename window rather than merely two flushes ever — and this
    * codebase has no file-lock helper to close it with (checked `src/utils`),
-   * so it's documented here rather than solved.
+   * so it's documented here rather than solved (tracked as #8073).
    *
    * On failure: either re-throw (subclass set `throwOnFlushError`) or swallow
    * with a warn. `_dirty` and `_changedKeys` both stay set on failure so a
@@ -415,14 +534,46 @@ export class PathHashTrustLedger {
   flush() {
     if (!this._dirty) return
     const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    const { records: diskRecords, parsed: diskParsed } = this._loadRecords()
-    const merged = { ...diskRecords }
+    const { records: diskRecords, parsed: diskParsed, readFailed } = this._loadRecords({ atFlush: true })
+    // C2: a failed re-read must not be treated as "the ledger is empty" — a
+    // transient malformed/unreadable file would otherwise drop every pin
+    // this instance holds but didn't change this flush. Fall back to this
+    // instance's own current records (already reflects every change it has
+    // made, applied immediately by `_setRecord`/`_deleteRecord`), matching
+    // the pre-#8072 "write my snapshot" behaviour for exactly this failure.
+    const base = readFailed ? this._records : diskRecords
+    // C1: null-prototype, not `{ ...base }` — a plain object lets a key
+    // named `constructor`/`toString`/`__proto__` resolve through the
+    // prototype chain instead of a real own-property miss.
+    const merged = Object.assign(Object.create(null), base)
     for (const [key, op] of this._changedKeys) {
-      if (op === 'delete') delete merged[key]
-      else merged[key] = this._records[key]
+      if (op === 'delete') {
+        delete merged[key]
+        continue
+      }
+      if (op === 'tofu') {
+        // C3: a first-sight pin is not a decision — never override a
+        // record another process/instance already holds for this path.
+        if (base[key]) continue
+        merged[key] = this._records[key]
+        continue
+      }
+      if (op === 'touch') {
+        // C3: an informational bump is not a decision — only apply it when
+        // the base still agrees with the hash this instance verified
+        // against. If it doesn't (a real approve/acceptHash superseded this
+        // instance, or the record is gone), keep the base's value.
+        const baseRec = base[key]
+        const ourRec = this._records[key]
+        if (!baseRec || !ourRec || baseRec.sha256 !== ourRec.sha256) continue
+        merged[key] = this._records[key]
+        continue
+      }
+      // 'set': an explicit operator decision — always wins.
+      merged[key] = this._records[key]
     }
     this._records = merged
-    this._mergeExtra(diskParsed)
+    if (!readFailed) this._mergeExtra(diskParsed)
     try {
       saveJsonState(this._filePath, this._serialize(), { fsync: true, tmpSuffix })
       this._dirty = false

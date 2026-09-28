@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -35,6 +35,25 @@ class TestLedger extends PathHashTrustLedger {
     this._records = loaded.records
     this._migrated = loaded.migratedLegacy
     this._dirty = loaded.migratedLegacy || false
+  }
+}
+
+// #8072 review S1: a TestLedger whose `_serialize()` throws exactly once, so
+// a test can force ONE failed flush (the write itself fails, not the re-read)
+// and then verify the retry recovers every pin, proving `_changedKeys` is not
+// cleared until the write actually succeeds.
+class FlakyLedger extends TestLedger {
+  constructor(opts) {
+    super(opts)
+    this._failNextSerialize = false
+  }
+
+  _serialize() {
+    if (this._failNextSerialize) {
+      this._failNextSerialize = false
+      throw new Error('boom (forced failure)')
+    }
+    return super._serialize()
   }
 }
 
@@ -364,8 +383,16 @@ describe('PathHashTrustLedger (#5580)', () => {
         'flush() must refresh in-memory state from the merged result')
     })
 
-    it('a corrupt on-disk file at flush time still self-heals (fail-open preserved)', () => {
+    // #8072 review C2/S2: the original version of this test only asserted
+    // "does not throw" and "the NEW write lands" — it passed even on the
+    // pre-#8072 whole-snapshot flush AND on the #8072-head bug where a
+    // failed re-read became an EMPTY merge base. The assertion that
+    // actually distinguishes correct behaviour is that a pin approved
+    // BEFORE the corruption survives the flush that hits it.
+    it('a corrupt on-disk file at flush time keeps this instance\'s own pins (fail-open, not fail-EMPTY)', () => {
       const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
       // Corrupt the file directly, simulating another writer's crash mid-
       // write (or an operator edit) landing between this instance's load
       // and its next flush.
@@ -374,8 +401,140 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.doesNotThrow(() => l.approve('/x/file', sha('a')),
         'flush must not throw on a corrupt on-disk file — same fail-open contract as load')
 
+      // The pin from BEFORE the corruption must survive — a failed re-read
+      // must fall back to this instance's own records, not an empty map.
+      assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
+        'a pin approved before the corruption must survive a flush that hits a corrupt re-read')
       const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
-      assert.ok(onDisk.records['/x/file'], 'the write must still land despite the prior corruption')
+      assert.ok(onDisk.records['/x/earlier'], 'the earlier pin must still be on disk, not wiped')
+      assert.ok(onDisk.records['/x/file'], 'the new write must still land despite the prior corruption')
+    })
+
+    it('an unreadable (EACCES) file at flush time also keeps this instance\'s own pins', { skip: process.platform === 'win32' }, () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
+      // Make the target unreadable so the next flush's re-read hits EACCES
+      // rather than a parse error — a different failure path through the
+      // same `readFailed` contract.
+      chmodSync(ledgerPath, 0o000)
+      try {
+        assert.doesNotThrow(() => l.approve('/x/file', sha('a')))
+      } finally {
+        // Restore permissions so afterEach's rmSync can clean up the dir.
+        chmodSync(ledgerPath, 0o600)
+      }
+
+      assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
+        'a pin approved before the file became unreadable must survive')
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/earlier'])
+      assert.ok(onDisk.records['/x/file'])
+    })
+
+    it('a genuinely missing file (ENOENT) still resets to empty — only a real failure keeps the in-memory base', () => {
+      // Distinguishes "no file at all" (an operator deleting the ledger to
+      // reset it — must behave as a clean reset) from "the file exists but
+      // failed to re-read" (must NOT reset — see the tests above).
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+      rmSync(ledgerPath, { force: true })
+
+      l.approve('/x/new', sha('new'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/new'])
+      // Whether `/x/earlier` also survives is incidental here (this
+      // instance's own in-memory `_records` still has it, and the merge
+      // base for a genuine ENOENT is an empty DISK map, not this instance's
+      // memory) — the point of this test is only that ENOENT does not throw
+      // and does not need the readFailed fallback.
+    })
+  })
+
+  // #8072 review C1: a plain-object merge target (`{ ...spread }`) lets a
+  // key named `constructor`/`toString`/`valueOf`/`__proto__` resolve through
+  // the prototype chain to a truthy value instead of a real own-property
+  // miss — a security bypass for any caller doing a bracket-key truthiness
+  // check against the merged map (skills' `isCommunityTrusted`).
+  describe('the merge stays null-prototype (#8072 review C1)', () => {
+    it('_records stays null-prototype after a flush, so prototype-named keys are never "trusted"', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/file', sha('a')) // dirties + flushes, exercising the merge path
+
+      assert.equal(Object.getPrototypeOf(l._records), null,
+        '_records must stay a null-prototype object after a flush')
+      for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+        assert.equal(l.isTrusted(name, sha('anything')), false, `${name} must not resolve through the prototype chain`)
+        assert.equal(l.getRecord(name), null, `${name} must not resolve through the prototype chain`)
+      }
+    })
+  })
+
+  // #8072 review S1: mutant m3 ("clear _changedKeys before the write") killed
+  // by this test — moving the clear before `saveJsonState` throws away the
+  // pending change the moment the write fails, instead of only once it
+  // actually lands.
+  describe('_changedKeys retention across a failed write (#8072 review S1)', () => {
+    it('retains every pending pin across a failed write, so the next flush retries them all', () => {
+      const l = new FlakyLedger({ filePath: ledgerPath })
+      l.approve('/x/a', sha('a')) // succeeds and flushes cleanly
+
+      l._failNextSerialize = true
+      l.approve('/x/b', sha('b')) // this flush's write throws; best-effort swallows it
+
+      l.approve('/x/c', sha('c')) // retries — must include a, b AND c
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.ok(onDisk['/x/a'], 'a survives (flushed before the failure)')
+      assert.ok(onDisk['/x/b'],
+        'b must land on the retry — _changedKeys must not have been cleared before the failed write')
+      assert.ok(onDisk['/x/c'], 'c lands too (approved after the retry-triggering flush)')
+    })
+  })
+
+  // #8072 review C3: TOFU first-sight pins and lastVerified-style bumps are
+  // not operator decisions — they're written from a possibly-stale
+  // snapshot, so the merge must not let them override a pin/decision this
+  // instance never saw. Exercised at the base level via `approve(path, hash,
+  // { firstSight: true })`; the skills-specific inspect()/acceptHash
+  // scenarios live in skills-trust.test.js, and the binary-ledger scenario
+  // (this option's real caller) lives in binary-provenance-trust.test.js.
+  describe('a first-sight (TOFU) pin never overrides a pin this instance never saw (#8072 review C3)', () => {
+    it('a stale instance\'s TOFU write does not overwrite another instance\'s genuine pin for the same path', () => {
+      const cli = new TestLedger({ filePath: ledgerPath })
+      const daemon = new TestLedger({ filePath: ledgerPath }) // stale: constructed before cli's pin lands
+
+      cli.approve('/usr/local/bin/claude', sha('genuine'), { firstSight: true })
+      // daemon never reloaded, so from its perspective this also looks like
+      // first sight — but it must not clobber cli's now-genuine pin.
+      daemon.approve('/usr/local/bin/claude', sha('stale-swap'), { firstSight: true })
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/usr/local/bin/claude'].sha256, sha('genuine'),
+        'the genuine pin must survive the stale TOFU write')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('stale-swap')), false,
+        'the daemon\'s own in-memory state must self-heal to the genuine pin after its flush')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('genuine')), true)
+    })
+
+    it('a TOFU write DOES apply when nobody else holds a pin for that path', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/first', sha('a'), { firstSight: true })
+      assert.equal(l.isTrusted('/x/first', sha('a')), true)
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/first'].sha256, sha('a'))
+    })
+
+    it('an explicit approve (no firstSight) still always wins, even over another instance\'s pin', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+      a.approve('/x/shared', sha('a'), { firstSight: true })
+      // An explicit (operator) approve is a decision, not a guess — it wins
+      // even though b never saw a's pin, unlike the TOFU case above.
+      b.approve('/x/shared', sha('b'))
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/shared'].sha256, sha('b'))
     })
   })
 })

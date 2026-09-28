@@ -355,16 +355,25 @@ export class SkillsTrustStore extends PathHashTrustLedger {
    * the change-sets themselves are cleared separately, only after a
    * successful write.
    *
+   * #8072 review C1: `byAuthor`/`byPath` MUST be built with `Object.assign
+   * (Object.create(null), …)`, never `{ ...spread }`. `isCommunityTrusted`
+   * (below) is a bracket-key truthiness check, so a plain object lets an
+   * author/path named `constructor`/`toString`/`__proto__`/etc. resolve
+   * through the prototype chain to a truthy value — trusting a
+   * repo-local `community/constructor/*.md` that was never granted.
+   * `_parseCommunityTrust` already returns null-prototype maps; this must
+   * not silently reintroduce a prototype via the merge.
+   *
    * @param {object|null} parsed
    * @protected
    */
   _mergeExtra(parsed) {
     const disk = this._parseCommunityTrust(parsed)
-    const byAuthor = { ...disk.byAuthor }
+    const byAuthor = Object.assign(Object.create(null), disk.byAuthor)
     for (const author of this._changedAuthors) {
       if (this.communityTrust.byAuthor[author]) byAuthor[author] = this.communityTrust.byAuthor[author]
     }
-    const byPath = { ...disk.byPath }
+    const byPath = Object.assign(Object.create(null), disk.byPath)
     for (const p of this._changedByPaths) {
       if (this.communityTrust.byPath[p]) byPath[p] = this.communityTrust.byPath[p]
     }
@@ -446,7 +455,12 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     const existing = this._records[key]
 
     if (!existing) {
-      this._setRecord(key, { sha256: newHash, firstSeen: now, lastVerified: now })
+      // #8072 review C3: trust-on-first-use, not an operator decision — a
+      // stale instance's first sight of a possibly-tampered hash must not
+      // override a pin/decision another process/instance already made for
+      // this path. Tagged `'tofu'` so flush()'s merge skips it when disk
+      // already has ANY record here.
+      this._setRecord(key, { sha256: newHash, firstSeen: now, lastVerified: now }, 'tofu')
       log.info(`Trust hash recorded for ${basename(absPath)}#${newHash.slice(0, 8)}`)
       return { status: 'recorded', hash: newHash }
     }
@@ -469,7 +483,11 @@ export class SkillsTrustStore extends PathHashTrustLedger {
         ? Date.parse(now) - lastMs
         : Number.POSITIVE_INFINITY
       if (elapsed >= this._verifyThrottleMs) {
-        this._setRecord(key, { ...existing, lastVerified: now })
+        // #8072 review C3: informational, not a decision — tagged `'touch'`
+        // so flush()'s merge skips it if disk's hash no longer matches the
+        // one this instance just verified against (someone else's real
+        // acceptHash/approve superseded this instance since its last load).
+        this._setRecord(key, { ...existing, lastVerified: now }, 'touch')
       }
       return { status: 'verified', hash: newHash }
     }

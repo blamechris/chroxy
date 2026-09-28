@@ -359,7 +359,12 @@ export function verifyProvenance({
     const record = ledger.getRecord(path)
     if (!record) {
       // First sight — trust-on-first-use: pin the hash and allow.
-      ledger.approve(path, hash)
+      // #8072 review C3: `firstSight: true` tags this as a TOFU pin, not an
+      // operator decision — the daemon's own snapshot can be stale (e.g. it
+      // hasn't seen a genuine pin `chroxy resume` just wrote for this same
+      // path), so this write must not be allowed to override a pin/decision
+      // this instance never saw. See `PathHashTrustLedger.flush()`'s merge.
+      ledger.approve(path, hash, { firstSight: true })
       return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
     }
     if (record.sha256 === hash) {
