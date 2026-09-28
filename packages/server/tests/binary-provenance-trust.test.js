@@ -9,6 +9,7 @@ import {
   defaultBinaryTrustFile,
   binaryTrustFileExists,
 } from '../src/binary-provenance-trust.js'
+import { verifyProvenance } from '../src/utils/verify-provenance.js'
 
 /**
  * Unit tests for the provider-binary provenance pin ledger (#6858) — a thin
@@ -160,6 +161,60 @@ describe('BinaryProvenanceLedger (#6858)', () => {
         'the daemon\'s own in-memory state must self-heal to the genuine pin after its flush')
       assert.equal(daemon.isTrusted('/usr/local/bin/claude', HASH_A), true,
         'so the NEXT verifyProvenance call in the daemon correctly blocks the swapped binary')
+    })
+
+    // #8072 review round 2, S1: the test above calls `approve(..., {
+    // firstSight: true })` DIRECTLY, so it cannot tell "verifyProvenance
+    // passes firstSight" apart from "the ledger honours firstSight when
+    // asked" — deleting `{ firstSight: true }` from verify-provenance.js's
+    // own call site (mutant MC3c) left this file, and verify-provenance's
+    // own suite (whose fake ledger ignores opts entirely), green. This test
+    // drives the SAME scenario through the real production entry point,
+    // `verifyProvenance()` itself, with an injected `sha256File` — so a
+    // dropped `firstSight` flag is caught here.
+    it('verifyProvenance\'s own first-sight pin does not overwrite another process\'s genuine pin', () => {
+      const path = '/usr/local/bin/claude'
+      const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first, sees nothing
+      const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
+
+      // CLI's first verifyProvenance call ever for this path — first sight,
+      // pins the real hash and allows.
+      const cliVerdict = verifyProvenance({
+        resolvedPath: path,
+        mode: 'block',
+        ledger: cli,
+        sha256File: () => HASH_A,
+      })
+      assert.equal(cliVerdict.ok, true)
+      assert.equal(cliVerdict.status, 'pinned')
+
+      // The daemon's stale ledger (constructed before the CLI's pin landed,
+      // never reloaded) also has no record for this path, so its own
+      // verifyProvenance call ALSO takes the first-sight branch — pinning
+      // whatever `sha256File` reports for the daemon's (possibly swapped)
+      // view of the binary.
+      const daemonVerdict = verifyProvenance({
+        resolvedPath: path,
+        mode: 'block',
+        ledger: daemon,
+        sha256File: () => HASH_B,
+      })
+      assert.equal(daemonVerdict.status, 'pinned')
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.binaries[path].sha256, HASH_A,
+        'the CLI\'s genuine pin (via verifyProvenance) must survive the daemon\'s stale first-sight write (via verifyProvenance)')
+
+      // The daemon's NEXT verifyProvenance call must correctly detect the
+      // hash mismatch and block, now that its memory has self-healed.
+      const daemonNextVerdict = verifyProvenance({
+        resolvedPath: path,
+        mode: 'block',
+        ledger: daemon,
+        sha256File: () => HASH_B,
+      })
+      assert.equal(daemonNextVerdict.status, 'hash_mismatch')
+      assert.equal(daemonNextVerdict.blocked, true)
     })
   })
 })

@@ -98,6 +98,19 @@ import { HEX64 } from './utils/validation-patterns.js'
  * before the next flush, never downgraded (#8072 review C3) — e.g. once a
  * key is tracked `'set'`, a later same-window `'touch'` on that key must not
  * quietly demote it back to an implicit write.
+ *
+ * `'delete'` composing with a LATER `'tofu'` in the same window (a same-
+ * window delete-then-first-sight-again) resolves to `'delete'` at this
+ * priority tier — i.e. the revoke wins, not "apply the tofu value" and not
+ * "skip and forget." A true sequential replay of the same two operations
+ * one flush apart would instead land the tofu value (delete lands, THEN a
+ * later first sight finds nothing and pins). This composed-in-one-window
+ * result is stricter than that, not looser, and is unreachable in practice
+ * today: no production caller revokes from a `PathHashTrustLedger` subclass
+ * (#8072 review round 2 N1 — `session-manager.js`'s preset revoke is the
+ * only real caller and nothing re-inspects a revoked preset in the same
+ * window), and the two subclasses with a `'tofu'` op (skills, binary) have
+ * no revoke caller either.
  */
 const CHANGE_OP_PRIORITY = { touch: 1, tofu: 2, set: 3, delete: 3 }
 
@@ -128,11 +141,13 @@ export class PathHashTrustLedger {
     this._records = Object.create(null)
     this._dirty = false
     // Tracks which keys THIS instance has changed since its last successful
-    // flush (or since construction) — key -> 'set' | 'delete'. A `Map` so a
-    // key that is set then deleted (or vice versa) before the next flush
-    // keeps only its latest op. Read by flush()'s merge (#8068); populated by
-    // `_setRecord`/`_deleteRecord`, which `approve`/`revoke` and any
-    // subclass that mutates `_records` directly must go through.
+    // flush (or since construction) — key -> 'set' | 'delete' | 'tofu' |
+    // 'touch' (#8072 review C3 added the latter two). A `Map` so a key
+    // changed more than once before the next flush keeps only its latest
+    // (highest-priority — see `_recordChange`) op. Read by flush()'s merge
+    // (#8068); populated by `_setRecord`/`_deleteRecord`, which
+    // `approve`/`revoke` and any subclass that mutates `_records` directly
+    // must go through.
     this._changedKeys = new Map()
   }
 
@@ -224,7 +239,7 @@ export class PathHashTrustLedger {
 
   /**
    * Read + parse the ledger's records map, failing open to empty on any error.
-   * Returns `{ records, parsed, migratedLegacy, readFailed }` where:
+   * Returns `{ records, parsed, migratedLegacy, readFailed, ioError }` where:
    *   - `records` is the validated, key-normalised path → record map (always
    *     a null-prototype object — see `flush()`/#8072 review C1)
    *   - `parsed` is the raw parsed JSON object (so a subclass can pull sibling
@@ -239,6 +254,16 @@ export class PathHashTrustLedger {
    *     re-read just failed" — the latter must NOT be treated as an empty
    *     merge base, or a transient read failure drops every pin this
    *     instance holds but didn't touch this flush.
+   *   - `ioError` (#8072 review S4) narrows `readFailed` to specifically "the
+   *     READ CALL ITSELF threw" (EACCES, EIO, EMFILE, …) rather than "the
+   *     bytes came back but are known-bad" (malformed JSON / wrong shape).
+   *     The distinction matters at flush time: known-bad bytes are safe to
+   *     repair-overwrite with this instance's own records (disk is garbage
+   *     either way), but an I/O error says NOTHING about whether disk's
+   *     current content is good — a root-owned file or a too-many-open-files
+   *     daemon can hit this on a perfectly healthy ledger. `flush()` skips
+   *     the write entirely on `ioError` rather than repair-overwriting it
+   *     (see `flush()`).
    *
    * The records map is sourced from `parsed[wrapperKey]` (v2-style nesting). A
    * subclass that supports a legacy flat-root format overrides `_extractLegacy`
@@ -246,24 +271,35 @@ export class PathHashTrustLedger {
    *
    * @param {{ atFlush?: boolean }} [opts]  `atFlush: true` only changes the
    *   WARN wording on a failure (#8072 review N1) — at flush time this
-   *   instance's own in-memory records are what actually gets kept (see
-   *   `readFailed` above), so "starting fresh" would describe the wrong
-   *   outcome. At construction (the default) there is nothing in memory yet,
-   *   so "starting fresh" is accurate.
-   * @returns {{ records: object, parsed: object|null, migratedLegacy: boolean, readFailed: boolean }}
+   *   instance's own in-memory records are what actually gets kept (or, on
+   *   `ioError`, the flush is skipped outright — see `readFailed`/`ioError`
+   *   above), so "starting fresh" would describe the wrong outcome. At
+   *   construction (the default) there is nothing in memory yet, so
+   *   "starting fresh" is accurate.
+   * @returns {{ records: object, parsed: object|null, migratedLegacy: boolean, readFailed: boolean, ioError: boolean, ioErrorDetail: string|null }}
    * @protected
    */
   _loadRecords({ atFlush = false } = {}) {
     const outcome = atFlush ? 'keeping this instance\'s own records' : 'starting fresh'
-    const empty = (readFailed) => ({ records: Object.create(null), parsed: null, migratedLegacy: false, readFailed })
+    const empty = (readFailed, ioError = false, ioErrorDetail = null) => ({
+      records: Object.create(null), parsed: null, migratedLegacy: false, readFailed, ioError, ioErrorDetail,
+    })
 
     let raw
     try {
       raw = readFileSync(this._filePath, 'utf8')
     } catch (err) {
       if (err && err.code !== 'ENOENT') {
-        this._log.warn(`Could not read trust file (${err.code || err.message}); ${outcome}`)
-        return empty(true)
+        // #8072 review S4: this is an I/O error, not known-bad bytes — say
+        // so distinctly at flush time, since the outcome differs (skip the
+        // write, not "keep this instance's own records" — see flush()).
+        // `ioErrorDetail` carries the code/message forward so flush()'s own
+        // warn/throw names the SAME underlying failure a caller would have
+        // seen from the write attempt this replaces (EISDIR, EACCES, ...).
+        const detail = (err && err.code) || (err && err.message) || 'read failed'
+        const ioOutcome = atFlush ? 'skipping this flush, will retry' : outcome
+        this._log.warn(`Could not read trust file (${detail}); ${ioOutcome}`)
+        return empty(true, true, detail)
       }
       // ENOENT: no file at all — a genuine empty ledger, not a failure.
       return empty(false)
@@ -312,7 +348,7 @@ export class PathHashTrustLedger {
         records[this._normalizeKey(key)] = rec
       }
     }
-    return { records, parsed, migratedLegacy, readFailed: false }
+    return { records, parsed, migratedLegacy, readFailed: false, ioError: false }
   }
 
   /**
@@ -464,37 +500,32 @@ export class PathHashTrustLedger {
    * keys THIS instance actually changed (tracked in `_changedKeys` by
    * `_setRecord`/`_deleteRecord`, which `approve`/`revoke` — and any
    * subclass mutation of `_records` — must go through), rather than with the
-   * whole snapshot. Conflict rule:
-   *
-   *   - a path THIS instance changed: this instance's value wins (a revoke
-   *     stays removed — it's a tracked deletion, not merely "absent from
-   *     this instance's map")
-   *   - a path this instance did NOT change: whatever is on disk right now
-   *     wins, including a pin/grant a different process wrote after this
-   *     instance's own last load
-   *   - the SAME path changed by two processes: the LATER flush wins,
-   *     because it re-reads first (picking up the earlier flush's value)
-   *     and then re-applies its own change on top of that
+   * whole snapshot (see "Conflict rule" below).
    *
    * The merged result also replaces this instance's in-memory `_records` (and,
    * via `_mergeExtra`, any subclass sibling index), so a later `isTrusted`/
    * `getRecord` in this same process sees the other writer's pins too — not
    * only the file.
    *
-   * Three refinements on top of the base rule (#8072 review):
+   * Four refinements on top of the base rule (#8072 review):
    *
    *   - **Null-prototype merge (C1).** The merge target is built with
    *     `Object.assign(Object.create(null), base)`, never `{ ...base }`. A
    *     plain object silently resurrects `constructor`/`toString`/
    *     `__proto__` as truthy prototype lookups — a real security bypass
    *     for `SkillsTrustStore.isCommunityTrusted()`'s bracket-key check.
-   *   - **A failed re-read is not "empty" (C2).** `_loadRecords` distinguishes
-   *     "no file" (ENOENT — a genuine reset) from "the file exists but the
-   *     re-read failed" (`readFailed: true` — malformed JSON, wrong shape,
-   *     unreadable). Only the former resets the merge base to empty; the
-   *     latter falls back to THIS instance's own current `_records` (and
-   *     skips `_mergeExtra`) — the exact pre-#8072 "write my snapshot"
-   *     behaviour, scoped to the one flush that hit the failure.
+   *   - **A failed re-read is not "empty" (C2), and not every failure is the
+   *     SAME kind of failed (S4, round 2).** `_loadRecords` distinguishes
+   *     three outcomes: "no file" (ENOENT — a genuine reset, resets the
+   *     merge base to empty); "the bytes came back but are known-bad"
+   *     (malformed JSON, wrong shape — `readFailed: true`, `ioError: false`
+   *     — falls back to THIS instance's own current `_records` and skips
+   *     `_mergeExtra`, a safe repair-overwrite since disk is garbage
+   *     either way); and "the READ CALL ITSELF failed" (EACCES/EIO/EMFILE —
+   *     `ioError: true` — which says nothing about whether disk's current
+   *     content is good, so repair-overwriting it would risk clobbering a
+   *     healthy pin a different process just wrote. This flush's write is
+   *     skipped ENTIRELY instead — see the `ioError` branch below.
    *   - **Implicit writes never outrank a decision this instance never saw
    *     (C3).** A change is tracked with WHY it happened (see `_setRecord`).
    *     `'set'`/`'delete'` are operator decisions and always win. `'tofu'`
@@ -504,12 +535,26 @@ export class PathHashTrustLedger {
    *     saw. `'touch'` (a `lastVerified` bump) is skipped when disk's hash no
    *     longer matches the one this instance verified against — an
    *     informational timestamp bump must not revert a real approval.
+   *   - **A resolved implicit op is forgotten, not retried (R2-C1, round 2).**
+   *     When the merge skips a `'tofu'`/`'touch'` above because disk already
+   *     resolved that key, the tracked op is deleted from `_changedKeys` (on
+   *     a `readFailed` flush the op is instead KEPT, since we didn't learn
+   *     anything reliable about disk this time — see the merge loop). Without
+   *     this, a swallowed write failure on THIS flush leaves `_changedKeys`
+   *     holding `key -> 'tofu'` while `_records[key]` already holds the OTHER
+   *     process's record (adopted from `base` above). A LATER flush would
+   *     then re-evaluate that stale `'tofu'` against whatever disk shows AT
+   *     THAT POINT — if the key was since revoked or hand-removed, disk no
+   *     longer has it, the skip condition ("disk already has a record") no
+   *     longer holds, and the stale op writes back a pin someone else
+   *     deliberately removed.
    *
    * Conflict rule for an explicit ('set'/'delete') change:
    *
    *   - a path THIS instance changed: this instance's value wins (a revoke
    *     stays removed — it's a tracked deletion, not merely "absent from
-   *     this instance's map")
+   *     this instance's map"; see the R2-C1 bullet above for why an implicit
+   *     `'tofu'`/`'touch'` needs its OWN, narrower guarantee here)
    *   - a path this instance did NOT change: whatever is on disk right now
    *     wins, including a pin/grant a different process wrote after this
    *     instance's own last load
@@ -529,18 +574,40 @@ export class PathHashTrustLedger {
    *
    * On failure: either re-throw (subclass set `throwOnFlushError`) or swallow
    * with a warn. `_dirty` and `_changedKeys` both stay set on failure so a
-   * later flush retries the same merge.
+   * later flush retries — this now also covers an `ioError` re-read (the
+   * write is never attempted, so there is nothing to catch; the same
+   * warn/throw policy is applied directly).
    */
   flush() {
     if (!this._dirty) return
     const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    const { records: diskRecords, parsed: diskParsed, readFailed } = this._loadRecords({ atFlush: true })
-    // C2: a failed re-read must not be treated as "the ledger is empty" — a
-    // transient malformed/unreadable file would otherwise drop every pin
-    // this instance holds but didn't change this flush. Fall back to this
-    // instance's own current records (already reflects every change it has
-    // made, applied immediately by `_setRecord`/`_deleteRecord`), matching
-    // the pre-#8072 "write my snapshot" behaviour for exactly this failure.
+    const { records: diskRecords, parsed: diskParsed, readFailed, ioError, ioErrorDetail } = this._loadRecords({ atFlush: true })
+
+    // S4 (#8072 review, round 2): an I/O error on the re-read says nothing
+    // about whether disk's CURRENT bytes are good — unlike the known-bad-
+    // bytes case below, repair-overwriting here risks clobbering a healthy
+    // pin a different process just wrote (the #8068 loss again, scoped to
+    // this one flush). Skip the write outright: `_dirty`/`_changedKeys` stay
+    // set so the next flush retries, matching a failed WRITE's own policy.
+    // The thrown/warned message names the SAME underlying code a failed
+    // WRITE to this same broken path would have surfaced (EACCES, EISDIR,
+    // ...), so a caller pattern-matching on that code sees identical text.
+    if (ioError) {
+      this._log.warn(`Could not persist trust file (${ioErrorDetail}); skipping this flush, will retry`)
+      if (this._throwOnFlushError) {
+        throw new Error(`Could not persist trust file: pre-write re-read failed (${ioErrorDetail})`)
+      }
+      return
+    }
+
+    // C2: a failed re-read of known-bad bytes must not be treated as "the
+    // ledger is empty" — that would drop every pin this instance holds but
+    // didn't change this flush. Fall back to this instance's own current
+    // records (already reflects every change it has made, applied
+    // immediately by `_setRecord`/`_deleteRecord`), matching the pre-#8072
+    // "write my snapshot" behaviour for exactly this failure. (An I/O error
+    // already returned above, so `readFailed` here only means malformed
+    // JSON / wrong shape — overwriting THOSE bytes is a repair, not a risk.)
     const base = readFailed ? this._records : diskRecords
     // C1: null-prototype, not `{ ...base }` — a plain object lets a key
     // named `constructor`/`toString`/`__proto__` resolve through the
@@ -554,7 +621,15 @@ export class PathHashTrustLedger {
       if (op === 'tofu') {
         // C3: a first-sight pin is not a decision — never override a
         // record another process/instance already holds for this path.
-        if (base[key]) continue
+        if (base[key]) {
+          // R2-C1: disk already resolved this key — forget the tracked op
+          // rather than risk replaying it against a LATER disk state where
+          // the key is gone (revoked/removed), which would resurrect it. On
+          // a `readFailed` base we didn't learn anything reliable about
+          // disk this time, so keep retrying instead of forgetting.
+          if (!readFailed) this._changedKeys.delete(key)
+          continue
+        }
         merged[key] = this._records[key]
         continue
       }
@@ -565,8 +640,19 @@ export class PathHashTrustLedger {
         // instance, or the record is gone), keep the base's value.
         const baseRec = base[key]
         const ourRec = this._records[key]
-        if (!baseRec || !ourRec || baseRec.sha256 !== ourRec.sha256) continue
-        merged[key] = this._records[key]
+        if (!baseRec || !ourRec || baseRec.sha256 !== ourRec.sha256) {
+          // R2-C1: same reasoning as the 'tofu' branch above.
+          if (!readFailed) this._changedKeys.delete(key)
+          continue
+        }
+        // #8072 review round 2 N2: apply ONLY the bumped approval
+        // timestamp on top of the BASE record, not this instance's whole
+        // (possibly stale) record. The hashes already match here, but
+        // `firstSeen` or a different approval timestamp on `baseRec` could
+        // reflect a revoke-then-re-approve this instance never saw — taking
+        // `this._records[key]` wholesale would silently revert those to
+        // this instance's own stale values.
+        merged[key] = { ...baseRec, [this._approvalField]: ourRec[this._approvalField] }
         continue
       }
       // 'set': an explicit operator decision — always wins.

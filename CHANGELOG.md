@@ -531,14 +531,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for its `communityTrust` sibling index. `SessionPresetTrustStore` and
   `BinaryProvenanceLedger` inherit the fix with no changes of their own.
   Atomicity and mode `0600` are unchanged. A genuinely missing file (an
-  operator deleting the ledger to reset it) still resets to empty, but a
-  file that exists and merely fails to re-read at flush time (malformed
-  JSON, wrong shape, unreadable) now falls back to this instance's own
-  in-memory records instead of wiping every pin it didn't touch this
-  flush. Only an explicit `approve`/`revoke`/`acceptHash`/
+  operator deleting the ledger to reset it) still resets to empty. A file
+  that exists but comes back KNOWN-BAD at flush time (malformed JSON or the
+  wrong shape) falls back to this instance's own in-memory records instead
+  of wiping every pin it didn't touch this flush — disk is garbage either
+  way, so overwriting it is a repair. A file that exists but the READ
+  ITSELF fails (permissions, too many open files, …) is treated differently:
+  that says nothing about whether disk's current content is good, so this
+  flush is skipped entirely and retried later rather than risking a
+  repair-overwrite that clobbers a healthy pin a different process just
+  wrote. Only an explicit `approve`/`revoke`/`acceptHash`/
   `grantCommunityTrust` is last-writer-wins; a trust-on-first-use
   first-sight pin or a `lastVerified` bump is never allowed to override a
-  pin or decision this instance never saw.
+  pin or decision this instance never saw, and — once resolved that way —
+  is forgotten rather than replayed against a later, different disk state
+  (which otherwise could resurrect a pin someone had deliberately revoked).
 
 - **`chroxy start --skip-checks` no longer crashes when the default provider
   fails preflight (#8029).** `startCliServer` created the startup "Default"
