@@ -54,6 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw field. Checked every other `...data`-shaped raw spread in the ingest
   handler and the notification sinks for the same pattern; none exists —
   this was the only site.
+  **Review follow-up:** `DiscordWebhookSink._projectKey()`'s own fallback
+  chain (`data.project || data.sessionName || data.sessionId || 'chroxy'`)
+  left `data.sessionName` and `data.sessionId` open to the identical
+  bypass — both are raw, wire-legal-to-4096-char `IngestEventDataSchema`
+  values, untouched by the ingest-side strip above, and the envelope
+  `sessionId` override only fires when `event.sessionId` is truthy.
+  `_projectKey()` now clamps its own OUTPUT to `MAX_EXTERNAL_PROJECT_CHARS`
+  (reused from `external-session-registry.js`, since the return value is
+  always used downstream as a project identifier — the state-file map key
+  and the per-project color-override lookup — regardless of which fallback
+  field produced it), closing `project`, `sessionName`, `sessionId`, and
+  any future fallback added to that chain in one place. The clamp runs on
+  the already-sanitized string, so every existing state-file key under the
+  cap is returned byte-for-byte unchanged.
 
 - **The codex model-catalog probe now spawns `codex app-server` through the
   same verified one-shot binary gate as the summarizer and semantic-title
