@@ -262,6 +262,9 @@ describe('#7123 end-to-end: the Discord sink state-file key is bounded', () => {
       ts: VALID_TS,
       data: { project: RAW_LONG_PROJECT },
     })
+    // The sink really delivered to Discord, so the state entry below was
+    // written by a real send rather than left over from setup.
+    assert.ok(fetchCalls.some((c) => c.method === 'POST'), 'the sink must have posted the embed')
     const store = sink._loadState()
     const keys = Object.keys(store.projects)
     assert.ok(keys.length > 0, 'the sink must have written an entry')
