@@ -198,7 +198,7 @@ before #8035 only `claude-sdk` did, and the per-turn subprocess providers
 still run with no per-spawn gate: `claude-cli` and `claude-tui` respawns and
 `codex` app-server's `start()` (#8038), the `codex` model-catalog probe
 (#8036), web tasks (#8039), and the `chroxy start` dependency checks, which run
-each provider binary and `cloudflared` with `--version` (#8041). The §5 table
+the configured provider's binary and `cloudflared` with `--version` (#8041). The §5 table
 lists what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
@@ -414,7 +414,8 @@ inherits the SAME exposure P1/P2 already cover for
 `claude-cli`/`claude-tui`/`claude-channel`: quarantine detection, and (opt-in)
 the SHA-256 pin ledger + signature gate — now re-checked every turn instead of
 once. The pin covers only the bytes at the resolved path; a launcher that execs
-or loads other files (npm `codex`, npm `gemini`) leaves those files unhashed
+or loads other files (npm-installed `codex`, and `gemini` however installed)
+leaves those files unhashed
 (#8040). Nothing provider-specific was added for the version gate below — it is
 generic `runProviderPreflight` machinery any provider can opt into via
 `spec.binary.minVersion` and/or `spec.binary.recommendedVersion`. The
@@ -497,7 +498,7 @@ the same installed `claude` on the end user's machine.
 | One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
 | `codex` model-catalog probe (post-auth `available_models` refresh) | none | none — spawns `codex app-server` from a fresh, unverified resolve with no session involved (#8036) |
 | Web tasks (`web-task-manager.js`) | none | none — runs a bare `claude` from PATH for feature detection at daemon start, for each launch and for teleport (#8039) |
-| `chroxy start` dependency checks | none | none — runs each provider binary and `cloudflared` with `--version`, with no provenance or signature gate, before any session exists; the desktop app runs these on every launch (#8041) |
+| `chroxy start` dependency checks | none | none — runs the configured provider's binary (plus `claude` for `claude-tui`) and `cloudflared` with `--version`, with no provenance or signature gate, before any session exists; the desktop app runs these on every launch (#8041) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than

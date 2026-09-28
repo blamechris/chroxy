@@ -33,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operator-visible: with `binaryProvenance.mode: block`, a change to the pinned
   `gemini` or `codex` file now refuses the next turn of a live session
   (`PROVIDER_BINARY_PROVENANCE`) instead of only the next session create,
-  matching what #8030 already did for `claude-sdk`. For npm installs that file
-  is a JS launcher, so an update that replaces only the native binary or bundle
+  matching what #8030 already did for `claude-sdk`. For an npm-installed `codex`,
+  and for `gemini` however installed, that file is a JS launcher, so an update that replaces only the native binary or bundle
   chunks it loads is not detected (#8040). The pinned gate runs in
   every provenance mode, including the default `off`: each turn re-checks that
   the pinned binary exists, is executable and is not quarantined, plus the
