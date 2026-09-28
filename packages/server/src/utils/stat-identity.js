@@ -11,10 +11,12 @@
  * included deliberately**: `utimes(2)` lets userland set a file's mtime to
  * any value (including its OLD one), which would let a binary swap that
  * restores the original mtime hide from an mtime-only cache key. ctime is
- * the filesystem's own "metadata last changed" timestamp and cannot be set
- * by userland on any platform this project supports — a `write()` that
- * replaces the file's content always bumps it, even when the writer also
- * rewrites mtime afterward. dev+ino+size are still included alongside both
+ * the filesystem's own "metadata last changed" timestamp, and on macOS and
+ * Linux no unprivileged call can set it — a `write()` that replaces the
+ * file's content always bumps it, even when the writer also rewrites mtime
+ * afterward. That does NOT hold on Windows, where Node reports NTFS
+ * ChangeTime, which the file's owner can set; security-relevant callers
+ * (verify-provenance.js's hash cache) do not trust this identity there. dev+ino+size are still included alongside both
  * timestamps: they catch a same-path replacement whose new content happens
  * to land on the same byte size, or a filesystem where two timestamps
  * collide at the granularity the OS reports.

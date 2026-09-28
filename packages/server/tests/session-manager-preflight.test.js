@@ -1,6 +1,6 @@
 import { describe, it, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync } from 'fs'
 import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -12,6 +12,7 @@ import {
   ProviderModelNotSupportedError,
 } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * Pre-flight check integration tests for SessionManager.createSession.
@@ -132,7 +133,9 @@ class FakeClaudeProvider extends BaseFakeSession {
 // VerifiedConnectionFixtureSession pattern: captures whatever SessionManager
 // passes as `opts.spawnPreflight` so a test can invoke it directly.
 class SpawnGateFixtureProvider extends BaseFakeSession {
-  static get resolvedBinary() { return process.execPath }
+  // Tests re-point this after create to prove the spawn gate stays pinned.
+  static resolvedOverride = null
+  static get resolvedBinary() { return SpawnGateFixtureProvider.resolvedOverride || process.execPath }
   static get preflight() {
     return { label: 'Fixture SDK', binary: { name: 'node', candidates: [] } }
   }
@@ -150,6 +153,27 @@ registerProvider('test-happy-2962', HappyProvider)
 registerProvider('test-model-limited-2962', ModelLimitedProvider)
 registerProvider('test-fake-claude-3403', FakeClaudeProvider)
 registerProvider('test-spawn-gate-8030', SpawnGateFixtureProvider)
+
+// #8030 review — declares a soft floor the running Node can never meet, so
+// every preflight of it produces a #8031 advisory.
+class AdvisoryFixtureProvider extends SpawnGateFixtureProvider {
+  static get resolvedBinary() { return process.execPath }
+  static get preflight() {
+    return { label: 'Advisory fixture', binary: { name: 'node', candidates: [], args: ['--version'], recommendedVersion: '999.0.0' } }
+  }
+}
+registerProvider('test-spawn-gate-advisory-8030', AdvisoryFixtureProvider)
+
+// #8030 review — a throwaway executable, so a test can delete the pinned
+// binary out from under a live session.
+class DisposableBinaryProvider extends SpawnGateFixtureProvider {
+  static binaryPath = null
+  static get resolvedBinary() { return DisposableBinaryProvider.binaryPath }
+  static get preflight() {
+    return { label: 'Disposable fixture', binary: { name: 'fixture-claude', candidates: [] } }
+  }
+}
+registerProvider('test-spawn-gate-disposable-8030', DisposableBinaryProvider)
 
 // #8030 — in-memory pin ledger (the surface verifyProvenance consults:
 // getRecord + approve), matching the shape used in agent-connections.test.js.
@@ -362,6 +386,62 @@ describe('SessionManager.createSession — per-spawn binary provenance gate (#80
         return true
       },
     )
+    mgr.destroySession(id)
+  })
+})
+
+describe('SessionManager per-spawn gate — pinning (#8030 review)', () => {
+  afterEach(() => { SpawnGateFixtureProvider.resolvedOverride = null })
+
+  it('keeps verifying the create-time path when the provider would now resolve somewhere else', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-8030', skipPersist: true })
+    // A PATH change after create: a fresh resolve would now land on a path that
+    // does not exist. The pinned gate must not look there.
+    SpawnGateFixtureProvider.resolvedOverride = join(tmpdir(), `chroxy-8030-elsewhere-${process.pid}`)
+    assert.equal(SpawnGateFixtureProvider.lastSpawnPreflight(), process.execPath)
+    mgr.destroySession(id)
+  })
+
+  it('names the vanished pinned path and says to start a new session', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-8030-pin-'))
+    const bin = join(dir, 'fixture-claude')
+    writeFileSync(bin, '#!/bin/sh\nexit 0\n')
+    chmodSync(bin, 0o755)
+    DisposableBinaryProvider.binaryPath = bin
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-disposable-8030', skipPersist: true })
+    const gate = SpawnGateFixtureProvider.lastSpawnPreflight
+    assert.equal(gate(), bin)
+    rmSync(dir, { recursive: true, force: true })
+    assert.throws(() => gate(), (err) => {
+      assert.equal(err.code, 'PROVIDER_BINARY_NOT_FOUND')
+      assert.ok(err.message.includes(bin), 'the message must name the pinned path')
+      assert.ok(err.message.includes('start a new session'), 'the remedy is a new session, not an install')
+      assert.ok(!err.message.includes('checked PATH'), 'only the pinned path was checked')
+      return true
+    })
+    mgr.destroySession(id)
+  })
+
+  it('does not re-log the #8031 soft-floor advisory on per-turn re-verification', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-advisory-8030', skipPersist: true })
+    const warns = []
+    const listener = (entry) => {
+      if (entry.component === 'preflight' && entry.level === 'warn' && entry.message.includes('recommended')) warns.push(entry)
+    }
+    addLogListener(listener)
+    try {
+      SpawnGateFixtureProvider.lastSpawnPreflight()
+      SpawnGateFixtureProvider.lastSpawnPreflight()
+    } finally {
+      removeLogListener(listener)
+    }
+    assert.equal(warns.length, 0, 'the per-turn gate must pass warnAdvisory:false')
     mgr.destroySession(id)
   })
 })

@@ -63,13 +63,16 @@ unverified-binaries gap it exposed is real regardless.)
 - **Spawn-time backstop.** If a spawn still fails after preflight passed (the
   binary changed between create and turn), the catch re-verifies the attempted
   path and labels the error (quarantine vs vanished) instead of an opaque
-  `ENOENT` / generic SDK text. Every provider spawn site now shares this via
+  `ENOENT` / generic SDK text. The provider spawn sites share this via
   `labelBinarySpawnFailure`: the subprocess providers (`cli-session.js`,
   `jsonl-subprocess-session.js`, `claude-tui-session.js`,
   `codex-app-server-session.js`) on a real `child_process`/PTY spawn error, and
   (since #8030) `claude-sdk`'s in-process `SdkSession` on a pre-first-message
   turn failure, since it has no child process of its own to catch an `error`
-  event from.
+  event from. The exception is `acp-session.js`, whose agent spawn has no
+  backstop yet (#8035). A backstop labels a spawn that FAILS; it does not stop
+  one that succeeds. The per-turn subprocess providers (gemini, `codex exec`)
+  still verify their binary only at create — also #8035.
 - **`chroxy doctor`.** The provider-binary and `cloudflared` health checks report
   a quarantined binary distinctly from a missing one, with a copy-pasteable fix:
   `xattr -d com.apple.quarantine <path>` (after verifying provenance) or
@@ -264,10 +267,10 @@ otherwise — resolved and spawned its OWN bundled platform binary
 (`@anthropic-ai/claude-agent-sdk-<platform>-<arch>/claude`). Preflight and the
 real spawn checked two different files. Chroxy no longer bundles that
 platform package (removed from the desktop build), so `SdkSession` now sets
-`pathToClaudeCodeExecutable` to `resolveClaudeBinary()` on every turn, before
-any subclass hook (`_augmentQueryOptions`) runs — the SAME resolver
-`static get resolvedBinary` hands to preflight, so both read the shared
-candidate list rather than two independently-maintained ones.
+`pathToClaudeCodeExecutable` on every turn, before any subclass hook
+(`_augmentQueryOptions`) runs. #7986 set it to a fresh `resolveClaudeBinary()`
+— the SAME resolver `static get resolvedBinary` hands to preflight; since
+#8030 it is the create-time path, re-verified per turn (below).
 
 **This closed the "checked one file, ran another" gap, but #7986 alone was a
 resolver-parity fix, not a per-turn re-verification — #8030 adds the latter.**
@@ -314,6 +317,13 @@ each get their own gate:
   give, instead of the SDK's generic "native binary … failed to launch" text.
   A failure after streaming started is never relabeled — the binary plainly
   launched fine.
+- **Containerised sessions (`docker-sdk`).** These run `claude` inside the
+  container through `spawnClaudeCodeProcess`. `pathToClaudeCodeExecutable`
+  names the host binary, which no gate checks for a containerised provider. A
+  turn that reaches `query()` without that hook — `DockerSdkSession` before
+  `docker run` has returned a container id — would exec the host `claude`
+  outside the container. `SdkSession` now refuses such a turn before dispatch
+  with `CONTAINER_SPAWN_UNAVAILABLE`.
 
 **Stat-identity caches keep this cheap.** A per-turn gate that re-hashed and
 re-`spctl`'d on every call would add real, synchronous latency (measured on
@@ -324,8 +334,10 @@ and `assessMacSignatureCached` (`utils/verify-provenance.js`) cache by
 — the same shape `probeBinaryVersion` already used, now shared rather than
 duplicated, and extended with **ctime**: `utimes(2)` lets userland restore a
 file's mtime to any value (including its old one) after an in-place write, but
-no unprivileged call can set ctime, so a swap that tries to hide behind a restored
-mtime still busts the cache. The hash cache additionally re-checks the
+no unprivileged call can set ctime on macOS or Linux, so a swap that tries to
+hide behind a restored mtime still busts the cache. On Windows, Node reports
+NTFS ChangeTime as ctime, and the file's owner can set it, so the hash cache is
+off there and every Windows call hashes, as every create did before #8030. The hash cache additionally re-checks the
 identity AFTER the read and only caches when it's unchanged from BEFORE — a
 file that changes mid-hash is never pinned to the wrong digest. The signature
 cache only ever stores a genuine PASS (`ok:true, skipped:false`); a rejection

@@ -247,6 +247,25 @@ describe('summarize_session handler', () => {
       assert.ok(!/a4291b0c/.test(reply.message), 'raw hash fragment must not leak')
     })
 
+    it('maps a version-floor refusal to binary-unverified even though it carries its own err.reason (#8030 review)', async () => {
+      ctx = makeCtx({
+        summarizeSession: createSpy(async () => {
+          // ProviderBinaryVersionError sets BOTH a PROVIDER_BINARY_* code and
+          // reason 'too_old'; the code must win.
+          const err = new Error('Claude SDK: "claude" at /opt/homebrew/bin/claude is older than the required 2.1.141 (found 2.1.100)')
+          err.code = 'PROVIDER_BINARY_VERSION'
+          err.reason = 'too_old'
+          throw err
+        }),
+      })
+      await summarizeHandlers.summarize_session(ws, client, {
+        type: 'summarize_session', sessionId: 'sess-1', requestId: 'r',
+      }, ctx)
+      const reply = lastSent(ctx)
+      assert.equal(reply.reason, 'binary-unverified')
+      assert.equal(reply.message, 'Could not summarize this session — the Claude binary did not pass verification (see the server log)')
+    })
+
     it('maps empty-history to a friendly message', async () => {
       ctx = makeCtx({
         summarizeSession: createSpy(async () => {

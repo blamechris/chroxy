@@ -281,8 +281,8 @@ describe('sha256FileCached (#8030)', () => {
     let reads = 0
     const statSync = statOf({ ino: 10, mtimeMs: 100, ctimeMs: 100 })
     const readFileSync = () => { reads += 1; return Buffer.from('abc') }
-    const first = sha256FileCached('/fake/claude', { statSync, readFileSync })
-    const second = sha256FileCached('/fake/claude', { statSync, readFileSync })
+    const first = sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
+    const second = sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
     assert.equal(first, second)
     assert.equal(reads, 1, 'the second call must be served from cache, not re-read')
   })
@@ -292,9 +292,9 @@ describe('sha256FileCached (#8030)', () => {
     const readFileSync = () => { reads += 1; return Buffer.from(`v${reads}`) }
     const idA = statOf({ ino: 30, mtimeMs: 300, ctimeMs: 300 })
     const idB = statOf({ ino: 31, mtimeMs: 301, ctimeMs: 301 })
-    sha256FileCached('/fake/claude', { statSync: idA, readFileSync })
-    sha256FileCached('/fake/claude', { statSync: idB, readFileSync })
-    sha256FileCached('/fake/claude', { statSync: idA, readFileSync })
+    sha256FileCached('/fake/claude', { statSync: idA, readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/claude', { statSync: idB, readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/claude', { statSync: idA, readFileSync, platform: 'linux' })
     assert.equal(reads, 3, 'identity A must have been replaced by B, not retained alongside it')
   })
 
@@ -302,17 +302,26 @@ describe('sha256FileCached (#8030)', () => {
     let reads = 0
     const readFileSync = () => { reads += 1; return Buffer.from('x') }
     const statSync = statOf({ ino: 32, mtimeMs: 302, ctimeMs: 302 })
-    sha256FileCached('/fake/claude', { statSync, readFileSync })
-    sha256FileCached('/fake/codex', { statSync, readFileSync })
-    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/codex', { statSync, readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
     assert.equal(reads, 2, 'the /fake/claude entry must survive a /fake/codex insert')
+  })
+
+  it('never caches on win32 — NTFS ChangeTime is owner-settable, so the identity is not trusted there', () => {
+    let reads = 0
+    const statSync = statOf({ ino: 33, mtimeMs: 303, ctimeMs: 303 })
+    const readFileSync = () => { reads += 1; return Buffer.from('x') }
+    sha256FileCached('C:\\fake\\claude.exe', { statSync, readFileSync, platform: 'win32' })
+    sha256FileCached('C:\\fake\\claude.exe', { statSync, readFileSync, platform: 'win32' })
+    assert.equal(reads, 2, 'every win32 call must re-hash')
   })
 
   it('re-reads when ONLY ctimeMs changes — utimes can restore mtime but not ctime', () => {
     let reads = 0
     const readFileSync = () => { reads += 1; return Buffer.from(`v${reads}`) }
-    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 200 }), readFileSync })
-    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 999 }), readFileSync })
+    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 200 }), readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 999 }), readFileSync, platform: 'linux' })
     assert.equal(reads, 2, 'an unchanged mtime with a changed ctime must still bust the cache')
   })
 
@@ -330,8 +339,8 @@ describe('sha256FileCached (#8030)', () => {
         : { dev: 1, ino: 1, size: 100, mtimeMs: 2, ctimeMs: 2 }
     }
     const readFileSync = () => { reads += 1; return Buffer.from('x') }
-    sha256FileCached('/fake/claude', { statSync, readFileSync })
-    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
+    sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' })
     assert.equal(reads, 2, 'a hash whose identity changed across the read must never be cached')
   })
 
@@ -339,8 +348,8 @@ describe('sha256FileCached (#8030)', () => {
     let reads = 0
     const statSync = statOf({ ino: 30, mtimeMs: 300, ctimeMs: 300 })
     const readFileSync = () => { reads += 1; const e = new Error('EACCES'); throw e }
-    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync }))
-    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync }))
+    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' }))
+    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync, platform: 'linux' }))
     assert.equal(reads, 2, 'a failed hash must never be cached — every call re-reads')
   })
 })
@@ -404,15 +413,18 @@ describe('assessMacSignatureCached (#8030)', () => {
     assert.equal(calls, 2, 'a rejected verdict must never be cached')
   })
 
-  it('does NOT cache a skipped verdict (non-macOS) — assessMacSignature no-ops before touching execFile', () => {
+  it('does NOT cache a skipped verdict — a later real assessment on the same identity still runs spctl', () => {
     let calls = 0
     const statSync = statOf({ ino: 70, mtimeMs: 700, ctimeMs: 700 })
     const execFile = () => { calls += 1; return 'accepted' }
+    // Seed with a skipped (non-macOS) verdict, then ask on darwin for the SAME
+    // identity: a cached skip would be returned without ever running spctl.
     const first = assessMacSignatureCached('/fake/claude', { statSync, platform: 'linux', execFile })
-    const second = assessMacSignatureCached('/fake/claude', { statSync, platform: 'linux', execFile })
+    const second = assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile })
     assert.equal(first.skipped, true)
-    assert.equal(second.skipped, true)
-    assert.equal(calls, 0)
+    assert.equal(second.skipped, false, 'the darwin call must be a real assessment, not the cached skip')
+    assert.equal(second.ok, true)
+    assert.equal(calls, 1)
   })
 })
 

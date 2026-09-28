@@ -183,13 +183,20 @@ export const SIGNATURE_CACHE_TTL_MS = 10 * 60 * 1000
  * exactly like the uncached `sha256File`, so `verifyProvenance`'s existing
  * UNREADABLE handling is unaffected.
  *
+ * Not cached on Windows: there `ctimeMs` is NTFS ChangeTime, which the file's
+ * owner can set (SetFileInformationByHandle), so a same-size in-place swap
+ * that restores every timestamp would keep its old identity. Every Windows
+ * call hashes, as every session create did before #8030.
+ *
  * @param {string} path
  * @param {object} [seams]
  * @param {(p:string)=>import('fs').Stats} [seams.statSync=fs.statSync]
  * @param {(p:string)=>Buffer} [seams.readFileSync=fs.readFileSync]
+ * @param {string} [seams.platform=process.platform]
  * @returns {string} 64-char lower-case hex digest
  */
-export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = fsReadFileSync } = {}) {
+export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = fsReadFileSync, platform = process.platform } = {}) {
+  if (platform === 'win32') return sha256File(path, { readFileSync })
   const before = statIdentity(path, statSync)
   const cached = hashCache.get(path)
   if (before && cached && cached.identity === before) {

@@ -160,15 +160,15 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
     // thrown reason for the discriminator and a fixed message per reason.
     //
     // #8030: a binary-gate refusal (PROVIDER_BINARY_NOT_FOUND,
-    // PROVIDER_BINARY_PROVENANCE, PROVIDER_BINARY_UNVERIFIED, …) carries no
-    // `err.reason` of its own — those errors are typed by `code`, not
-    // `reason` — so map the whole PROVIDER_BINARY_* family onto one curated
-    // reason/message rather than leaking a raw provenance message (which can
-    // embed a hex hash) onto the wire.
-    const reason = err && typeof err.reason === 'string' && err.reason.length > 0
-      ? err.reason
-      : (err && typeof err.code === 'string' && err.code.startsWith('PROVIDER_BINARY_'))
-        ? 'binary-unverified'
+    // PROVIDER_BINARY_PROVENANCE, PROVIDER_BINARY_UNVERIFIED, …) is typed by
+    // `code`, so map the whole PROVIDER_BINARY_* family onto one curated
+    // reason/message. The code is checked FIRST: ProviderBinaryVersionError
+    // also carries its own `reason` ('too_old' / 'unreadable'), which would
+    // otherwise win and fall through to the generic "model call failed" text.
+    const reason = (err && typeof err.code === 'string' && err.code.startsWith('PROVIDER_BINARY_'))
+      ? 'binary-unverified'
+      : err && typeof err.reason === 'string' && err.reason.length > 0
+        ? err.reason
         : 'summarize-failed'
     const message = messageForReason(reason)
     log.warn(`summarize_session failed for ${sessionId}: reason=${reason} (${getErrorMessage(err, 'unknown error')})`)

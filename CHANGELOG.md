@@ -40,7 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `binaryProvenance.mode: block`, a `claude` auto-update now refuses the next
   turn of a live `claude-sdk` session (`PROVIDER_BINARY_PROVENANCE`) until the
   new hash is re-approved, where it used to take effect only at the next
-  session create.
+  session create. A `docker-sdk` turn sent before its container exists is now
+  refused (`CONTAINER_SPAWN_UNAVAILABLE`) instead of running the host `claude`
+  outside the container. On Windows the hash is not cached, because NTFS
+  ChangeTime can be set by the file's owner. The per-turn subprocess providers
+  (gemini, `codex exec`) still verify only at create; that is #8035.
 
 - **The `claude-sdk` provider's minimum-version floor no longer hard-blocks
   every install after an SDK bump — it is now a hand-kept hard floor plus a

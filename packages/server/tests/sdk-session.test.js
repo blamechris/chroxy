@@ -1619,6 +1619,44 @@ describe('SdkSession', () => {
       assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
     })
 
+    it('refuses a turn whose gate returns an empty path — the SDK would otherwise fall back to its bundled binary', async () => {
+      const s = createSession({ spawnPreflight: () => '' })
+      s._processReady = true
+      let queryCalls = 0
+      s._callQuery = () => { queryCalls += 1; return (async function* () {})() }
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(queryCalls, 0)
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED')
+    })
+
+    it('refuses a DockerSdkSession turn before its container exists — never runs the host claude (#8030 review)', async () => {
+      const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+      const s = new DockerSdkSession({ cwd: '/tmp', stateFilePath: tmpStateFile() })
+      assert.equal(s._containerId, null, 'fixture: an owned container whose docker run has not returned yet')
+      s._processReady = true
+      let queryCalls = 0
+      s._callQuery = () => { queryCalls += 1; return (async function* () {})() }
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+      const admissions = []
+
+      await s.sendMessage('hello', undefined, { onInputAdmission: (a) => admissions.push(a) })
+      s.removeAllListeners()
+
+      assert.equal(queryCalls, 0, 'query() must never run without the in-container spawn hook')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'CONTAINER_SPAWN_UNAVAILABLE')
+      assert.equal(admissions.length, 1)
+      assert.equal(admissions[0].status, 'rejected')
+      assert.equal(admissions[0].delivery, 'not_dispatched')
+    })
+
     describe('spawn-failure backstop (labelBinarySpawnFailure)', () => {
       const SDK_LAUNCH_FAILURE_TEXT = 'Claude Code native binary at /x exists but failed to launch.'
 
@@ -1662,6 +1700,25 @@ describe('SdkSession', () => {
 
         assert.equal(errors.length, 1)
         assert.equal(errors[0].message, SDK_LAUNCH_FAILURE_TEXT, 'a healthy attempted path must not be relabeled')
+      })
+
+      it('does not relabel a containerised pre-message failure — the host path is not what the container ran', async () => {
+        class ContainerisedFixture extends SdkSession {
+          static get capabilities() { return { ...SdkSession.capabilities, containerized: true } }
+          _augmentQueryOptions(options) { options.spawnClaudeCodeProcess = () => { throw new Error('unused') } }
+        }
+        const missingPath = join(tmpdir(), `chroxy-8030-missing-container-${process.pid}-${Date.now()}`)
+        const s = new ContainerisedFixture({ cwd: '/tmp', stateFilePath: tmpStateFile(), spawnPreflight: () => missingPath })
+        s._processReady = true
+        s._callQuery = () => (async function* () { throw new Error(SDK_LAUNCH_FAILURE_TEXT) })()
+        const errors = []
+        s.on('error', (data) => errors.push(data))
+
+        await s.sendMessage('hello')
+        s.destroy()
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].message, SDK_LAUNCH_FAILURE_TEXT, 'a containerised failure must not get a host-side binary diagnosis')
       })
 
       it('does not relabel a failure that arrives AFTER a first message', async () => {

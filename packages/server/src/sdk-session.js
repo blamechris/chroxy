@@ -933,17 +933,39 @@ export class SdkSession extends BaseSession {
       // `resolvedBinary` read when no gate was wired (a direct `new
       // SdkSession(...)` caller that bypassed SessionManager, or a test).
       // Set BEFORE _augmentQueryOptions so a subclass override can see/override it.
+      //
+      // Everything in this inner try runs before query() and decides WHAT would
+      // be exec'd, so any throw here is a pre-dispatch refusal (spawnRefused).
       try {
         spawnPath = this._spawnPreflight ? this._spawnPreflight() : this.constructor.resolvedBinary
+        // An empty path would leave pathToClaudeCodeExecutable unset, and the
+        // SDK would then fall back to its own bundled binary — unverified.
+        if (typeof spawnPath !== 'string' || spawnPath.length === 0) {
+          const err = new Error('No verified claude binary path is available for this turn.')
+          err.code = 'PROVIDER_BINARY_UNVERIFIED'
+          throw err
+        }
+        options.pathToClaudeCodeExecutable = spawnPath
+
+        // Allow subclasses to augment query options (e.g. DockerSdkSession
+        // injects spawnClaudeCodeProcess here)
+        this._augmentQueryOptions(options)
+
+        // #8030 review: a containerised subclass runs claude INSIDE its
+        // container through spawnClaudeCodeProcess, and pathToClaudeCodeExecutable
+        // is the HOST binary, which no gate has checked (containerised providers
+        // get no spawnPreflight). Without the hook — e.g. DockerSdkSession before
+        // `docker run` has returned a container id — query() would exec the host
+        // claude outside the container. Refuse instead.
+        if (this.constructor.capabilities?.containerized && typeof options.spawnClaudeCodeProcess !== 'function') {
+          const err = new Error('The session container is not ready, so this turn was not sent (it would otherwise run the host claude outside the container). Retry once the container has started.')
+          err.code = 'CONTAINER_SPAWN_UNAVAILABLE'
+          throw err
+        }
       } catch (err) {
         spawnRefused = true
         throw err
       }
-      options.pathToClaudeCodeExecutable = spawnPath
-
-      // Allow subclasses to augment query options (e.g. DockerSdkSession
-      // injects spawnClaudeCodeProcess here)
-      this._augmentQueryOptions(options)
 
       // If attachments present, build multimodal content blocks
       const promptWithSkills = firstMessagePrefix
@@ -1385,9 +1407,10 @@ export class SdkSession extends BaseSession {
           ;(this._log || log).info('Query aborted after user stop')
           this.emit('stopped', {})
         } else if (spawnRefused) {
-          // #8030: the per-spawn binary gate refused this turn BEFORE query()
-          // was ever called (a block-mode hash mismatch, quarantine, a
-          // vanished pinned binary, …). Two things this branch deliberately
+          // #8030: the turn was refused BEFORE query() was ever called — by the
+          // per-spawn binary gate (a block-mode hash mismatch, quarantine, a
+          // vanished pinned binary, …) or because a containerised session has
+          // no in-container spawn hook yet. Two things this branch deliberately
           // does NOT do:
           //   - route through _enrichErrorMessage: a provenance message
           //     embeds a hex hash prefix (e.g. "...a4291b0c...") that can
@@ -1397,12 +1420,12 @@ export class SdkSession extends BaseSession {
           //     real cause.
           //   - run container classification: the turn never reached the
           //     SDK, so there is no container to have vanished.
-          ;(this._log || log).error(`Spawn refused by binary gate: ${err.message}`)
+          ;(this._log || log).error(`Turn refused before dispatch: ${err.message}`)
           this.emit('error', { code: err.code || 'PROVIDER_BINARY_UNVERIFIED', message: err.message })
           reportInputAdmission(sendOptions, {
             status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
             reason: err.code || 'provider_binary_unverified',
-            message: 'The provider binary failed verification before this turn was dispatched.',
+            message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
           })
         } else {
           // #7599: let a containerized subclass classify this turn failure as a

@@ -1114,13 +1114,29 @@ export class SessionManager extends EventEmitter {
    *   mismatch, or one of `runProviderPreflight`'s own typed errors otherwise.
    */
   _verifyPinnedSpawn(ProviderClass, pinnedPath) {
-    const result = runProviderPreflight(ProviderClass, {
-      provenance: this._binaryProvenanceOptions(),
-      pinnedPath,
-      // #8030: a per-turn re-verification must not re-log the #8031 soft-floor
-      // advisory on every single turn — see runProviderPreflight's docblock.
-      warnAdvisory: false,
-    })
+    let result
+    try {
+      result = runProviderPreflight(ProviderClass, {
+        provenance: this._binaryProvenanceOptions(),
+        pinnedPath,
+        // #8030: a per-turn re-verification must not re-log the #8031 soft-floor
+        // advisory on every single turn — see runProviderPreflight's docblock.
+        warnAdvisory: false,
+      })
+    } catch (err) {
+      // The generic not-found text ("checked PATH and …") is wrong here: only
+      // the pinned path was checked, and a session stays pinned to it, so the
+      // remedy is a new session rather than an install.
+      if (err?.code === 'PROVIDER_BINARY_NOT_FOUND') {
+        const gone = new Error(`${err.provider}: the "${err.binary}" binary this session was verified with at ${pinnedPath} is no longer there — start a new session to use the currently installed one.`)
+        gone.code = err.code
+        gone.provider = err.provider
+        gone.binary = err.binary
+        gone.path = pinnedPath
+        throw gone
+      }
+      throw err
+    }
     if (result.binaryPath !== pinnedPath) {
       const err = new Error(`Provider binary at "${pinnedPath}" could not be re-verified for this spawn (preflight resolved a different or no path).`)
       err.code = 'PROVIDER_BINARY_UNVERIFIED'
