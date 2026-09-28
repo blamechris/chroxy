@@ -7,7 +7,7 @@ import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadin
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
-import { sdkClaudeCodeVersion } from '../src/utils/agent-sdk-version.js'
+import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from '../src/utils/agent-sdk-version.js'
 import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
 
 /**
@@ -371,6 +371,117 @@ describe('checkBinary minVersion gate (#3953)', () => {
   })
 })
 
+// #8031 — `recommendedVersion` is a SOFT, advisory floor: below it downgrades
+// to `warn` (never `fail`, never aborts `chroxy start`), and it never
+// disables the hard `minVersion` gate above.
+describe('checkBinary recommendedVersion soft gate (#8031)', () => {
+  it('warns (not fails) when the version is below recommendedVersion, with no minVersion declared', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      recommendedVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /older than the recommended node 999\.0\.0/)
+  })
+
+  it('passes when the version is at/above recommendedVersion', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      recommendedVersion: '1.0.0',
+    })
+    assert.equal(result.status, 'pass')
+  })
+
+  it('prefers updateHint over installHint in the advisory message', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      updateHint: 'run `nvm install --lts`',
+      recommendedVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /run `nvm install --lts`/)
+  })
+
+  it('falls back to installHint when updateHint is absent', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node ≥ 999',
+      recommendedVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /install node ≥ 999/)
+  })
+
+  it('a hard minVersion failure still wins (fail) even when recommendedVersion is also declared', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '999.0.0',
+      recommendedVersion: '1000.0.0',
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /requires node ≥ 999\.0\.0/)
+  })
+
+  it('when minVersion passes and recommendedVersion is also satisfied, the result is pass', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '1.0.0',
+      recommendedVersion: '1.0.0',
+    })
+    assert.equal(result.status, 'pass')
+  })
+
+  it('when minVersion passes but recommendedVersion is not met, the result warns', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '1.0.0',
+      recommendedVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+  })
+
+  it('an unparseable version with ONLY recommendedVersion declared just passes (no parse warning for a soft check)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: () => 'some weird build identifier',
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      recommendedVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'pass')
+  })
+
+  it('ignores recommendedVersion when not declared (back-compat)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+    })
+    assert.equal(result.status, 'pass')
+  })
+})
+
 // #7986 — `preflight.binary.minVersion` may be a THUNK (claude-sdk derives its
 // floor from the installed SDK's claudeCodeVersion). doctor read the field raw
 // and handed the function itself to compareSemver, so every claude-sdk install
@@ -412,10 +523,18 @@ describe('provider minVersion declared as a thunk (#7986)', () => {
     assert.ok(!row.message.includes('=>'), `the thunk's source leaked into the message: ${row.message}`)
   })
 
-  it("claude-sdk's declared floor resolves to the installed SDK's claudeCodeVersion", () => {
-    const floor = resolveDeclaredMinVersion(SdkSession.preflight.binary.minVersion)
-    assert.equal(floor, sdkClaudeCodeVersion())
-    assert.ok(/^\d+\.\d+\.\d+/.test(floor || ''), `expected a semver floor, got ${JSON.stringify(floor)}`)
+  // #8031: claude-sdk's HARD floor is now the hand-kept CLAUDE_SDK_MIN_CLI_VERSION
+  // constant, not the installed SDK's own claudeCodeVersion — that field moves on
+  // every SDK bump and is no longer treated as a minimum. It is instead the SOFT,
+  // advisory `recommendedVersion`.
+  it("claude-sdk's declared minVersion resolves to CLAUDE_SDK_MIN_CLI_VERSION, and recommendedVersion resolves to the installed SDK's claudeCodeVersion", () => {
+    const minFloor = resolveDeclaredMinVersion(SdkSession.preflight.binary.minVersion)
+    assert.equal(minFloor, CLAUDE_SDK_MIN_CLI_VERSION)
+    assert.ok(/^\d+\.\d+\.\d+/.test(minFloor || ''), `expected a semver floor, got ${JSON.stringify(minFloor)}`)
+
+    const recommendedFloor = resolveDeclaredMinVersion(SdkSession.preflight.binary.recommendedVersion)
+    assert.equal(recommendedFloor, sdkClaudeCodeVersion())
+    assert.ok(/^\d+\.\d+\.\d+/.test(recommendedFloor || ''), `expected a semver recommended floor, got ${JSON.stringify(recommendedFloor)}`)
   })
 })
 

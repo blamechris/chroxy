@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `claude-sdk` provider's minimum-version floor no longer hard-blocks
+  every install after an SDK bump — it is now a hand-kept hard floor plus a
+  soft, advisory floor (#8031).** #7986 (below) enforced a minimum `claude`
+  version equal to the installed Agent SDK's own `claudeCodeVersion` field.
+  That field names the CLI build the SDK release was *published alongside*,
+  not a genuine minimum — the CLI's patch number is its release counter, so
+  a `claude` on a lagging release channel (e.g. npm `stable`, which trails
+  `latest`) could be several patches behind without being broken in any way,
+  and every SDK bump instantly hard-blocked it regardless. Preflight now
+  enforces a small, hand-raised `CLAUDE_SDK_MIN_CLI_VERSION` constant as the
+  hard floor (below it: `ProviderBinaryVersionError`/`PROVIDER_BINARY_VERSION`,
+  unchanged), and treats the SDK's own `claudeCodeVersion` as a soft,
+  advisory floor instead: at/above the hard floor but below the SDK's
+  pairing, preflight logs a warning and `chroxy doctor` reports `warn`
+  (never aborts `chroxy start`) rather than throwing. A tripwire test forces
+  a maintainer to re-verify (and, if needed, raise) the hard floor whenever
+  an SDK bump moves its pairing, and Renovate now throttles
+  `@anthropic-ai/claude-agent-sdk` bumps the same way it already throttles
+  `@anthropic-ai/claude-code`, so a lagging CLI channel gets real time to
+  catch up between bumps. This replaces the "installed SDK's own
+  `claudeCodeVersion`, not a hand-kept constant" minimum-version rule #7986
+  originally shipped.
+
 - **The `claude-sdk` provider now spawns your installed `claude`, resolved through
   the same candidate list preflight verifies at session create (#7986).**
   The Agent SDK's `query()` spawns its own bundled platform binary unless told

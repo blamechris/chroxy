@@ -661,6 +661,10 @@ function checkProvider(providerName, { platform = process.platform } = {}) {
         // a thunk (claude-sdk derives its floor from the SDK, #7986), so it is
         // resolved through the same helper preflight uses, never read raw.
         minVersion: resolveDeclaredMinVersion(spec.binary.minVersion),
+        // #8031: a soft, advisory floor — below it downgrades to `warn`
+        // (never blocks server startup), same resolve helper as minVersion.
+        recommendedVersion: resolveDeclaredMinVersion(spec.binary.recommendedVersion),
+        updateHint: spec.binary.updateHint,
       })
       bin.provider = providerName
       out.push(bin)
@@ -700,7 +704,7 @@ function checkProvider(providerName, { platform = process.platform } = {}) {
  *
  * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null, verify = defaultVerifyBinary }) {
+export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null, recommendedVersion = null, updateHint = null, verify = defaultVerifyBinary }) {
   const resolved = resolveBinary(name, candidates)
   // #6708 — integrity gate BEFORE we try to exec for a version. A macOS
   // Gatekeeper-quarantined binary keeps its X bit, and a present-but-non-
@@ -729,8 +733,14 @@ export function checkBinary(name, args, { parseVersion, required, installHint, c
     // and fail the check below the floor. If the version can't be parsed
     // we don't block the user — we surface a warn so a format change in
     // the upstream CLI doesn't hard-fail an otherwise-working install.
+    // #8031: `recommendedVersion` is a SOFT floor, checked with the same
+    // parsed `found` — below it downgrades to `warn` regardless of
+    // `required` (a soft check never aborts `chroxy start`), never `fail`.
+    let found = null
+    if (minVersion || recommendedVersion) {
+      found = parseLeadingSemver(message)
+    }
     if (minVersion) {
-      const found = parseLeadingSemver(message)
       if (found === null) {
         return {
           name,
@@ -744,6 +754,18 @@ export function checkBinary(name, args, { parseVersion, required, installHint, c
           status: required ? 'fail' : 'warn',
           message: `${message} — requires ${name} ≥ ${minVersion}; ${installHint}`,
         }
+      }
+    }
+    // Only reached once the hard floor (if any) is satisfied. When ONLY
+    // `recommendedVersion` is declared and `found` couldn't be parsed, this
+    // is silently skipped — an unparseable version is not itself a defect
+    // for a soft, advisory check (the hard-floor branch above already owns
+    // the "could not parse" warning when a min is also declared).
+    if (recommendedVersion && found !== null && compareSemver(found, recommendedVersion) < 0) {
+      return {
+        name,
+        status: 'warn',
+        message: `${message} — older than the recommended ${name} ${recommendedVersion}; ${updateHint || installHint}`,
       }
     }
     return { name, status: 'pass', message }

@@ -29,7 +29,7 @@
  * entirely — the binary lives inside the container and the host preflight
  * cannot meaningfully check it.
  *
- * ## Optional minimum-version gate (#7986)
+ * ## Optional minimum-version gate (#7986), and a soft advisory floor (#8031)
  *
  * `spec.binary.minVersion` — a version string, or a thunk `() => string|null`
  * (e.g. `() => sdkClaudeCodeVersion()`, resolved once per call so a derived
@@ -42,6 +42,25 @@
  * blocking — an SDK field that goes missing on a dependency bump must not
  * silently disable the gate, but it also must not turn into a hard failure
  * for something the operator can't fix by reinstalling a binary.
+ *
+ * `spec.binary.recommendedVersion` — same shape (string or thunk), resolved
+ * through the same `resolveDeclaredMinVersion` helper — is a SOFT floor: when
+ * the probed version is below it, preflight does NOT throw. It logs a
+ * one-line `log.warn` and returns a `versionAdvisory` describing the gap
+ * instead. This is the #8031 fix for `claude-sdk`, which used to declare its
+ * installed Agent SDK's own `claudeCodeVersion` field as a HARD `minVersion` —
+ * that field is the CLI build the SDK was *published alongside*, not a
+ * genuine minimum, so every SDK bump instantly hard-blocked any `claude` CLI
+ * on a lagging release channel (e.g. npm `stable`, which trails `latest`).
+ * `claude-sdk` now declares a small, hand-raised, deliberately-conservative
+ * `minVersion` (`CLAUDE_SDK_MIN_CLI_VERSION`) as the hard floor, and the SDK's
+ * `claudeCodeVersion` as the soft `recommendedVersion` — below the hard floor
+ * still throws; between the two floors just warns; at or above the soft floor
+ * is silent. The probe still runs AT MOST ONCE per call even when both fields
+ * are declared: the same probed `found` version feeds both checks. A
+ * `recommendedVersion` that resolves to `null`/unparseable is silently
+ * ignored — a soft check exists to advise, never to invent a failure or a
+ * warning of its own.
  *
  * ## Direct-exec refusal (#7986 review S2)
  *
@@ -276,11 +295,18 @@ function versionRemediation(binarySpec) {
  *   - opt-in provenance config + pin ledger; null/disabled ⇒ gate skipped
  * @param {Function} [options.verifyProvenance] - provenance checker (injected in tests)
  * @param {Function} [options.probeVersion] - `(path, args) => string|null` version
- *   prober (injected in tests); only called when `spec.binary.minVersion` resolves
- *   to a valid version, and only after verifyBinary + provenance both pass (#7986)
+ *   prober (injected in tests); called AT MOST ONCE per call, when either
+ *   `spec.binary.minVersion` OR `spec.binary.recommendedVersion` resolves to a
+ *   valid version, and only after verifyBinary + provenance both pass (#7986,
+ *   #8031)
  * @param {string} [options.platform] - defaults to `process.platform`; injectable
  *   for tests exercising the `requiresDirectExec` shim refusal (#7986 review S2)
- * @returns {{ binaryPath: string|null }} exact healthy path allowed by all enabled gates
+ * @returns {{ binaryPath: string|null, versionAdvisory: object|null }} the exact
+ *   healthy path allowed by all enabled gates, plus a soft-floor advisory
+ *   (#8031) — `{ provider, binary, path, found, recommended, remediation }` —
+ *   when the probed version is below `spec.binary.recommendedVersion` but at
+ *   or above `spec.binary.minVersion`; `null` when there is no such gap (or no
+ *   `recommendedVersion` declared, or the min gate already threw).
  * @throws {ProviderBinaryNotFoundError|ProviderBinaryQuarantinedError|ProviderBinaryProvenanceError|ProviderBinaryUnsupportedError|ProviderBinaryVersionError|ProviderCredentialMissingError}
  */
 export function runProviderPreflight(ProviderClass, {
@@ -291,18 +317,19 @@ export function runProviderPreflight(ProviderClass, {
   probeVersion = defaultProbeBinaryVersion,
   platform = process.platform,
 } = {}) {
-  if (!ProviderClass) return { binaryPath: null }
+  if (!ProviderClass) return { binaryPath: null, versionAdvisory: null }
 
   // Containerised providers run their binary inside the container, so a host
   // preflight check would always fail (or worse — silently pass against a
   // wrong binary). Trust the container image / health probe instead.
-  if (ProviderClass.capabilities?.containerized) return { binaryPath: null }
+  if (ProviderClass.capabilities?.containerized) return { binaryPath: null, versionAdvisory: null }
 
   const spec = ProviderClass.preflight
-  if (!spec) return { binaryPath: null }
+  if (!spec) return { binaryPath: null, versionAdvisory: null }
 
   const providerLabel = spec.label || ProviderClass.name || 'provider'
   let binaryPath = null
+  let versionAdvisory = null
 
   if (spec.binary && spec.binary.name) {
     const candidates = spec.binary.candidates || []
@@ -391,21 +418,43 @@ export function runProviderPreflight(ProviderClass, {
       }
     }
 
-    // #7986: optional minimum-version gate. Runs ONLY after verifyBinary and
-    // the provenance gate above both passed — binaryPath is the same healthy,
-    // provenance-cleared path the spawn will use, so this never execs a
-    // binary that failed either gate.
-    if (Object.prototype.hasOwnProperty.call(spec.binary, 'minVersion')) {
-      const rawMinVersion = resolveDeclaredMinVersion(spec.binary.minVersion)
-      const required = parseSemver(rawMinVersion)
+    // #7986 / #8031: optional minimum-version gate (hard `minVersion`) plus a
+    // soft, advisory `recommendedVersion`. Both run ONLY after verifyBinary
+    // and the provenance gate above both passed — binaryPath is the same
+    // healthy, provenance-cleared path the spawn will use, so this never
+    // execs a binary that failed either gate.
+    const hasMinVersion = Object.prototype.hasOwnProperty.call(spec.binary, 'minVersion')
+    let rawMinVersion = null
+    let required = null
+    if (hasMinVersion) {
+      rawMinVersion = resolveDeclaredMinVersion(spec.binary.minVersion)
+      required = parseSemver(rawMinVersion)
       if (!required) {
         // A thunk that returns null (e.g. the SDK's claudeCodeVersion field
         // went missing on a dependency bump) or a malformed string must not
         // silently disable the gate NOR hard-fail a session the operator has
         // no way to fix — surfaced loudly, then skipped.
         log.warn(`Provider "${providerLabel}" (binary "${spec.binary.name}") declared an invalid/empty minVersion (${JSON.stringify(rawMinVersion)}) — skipping the version check`)
-      } else {
-        const found = probeVersion(binaryPath, spec.binary.args || ['--version'])
+      }
+    }
+
+    // #8031: `recommendedVersion` shares the exact same resolve step, but an
+    // invalid/null result is silently ignored — a soft check exists to
+    // advise, never to invent a warning or a failure of its own.
+    const hasRecommendedVersion = Object.prototype.hasOwnProperty.call(spec.binary, 'recommendedVersion')
+    let rawRecommendedVersion = null
+    let recommended = null
+    if (hasRecommendedVersion) {
+      rawRecommendedVersion = resolveDeclaredMinVersion(spec.binary.recommendedVersion)
+      recommended = parseSemver(rawRecommendedVersion)
+    }
+
+    // The probe runs AT MOST ONCE per call — when EITHER field resolved to a
+    // valid version — and its result feeds both checks below (#8031).
+    if (required || recommended) {
+      const found = probeVersion(binaryPath, spec.binary.args || ['--version'])
+
+      if (required) {
         if (!found) {
           throw new ProviderBinaryVersionError({
             provider: providerLabel,
@@ -429,13 +478,34 @@ export function runProviderPreflight(ProviderClass, {
           })
         }
       }
+
+      // The min gate above either passed or wasn't declared (a thrown
+      // ProviderBinaryVersionError would have already unwound out of this
+      // function), so a found version here is a green light for the soft
+      // check too. A `found === null` here only happens when `required` is
+      // falsy (an unreadable probe with `required` set always throws above)
+      // — i.e. ONLY recommendedVersion was declared and the probe couldn't
+      // read a version; a soft check never blocks and never invents a
+      // failure, so that case is silently skipped, not warned.
+      if (recommended && found && compareSemver(found, recommended) < 0) {
+        const remediation = versionRemediation(spec.binary)
+        versionAdvisory = {
+          provider: providerLabel,
+          binary: spec.binary.name,
+          path: binaryPath,
+          found,
+          recommended: rawRecommendedVersion,
+          remediation,
+        }
+        log.warn(`Provider "${providerLabel}" (binary "${spec.binary.name}") at ${binaryPath} is version ${found}, older than the recommended ${rawRecommendedVersion} — ${remediation}`)
+      }
     }
   }
 
   if (spec.credentials && Array.isArray(spec.credentials.envVars) && spec.credentials.envVars.length > 0) {
     // Optional credentials never block creation — Claude can authenticate
     // via a prior `claude login` subscription instead of ANTHROPIC_API_KEY.
-    if (spec.credentials.optional) return { binaryPath }
+    if (spec.credentials.optional) return { binaryPath, versionAdvisory }
     const matched = spec.credentials.envVars.find(v => env[v])
     if (!matched) {
       throw new ProviderCredentialMissingError({
@@ -445,5 +515,5 @@ export function runProviderPreflight(ProviderClass, {
       })
     }
   }
-  return { binaryPath }
+  return { binaryPath, versionAdvisory }
 }
