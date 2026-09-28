@@ -148,11 +148,18 @@ export function assessMacSignature(path, { platform = process.platform, execFile
 // stat-identity string -> sha256 hex digest. Module-level so it survives
 // across preflight/spawn-gate calls within one daemon process (#8030).
 const hashCache = new Map()
-// stat-identity string -> { ok: true, skipped: false, detail } signature
-// verdict. Only ever holds PASSING, non-skipped verdicts — see
-// assessMacSignatureCached's docblock for why a rejection/skip is never
-// stored.
+// stat-identity string -> { verdict, at } for a PASSING, non-skipped
+// signature verdict — see assessMacSignatureCached's docblock for why a
+// rejection/skip is never stored, and why a stored pass expires.
 const signatureCache = new Map()
+
+// A cached signature PASS expires after this long. Unlike a hash, a Gatekeeper
+// verdict can change while the file does not: Apple can revoke a notarization
+// ticket or a Developer ID, and the stat identity cannot see that. Before
+// #8030 the gate re-ran `spctl` at every session create; this bounds how stale
+// a pass may get while keeping the per-turn cost at one ~430ms assessment per
+// window instead of one per turn.
+export const SIGNATURE_CACHE_TTL_MS = 10 * 60 * 1000
 
 /**
  * Cached wrapper around {@link sha256File}, keyed by {@link statIdentity}.
@@ -201,21 +208,29 @@ export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = f
  * `skipped` verdict (non-macOS, or the gate resolved to a no-op) is likewise
  * never cached since it carries no real assessment to reuse.
  *
+ * A cached pass also expires after {@link SIGNATURE_CACHE_TTL_MS}: a
+ * revocation (notarization ticket or Developer ID) changes the verdict without
+ * changing the file, so the stat identity alone would keep serving a stale
+ * pass for the daemon's lifetime.
+ *
  * @param {string} path
  * @param {object} [opts] - forwarded to {@link assessMacSignature} (`platform`,
- *   `execFile`), plus the cache's own `statSync` seam.
+ *   `execFile`), plus the cache's own `statSync` and `now` seams.
  * @param {(p:string)=>import('fs').Stats} [opts.statSync=fs.statSync]
+ * @param {() => number} [opts.now=Date.now]
  * @returns {{ ok: boolean, skipped: boolean, detail?: string }}
  */
-export function assessMacSignatureCached(path, { statSync = fsStatSync, ...rest } = {}) {
+export function assessMacSignatureCached(path, { statSync = fsStatSync, now = Date.now, ...rest } = {}) {
   const identity = statIdentity(path, statSync)
   if (identity && signatureCache.has(identity)) {
-    return signatureCache.get(identity)
+    const entry = signatureCache.get(identity)
+    if (now() - entry.at < SIGNATURE_CACHE_TTL_MS) return entry.verdict
+    signatureCache.delete(identity)
   }
 
   const verdict = assessMacSignature(path, rest)
   if (identity && verdict && verdict.ok === true && !verdict.skipped) {
-    signatureCache.set(identity, verdict)
+    signatureCache.set(identity, { verdict, at: now() })
   }
   return verdict
 }

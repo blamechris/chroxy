@@ -34,8 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached by stat identity (`utils/stat-identity.js`, shared with the existing
   version-probe cache) including file **ctime** — mtime alone can be restored
   by `utimes(2)` after an in-place write, but ctime cannot be forged by
-  userland, so a swap that tries to hide behind a restored mtime still busts
-  the cache.
+  unprivileged code, so a swap that tries to hide behind a restored mtime still busts
+  the cache. A cached signature pass also expires after 10 minutes, since a
+  revoked notarization does not change the file. Operator-visible: with
+  `binaryProvenance.mode: block`, a `claude` auto-update now refuses the next
+  turn of a live `claude-sdk` session (`PROVIDER_BINARY_PROVENANCE`) until the
+  new hash is re-approved, where it used to take effect only at the next
+  session create.
 
 - **The `claude-sdk` provider's minimum-version floor no longer hard-blocks
   every install after an SDK bump — it is now a hand-kept hard floor plus a

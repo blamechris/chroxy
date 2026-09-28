@@ -9,6 +9,7 @@ import {
   MACOS_SPCTL,
   sha256FileCached,
   assessMacSignatureCached,
+  SIGNATURE_CACHE_TTL_MS,
   _resetProvenanceCacheForTest,
 } from '../src/utils/verify-provenance.js'
 
@@ -335,6 +336,21 @@ describe('assessMacSignatureCached (#8030)', () => {
     assert.equal(first.ok, true)
     assert.equal(second.ok, true)
     assert.equal(calls, 1, 'the second call must be served from cache, not re-assessed')
+  })
+
+  it('re-assesses a cached PASS once SIGNATURE_CACHE_TTL_MS has elapsed (a revocation leaves the file unchanged)', () => {
+    let calls = 0
+    let clock = 1_000_000
+    const now = () => clock
+    const statSync = statOf({ ino: 45, mtimeMs: 450, ctimeMs: 450 })
+    const execFile = () => { calls += 1; return 'accepted' }
+    assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile, now })
+    clock += SIGNATURE_CACHE_TTL_MS - 1
+    assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile, now })
+    assert.equal(calls, 1, 'inside the TTL the pass is served from cache')
+    clock += 1
+    assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile, now })
+    assert.equal(calls, 2, 'at the TTL the pass must be re-assessed')
   })
 
   it('re-assesses when the stat identity changes', () => {

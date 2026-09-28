@@ -1049,43 +1049,6 @@ export class SessionManager extends EventEmitter {
     return out
   }
 
-  /**
-   * Resolve the validated "create plan" for a session (#6036 — the front-half
-   * SRP extraction out of {@link SessionManager#createSession}). Owns exactly
-   * the preflight + isolation + provider/preset resolution responsibilities:
-   *
-   *   1. session-limit guard + cwd existence check (throws on failure),
-   *   2. id generation (preserve-id validation #4983) + name,
-   *   3. provider resolution + the #2962 preflight (binary/credential) + the
-   *      user-shell fail-closed gate (#5985) + the #3403 model soft-fallback,
-   *   4. worktree isolation (fresh `git worktree add` OR the #5310 restore
-   *      rebind with the path-safety check),
-   *   5. per-repo session-preset resolution + preamble fold (#5553).
-   *
-   * Returns a plain plan object; {@link SessionManager#createSession} consumes
-   * it to build `providerOpts`, construct the session, register it, and start.
-   * Splitting the validation from the wiring keeps them close enough to read
-   * together — the "middle-layer trap" (#3224/#3231/#4790) recurs when they
-   * drift apart. Behaviour is identical to the previous inline front-half: the
-   * same checks run in the same order and throw the same errors.
-   *
-   * @param {object} args The (already-destructured) createSession options that
-   *   the plan depends on.
-   * @returns {{
-   *   sessionId: string,
-   *   sessionName: string,
-   *   resolvedCwd: string,
-   *   resolvedModel: (string|null),
-   *   resolvedPermissionMode: string,
-   *   resolvedProvider: string,
-   *   ProviderClass: Function,
-   *   worktreePath: (string|null),
-   *   worktreeRepoDir: (string|null),
-   *   presetDescriptor: (object|null),
-   *   effectiveSessionPreamble: (string|undefined),
-   * }} the validated create plan.
-   */
-  //
   // #8030 — three helpers that share the "opt-in provenance bag + re-verify a
   // binary before a spawn" logic that used to live inline at each call site:
   //
@@ -1206,6 +1169,43 @@ export class SessionManager extends EventEmitter {
     }
     return result.binaryPath
   }
+
+  /**
+   * Resolve the validated "create plan" for a session (#6036 — the front-half
+   * SRP extraction out of {@link SessionManager#createSession}). Owns exactly
+   * the preflight + isolation + provider/preset resolution responsibilities:
+   *
+   *   1. session-limit guard + cwd existence check (throws on failure),
+   *   2. id generation (preserve-id validation #4983) + name,
+   *   3. provider resolution + the #2962 preflight (binary/credential) + the
+   *      user-shell fail-closed gate (#5985) + the #3403 model soft-fallback,
+   *   4. worktree isolation (fresh `git worktree add` OR the #5310 restore
+   *      rebind with the path-safety check),
+   *   5. per-repo session-preset resolution + preamble fold (#5553).
+   *
+   * Returns a plain plan object; {@link SessionManager#createSession} consumes
+   * it to build `providerOpts`, construct the session, register it, and start.
+   * Splitting the validation from the wiring keeps them close enough to read
+   * together — the "middle-layer trap" (#3224/#3231/#4790) recurs when they
+   * drift apart. Behaviour is identical to the previous inline front-half: the
+   * same checks run in the same order and throw the same errors.
+   *
+   * @param {object} args The (already-destructured) createSession options that
+   *   the plan depends on.
+   * @returns {{
+   *   sessionId: string,
+   *   sessionName: string,
+   *   resolvedCwd: string,
+   *   resolvedModel: (string|null),
+   *   resolvedPermissionMode: string,
+   *   resolvedProvider: string,
+   *   ProviderClass: Function,
+   *   worktreePath: (string|null),
+   *   worktreeRepoDir: (string|null),
+   *   presetDescriptor: (object|null),
+   *   effectiveSessionPreamble: (string|undefined),
+   * }} the validated create plan.
+   */
   _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)

@@ -324,16 +324,27 @@ and `assessMacSignatureCached` (`utils/verify-provenance.js`) cache by
 — the same shape `probeBinaryVersion` already used, now shared rather than
 duplicated, and extended with **ctime**: `utimes(2)` lets userland restore a
 file's mtime to any value (including its old one) after an in-place write, but
-no userland call can set ctime, so a swap that tries to hide behind a restored
+no unprivileged call can set ctime, so a swap that tries to hide behind a restored
 mtime still busts the cache. The hash cache additionally re-checks the
 identity AFTER the read and only caches when it's unchanged from BEFORE — a
 file that changes mid-hash is never pinned to the wrong digest. The signature
 cache only ever stores a genuine PASS (`ok:true, skipped:false`); a rejection
 or a skip (non-macOS) is re-assessed every call so neither is masked by a
-stale result. Both are the DEFAULT `sha256File`/`assessSignature` seams
+stale result, and a stored pass expires after `SIGNATURE_CACHE_TTL_MS`
+(10 minutes): a notarization ticket or Developer ID can be revoked without the
+file changing, which no stat identity can see. Both are the DEFAULT `sha256File`/`assessSignature` seams
 `verifyProvenance` uses, so an injected seam (every existing test) is
 unaffected — the cache only activates on the real filesystem path, and
 `_resetProvenanceCacheForTest()` clears both between test files.
+
+**What operators will notice.** With `binaryProvenance.mode: block`, a
+`claude` auto-update (which re-points `~/.local/bin/claude` at a new build)
+now refuses the NEXT TURN of every live `claude-sdk` session with
+`PROVIDER_BINARY_PROVENANCE`, not only the next session create, until the new
+hash is re-approved. That is the promise `block` mode makes, now kept for a
+provider that spawns per turn. In `warn` mode the mismatch is logged on every
+turn until it is re-approved, since `verifyProvenance` deliberately never
+re-pins a mismatch on its own.
 
 **What is still NOT covered.** A TOCTOU window between the gate's checks and
 the actual `exec()` remains, exactly as it does for every other provider this
