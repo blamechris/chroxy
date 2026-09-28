@@ -398,6 +398,58 @@ describe('dashboard message-handler dispatch', () => {
       expect(infos.length).toBe(1)
       expect(infos[0]!.toLowerCase()).toContain('exceeded')
     })
+
+    // #7377 — the wire `billingClass` field the sidebar meter uses to
+    // resolve its label (instead of a hardcoded "Credit spend"). Parsed
+    // defensively: only the three known values pass through, anything else
+    // (or an omitted field, from an older server) becomes `undefined` so
+    // the component's own neutral fallback takes over.
+    it('carries a recognized billingClass through to the stored snapshot', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 23.45, turnsBilled: 12, budgetUsd: 100,
+          warningPercent: 80, percent: 23.45, warning: false, exceeded: false,
+          billingClass: 'subscription',
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).monthlyBudget.billingClass).toBe('subscription')
+    })
+
+    it('drops an unrecognized billingClass value rather than passing it through', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 23.45, turnsBilled: 12, budgetUsd: 100,
+          warningPercent: 80, percent: 23.45, warning: false, exceeded: false,
+          billingClass: 'not-a-real-class',
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).monthlyBudget.billingClass).toBeUndefined()
+    })
+
+    it('leaves billingClass undefined when the server omits it (pre-#7377)', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 23.45, turnsBilled: 12, budgetUsd: 100,
+          warningPercent: 80, percent: 23.45, warning: false, exceeded: false,
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).monthlyBudget.billingClass).toBeUndefined()
+    })
   })
 
   describe('pair_fail dispatch (#5281 ③ PR 2)', () => {

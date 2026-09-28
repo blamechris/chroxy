@@ -9,50 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`codex-app-server`'s attachment dir and `docker-byok`'s compose env-file —
-  which HOLDS `ANTHROPIC_API_KEY` — now leak on a crash no more than the two
-  session-dir classes #5323/#7337 already fixed do (#7373).** Both sites wrote
-  a per-session tmp artifact removed on `destroy()` but never on a crash:
-  `codex-app-server-session.js`'s materialized-attachment dir was a bare
-  `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))`, and
-  `docker-byok-session.js`'s `ANTHROPIC_API_KEY` tmpfile sat flat under
-  `tmpdir()` as `chroxy-byok-<project>.env`. Neither carried an ownership
-  signal, so a boot-time reaper could never tell a crashed session's leftover
-  apart from a live one's — deleting on age alone would have removed a live
-  session's credential file mid-use. Both now follow the shared shape
-  `sweepStaleOwnedDirs`/`ensureOwnedBaseDir` already established: a
-  dedicated, owned base dir (`ATTACH_BASE` / `ENV_FILE_BASE`), an
-  `s-`-prefixed per-session dir stamped with `owner.pid`, and the artifact
-  written inside it. `destroy()` removes the whole dir — for `docker-byok`
-  this is new (was: just the file); `codex-app-server`'s `destroy()` already
-  removed its whole `mkdtemp` dir and is unchanged in that respect, only the
-  dir's location and ownership stamp moved. A new boot sweep entry in
-  `sweep-stale-provider-dirs.js` (`CodexAppServerSession.sweepStaleAttachDirs`
-  / `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
-  including the API-key file — while a live owner's are never touched. No
-  second reaper implementation was added; both route through the existing
-  `sweepStaleOwnedDirs`.
-
-  **Not covered:** credentials leaked by a crash *before* this fix shipped —
-  the legacy flat `chroxy-byok-chroxy-byok-<hex>.env` (holds
-  `ANTHROPIC_API_KEY`; the doubled prefix is real — the old path was
-  `` `chroxy-byok-${composeProject}.env` `` and `composeProject` itself
-  already starts with `chroxy-byok-`) and `chroxy-codex-attach-<random>/` —
-  are outside the new sweep's two bases and are never swept automatically,
-  because the old flat files carry no `owner.pid` a sweep could use to tell
-  a genuinely-dead pre-upgrade session from one still running the old code
-  (for example a desktop daemon already upgraded alongside a CLI daemon that
-  hasn't been — deleting the latter's `--env-file` out from under it breaks
-  every later `docker exec` in that session). List and review them by hand
-  before removing anything (macOS/Linux; `find` has no direct Windows
-  equivalent, so on Windows check `%TEMP%`/`%TMP%` by hand instead):
-  ```
-  find "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}" -maxdepth 1 \( -type f -name 'chroxy-byok-chroxy-byok-*.env' \) -o \( -type d -name 'chroxy-codex-attach-*' \)
-  ```
-  For each `chroxy-byok-chroxy-byok-<hex>.env` match, the compose project is
-  the filename with the leading `chroxy-byok-` and trailing `.env` stripped
-  (`chroxy-byok-<hex>`) — `docker compose ls -a` shows whether that project
-  is still up before you touch its env-file.
+- **The sidebar's machine-wide monthly meter no longer asserts "Credit
+  spend" for a subscription session (#7377).** #7333/#7361 fixed the
+  per-session and per-provider rows to resolve their cost label from the
+  billing class (`subscription` → "Included (subscription)", no dollar
+  figure; `programmatic-credit` → "Credit spend" with one), but the
+  machine-wide monthly meter (`SidebarTokenView.tsx`, #5665) kept a
+  hardcoded "Credit spend" label gated only on "is there a budget or some
+  spend" — the fourth site of the #5630 rule, missed by #7333's sweep of
+  the other three. The server's `monthly_budget` payload now carries a
+  `billingClass` (derived from the same programmatic-credit-era check — the
+  operator flag and the era start date — that already gates what feeds the meter — `programmatic-credit` while the era
+  is in force, `subscription` while it is not, which is the default since
+  the era never started), and the dashboard resolves the meter's label
+  through the same `BILLING_CLASS_LABEL` map the per-session/per-provider
+  rows use instead of a fourth hand-written copy. A `subscription` snapshot
+  now reads "Included (subscription)" with no dollar figure and no
+  progress bar (a stale total left over from before #7361 no longer reads
+  as live credit spend); a `programmatic-credit` snapshot is unchanged; a
+  server that predates this field falls back to a neutral "API-equivalent
+  estimate" label rather than asserting either claim.
 
 - **Dashboard chat scroller is now keyboard-focusable (#7406).** `.chat-messages`
   had no `tabIndex`, so a keyboard-only reader could never move focus into it —
@@ -103,6 +79,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, and pinning applies in every mode, including the default `off` (a
   vanished pinned binary refuses the respawn with a message to start a new
   session, rather than spawning whatever `PATH` now resolves).
+
+- **`codex-app-server`'s attachment dir and `docker-byok`'s compose env-file —
+  which HOLDS `ANTHROPIC_API_KEY` — now leak on a crash no more than the two
+  session-dir classes #5323/#7337 already fixed do (#7373).** Both sites wrote
+  a per-session tmp artifact removed on `destroy()` but never on a crash:
+  `codex-app-server-session.js`'s materialized-attachment dir was a bare
+  `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))`, and
+  `docker-byok-session.js`'s `ANTHROPIC_API_KEY` tmpfile sat flat under
+  `tmpdir()` as `chroxy-byok-<project>.env`. Neither carried an ownership
+  signal, so a boot-time reaper could never tell a crashed session's leftover
+  apart from a live one's — deleting on age alone would have removed a live
+  session's credential file mid-use. Both now follow the shared shape
+  `sweepStaleOwnedDirs`/`ensureOwnedBaseDir` already established: a
+  dedicated, owned base dir (`ATTACH_BASE` / `ENV_FILE_BASE`), an
+  `s-`-prefixed per-session dir stamped with `owner.pid`, and the artifact
+  written inside it. `destroy()` removes the whole dir — for `docker-byok`
+  this is new (was: just the file); `codex-app-server`'s `destroy()` already
+  removed its whole `mkdtemp` dir and is unchanged in that respect, only the
+  dir's location and ownership stamp moved. A new boot sweep entry in
+  `sweep-stale-provider-dirs.js` (`CodexAppServerSession.sweepStaleAttachDirs`
+  / `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
+  including the API-key file — while a live owner's are never touched. No
+  second reaper implementation was added; both route through the existing
+  `sweepStaleOwnedDirs`.
+
+  **Not covered:** credentials leaked by a crash *before* this fix shipped —
+  the legacy flat `chroxy-byok-chroxy-byok-<hex>.env` (holds
+  `ANTHROPIC_API_KEY`; the doubled prefix is real — the old path was
+  `` `chroxy-byok-${composeProject}.env` `` and `composeProject` itself
+  already starts with `chroxy-byok-`) and `chroxy-codex-attach-<random>/` —
+  are outside the new sweep's two bases and are never swept automatically,
+  because the old flat files carry no `owner.pid` a sweep could use to tell
+  a genuinely-dead pre-upgrade session from one still running the old code
+  (for example a desktop daemon already upgraded alongside a CLI daemon that
+  hasn't been — deleting the latter's `--env-file` out from under it breaks
+  every later `docker exec` in that session). List and review them by hand
+  before removing anything (macOS/Linux; `find` has no direct Windows
+  equivalent, so on Windows check `%TEMP%`/`%TMP%` by hand instead):
+  ```
+  find "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}" -maxdepth 1 \( -type f -name 'chroxy-byok-chroxy-byok-*.env' \) -o \( -type d -name 'chroxy-codex-attach-*' \)
+  ```
+  For each `chroxy-byok-chroxy-byok-<hex>.env` match, the compose project is
+  the filename with the leading `chroxy-byok-` and trailing `.env` stripped
+  (`chroxy-byok-<hex>`) — `docker compose ls -a` shows whether that project
+  is still up before you touch its env-file.
 
 - **`gemini` and `codex exec` sessions now re-verify their binary before
   every turn, not just at session create (#8035).** #8030 (below) closed this

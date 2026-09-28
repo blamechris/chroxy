@@ -51,15 +51,33 @@
  * unguarded call.
  *
  * WHERE THIS IS INSTALLED, AND ITS LIMITS. Four packages run `node --test`
- * (`server`, `claude-hooks`, `protocol`, `design-tokens`). This installs from
- * `packages/server/tests/_setup.mjs` ONLY — server is where every large-subject
- * assertion lives; the other three were swept and have none. Extending it is a
- * `--import` flag away (see `no-test-force-exit-hook.mjs` for the
- * side-effecting-entry-point pattern the two `_setup`-less packages use), and
- * is tracked rather than done here. As with every guard installed this way, a
- * run that skips `--import` altogether — a bare `node --test tests/foo.test.js`
- * — is out of reach; such a run also has no fs write sandbox, which is the
- * larger reason not to do it.
+ * (`server`, `claude-hooks`, `protocol`, `design-tokens`) and all four install
+ * this now (#7413 — server was the only one until then, since it is where
+ * every large-subject assertion lived; the other three were swept during
+ * #7401 and had none, which is why extending coverage to them was deferred
+ * rather than folded in). `server` and `claude-hooks` call
+ * `installAssertMatchPayloadGuard()` from their own `tests/_setup.mjs`;
+ * `protocol` and `design-tokens` have no setup module, so their package.json
+ * `--import`s `assert-match-payload-guard-hook.mjs` instead — the same
+ * side-effecting-entry-point pattern `no-test-force-exit-hook.mjs` uses for
+ * the sibling `--test-force-exit` refusal. Each installation is pinned by a
+ * call-site test running under that package's own test command:
+ * `packages/server/tests/assert-match-payload-guard.test.js`,
+ * `packages/claude-hooks/tests/setup-payload-guard.test.js`,
+ * `packages/protocol/tests/payload-guard-installed.test.js` and
+ * `packages/design-tokens/test/payload-guard-installed.test.js` — the last two
+ * exist precisely because `protocol` and `design-tokens` have no
+ * `tests/_setup.mjs` to hang an install call on, so their wiring is a STRING
+ * in `package.json` (`--import assert-match-payload-guard-hook.mjs`) that a
+ * one-token slip (importing this library file directly instead) can silently
+ * defeat; a call-site test needs no setup module, only to run under the
+ * package's own `test` script, which both already do. On top of those four,
+ * `scripts/__tests__/assert-match-payload-guard-wiring.test.mjs` walks
+ * `packages/*` and checks the same `--import` string textually, so a fifth
+ * package that never wires the guard at all fails there by name. As with
+ * every guard installed this way, a run that skips `--import` altogether — a
+ * bare `node --test tests/foo.test.js` — is out of reach; such a run also has
+ * no fs write sandbox, which is the larger reason not to do it.
  *
  * COVERAGE, AND THE BINDING-FORM RULE IT INHERITS. Patching the CJS
  * `module.exports` object covers DEFAULT importers (`import assert from
