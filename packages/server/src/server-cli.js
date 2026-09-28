@@ -800,8 +800,9 @@ export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, l
 // #8029: the set of typed errors `runProviderPreflight` (via
 // SessionManager#createSession) throws for a provider that isn't usable —
 // binary missing/quarantined/unsupported/wrong-provenance/wrong-version, or
-// missing credentials. Exported (and kept as an explicit instanceof list,
-// not a duck-typed `err.code` check) so a test can prove the startup
+// missing credentials. Kept as an explicit instanceof list (not a
+// duck-typed `err.code` check) and exposed through `isProviderPreflightError`
+// below, so a test can prove the startup
 // default-session guard below only swallows THIS class of failure and lets
 // anything else — a bug, an out-of-memory error, a corrupted state file —
 // still crash loudly instead of being silently absorbed by a broadened net.
@@ -830,11 +831,11 @@ export function isProviderPreflightError(err) {
  * the provider isn't usable. Without `--skip-checks`, `chroxy start`'s
  * doctor pass (server-cmd.js) catches the same class of failure first and
  * refuses with a readable one-line message before any server state exists.
- * `--skip-checks` reaches this point instead, and `restoreState()` (called
- * just before this) already treats an unusable provider as recoverable for a
- * RESTORED session — it logs and keeps the daemon running rather than
- * crashing the whole process over one provider being broken. This mirrors
- * that for the startup default session: log the same readable message and
+ * `--skip-checks` reaches this point instead. `restoreState()` (called just
+ * before this) already keeps the daemon running when a RESTORED session fails
+ * to come back (it catches any restore failure, broader than this guard), so
+ * one broken provider does not take the whole process down. This does the
+ * same, more narrowly, for the startup default session: log the same readable message and
  * keep starting with no default session, rather than letting an uncaught
  * exception kill a daemon that (a) may serve other, working providers per
  * session and (b) is often the only way to reach this machine remotely to
@@ -857,7 +858,7 @@ export function createDefaultSessionIfNeeded({ sessionManager, defaultSessionId,
     return sessionManager.createSession({ name: 'Default' })
   } catch (err) {
     if (!isProviderPreflightError(err)) throw err
-    logger.warn(`✗ default session: ${err.message}`)
+    logger.warn(`✗ default session [${err.code}]: ${err.message}`)
     logger.warn('Starting with no default session — fix the provider (see the message above) and create a session from the app or dashboard, or restart once resolved.')
     return null
   }

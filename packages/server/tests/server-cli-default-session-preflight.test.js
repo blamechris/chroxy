@@ -126,6 +126,12 @@ describe('createDefaultSessionIfNeeded (#8029)', () => {
         logger.warnings.some((w) => w.includes(err.message)),
         `expected a logged warning to include the error message ${JSON.stringify(err.message)}, got ${JSON.stringify(logger.warnings)}`,
       )
+      // #8069 review: the stable code is logged too, so the line is greppable.
+      assert.ok(typeof err.code === 'string' && err.code.length > 0, 'fixture error carries a code')
+      assert.ok(
+        logger.warnings.some((w) => w.includes(`[${err.code}]`)),
+        `expected a logged warning to include the error code [${err.code}], got ${JSON.stringify(logger.warnings)}`,
+      )
     })
   }
 
