@@ -2337,12 +2337,20 @@ export class ClaudeTuiSession extends BaseSession {
         // refusal error for a destroyed session would reach no client.
         if (this._destroying) return
         // #5348: this attempt already consumed `_freshRetryPending` above to
-        // decide `--session-id` vs `--resume`, but the gate refused before
-        // claude ever saw either argv — the fresh-uuid decision this attempt
-        // was about to make is still owed. Re-arm it so the eventual revival
-        // still mints a new conversation instead of `--resume`-ing an id
-        // claude never learned about.
-        if (wasFreshRetry) this._freshRetryPending = true
+        // decide `--session-id` vs `--resume`, and the fresh-uuid decision it
+        // was making is still owed. Re-arm it so the eventual revival still
+        // starts a NEW conversation instead of `--resume`-ing an id claude may
+        // never have learned about — and give that revival a NEW uuid: a
+        // post-spawn refusal (#8057, the endpoint marker) DID launch claude
+        // with this `--session-id`, which claude may now hold, so reusing it
+        // could die "already in use" and, with the fallback latch still set,
+        // exhaust the session. For a pre-spawn refusal the old uuid was never
+        // used, so replacing it costs nothing.
+        if (wasFreshRetry) {
+          this._freshRetryPending = true
+          this._sessionId = randomUUID()
+          this._log = loggerForSession('claude-tui-session', this._sessionId)
+        }
         // The PTY that died before this attempt is still dead and no new one
         // was spawned, so restore the latch the top of this method cleared.
         // The top of this method already dropped the dead handle (#8043), so

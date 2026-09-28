@@ -553,6 +553,7 @@ describe('ClaudeTuiSession', () => {
           )
           assert.equal(killed, true, 'unverified PTY is stopped before it can become ready')
           assert.equal(candidate._term, null)
+          assert.equal(candidate._ptyExited, true, '#8057: the dropped PTY is marked exited on a direct spawn too')
           assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
           assert.equal(candidate.agentConnection.readiness.state, 'blocked')
           assert.equal(

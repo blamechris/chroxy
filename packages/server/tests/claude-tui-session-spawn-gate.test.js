@@ -523,6 +523,39 @@ describe('ClaudeTuiSession — native endpoint-marker refusal on a respawn (#805
     })
   }
 
+  it('a post-spawn refusal of a fresh-retry attempt re-arms the retry with a NEW uuid, so the revival never reuses the id claude was launched with', async () => {
+    const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
+    const control = { markerMode: 'mismatch' }
+    const { session, spawnCalls, cleanup } = makeNativeMarkerSession(sinkDir, control)
+    try {
+      // #5348 retry-FRESH attempt: a brand-new uuid, spawned with --session-id.
+      session._freshRetryPending = true
+      session._resumedFromPersisted = false
+      session._didFallbackFromUnknownResume = true
+      const launchedId = session._sessionId
+
+      await session._respawnPty()
+
+      assert.equal(spawnCalls.length, 1)
+      const firstArgs = spawnCalls[0].args
+      assert.equal(firstArgs[firstArgs.indexOf('--session-id') + 1], launchedId, 'claude was launched with the fresh id')
+      assert.equal(session._spawnRefusal?.code, 'NATIVE_ENDPOINT_ROUTE_MISMATCH')
+      assert.equal(session._freshRetryPending, true, 'the fresh retry is still owed')
+      assert.notEqual(session._sessionId, launchedId, 'but with a new uuid, not the one claude may now hold')
+
+      // Route fixed: the revival starts a new conversation with the NEW id.
+      control.markerMode = 'clean'
+      await session.sendMessage('hello again')
+      const reviveArgs = spawnCalls[1].args
+      assert.ok(reviveArgs.includes('--session-id'), 'still a fresh conversation, not --resume')
+      assert.notEqual(reviveArgs[reviveArgs.indexOf('--session-id') + 1], launchedId)
+      assert.equal(session._spawnRefusal, null)
+    } finally {
+      await cleanup()
+      rmSync(sinkDir, { recursive: true, force: true })
+    }
+  })
+
   it('after a route-mismatch refusal, the next input re-runs the spawn and a corrected route revives the session', async () => {
     const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
     const control = { markerMode: 'mismatch' }
