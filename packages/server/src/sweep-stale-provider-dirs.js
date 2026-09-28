@@ -20,10 +20,12 @@
  * boot. That residual is recorded in `docs/false-safety-guards.md` rather than
  * papered over in a comment here.
  *
- * Both sweeps are safe and unconditional: only dirs whose owner pid is DEAD are
- * removed, so a live daemon's dirs — including ours — are kept. Lazily imported
- * so a boot that uses neither provider pays nothing, and every failure is
- * warned rather than thrown so a sweep can never affect startup.
+ * All four sweeps (claude-tui, claude-cli, codex app-server, docker-byok —
+ * #8047 added the latter two) are safe and unconditional: only dirs whose
+ * owner pid is DEAD are removed, so a live daemon's dirs — including ours —
+ * are kept. Lazily imported so a boot that uses none of the four providers
+ * pays nothing, and every failure is warned rather than thrown so a sweep can
+ * never affect startup.
  */
 
 /**
@@ -43,6 +45,19 @@ export const DEFAULT_SWEEP_LOADERS = {
   'claude-cli sidecar-dir': async () => {
     const { CliSession } = await import('./cli-session.js')
     return (log) => CliSession.sweepStaleSidecarDirs(log)
+  },
+  // #7373 — codex app-server's per-session materialized-attachment dirs,
+  // same crash-leak shape as the two sweeps above.
+  'codex attach-dir': async () => {
+    const { CodexAppServerSession } = await import('./codex-app-server-session.js')
+    return (log) => CodexAppServerSession.sweepStaleAttachDirs(log)
+  },
+  // #7373 — docker-byok's per-session compose env-file dirs. This one is
+  // materially worse than a plain directory leak: the file holds
+  // ANTHROPIC_API_KEY, so an unswept orphan is a credential left in /tmp.
+  'docker-byok env-file-dir': async () => {
+    const { DockerByokSession } = await import('./docker-byok-session.js')
+    return (log) => DockerByokSession.sweepStaleEnvDirs(log)
   },
 }
 

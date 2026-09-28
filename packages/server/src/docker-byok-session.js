@@ -121,11 +121,12 @@
  */
 
 import { execFile } from 'child_process'
-import { mkdirSync, writeFileSync, unlinkSync } from 'fs'
+import { mkdirSync, writeFileSync, rmSync } from 'fs'
 import { createHash, randomBytes } from 'crypto'
 import { tmpdir } from 'os'
 import { isAbsolute, join, posix, resolve, sep } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
+import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import {
   applyEdit,
   GLOB_PATTERN_SHELL_METACHARS,
@@ -559,13 +560,29 @@ export class DockerByokSession extends ClaudeByokSession {
     // env, passed to every `docker exec` via `--env-file` so the key is
     // forwarded into model-spawned commands WITHOUT exposing it on the
     // host's process-listing (`docker exec --env KEY=secret` is visible
-    // in `ps`). The file is mode 0600 and lives under os.tmpdir(); it's
-    // unlinked on destroy() (and best-effort on start-failure paths).
+    // in `ps`). #7373 — the file no longer sits flat in os.tmpdir(): it
+    // lives inside `_composeEnvDir`, a dedicated `owner.pid`-stamped
+    // per-session dir under ENV_FILE_BASE (same shape as claude-tui's
+    // hook-sink dirs and claude-cli's permission-mode sidecar), so a
+    // SIGKILL/crash leaves the boot-time sweep able to remove an orphaned
+    // credential file instead of leaking it in /tmp forever. The file is
+    // mode 0600; destroy() removes the whole per-session dir (and
+    // best-effort on start-failure paths).
     this._composeEnvFile = null
-    // Test seam: override the writer / unlinker so tests can assert the
+    this._composeEnvDir = null
+    // Test seam: override the writer / remover so tests can assert the
     // file lifecycle without touching the real filesystem.
     this._writeEnvFile = opts._writeEnvFile || ((p, c) => writeFileSync(p, c, { mode: 0o600 }))
-    this._unlinkEnvFile = opts._unlinkEnvFile || ((p) => { try { unlinkSync(p) } catch { /* ignore */ } })
+    // #8047 review N2/N6 — named `_removeEnvDir`, not `_unlinkEnvFile`: it
+    // takes a DIRECTORY (not the bare file) and removes it recursively, so
+    // the owner.pid stamp is removed along with the credential. Every
+    // regular call site (_startComposeStack's two cleanup paths, destroy()'s
+    // primary path) passes the owning dir. The one exception is destroy()'s
+    // `composeEnvFile` fallback — a defensive branch for a state that
+    // should not arise (dir tracking lost while the file path survived) —
+    // which passes the bare file; rmSync handles a plain file the same as a
+    // dir, so the credential is still removed either way.
+    this._removeEnvDir = opts._removeEnvDir || ((p) => { try { rmSync(p, { recursive: true, force: true }) } catch { /* ignore */ } })
     this._envForApiKey = opts._envForApiKey || process.env
     // #5081 — crash-durable record of the compose project id so a daemon
     // crash between `compose up` and `compose down` leaves an on-disk paper
@@ -1573,6 +1590,34 @@ export class DockerByokSession extends ClaudeByokSession {
   }
 
   /**
+   * Base dir the per-session compose env-file dirs live under (#7373).
+   * Named once so `_startComposeStack()` and the boot sweep cannot drift
+   * onto two different paths. Mirrors `CliSession.PERMISSION_MODE_SIDECAR_BASE`
+   * and `ClaudeTuiSession.SINK_BASE`.
+   */
+  static get ENV_FILE_BASE() { return join(tmpdir(), 'chroxy-byok') }
+
+  /**
+   * #7373 — boot-time sweep of compose env-file dirs orphaned by a crash.
+   * destroy() removes a session's own dir, but a SIGKILL leaks it, so a
+   * long-lived host accumulates one per crashed compose-mode session that
+   * ever forwarded ANTHROPIC_API_KEY — a leaked API KEY, not just a leaked
+   * directory. Same ownership rule and implementation as the claude-tui sink
+   * sweep and the claude-cli sidecar sweep — only dirs whose `owner.pid` is
+   * DEAD are removed, so a live daemon's dirs (including this one's) are
+   * kept and the sweep is safe to run unconditionally at boot.
+   *
+   * @param {object} [logger] - logger with info/warn (defaults to module log)
+   * @returns {{swept:number, kept:number}}
+   */
+  static sweepStaleEnvDirs(logger = log) {
+    return sweepStaleOwnedDirs(DockerByokSession.ENV_FILE_BASE, {
+      logger,
+      label: 'docker-byok compose env-file',
+    })
+  }
+
+  /**
    * #5024: Bring up the compose stack and identify the primary service
    * container. The stack is owned by THIS session — destroy() runs
    * `docker compose down --remove-orphans` against the same project id.
@@ -1587,42 +1632,74 @@ export class DockerByokSession extends ClaudeByokSession {
    * #5079 — ANTHROPIC_API_KEY forwarding. The bare-image path forwards
    * the key via `docker run --env`; compose mode does the same job via
    * an `--env-file` tmpfile so the key is symmetric with the bare path
-   * without being exposed in `ps` output. The tmpfile is written at
-   * 0600 under os.tmpdir() and:
+   * without being exposed in `ps` output. #7373 — the tmpfile is written
+   * at 0600 inside an `owner.pid`-stamped, 0700 per-session dir under
+   * `ENV_FILE_BASE` (not bare under os.tmpdir()) and:
    *   - passed to `docker compose --env-file <path>` so a service that
    *     references `${ANTHROPIC_API_KEY}` in its compose file resolves
    *     the value during interpolation; and
    *   - reused on every `_execAsContainerUser` dispatch so a Bash command
    *     the model spawns inside the container (e.g. `curl
    *     api.anthropic.com` or a one-off `claude -p`) sees the key.
-   * destroy() unlinks the file. When `ANTHROPIC_API_KEY` is not set in
-   * the host env, no tmpfile is created — the path stays at `null` and
-   * `_execAsContainerUser` skips the `--env-file` flag.
+   * destroy() removes the whole per-session dir (not just the file), and a
+   * boot-time sweep (`sweepStaleEnvDirs`) removes a crashed session's dir
+   * too. When `ANTHROPIC_API_KEY` is not set in the host env, no dir is
+   * created — the path stays at `null` and `_execAsContainerUser` skips the
+   * `--env-file` flag.
    */
   async _startComposeStack() {
     if (!this._composeProject) {
       this._composeProject = `chroxy-byok-${randomBytes(6).toString('hex')}`
     }
     const cwd = this.cwd || process.cwd()
-    // #5079: write the ANTHROPIC_API_KEY tmpfile BEFORE compose up so
-    // the file is on disk for both compose interpolation AND for the
-    // exec dispatches that follow. Created at 0600 under os.tmpdir()
-    // with a session-scoped random suffix to avoid collision between
-    // parallel byok sessions on the same host.
+    // #5079/#7373: write the ANTHROPIC_API_KEY tmpfile BEFORE compose up so
+    // the file is on disk for both compose interpolation AND for the exec
+    // dispatches that follow. #7373 — the file lives inside a dedicated,
+    // `owner.pid`-stamped per-session dir under ENV_FILE_BASE rather than
+    // flat in os.tmpdir(), so a crash leaves the boot-time sweep able to
+    // tell a dead session's leftover credential from a live one's and
+    // remove only the dead one (the same shape ClaudeTuiSession's sink dirs
+    // and CliSession's permission-mode sidecar use — see
+    // utils/stale-session-dirs.js).
     const apiKey = this._envForApiKey?.ANTHROPIC_API_KEY
     if (apiKey) {
-      const envFilePath = join(tmpdir(), `chroxy-byok-${this._composeProject}.env`)
+      // #8047 review S1 — declared OUTSIDE the try so the catch can clean up
+      // a dir that was successfully created (and stamped with owner.pid)
+      // even when the LATER `_writeEnvFile` call is what throws (ENOSPC,
+      // EIO, a partial write). Without this, that dir — owner.pid plus
+      // whatever fragment of the key made it to disk — had nothing tracking
+      // it (`_composeEnvDir` is about to be nulled in the catch below), so
+      // destroy() would never remove it and the boot sweep would keep it
+      // forever: owner.pid still names this live daemon.
+      let dir = null
       try {
+        const base = ensureOwnedBaseDir(DockerByokSession.ENV_FILE_BASE)
+        dir = join(base, `s-${this._composeProject}`)
+        mkdirSync(dir, { recursive: true, mode: 0o700 })
+        // Stamp the owning pid so the boot-time sweep can tell a live
+        // daemon's dir from one orphaned by a crash. Best-effort: a missing
+        // pidfile just makes the dir sweep-eligible after a grace window —
+        // the safe default for an orphan.
+        try { writeFileSync(join(dir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
+        const envFilePath = join(dir, `${this._composeProject}.env`)
         this._writeEnvFile(envFilePath, `ANTHROPIC_API_KEY=${apiKey}\n`)
         this._composeEnvFile = envFilePath
+        this._composeEnvDir = dir
       } catch (err) {
         // Non-fatal: log and proceed without the env file. The model
         // running inside the container won't see the key (matching the
         // pre-#5079 behaviour) but the host-side agent loop is what
         // actually authenticates to Anthropic, so the session still
         // functions for the common case.
-        log.warn(`docker-byok compose: failed to write env-file ${envFilePath}: ${err.message}`)
+        //
+        // `dir` is only non-null once `ensureOwnedBaseDir` has already
+        // returned successfully, so this never touches an attacker's
+        // symlink target — a refusal from `ensureOwnedBaseDir` itself
+        // leaves `dir` at `null` and this is a no-op.
+        if (dir) this._removeEnvDir(dir)
+        log.warn(`docker-byok compose: failed to write env-file for ${this._composeProject}: ${err.message}`)
         this._composeEnvFile = null
+        this._composeEnvDir = null
       }
     }
     log.info(`docker-byok compose stack starting (file=${this._composeFile} project=${this._composeProject} service=${this._composeService || '<first>'})`)
@@ -1638,12 +1715,14 @@ export class DockerByokSession extends ClaudeByokSession {
         envFile: this._composeEnvFile,
       })
     } catch (err) {
-      // Compose up failed — unlink the tmpfile before re-throwing so a
+      // Compose up failed — remove the whole per-session env dir (the
+      // tmpfile AND its owner.pid stamp) before re-throwing so a
       // start-failure path doesn't leak the key on disk.
-      if (this._composeEnvFile) {
-        this._unlinkEnvFile(this._composeEnvFile)
-        this._composeEnvFile = null
+      if (this._composeEnvDir) {
+        this._removeEnvDir(this._composeEnvDir)
+        this._composeEnvDir = null
       }
+      this._composeEnvFile = null
       const error = new Error(`docker compose start failed: ${err.message}`)
       error.code = err.code || 'compose_start_failed'
       throw error
@@ -2454,17 +2533,20 @@ export class DockerByokSession extends ClaudeByokSession {
     // nulling state so the finally-block has them.
     const composeFile = this._composeFile
     const composeProject = this._composeProject
-    // #5079: unlink the ANTHROPIC_API_KEY tmpfile created at compose-up
-    // time. Snapshot the path BEFORE nulling so the finally-block has
-    // it; unlink AFTER `compose down` runs (the tmpfile is referenced
-    // by the down call indirectly via the project metadata, and we want
-    // a clean teardown order — compose first, then secret material).
+    // #5079/#7373: remove the ANTHROPIC_API_KEY tmpfile's owning dir
+    // created at compose-up time. Snapshot the path BEFORE nulling so the
+    // finally-block has it; remove AFTER `compose down` runs (the tmpfile
+    // is referenced by the down call indirectly via the project metadata,
+    // and we want a clean teardown order — compose first, then secret
+    // material).
     const composeEnvFile = this._composeEnvFile
+    const composeEnvDir = this._composeEnvDir
     const cwd = this.cwd || process.cwd()
     this._containerId = null
     this._containerReady = false
     this._acquiredFromPool = false
     this._composeEnvFile = null
+    this._composeEnvDir = null
     try {
       await super.destroy()
     } finally {
@@ -2489,9 +2571,14 @@ export class DockerByokSession extends ClaudeByokSession {
         } catch (err) {
           log.warn(`compose destroy failed: ${err.message}`)
         }
-        // Unlink the env-file last — best-effort, silent on missing.
-        if (composeEnvFile) {
-          this._unlinkEnvFile(composeEnvFile)
+        // Remove the env-file's owning dir last — best-effort, silent on
+        // missing. `composeEnvFile` alone (no dir) is a defensive fallback
+        // for a state that should not arise, so the credential is never
+        // left behind even if `_composeEnvDir` was somehow lost.
+        if (composeEnvDir) {
+          this._removeEnvDir(composeEnvDir)
+        } else if (composeEnvFile) {
+          this._removeEnvDir(composeEnvFile)
         }
       } else if (!containerId || !owned) {
         // Nothing for us to clean up — externally-managed container

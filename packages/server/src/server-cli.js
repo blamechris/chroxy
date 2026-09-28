@@ -1743,8 +1743,9 @@ export async function startCliServer(config) {
       .catch((err) => log.warn(`orphan-reaper failed: ${(err && err.message) || err}`))
   }
 
-  // #7374 — both providers' stale per-session dirs. The body lives in its own
-  // module so the sweep is covered by tests that RUN it; this block used to be
+  // #7374 — every provider's stale per-session dirs (claude-tui, claude-cli,
+  // codex app-server, docker-byok — #8047). The body lives in its own module
+  // so the sweep is covered by tests that RUN it; this block used to be
   // inline and was pinned only by a source grep, which stayed green with the
   // whole thing behind a false condition. Fire-and-forget: the function never
   // rejects, and a sweep must never affect startup.

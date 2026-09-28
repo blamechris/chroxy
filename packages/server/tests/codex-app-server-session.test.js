@@ -1,10 +1,12 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it, mock, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, utimesSync, symlinkSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, dirname, basename } from 'path'
 import { EventEmitter } from 'node:events'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
 import { CodexSession, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
 import {
@@ -1437,6 +1439,29 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
 describe('CodexAppServerSession — attachments (#6609)', () => {
   const PNG_B64 = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64')
 
+  // #8047 review N8 — every test here that materializes a binary attachment
+  // creates a real owner.pid-stamped dir under ATTACH_BASE. Left pointed at
+  // the real system tmpdir, a run leaves the empty `chroxy-codex-attach`
+  // base behind (harmless, but uncontained — unlike docker-byok's
+  // equivalent base after #8047 review N4). Pin it to a per-test sandbox,
+  // mirroring docker-byok-session.test.js's file-level beforeEach/afterEach.
+  let attachSandbox
+  let origAttachBase
+
+  beforeEach(() => {
+    attachSandbox = mkdtempSync(join(tmpdir(), 'chroxy-cas-attach-sandbox-'))
+    origAttachBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+    Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', {
+      get: () => join(attachSandbox, 'chroxy-codex-attach'),
+      configurable: true,
+    })
+  })
+
+  afterEach(() => {
+    if (origAttachBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origAttachBase)
+    rmSync(attachSandbox, { recursive: true, force: true })
+  })
+
   it('text-only input when there are no attachments', () => {
     const { s, cleanup } = mkSession()
     assert.deepEqual(s._buildTurnInput('hi', undefined, 'm1'), [{ type: 'text', text: 'hi' }])
@@ -1483,6 +1508,69 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     cleanup()
   })
 
+  it('the attach dir is an owner.pid-stamped session dir under ATTACH_BASE, not a bare mkdtemp (#7373)', async () => {
+    const { s, cleanup } = mkSession()
+    s._buildTurnInput('x', [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'a.png' }], 'm5')
+    const dir = s._attachDir
+    // #7373 — a bare `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))` left
+    // no liveness signal at all, so a crash-orphaned dir could never be told
+    // apart from a live session's. It now lives directly under the dedicated,
+    // owned ATTACH_BASE with an owner.pid stamp, the same shape ClaudeTuiSession
+    // and CliSession use for their own crash-leaked dirs.
+    assert.equal(dirname(dir), CodexAppServerSession.ATTACH_BASE, 'attach dir lives directly under ATTACH_BASE')
+    assert.match(basename(dir), /^s-/, 'attach dir is s-prefixed')
+    const pidFile = join(dir, OWNER_PID_FILE)
+    assert.ok(existsSync(pidFile), 'owner.pid stamped in the attach dir')
+    assert.equal(readFileSync(pidFile, 'utf8').trim(), String(process.pid))
+    await s.destroy()
+    cleanup()
+  })
+
+  // #8047 review C1 — the PR's headline security claim ("refuses a
+  // symlinked/foreign-uid base, same protection the tui/cli sites have")
+  // had no test at either new site. Swapping `ensureOwnedBaseDir(ATTACH_BASE)`
+  // for a plain `mkdirSync(base, {recursive:true})` left the whole suite
+  // green. Mirrors the pattern in claude-tui-session.test.js's "untrusted
+  // sink base dir" describe: plant the base as a symlink to a victim dir,
+  // and assert nothing was written THROUGH the link.
+  it(
+    'refuses a symlinked ATTACH_BASE — no attachment written through the link, turn degrades to text-only (#8047 review C1)',
+    { skip: SKIP_NO_SYMLINK },
+    () => {
+      const baseTmp = mkdtempSync(join(tmpdir(), 'chroxy-cas-basedir-'))
+      const origBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+      try {
+        const victim = join(baseTmp, 'victim')
+        const squatted = join(baseTmp, 'squatted-attach-base')
+        mkdirSync(victim, { recursive: true })
+        symlinkSync(victim, squatted)
+        Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', { get: () => squatted, configurable: true })
+
+        const { s, cleanup } = mkSession()
+        try {
+          const input = s._buildTurnInput(
+            'look at this',
+            [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'shot.png' }],
+            'm-symlink',
+          )
+
+          assert.equal(s._attachDir, null, 'no attach dir adopted through the symlinked base')
+          assert.equal(input.filter((i) => i.type === 'localImage').length, 0,
+            'no localImage item — the attachment could not be materialized')
+          assert.deepEqual(input, [{ type: 'text', text: 'look at this' }], 'turn degrades to text-only')
+          // The whole point: nothing was written THROUGH the link.
+          assert.deepEqual(readdirSync(victim), [],
+            'a plain mkdirSync would have created the session dir (owner.pid + the attachment) inside the attacker-controlled target')
+        } finally {
+          cleanup()
+        }
+      } finally {
+        if (origBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origBase)
+        rmSync(baseTmp, { recursive: true, force: true })
+      }
+    },
+  )
+
   it('skips an absolute / parent-traversing file_ref path (defence-in-depth, #6614)', () => {
     const { s, cleanup } = mkSession()
     for (const bad of ['/etc/passwd.jpg', '../secrets/key.png']) {
@@ -1499,6 +1587,81 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     const input = s._buildTurnInput('hi', [{ type: 'image', mediaType: 'image/png', name: 'nodata.png' }], 'm7')
     assert.deepEqual(input, [{ type: 'text', text: 'hi' }], 'malformed attachment omitted, prompt preserved')
     cleanup()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #7373 — boot-time sweep of materialized-attachment dirs orphaned by a
+// crash. Same ownership rule and test shape as
+// ClaudeTuiSession.sweepStaleSinkDirs / CliSession.sweepStaleSidecarDirs.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('CodexAppServerSession.sweepStaleAttachDirs (#7373)', () => {
+  const DEAD_PID = 999999
+  let created = []
+  let realKill
+  // #8047 review N8 — same containment as the attachments describe above:
+  // pin ATTACH_BASE to a per-test sandbox so this describe's own
+  // makeAttachDir fixtures don't leave the empty base behind in the real
+  // system tmpdir either.
+  let attachSandbox
+  let origAttachBase
+
+  beforeEach(() => {
+    created = []
+    // Deterministic dead-pid stub, matching the sibling sink-dir/sidecar-dir
+    // sweep suites: don't rely on 999999 being unused, delegate everything
+    // else to the real probe so our own live pid still reads alive.
+    realKill = process.kill.bind(process)
+    mock.method(process, 'kill', (pid, sig) => {
+      if (pid === DEAD_PID) { const e = new Error('ESRCH'); e.code = 'ESRCH'; throw e }
+      return realKill(pid, sig)
+    })
+    attachSandbox = mkdtempSync(join(tmpdir(), 'chroxy-cas-sweep-sandbox-'))
+    origAttachBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+    Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', {
+      get: () => join(attachSandbox, 'chroxy-codex-attach'),
+      configurable: true,
+    })
+  })
+
+  afterEach(() => {
+    mock.restoreAll()
+    for (const d of created) rmSync(d, { recursive: true, force: true })
+    if (origAttachBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origAttachBase)
+    rmSync(attachSandbox, { recursive: true, force: true })
+  })
+
+  function makeAttachDir(suffix, pidContent) {
+    const base = CodexAppServerSession.ATTACH_BASE
+    mkdirSync(base, { recursive: true })
+    const dir = join(base, `s-test-${suffix}-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    if (pidContent !== undefined) writeFileSync(join(dir, OWNER_PID_FILE), pidContent)
+    created.push(dir)
+    return dir
+  }
+
+  it('sweeps a DEAD-owner attach dir', () => {
+    const dir = makeAttachDir('dead', String(DEAD_PID))
+    const result = CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(!existsSync(dir), 'dead-owner attach dir swept')
+    assert.ok(result.swept >= 1)
+  })
+
+  it('keeps a LIVE-owner attach dir', () => {
+    const dir = makeAttachDir('live', String(process.pid))
+    const result = CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(existsSync(dir), 'live-owner attach dir kept')
+    assert.ok(result.kept >= 1)
+  })
+
+  it('sweeps a pidfile-less orphan once past the grace window', () => {
+    const dir = makeAttachDir('orphan', undefined)
+    const past = new Date(Date.now() - 120_000)
+    utimesSync(dir, past, past)
+    CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(!existsSync(dir), 'aged pidfile-less attach dir swept')
   })
 })
 

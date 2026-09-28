@@ -136,15 +136,20 @@ export function sweepStaleOwnedDirs(base, { prefix = 's-', graceMs = OWNED_DIR_S
  *
  * Throws when the base is a symlink, is not a directory, or (POSIX) is owned by
  * another uid. A base we DO own that is group/other-writable is not refused:
- * it is chmod-ed back to 0700 before use. What a caller DOES with that refusal is the caller's call, and the two
- * callers deliberately differ (#7372): `CliSession` degrades to env-var-only,
- * because its base carries only the permission-mode sidecar and losing
- * mid-session mode switching beats losing the session. `ClaudeTuiSession`
- * REFUSES to start — its base carries the whole hook pipeline (settings.json,
- * the hook payloads AND the sidecar), so running on would be a session that
- * reports success while the permission floor is silently unenforced. Do not
- * read either as the contract for a third caller; decide it from what the
- * base holds.
+ * it is chmod-ed back to 0700 before use. What a caller DOES with that refusal
+ * is the caller's call, and the four callers deliberately differ (#7372,
+ * #8047): `CliSession` degrades to env-var-only, because its base carries
+ * only the permission-mode sidecar and losing mid-session mode switching
+ * beats losing the session. `ClaudeTuiSession` REFUSES to start — its base
+ * carries the whole hook pipeline (settings.json, the hook payloads AND the
+ * sidecar), so running on would be a session that reports success while the
+ * permission floor is silently unenforced. `CodexAppServerSession` sends the
+ * turn as text-only (no attachments); `DockerByokSession` runs the container
+ * without the key forwarded via `--env-file` — both are the same "degrade
+ * rather than fail the session" choice `CliSession` makes, for the same
+ * reason: the refused artifact is not load-bearing for the rest of the
+ * session. Do not read any of these as the contract for a fifth caller;
+ * decide it from what the base holds.
  *
  * @param {string} base Directory to create or adopt.
  * @returns {string} `base`, once it is safe to write into.

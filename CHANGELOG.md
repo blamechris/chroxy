@@ -123,6 +123,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vanished pinned binary refuses the respawn with a message to start a new
   session, rather than spawning whatever `PATH` now resolves).
 
+- **`codex-app-server`'s attachment dir and `docker-byok`'s compose env-file —
+  which HOLDS `ANTHROPIC_API_KEY` — now leak on a crash no more than the two
+  session-dir classes #5323/#7337 already fixed do (#7373).** Both sites wrote
+  a per-session tmp artifact removed on `destroy()` but never on a crash:
+  `codex-app-server-session.js`'s materialized-attachment dir was a bare
+  `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))`, and
+  `docker-byok-session.js`'s `ANTHROPIC_API_KEY` tmpfile sat flat under
+  `tmpdir()` as `chroxy-byok-<project>.env`. Neither carried an ownership
+  signal, so a boot-time reaper could never tell a crashed session's leftover
+  apart from a live one's — deleting on age alone would have removed a live
+  session's credential file mid-use. Both now follow the shared shape
+  `sweepStaleOwnedDirs`/`ensureOwnedBaseDir` already established: a
+  dedicated, owned base dir (`ATTACH_BASE` / `ENV_FILE_BASE`), an
+  `s-`-prefixed per-session dir stamped with `owner.pid`, and the artifact
+  written inside it. `destroy()` removes the whole dir — for `docker-byok`
+  this is new (was: just the file); `codex-app-server`'s `destroy()` already
+  removed its whole `mkdtemp` dir and is unchanged in that respect, only the
+  dir's location and ownership stamp moved. A new boot sweep entry in
+  `sweep-stale-provider-dirs.js` (`CodexAppServerSession.sweepStaleAttachDirs`
+  / `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
+  including the API-key file — while a live owner's are never touched. No
+  second reaper implementation was added; both route through the existing
+  `sweepStaleOwnedDirs`.
+
+  **Not covered:** credentials leaked by a crash *before* this fix shipped —
+  the legacy flat `chroxy-byok-chroxy-byok-<hex>.env` (holds
+  `ANTHROPIC_API_KEY`; the doubled prefix is real — the old path was
+  `` `chroxy-byok-${composeProject}.env` `` and `composeProject` itself
+  already starts with `chroxy-byok-`) and `chroxy-codex-attach-<random>/` —
+  are outside the new sweep's two bases and are never swept automatically,
+  because the old flat files carry no `owner.pid` a sweep could use to tell
+  a genuinely-dead pre-upgrade session from one still running the old code
+  (for example a desktop daemon already upgraded alongside a CLI daemon that
+  hasn't been — deleting the latter's `--env-file` out from under it breaks
+  every later `docker exec` in that session). List and review them by hand
+  before removing anything (macOS/Linux; `find` has no direct Windows
+  equivalent, so on Windows check `%TEMP%`/`%TMP%` by hand instead):
+  ```
+  find "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}" -maxdepth 1 \( -type f -name 'chroxy-byok-chroxy-byok-*.env' \) -o \( -type d -name 'chroxy-codex-attach-*' \)
+  ```
+  For each `chroxy-byok-chroxy-byok-<hex>.env` match, the compose project is
+  the filename with the leading `chroxy-byok-` and trailing `.env` stripped
+  (`chroxy-byok-<hex>`) — `docker compose ls -a` shows whether that project
+  is still up before you touch its env-file.
+
 - **`gemini` and `codex exec` sessions now re-verify their binary before
   every turn, not just at session create (#8035).** #8030 (below) closed this
   gap for the Agent SDK; the per-turn subprocess providers were the ones left

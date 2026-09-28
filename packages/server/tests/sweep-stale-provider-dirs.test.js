@@ -13,6 +13,9 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   sweepStaleProviderDirs,
@@ -99,15 +102,83 @@ describe('sweepStaleProviderDirs (#7374)', () => {
     )
   })
 
+  // The routing table the two describes below both use — the LOADERS roster
+  // (checked in both directions, #8047 review S5) and the per-loader
+  // "routes to the real static" spy tests. One list, so it cannot drift
+  // between the two checks that read it.
+  const ROUTING_TABLE = [
+    ['claude-tui sink-dir', '../src/claude-tui-session.js', 'ClaudeTuiSession', 'sweepStaleSinkDirs'],
+    ['claude-cli sidecar-dir', '../src/cli-session.js', 'CliSession', 'sweepStaleSidecarDirs'],
+    ['codex attach-dir', '../src/codex-app-server-session.js', 'CodexAppServerSession', 'sweepStaleAttachDirs'],
+    ['docker-byok env-file-dir', '../src/docker-byok-session.js', 'DockerByokSession', 'sweepStaleEnvDirs'],
+  ]
+
   // The real loaders, exercised for real. This is what makes the default
   // wiring behavioural rather than a claim: it imports the actual provider
   // modules and reaches the actual static sweep methods.
   describe('DEFAULT_SWEEP_LOADERS — the real wiring', () => {
-    it('covers both providers', () => {
+    // #8047 review S5 — renamed from "covers every provider": that title
+    // claimed a two-directional check this test never performed. It only
+    // ever asked "are these four IN the roster" — a fifth site that forgets
+    // to register a loader would stay green here forever. Renamed to say
+    // exactly what it checks; the reverse direction is the next test.
+    it('is exactly these four loaders', () => {
       assert.deepEqual(Object.keys(DEFAULT_SWEEP_LOADERS).sort(), [
         'claude-cli sidecar-dir',
         'claude-tui sink-dir',
+        'codex attach-dir',
+        'docker-byok env-file-dir',
       ])
+    })
+
+    // #8047 review S5 — the OTHER direction. A module that creates an owned,
+    // swept per-session dir writes `OWNER_PID_FILE`, calls
+    // `ensureOwnedBaseDir`, or writes the literal `owner.pid` filename (S5c:
+    // a writer could spell the stamp as a literal instead of importing the
+    // constant, same file on disk, invisible to an identifier-only scan).
+    // Scan `src/` for every such marker and assert that set equals the
+    // modules named in ROUTING_TABLE (and so, transitively, in
+    // DEFAULT_SWEEP_LOADERS). A module that starts stamping an owner-pid file
+    // but is never added to the routing table would leak forever with no
+    // boot sweep, and the test above alone would never catch it — this is
+    // the "roster diffs must read both directions" shape documented in
+    // project memory, applied to this file's own roster.
+    it('every module that marks itself as an owned-dir writer is named in the routing table (reverse check)', () => {
+      const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+      // #8047 review S6 — excludes exactly ONE file by exact path, not the
+      // whole `utils/` directory (29 files). The excluded file is
+      // `OWNER_PID_FILE`'s own home: it defines and reads the marker, it
+      // doesn't create an owned dir itself. Every OTHER file under `utils/`
+      // — including a plausible fifth writer like
+      // `utils/permission-mode-sidecar.js` — is scanned like any other
+      // module. round-1's `if (entry.name === 'utils') continue` excluded
+      // the whole subtree and was never exercised against a writer actually
+      // placed there; this is that gap closed.
+      const OWNER_PID_FILE_HOME = join(srcDir, 'utils', 'stale-session-dirs.js')
+      const MARKER = /OWNER_PID_FILE|ensureOwnedBaseDir|owner\.pid/
+      const writers = []
+      const walk = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name)
+          if (entry.isDirectory()) {
+            walk(full)
+            continue
+          }
+          if (!entry.name.endsWith('.js')) continue
+          if (full === OWNER_PID_FILE_HOME) continue
+          const src = readFileSync(full, 'utf8')
+          if (MARKER.test(src)) {
+            writers.push(`../src/${relative(srcDir, full).split('\\').join('/')}`)
+          }
+        }
+      }
+      walk(srcDir)
+      const routed = ROUTING_TABLE.map(([, modulePath]) => modulePath)
+      assert.deepEqual(
+        writers.sort(),
+        routed.sort(),
+        'a module that stamps OWNER_PID_FILE but is missing from ROUTING_TABLE/DEFAULT_SWEEP_LOADERS would leak forever with no boot sweep',
+      )
     })
 
     for (const label of Object.keys(DEFAULT_SWEEP_LOADERS)) {
@@ -135,10 +206,7 @@ describe('sweepStaleProviderDirs (#7374)', () => {
     // Spy the real static method instead: it proves the loader reaches the
     // real class and threads the logger and the tally through, and it touches
     // no filesystem.
-    for (const [label, modulePath, className, method] of [
-      ['claude-tui sink-dir', '../src/claude-tui-session.js', 'ClaudeTuiSession', 'sweepStaleSinkDirs'],
-      ['claude-cli sidecar-dir', '../src/cli-session.js', 'CliSession', 'sweepStaleSidecarDirs'],
-    ]) {
+    for (const [label, modulePath, className, method] of ROUTING_TABLE) {
       it(`${label}: routes to ${className}.${method} and returns its tally`, async () => {
         const ns = await import(modulePath)
         const Klass = ns[className]
