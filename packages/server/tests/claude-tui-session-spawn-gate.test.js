@@ -320,6 +320,43 @@ describe('ClaudeTuiSession — respawn spawn gate (#8038)', () => {
 })
 
 describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)', () => {
+  it('a hook-settings write failure before the auth check is NOT a refusal: it keeps the backoff and blocks readiness', async () => {
+    let authCalls = 0
+    const { session, spawnCalls, cleanup } = makeGatedSession({
+      ctorOpts: {
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/native/claude',
+        connectionRuntimePreflight: () => '/fixture/native/claude',
+        connectionAuthStatusRunner: async () => { authCalls++; return { status: 0, stdout: '{}' } },
+      },
+    })
+    try {
+      session._sessionId = 'fixture-uuid-8044-io'
+      // A sink dir that does not exist: writeHookSettings throws (a local I/O
+      // failure, not a verdict about the host).
+      session._sinkDir = join(tmpdir(), `chroxy-8044-missing-${process.pid}`, 'nested')
+      session._settingsPath = join(tmpdir(), 'fixture-settings.json')
+      session._resumedFromPersisted = true
+      session.agentConnection = {
+        authentication: { requested: 'native', observed: 'native' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+      }
+
+      await session._respawnPty()
+
+      assert.equal(authCalls, 0, 'the auth check never ran')
+      assert.equal(spawnCalls.length, 0)
+      assert.equal(session._spawnRefusal, null, 'an I/O failure does not latch a refusal')
+      assert.equal(session._respawnScheduled, true, 'the ordinary backoff handles it')
+      assert.equal(session.agentConnection.readiness.state, 'blocked', 'readiness is still blocked for this spawn')
+    } finally {
+      await cleanup()
+    }
+  })
+
   it('a logged-out auth status latches a refusal instead of burning the backoff; the next input re-checks, and a login revives the session in place', async () => {
     const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
     let loggedIn = false
@@ -358,6 +395,12 @@ describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)',
       session._settingsPath = join(sinkDir, 'settings.json')
       session._resumedFromPersisted = true
       session._respawnCount = 2
+      session.agentConnection = {
+        authentication: { requested: 'native', observed: 'native' },
+        entitlement: { route: 'subscription', status: 'unknown' },
+        readiness: { state: 'ready', reasonCode: null, message: 'Prior spawn was verified.', recoveryAction: null },
+        provenance: { observedAt: '2026-09-12T00:00:00.000Z' },
+      }
       const errors = []
       session.on('error', (e) => errors.push(e))
       const exhausted = []
@@ -370,6 +413,9 @@ describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)',
       assert.equal(spawnCalls.length, 0, 'node-pty never reached')
       assert.deepEqual(errors.map((e) => e.code), ['NATIVE_LOGIN_REQUIRED'], 'the native code, once')
       assert.equal(errors[0].message, session._spawnRefusal?.message, 'with the verdict\'s own message')
+      assert.ok(/claude auth login/.test(errors[0].message), 'the message tells the user how to recover')
+      assert.equal(session.agentConnection.readiness.state, 'blocked')
+      assert.equal(session.agentConnection.readiness.reasonCode, 'NATIVE_LOGIN_REQUIRED')
       assert.ok(!/failed to stay alive/i.test(errors[0].message))
       assert.equal(session._respawnScheduled, false, 'no backoff armed for a deterministic verdict')
       assert.equal(session._respawnCount, 0, 'the backoff chain reset')
@@ -392,6 +438,7 @@ describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)',
       assert.equal(session._spawnRefusal, null)
       assert.equal(accepted[0]?.status, 'accepted')
       assert.ok(writes.join('').includes('hello again'), 'the input was typed into the revived PTY')
+      assert.equal(session.agentConnection.readiness.state, 'ready', 'readiness recovers with the session')
       assert.deepEqual(exhausted, [])
     } finally {
       await cleanup()

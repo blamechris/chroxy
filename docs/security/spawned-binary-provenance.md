@@ -539,12 +539,19 @@ refusal there throws out of `start()` before the client is created, and
 **The `claude-tui` native auth route's `claude auth status` verdict is refused
 the same way (#8044).** On an explicit native agent-connection session, every
 PTY (re)spawn runs `claude auth status`. A logged-out host
-(`NATIVE_LOGIN_REQUIRED`), a non-first-party route (`NATIVE_AUTH_ROUTE_MISMATCH`)
-or unreadable status output (`NATIVE_AUTH_STATUS_UNVERIFIED`) is a verdict about
-the host, not a PTY that failed to stay up: nothing is spawned, the native code
-is emitted once with its own message, no backoff is armed, and the session
-stays listed and idle. The next input re-runs the check, so a `claude login`
-recovers it in place. Before this, each respawn re-ran the check up to five
+(`NATIVE_LOGIN_REQUIRED`) or a non-first-party route (`NATIVE_AUTH_ROUTE_MISMATCH`)
+is a verdict about the host, not a PTY that failed to stay up: nothing is
+spawned, the native code is emitted once with its own message, no backoff is
+armed, and the session stays listed and idle. The next input re-runs the check,
+so a `claude login` recovers it in place. `NATIVE_AUTH_STATUS_UNVERIFIED` is
+refused the same way, although it also covers the probe itself failing (its 5s
+timeout, a spawn or resource error, oversized or unparseable output), which can
+be transient: the trade is deliberate — the next input retries, where the old
+backoff retried five times and then destroyed the session. A probe that fails
+with an uncoded error (e.g. the binary vanished or was quarantined between the
+gate and the probe) is refused too, as `SPAWN_REFUSED`. The endpoint-marker
+check after the spawn (`NATIVE_ENDPOINT_*`) still takes the backoff path
+(#8057). Before this, each respawn re-ran the check up to five
 times over about 30s and then destroyed the session with a
 `pty_respawn_exhausted` "failed to stay alive".
 

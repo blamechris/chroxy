@@ -2197,9 +2197,15 @@ export class ClaudeTuiSession extends BaseSession {
       // contract as CliSession's `_spawnPersistentProcess` gate refusal.
       // Identity check (not error-code sniffing): `_spawnPty` sets
       // `this._spawnRefusal = err` to this EXACT thrown object only on its
-      // two gate-refusal paths — any other throw (native auth-status /
-      // endpoint mismatch, node-pty import failure, …) leaves it unset.
+      // refusal paths — the binary gate, the native re-check before the spawn,
+      // and (#8044) the native `claude auth status` verdict. Any other throw
+      // (the nonce / hook-settings write, the post-spawn endpoint-marker check
+      // — #8057, a node-pty import failure, …) leaves it unset.
       if (err === this._spawnRefusal) {
+        // A destroy() that landed while this respawn was awaiting (e.g. the
+        // native `claude auth status` probe) owns the session's end; a coded
+        // refusal error for a destroyed session would reach no client.
+        if (this._destroying) return
         // #5348: this attempt already consumed `_freshRetryPending` above to
         // decide `--session-id` vs `--resume`, but the gate refused before
         // claude ever saw either argv — the fresh-uuid decision this attempt
@@ -2508,15 +2514,17 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
     } catch (err) {
-      // #8044: `claude auth status` reporting logged-out, a non-first-party
-      // route, or unreadable output (NATIVE_LOGIN_REQUIRED /
-      // NATIVE_AUTH_ROUTE_MISMATCH / NATIVE_AUTH_STATUS_UNVERIFIED) is a
-      // deterministic verdict about the host's auth state, not a PTY that
-      // failed to stay up. Latch it exactly like a #8038 gate refusal:
-      // `_respawnPty` then arms no backoff (which used to re-run the check ≤5
-      // times and end in a misleading `pty_respawn_exhausted`), emits the
-      // native code once, and the next input re-runs the check — so a
-      // `claude login` recovers the session in place.
+      // #8044: `claude auth status` reporting logged-out
+      // (NATIVE_LOGIN_REQUIRED) or a non-first-party route
+      // (NATIVE_AUTH_ROUTE_MISMATCH) is a verdict about the host's auth state,
+      // not a PTY that failed to stay up. NATIVE_AUTH_STATUS_UNVERIFIED also
+      // covers the probe itself failing (its 5s timeout, spawn/resource errors,
+      // oversized or unparseable output), which can be transient — latched all
+      // the same, deliberately: the next input re-runs the check, whereas the
+      // backoff it replaces re-ran it ≤5 times and then DESTROYED the session
+      // with a misleading `pty_respawn_exhausted`. Latch it exactly like a
+      // #8038 gate refusal: `_respawnPty` arms no backoff, emits the native
+      // code once, and a `claude login` recovers the session in place.
       this._spawnRefusal = err
       this._blockNativeRouteVerification(err)
       throw err

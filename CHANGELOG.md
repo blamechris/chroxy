@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A logged-out `claude-tui` native session no longer burns its respawn
   budget into "failed to stay alive" (#8044).** On an explicit native
   agent-connection session, a PTY respawn whose `claude auth status` reports
-  logged out, a non-first-party route or unreadable output is now refused like
-  a #8038 binary-gate refusal: nothing is spawned, the native code
+  logged out, a non-first-party route or unreadable output (including the
+  probe itself timing out or failing, which can be transient) is now refused
+  like a #8038 binary-gate refusal: nothing is spawned, the native code
   (`NATIVE_LOGIN_REQUIRED`, `NATIVE_AUTH_ROUTE_MISMATCH` or
   `NATIVE_AUTH_STATUS_UNVERIFIED`) is emitted once, no backoff is armed, and
   the session stays listed. The next input re-runs the check, so running
@@ -42,8 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   count resets, so a refused binary can no longer burn that budget into a
   misleading `respawn_exhausted` / `pty_respawn_exhausted` "failed to stay
   alive" (this includes the `claude-tui` native route, whose binary-gate
-  refusals used to do exactly that; its auth-status refusals still take the
-  backoff path, #8044). The session sits idle until something asks for a new spawn
+  refusals used to do exactly that; its auth-status refusals did too until
+  #8044, above). The session sits idle until something asks for a new spawn
   — the next input, or for `claude-cli` also a model or permission-mode change
   — which re-runs the gate; an input the gate still refuses is rejected with
   the gate's code rather than queued, and `claude-cli` messages queued before
