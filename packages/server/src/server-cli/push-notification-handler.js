@@ -80,7 +80,15 @@ export class PushNotificationHandler {
       : pushManager.hasTokens
 
     if (event === 'ready') {
-      log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
+      // #7327 review N4: `data.model` alone is the CONFIGURED model (often
+      // null for claude-tui's default, un-overridden case) — fall back to
+      // the entry's `bootedModel` observation, same precedence
+      // event-normalizer's `ready` handler uses for `model_changed`, so this
+      // log line doesn't read "model: null" on the exact event that exists
+      // to report a model.
+      const entry = sessionManager.getSession(sessionId)
+      const reportedModel = data.model || entry?.session?.model || entry?.session?.bootedModel || null
+      log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${reportedModel})`)
     } else if (event === 'error') {
       log.error(`Session ${sessionId} error: ${data.message}`)
       // Error is already broadcast as { type: 'message', messageType: 'error' } through

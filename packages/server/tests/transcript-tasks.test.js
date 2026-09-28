@@ -486,4 +486,16 @@ describe('TranscriptTaskScanner — observedModel (#7327)', () => {
     assert.equal(snap.observedModel, 'claude-opus-5')
     assert.equal(snap.backgroundTasks.length, 1)
   })
+
+  it('ignores a sidechain entry\'s model — a subagent turn can run a different model (review N2)', () => {
+    const main = assistantTextLine({ model: 'claude-sonnet-5', ts: '2026-06-10T02:39:00.000Z' })
+    const sidechain = JSON.stringify({
+      type: 'assistant',
+      isSidechain: true,
+      timestamp: '2026-06-10T02:39:30.000Z',
+      message: { role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'subagent output' }] },
+    })
+    const snap = new TranscriptTaskScanner(writeTranscript([main, sidechain])).scan()
+    assert.equal(snap.observedModel, 'claude-sonnet-5', 'the sidechain entry\'s model must not overwrite the main session\'s observation')
+  })
 })

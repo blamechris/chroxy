@@ -25,15 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used for background-task tracking, #5431) now also tracks the most
   recently observed `message.model` as it reads, excluding the harness's own
   `<synthetic>` placeholder entries (API-error stand-ins) so a transient
-  error never reports a fake model. `ClaudeTuiSession` adopts that
-  observation into `bootedModel` at every turn end and, only when it
-  actually changed, re-emits `ready` — the same event path CliSession/
-  SdkSession use to report their own booted model — so the badge/header
-  update live without a respawn. This is strictly an OBSERVATION: it is
-  never derived from the session's configured/requested `model` option, and
-  model *switching* remains unavailable for claude-tui (`modelSwitch:
-  false`, tracked separately by #7855); discovery of available models is
-  #7348.
+  error never reports a fake model. `ClaudeTuiSession` re-checks that
+  observation at the end of every turn that reaches the normal success or
+  error teardown path (hard-timeout, stream-stall and interrupt paths defer
+  to the next completed turn or a respawn instead) and, only when it
+  actually changed `bootedModel`, re-emits `ready` — the same event path
+  CliSession/SdkSession use to report their own booted model — so the
+  badge/header update live without a respawn. The re-emit is skipped
+  outright when the PTY has already died or the session is tearing down
+  (`ready` never announces a session nothing can talk to); the observation
+  is still recorded for the next boot/respawn to report. This is strictly an
+  OBSERVATION: it is never derived from the session's configured/requested
+  `model` option, and model *switching* remains unavailable for claude-tui
+  (`modelSwitch: false`, tracked separately by #7855); discovery of
+  available models is #7348.
 
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified

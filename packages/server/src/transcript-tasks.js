@@ -264,10 +264,16 @@ export class TranscriptTaskScanner {
     if (entry.type === 'assistant') {
       // #7327: an OBSERVATION of the model this turn actually ran on — never
       // a stand-in for the requested/configured model. Excludes the
-      // synthetic placeholder (see SYNTHETIC_MODEL) and any non-string/empty
-      // value; a later real observation always supersedes an earlier one.
+      // synthetic placeholder (see SYNTHETIC_MODEL), any non-string/empty
+      // value, and a sidechain entry (review N2) — a subagent turn can run a
+      // DIFFERENT model than the main conversation, and this scanner reports
+      // the main session's own model. A later real observation always
+      // supersedes an earlier one.
       const observedModel = entry?.message?.model
-      if (typeof observedModel === 'string' && observedModel && observedModel !== SYNTHETIC_MODEL) {
+      if (
+        entry.isSidechain !== true &&
+        typeof observedModel === 'string' && observedModel && observedModel !== SYNTHETIC_MODEL
+      ) {
         this._observedModel = observedModel
       }
       const blocks = entry?.message?.content
