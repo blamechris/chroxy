@@ -651,5 +651,35 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.equal(bStale._changedKeys.has(key), false,
         'a skipped touch must forget its retained op — not just self-heal in memory — so a later flush cannot replay it against a different disk state')
     })
+
+    // #8072 review round 3 S5 — pins round 2's N2 fix. A matching-hash touch
+    // applies ONLY the bumped approval timestamp on top of the BASE record;
+    // every other field comes from disk, which may reflect a revoke-then-
+    // re-approve (same hash) this instance never saw. Reverting to the
+    // wholesale `merged[key] = this._records[key]` write puts this
+    // instance's stale metadata back on disk.
+    it('a matching-hash touch applies only the approval timestamp on top of the disk record (#8072 review round 3 S5)', () => {
+      writeFileSync(ledgerPath, JSON.stringify({ records: {
+        '/x/p': { sha256: sha('v1'), approvedAt: '2026-01-01T00:00:00.000Z', firstSeen: 'stale-instance-view' },
+      } }))
+      const bStale = new TestLedger({ filePath: ledgerPath })
+
+      // Another process revokes and re-approves P with the SAME hash, which
+      // rewrites the record's metadata — bStale never reloads.
+      writeFileSync(ledgerPath, JSON.stringify({ records: {
+        '/x/p': { sha256: sha('v1'), approvedAt: '2026-06-01T00:00:00.000Z', firstSeen: 're-approved-elsewhere' },
+      } }))
+
+      const key = bStale._normalizeKey('/x/p')
+      const bumped = '2026-09-28T00:00:00.000Z'
+      bStale._setRecord(key, { ...bStale._records[key], approvedAt: bumped }, 'touch')
+      bStale.flush()
+
+      const rec = JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/p']
+      assert.equal(rec.sha256, sha('v1'))
+      assert.equal(rec.approvedAt, bumped, 'the touch\'s own bumped timestamp lands')
+      assert.equal(rec.firstSeen, 're-approved-elsewhere',
+        'every other field must come from the disk record, not this instance\'s stale copy')
+    })
   })
 })

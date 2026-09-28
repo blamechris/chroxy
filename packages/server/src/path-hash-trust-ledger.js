@@ -591,7 +591,9 @@ export class PathHashTrustLedger {
     // set so the next flush retries, matching a failed WRITE's own policy.
     // The thrown/warned message names the SAME underlying code a failed
     // WRITE to this same broken path would have surfaced (EACCES, EISDIR,
-    // ...), so a caller pattern-matching on that code sees identical text.
+    // ...) in its MESSAGE, so a caller matching on the message text sees
+    // the same code. The thrown Error carries no `.code` property, unlike a
+    // re-thrown write failure; no current caller reads `.code`.
     if (ioError) {
       this._log.warn(`Could not persist trust file (${ioErrorDetail}); skipping this flush, will retry`)
       if (this._throwOnFlushError) {
