@@ -309,9 +309,12 @@ export function createAcpSessionClass(rawEntry) {
           ...spawnSpec.options,
         })
       } catch (err) {
-        // #8035 — see labelAcpSpawnFailure for which failures get a label.
+        // #8035 — see labelAcpSpawnFailure for which failures get a label. The
+        // label keeps the spawn error's own code, which may be the real cause.
         const labeled = labelAcpSpawnFailure(entryRef, `Failed to spawn ACP agent "${entryRef.label}"`)
-        throw new Error(labeled || `Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
+        throw new Error(labeled
+          ? `${labeled} (${err?.code || err?.message})`
+          : `Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
       }
       this._child = child
 
@@ -760,7 +763,9 @@ export function createAcpSessionClass(rawEntry) {
       if (this._destroying) return
       // #8035 — same backstop as start()'s sync spawn catch.
       const labeled = labelAcpSpawnFailure(this._acpEntry, `Failed to run ACP agent "${this._acpEntry.label}"`)
-      this._reportTeardown(labeled || `Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
+      this._reportTeardown(labeled
+        ? `${labeled} (${err?.code || err?.message})`
+        : `Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
     }
 
     /**

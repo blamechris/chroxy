@@ -224,6 +224,21 @@ class TestCodexSpawnGate extends CodexSession {
 }
 registerProvider('test-codex-spawn-gate-8035', TestCodexSpawnGate)
 
+// #8035 review — the same Gemini fixture with a REQUIRED credential, so the
+// per-turn gate's credential re-check (runProviderPreflight runs it on the
+// pinned path too) has something to refuse.
+const REQUIRED_CRED_8035 = '__CHROXY_8035_REQUIRED_CRED__'
+class TestGeminiCredentialGate extends TestGeminiSpawnGate {
+  static get preflight() {
+    return {
+      label: 'Test Gemini Credential Gate',
+      binary: { name: 'node', candidates: [] },
+      credentials: { envVars: [REQUIRED_CRED_8035], hint: `set ${REQUIRED_CRED_8035}`, optional: false },
+    }
+  }
+}
+registerProvider('test-gemini-credential-gate-8035', TestGeminiCredentialGate)
+
 // A shim that writes a MARKER the instant it actually runs, so a refused turn
 // can be proven to have never spawned (marker absent) rather than only
 // inferred. No JSONL output needed — JsonlSubprocessSession's default
@@ -721,4 +736,44 @@ describe('SessionManager end-to-end — per-turn subprocess spawn gate, Gemini +
       }
     })
   }
+
+  it('a required credential removed between turns refuses the next turn with PROVIDER_CREDENTIAL_MISSING', async () => {
+    const { dir, shimPath, markerPath } = makeGateShim()
+    // _buildArgs reads the parent fixture's static, not this subclass's.
+    TestGeminiSpawnGate.shimPath = shimPath
+    const saved = process.env[REQUIRED_CRED_8035]
+    process.env[REQUIRED_CRED_8035] = 'present'
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-gemini-credential-gate-8035', skipPersist: true })
+      const session = mgr.getSession(id).session
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      const results = []
+      session.on('result', (d) => results.push(d))
+
+      await session.sendMessage('turn one')
+      await waitFor(() => results.length >= 1 || errors.length >= 1, { label: 'turn 1 settle' })
+      assert.deepEqual(errors.map((e) => e.message), [], 'turn 1 runs with the credential set')
+      assert.equal(existsSync(markerPath), true, 'turn 1 spawned')
+      await waitFor(() => !session.isRunning, { label: 'turn 1 fully closed' })
+
+      unlinkSync(markerPath)
+      delete process.env[REQUIRED_CRED_8035]
+      const admissions = []
+      await session.sendMessage('turn two', [], { onInputAdmission: (a) => admissions.push(a) })
+
+      assert.equal(errors.length, 1, 'turn 2 produced exactly one refusal')
+      assert.equal(errors[0].code, 'PROVIDER_CREDENTIAL_MISSING')
+      assert.equal(existsSync(markerPath), false, 'turn 2 never spawned')
+      assert.equal(admissions[0]?.status, 'rejected')
+      assert.equal(admissions[0]?.reason, 'PROVIDER_CREDENTIAL_MISSING')
+    } finally {
+      if (id) mgr.destroySession(id)
+      if (saved === undefined) delete process.env[REQUIRED_CRED_8035]
+      else process.env[REQUIRED_CRED_8035] = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

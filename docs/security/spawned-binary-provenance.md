@@ -49,9 +49,11 @@ unverified-binaries gap it exposed is real regardless.)
 | `quarantined` | macOS: present + executable but carries a **blocking** `com.apple.quarantine` xattr | `ProviderBinaryQuarantinedError` / doctor `fail` |
 
 - **Preflight gate (per session-create; per turn for `claude-sdk`, `gemini`, and
-  `codex exec`, §5).** `runProviderPreflight` re-resolves the
+  `codex exec`, §5).** At create, `runProviderPreflight` resolves the
   binary fresh and prefers the provider's live `resolvedBinary` — the exact path
   the spawn will use — so the existence gate and the spawn can no longer diverge.
+  The per-turn re-check does not re-resolve: it verifies the path pinned at
+  create (§5).
   A quarantined binary throws `ProviderBinaryQuarantinedError`
   (`code: PROVIDER_BINARY_QUARANTINED`), which `createSession` propagates and the
   WS layer surfaces as a `session_error` with that code (see
@@ -195,8 +197,9 @@ before #8035 only `claude-sdk` did, and the per-turn subprocess providers
 (gemini, `codex exec`) verified their binary only at create. Some spawns
 still run with no per-spawn gate: `claude-cli` and `claude-tui` respawns and
 `codex` app-server's `start()` (#8038), the `codex` model-catalog probe
-(#8036), and web tasks (#8039). The §5 table lists what each provider verifies
-and when.
+(#8036), web tasks (#8039), and the `chroxy start` dependency checks, which run
+each provider binary and `cloudflared` with `--version` (#8041). The §5 table
+lists what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -391,9 +394,13 @@ now refuses the NEXT TURN of every live `claude-sdk` session with
 `PROVIDER_BINARY_PROVENANCE`, not only the next session create, until the new
 hash is re-approved. That is the promise `block` mode makes, now kept for a
 provider that spawns per turn. Since #8035 the same is true of every live
-`gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session too — an
-in-place `npm i -g` over either binary now refuses the next turn instead of
-silently spawning the swapped binary until the session is recreated. In `warn`
+`gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session, with one
+qualification: the gate hashes only the file at the pinned path. For an
+npm-installed `codex` that file is the `bin/codex.js` launcher, which execs a
+native binary from a separate platform package; for `gemini` it is
+`bundle/gemini.js`, which loads dozens of chunk files. A change to that file
+refuses the next turn, but an `npm i -g` that replaces only the native binary
+or a chunk leaves the pinned hash unchanged and is not detected (#8040). In `warn`
 mode the mismatch is logged on every turn until it is re-approved, since
 `verifyProvenance` deliberately never re-pins a mismatch on its own.
 
@@ -406,7 +413,9 @@ here. And this closes the gap for `claude-sdk` specifically, but means it now
 inherits the SAME exposure P1/P2 already cover for
 `claude-cli`/`claude-tui`/`claude-channel`: quarantine detection, and (opt-in)
 the SHA-256 pin ledger + signature gate — now re-checked every turn instead of
-once. Nothing provider-specific was added for the version gate below — it is
+once. The pin covers only the bytes at the resolved path; a launcher that execs
+or loads other files (npm `codex`, npm `gemini`) leaves those files unhashed
+(#8040). Nothing provider-specific was added for the version gate below — it is
 generic `runProviderPreflight` machinery any provider can opt into via
 `spec.binary.minVersion` and/or `spec.binary.recommendedVersion`. The
 create-time preflight call still logs the #8031 soft-floor warning as before;
@@ -488,20 +497,22 @@ the same installed `claude` on the end user's machine.
 | One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
 | `codex` model-catalog probe (post-auth `available_models` refresh) | none | none — spawns `codex app-server` from a fresh, unverified resolve with no session involved (#8036) |
 | Web tasks (`web-task-manager.js`) | none | none — runs a bare `claude` from PATH for feature detection at daemon start, for each launch and for teleport (#8039) |
+| `chroxy start` dependency checks | none | none — runs each provider binary and `cloudflared` with `--version`, with no provenance or signature gate, before any session exists; the desktop app runs these on every launch (#8041) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than
 re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. A row marked
-"none" gets at most the create-time check; the respawns, the catalog probe and
-the web-task spawns tracked in #8036, #8038 and #8039 are the known spawns that
-run with no gate of their own.
+"none" gets at most the create-time check; the respawns, the catalog probe,
+the web-task spawns and the startup checks tracked in #8036, #8038, #8039 and
+#8041 are the known spawns that run with no gate of their own. Where a gate
+does run, it hashes only the file at the pinned path (#8040).
 
 **The pinned per-turn gate runs in every mode, not only in `block`.** It is
 wired whenever create-time preflight ran, whatever `binaryProvenance.mode`
 says. In the default `off` mode it still re-checks, on every turn, that the
 pinned path exists, is executable and is not quarantined, the direct-exec shim
 refusal, the version floor, and any required credentials. A pinned binary that
-disappears (an `nvm` switch, an uninstall) therefore refuses every later turn
+disappears (`nvm uninstall`, a package removal) therefore refuses every later turn
 with a message saying to start a new session, rather than spawning whatever
 `PATH` now resolves.
 

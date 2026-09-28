@@ -652,6 +652,7 @@ describe('AcpSession — spawn-failure backstop is absolute-command-only (#8035)
     assert.ok(payload.message.startsWith('Failed to run ACP agent "Fake ACP Agent": '), `keeps the ACP prefix: ${payload.message}`)
     assert.match(payload.message, /not executable/i, 'labeled not-executable diagnosis')
     assert.match(payload.message, /chmod \+x/, 'includes the remediation command')
+    assert.match(payload.message, /\(EACCES\)$/, 'keeps the spawn error code')
     assert.ok(payload.message.includes(notExecutable), 'names the actual attempted path')
 
     await s.destroy().catch(() => {})
@@ -762,6 +763,7 @@ describe('AcpSession — which spawn failures get a label (#8035 review)', () =>
     await assert.rejects(s.start(), (err) => {
       assert.ok(err.message.startsWith('Failed to spawn ACP agent "Fake ACP Agent": '), `keeps the prefix: ${err.message}`)
       assert.match(err.message, /not executable/i)
+      assert.match(err.message, /\(ERR_INVALID_ARG_VALUE\)$/, 'keeps the real cause, the invalid argument')
       return true
     })
 
