@@ -42,12 +42,15 @@ function makeGatedSession({ spawnPreflight, ctorOpts = {} } = {}) {
   // See file doc: skip the real FS-based warmup probe.
   s._waitForPrompt = async () => true
   const spawnCalls = []
+  const writes = []
   s._ptyModOverride = {
     spawn: (cmd, args, opts) => {
       spawnCalls.push({ cmd, args, opts })
       return {
-        pid: 20000 + spawnCalls.length,
-        write: () => {},
+        // No pid: destroy() arms its SIGKILL escalation only for an integer
+        // pid, and a made-up one could name a real process on this machine.
+        pid: undefined,
+        write: (data) => writes.push(data),
         kill: () => {},
         onData: () => {},
         onExit: () => {},
@@ -62,6 +65,7 @@ function makeGatedSession({ spawnPreflight, ctorOpts = {} } = {}) {
   return {
     session: s,
     spawnCalls,
+    writes,
     cleanup: async () => {
       try { await s.destroy() } catch { /* ignore */ }
       try { rmSync(skillsDir, { recursive: true, force: true }) } catch { /* ignore */ }
@@ -142,7 +146,7 @@ describe('ClaudeTuiSession — respawn spawn gate (#8038)', () => {
 
   it('a passing gate revives the session on the next sendMessage, spawning the create-time-pinned path', async () => {
     const pinnedPath = '/fixture/pinned/claude'
-    const { session, spawnCalls, cleanup } = makeGatedSession({ spawnPreflight: () => pinnedPath })
+    const { session, spawnCalls, writes, cleanup } = makeGatedSession({ spawnPreflight: () => pinnedPath })
     try {
       session._sessionId = 'fixture-uuid-0003'
       session._settingsPath = join(tmpdir(), 'fixture-settings.json')
@@ -153,9 +157,15 @@ describe('ClaudeTuiSession — respawn spawn gate (#8038)', () => {
       const readies = []
       session.on('ready', (d) => readies.push(d))
 
-      await session.sendMessage('hello world')
+      const admissions = []
+      await session.sendMessage('hello world', [], { onInputAdmission: (a) => admissions.push(a) })
 
       assert.equal(spawnCalls.length, 1, 'the stand-in was invoked exactly once')
+      // The input that triggered the revival is delivered, not just the PTY
+      // brought back: admitted as dispatched and typed into the new PTY.
+      assert.equal(admissions[0]?.status, 'accepted')
+      assert.equal(admissions[0]?.delivery, 'dispatch_started')
+      assert.ok(writes.join('').includes('hello world'), 'the prompt was written to the revived PTY')
       assert.equal(spawnCalls[0].cmd, pinnedPath, 'spawned the gate-returned (pinned) path')
       assert.equal(session._spawnRefusal, null, 'the latch clears once the gate passes')
       assert.equal(session._processReady, true)
@@ -218,6 +228,76 @@ describe('ClaudeTuiSession — respawn spawn gate (#8038)', () => {
       assert.ok(session._spawnRefusal, 'the native-route gate refusal is latched exactly like the non-native one')
     } finally {
       await cleanup()
+    }
+  })
+
+  it('a refused respawn leaves the dead PTY marked exited, so destroy() never signals its reaped pid', async () => {
+    const { session, cleanup } = makeGatedSession({
+      spawnPreflight: () => { throw makeRefusal() },
+    })
+    // The PTY that died before the respawn: _onPtyGone latched _ptyExited and
+    // left `_term` holding the dead handle. The pid is an integer so that a
+    // missing latch WOULD arm destroy()'s SIGKILL escalation; it is far above
+    // any real pid, so even then the liveness probe finds nothing to kill.
+    const deadKills = []
+    session._term = { pid: 2147483646, kill: (sig) => deadKills.push(sig), write: () => {}, on: () => {} }
+    session._ptyExited = true
+    try {
+      session._sessionId = 'fixture-uuid-0007'
+      session._settingsPath = join(tmpdir(), 'fixture-settings.json')
+      session._resumedFromPersisted = true
+
+      await session._respawnPty()
+      assert.ok(session._spawnRefusal, 'the respawn was refused')
+      assert.equal(session._ptyExited, true, 'the dead PTY is still marked exited after the refusal')
+
+      await session.destroy()
+      assert.deepEqual(deadKills, [], 'destroy() sent no signal to the long-dead PTY')
+      assert.equal(session._killTimer, null, 'no SIGKILL escalation armed against its pid')
+    } finally {
+      if (session._killTimer) { clearTimeout(session._killTimer); session._killTimer = null }
+      await cleanup()
+    }
+  })
+
+  it('the native route latches a refusal from its SECOND connectionRuntimePreflight check, just before the spawn', async () => {
+    const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
+    let preflightCalls = 0
+    const { session, spawnCalls, cleanup } = makeGatedSession({
+      ctorOpts: {
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/native/claude',
+        // Passes the first check; refuses the re-check right before node-pty.
+        connectionRuntimePreflight: () => {
+          preflightCalls++
+          if (preflightCalls === 1) return '/fixture/native/claude'
+          throw makeRefusal('PROVIDER_BINARY_PROVENANCE', 'binary changed between the two native checks')
+        },
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      },
+    })
+    try {
+      session._sessionId = 'fixture-uuid-0008'
+      session._sinkDir = sinkDir
+      session._settingsPath = join(sinkDir, 'settings.json')
+      session._resumedFromPersisted = true
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      await session._respawnPty()
+
+      assert.equal(preflightCalls, 2, 'both native checks ran')
+      assert.equal(spawnCalls.length, 0, 'node-pty never reached')
+      assert.equal(session._spawnRefusal?.code, 'PROVIDER_BINARY_PROVENANCE', 'the second check latched the refusal')
+      assert.equal(session._respawnScheduled, false, 'a refusal, not a scheduled respawn')
+      assert.deepEqual(errors.map((e) => e.code), ['PROVIDER_BINARY_PROVENANCE'])
+    } finally {
+      await cleanup()
+      rmSync(sinkDir, { recursive: true, force: true })
     }
   })
 

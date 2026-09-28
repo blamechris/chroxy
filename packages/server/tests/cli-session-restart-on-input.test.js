@@ -194,6 +194,27 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     )
   })
 
+  it('#8038: a synchronous start() failure during a refusal revival is reported as itself, not under the stale refusal code', () => {
+    const session = createSession()
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    // A prior respawn was refused by the binary gate: no child, latch set.
+    const refusal = new Error('pinned claude hash changed')
+    refusal.code = 'PROVIDER_BINARY_PROVENANCE'
+    session._spawnRefusal = refusal
+    // The revival's start() then fails for an unrelated reason, synchronously.
+    session._spawnPersistentProcess = () => { throw new Error('spawn boom') }
+
+    const admissions = []
+    session.sendMessage('after a refusal', [], { onInputAdmission: (a) => admissions.push(a) })
+
+    assert.equal(session._spawnRefusal, null, 'the revival consumed the stale refusal')
+    assert.equal(admissions[0]?.status, 'queued', 'not rejected under the previous refusal code')
+    assert.equal(session._stoppedByUser, true, 're-armed so the next input retries the restart')
+    assert.equal(errors.length, 1, 'only the real start failure is surfaced')
+    assert.ok(/spawn boom/.test(errors[0].message), 'the error names the real failure')
+  })
+
   it('restarts exactly once when several follow-ups arrive after a Stop', async () => {
     const session = createRunningSession()
 

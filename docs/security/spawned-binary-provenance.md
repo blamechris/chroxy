@@ -194,11 +194,12 @@ at the point where the gate runs. For providers that spawn more than once per
 session, that is only as strong as how often the gate runs: `claude-sdk`,
 `gemini`, and `codex exec` all now re-run it before every turn (§5, #8035), and
 `claude-cli`, `claude-tui` and `codex` app-server now re-run it before every
-(re)spawn too (§5, #8038) — before #8035/#8038 only `claude-sdk` did, and every
-other provider verified its binary only at create. A refusal on a respawn is
-NOT treated as the process dying: nothing is spawned, no backoff/budget is
-consumed, and the session sits idle until the next input re-runs the gate (see
-"Per-spawn refusal semantics" after the §5 table). Some spawns still run with
+(re)spawn too (§5, #8038). Before #8035/#8038 only `claude-sdk` and the
+`claude-tui` explicit native auth route did; every other provider verified its
+binary only at create. A refusal on a respawn is NOT treated as the process
+dying: nothing is spawned, no further backoff is armed, and the session sits
+idle until the next spawn request re-runs the gate (see "Per-spawn refusal
+semantics" after the §5 table). Some spawns still run with
 no per-spawn gate: the `codex` model-catalog probe (#8036), web tasks (#8039),
 and the `chroxy start` dependency checks, which run the configured provider's
 binary and `cloudflared` with `--version` (#8041). The §5 table lists what each
@@ -522,10 +523,14 @@ scheduling that timer would just burn the bounded budget into a misleading
 Instead: nothing is spawned, exactly one coded `error` is emitted (the gate's
 own `code`, e.g. `PROVIDER_BINARY_PROVENANCE`; no error-text rewriter — a
 provenance message's hex hash prefix can spuriously match a `429`/`401`
-text-classification pattern), the backoff chain resets (the next attempt is
-user-initiated, mirroring how a model switch already resets it), and the
-session sits idle — not busy, not respawning — until the next `sendMessage`
-lazily retries the gate. `codex` app-server has no respawn loop at all: a
+text-classification pattern), no further backoff is armed and the respawn count
+resets (the next attempt is user-initiated, mirroring how a model switch
+already resets it; a refused crash respawn does keep the one rolling
+rate-limit slot its scheduling took), and the session sits idle — not busy, not
+respawning — until something asks for a new spawn: the next input, or for
+`claude-cli` also a model or permission-mode change. That spawn re-runs the
+gate; an input it still refuses is rejected with the gate's code instead of
+being queued. `codex` app-server has no respawn loop at all: a
 refusal there throws out of `start()` before the client is created, and
 `SessionManager` handles it exactly like any other `start()` failure.
 

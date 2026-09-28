@@ -2194,6 +2194,14 @@ export class ClaudeTuiSession extends BaseSession {
         // still mints a new conversation instead of `--resume`-ing an id
         // claude never learned about.
         if (wasFreshRetry) this._freshRetryPending = true
+        // The PTY that died before this attempt is still dead and no new one
+        // was spawned, so restore the latch the top of this method cleared.
+        // `_term` still holds the dead handle (_onPtyGone never nulls it), and
+        // with `_ptyExited` false destroy() would SIGTERM its long-reaped pid
+        // and arm the SIGKILL escalation against it (a recycled pid), and
+        // writes/repaints would target it as if it were live. On main that
+        // window lasted one backoff delay; a refusal lasts until the next input.
+        this._ptyExited = true
         this._respawnCount = 0
         this._refuseSpawn(err, this._log || log)
         return
@@ -3241,8 +3249,8 @@ export class ClaudeTuiSession extends BaseSession {
     // resolved typed object never trips.
     //
     // #8038: revive a session parked on a latched spawn refusal BEFORE
-    // deciding anything else about this input — a model-switch / permission-
-    // mode-change / crash respawn the gate rejected leaves `_spawnRefusal`
+    // deciding anything else about this input — a PTY-death respawn the gate
+    // rejected (the TUI respawns only when its PTY dies) leaves `_spawnRefusal`
     // set and no PTY alive, and nothing else will retry the gate until a user
     // asks for more work (mirrors CliSession's `_restartAfterStop` revival).
     // Skip the retry when a respawn is already in flight or scheduled (it

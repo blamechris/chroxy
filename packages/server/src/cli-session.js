@@ -618,6 +618,12 @@ export class CliSession extends BaseSession {
       // The chain that got us here (crash backoff, model switch, …) is over —
       // the next spawn attempt is a fresh, user-initiated one, exactly as
       // `_killAndRespawn` already resets this counter on its own respawn path.
+      //
+      // On the FIRST start this is only a race (create-time preflight passed
+      // moments earlier), and it latches rather than throwing like every other
+      // attempt. SessionManager has not broadcast `session_created` yet, so a
+      // client can miss this error: the session is listed but never ready,
+      // and its first input re-runs the gate and is rejected with the code.
       this._respawnCount = 0
       this._refuseSpawn(err, this._log || log)
       return
@@ -2305,14 +2311,21 @@ export class CliSession extends BaseSession {
     // A child already exists — whoever spawned it owns the warmup drain.
     if (this._child) return
 
-    ;(this._log || log).info('Restarting the stopped claude process to deliver a new message')
-    // Consume the latch BEFORE starting, not inside start(): DockerSession
+    ;(this._log || log).info(this._spawnRefusal
+      ? 'Re-running the binary gate to restart claude for a new message (its last spawn was refused)'
+      : 'Restarting the stopped claude process to deliver a new message')
+    // Consume the latches BEFORE starting, not inside start(): DockerSession
     // overrides start() and defers super.start() behind an async container
     // launch, so a second message arriving in that window would otherwise see
     // `_stoppedByUser` still armed and no child yet, and start a SECOND
     // container. Single-shot here makes the restart at-most-once regardless of
     // what a subclass's start() does or how long it takes.
     this._stoppedByUser = false
+    // #8038: the refusal latch is consumed too. The gate re-runs inside start()
+    // and re-latches only if it refuses AGAIN; left armed, a synchronous throw
+    // from elsewhere in start() would get this input rejected under the
+    // previous refusal's code instead of its own error.
+    this._spawnRefusal = null
     try {
       this.start()
     } catch (err) {
@@ -2321,7 +2334,11 @@ export class CliSession extends BaseSession {
       // latch stays consumed and the next sendMessage would only enqueue — never
       // retry the restart — re-stranding the follow-up behind a start-time error
       // (the exact #7438 failure mode). Re-arming lets the next user input retry;
-      // it is not a loop — a retry only happens on a fresh send.
+      // it is not a loop — a retry only happens on a fresh send. It is re-armed
+      // for a refusal-triggered restart as well (#8038): a gate refusal never
+      // throws (_spawnPersistentProcess latches it and returns), so reaching
+      // here means a DIFFERENT failure, and `_stoppedByUser` is the latch that
+      // keeps a childless session revivable whatever took its child away.
       this._stoppedByUser = true
       ;(this._log || log).error(`Restart after stop failed: ${err.message}`)
       this.emit('error', { message: `Failed to restart the stopped Claude process: ${err.message}` })

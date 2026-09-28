@@ -877,6 +877,9 @@ describe('SessionManager end-to-end — claude-cli (re)spawn gate (#8038)', () =
       assert.equal(errors.length, 1, 'exactly one refusal error')
       assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
       assert.equal(spawnCount(markerPath), 1, 'no second spawn happened')
+      // The marker is written by the child itself, so reading it right after
+      // the refusal cannot see a spawn that has not run yet; the child handle can.
+      assert.equal(session._child, null, 'no child process was created for the refused attempt')
       assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
       assert.equal(session._respawnScheduled, false, 'no backoff timer armed for a refused spawn')
       assert.equal(session._respawnCount, 0, 'the backoff chain reset — the next spawn is user-initiated')
@@ -915,6 +918,9 @@ describe('SessionManager end-to-end — claude-cli (re)spawn gate (#8038)', () =
       assert.equal(errors.length, 1, 'exactly one refusal error')
       assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
       assert.equal(spawnCount(markerPath), 1, 'no second spawn happened')
+      // The marker is written by the child itself, so reading it right after
+      // the refusal cannot see a spawn that has not run yet; the child handle can.
+      assert.equal(session._child, null, 'no child process was created for the refused attempt')
       assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
       assert.equal(session._respawnScheduled, false)
       assert.equal(session._respawnCount, 0)
@@ -954,6 +960,9 @@ describe('SessionManager end-to-end — claude-cli (re)spawn gate (#8038)', () =
       assert.equal(admissions[0].delivery, 'not_dispatched')
       assert.equal(admissions[0].reason, 'PROVIDER_BINARY_PROVENANCE')
       assert.equal(spawnCount(markerPath), 1, 'the revival attempt never spawned')
+      // The marker is written by the child itself, so reading it right after
+      // the refusal cannot see a spawn that has not run yet; the child handle can.
+      assert.equal(session._child, null, 'no child process was created for the refused attempt')
       assert.equal(session._pendingQueue.length, 0, 'the refused input was never queued behind a child that will not start')
     } finally {
       if (id) mgr.destroySession(id)
@@ -993,6 +1002,9 @@ describe('SessionManager end-to-end — claude-cli (re)spawn gate (#8038)', () =
       )
 
       assert.equal(spawnCount(markerPath), 1, 'the refused crash-respawn attempt never spawned')
+      // The marker is written by the child itself, so reading it right after
+      // the refusal cannot see a spawn that has not run yet; the child handle can.
+      assert.equal(session._child, null, 'no child process was created for the refused attempt')
       assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
       assert.equal(session._respawnScheduled, false, 'no further backoff timer armed')
       assert.equal(session._respawnCount, 0, 'the backoff chain reset')
