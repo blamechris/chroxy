@@ -30,8 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error` is emitted, no further auto-respawn backoff is armed and the respawn
   count resets, so a refused binary can no longer burn that budget into a
   misleading `respawn_exhausted` / `pty_respawn_exhausted` "failed to stay
-  alive" (this includes the `claude-tui` native route, whose refusals used to
-  do exactly that). The session sits idle until something asks for a new spawn
+  alive" (this includes the `claude-tui` native route, whose binary-gate
+  refusals used to do exactly that; its auth-status refusals still take the
+  backoff path, #8044). The session sits idle until something asks for a new spawn
   — the next input, or for `claude-cli` also a model or permission-mode change
   — which re-runs the gate; an input the gate still refuses is rejected with
   the gate's code rather than queued, and `claude-cli` messages queued before

@@ -748,10 +748,10 @@ export class BaseSession extends EventEmitter {
    *    a backoff timer for a spawn that was never going to happen anyway
    *    (which would otherwise burn the bounded respawn budget into a
    *    misleading `respawn_exhausted` / "failed to stay alive");
-   *  - the next `sendMessage` can reject THAT input immediately via
-   *    `spawnRefusalAdmission` (CliSession) or retry the gate once via
-   *    `_respawnPty` before rejecting (ClaudeTuiSession) instead of queuing
-   *    the input behind a child that will never start.
+   *  - the next `sendMessage` re-runs the gate once (CliSession via
+   *    `_restartAfterStop`, ClaudeTuiSession via `_respawnPty`) and, if it
+   *    refuses again, rejects THAT input with `spawnRefusalAdmission` instead
+   *    of queuing it behind a child that will never start.
    *
    * Emits the SAME coded `error` shape `_refuseTurnBeforeDispatch` does
    * (`code: err.code || …, message: err.message`) with NO error-text

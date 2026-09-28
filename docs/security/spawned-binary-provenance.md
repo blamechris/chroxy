@@ -310,9 +310,11 @@ platform package (removed from the desktop build), so `SdkSession` now sets
 
 **This closed the "checked one file, ran another" gap, but #7986 alone was a
 resolver-parity fix, not a per-turn re-verification — #8030 adds the latter.**
-The Agent SDK execs a brand-new process on every chat turn (`claude-tui` and
-`claude-cli` keep one PTY or child per session, respawned only on events such
-as a model switch or a crash — those respawns are gated too, closing #8038),
+The Agent SDK execs a brand-new process on every chat turn (`claude-cli` and
+`claude-tui` keep one child or PTY per session, respawned only on events: for
+`claude-cli` a model switch, a permission-mode change, the next input after
+Stop or a crash; for `claude-tui` a PTY death — those respawns are gated too,
+closing #8038),
 so "verified once at session-create" covered turn one only. Three spawn paths
 now each get their own gate:
 
@@ -533,6 +535,14 @@ gate; an input it still refuses is rejected with the gate's code instead of
 being queued. `codex` app-server has no respawn loop at all: a
 refusal there throws out of `start()` before the client is created, and
 `SessionManager` handles it exactly like any other `start()` failure.
+
+The very first spawn is gated too, and a refusal there (possible only if the
+binary changes in the moment between create-time preflight and the spawn)
+differs by provider: `claude-tui` and `codex` app-server reject `start()`, so
+session creation fails with the gate's code (a restored session is parked as a
+failed restore); `claude-cli` latches the refusal like any respawn, so the
+session is listed but never becomes ready, and its first input re-runs the gate
+and is rejected with the code.
 
 **The pinned per-turn gate runs in every mode, not only in `block`.** It is
 wired whenever create-time preflight ran, whatever `binaryProvenance.mode`

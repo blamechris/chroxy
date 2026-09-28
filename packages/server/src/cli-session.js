@@ -2340,8 +2340,8 @@ export class CliSession extends BaseSession {
       // here means a DIFFERENT failure, and `_stoppedByUser` is the latch that
       // keeps a childless session revivable whatever took its child away.
       this._stoppedByUser = true
-      ;(this._log || log).error(`Restart after stop failed: ${err.message}`)
-      this.emit('error', { message: `Failed to restart the stopped Claude process: ${err.message}` })
+      ;(this._log || log).error(`Restart on new input failed: ${err.message}`)
+      this.emit('error', { message: `Failed to restart the Claude process: ${err.message}` })
     }
   }
 
