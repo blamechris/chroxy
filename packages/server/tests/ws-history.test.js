@@ -1,8 +1,10 @@
 import { describe, it, before, after, beforeEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { SessionManager } from '../src/session-manager.js'
 import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
 import {
   sendPostAuthInfo,
@@ -3965,6 +3967,219 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
     const totalPushes = ctx._sends.filter(m => m.type === 'available_models').length
     assert.equal(totalPushes, syncPushes + 1,
       'exactly one async re-push on top of the single synchronous snapshot')
+  })
+
+  // #8036 — the codex model-catalog probe's no-session spawn had NO binary
+  // gate at all: `scheduleProviderModelsRefresh` called `ProviderClass.
+  // refreshModels()` with no seam, and `probeCodexCatalog` (codex-model-
+  // catalog.js) resolved a fresh, UNVERIFIED `resolvedBinary` and spawned
+  // from it directly. The fix threads a `bin` thunk built from
+  // `SessionManager.verifyOneShotExecutable(ProviderClass)` — #8030's
+  // verified one-shot gate, generalized (#8036) to take an explicit provider
+  // class — into every `refreshModels(deps)` call.
+  //
+  // These tests pin that WIRING with a REAL `SessionManager` (so the actual
+  // provenance gate runs, using the same `fakeProvenanceLedger` /
+  // SPAWN_GATE_*_HASH fixtures session-manager-preflight.test.js uses) and a
+  // fake provider class shaped exactly like the codex contract:
+  // `refreshModels(deps)` calls `deps.bin()` FIRST, inside a try, and only
+  // records a "spawn" if that succeeds — a throw degrades to null with NO
+  // spawn attempt, mirroring `probeCodexCatalog`'s own bin-before-client
+  // order (pinned directly, with the real codex-catalog classes, by
+  // codex-model-catalog.test.js's "a THROWING bin thunk degrades to null"
+  // case). A fake provider keeps this suite independent of the real `codex`
+  // binary/credentials so it is green on any machine and any CI leg.
+  describe('#8036 — codex-style spawn gate (SessionManager.verifyOneShotExecutable)', () => {
+    let spawnGateTmpDir
+    before(() => { spawnGateTmpDir = mkdtempSync(join(tmpdir(), 'ws-history-8036-')) })
+    after(() => { rmSync(spawnGateTmpDir, { recursive: true, force: true }) })
+
+    function tmpStateFile() {
+      return join(spawnGateTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+    }
+
+    // The REAL hash of the running Node binary, and a hash that can never
+    // match it — same convention as session-manager-preflight.test.js.
+    const SPAWN_GATE_REAL_HASH = createHash('sha256').update(readFileSync(process.execPath)).digest('hex')
+    const SPAWN_GATE_WRONG_HASH = 'f'.repeat(64)
+
+    function fakeProvenanceLedger(seed = {}) {
+      const records = new Map(Object.entries(seed))
+      return {
+        getRecord: (p) => (records.has(p) ? { ...records.get(p) } : null),
+        approve: (p, sha256) => { records.set(p, { sha256 }); return true },
+      }
+    }
+
+    /**
+     * A fake "codex-shaped" provider: `preflight` verifies `process.execPath`
+     * under the name 'node' (no real codex binary or credential needed, so
+     * the provenance gate is the only thing exercised), and `refreshModels`
+     * mirrors `probeCodexCatalog`'s contract exactly — resolve `deps.bin`
+     * FIRST inside a try; a throw is the gate's refusal and degrades to null
+     * with NO spawn; a resolved path records one "spawn" and returns a
+     * changed model list.
+     */
+    function registerSpawnGateFakeProvider(name) {
+      class FakeCodexShapedSession {
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+        static get capabilities() { return {} }
+        static get preflight() {
+          return { label: 'Fake Codex Shape', binary: { name: 'node', candidates: [] } }
+        }
+        static get resolvedBinary() { return process.execPath }
+        static getFallbackModels() {
+          return [{ id: 'fake-seed', label: 'Fake Seed', fullId: 'fake-seed', contextWindow: 8192 }]
+        }
+        static spawnAttempts = 0
+        static async refreshModels(deps = {}) {
+          let resolvedBin
+          try {
+            resolvedBin = typeof deps.bin === 'function' ? deps.bin() : deps.bin
+          } catch {
+            // #8036: exactly probeCodexCatalog's degrade-to-null on a thrown
+            // gate refusal — no client/spawn is ever attempted.
+            return null
+          }
+          if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) return null
+          FakeCodexShapedSession.spawnAttempts++
+          getRegistryForProvider(name).updateModels([
+            { value: 'fake-discovered', displayName: 'Fake Discovered' },
+          ])
+          return ['fake-discovered']
+        }
+      }
+      registerProvider(name, FakeCodexShapedSession)
+      return FakeCodexShapedSession
+    }
+
+    it('a block-mode hash mismatch refuses: no spawn attempt, no re-push, prior catalog untouched', async () => {
+      const name = 'fake-spawn-gate-block-mismatch-8036'
+      const Fake = registerSpawnGateFakeProvider(name)
+      const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+      const sessionManager = new SessionManager({
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        defaultCwd: tmpdir(),
+        binaryProvenanceMode: 'block',
+        binaryProvenanceLedger: ledger,
+      })
+      const ctx = makeCtx({ sessionManager })
+      const ws = makeFakeWs()
+
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+
+      assert.equal(Fake.spawnAttempts, 0, 'a provenance refusal must never reach the spawn branch — this is the test that goes red if the #8036 gate is removed')
+      assert.equal(ctx.send.callCount, 0, 'no re-push — the picker keeps whatever it already had')
+      assert.deepEqual(getRegistryForProvider(name).getModels().map(m => m.id), ['fake-seed'],
+        'the previous catalog (here, the never-refreshed static seed) must be left exactly as it was')
+    })
+
+    it('a matching ledger entry probes through the verified path and refreshes', async () => {
+      const name = 'fake-spawn-gate-block-match-8036'
+      const Fake = registerSpawnGateFakeProvider(name)
+      const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+      const sessionManager = new SessionManager({
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        defaultCwd: tmpdir(),
+        binaryProvenanceMode: 'block',
+        binaryProvenanceLedger: ledger,
+      })
+      const ctx = makeCtx({ sessionManager })
+      const ws = makeFakeWs()
+
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+
+      assert.equal(Fake.spawnAttempts, 1, 'a matching pin must let the probe through to the verified path')
+      assert.equal(ctx.send.callCount, 1, 're-push on a changed catalog')
+      assert.deepEqual(getRegistryForProvider(name).getModels().map(m => m.id), ['fake-discovered'])
+    })
+
+    it('a quarantine/missing-binary case degrades to null with no spawn attempt', async () => {
+      const name = 'fake-spawn-gate-missing-8036'
+      class MissingBinaryFake {
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+        static get capabilities() { return {} }
+        static get preflight() {
+          return { label: 'Fake Missing', binary: { name: '__chroxy_8036_missing_binary__', candidates: [] } }
+        }
+        static get resolvedBinary() { return '__chroxy_8036_missing_binary__' }
+        static getFallbackModels() {
+          return [{ id: 'fake-seed', label: 'Fake Seed', fullId: 'fake-seed', contextWindow: 8192 }]
+        }
+        static spawnAttempts = 0
+        static async refreshModels(deps = {}) {
+          let resolvedBin
+          try {
+            resolvedBin = typeof deps.bin === 'function' ? deps.bin() : deps.bin
+          } catch {
+            return null
+          }
+          if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) return null
+          MissingBinaryFake.spawnAttempts++
+          return ['fake-discovered']
+        }
+      }
+      registerProvider(name, MissingBinaryFake)
+      const sessionManager = new SessionManager({
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        defaultCwd: tmpdir(),
+      })
+      const ctx = makeCtx({ sessionManager })
+      const ws = makeFakeWs()
+
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+
+      assert.equal(MissingBinaryFake.spawnAttempts, 0, 'a missing binary must degrade to null, never a spawn')
+      assert.equal(ctx.send.callCount, 0)
+    })
+
+    it('gates OFF (no binaryProvenanceMode configured): behaviour is unchanged — the probe still spawns and refreshes', async () => {
+      const name = 'fake-spawn-gate-off-8036'
+      const Fake = registerSpawnGateFakeProvider(name)
+      const sessionManager = new SessionManager({
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        defaultCwd: tmpdir(),
+        // binaryProvenanceMode intentionally omitted — default 'off'.
+      })
+      const ctx = makeCtx({ sessionManager })
+      const ws = makeFakeWs()
+
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+
+      assert.equal(Fake.spawnAttempts, 1, 'with the provenance gate off, a healthy binary must still probe exactly as before #8036')
+      assert.equal(ctx.send.callCount, 1)
+    })
+
+    it('fails CLOSED when ctx.sessionManager exposes no verifyOneShotExecutable (e.g. sessionManager: null) — no spawn attempt', async () => {
+      const name = 'fake-spawn-gate-no-sm-8036'
+      const Fake = registerSpawnGateFakeProvider(name)
+      const ctx = makeCtx() // default sessionManager: null, same as every other test in this describe block
+      const ws = makeFakeWs()
+
+      scheduleProviderModelsRefresh(ctx, ws, name)
+      await flushAsync()
+
+      assert.equal(Fake.spawnAttempts, 0, 'no verified gate available must refuse, not silently fall back to an unverified spawn')
+      assert.equal(ctx.send.callCount, 0)
+    })
   })
 })
 

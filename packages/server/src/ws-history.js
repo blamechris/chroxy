@@ -1110,6 +1110,25 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
  * Advisory only — this path feeds the picker; model VALIDATION for ollama
  * stays unrestricted via getAllowedModels() returning null (a user can
  * `ollama pull` mid-session or use an alias the tag list doesn't spell out).
+ *
+ * #8036 — this is also the ONLY production call site that reaches
+ * `CodexSession.refreshModels()` with no live client: `probeCodexCatalog`
+ * (codex-model-catalog.js) then spawns a short-lived `codex app-server` from
+ * `ProviderClass.resolvedBinary` — a fresh, UNVERIFIED resolve — to answer
+ * `model/list` on every post-auth `available_models` push. A `bin` thunk built
+ * from `SessionManager.verifyOneShotExecutable(ProviderClass)` (#8030's
+ * verified one-shot gate, generalized to take a provider class) is threaded
+ * into `refreshModels(deps)` so that spawn is refused exactly like a fresh
+ * codex chat session would be in `binaryProvenance.mode: 'block'`. Harmless
+ * for every OTHER `refreshModels` implementation (ollama's HTTP `/api/tags`
+ * probe, the anthropic-compatible catalog probe) — neither reads a `bin` key
+ * from `deps`, so the extra property is simply ignored.
+ *
+ * Fails CLOSED when `ctx.sessionManager` is unavailable or too old to expose
+ * `verifyOneShotExecutable` (a stubbed/minimal ctx in a test, or a future
+ * refactor): the `bin` thunk still refuses rather than silently falling back
+ * to `ProviderClass`'s own unverified default — same convention
+ * `summarize-handlers.js` uses for the #8030 summarizer gate.
  */
 export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
   if (!providerName) return
@@ -1120,8 +1139,16 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
     return // unknown provider — nothing to refresh
   }
   if (typeof ProviderClass?.refreshModels !== 'function') return
+  const sessionManager = ctx?.sessionManager
+  const verifyBin = typeof sessionManager?.verifyOneShotExecutable === 'function'
+    ? () => sessionManager.verifyOneShotExecutable(ProviderClass)
+    : () => {
+      const err = new Error(`model refresh for provider ${providerName}: sessionManager.verifyOneShotExecutable is unavailable — refusing an unverified spawn (#8036)`)
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
   Promise.resolve()
-    .then(() => ProviderClass.refreshModels())
+    .then(() => ProviderClass.refreshModels({ bin: verifyBin }))
     .then((models) => {
       if (!Array.isArray(models) || models.length === 0) return
       if (ws.readyState !== undefined && ws.readyState !== 1) return // client gone

@@ -666,6 +666,90 @@ describe('SessionManager.verifyOneShotExecutable (#8030)', () => {
   })
 })
 
+// #8036 — verifyOneShotExecutable GENERALIZED to take an explicit provider
+// class, so a caller that needs a DIFFERENT provider's one-shot spawn gated
+// (the codex model-catalog probe, which — like the summarizer/semantic-title
+// calls #8030 already covers — has no create-time session to pin a path
+// from) can reuse this same verified resolver instead of a second
+// implementation. These pin that the explicit-class argument runs the exact
+// same gate as the #8030 default, and that it WINS over both the built-in
+// `getProvider('claude-sdk')` fallback and a ctor-configured
+// `oneShotProviderClass` when supplied.
+describe('SessionManager.verifyOneShotExecutable — explicit ProviderClass (#8036)', () => {
+  it('an explicit ProviderClass argument is gated even with no oneShotProviderClass configured', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      // No oneShotProviderClass — the no-arg default would resolve
+      // getProvider('claude-sdk') instead, which this ledger says nothing
+      // about. Passing the class explicitly must be what gets gated.
+    })
+    assert.throws(
+      () => mgr.verifyOneShotExecutable(SpawnGateFixtureProvider),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        return true
+      },
+      'an explicit ProviderClass must be verified against the SAME real gate the #8030 default uses',
+    )
+  })
+
+  it('an explicit ProviderClass argument WINS over a different ctor-configured oneShotProviderClass', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    class NoBinaryFixture extends SpawnGateFixtureProvider {
+      static get preflight() { return { label: 'Unrelated one-shot class' } }
+    }
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      // The ctor default would hit NoBinaryFixture's empty preflight and
+      // throw PROVIDER_BINARY_UNVERIFIED (no binary declared at all) — a
+      // DIFFERENT error than the provenance mismatch below, so this also
+      // proves the explicit argument is what actually ran.
+      oneShotProviderClass: NoBinaryFixture,
+    })
+    assert.throws(
+      () => mgr.verifyOneShotExecutable(SpawnGateFixtureProvider),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        return true
+      },
+    )
+    // The no-arg call still runs the CTOR default, unaffected — confirms the
+    // explicit-class call above did not somehow rebind the instance default.
+    assert.throws(() => mgr.verifyOneShotExecutable(), (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED')
+  })
+
+  it('returns the verified path for an explicit ProviderClass on a matching hash', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+    })
+    assert.equal(mgr.verifyOneShotExecutable(SpawnGateFixtureProvider), process.execPath)
+  })
+
+  it('with skipPreflight:true, an explicit ProviderClass still returns its UNVERIFIED resolvedBinary', () => {
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+    })
+    assert.equal(mgr.verifyOneShotExecutable(SpawnGateFixtureProvider), process.execPath)
+  })
+})
+
 describe('SessionManager._binaryProvenanceOptions (#8030 review)', () => {
   const ledger = fakeProvenanceLedger()
   const make = (opts) => new SessionManager({

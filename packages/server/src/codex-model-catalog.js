@@ -412,12 +412,24 @@ export function defaultCreateClient(opts) {
 export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultCreateClient, timeoutMs = CODEX_CATALOG_PROBE_TIMEOUT_MS, includeHidden = false, now = Date.now } = {}) {
   let client = null
   try {
-    // The `bin` thunk is called INSIDE the try (#7757 re-review). `resolveBinary`
-    // cannot throw today, so this is theoretical — but outside it a throwing
-    // thunk escapes as a rejected promise, and neither caller catches one:
-    // `refreshDiscoveredModels` has only a `finally`, and
-    // `CodexAppServerSession._refreshModelCatalog`'s try/catch is synchronous.
-    // Before the thunk landed, that same call sat inside this try.
+    // The `bin` thunk is called INSIDE the try (#7757 re-review). At the time
+    // of that review `resolveBinary` could not throw, so a throwing thunk was
+    // theoretical — but outside this try it would escape as a rejected
+    // promise, and neither caller catches one: `refreshDiscoveredModels` has
+    // only a `finally`, and `CodexAppServerSession._refreshModelCatalog`'s
+    // try/catch is synchronous. Before the thunk landed, that same call sat
+    // inside this try.
+    //
+    // #8036: no longer theoretical. `scheduleProviderModelsRefresh`
+    // (ws-history.js) now passes a `bin` thunk built from
+    // `SessionManager.verifyOneShotExecutable(ProviderClass)` — the SAME
+    // gated resolver #8030 wired for the summarizer/semantic-title one-shots
+    // — so a `block`-mode provenance mismatch, a quarantined binary, or a
+    // missing binary THROWS a typed `PROVIDER_BINARY_*` error here. This
+    // try/catch is exactly the fail-closed boundary that refusal needs: no
+    // client is ever constructed, nothing is spawned, and the catch below
+    // returns null — leaving the previous catalog exactly as it was, same as
+    // any other probe failure.
     const resolvedBin = typeof bin === 'function' ? bin() : bin
     if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) {
       log.debug('codex catalog probe skipped: no codex binary resolved')
@@ -446,7 +458,14 @@ export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultC
     const remainingMs = bounded ? (Number.isFinite(rem) ? Math.max(1, rem) : timeoutMs) : timeoutMs
     return await fetchCodexCatalogFromClient(client, { timeoutMs: remainingMs, includeHidden })
   } catch (err) {
-    log.debug(`codex catalog probe failed: ${err?.message || err}`)
+    // #8036: name the gate's code (e.g. PROVIDER_BINARY_PROVENANCE,
+    // PROVIDER_BINARY_QUARANTINED, PROVIDER_BINARY_NOT_FOUND,
+    // PROVIDER_BINARY_UNVERIFIED, PROVIDER_CREDENTIAL_MISSING) when the `bin`
+    // thunk's spawn gate refused, so a block-mode refusal leaves a legible
+    // trace instead of collapsing into the same generic line every other
+    // probe failure (a timeout, a transport error) produces.
+    const codeSuffix = err?.code ? ` (code=${err.code})` : ''
+    log.debug(`codex catalog probe failed: ${err?.message || err}${codeSuffix}`)
     return null
   } finally {
     try { client?.kill() } catch { /* already gone */ }

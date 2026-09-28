@@ -1168,22 +1168,32 @@ export class SessionManager extends EventEmitter {
    * refuse a new chat session.
    *
    * `this._oneShotProviderClass` is a test seam (constructor opt
-   * `oneShotProviderClass`); production always resolves `getProvider('claude-sdk')`
-   * — the one-shot path always spawns the Agent SDK regardless of which
-   * provider the CALLING session uses (summarize-session.js's `defaultRunOneShot`
-   * is SDK-only).
+   * `oneShotProviderClass`); production defaults to resolving
+   * `getProvider('claude-sdk')` — the summarizer / semantic-title one-shots
+   * always spawn the Agent SDK regardless of which provider the CALLING
+   * session uses (summarize-session.js's `defaultRunOneShot` is SDK-only).
+   *
+   * #8036 — GENERALIZED to take an explicit `ProviderClass` so a caller that
+   * needs a DIFFERENT provider's one-shot spawn gated (the codex model-catalog
+   * probe, which has no session either) can reuse this same verified resolver
+   * instead of a second implementation. Passing no argument (or `undefined`)
+   * preserves the exact #8030 default above; the ctor-time
+   * `oneShotProviderClass` seam still wins over the built-in default when no
+   * explicit class is passed at the call site.
    *
    * `this._skipPreflight` (test-only; see the ctor opt) returns the UNVERIFIED
    * resolved path with no gate at all — the same meaning `skipPreflight` has
    * everywhere else in this class.
    *
+   * @param {Function} [ProviderClass] - #8036: the provider class to verify a
+   *   spawnable binary for. Defaults to `this._oneShotProviderClass ||
+   *   getProvider('claude-sdk')`, the original #8030 behaviour.
    * @returns {string} a verified, spawnable binary path.
    * @throws {Error} with `code = 'PROVIDER_BINARY_UNVERIFIED'` when preflight
    *   resolves no usable path, or one of `runProviderPreflight`'s own typed
    *   errors (e.g. `PROVIDER_BINARY_PROVENANCE`) on a gate failure.
    */
-  verifyOneShotExecutable() {
-    const ProviderClass = this._oneShotProviderClass || getProvider('claude-sdk')
+  verifyOneShotExecutable(ProviderClass = this._oneShotProviderClass || getProvider('claude-sdk')) {
     if (this._skipPreflight) {
       // Test-only escape hatch — same unverified-path meaning as skipPreflight
       // everywhere else in this class. Production always leaves this false.
