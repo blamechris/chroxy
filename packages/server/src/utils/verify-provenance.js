@@ -334,7 +334,7 @@ export function verifyProvenance({
   if (pinning) {
     let hash
     try {
-      hash = hashFn(path)
+      hash = hashFn(path, { platform })
     } catch (err) {
       // Cannot read the binary to hash it → unverifiable. Fail-safe: block in
       // `block` mode, surface-but-allow in `warn` mode.

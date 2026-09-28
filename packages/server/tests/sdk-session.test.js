@@ -1509,7 +1509,7 @@ describe('SdkSession', () => {
       assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
     })
 
-    it('a subclass _augmentQueryOptions CAN override pathToClaudeCodeExecutable after the fact', async () => {
+    it('a subclass _augmentQueryOptions that re-points pathToClaudeCodeExecutable is refused (#8030: the new path was never verified)', async () => {
       class OverridingSdkSession extends SdkSession {
         _augmentQueryOptions(options) {
           options.pathToClaudeCodeExecutable = '/custom/override/claude'
@@ -1526,11 +1526,15 @@ describe('SdkSession', () => {
           yield { type: 'result', session_id: 'test-path-override', total_cost_usd: 0, duration_ms: 0, usage: {} }
         })()
       }
+      const errors = []
+      s.on('error', (data) => errors.push(data))
 
       await s.sendMessage('hello')
       s.destroy()
 
-      assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/custom/override/claude')
+      assert.equal(captured.length, 0, 'query() must not run with a path no gate checked')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED')
     })
   })
 
@@ -1633,6 +1637,23 @@ describe('SdkSession', () => {
       assert.equal(queryCalls, 0)
       assert.equal(errors.length, 1)
       assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED')
+    })
+
+    it('gives an uncoded augment-hook throw a neutral code, not a binary-verification one', async () => {
+      class ThrowingFixture extends SdkSession {
+        _augmentQueryOptions() { throw new Error('augment exploded') }
+      }
+      const s = new ThrowingFixture({ cwd: '/tmp', stateFilePath: tmpStateFile(), spawnPreflight: () => '/verified/claude' })
+      s._processReady = true
+      s._callQuery = () => (async function* () {})()
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'TURN_REFUSED')
     })
 
     it('refuses a DockerSdkSession turn before its container exists — never runs the host claude (#8030 review)', async () => {

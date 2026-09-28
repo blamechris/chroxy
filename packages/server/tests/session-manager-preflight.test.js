@@ -466,6 +466,19 @@ describe('SessionManager.verifyOneShotExecutable (#8030)', () => {
     )
   })
 
+  it('throws PROVIDER_BINARY_UNVERIFIED when preflight yields no binary path (#8030 review)', () => {
+    class NoBinaryFixture extends SpawnGateFixtureProvider {
+      static get preflight() { return { label: 'No binary' } }
+    }
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      oneShotProviderClass: NoBinaryFixture,
+    })
+    assert.throws(() => mgr.verifyOneShotExecutable(), (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED')
+  })
+
   it('returns the path on a matching hash', () => {
     const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
     const mgr = new SessionManager({
@@ -500,5 +513,29 @@ describe('SessionManager.verifyOneShotExecutable (#8030)', () => {
     })
     const ClaudeSdk = getProvider('claude-sdk')
     assert.equal(mgr.verifyOneShotExecutable(), ClaudeSdk.resolvedBinary)
+  })
+})
+
+describe('SessionManager._binaryProvenanceOptions (#8030 review)', () => {
+  const ledger = fakeProvenanceLedger()
+  const make = (opts) => new SessionManager({
+    maxSessions: 5,
+    stateFilePath: tmpStateFile(),
+    defaultCwd: tmpdir(),
+    binaryProvenanceLedger: ledger,
+    ...opts,
+  })
+
+  it('is null when pinning is off and the signature gate is off', () => {
+    assert.equal(make({})._binaryProvenanceOptions(), null)
+  })
+
+  it('is ON when only the signature gate is enabled — every spawn gate reads this one condition', () => {
+    assert.deepEqual(make({ binarySignatureGate: true })._binaryProvenanceOptions(), { mode: 'off', signatureGate: true, ledger })
+  })
+
+  it('is ON for warn and block pinning', () => {
+    assert.equal(make({ binaryProvenanceMode: 'warn' })._binaryProvenanceOptions().mode, 'warn')
+    assert.equal(make({ binaryProvenanceMode: 'block' })._binaryProvenanceOptions().mode, 'block')
   })
 })

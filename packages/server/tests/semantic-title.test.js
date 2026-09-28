@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * #6764 — SessionManager wiring for semantic session titles. The model call is
@@ -265,12 +266,24 @@ describe('SessionManager semantic titles — per-spawn binary gate (#8030)', () 
 
     const names = []
     mgr.on('session_updated', (d) => names.push(d.name))
+    // generateSessionTitle swallows the runner's error, so this warning is the
+    // only trace the refusal leaves.
+    const refusals = []
+    const listener = (entry) => {
+      if (entry.level === 'warn' && entry.message.includes('Semantic title spawn refused by the binary gate for s1')) refusals.push(entry)
+    }
+    addLogListener(listener)
 
-    mgr.recordUserInput('s1', 'please help me fix the flaky WebSocket reconnect test in ws-server.js')
-    await flush()
+    try {
+      mgr.recordUserInput('s1', 'please help me fix the flaky WebSocket reconnect test in ws-server.js')
+      await flush()
+    } finally {
+      removeLogListener(listener)
+    }
 
     assert.ok(sawResolveExecutable, 'the runner must receive a resolveExecutable function')
     assert.equal(spawned, 0, 'the runner must never spawn once resolveExecutable throws')
+    assert.equal(refusals.length, 1, 'the refusal must be logged')
     assert.equal(mgr.getSession('s1').name, 'please help me fix the flaky WebSocket...', 'title stays the truncation label — fail-open')
     assert.equal(names.length, 1, 'only the truncation update was broadcast')
   })

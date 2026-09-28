@@ -932,7 +932,8 @@ export class SdkSession extends BaseSession {
       // before every subsequent spawn too. Falls back to a plain
       // `resolvedBinary` read when no gate was wired (a direct `new
       // SdkSession(...)` caller that bypassed SessionManager, or a test).
-      // Set BEFORE _augmentQueryOptions so a subclass override can see/override it.
+      // Set BEFORE _augmentQueryOptions so a subclass can read it; a subclass
+      // that CHANGES it is refused below, since the new path was never checked.
       //
       // Everything in this inner try runs before query() and decides WHAT would
       // be exec'd, so any throw here is a pre-dispatch refusal (spawnRefused).
@@ -950,6 +951,11 @@ export class SdkSession extends BaseSession {
         // Allow subclasses to augment query options (e.g. DockerSdkSession
         // injects spawnClaudeCodeProcess here)
         this._augmentQueryOptions(options)
+        if (options.pathToClaudeCodeExecutable !== spawnPath) {
+          const err = new Error('A provider hook changed the claude binary path after it was verified; this turn was not sent.')
+          err.code = 'PROVIDER_BINARY_UNVERIFIED'
+          throw err
+        }
 
         // #8030 review: a containerised subclass runs claude INSIDE its
         // container through spawnClaudeCodeProcess, and pathToClaudeCodeExecutable
@@ -1421,10 +1427,12 @@ export class SdkSession extends BaseSession {
           //   - run container classification: the turn never reached the
           //     SDK, so there is no container to have vanished.
           ;(this._log || log).error(`Turn refused before dispatch: ${err.message}`)
-          this.emit('error', { code: err.code || 'PROVIDER_BINARY_UNVERIFIED', message: err.message })
+          // An uncoded throw (e.g. from a subclass's augment hook) is not a
+          // binary-verification failure, so it gets a neutral code.
+          this.emit('error', { code: err.code || 'TURN_REFUSED', message: err.message })
           reportInputAdmission(sendOptions, {
             status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
-            reason: err.code || 'provider_binary_unverified',
+            reason: err.code || 'turn_refused',
             message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
           })
         } else {

@@ -208,6 +208,15 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
   if (typeof resolveExecutable !== 'function') {
     throw new Error('defaultRunOneShot (#8030): resolveExecutable is required — the caller must supply its verified spawn gate (e.g. SessionManager.verifyOneShotExecutable) instead of relying on an unverified default binary resolve.')
   }
+  // Resolved BEFORE queryFn so a gate refusal never spawns anything. An empty
+  // result is refused too: with pathToClaudeCodeExecutable unset the SDK falls
+  // back to its own bundled binary, which nothing has verified.
+  const executable = resolveExecutable()
+  if (typeof executable !== 'string' || executable.length === 0) {
+    const err = new Error('defaultRunOneShot (#8030): the spawn gate returned no binary path — refusing rather than letting the SDK fall back to its bundled binary.')
+    err.code = 'PROVIDER_BINARY_UNVERIFIED'
+    throw err
+  }
   const options = {
     // No tools — a pure text summarization turn. The session must not be able
     // to read/write files or run commands during summarization.
@@ -219,9 +228,8 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
     // #7986 / #8030: the desktop bundle does not ship the Agent SDK's platform
     // binary, and query() throws if pathToClaudeCodeExecutable is unset and
     // that binary is absent — point it at the installed CLI, same as the
-    // chat-turn SDK provider, on every install. Called BEFORE queryFn so a
-    // gate refusal never spawns anything.
-    pathToClaudeCodeExecutable: resolveExecutable(),
+    // chat-turn SDK provider, on every install.
+    pathToClaudeCodeExecutable: executable,
   }
   if (typeof cwd === 'string' && cwd) options.cwd = cwd
   if (typeof model === 'string' && model) options.model = model

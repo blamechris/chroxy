@@ -48,7 +48,7 @@ unverified-binaries gap it exposed is real regardless.)
 | `not_executable` | present but no `X` bit for this process | `ProviderBinaryNotFoundError` / doctor `fail` |
 | `quarantined` | macOS: present + executable but carries a **blocking** `com.apple.quarantine` xattr | `ProviderBinaryQuarantinedError` / doctor `fail` |
 
-- **Preflight gate (per session-create).** `runProviderPreflight` re-resolves the
+- **Preflight gate (per session-create; per turn for `claude-sdk`, §5).** `runProviderPreflight` re-resolves the
   binary fresh and prefers the provider's live `resolvedBinary` — the exact path
   the spawn will use — so the existence gate and the spawn can no longer diverge.
   A quarantined binary throws `ProviderBinaryQuarantinedError`
@@ -167,7 +167,11 @@ Authenticode signature gating is tracked in #6932.
 ### Fail-safe semantics
 
 When a gate is ON, a verification failure blocks (`block` mode / signature gate) or
-loudly surfaces (`warn` mode) — it **never silently spawns an unverified binary**.
+loudly surfaces (`warn` mode) — it **never silently spawns an unverified binary**
+at the point where the gate runs. For providers that spawn more than once per
+session, that is only as strong as how often the gate runs: `claude-sdk`
+re-runs it before every turn (§5), while the per-turn subprocess providers
+(gemini, `codex exec`) still run it only at create (#8035).
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -290,8 +294,13 @@ each get their own gate:
   `claude update`, quarantine, or removal) is still caught on the very next
   turn. A gate refusal never reaches `query()` — it fails closed with a typed
   error (`PROVIDER_BINARY_PROVENANCE`, `PROVIDER_BINARY_QUARANTINED`, …) that
-  `SdkSession` surfaces verbatim (see below) and reports as a rejected,
-  not-dispatched turn.
+  `SdkSession` surfaces verbatim (not through its error-text rewriter, whose
+  `429`/`401` patterns a hex hash can match) and reports as a rejected,
+  not-dispatched turn. Two more pre-dispatch refusals close the ways around
+  the gate: an empty path (the SDK would fall back to its bundled binary), and
+  a subclass `_augmentQueryOptions` hook that re-points
+  `pathToClaudeCodeExecutable` after it was verified. The one-shot runner
+  refuses an empty path the same way.
 - **One-shots (the `summarize_session` handler, the semantic-title
   generator).** Neither has a session-create step to pin a path from, so each
   call runs the SAME preflight gate `createSession` runs, with a FRESH
@@ -347,7 +356,8 @@ stale result, and a stored pass expires after `SIGNATURE_CACHE_TTL_MS`
 file changing, which no stat identity can see. Both are the DEFAULT `sha256File`/`assessSignature` seams
 `verifyProvenance` uses, so an injected seam (every existing test) is
 unaffected — the cache only activates on the real filesystem path, and
-`_resetProvenanceCacheForTest()` clears both between test files.
+`_resetProvenanceCacheForTest()` clears both, and the cache test suites call it
+before each test.
 
 **What operators will notice.** With `binaryProvenance.mode: block`, a
 `claude` auto-update (which re-points `~/.local/bin/claude` at a new build)

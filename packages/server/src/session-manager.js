@@ -1128,7 +1128,7 @@ export class SessionManager extends EventEmitter {
       // the pinned path was checked, and a session stays pinned to it, so the
       // remedy is a new session rather than an install.
       if (err?.code === 'PROVIDER_BINARY_NOT_FOUND') {
-        const gone = new Error(`${err.provider}: the "${err.binary}" binary this session was verified with at ${pinnedPath} is no longer there — start a new session to use the currently installed one.`)
+        const gone = new Error(`${err.provider}: the "${err.binary}" binary this session was verified with at ${pinnedPath} is no longer there or no longer executable — start a new session to use the currently installed one.`)
         gone.code = err.code
         gone.provider = err.provider
         gone.binary = err.binary

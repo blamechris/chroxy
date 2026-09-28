@@ -243,6 +243,18 @@ describe('defaultRunOneShot — pathToClaudeCodeExecutable (#7986)', () => {
     assert.equal(captured.length, 0, 'queryFn must never be invoked when the gate throws')
   })
 
+  it('refuses an empty or missing gate result before queryFn — the SDK would fall back to its bundled binary (#8030 review)', async () => {
+    for (const bad of ['', undefined, null]) {
+      let queryCalls = 0
+      const queryFn = () => { queryCalls += 1; return fakeStream() }
+      await assert.rejects(
+        () => defaultRunOneShot({ prompt: 'summarize this', queryFn, resolveExecutable: () => bad }),
+        (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED',
+      )
+      assert.equal(queryCalls, 0, `queryFn must never run for a gate result of ${JSON.stringify(bad)}`)
+    }
+  })
+
   it('still sets model/cwd/maxTurns/tools alongside pathToClaudeCodeExecutable', async () => {
     const captured = []
     const queryFn = (args) => { captured.push(args); return fakeStream() }
