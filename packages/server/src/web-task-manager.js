@@ -2,6 +2,10 @@ import { EventEmitter } from 'events'
 import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
 import { cliHelpAdvertisesFlag, cliHelpFlagArity } from './utils/argv-safety.js'
+import { CliSession } from './cli-session.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('web-task-manager')
 
 /**
  * Manages Claude Code Web tasks (cloud sandbox delegation).
@@ -20,6 +24,19 @@ import { cliHelpAdvertisesFlag, cliHelpFlagArity } from './utils/argv-safety.js'
  *   task_created  { task }           - New task launched
  *   task_updated  { task }           - Task status changed
  *   task_error    { taskId, message } - Task failed or launch error
+ *
+ * #8039 — every spawn below (feature detection, launch, teleport) used to run
+ * a BARE `claude` resolved by the OS's own PATH lookup: no existence check,
+ * no quarantine check, no opt-in provenance verification. In
+ * `binaryProvenance.mode: 'block'` a hash-mismatched `claude` still ran here
+ * unchecked, even though the exact same binary would refuse a fresh chat
+ * session. `_verifyBinary()` routes every spawn through
+ * `SessionManager.verifyOneShotExecutable(ProviderClass)` — the #8030 verified
+ * one-shot resolver, generalized by #8036 to take an explicit provider class
+ * — reusing the SAME gate the codex model-catalog probe now uses rather than
+ * writing a second one. This class has no create-time session to pin a path
+ * from, so the full gate (existence, quarantine, the direct-exec shim
+ * refusal, opt-in provenance, the version floor) re-runs fresh on every call.
  */
 
 const POLL_INTERVAL_MS = 10_000 // 10s between status checks
@@ -27,9 +44,27 @@ const MAX_TASKS = 100 // evict oldest completed/failed tasks beyond this
 const MAX_POLL_COUNT = 60 // 60 polls × 10s = 10 min max poll duration
 
 export class WebTaskManager extends EventEmitter {
-  constructor({ cwd } = {}) {
+  /**
+   * @param {object} [opts]
+   * @param {string} [opts.cwd]
+   * @param {object|null} [opts.sessionManager] - #8039: supplies
+   *   `verifyOneShotExecutable(ProviderClass)`. Production (ws-server.js)
+   *   always passes the real daemon `SessionManager`; a manager constructed
+   *   with none refuses every spawn (fail closed — see `_verifyBinary`).
+   * @param {Function} [opts.providerClass] - #8039: the provider class whose
+   *   preflight is verified. Defaults to `CliSession` ('claude-cli') — web
+   *   tasks always shell out to the `claude` CLI binary via `execFile`
+   *   (`buildRemoteTaskArgs` / `--help` / `--teleport`), the same binary
+   *   `CliSession.resolvedBinary` resolves through `resolveClaudeBinary()`
+   *   and the same one `CliSession.preflight` declares — regardless of which
+   *   provider the daemon's chat sessions currently use. Overridable for
+   *   tests so they don't depend on the real `claude` binary being installed.
+   */
+  constructor({ cwd, sessionManager = null, providerClass = CliSession } = {}) {
     super()
     this._cwd = cwd || process.cwd()
+    this._sessionManager = sessionManager
+    this._providerClass = providerClass
     this._tasks = new Map()
     this._childProcesses = new Set()
     this._remoteAvailable = false
@@ -38,6 +73,35 @@ export class WebTaskManager extends EventEmitter {
     this._pollTimer = null
     this._pollCount = 0
     this._inPoll = false
+  }
+
+  /**
+   * #8039 — the ONE verified-binary resolver every spawn site in this class
+   * must go through instead of touching a bare `'claude'` name. Reuses
+   * `SessionManager.verifyOneShotExecutable()` rather than writing a second
+   * gate (see #8036, which did the same for the codex model-catalog probe).
+   *
+   * Fails CLOSED when this manager was constructed with no `sessionManager`
+   * (or one too old to expose `verifyOneShotExecutable`) — the same
+   * convention `ws-history.js`'s `scheduleProviderModelsRefresh` uses for the
+   * #8036 gate — rather than silently falling back to an unverified PATH
+   * lookup. Production always supplies a real `SessionManager`; only a
+   * stubbed/minimal construction (or a future refactor that forgets to wire
+   * it) hits this refusal.
+   *
+   * @returns {string} a verified, spawnable absolute path.
+   * @throws {Error} `PROVIDER_BINARY_UNVERIFIED`, or one of
+   *   `runProviderPreflight`'s own typed errors (e.g.
+   *   `PROVIDER_BINARY_PROVENANCE`, `PROVIDER_BINARY_NOT_FOUND`,
+   *   `PROVIDER_BINARY_QUARANTINED`) on a gate refusal.
+   */
+  _verifyBinary() {
+    if (typeof this._sessionManager?.verifyOneShotExecutable !== 'function') {
+      const err = new Error('web task: sessionManager.verifyOneShotExecutable is unavailable — refusing an unverified spawn (#8039)')
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
+    return this._sessionManager.verifyOneShotExecutable(this._providerClass)
   }
 
   /** Whether the CLI supports --remote (web task launch) */
@@ -59,12 +123,36 @@ export class WebTaskManager extends EventEmitter {
    * Detect available CLI features by parsing `claude --help`.
    * Safe to call multiple times (e.g. after CLI upgrade).
    *
-   * @param {object} [deps] - test seam: { exec } promisified execFile stand-in
+   * #8039: resolves the binary through `_verifyBinary()` (the same gate
+   * every other spawn site in this class uses) before invoking `--help`. A
+   * gate refusal degrades to "unavailable" exactly like a failed `--help`
+   * invocation already did — this method has never thrown, and still
+   * doesn't — but is logged at `warn` (naming the refusal's code) so a
+   * `block`-mode hash mismatch leaves a legible trace instead of collapsing
+   * into the same silent false/false a missing CLI produces.
+   *
+   * @param {object} [deps] - test seam: { exec } promisified execFile
+   *   stand-in, { bin } a resolved binary path/thunk overriding the gate
+   *   (value or zero-arg function; used by tests that want to exercise the
+   *   `--help` parsing logic in isolation from the binary gate itself).
    */
   async detectFeatures(deps = {}) {
     const exec = deps.exec || execFileAsync
+    let bin
     try {
-      const stdout = await exec('claude', ['--help'])
+      bin = 'bin' in deps
+        ? (typeof deps.bin === 'function' ? deps.bin() : deps.bin)
+        : this._verifyBinary()
+    } catch (err) {
+      this._remoteAvailable = false
+      this._teleportAvailable = false
+      this._detected = true
+      const codeSuffix = err?.code ? ` (code=${err.code})` : ''
+      log.warn(`web task feature detection refused: ${err?.message || err}${codeSuffix}`)
+      return { remote: false, teleport: false }
+    }
+    try {
+      const stdout = await exec(bin, ['--help'])
       // #7291: this was `stdout.includes('--remote')`, a SUBSTRING match, which
       // is satisfied by the LONGER flag `--remote-control`. The installed CLI
       // advertises `--remote-control` and `--remote-control-session-name-prefix`
@@ -167,8 +255,19 @@ export class WebTaskManager extends EventEmitter {
 
   /**
    * Teleport a completed cloud task into a local session.
+   *
+   * #8039: resolves the binary through `_verifyBinary()` before spawning.
+   * The gate call sits INSIDE the try so a refusal (a coded
+   * `PROVIDER_BINARY_*`/`PROVIDER_CREDENTIAL_*` error) is wrapped in the same
+   * `Teleport failed: …` shape every other teleport failure already
+   * surfaces through — `handleTeleportWebTask` (feature-handlers.js) forwards
+   * `err.message` verbatim as the `web_task_error` message, so the gate's
+   * code is appended to the message text for legibility rather than added as
+   * a new wire field.
+   *
    * @param {string} taskId
-   * @throws {Error} if teleport not available or task not found
+   * @throws {Error} if teleport not available, task not found, or the
+   *   binary gate refuses (no process is spawned in that case).
    */
   async teleportTask(taskId) {
     if (!this._teleportAvailable) {
@@ -181,10 +280,15 @@ export class WebTaskManager extends EventEmitter {
     }
 
     try {
-      const stdout = await execFileAsync('claude', ['--teleport', task.taskId], { cwd: task.cwd })
+      const bin = this._verifyBinary()
+      const stdout = await execFileAsync(bin, ['--teleport', task.taskId], { cwd: task.cwd })
       return { success: true, output: stdout }
     } catch (err) {
-      throw new Error(`Teleport failed: ${err.message}`)
+      const codeSuffix = err?.code ? ` (code=${err.code})` : ''
+      if (err?.code && /^PROVIDER_(BINARY|CREDENTIAL)_/.test(err.code)) {
+        log.warn(`web task teleport refused: ${err.message}${codeSuffix}`)
+      }
+      throw new Error(`Teleport failed: ${err.message}${codeSuffix}`)
     }
   }
 
@@ -206,11 +310,32 @@ export class WebTaskManager extends EventEmitter {
 
   /**
    * Spawn the remote CLI process for a task.
+   *
+   * #8039: resolves the binary through `_verifyBinary()` first. A refusal
+   * never reaches `execFile` — it transitions the (already-created, already
+   * `task_created`-emitted) task straight to `failed` and emits
+   * `task_updated`/`task_error`, the exact same pair a spawn failure from
+   * `execFile`'s own error callback below already emits, so a gate refusal
+   * surfaces through the identical client-visible path as any other launch
+   * failure.
    * @private
    */
   _spawnRemoteTask(task) {
+    let bin
+    try {
+      bin = this._verifyBinary()
+    } catch (err) {
+      const codeSuffix = err?.code ? ` (code=${err.code})` : ''
+      log.warn(`web task launch refused: ${err?.message || err}${codeSuffix}`)
+      task.status = 'failed'
+      task.error = `${err?.message || err}${codeSuffix}`
+      task.updatedAt = Date.now()
+      this.emit('task_updated', { ...task })
+      this.emit('task_error', { taskId: task.taskId, message: task.error })
+      return
+    }
     // Use execFile with args array to prevent command injection
-    const child = execFile('claude', buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
+    const child = execFile(bin, buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
       this._childProcesses.delete(child)
 
       if (err) {

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web tasks (feature detection, launch, and teleport) now spawn `claude`
+  through the same verified one-shot binary gate as the codex model-catalog
+  probe, instead of a bare, unverified PATH lookup (#8039).**
+  `web-task-manager.js` ran `execFile('claude', …)` at three no-session spawn
+  sites — `detectFeatures()` (parsed at daemon start, with no session or user
+  action involved), `_spawnRemoteTask()` (every `launch_web_task`), and
+  `teleportTask()` (every teleport) — with no existence check, no quarantine
+  check, and no opt-in provenance verification at any of them. In
+  `binaryProvenance.mode: 'block'`, a `claude` whose pinned hash no longer
+  matched was still executed unchecked by all three, even though the exact
+  same binary would refuse a fresh chat session. All three now resolve their
+  binary through `SessionManager.verifyOneShotExecutable(CliSession)` — the
+  same #8030/#8036 verified one-shot resolver the codex model-catalog probe
+  uses, reused rather than a second gate — re-running the full create-time
+  preflight (existence, quarantine, the direct-exec shim refusal, opt-in
+  provenance, the version floor) fresh on every call, since this class has no
+  create-time session of its own to pin a path from. A gate refusal degrades
+  `detectFeatures()` to "feature unavailable" (logged at `warn`, naming the
+  refusal's code) and fails a launch or teleport with the gate's coded error,
+  surfaced through the same `task_error`/`web_task_error` paths those
+  operations already use for any other spawn failure — nothing is spawned in
+  either case. With gates off (the default), behaviour is unchanged.
+
 - **The codex model-catalog probe now spawns `codex app-server` through the
   same verified one-shot binary gate as the summarizer and semantic-title
   calls, instead of a fresh, unverified resolve (#8036).** On every post-auth

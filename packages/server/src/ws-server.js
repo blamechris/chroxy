@@ -1326,8 +1326,11 @@ export class WsServer {
     // Dev server preview tunneling
     this._devPreview = new DevPreviewManager()
 
-    // Web task manager (Claude Code Web cloud delegation)
-    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?.defaultCwd || process.cwd() })
+    // Web task manager (Claude Code Web cloud delegation). #8039: pass
+    // sessionManager so every spawn (feature detection, launch, teleport)
+    // routes through the verified SessionManager.verifyOneShotExecutable()
+    // gate instead of a bare, unverified `claude` PATH lookup.
+    this._webTaskManager = new WebTaskManager({ cwd: sessionManager?.defaultCwd || process.cwd(), sessionManager })
 
     // Legacy single-session mode: wrap cliSession in a minimal shim
     if (!sessionManager && cliSession) {
