@@ -7977,9 +7977,17 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
   it('the sidecar write is owner-only (0600), not the umask-dependent mode a plain writeFileSync leaves', { skip: process.platform === 'win32' }, () => {
     session = makeSession()
     const target = join(dir, 'permission-mode')
-    session._writePermissionModeSidecarAtomic(target, 'plan')
+    // Pin the umask so the mutant is killed on ANY host: with a 077 umask a bare
+    // writeFileSync would already produce 0600 and this assertion would pass
+    // vacuously (same pattern as the sink-dir 0700 test below, #7372).
+    const prevUmask = process.umask(0o022)
+    try {
+      session._writePermissionModeSidecarAtomic(target, 'plan')
+    } finally {
+      process.umask(prevUmask)
+    }
     assert.equal(statSync(target).mode & 0o777, 0o600,
-      'this file decides whether a tool call is prompted — a bare writeFileSync leaves it at the umask-dependent default (typically 0o644), not 0o600')
+      'this file decides whether a tool call is prompted — a bare writeFileSync leaves it at the umask-dependent default (0o644 under the pinned 022), not 0o600')
   })
 
   it('helper replaces an existing value cleanly (no torn intermediate left on disk)', () => {
