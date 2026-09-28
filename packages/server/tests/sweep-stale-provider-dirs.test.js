@@ -131,30 +131,43 @@ describe('sweepStaleProviderDirs (#7374)', () => {
       ])
     })
 
-    // #8047 review S5 — the OTHER direction. `OWNER_PID_FILE` is written
-    // only by a module that creates an owned, swept per-session dir (the
-    // constant's own home, utils/stale-session-dirs.js, is excluded — it
-    // defines the name, it doesn't write it). Scan `src/` for every such
-    // writer and assert that set equals the modules named in ROUTING_TABLE
-    // (and so, transitively, in DEFAULT_SWEEP_LOADERS). A module that starts
-    // stamping OWNER_PID_FILE but is never added to the routing table would
-    // leak forever with no boot sweep, and the test above alone would never
-    // catch it — this is the "roster diffs must read both directions" shape
-    // documented in project memory, applied to this file's own roster.
-    it('every module that stamps OWNER_PID_FILE is named in the routing table (reverse check)', () => {
+    // #8047 review S5 — the OTHER direction. A module that creates an owned,
+    // swept per-session dir writes `OWNER_PID_FILE`, calls
+    // `ensureOwnedBaseDir`, or writes the literal `owner.pid` filename (S5c:
+    // a writer could spell the stamp as a literal instead of importing the
+    // constant, same file on disk, invisible to an identifier-only scan).
+    // Scan `src/` for every such marker and assert that set equals the
+    // modules named in ROUTING_TABLE (and so, transitively, in
+    // DEFAULT_SWEEP_LOADERS). A module that starts stamping an owner-pid file
+    // but is never added to the routing table would leak forever with no
+    // boot sweep, and the test above alone would never catch it — this is
+    // the "roster diffs must read both directions" shape documented in
+    // project memory, applied to this file's own roster.
+    it('every module that marks itself as an owned-dir writer is named in the routing table (reverse check)', () => {
       const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+      // #8047 review S6 — excludes exactly ONE file by exact path, not the
+      // whole `utils/` directory (29 files). The excluded file is
+      // `OWNER_PID_FILE`'s own home: it defines and reads the marker, it
+      // doesn't create an owned dir itself. Every OTHER file under `utils/`
+      // — including a plausible fifth writer like
+      // `utils/permission-mode-sidecar.js` — is scanned like any other
+      // module. round-1's `if (entry.name === 'utils') continue` excluded
+      // the whole subtree and was never exercised against a writer actually
+      // placed there; this is that gap closed.
+      const OWNER_PID_FILE_HOME = join(srcDir, 'utils', 'stale-session-dirs.js')
+      const MARKER = /OWNER_PID_FILE|ensureOwnedBaseDir|owner\.pid/
       const writers = []
       const walk = (dir) => {
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, entry.name)
           if (entry.isDirectory()) {
-            if (entry.name === 'utils') continue // OWNER_PID_FILE's own home, not a writer
-            walk(join(dir, entry.name))
+            walk(full)
             continue
           }
           if (!entry.name.endsWith('.js')) continue
-          const full = join(dir, entry.name)
+          if (full === OWNER_PID_FILE_HOME) continue
           const src = readFileSync(full, 'utf8')
-          if (src.includes('OWNER_PID_FILE')) {
+          if (MARKER.test(src)) {
             writers.push(`../src/${relative(srcDir, full).split('\\').join('/')}`)
           }
         }

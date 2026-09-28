@@ -34,13 +34,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sweepStaleOwnedDirs`.
 
   **Not covered:** credentials leaked by a crash *before* this fix shipped —
-  `$TMPDIR/chroxy-byok-*.env` (holds `ANTHROPIC_API_KEY`) and
-  `$TMPDIR/chroxy-codex-attach-*/` — are outside the new sweep's two bases and
-  are never swept automatically, because the old flat files carry no
-  `owner.pid` a sweep could use to tell a genuinely-dead pre-upgrade session
-  from one still running the old code. List and review them by hand before
-  removing anything:
-  `find "${TMPDIR:-/tmp}" -maxdepth 1 \( -name 'chroxy-byok-*.env' -o -name 'chroxy-codex-attach-*' \) -user "$(id -un)"`.
+  the legacy flat `chroxy-byok-chroxy-byok-<hex>.env` (holds
+  `ANTHROPIC_API_KEY`; the doubled prefix is real — the old path was
+  `` `chroxy-byok-${composeProject}.env` `` and `composeProject` itself
+  already starts with `chroxy-byok-`) and `chroxy-codex-attach-<random>/` —
+  are outside the new sweep's two bases and are never swept automatically,
+  because the old flat files carry no `owner.pid` a sweep could use to tell
+  a genuinely-dead pre-upgrade session from one still running the old code
+  (for example a desktop daemon already upgraded alongside a CLI daemon that
+  hasn't been — deleting the latter's `--env-file` out from under it breaks
+  every later `docker exec` in that session). List and review them by hand
+  before removing anything (macOS/Linux; `find` has no direct Windows
+  equivalent, so on Windows check `%TEMP%`/`%TMP%` by hand instead):
+  ```
+  find "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}" -maxdepth 1 \( -type f -name 'chroxy-byok-chroxy-byok-*.env' \) -o \( -type d -name 'chroxy-codex-attach-*' \)
+  ```
+  For each `chroxy-byok-chroxy-byok-<hex>.env` match, the compose project is
+  the filename with the leading `chroxy-byok-` and trailing `.env` stripped
+  (`chroxy-byok-<hex>`) — `docker compose ls -a` shows whether that project
+  is still up before you touch its env-file.
 
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified

@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync, symlinkSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
@@ -3764,6 +3764,13 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     assert.ok(session._composeEnvDir, 'session tracks the owning dir')
     assert.equal(dirname(writes[0].path), session._composeEnvDir, 'env-file lives inside the owning dir')
     assert.equal(dirname(session._composeEnvDir), DockerByokSession.ENV_FILE_BASE, 'owning dir lives directly under ENV_FILE_BASE')
+    // #8047 review C2 — the codex twin already pinned this; docker-byok, the
+    // site that actually holds the credential, hadn't. Without it, a rename
+    // of the creation-side prefix (`s-` → anything else) leaves the dir
+    // outside sweepStaleEnvDirs's `s-` match with nothing here to notice.
+    // The stronger, no-hardcoded-prefix version lives in the
+    // sweepStaleEnvDirs describe below, against the REAL creation path.
+    assert.match(basename(session._composeEnvDir), /^s-/, 'owning dir is s-prefixed so sweepStaleEnvDirs can reap it')
     const pidFile = join(session._composeEnvDir, OWNER_PID_FILE)
     assert.ok(existsSync(pidFile), 'owner.pid stamped in the owning dir')
     assert.equal(readFileSync(pidFile, 'utf8').trim(), String(process.pid), 'owner.pid holds THIS process\'s pid')
@@ -3937,25 +3944,43 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
   // nulled in the same catch that swallows the error, so neither destroy()
   // nor the boot sweep would ever remove it (owner.pid still names this
   // live daemon).
-  it('a partial env-file write failure does not leave the owner.pid dir behind (#8047 review S1)', async () => {
+  it('a partial env-file write failure does not leave the owner.pid dir behind (#8047 review S1/S7)', async () => {
     const _execFile = execFileStub({ info: { stdout: 'ok' } })
     const backend = composeBackendStub({ primaryId: 'COMPOSE_S1_PARTIAL' })
+    let probeDir = null
+    let pidStampedBeforeThrow = false
     const session = new DockerByokSession({
       cwd: tmpHome,
       composeFile: '/proj/docker-compose.yml',
       _execFile,
       _dockerBackend: backend,
-      _writeEnvFile: () => { throw new Error('ENOSPC: no space left on device') },
+      // #8047 review S7 — round-1's stub threw before writing anything, so
+      // the "partial write" never wrote a fragment, and the assertion (a
+      // generic readdirSync scan of the base, filtered by the `s-` prefix)
+      // checked nothing once the base or the prefix drifted — it was hedged
+      // against the very thing this test exists to prove. This stub instead
+      // captures the EXACT dir the real creation path made, confirms
+      // owner.pid was genuinely stamped in it BEFORE the throw (proving the
+      // precondition — a real, really-owned dir — rather than assuming it),
+      // writes a real key fragment, THEN throws.
+      _writeEnvFile: (p, content) => {
+        probeDir = dirname(p)
+        pidStampedBeforeThrow = existsSync(join(probeDir, OWNER_PID_FILE))
+        writeFileSync(p, content.slice(0, 10)) // a genuine partial write
+        throw new Error('ENOSPC: no space left on device')
+      },
       _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-s1-partial' },
     })
     session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
     await session.start()
 
+    assert.ok(probeDir, 'the stub ran and captured the real dir the creation path made')
+    assert.ok(pidStampedBeforeThrow, 'owner.pid was genuinely stamped in that dir before the write failed')
     assert.equal(session._composeEnvFile, null)
     assert.equal(session._composeEnvDir, null)
-    const base = DockerByokSession.ENV_FILE_BASE
-    const leftover = existsSync(base) ? readdirSync(base).filter((n) => n.startsWith('s-')) : []
-    assert.deepEqual(leftover, [], 'the owner.pid-stamped dir must not survive a failed env-file write')
+    // The EXACT dir the real creation path made and partially wrote a key
+    // fragment into — not a generic prefix-filtered scan of the base.
+    assert.ok(!existsSync(probeDir), 'the exact dir holding the key fragment is gone')
 
     await session.destroy()
   })
@@ -3967,25 +3992,37 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     'the env-file is 0600 and its owning dir is 0700 (POSIX)',
     { skip: process.platform === 'win32' ? 'POSIX file-mode bits only' : false },
     async () => {
-      const _execFile = execFileStub({ info: { stdout: 'ok' } })
-      const backend = composeBackendStub({ primaryId: 'COMPOSE_S2_MODE' })
-      const session = new DockerByokSession({
-        cwd: tmpHome,
-        composeFile: '/proj/docker-compose.yml',
-        _execFile,
-        _dockerBackend: backend,
-        // No _writeEnvFile override — use the REAL default writer, so the
-        // mode this test pins is the mode production code actually sets.
-        _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-mode-check' },
-      })
-      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
-      await session.start()
+      // #8047 review N9 — an explicit mode arg to writeFileSync/mkdirSync is
+      // still masked by the process umask. At umask 022 (typical CI) R3/R4
+      // go RED as intended; at umask 077 the ambient mask alone already
+      // produces 0600/0700, so the mutants' EXPLICIT modes become
+      // indistinguishable from their absence and this test would pass for
+      // the wrong reason — a host-dependent guard, not a real one. Pin the
+      // umask for the duration of this one test and restore it unconditionally.
+      const prevUmask = process.umask(0o022)
+      try {
+        const _execFile = execFileStub({ info: { stdout: 'ok' } })
+        const backend = composeBackendStub({ primaryId: 'COMPOSE_S2_MODE' })
+        const session = new DockerByokSession({
+          cwd: tmpHome,
+          composeFile: '/proj/docker-compose.yml',
+          _execFile,
+          _dockerBackend: backend,
+          // No _writeEnvFile override — use the REAL default writer, so the
+          // mode this test pins is the mode production code actually sets.
+          _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-mode-check' },
+        })
+        session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+        await session.start()
 
-      assert.ok(session._composeEnvFile && session._composeEnvDir, 'env-file + owning dir created')
-      assert.equal(statSync(session._composeEnvFile).mode & 0o777, 0o600, 'env-file must be 0600')
-      assert.equal(statSync(session._composeEnvDir).mode & 0o777, 0o700, 'owning dir must be 0700')
+        assert.ok(session._composeEnvFile && session._composeEnvDir, 'env-file + owning dir created')
+        assert.equal(statSync(session._composeEnvFile).mode & 0o777, 0o600, 'env-file must be 0600')
+        assert.equal(statSync(session._composeEnvDir).mode & 0o777, 0o700, 'owning dir must be 0700')
 
-      await session.destroy()
+        await session.destroy()
+      } finally {
+        process.umask(prevUmask)
+      }
     },
   )
 
@@ -4133,11 +4170,16 @@ describe('DockerByokSession.sweepStaleEnvDirs (#7373)', () => {
     for (const d of created) rmSync(d, { recursive: true, force: true })
   })
 
-  // Builds a dir directly under the REAL ENV_FILE_BASE (read off the class
-  // per #7372's lesson — a hardcoded second copy of the path is exactly the
-  // drift this dir naming exists to prevent), containing both an owner.pid
-  // stamp and a fake .env credential file, so the sweep is exercised against
-  // the actual shape _startComposeStack() creates.
+  // #8047 review N7 — this used to build under the REAL system ENV_FILE_BASE;
+  // since the file-level root `beforeEach` (N4) started pinning ENV_FILE_BASE
+  // to `tmpHome/byok-env-base` for every test in this file, it builds under
+  // THAT sandboxed base instead — every test here inherits the root hooks the
+  // same as any other test in the file. Still read off the class (per #7372's
+  // lesson — a hardcoded second copy of the path is exactly the drift this
+  // dir naming exists to prevent) rather than re-spelled, so wherever the
+  // getter currently points, creation and sweep here agree. Contains both an
+  // owner.pid stamp and a fake .env credential file, so the sweep is
+  // exercised against the actual shape _startComposeStack() creates.
   function makeEnvDir(suffix, pidContent) {
     const base = DockerByokSession.ENV_FILE_BASE
     mkdirSync(base, { recursive: true })
@@ -4183,6 +4225,58 @@ describe('DockerByokSession.sweepStaleEnvDirs (#7373)', () => {
     assert.ok(!existsSync(dir), 'aged pidfile-less dir swept')
     assert.ok(!existsSync(envFile), 'its credential file is gone too')
   })
+
+  // #8047 review C2 (blocking, strong version) — every other test in this
+  // describe plants its OWN `s-`-prefixed dir via `makeEnvDir`, which
+  // hardcodes the prefix independently of production code — so a drift
+  // between the prefix `_startComposeStack` actually creates and the prefix
+  // `sweepStaleOwnedDirs` actually matches (mutant M7: `s-` → `x-` at the
+  // creation site) is invisible to them: they never touch the creation
+  // path. This test runs the REAL `_startComposeStack` (via `start()`) to
+  // create the dir, then runs the REAL `sweepStaleEnvDirs` against it —
+  // no hardcoded prefix anywhere in the test — so a drift on EITHER side
+  // breaks this test regardless of which side moved.
+  it(
+    'a dir created by a real session is swept once its owner reads DEAD, and kept while its owner is alive (#8047 review C2)',
+    async () => {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = {
+        createCalls: [],
+        async createComposeEnvironment(opts) {
+          this.createCalls.push(opts)
+          return { containerId: 'COMPOSE_C2_STRONG', containerCliPath: '/usr/local/bin/claude', services: [] }
+        },
+        async destroyComposeEnvironment() {},
+        async execInEnvironment() { return { stdout: '', stderr: '' } },
+      }
+      const session = new DockerByokSession({
+        cwd: tmpHome,
+        composeFile: '/proj/docker-compose.yml',
+        _execFile,
+        _dockerBackend: backend,
+        _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-c2-strong' },
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const dir = session._composeEnvDir
+      assert.ok(dir, 'the real _startComposeStack path created and tracked the owning dir')
+      created.push(dir)
+
+      // Sweep right after start(): owner.pid is THIS process, still alive —
+      // the real creation path's dir must survive a real sweep.
+      DockerByokSession.sweepStaleEnvDirs({ info() {}, warn() {} })
+      assert.ok(existsSync(dir), "a live session's dir is not swept out from under it")
+
+      // Stamp a DEAD pid into the SAME dir the session created (not a
+      // separately-planted fixture), then sweep again.
+      writeFileSync(join(dir, OWNER_PID_FILE), String(DEAD_PID))
+      DockerByokSession.sweepStaleEnvDirs({ info() {}, warn() {} })
+      assert.ok(!existsSync(dir),
+        'the sweep reaps the dir the real creation path made, once its owner reads dead — ties the s- prefix on both sides together')
+
+      await session.destroy() // must not throw on an already-swept dir
+    },
+  )
 })
 
 // ─────────────────────────────────────────────────────────────────────

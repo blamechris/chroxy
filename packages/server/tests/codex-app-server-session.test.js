@@ -1439,6 +1439,29 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
 describe('CodexAppServerSession — attachments (#6609)', () => {
   const PNG_B64 = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').toString('base64')
 
+  // #8047 review N8 — every test here that materializes a binary attachment
+  // creates a real owner.pid-stamped dir under ATTACH_BASE. Left pointed at
+  // the real system tmpdir, a run leaves the empty `chroxy-codex-attach`
+  // base behind (harmless, but uncontained — unlike docker-byok's
+  // equivalent base after #8047 review N4). Pin it to a per-test sandbox,
+  // mirroring docker-byok-session.test.js's file-level beforeEach/afterEach.
+  let attachSandbox
+  let origAttachBase
+
+  beforeEach(() => {
+    attachSandbox = mkdtempSync(join(tmpdir(), 'chroxy-cas-attach-sandbox-'))
+    origAttachBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+    Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', {
+      get: () => join(attachSandbox, 'chroxy-codex-attach'),
+      configurable: true,
+    })
+  })
+
+  afterEach(() => {
+    if (origAttachBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origAttachBase)
+    rmSync(attachSandbox, { recursive: true, force: true })
+  })
+
   it('text-only input when there are no attachments', () => {
     const { s, cleanup } = mkSession()
     assert.deepEqual(s._buildTurnInput('hi', undefined, 'm1'), [{ type: 'text', text: 'hi' }])
@@ -1577,6 +1600,12 @@ describe('CodexAppServerSession.sweepStaleAttachDirs (#7373)', () => {
   const DEAD_PID = 999999
   let created = []
   let realKill
+  // #8047 review N8 — same containment as the attachments describe above:
+  // pin ATTACH_BASE to a per-test sandbox so this describe's own
+  // makeAttachDir fixtures don't leave the empty base behind in the real
+  // system tmpdir either.
+  let attachSandbox
+  let origAttachBase
 
   beforeEach(() => {
     created = []
@@ -1588,11 +1617,19 @@ describe('CodexAppServerSession.sweepStaleAttachDirs (#7373)', () => {
       if (pid === DEAD_PID) { const e = new Error('ESRCH'); e.code = 'ESRCH'; throw e }
       return realKill(pid, sig)
     })
+    attachSandbox = mkdtempSync(join(tmpdir(), 'chroxy-cas-sweep-sandbox-'))
+    origAttachBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+    Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', {
+      get: () => join(attachSandbox, 'chroxy-codex-attach'),
+      configurable: true,
+    })
   })
 
   afterEach(() => {
     mock.restoreAll()
     for (const d of created) rmSync(d, { recursive: true, force: true })
+    if (origAttachBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origAttachBase)
+    rmSync(attachSandbox, { recursive: true, force: true })
   })
 
   function makeAttachDir(suffix, pidContent) {

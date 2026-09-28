@@ -573,10 +573,15 @@ export class DockerByokSession extends ClaudeByokSession {
     // Test seam: override the writer / remover so tests can assert the
     // file lifecycle without touching the real filesystem.
     this._writeEnvFile = opts._writeEnvFile || ((p, c) => writeFileSync(p, c, { mode: 0o600 }))
-    // #8047 review N2 — named `_removeEnvDir`, not `_unlinkEnvFile`: it takes
-    // the OWNING DIR (not the bare file) and removes it recursively, so the
-    // owner.pid stamp is removed along with the credential — see
-    // destroy()/_startComposeStack, both of which pass a directory.
+    // #8047 review N2/N6 — named `_removeEnvDir`, not `_unlinkEnvFile`: it
+    // takes a DIRECTORY (not the bare file) and removes it recursively, so
+    // the owner.pid stamp is removed along with the credential. Every
+    // regular call site (_startComposeStack's two cleanup paths, destroy()'s
+    // primary path) passes the owning dir. The one exception is destroy()'s
+    // `composeEnvFile` fallback — a defensive branch for a state that
+    // should not arise (dir tracking lost while the file path survived) —
+    // which passes the bare file; rmSync handles a plain file the same as a
+    // dir, so the credential is still removed either way.
     this._removeEnvDir = opts._removeEnvDir || ((p) => { try { rmSync(p, { recursive: true, force: true }) } catch { /* ignore */ } })
     this._envForApiKey = opts._envForApiKey || process.env
     // #5081 — crash-durable record of the compose project id so a daemon
