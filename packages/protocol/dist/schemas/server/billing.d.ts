@@ -264,6 +264,11 @@ export declare const ServerMonthlyBudgetSchema: z.ZodObject<{
     exceeded: z.ZodBoolean;
     justWarned: z.ZodOptional<z.ZodBoolean>;
     justExceeded: z.ZodOptional<z.ZodBoolean>;
+    billingClass: z.ZodOptional<z.ZodEnum<{
+        "api-key": "api-key";
+        subscription: "subscription";
+        "programmatic-credit": "programmatic-credit";
+    }>>;
 }, z.core.$strip>;
 export declare const ServerWebFeatureStatusSchema: z.ZodObject<{
     type: z.ZodLiteral<"web_feature_status">;
