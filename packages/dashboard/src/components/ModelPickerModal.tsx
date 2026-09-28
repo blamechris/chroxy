@@ -95,6 +95,11 @@ export function ModelPickerModal({
   // filter has narrowed to exactly one enabled match (type-to-pick).
   const handleSearchKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // #8064 — don't let an IME composition's commit key (usually Enter)
+      // get read as "select the single matching model". `keyCode === 229`
+      // is the Safari fallback for browsers that don't set `isComposing`
+      // reliably.
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         listRef.current

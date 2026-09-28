@@ -156,6 +156,41 @@ describe('QuestionPrompt', () => {
     expect(onSelect).toHaveBeenCalledWith('Bob')
   })
 
+  // #8064 — the Enter that commits an IME composition (Japanese/Chinese/
+  // Korean, …) must not be read as "submit the response".
+  it('does not submit free-text response on Enter during IME composition (#8064)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        onSelect={onSelect}
+      />
+    )
+    const input = screen.getByPlaceholderText('Type your response…')
+    fireEvent.change(input, { target: { value: 'こんにちは' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  // #8064 — Safari fallback: some Safari versions don't set `isComposing`
+  // reliably, so keyCode 229 (the historical "still composing" sentinel)
+  // must suppress the submit too.
+  it('does not submit free-text response on Enter with keyCode 229 (Safari fallback) (#8064)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="What is your name?"
+        options={[]}
+        onSelect={onSelect}
+      />
+    )
+    const input = screen.getByPlaceholderText('Type your response…')
+    fireEvent.change(input, { target: { value: 'Bob' } })
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
   it('does not submit empty free-text response (#1245)', () => {
     const onSelect = vi.fn()
     render(

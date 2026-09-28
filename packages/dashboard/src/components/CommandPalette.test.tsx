@@ -116,6 +116,22 @@ describe('CommandPalette', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "run the highlighted command". Uses its own command list (rather than
+  // the shared `mockCommands`) so it doesn't depend on the call-count state
+  // other tests in this file leave on the shared `vi.fn()` actions.
+  it('does not execute the highlighted command on Enter during IME composition', () => {
+    const onClose = vi.fn()
+    const commands: Command[] = [
+      { id: 'solo', name: 'Solo Command', category: 'Session', action: vi.fn() },
+    ]
+    render(<CommandPalette commands={commands} isOpen={true} onClose={onClose} />)
+    const input = screen.getByRole('combobox')
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(commands[0]!.action).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('closes on Escape', () => {
     const onClose = vi.fn()
     render(<CommandPalette commands={mockCommands} isOpen={true} onClose={onClose} />)

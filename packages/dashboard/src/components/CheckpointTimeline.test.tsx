@@ -209,6 +209,18 @@ describe('CheckpointTimeline', () => {
     expect(mockCreateCheckpoint).toHaveBeenCalledWith('Quick save')
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "create the checkpoint".
+  it('does not create the checkpoint on Enter during IME composition', () => {
+    render(<CheckpointTimeline />)
+
+    fireEvent.click(screen.getByText('+ New Checkpoint'))
+    const input = screen.getByPlaceholderText('Checkpoint name (optional)')
+    fireEvent.change(input, { target: { value: 'Quick save' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(mockCreateCheckpoint).not.toHaveBeenCalled()
+  })
+
   it('cancels create form on Escape key', () => {
     render(<CheckpointTimeline />)
 

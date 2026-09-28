@@ -715,6 +715,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   }, [voiceInput, startVoiceAtCaret])
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // #8064 — while an IME composition is in progress, the key that commits
+    // the candidate (typically Enter) must not be treated as a composer
+    // command. `isComposing` is the standard signal; Safari doesn't set it
+    // reliably so `keyCode === 229` (the historical "still composing"
+    // sentinel) is checked as a fallback. Bail out before any Enter/Tab/
+    // arrow/Escape handling below — pickers, history recall, send, and
+    // interrupt all live after this point.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+
     if (e.key === 'Control') {
       if (handleControlPttKeyDown(e)) return
     } else {

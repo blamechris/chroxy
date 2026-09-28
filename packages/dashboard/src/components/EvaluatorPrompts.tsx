@@ -132,6 +132,10 @@ export function EvaluatorClarifyPrompt({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "submit the clarification". `keyCode === 229` is the Safari
+    // fallback for browsers that don't set `isComposing` reliably.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     // Enter alone submits; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()

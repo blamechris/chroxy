@@ -52,6 +52,10 @@ export function TranscriptSearchBar({
   const hasMatches = matchCount > 0
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "jump to the next match". `keyCode === 229` is the Safari
+    // fallback for browsers that don't set `isComposing` reliably.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Enter') {
       e.preventDefault()
       if (!hasMatches) return

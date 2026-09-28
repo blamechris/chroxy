@@ -42,6 +42,10 @@ export function CreateSessionPanel({
   }, [cwdValue, cwd, model, permMode, onCreate])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "submit the form". `keyCode === 229` is the Safari fallback
+    // for browsers that don't set `isComposing` reliably.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Enter') {
       e.preventDefault()
       submit()

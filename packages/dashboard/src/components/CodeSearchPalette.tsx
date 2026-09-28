@@ -82,6 +82,10 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
   }, [results, openFileInBrowser, onClose])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "open the highlighted result". `keyCode === 229` is the
+    // Safari fallback for browsers that don't set `isComposing` reliably.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if (e.key === 'Escape') { e.preventDefault(); onClose() }
     else if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(i => Math.min(i + 1, Math.min(results.length, DISPLAY_CAP) - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIndex(i => Math.max(i - 1, 0)) }
