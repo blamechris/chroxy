@@ -200,13 +200,27 @@ binary only at create. A refusal on a respawn is NOT treated as the process
 dying: nothing is spawned, no further backoff is armed, and the session sits
 idle until the next spawn request re-runs the gate (see "Per-spawn refusal
 semantics" after the §5 table). Some spawns still run with
-no gate at all: web tasks (#8039), and the `chroxy start` dependency checks,
-which run the configured provider's binary and `cloudflared` with `--version`
-(#8041). The `codex` model-catalog probe closed the same gap (#8036): its
-no-session spawn now runs through `SessionManager.verifyOneShotExecutable()`,
-the SAME verified one-shot resolver #8030 wired for the summarizer and
-semantic-title generator, generalized to take an explicit provider class. The
-§5 table lists what each provider verifies and when.
+no gate at all: the `chroxy start` dependency checks, which run the
+configured provider's binary and `cloudflared` with `--version` (#8041). The
+`codex` model-catalog probe closed the same gap (#8036): its no-session spawn
+now runs through `SessionManager.verifyOneShotExecutable()`, the SAME verified
+one-shot resolver #8030 wired for the summarizer and semantic-title generator,
+generalized to take an explicit provider class. Web tasks closed the same gap
+a second time (#8039): `web-task-manager.js` ran a bare `claude`, resolved by
+the OS's own PATH lookup, at THREE no-session spawn sites — feature detection
+(`detectFeatures`, called once at daemon start with no session or user action
+involved), every `launch_web_task` (`_spawnRemoteTask`), and every teleport
+(`teleportTask`) — none of them gated at all. All three now call
+`verifyOneShotExecutable(CliSession)` fresh on every invocation (this class
+has no create-time session to pin a path from, same as the codex probe); a
+refusal degrades `detectFeatures` to "unavailable" (logged at `warn` naming
+the refusal's code) and fails a launch or teleport with the gate's coded
+error, surfaced through the same `task_error`/`web_task_error` paths those
+operations already use for any other spawn failure — nothing is spawned in
+either case. `CliSession` (`claude-cli`), not `claude-sdk`, because web tasks
+always shell out to the `claude` CLI binary via `execFile`, never the
+in-process Agent SDK, regardless of which provider the daemon's chat sessions
+currently use. The §5 table lists what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -506,18 +520,21 @@ the same installed `claude` on the end user's machine.
 | `acp` (config-driven ACP agents) | none | none — operator-configured `command`; a spawn-failure backstop labels a quarantined or not-executable ABSOLUTE command (§2) |
 | One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
 | `codex` model-catalog probe (post-auth `available_models` refresh) | n/a | the FULL create-time preflight (existence, quarantine, the direct-exec shim refusal, provenance, credentials) fresh on every no-session probe, via `SessionManager.verifyOneShotExecutable(ProviderClass)` — the #8030 one-shot resolver generalized to take an explicit provider class (#8036); a codex install with no `OPENAI_API_KEY`/`codex login` now refuses to probe too, same as `createSession`; a refusal is TTL-cached for the same 5-minute window a success is; a live session's own probe (`CodexAppServerSession.start()`) reuses that session's already-verified client and spawns nothing new |
-| Web tasks (`web-task-manager.js`) | none | none — runs a bare `claude` from PATH for feature detection at daemon start, for each launch and for teleport (#8039) |
+| Web tasks (`web-task-manager.js`) | n/a | a fresh full gate on every call, at all THREE no-session spawn sites (feature detection at daemon start, every `launch_web_task`, every teleport), via `SessionManager.verifyOneShotExecutable(CliSession)` — the same #8030/#8036 one-shot resolver the codex model-catalog probe uses; a refusal degrades feature detection to unavailable (logged at `warn`) and fails a launch/teleport with the gate's coded error — nothing is spawned either way (#8039) |
 | `chroxy start` dependency checks | none | none — runs the configured provider's binary (plus `claude` for `claude-tui`) and `cloudflared` with `--version`, with no provenance or signature gate, before any session exists; the desktop app runs these on every launch (#8041) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than
 re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. The catalog
 probe has no create-time step to pin from (same as the other one-shots), so it
-re-resolves AND re-verifies fresh on every call instead. A row marked "none"
-gets at most the create-time check; the web-task spawns and the startup
-checks tracked in #8039 and #8041 are the known
-spawns that still run with no gate of their own. Where a gate does run, it
-hashes only the file at the pinned path (#8040).
+re-resolves AND re-verifies fresh on every call instead — the web-task spawns
+closed by #8039 follow the identical pattern. A row marked "none" gets at
+most the create-time check; the known remaining spawns that run with no gate
+of their own are the `chroxy start` dependency checks (#8041) and the
+`chroxy session resume` CLI subcommand (`cli/session-cmd.js`), which runs a
+bare `execFileSync('claude', ['--resume', convId, …])` with no gate at all
+(#8061). Where a gate does run, it hashes only the file at the pinned path
+(#8040).
 
 **Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not
 treated as the process dying. `claude-cli` and `claude-tui` normally respond to

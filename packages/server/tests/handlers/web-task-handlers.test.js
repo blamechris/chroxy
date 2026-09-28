@@ -9,7 +9,11 @@ function makeCtx(overrides = {}) {
   return nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     webTaskManager: {
-      launchTask: createSpy(() => ({ taskId: 'task-1' })),
+      // #8060 review: `task` mirrors the REAL WebTaskManager.launchTask()
+      // contract (`{ taskId, task }`, never just `{ taskId }`) — the
+      // feature-handlers.js nitpick fix reads `task.status` to decide
+      // whether the launch actually spawned.
+      launchTask: createSpy(() => ({ taskId: 'task-1', task: { taskId: 'task-1', status: 'pending' } })),
       listTasks: createSpy(() => []),
       teleportTask: createSpy(async () => {}),
     },
@@ -63,6 +67,26 @@ describe('web-task-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'web_task_error')
       assert.match(ctx._sent[0].message, /Failed to launch/)
+    })
+
+    // #8060 review nitpick: launchTask() does NOT throw for a #8039 binary
+    // gate refusal discovered synchronously at spawn time — it returns
+    // normally with a task already marked 'failed'. The handler must not
+    // crash on that shape (task.status, not task.taskId, decides the log
+    // line) and must not ALSO send a web_task_error itself — the real
+    // WebTaskManager already emitted task_error via its EventEmitter, which
+    // ws-server.js broadcasts separately.
+    it('does not throw or double-send when launchTask returns a task the #8039 gate already failed synchronously', () => {
+      const ctx = makeCtx()
+      ctx.services.webTaskManager.launchTask = createSpy(() => ({
+        taskId: 'task-gate-refused',
+        task: { taskId: 'task-gate-refused', status: 'failed', error: 'PROVIDER_BINARY_PROVENANCE refused (code=PROVIDER_BINARY_PROVENANCE)' },
+      }))
+
+      webTaskHandlers.launch_web_task(makeWs(), makeClient(), { prompt: 'Do something' }, ctx)
+
+      assert.equal(ctx.services.webTaskManager.launchTask.callCount, 1)
+      assert.equal(ctx._sent.length, 0, 'no web_task_error from this handler — task_error already fired on the manager')
     })
 
     // --- Adversary A10 (2026-04-11 audit) --------------------
