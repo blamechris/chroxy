@@ -549,7 +549,9 @@ timeout, a spawn or resource error, oversized or unparseable output), which can
 be transient: the trade is deliberate — the next input retries, where the old
 backoff retried five times and then destroyed the session. A probe that fails
 with an uncoded error (e.g. the binary vanished or was quarantined between the
-gate and the probe) is refused too, as `SPAWN_REFUSED`.
+gate and the probe) is refused too, as `SPAWN_REFUSED`. Before this, each
+respawn re-ran the check up to five times over about 30s and then destroyed the
+session with a `pty_respawn_exhausted` "failed to stay alive".
 
 **So is the native route's post-spawn endpoint marker (#8057).** After the TUI
 launches, its SessionStart hook writes a route marker. A marker reporting a
@@ -561,9 +563,7 @@ PTY did launch, so it is killed and dropped; the code is emitted once, no backof
 is armed, and the next input relaunches and re-checks. Before this, each of up
 to five backoff attempts relaunched claude under the rejected route (paying the
 warmup each time), emitted no coded error at all, and ended by destroying the
-session with `pty_respawn_exhausted`. Before this, each respawn re-ran the check up to five
-times over about 30s and then destroyed the session with a
-`pty_respawn_exhausted` "failed to stay alive".
+session with `pty_respawn_exhausted`.
 
 The very first spawn is gated too, and a refusal there (possible only if the
 binary changes in the moment between create-time preflight and the spawn)

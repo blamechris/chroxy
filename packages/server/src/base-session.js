@@ -742,8 +742,11 @@ export class BaseSession extends EventEmitter {
    * verified path — nothing was spawned, so there is no child/PTY error to
    * report through the normal exit-handling path. #8044: the TUI native
    * route's `claude auth status` verdict (logged out, a non-first-party route,
-   * unreadable status) is refused the same way; #8057: so is its post-spawn
-   * endpoint-marker verdict (that PTY was launched, then killed and dropped).
+   * unreadable status) is refused the same way, also before any spawn.
+   * #8057 is the one post-spawn case: the native endpoint-marker verdict
+   * arrives after the PTY launched, so `_spawnPty` kills and drops that PTY
+   * first and the refusal then follows these same semantics — no live child
+   * remains, and no exit-handling path reports it either.
    *
    * Latches `this._spawnRefusal = err` so:
    *  - the provider's own respawn machinery can tell "the gate refused this
