@@ -536,6 +536,18 @@ being queued. `codex` app-server has no respawn loop at all: a
 refusal there throws out of `start()` before the client is created, and
 `SessionManager` handles it exactly like any other `start()` failure.
 
+**The `claude-tui` native auth route's `claude auth status` verdict is refused
+the same way (#8044).** On an explicit native agent-connection session, every
+PTY (re)spawn runs `claude auth status`. A logged-out host
+(`NATIVE_LOGIN_REQUIRED`), a non-first-party route (`NATIVE_AUTH_ROUTE_MISMATCH`)
+or unreadable status output (`NATIVE_AUTH_STATUS_UNVERIFIED`) is a verdict about
+the host, not a PTY that failed to stay up: nothing is spawned, the native code
+is emitted once with its own message, no backoff is armed, and the session
+stays listed and idle. The next input re-runs the check, so a `claude login`
+recovers it in place. Before this, each respawn re-ran the check up to five
+times over about 30s and then destroyed the session with a
+`pty_respawn_exhausted` "failed to stay alive".
+
 The very first spawn is gated too, and a refusal there (possible only if the
 binary changes in the moment between create-time preflight and the spawn)
 differs by provider: `claude-tui` and `codex` app-server reject `start()`, so

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A logged-out `claude-tui` native session no longer burns its respawn
+  budget into "failed to stay alive" (#8044).** On an explicit native
+  agent-connection session, a PTY respawn whose `claude auth status` reports
+  logged out, a non-first-party route or unreadable output is now refused like
+  a #8038 binary-gate refusal: nothing is spawned, the native code
+  (`NATIVE_LOGIN_REQUIRED`, `NATIVE_AUTH_ROUTE_MISMATCH` or
+  `NATIVE_AUTH_STATUS_UNVERIFIED`) is emitted once, no backoff is armed, and
+  the session stays listed. The next input re-runs the check, so running
+  `claude login` and sending again recovers the session in place instead of
+  it being destroyed after five futile retries.
+
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
   (#8038).** #8035 (below) closed the per-turn gap for `gemini` and `codex

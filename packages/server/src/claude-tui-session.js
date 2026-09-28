@@ -2480,10 +2480,9 @@ export class ClaudeTuiSession extends BaseSession {
     // through `_gatedSpawnBinary` — previously it read `_connectionVerifiedBinary`
     // once at create time and never re-verified it on a respawn — and the native
     // route's own `_connectionRuntimePreflight` re-check is unchanged but is
-    // ALSO the gate for that route). A failure in `_verifyNativeConnectionRoute`
-    // below is a different defect class (native auth-status / endpoint-route
-    // mismatch — out of scope for #8038) and must not latch a refusal or
-    // suppress the respawn backoff the way a real gate refusal does.
+    // ALSO the gate for that route). The native `claude auth status` verdict
+    // below latches the same way (#8044); the nonce / hook-settings write in
+    // between does not — that is a local I/O failure, not a verdict.
     try {
       attemptedBinary = this._connectionAuthRoute === 'native'
         ? this._connectionRuntimePreflight?.()
@@ -2502,8 +2501,23 @@ export class ClaudeTuiSession extends BaseSession {
       if (nativeRouteNonce) {
         this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
       }
+    } catch (err) {
+      this._blockNativeRouteVerification(err)
+      throw err
+    }
+    try {
       await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
     } catch (err) {
+      // #8044: `claude auth status` reporting logged-out, a non-first-party
+      // route, or unreadable output (NATIVE_LOGIN_REQUIRED /
+      // NATIVE_AUTH_ROUTE_MISMATCH / NATIVE_AUTH_STATUS_UNVERIFIED) is a
+      // deterministic verdict about the host's auth state, not a PTY that
+      // failed to stay up. Latch it exactly like a #8038 gate refusal:
+      // `_respawnPty` then arms no backoff (which used to re-run the check ≤5
+      // times and end in a misleading `pty_respawn_exhausted`), emits the
+      // native code once, and the next input re-runs the check — so a
+      // `claude login` recovers the session in place.
+      this._spawnRefusal = err
       this._blockNativeRouteVerification(err)
       throw err
     }
