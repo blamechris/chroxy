@@ -93,6 +93,19 @@ describe('CodeSearchPalette (#6474)', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "open the highlighted match".
+  it('does not open the highlighted match on Enter during IME composition', async () => {
+    const onClose = vi.fn()
+    render(<CodeSearchPalette isOpen={true} onClose={onClose} />)
+    const input = screen.getByTestId('code-search-input')
+    fireEvent.change(input, { target: { value: 'target' } })
+    await waitFor(() => screen.getByTestId('code-search-item-0'))
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(mockOpenFileInBrowser).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('arrow-down then Enter opens the second match', async () => {
     render(<CodeSearchPalette isOpen={true} onClose={() => {}} />)
     const input = screen.getByTestId('code-search-input')

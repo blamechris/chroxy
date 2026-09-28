@@ -1,4 +1,12 @@
-import { SessionManager } from './session-manager.js'
+import {
+  SessionManager,
+  ProviderBinaryNotFoundError,
+  ProviderBinaryQuarantinedError,
+  ProviderBinaryProvenanceError,
+  ProviderBinaryUnsupportedError,
+  ProviderBinaryVersionError,
+  ProviderCredentialMissingError,
+} from './session-manager.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -789,6 +797,73 @@ export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, l
   try { removeConnectionInfo() } catch {}
 }
 
+// #8029: the set of typed errors `runProviderPreflight` (via
+// SessionManager#createSession) throws for a provider that isn't usable —
+// binary missing/quarantined/unsupported/wrong-provenance/wrong-version, or
+// missing credentials. Kept as an explicit instanceof list (not a
+// duck-typed `err.code` check) and exposed through `isProviderPreflightError`
+// below, so a test can prove the startup
+// default-session guard below only swallows THIS class of failure and lets
+// anything else — a bug, an out-of-memory error, a corrupted state file —
+// still crash loudly instead of being silently absorbed by a broadened net.
+const PROVIDER_PREFLIGHT_ERROR_CLASSES = [
+  ProviderBinaryNotFoundError,
+  ProviderBinaryQuarantinedError,
+  ProviderBinaryProvenanceError,
+  ProviderBinaryUnsupportedError,
+  ProviderBinaryVersionError,
+  ProviderCredentialMissingError,
+]
+
+export function isProviderPreflightError(err) {
+  return PROVIDER_PREFLIGHT_ERROR_CLASSES.some((ErrorClass) => err instanceof ErrorClass)
+}
+
+/**
+ * Create the startup default session, or return the already-restored one.
+ * Extracted (like `createDaemonSessionManager` above) so the #8029 preflight
+ * guard is unit-testable without driving the rest of `startCliServer`'s
+ * WS-server/tunnel/push-manager setup.
+ *
+ * `createSession` runs `runProviderPreflight` for the configured default
+ * provider, which throws a typed error (binary missing/quarantined/
+ * unsupported/wrong-provenance/wrong-version, or missing credentials) when
+ * the provider isn't usable. Without `--skip-checks`, `chroxy start`'s
+ * doctor pass (server-cmd.js) catches the same class of failure first and
+ * refuses with a readable one-line message before any server state exists.
+ * `--skip-checks` reaches this point instead. `restoreState()` (called just
+ * before this) already keeps the daemon running when a RESTORED session fails
+ * to come back (it catches any restore failure, broader than this guard), so
+ * one broken provider does not take the whole process down. This does the
+ * same, more narrowly, for the startup default session: log the same readable message and
+ * keep starting with no default session, rather than letting an uncaught
+ * exception kill a daemon that (a) may serve other, working providers per
+ * session and (b) is often the only way to reach this machine remotely to
+ * fix the credential/binary problem in the first place.
+ *
+ * The returned `defaultSessionId` may be `null` — `ws-server.js` already
+ * coalesces that (`this.defaultSessionId = defaultSessionId || null`) and
+ * every client (dashboard's WelcomeScreen, the app's "No active sessions"
+ * states) already renders a clean zero-session state.
+ *
+ * Anything NOT one of the typed preflight errors is an unexpected failure
+ * and must still surface (uncaught), same as before this guard existed.
+ *
+ * @param {{ sessionManager: SessionManager, defaultSessionId: string|null, logger?: { warn: Function } }} args
+ * @returns {string|null}
+ */
+export function createDefaultSessionIfNeeded({ sessionManager, defaultSessionId, logger = log }) {
+  if (defaultSessionId) return defaultSessionId
+  try {
+    return sessionManager.createSession({ name: 'Default' })
+  } catch (err) {
+    if (!isProviderPreflightError(err)) throw err
+    logger.warn(`✗ default session [${err.code}]: ${err.message}`)
+    logger.warn('Starting with no default session — fix the provider (see the message above) and create a session from the app or dashboard, or restart once resolved.')
+    return null
+  }
+}
+
 export async function startCliServer(config) {
   // Enable JSON log format if configured
   if (config.logFormat === 'json') {
@@ -1167,9 +1242,7 @@ export async function startCliServer(config) {
   }
 
   // 3. Create default session if no restore
-  if (!defaultSessionId) {
-    defaultSessionId = sessionManager.createSession({ name: 'Default' })
-  }
+  defaultSessionId = createDefaultSessionIfNeeded({ sessionManager, defaultSessionId, logger: log })
 
   let wsServer
 

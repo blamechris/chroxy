@@ -145,4 +145,18 @@ describe('ModelPickerModal (#6220)', () => {
     fireEvent.keyDown(search, { key: 'Enter' })
     expect(onSelect).not.toHaveBeenCalled()
   })
+
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "select the single matching model", even when the filter has narrowed
+  // to exactly one match.
+  it('Enter in the search field during IME composition does not select', () => {
+    const onSelect = vi.fn()
+    const onClose = vi.fn()
+    renderModal({ onSelect, onClose })
+    const search = screen.getByTestId('model-picker-search')
+    fireEvent.change(search, { target: { value: 'opus' } })
+    fireEvent.keyDown(search, { key: 'Enter', isComposing: true })
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
 })

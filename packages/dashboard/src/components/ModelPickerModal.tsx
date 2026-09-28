@@ -13,6 +13,7 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { Modal } from './Modal'
 import type { ModelInfo } from '../store/types'
+import { isImeComposing } from '../utils/ime'
 
 export interface ModelPickerModalProps {
   open: boolean
@@ -95,6 +96,11 @@ export function ModelPickerModal({
   // filter has narrowed to exactly one enabled match (type-to-pick).
   const handleSearchKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
+      // #8064 — don't let an IME composition's commit key (usually Enter)
+      // get read as "select the single matching model". `keyCode === 229`
+      // is the Safari fallback for browsers that don't set `isComposing`
+      // reliably.
+      if (isImeComposing(e)) return
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         listRef.current

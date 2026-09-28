@@ -22,6 +22,7 @@
 import { useState, useCallback, useRef, useEffect, useId } from 'react'
 import type { SessionVisualStatus } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
+import { isImeComposing } from '../utils/ime'
 
 export type SessionStatus = SessionVisualStatus
 
@@ -564,6 +565,11 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 value={renameValue}
                 onChange={e => setRenameValue(e.target.value)}
                 onKeyDown={e => {
+                  // #8064 — don't let an IME composition's commit key
+                  // (usually Enter) get read as "commit the rename".
+                  // `keyCode === 229` is the Safari fallback for browsers
+                  // that don't set `isComposing` reliably.
+                  if (isImeComposing(e)) return
                   if (e.key === 'Enter') {
                     e.preventDefault()
                     commitRename(session.sessionId)

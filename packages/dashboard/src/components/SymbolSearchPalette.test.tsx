@@ -71,6 +71,17 @@ describe('SymbolSearchPalette (#6476)', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "jump to the highlighted symbol".
+  it('does not jump to the highlighted symbol on Enter during IME composition', async () => {
+    const onClose = vi.fn()
+    render(<SymbolSearchPalette isOpen={true} onClose={onClose} />)
+    const input = await screen.findByTestId('symbol-search-input')
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(mockOpenFileInBrowser).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('arrow-down then Enter jumps to the second symbol', async () => {
     render(<SymbolSearchPalette isOpen={true} onClose={() => {}} />)
     const input = await screen.findByTestId('symbol-search-input')

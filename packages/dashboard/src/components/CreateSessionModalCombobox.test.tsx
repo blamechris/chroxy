@@ -149,4 +149,34 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     fireEvent.keyDown(cwdInput, { key: 'Escape' })
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
+
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "select the highlighted suggestion".
+  it('does not select the highlighted suggestion on Enter during IME composition', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+
+    fireEvent.keyDown(cwdInput, { key: 'Enter', isComposing: true })
+
+    expect(cwdInput.value).toBe('')
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+  })
+})
+
+describe('CreateSessionModal submit (#8064)', () => {
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "submit the session name".
+  it('does not submit the session name on Enter during IME composition', () => {
+    const { onCreate } = renderModal({ initialCwd: '/home/user/projects/my-app' })
+    const nameInput = screen.getByLabelText('Session name') as HTMLInputElement
+    expect(nameInput.value).toBe('my-app')
+
+    fireEvent.keyDown(nameInput, { key: 'Enter', isComposing: true })
+
+    expect(onCreate).not.toHaveBeenCalled()
+  })
 })

@@ -220,6 +220,25 @@ describe('EvaluatorClarifyPrompt (#3188)', () => {
     expect(onSubmit).toHaveBeenCalledWith('foo')
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "submit the clarification".
+  it('does not submit on Enter during IME composition', () => {
+    const onSubmit = vi.fn()
+    render(
+      <EvaluatorClarifyPrompt
+        evaluatorIteration={1}
+        originalDraft="x"
+        clarification="y"
+        reasoning="z"
+        onSubmit={onSubmit}
+      />,
+    )
+    const input = screen.getByTestId('evaluator-clarify-input')
+    fireEvent.change(input, { target: { value: 'foo' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
   it('guards against double-submit (submittedRef)', () => {
     const onSubmit = vi.fn()
     render(

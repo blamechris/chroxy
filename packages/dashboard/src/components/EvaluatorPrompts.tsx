@@ -23,6 +23,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { EvaluatorRewriteMeta } from '../store/types'
 import { MAX_EVALUATOR_ITERATIONS } from '../store/types'
+import { isImeComposing } from '../utils/ime'
 
 export interface EvaluatorRewriteBannerProps {
   meta: EvaluatorRewriteMeta
@@ -132,6 +133,10 @@ export function EvaluatorClarifyPrompt({
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "submit the clarification". `keyCode === 229` is the Safari
+    // fallback for browsers that don't set `isComposing` reliably.
+    if (isImeComposing(e)) return
     // Enter alone submits; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
