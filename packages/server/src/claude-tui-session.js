@@ -2475,14 +2475,14 @@ export class ClaudeTuiSession extends BaseSession {
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary
     // #8038: the binary-gate step gets its OWN try, split out from the nonce /
-    // hook-settings / native-auth-status step below. ONLY a failure HERE is a
-    // `_spawnRefusal` (this is the #8038 gate: the non-native route now goes
-    // through `_gatedSpawnBinary` — previously it read `_connectionVerifiedBinary`
-    // once at create time and never re-verified it on a respawn — and the native
-    // route's own `_connectionRuntimePreflight` re-check is unchanged but is
-    // ALSO the gate for that route). The native `claude auth status` verdict
-    // below latches the same way (#8044); the nonce / hook-settings write in
-    // between does not — that is a local I/O failure, not a verdict.
+    // hook-settings and native-auth-status steps below. A failure here latches
+    // `_spawnRefusal` (the non-native route goes through `_gatedSpawnBinary`,
+    // which previously read `_connectionVerifiedBinary` once at create time and
+    // never re-verified it on a respawn; the native route's own
+    // `_connectionRuntimePreflight` re-check is its gate). Three steps latch a
+    // refusal: this one, the native `claude auth status` verdict below (#8044),
+    // and the native re-check just before the spawn. The nonce / hook-settings
+    // write in between does not — that is a local I/O failure, not a verdict.
     try {
       attemptedBinary = this._connectionAuthRoute === 'native'
         ? this._connectionRuntimePreflight?.()
