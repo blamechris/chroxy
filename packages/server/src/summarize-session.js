@@ -22,7 +22,6 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { extractSearchableText } from './conversation-search.js'
-import { resolveClaudeBinary } from './utils/claude-binary.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('summarize')
@@ -179,10 +178,19 @@ export function buildSummaryPrompt({ transcript, truncated, sessionName }) {
  * user prompt, and the result text collected from assistant content blocks.
  * Used when the caller doesn't inject a `runOneShot` seam.
  *
- * `queryFn` / `resolveExecutable` are injectable seams (default to the real
- * SDK `query` and `resolveClaudeBinary`) so a test can assert on the built
- * options — including `pathToClaudeCodeExecutable` (#7986) — without module-
- * mocking `@anthropic-ai/claude-agent-sdk`.
+ * `queryFn` is an injectable seam (defaults to the real SDK `query`) so a test
+ * can assert on the built options — including `pathToClaudeCodeExecutable`
+ * (#7986) — without module-mocking `@anthropic-ai/claude-agent-sdk`.
+ *
+ * `resolveExecutable` has NO default (#8030) — it is a REQUIRED, verified
+ * binary-gate call, not a plain path resolve. Before #8030 this defaulted to
+ * `resolveClaudeBinary()`, which resolves a path but verifies nothing: a
+ * `block`-mode hash-mismatched `claude` that `createSession` would refuse
+ * could still be spawned by this one-shot path (the summarizer, the
+ * semantic-title generator) with no gate at all. Every caller now supplies a
+ * verified resolver — production wires `SessionManager.verifyOneShotExecutable`
+ * (see summarize-handlers.js / session-manager.js's `_generateSemanticTitle`),
+ * which re-runs the SAME preflight gate `createSession` runs.
  *
  * @param {object} args
  * @param {string} args.prompt
@@ -190,10 +198,25 @@ export function buildSummaryPrompt({ transcript, truncated, sessionName }) {
  * @param {string} [args.cwd]
  * @param {AbortSignal} [args.signal]
  * @param {Function} [args.queryFn] - injected in tests; defaults to the SDK's `query`.
- * @param {Function} [args.resolveExecutable] - injected in tests; defaults to `resolveClaudeBinary`.
+ * @param {Function} args.resolveExecutable - REQUIRED (#8030): `() => string`,
+ *   a verified binary-gate call. Throwing a `PROVIDER_BINARY_*`-coded error
+ *   refuses the spawn before `queryFn` is ever invoked.
  * @returns {Promise<string>} the model's text reply.
+ * @throws {Error} when `resolveExecutable` is not a function, or when it throws.
  */
-export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = query, resolveExecutable = resolveClaudeBinary }) {
+export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = query, resolveExecutable }) {
+  if (typeof resolveExecutable !== 'function') {
+    throw new Error('defaultRunOneShot (#8030): resolveExecutable is required — the caller must supply its verified spawn gate (e.g. SessionManager.verifyOneShotExecutable) instead of relying on an unverified default binary resolve.')
+  }
+  // Resolved BEFORE queryFn so a gate refusal never spawns anything. An empty
+  // result is refused too: with pathToClaudeCodeExecutable unset the SDK falls
+  // back to its own bundled binary, which nothing has verified.
+  const executable = resolveExecutable()
+  if (typeof executable !== 'string' || executable.length === 0) {
+    const err = new Error('defaultRunOneShot (#8030): the spawn gate returned no binary path — refusing rather than letting the SDK fall back to its bundled binary.')
+    err.code = 'PROVIDER_BINARY_UNVERIFIED'
+    throw err
+  }
   const options = {
     // No tools — a pure text summarization turn. The session must not be able
     // to read/write files or run commands during summarization.
@@ -202,11 +225,11 @@ export async function defaultRunOneShot({ prompt, model, cwd, signal, queryFn = 
     allowDangerouslySkipPermissions: true,
     includePartialMessages: false,
     maxTurns: 1,
-    // #7986: the desktop bundle does not ship the Agent SDK's platform binary,
-    // and query() throws if pathToClaudeCodeExecutable is unset and that
-    // binary is absent — point it at the installed CLI, same as the chat-turn
-    // SDK provider, on every install.
-    pathToClaudeCodeExecutable: resolveExecutable(),
+    // #7986 / #8030: the desktop bundle does not ship the Agent SDK's platform
+    // binary, and query() throws if pathToClaudeCodeExecutable is unset and
+    // that binary is absent — point it at the installed CLI, same as the
+    // chat-turn SDK provider, on every install.
+    pathToClaudeCodeExecutable: executable,
   }
   if (typeof cwd === 'string' && cwd) options.cwd = cwd
   if (typeof model === 'string' && model) options.model = model
@@ -253,10 +276,13 @@ function abortControllerFromSignal(signal) {
  * @param {string} [args.sessionName] - human label for the brief header.
  * @param {Function} [args.runOneShot] - injected model runner.
  * @param {AbortSignal} [args.signal]
+ * @param {Function} [args.resolveExecutable] - #8030: forwarded to the runner
+ *   (`defaultRunOneShot` requires it; an injected `runOneShot` test double may
+ *   ignore it). Production wires `SessionManager.verifyOneShotExecutable`.
  * @returns {Promise<{ summary: string, truncated: boolean }>}
  * @throws {Error} when there is no history to summarize or the model returns empty.
  */
-export async function summarizeSession({ history, model, cwd, sessionName, runOneShot, signal } = {}) {
+export async function summarizeSession({ history, model, cwd, sessionName, runOneShot, signal, resolveExecutable } = {}) {
   const transcript = flattenHistory(history)
   if (!transcript.trim()) {
     const err = new Error('Session has no readable history to summarize')
@@ -268,7 +294,7 @@ export async function summarizeSession({ history, model, cwd, sessionName, runOn
   const prompt = buildSummaryPrompt({ transcript: text, truncated, sessionName })
 
   const runner = typeof runOneShot === 'function' ? runOneShot : defaultRunOneShot
-  const summary = await runner({ prompt, model, cwd, signal })
+  const summary = await runner({ prompt, model, cwd, signal, resolveExecutable })
 
   if (typeof summary !== 'string' || !summary.trim()) {
     const err = new Error('The summarizer returned no text')

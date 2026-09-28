@@ -235,6 +235,17 @@ describe('probeBinaryVersion', () => {
     assert.equal(calls, 2, 'a changed stat identity must trigger a fresh probe')
   })
 
+  it('holds ONE entry per path — a new identity replaces the old one instead of accumulating (#8030 review)', () => {
+    let calls = 0
+    const spawnSync = () => { calls += 1; return { error: undefined, status: 0, stdout: '2.1.283\n', stderr: '' } }
+    const idA = { spawnSync, statSync: statOf({ ino: 90, mtimeMs: 900 }) }
+    const idB = { spawnSync, statSync: statOf({ ino: 91, mtimeMs: 901 }) }
+    probeBinaryVersion('/fake/claude', ['--version'], idA)
+    probeBinaryVersion('/fake/claude', ['--version'], idB)
+    probeBinaryVersion('/fake/claude', ['--version'], idA)
+    assert.equal(calls, 3, 'identity A must have been replaced by B, not retained alongside it')
+  })
+
   it('does not cache a FAILED probe — a transient timeout must not pin "unreadable"', () => {
     let calls = 0
     const seams = {

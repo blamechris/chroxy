@@ -149,6 +149,17 @@ describe('summarizeSession orchestration', () => {
     assert.match(receivedPrompt, /done the thing/)
   })
 
+  it('forwards resolveExecutable to the runner (#8030)', async () => {
+    let received
+    const resolveExecutable = () => '/verified/claude'
+    await summarizeSession({
+      history,
+      runOneShot: async (args) => { received = args.resolveExecutable; return 'brief' },
+      resolveExecutable,
+    })
+    assert.equal(received, resolveExecutable, 'the exact resolveExecutable function must reach the runner')
+  })
+
   it('throws empty-history when there is nothing readable', async () => {
     await assert.rejects(
       () => summarizeSession({ history: [], runOneShot: async () => 'unused' }),
@@ -197,14 +208,51 @@ describe('defaultRunOneShot — pathToClaudeCodeExecutable (#7986)', () => {
     assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/fake/resolved/claude')
   })
 
-  it('defaults resolveExecutable to resolveClaudeBinary() when not injected', async () => {
-    const { resolveClaudeBinary } = await import('../src/utils/claude-binary.js')
+  // #8030: the unverified `resolveClaudeBinary()` default is REMOVED —
+  // resolveExecutable is now a required, verified binary-gate call. This
+  // replaces the old "defaults resolveExecutable to resolveClaudeBinary()"
+  // test; that fallback behaviour is intentionally gone.
+  it('throws when resolveExecutable is not supplied — queryFn is never called (#8030)', async () => {
     const captured = []
     const queryFn = (args) => { captured.push(args); return fakeStream() }
 
-    await defaultRunOneShot({ prompt: 'summarize this', queryFn })
+    await assert.rejects(
+      () => defaultRunOneShot({ prompt: 'summarize this', queryFn }),
+      (err) => {
+        assert.ok(/resolveExecutable/.test(err.message), `expected a resolveExecutable-naming error, got: ${err.message}`)
+        assert.ok(/#8030/.test(err.message), `expected the error to name #8030, got: ${err.message}`)
+        return true
+      },
+    )
+    assert.equal(captured.length, 0, 'queryFn must never be invoked when the spawn gate is missing')
+  })
 
-    assert.equal(captured[0].options.pathToClaudeCodeExecutable, resolveClaudeBinary())
+  it('propagates a resolveExecutable throw — queryFn is never called (#8030)', async () => {
+    const captured = []
+    const queryFn = (args) => { captured.push(args); return fakeStream() }
+    const resolveExecutable = () => {
+      const err = new Error('binary hash changed since it was pinned')
+      err.code = 'PROVIDER_BINARY_PROVENANCE'
+      throw err
+    }
+
+    await assert.rejects(
+      () => defaultRunOneShot({ prompt: 'summarize this', queryFn, resolveExecutable }),
+      (err) => err.code === 'PROVIDER_BINARY_PROVENANCE',
+    )
+    assert.equal(captured.length, 0, 'queryFn must never be invoked when the gate throws')
+  })
+
+  it('refuses an empty or missing gate result before queryFn — the SDK would fall back to its bundled binary (#8030 review)', async () => {
+    for (const bad of ['', undefined, null]) {
+      let queryCalls = 0
+      const queryFn = () => { queryCalls += 1; return fakeStream() }
+      await assert.rejects(
+        () => defaultRunOneShot({ prompt: 'summarize this', queryFn, resolveExecutable: () => bad }),
+        (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED',
+      )
+      assert.equal(queryCalls, 0, `queryFn must never run for a gate result of ${JSON.stringify(bad)}`)
+    }
   })
 
   it('still sets model/cwd/maxTurns/tools alongside pathToClaudeCodeExecutable', async () => {

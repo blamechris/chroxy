@@ -34,11 +34,41 @@
  *
  * Every filesystem / subprocess touchpoint is an injectable seam so the whole
  * module is unit-testable with no real binary, ledger file, or `spctl`.
+ *
+ * ## Stat-identity caches (#8030)
+ *
+ * #8030 re-runs this gate before EVERY spawn of a per-turn provider (the Agent
+ * SDK execs a new process per chat turn), not just once at session-create. Both
+ * checks are synchronous and would otherwise add real latency to every turn —
+ * measured on this machine's 215 MB `claude`: ~100ms to SHA-256 hash, ~430ms
+ * for `spctl --assess`. `sha256FileCached` and `assessMacSignatureCached` wrap
+ * the two checks in module-level caches that hold one entry per path, valid
+ * only while the path's `statIdentity` (path + dev + ino + size + mtimeMs +
+ * ctimeMs — see stat-identity.js) is unchanged, so a spawn against an
+ * UNCHANGED binary is served from cache instead of re-hashing/re-assessing,
+ * and a replaced binary overwrites its old entry instead of adding one:
+ *
+ *   - The hash cache takes the identity BEFORE and AFTER the read and caches
+ *     only when both are non-null and equal — a file that changed mid-read
+ *     (a `claude update` racing this exact spawn) must never pin a hash that
+ *     doesn't match what's on disk NOW. A hashing error is never cached
+ *     either, for the same "don't pin a transient failure" reason
+ *     `probeBinaryVersion` already established.
+ *   - The signature cache stores a verdict only when it is `ok === true &&
+ *     !skipped` — a rejected or skipped assessment is re-run every call so a
+ *     binary that starts failing `spctl` (or a gate that just got turned on
+ *     for a previously-skipped platform check) is never masked by a stale
+ *     pass.
+ *
+ * These caches are the DEFAULT `sha256File` / `assessSignature` seams passed
+ * to `verifyProvenance` below, so every existing test that injects its OWN
+ * seam is unaffected — the cache only activates on the real filesystem path.
  */
 
 import { createHash } from 'crypto'
-import { readFileSync as fsReadFileSync } from 'fs'
+import { readFileSync as fsReadFileSync, statSync as fsStatSync } from 'fs'
 import { execFileSync } from 'child_process'
+import { statIdentity } from './stat-identity.js'
 
 /**
  * Classification of a provenance verification.
@@ -117,6 +147,119 @@ export function assessMacSignature(path, { platform = process.platform, execFile
   }
 }
 
+// path -> { identity, hash }. Module-level so it survives across
+// preflight/spawn-gate calls within one daemon process (#8030). Keyed by PATH,
+// not by identity, so a path holds at most one entry: each `claude update`
+// mints a new identity that replaces the old one instead of leaving a dead
+// key behind for the daemon's lifetime.
+const hashCache = new Map()
+// path -> { identity, verdict, at } for a PASSING, non-skipped signature
+// verdict — see assessMacSignatureCached's docblock for why a rejection/skip
+// is never stored, and why a stored pass expires. One entry per path, as above.
+const signatureCache = new Map()
+
+// A cached signature PASS expires after this long. Unlike a hash, a Gatekeeper
+// verdict can change while the file does not: Apple can revoke a notarization
+// ticket or a Developer ID, and the stat identity cannot see that. Before
+// #8030 the gate re-ran `spctl` at every session create; this bounds how stale
+// a pass may get while keeping the per-turn cost at one ~430ms assessment per
+// window instead of one per turn.
+export const SIGNATURE_CACHE_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Cached wrapper around {@link sha256File}: one entry per path, served only
+ * while the path's {@link statIdentity} matches the one it was hashed under.
+ *
+ * Reads the identity BEFORE hashing and again AFTER — the hash is cached only
+ * when both reads succeeded (non-null) AND agree, which means the file did
+ * not change out from under the read. This is deliberately stricter than
+ * `probeBinaryVersion`'s single before-only identity: a version probe just
+ * re-execs the binary (a changed file gets a fresh, correct probe next time
+ * regardless), but a hash cached against the WRONG bytes would pin a false
+ * "verified" verdict for every subsequent spawn until something else changed
+ * the file again.
+ *
+ * A thrown hash error (unreadable file) is never cached — propagated as-is,
+ * exactly like the uncached `sha256File`, so `verifyProvenance`'s existing
+ * UNREADABLE handling is unaffected.
+ *
+ * Not cached on Windows: there `ctimeMs` is NTFS ChangeTime, which the file's
+ * owner can set (SetFileInformationByHandle), so a same-size in-place swap
+ * that restores every timestamp would keep its old identity. Every Windows
+ * call hashes, as every session create did before #8030.
+ *
+ * @param {string} path
+ * @param {object} [seams]
+ * @param {(p:string)=>import('fs').Stats} [seams.statSync=fs.statSync]
+ * @param {(p:string)=>Buffer} [seams.readFileSync=fs.readFileSync]
+ * @param {string} [seams.platform=process.platform]
+ * @returns {string} 64-char lower-case hex digest
+ */
+export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = fsReadFileSync, platform = process.platform } = {}) {
+  if (platform === 'win32') return sha256File(path, { readFileSync })
+  const before = statIdentity(path, statSync)
+  const cached = hashCache.get(path)
+  if (before && cached && cached.identity === before) {
+    return cached.hash
+  }
+
+  // Let a hash failure propagate uncaught — never cached (see docblock).
+  const hash = sha256File(path, { readFileSync })
+
+  const after = statIdentity(path, statSync)
+  if (before && after && before === after) {
+    hashCache.set(path, { identity: before, hash })
+  }
+  return hash
+}
+
+/**
+ * Cached wrapper around {@link assessMacSignature}: one entry per path, served
+ * only while the path's {@link statIdentity} matches and the TTL holds.
+ *
+ * Only caches an `{ ok: true, skipped: false }` verdict — a genuine Gatekeeper
+ * PASS. A rejected verdict (`ok: false`) is re-assessed on every call so a
+ * binary that starts failing `spctl` is never masked by a stale pass, and a
+ * `skipped` verdict (non-macOS, or the gate resolved to a no-op) is likewise
+ * never cached since it carries no real assessment to reuse.
+ *
+ * A cached pass also expires after {@link SIGNATURE_CACHE_TTL_MS}: a
+ * revocation (notarization ticket or Developer ID) changes the verdict without
+ * changing the file, so the stat identity alone would keep serving a stale
+ * pass for the daemon's lifetime.
+ *
+ * @param {string} path
+ * @param {object} [opts] - forwarded to {@link assessMacSignature} (`platform`,
+ *   `execFile`), plus the cache's own `statSync` and `now` seams.
+ * @param {(p:string)=>import('fs').Stats} [opts.statSync=fs.statSync]
+ * @param {() => number} [opts.now=Date.now]
+ * @returns {{ ok: boolean, skipped: boolean, detail?: string }}
+ */
+export function assessMacSignatureCached(path, { statSync = fsStatSync, now = Date.now, ...rest } = {}) {
+  const identity = statIdentity(path, statSync)
+  const cached = signatureCache.get(path)
+  if (identity && cached && cached.identity === identity) {
+    if (now() - cached.at < SIGNATURE_CACHE_TTL_MS) return cached.verdict
+    signatureCache.delete(path)
+  }
+
+  const verdict = assessMacSignature(path, rest)
+  if (identity && verdict && verdict.ok === true && !verdict.skipped) {
+    signatureCache.set(path, { identity, verdict, at: now() })
+  }
+  return verdict
+}
+
+/**
+ * Test-only hook: clear both module-level provenance caches (hash + macOS
+ * signature) so suites don't leak identities across test files that reuse the
+ * same tmp paths. Mirrors `binary-version.js`'s `_resetProbeCacheForTest`.
+ */
+export function _resetProvenanceCacheForTest() {
+  hashCache.clear()
+  signatureCache.clear()
+}
+
 /**
  * @typedef {Object} ProvenanceVerdict
  * @property {boolean} ok       True when the spawn is allowed (not blocked, no fatal issue).
@@ -144,8 +287,8 @@ export function assessMacSignature(path, { platform = process.platform, execFile
  * @param {boolean} [opts.signatureGate=false] - macOS spctl gate (hard block when on)
  * @param {{ getRecord:Function, approve:Function }|null} [opts.ledger=null] - pin ledger
  * @param {string} [opts.platform=process.platform]
- * @param {Function} [opts.sha256File=sha256File]         - injectable hasher
- * @param {Function} [opts.assessSignature=assessMacSignature] - injectable signature assessor
+ * @param {Function} [opts.sha256File=sha256FileCached]         - injectable hasher
+ * @param {Function} [opts.assessSignature=assessMacSignatureCached] - injectable signature assessor
  * @returns {ProvenanceVerdict}
  */
 export function verifyProvenance({
@@ -154,8 +297,13 @@ export function verifyProvenance({
   signatureGate = false,
   ledger = null,
   platform = process.platform,
-  sha256File: hashFn = sha256File,
-  assessSignature = assessMacSignature,
+  // #8030: default to the stat-identity-CACHED hasher/assessor, not the raw
+  // ones — a per-turn re-verification gate calling the uncached versions
+  // would add ~0.1-0.5s of blocking work to every turn. Every existing test
+  // that injects its own `sha256File`/`assessSignature` seam is unaffected;
+  // this only changes what runs when nothing is injected (production).
+  sha256File: hashFn = sha256FileCached,
+  assessSignature = assessMacSignatureCached,
 } = {}) {
   const path = typeof resolvedPath === 'string' ? resolvedPath : ''
   const pinning = mode === 'warn' || mode === 'block'
@@ -186,7 +334,7 @@ export function verifyProvenance({
   if (pinning) {
     let hash
     try {
-      hash = hashFn(path)
+      hash = hashFn(path, { platform })
     } catch (err) {
       // Cannot read the binary to hash it → unverifiable. Fail-safe: block in
       // `block` mode, surface-but-allow in `warn` mode.

@@ -1,6 +1,7 @@
 import { describe, it, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync } from 'fs'
+import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { EventEmitter } from 'events'
@@ -11,6 +12,7 @@ import {
   ProviderModelNotSupportedError,
 } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * Pre-flight check integration tests for SessionManager.createSession.
@@ -125,6 +127,24 @@ class FakeClaudeProvider extends BaseFakeSession {
   }
 }
 
+// #8030 — a real, hashable, always-present binary (the running Node
+// executable) so the opt-in provenance gate can run its REAL sha256File
+// against it with no fixture file to manage. Mirrors agent-connections.test.js's
+// VerifiedConnectionFixtureSession pattern: captures whatever SessionManager
+// passes as `opts.spawnPreflight` so a test can invoke it directly.
+class SpawnGateFixtureProvider extends BaseFakeSession {
+  // Tests re-point this after create to prove the spawn gate stays pinned.
+  static resolvedOverride = null
+  static get resolvedBinary() { return SpawnGateFixtureProvider.resolvedOverride || process.execPath }
+  static get preflight() {
+    return { label: 'Fixture SDK', binary: { name: 'node', candidates: [] } }
+  }
+  constructor(opts = {}) {
+    super(opts)
+    SpawnGateFixtureProvider.lastSpawnPreflight = typeof opts.spawnPreflight === 'function' ? opts.spawnPreflight : null
+  }
+}
+
 // Register once — these are stable test-only provider names that won't clash
 // with built-ins.
 registerProvider('test-missing-binary-2962', MissingBinaryProvider)
@@ -132,6 +152,44 @@ registerProvider('test-missing-credential-2962', MissingCredentialProvider)
 registerProvider('test-happy-2962', HappyProvider)
 registerProvider('test-model-limited-2962', ModelLimitedProvider)
 registerProvider('test-fake-claude-3403', FakeClaudeProvider)
+registerProvider('test-spawn-gate-8030', SpawnGateFixtureProvider)
+
+// #8030 review — declares a soft floor the running Node can never meet, so
+// every preflight of it produces a #8031 advisory.
+class AdvisoryFixtureProvider extends SpawnGateFixtureProvider {
+  static get resolvedBinary() { return process.execPath }
+  static get preflight() {
+    return { label: 'Advisory fixture', binary: { name: 'node', candidates: [], args: ['--version'], recommendedVersion: '999.0.0' } }
+  }
+}
+registerProvider('test-spawn-gate-advisory-8030', AdvisoryFixtureProvider)
+
+// #8030 review — a throwaway executable, so a test can delete the pinned
+// binary out from under a live session.
+class DisposableBinaryProvider extends SpawnGateFixtureProvider {
+  static binaryPath = null
+  static get resolvedBinary() { return DisposableBinaryProvider.binaryPath }
+  static get preflight() {
+    return { label: 'Disposable fixture', binary: { name: 'fixture-claude', candidates: [] } }
+  }
+}
+registerProvider('test-spawn-gate-disposable-8030', DisposableBinaryProvider)
+
+// #8030 — in-memory pin ledger (the surface verifyProvenance consults:
+// getRecord + approve), matching the shape used in agent-connections.test.js.
+function fakeProvenanceLedger(seed = {}) {
+  const records = new Map(Object.entries(seed))
+  return {
+    getRecord: (p) => (records.has(p) ? { ...records.get(p) } : null),
+    approve: (p, sha256) => { records.set(p, { sha256 }); return true },
+    _records: records,
+  }
+}
+
+// The REAL hash of the running Node binary — used to seed a "matching" pin,
+// and deliberately never used as the "wrong" hash below.
+const SPAWN_GATE_REAL_HASH = createHash('sha256').update(readFileSync(process.execPath)).digest('hex')
+const SPAWN_GATE_WRONG_HASH = 'f'.repeat(64)
 
 describe('SessionManager.createSession — preflight', () => {
   let mgr
@@ -280,5 +338,204 @@ describe('SessionManager.createSession — preflight', () => {
     const entry = restoredMgr.getSession(id)
     assert.equal(entry.session.model, null, 'explicit null must NOT fall back to _defaultModel')
     restoredMgr.destroySession(id)
+  })
+})
+
+describe('SessionManager.createSession — per-spawn binary provenance gate (#8030)', () => {
+  it('a block-mode ledger mismatch at create time throws PROVIDER_BINARY_PROVENANCE', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+    })
+    assert.throws(
+      () => mgr.createSession({ provider: 'test-spawn-gate-8030', skipPersist: true }),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        return true
+      },
+    )
+    assert.equal(mgr.listSessions().length, 0, 'no phantom session for a failed preflight')
+  })
+
+  it('a matching seed succeeds; the captured spawnPreflight re-verifies and returns the pinned path, then fails closed once the ledger is mutated', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+    })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-8030', skipPersist: true })
+    assert.ok(id, 'session id should be returned')
+    assert.equal(typeof SpawnGateFixtureProvider.lastSpawnPreflight, 'function', 'providerOpts.spawnPreflight must be forwarded to the constructor')
+    assert.equal(SpawnGateFixtureProvider.lastSpawnPreflight(), process.execPath)
+
+    // Mutate the ledger to a wrong hash — the pinned path re-verify must now
+    // fail closed, exactly as create-time preflight would for a fresh session.
+    ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+    assert.throws(
+      () => SpawnGateFixtureProvider.lastSpawnPreflight(),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        return true
+      },
+    )
+    mgr.destroySession(id)
+  })
+})
+
+describe('SessionManager per-spawn gate — pinning (#8030 review)', () => {
+  afterEach(() => { SpawnGateFixtureProvider.resolvedOverride = null })
+
+  it('keeps verifying the create-time path when the provider would now resolve somewhere else', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-8030', skipPersist: true })
+    // A PATH change after create: a fresh resolve would now land on a path that
+    // does not exist. The pinned gate must not look there.
+    SpawnGateFixtureProvider.resolvedOverride = join(tmpdir(), `chroxy-8030-elsewhere-${process.pid}`)
+    assert.equal(SpawnGateFixtureProvider.lastSpawnPreflight(), process.execPath)
+    mgr.destroySession(id)
+  })
+
+  it('names the vanished pinned path and says to start a new session', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-8030-pin-'))
+    const bin = join(dir, 'fixture-claude')
+    writeFileSync(bin, '#!/bin/sh\nexit 0\n')
+    chmodSync(bin, 0o755)
+    DisposableBinaryProvider.binaryPath = bin
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-disposable-8030', skipPersist: true })
+    const gate = SpawnGateFixtureProvider.lastSpawnPreflight
+    assert.equal(gate(), bin)
+    rmSync(dir, { recursive: true, force: true })
+    assert.throws(() => gate(), (err) => {
+      assert.equal(err.code, 'PROVIDER_BINARY_NOT_FOUND')
+      assert.ok(err.message.includes(bin), 'the message must name the pinned path')
+      assert.ok(err.message.includes('start a new session'), 'the remedy is a new session, not an install')
+      assert.ok(!err.message.includes('checked PATH'), 'only the pinned path was checked')
+      return true
+    })
+    mgr.destroySession(id)
+  })
+
+  it('does not re-log the #8031 soft-floor advisory on per-turn re-verification', () => {
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    SpawnGateFixtureProvider.lastSpawnPreflight = null
+    const id = mgr.createSession({ provider: 'test-spawn-gate-advisory-8030', skipPersist: true })
+    const warns = []
+    const listener = (entry) => {
+      if (entry.component === 'preflight' && entry.level === 'warn' && entry.message.includes('recommended')) warns.push(entry)
+    }
+    addLogListener(listener)
+    try {
+      SpawnGateFixtureProvider.lastSpawnPreflight()
+      SpawnGateFixtureProvider.lastSpawnPreflight()
+    } finally {
+      removeLogListener(listener)
+    }
+    assert.equal(warns.length, 0, 'the per-turn gate must pass warnAdvisory:false')
+    mgr.destroySession(id)
+  })
+})
+
+describe('SessionManager.verifyOneShotExecutable (#8030)', () => {
+  it('throws PROVIDER_BINARY_PROVENANCE on a block-mode hash mismatch against the fixture oneShotProviderClass', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      oneShotProviderClass: SpawnGateFixtureProvider,
+    })
+    assert.throws(
+      () => mgr.verifyOneShotExecutable(),
+      (err) => {
+        assert.equal(err.code, 'PROVIDER_BINARY_PROVENANCE')
+        return true
+      },
+    )
+  })
+
+  it('throws PROVIDER_BINARY_UNVERIFIED when preflight yields no binary path (#8030 review)', () => {
+    class NoBinaryFixture extends SpawnGateFixtureProvider {
+      static get preflight() { return { label: 'No binary' } }
+    }
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      oneShotProviderClass: NoBinaryFixture,
+    })
+    assert.throws(() => mgr.verifyOneShotExecutable(), (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED')
+  })
+
+  it('returns the path on a matching hash', () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      oneShotProviderClass: SpawnGateFixtureProvider,
+    })
+    assert.equal(mgr.verifyOneShotExecutable(), process.execPath)
+  })
+
+  it('with skipPreflight:true returns the UNVERIFIED resolvedBinary (documented test-only meaning)', () => {
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+      oneShotProviderClass: SpawnGateFixtureProvider,
+    })
+    assert.equal(mgr.verifyOneShotExecutable(), process.execPath)
+  })
+
+  it('falls back to getProvider(\'claude-sdk\') when no oneShotProviderClass is configured', async () => {
+    const { getProvider } = await import('../src/providers.js')
+    const mgr = new SessionManager({
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      defaultCwd: tmpdir(),
+      skipPreflight: true,
+    })
+    const ClaudeSdk = getProvider('claude-sdk')
+    assert.equal(mgr.verifyOneShotExecutable(), ClaudeSdk.resolvedBinary)
+  })
+})
+
+describe('SessionManager._binaryProvenanceOptions (#8030 review)', () => {
+  const ledger = fakeProvenanceLedger()
+  const make = (opts) => new SessionManager({
+    maxSessions: 5,
+    stateFilePath: tmpStateFile(),
+    defaultCwd: tmpdir(),
+    binaryProvenanceLedger: ledger,
+    ...opts,
+  })
+
+  it('is null when pinning is off and the signature gate is off', () => {
+    assert.equal(make({})._binaryProvenanceOptions(), null)
+  })
+
+  it('is ON when only the signature gate is enabled — every spawn gate reads this one condition', () => {
+    assert.deepEqual(make({ binarySignatureGate: true })._binaryProvenanceOptions(), { mode: 'off', signatureGate: true, ledger })
+  })
+
+  it('is ON for warn and block pinning', () => {
+    assert.equal(make({ binaryProvenanceMode: 'warn' })._binaryProvenanceOptions().mode, 'warn')
+    assert.equal(make({ binaryProvenanceMode: 'block' })._binaryProvenanceOptions().mode, 'block')
   })
 })

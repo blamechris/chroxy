@@ -122,6 +122,21 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
   // live provider. Production falls through to the real implementation.
   const summarizeFn = typeof ctx?.summarizeSession === 'function' ? ctx.summarizeSession : defaultSummarizeSession
 
+  // #8030: the one-shot spawn must go through the SAME binary gate a fresh
+  // chat session would (SessionManager.verifyOneShotExecutable) — otherwise a
+  // client authorized only to summarize could still get a `block`-mode
+  // hash-mismatched `claude` exec'd via this path. Guarded: an older/stubbed
+  // sessionManager without the method fails CLOSED (throws) rather than
+  // silently falling back to an unverified spawn.
+  const sessionManager = ctx?.sessions?.sessionManager
+  const resolveExecutable = typeof sessionManager?.verifyOneShotExecutable === 'function'
+    ? () => sessionManager.verifyOneShotExecutable()
+    : () => {
+      const err = new Error('summarize_session: sessionManager.verifyOneShotExecutable is unavailable — refusing an unverified spawn (#8030)')
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
+
   summarizeInFlight.add(sessionId)
   try {
     const { summary, truncated } = await summarizeFn({
@@ -129,6 +144,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
       model,
       cwd: entry.cwd,
       sessionName: entry.name,
+      resolveExecutable,
     })
     log.info(`summarize_session completed for ${sessionId} (client=${client?.id}, truncated=${truncated})`)
     ctx.transport.send(ws, {
@@ -142,7 +158,18 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
     // Curated, provider-agnostic message — NEVER echo raw provider/API error
     // text (could leak key fragments, endpoints, or auth headers). Use the
     // thrown reason for the discriminator and a fixed message per reason.
-    const reason = err && typeof err.reason === 'string' && err.reason.length > 0 ? err.reason : 'summarize-failed'
+    //
+    // #8030: a binary-gate refusal (PROVIDER_BINARY_NOT_FOUND,
+    // PROVIDER_BINARY_PROVENANCE, PROVIDER_BINARY_UNVERIFIED, …) is typed by
+    // `code`, so map the whole PROVIDER_BINARY_* family onto one curated
+    // reason/message. The code is checked FIRST: ProviderBinaryVersionError
+    // also carries its own `reason` ('too_old' / 'unreadable'), which would
+    // otherwise win and fall through to the generic "model call failed" text.
+    const reason = (err && typeof err.code === 'string' && err.code.startsWith('PROVIDER_BINARY_'))
+      ? 'binary-unverified'
+      : err && typeof err.reason === 'string' && err.reason.length > 0
+        ? err.reason
+        : 'summarize-failed'
     const message = messageForReason(reason)
     log.warn(`summarize_session failed for ${sessionId}: reason=${reason} (${getErrorMessage(err, 'unknown error')})`)
     summarizeError(ws, ctx, sessionId, requestId, reason, message)
@@ -162,6 +189,10 @@ function messageForReason(reason) {
       return 'This session has no conversation to summarize yet'
     case 'empty-summary':
       return 'The summarizer returned no text — try again'
+    case 'binary-unverified':
+      // #8030: fixed string — never echoes the underlying provenance detail
+      // (which can carry a hex hash fragment) onto the wire.
+      return 'Could not summarize this session — the Claude binary did not pass verification (see the server log)'
     default:
       return 'Could not summarize this session — the model call failed'
   }
