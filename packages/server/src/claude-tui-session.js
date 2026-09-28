@@ -1527,6 +1527,12 @@ export class ClaudeTuiSession extends BaseSession {
    * advance on a call that also broadcasts the result (#7327 review C1: a
    * turn-end scan that silently moved the dedup baseline — or stopped the
    * poll — without broadcasting stranded the background-task indicator).
+   * That invariant is NOT yet held by every caller: the push-notification
+   * handler's idle-body read (no active viewers) still calls THIS method
+   * rather than `_scanTranscript()`, so it can advance the baseline / adopt
+   * a model observation without broadcasting either — tracked as #8052,
+   * unfixed here (out of scope for #7327; round-2 review N3 notes the same
+   * shape applies to the model, self-healing on the next real edge).
    * Never throws.
    */
   getBackgroundTaskSnapshot() {

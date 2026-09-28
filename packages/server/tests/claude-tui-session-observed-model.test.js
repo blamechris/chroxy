@@ -320,24 +320,109 @@ describe('ClaudeTuiSession — observed model from the transcript (#7327)', () =
         'the client is told the task is done')
     })
 
-    it('a task launched mid-turn (poll not yet armed) is still visible on the next real snapshot read', () => {
+    it('a task launched mid-turn does not touch the poll bookkeeping, and is still visible on the next real snapshot read', () => {
       // Companion shape: nothing outstanding yet when the turn starts, so
       // the poll was never armed. The bug's other face was the baseline
       // silently including a brand-new task before any broadcast pass ever
-      // saw it as newly-outstanding. Assert the scanner's own state (what
-      // the NEXT real getBackgroundTaskSnapshot() call — e.g. a respawn's
-      // `ready` — will see) is accurate after a turn-end refresh.
+      // saw it as newly-outstanding.
+      //
+      // #7327 round-2 review S2: the ORIGINAL version of this test only
+      // asserted the scanner's cumulative state via a follow-up
+      // getBackgroundTaskSnapshot() call — and `scan()` is cumulative
+      // regardless of which caller advanced the byte offset, so that
+      // assertion passes even against the pre-fix code (verified against
+      // 53f7b8f7a) and could never catch the bug it was written for. The
+      // bug was specifically that `_refreshObservedModel()` going through
+      // `getBackgroundTaskSnapshot()` moved `_lastBackgroundTaskKey` and
+      // (re)armed the poll as a SIDE EFFECT of the turn-end scan, with
+      // nothing broadcasting the change. So this test now asserts the
+      // bookkeeping directly: a turn-end scan must leave both untouched.
       const s = makeSession()
       attachLivePty(s, fakePid)
       s._sessionId = 'uuid-new-task'
       const sessFile = writeSessFile(fakePid, s._sessionId)
       writeJournal(sessFile, [launchLine('toolu_new')])
 
+      assert.equal(s._lastBackgroundTaskKey, null, 'precondition: poll bookkeeping untouched')
+      assert.equal(s._backgroundTaskPollTimer, null, 'precondition: poll not armed')
+
       s._clearTurnEndState() // model refresh scans past the launch line
+
+      assert.equal(s._lastBackgroundTaskKey, null,
+        'the turn-end model refresh must not move the poll dedup baseline')
+      assert.equal(s._backgroundTaskPollTimer, null,
+        'the turn-end model refresh must not arm the poll — only a call that also broadcasts may')
 
       const snap = s.getBackgroundTaskSnapshot()
       assert.equal(snap.backgroundTasks.length, 1, 'the task is still visible — the turn-end scan did not silently swallow it')
       assert.equal(snap.backgroundTasks[0].toolUseId, 'toolu_new')
+    })
+  })
+
+  // #7327 round-2 review N1 — the background-task-poll dedup key
+  // (`_backgroundTaskKey()`) must reflect ONLY `backgroundTasks` /
+  // `scheduledWakeup`, never `observedModel`. An idle poll tick where only
+  // the model changed (no task/wakeup change) must not register as
+  // "changed" and broadcast `background_tasks_changed` with an unchanged
+  // task list.
+  describe('background-task poll key excludes observedModel (#7327 round-2 review N1)', () => {
+    let origPollMsDescriptor
+
+    beforeEach(() => {
+      origPollMsDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS')
+      Object.defineProperty(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS', { value: 20, configurable: true })
+    })
+
+    afterEach(() => {
+      Object.defineProperty(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS', origPollMsDescriptor)
+    })
+
+    function launchLine(id) {
+      return JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-06-10T02:39:05.423Z',
+        message: { role: 'assistant', model: 'claude-sonnet-5', content: [{ type: 'tool_use', id, name: 'Bash', input: { description: 'long build', run_in_background: true } }] },
+      })
+    }
+
+    it('an idle append that changes only the model does not broadcast background_tasks_changed', async () => {
+      const s = makeSession()
+      attachLivePty(s, fakePid)
+      s._sessionId = 'uuid-model-only-idle'
+      const sessFile = writeSessFile(fakePid, s._sessionId)
+      // A still-outstanding task (no completion) keeps the poll armed for
+      // the duration of the test — arming/disarming is not what N1 is about.
+      const transcriptPath = writeJournal(sessFile, [launchLine('toolu_keep')])
+
+      const snap1 = s.getBackgroundTaskSnapshot()
+      assert.equal(snap1.backgroundTasks.length, 1, 'precondition: task outstanding, poll armed')
+      assert.ok(s._backgroundTaskPollTimer, 'precondition: poll armed')
+      const keyAfterArm = s._lastBackgroundTaskKey
+
+      const broadcasts = []
+      s.on('background_tasks_changed', (d) => broadcasts.push(d))
+
+      // Idle append that changes ONLY the observed model — the outstanding
+      // task is untouched, no new task, no wakeup.
+      appendJournal(transcriptPath, [assistantLine('claude-opus-5')])
+
+      await new Promise((resolve) => setTimeout(resolve, 80))
+
+      assert.equal(broadcasts.length, 0,
+        'a model-only transcript change must not trigger a background_tasks_changed broadcast')
+      assert.equal(s._lastBackgroundTaskKey, keyAfterArm,
+        'the dedup baseline must not move for a change the key does not track')
+      // The idle poll tick scans the transcript but only ever calls
+      // `emit('background_tasks_changed', ...)` — never `_adoptObservedModel`
+      // — so a model observed ONLY via this path is not yet reflected in
+      // `bootedModel`. It surfaces on the next real readiness edge
+      // (`getBackgroundTaskSnapshot()` / `_refreshObservedModel()`), same as
+      // any other pending scanner state.
+      assert.equal(s.bootedModel, 'claude-sonnet-5',
+        'the idle poll tick alone does not adopt the model — that needs a real readiness edge')
+      const snap2 = s.getBackgroundTaskSnapshot()
+      assert.equal(snap2.observedModel, 'claude-opus-5', 'the scanner itself did see the new model')
+      assert.equal(s.bootedModel, 'claude-opus-5', 'a real readiness edge now adopts it')
     })
   })
 
@@ -386,6 +471,36 @@ describe('ClaudeTuiSession — observed model from the transcript (#7327)', () =
 
       assert.equal(s.bootedModel, 'claude-sonnet-5')
       assert.equal(readyEvents.length, 0, 'no ready while the session is tearing down')
+    })
+
+    it('adopts the observation but does not emit ready during the #8043 respawn window (live term, not yet processReady)', () => {
+      // #7327 round-2 review S1: the gate is `_ptyExited || !_processReady ||
+      // _destroying`. The two tests above cover `_ptyExited` (which always
+      // travels with `_processReady = false` at every real call site — see
+      // `_onPtyGone`) and `_destroying`. Neither covers `!_processReady` in
+      // isolation: the #8043 respawn window has a freshly-assigned LIVE
+      // `_term` (a new PTY handle exists), `_ptyExited` is false (the new
+      // spawn hasn't failed), but readiness hasn't been confirmed yet. That
+      // is the ONE state only the `!_processReady` clause catches — without
+      // it, this scenario would wrongly emit `ready` for a handle the
+      // client cannot usefully talk to yet.
+      const s = makeSession()
+      attachLivePty(s, fakePid) // sets _processReady = true by default
+      s._sessionId = 'uuid-respawn-window'
+      const sessFile = writeSessFile(fakePid, s._sessionId)
+      writeJournal(sessFile, [assistantLine('claude-sonnet-5')])
+
+      s._ptyExited = false
+      s._processReady = false // the respawn window: live term, not yet ready
+
+      const readyEvents = []
+      s.on('ready', (d) => readyEvents.push(d))
+
+      s._clearTurnEndState()
+
+      assert.equal(s.bootedModel, 'claude-sonnet-5', 'still adopted')
+      assert.equal(readyEvents.length, 0,
+        'no ready during the pre-readiness respawn window, even with a live term and _ptyExited false')
     })
 
     it('POSITIVE CONTROL: still emits ready for a live, processReady PTY (not over-gated)', () => {
