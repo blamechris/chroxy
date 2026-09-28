@@ -2980,6 +2980,16 @@ button.sidebar-token-view-session-row:hover {
   overscroll-behavior: contain;
 }
 
+/* #7406 — visible focus indicator for the now-tabbable `.chat-messages`
+ * scroller. `outline-offset: -2px` (inset, matching `.sidebar-repo` /
+ * `.sidebar-session-item`) rather than a positive offset: the parent
+ * `.chat-view { overflow: hidden }` clips anything drawn outside the
+ * scroller's box, so an outset outline would be cut off at the edges. */
+.chat-messages:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
 /*
  * Chat redesign #6392 — presence rail. A continuous left-edge spine painted on
  * the non-scrolling .chat-view parent (NOT inside the virtualized .chat-messages

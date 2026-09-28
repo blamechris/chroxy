@@ -903,17 +903,17 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // Keys only count when they did not come from a text entry or an arrow-key
   // widget inside the list — that is caret movement, not scrolling.
   //
-  // PRECONDITION, and it is a narrow one: a keydown targets
-  // `document.activeElement`, and this container is not itself focusable, so
-  // this handler is only reached when focus is already INSIDE the list — a
-  // reader who clicked a row's copy button or an expandable tool row
-  // (`ToolBubble` carries role=button + tabIndex=0). That is also exactly the
-  // state in which the browser scrolls this container rather than the document,
-  // so the handler is useful precisely where it is reachable. With focus on
-  // `body` the keys do not scroll the conversation at all today — a real
-  // keyboard-access gap, but a pre-existing one that wants the whole scroller in
-  // the tab order, so it is tracked separately in #7406 rather than smuggled
-  // into a scroll-behaviour fix.
+  // #7406 — the container itself is now in the tab order (`tabIndex={0}` on
+  // `.chat-messages` below), so a keydown can target the container DIRECTLY as
+  // well as a focused descendant. Both are exactly the states in which the
+  // browser natively scrolls this element on Arrow/PageUp/PageDown/Home/End —
+  // a focused scrollable element scrolls itself; a focused descendant's
+  // keydown bubbles here while the nearest scrollable ancestor (this
+  // container) is what the browser moves — so this handler's job is unchanged
+  // either way: read the gesture and update the follow/scrolled-up intent that
+  // the auto-follow re-pin loop reads, never drive `scrollTop` itself. Before
+  // #7406, `body`-focused keys reached neither the browser's native scroll nor
+  // this handler at all — the gap the issue closes.
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     const up = SCROLL_UP_KEYS.has(e.key)
     if (!up && !SCROLL_DOWN_KEYS.has(e.key)) return
@@ -1294,6 +1294,18 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
           ref={containerRef}
           className="chat-messages"
           data-testid="chat-messages"
+          // #7406 (axe `scrollable-region-focusable`, WCAG 2.1.1) — a
+          // scrollable region with no way to reach it by keyboard. `tabIndex={0}`
+          // puts the container itself in the tab order so a keyboard-only
+          // reader can Tab to it and then Arrow/PageUp/PageDown/Home/End scroll
+          // it directly (see `handleKeyDown` above). `role="region"` +
+          // `aria-label` gives it an exposed landmark name — a bare `aria-label`
+          // on a generic div is not reliably announced. Deliberately NOT
+          // `role="log"`: that role's implicit `aria-live="polite"` would make
+          // a screen reader announce every streamed token.
+          role="region"
+          aria-label="Conversation"
+          tabIndex={0}
           onScroll={handleScroll}
           onWheel={handleWheel}
           onTouchStart={handleTouchStart}
