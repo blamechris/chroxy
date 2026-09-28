@@ -635,7 +635,17 @@ describe('ClaudeTuiSession', () => {
       assert.equal(candidate.agentConnection.provenance.observedAt, priorObservedAt,
         'a failed respawn retains the last successful observation only as history')
       assert.equal(candidate._nativeRouteVerifiedForSpawn, false)
-      assert.equal(scheduled, 1)
+      // #8038: a PROVIDER_BINARY_PROVENANCE throw from connectionRuntimePreflight
+      // IS the native route's binary gate (see spawned-binary-provenance.md §5) —
+      // a refusal there must not burn the bounded respawn budget into a
+      // misleading pty_respawn_exhausted for a binary chroxy deliberately
+      // refused to launch. Before #8038 this scheduled a normal backoff
+      // respawn (scheduled === 1); now it latches _spawnRefusal instead and
+      // schedules nothing — revival is driven by the next sendMessage.
+      assert.equal(scheduled, 0, 'a gate refusal on a respawn must not schedule the normal backoff path')
+      assert.ok(candidate._spawnRefusal, 'the refusal is latched for the next sendMessage to see')
+      assert.equal(candidate._spawnRefusal.code, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(candidate._respawnScheduled, false)
 
       failProvenance = false
       await candidate._respawnPty()
@@ -644,7 +654,8 @@ describe('ClaudeTuiSession', () => {
       assert.equal(candidate.agentConnection.readiness.reasonCode, null)
       assert.notEqual(candidate.agentConnection.provenance.observedAt, priorObservedAt)
       assert.equal(candidate._nativeRouteVerifiedForSpawn, true)
-      assert.equal(scheduled, 1, 'the verified retry does not schedule another respawn')
+      assert.equal(scheduled, 0, 'the verified retry never went through the backoff path either')
+      assert.equal(candidate._spawnRefusal, null, 'the latch clears once the gate passes')
 
       await candidate.destroy()
       rmSync(sink, { recursive: true, force: true })

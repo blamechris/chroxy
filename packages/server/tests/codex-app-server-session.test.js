@@ -2069,6 +2069,52 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
   })
 })
 
+// #8038 — app-server's one spawn (at start()) now goes through the same
+// `_gatedSpawnBinary` seam every other provider's (re)spawn uses, instead of a
+// bare `CodexAppServerSession.resolvedBinary` read. `_gatedSpawnBinary` is a
+// BaseSession method that calls `this._spawnPreflight()` when a gate is wired
+// (the `spawnPreflight` ctor opt, exactly like SessionManager wires it via
+// `_verifyPinnedSpawn`) and falls back to the plain static read otherwise — so
+// these tests drive it directly via the ctor opt, mirroring how
+// session-manager-preflight.test.js's TestGeminiSpawnGate/TestCodexSpawnGate/
+// TestCliSpawnGate fixtures exercise the SAME method for the other providers.
+describe('CodexAppServerSession — start() spawn gate (#8038)', () => {
+  it('a refusing gate rejects start() with the gate\'s own code and never creates a client', async () => {
+    let clientCreations = 0
+    const gateErr = new Error('pinned codex binary hash changed since it was pinned')
+    gateErr.code = 'PROVIDER_BINARY_PROVENANCE'
+    const { s, cleanup } = mkSession({
+      spawnPreflight: () => { throw gateErr },
+      clientFactory: () => { clientCreations++; return stubClient({ 'thread/start': THREAD_START_ECHO }).client },
+    })
+    try {
+      await assert.rejects(s.start(), (err) => err === gateErr && err.code === 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(clientCreations, 0, 'a gate refusal must throw BEFORE _createClient — no subprocess is spawned')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
+  it('a passing gate hands the client factory the GATED (pinned) path, not a fresh resolvedBinary read', async () => {
+    const pinnedPath = '/fixture/pinned/codex'
+    let receivedBin = null
+    const stub = stubClient({ 'thread/start': THREAD_START_ECHO })
+    const { s, cleanup } = mkSession({
+      spawnPreflight: () => pinnedPath,
+      clientFactory: (config) => { receivedBin = config.bin; return stub.client },
+    })
+    try {
+      await s.start()
+      assert.equal(receivedBin, pinnedPath, 'the client was built with the gate-returned path')
+      assert.equal(s._spawnedBinary, pinnedPath, 'the #6708 spawn-failure backstop also verifies the gated path')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+})
+
 describe('CodexAppServerSession — param builders (#7729)', () => {
   it('_buildThreadParams matches the inline shape, and omits `model` when there is none', () => {
     const { s, cleanup } = mkSession()

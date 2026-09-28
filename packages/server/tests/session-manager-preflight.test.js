@@ -15,6 +15,7 @@ import { registerProvider } from '../src/providers.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { GeminiSession } from '../src/gemini-session.js'
 import { CodexSession } from '../src/codex-session.js'
+import { CliSession } from '../src/cli-session.js'
 import { waitFor } from './test-helpers.js'
 
 /**
@@ -238,6 +239,71 @@ class TestGeminiCredentialGate extends TestGeminiSpawnGate {
   }
 }
 registerProvider('test-gemini-credential-gate-8035', TestGeminiCredentialGate)
+
+// #8038 — end-to-end fixture for the REAL claude-cli (re)spawn gate, exercised
+// through an actual CliSession subclass so the test goes red if
+// `_spawnPersistentProcess`'s gate call is ever reverted to a bare
+// `resolveClaudeBinary()`. Overrides ONLY `_spawnPersistentProcess` to splice a
+// node shim path in front of the real argv — the REAL gate code
+// (`this._gatedSpawnBinary('claude')`, the `_respawnCount = 0` reset, and
+// `_refuseSpawn`) all still run unchanged; only the eventual `spawn()` target
+// changes from the real `claude` to a node shim script. Mirrors
+// TestGeminiSpawnGate/TestCodexSpawnGate above.
+class TestCliSpawnGate extends CliSession {
+  static resolvedOverride = null
+  static shimPath = null
+  static get resolvedBinary() { return TestCliSpawnGate.resolvedOverride || process.execPath }
+  static get preflight() {
+    return {
+      label: 'Test CLI Spawn Gate',
+      binary: { name: 'node', candidates: [] },
+      // CliSession.resolveAuth() (inherited, unchanged) is hardcoded ready:true
+      // regardless of this block (claude-cli always auths via host OAuth), but
+      // runProviderPreflight still reads `this.preflight.credentials`
+      // unconditionally — an empty-but-present, optional block keeps that read
+      // from throwing without requiring any real credential.
+      credentials: { envVars: [], hint: '', optional: true },
+    }
+  }
+  _spawnPersistentProcess(args) {
+    return super._spawnPersistentProcess([TestCliSpawnGate.shimPath, ...args])
+  }
+}
+registerProvider('test-cli-spawn-gate-8038', TestCliSpawnGate)
+
+// #8038 — a PERSISTENT shim (unlike makeGateShim's one-shot below): writes one
+// line to `markerPath` per launch (proving whether a spawn actually happened,
+// and how many), then stays alive echoing every stdin line it receives to
+// `receivedPath` (proving a message was actually WRITTEN to its stdin, not
+// just admitted), until stdin ends or it is signalled — mirroring how the real
+// `claude -p` subprocess stays alive for the session's lifetime.
+function makeCliGateShim() {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-8038-cli-shim-'))
+  const shimPath = join(dir, 'cli-gate-shim.mjs')
+  const markerPath = join(dir, 'marker.log')
+  const receivedPath = join(dir, 'received.log')
+  const body = [
+    "import { appendFileSync } from 'node:fs'",
+    "import { createInterface } from 'node:readline'",
+    `appendFileSync(${JSON.stringify(markerPath)}, 'spawn ' + Date.now() + '\\n')`,
+    'const rl = createInterface({ input: process.stdin })',
+    `rl.on('line', (line) => { try { appendFileSync(${JSON.stringify(receivedPath)}, line + '\\n') } catch {} })`,
+    "process.stdin.on('end', () => process.exit(0))",
+    "process.on('SIGTERM', () => process.exit(0))",
+    "process.on('SIGINT', () => process.exit(0))",
+  ].join('\n')
+  writeFileSync(shimPath, body)
+  chmodSync(shimPath, 0o755)
+  return { dir, shimPath, markerPath, receivedPath }
+}
+
+// #8038 — count completed spawns of the persistent shim above (one line per
+// launch) rather than just existsSync, so a test can assert "no SECOND spawn
+// happened" after a first one already succeeded.
+function spawnCount(markerPath) {
+  if (!existsSync(markerPath)) return 0
+  return readFileSync(markerPath, 'utf8').split('\n').filter(Boolean).length
+}
 
 // A shim that writes a MARKER the instant it actually runs, so a refused turn
 // can be proven to have never spawned (marker absent) rather than only
@@ -773,6 +839,241 @@ describe('SessionManager end-to-end — per-turn subprocess spawn gate, Gemini +
       if (id) mgr.destroySession(id)
       if (saved === undefined) delete process.env[REQUIRED_CRED_8035]
       else process.env[REQUIRED_CRED_8035] = saved
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('SessionManager end-to-end — claude-cli (re)spawn gate (#8038)', () => {
+  beforeEach(() => {
+    TestCliSpawnGate.resolvedOverride = null
+  })
+
+  it('a model switch after the ledger is mutated refuses without spawning, and does not schedule a respawn', async () => {
+    const { dir, shimPath, markerPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger,
+    })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      const exhausted = []
+      session.on('respawn_exhausted', (e) => exhausted.push(e))
+
+      // Mutate the ledger — the model-switch respawn `_killAndRespawn()` triggers
+      // must now be refused BEFORE a new child is spawned.
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+      assert.equal(session.setModel('fixture-model-8038-a'), true, 'setModel guard passed (model actually changed)')
+
+      await waitFor(() => errors.length >= 1, { label: 'model-switch refusal' })
+      assert.equal(errors.length, 1, 'exactly one refusal error')
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(spawnCount(markerPath), 1, 'no second spawn happened')
+      assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
+      assert.equal(session._respawnScheduled, false, 'no backoff timer armed for a refused spawn')
+      assert.equal(session._respawnCount, 0, 'the backoff chain reset — the next spawn is user-initiated')
+    } finally {
+      if (id) mgr.destroySession(id)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a permission-mode change after the ledger is mutated refuses without spawning', async () => {
+    const { dir, shimPath, markerPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger,
+    })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      const exhausted = []
+      session.on('respawn_exhausted', (e) => exhausted.push(e))
+
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+      // 'plan' is never gated by getProviderPermissionModeSupport (only 'auto'
+      // can be), so this changes the mode and fires _onPermissionModeChanged →
+      // _killAndRespawn() regardless of this fixture's declared capabilities.
+      assert.equal(session.setPermissionMode('plan'), true, 'setPermissionMode guard passed (mode actually changed)')
+
+      await waitFor(() => errors.length >= 1, { label: 'permission-mode-change refusal' })
+      assert.equal(errors.length, 1, 'exactly one refusal error')
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(spawnCount(markerPath), 1, 'no second spawn happened')
+      assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
+      assert.equal(session._respawnScheduled, false)
+      assert.equal(session._respawnCount, 0)
+    } finally {
+      if (id) mgr.destroySession(id)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('the next input after a user Stop is rejected once the ledger is mutated, and never queued', async () => {
+    const { dir, shimPath, markerPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger,
+    })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      // #4602/#7438: interrupt() sends SIGINT; the shim exits, and
+      // _handleChildClose's intentional-stop branch latches _stoppedByUser —
+      // the session sits stopped-but-revivable with no child.
+      session.interrupt()
+      await waitFor(() => session._stoppedByUser === true, { label: 'stop settled' })
+
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+
+      const admissions = []
+      await session.sendMessage('after stop', [], { onInputAdmission: (a) => admissions.push(a) })
+
+      assert.equal(admissions.length, 1, 'exactly one admission reported for this input')
+      assert.equal(admissions[0].status, 'rejected')
+      assert.equal(admissions[0].delivery, 'not_dispatched')
+      assert.equal(admissions[0].reason, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(spawnCount(markerPath), 1, 'the revival attempt never spawned')
+      assert.equal(session._pendingQueue.length, 0, 'the refused input was never queued behind a child that will not start')
+    } finally {
+      if (id) mgr.destroySession(id)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a crash respawn is refused once the ledger is mutated, with no further timer and no respawn_exhausted', async () => {
+    const { dir, shimPath, markerPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger,
+    })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      const exhausted = []
+      session.on('respawn_exhausted', (e) => exhausted.push(e))
+
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+      // Simulate a crash (NOT interrupt()) — _handleChildClose must treat this
+      // as unexpected and schedule the normal 1s-backoff respawn, which the
+      // gate then refuses when the timer fires.
+      session._child.kill('SIGKILL')
+
+      await waitFor(() => session._respawnScheduled === true, { label: 'crash respawn scheduled' })
+      await waitFor(
+        () => errors.some((e) => e.code === 'PROVIDER_BINARY_PROVENANCE'),
+        { label: 'crash respawn refused', timeoutMs: 5000 },
+      )
+
+      assert.equal(spawnCount(markerPath), 1, 'the refused crash-respawn attempt never spawned')
+      assert.equal(exhausted.length, 0, 'never treated as respawn_exhausted')
+      assert.equal(session._respawnScheduled, false, 'no further backoff timer armed')
+      assert.equal(session._respawnCount, 0, 'the backoff chain reset')
+    } finally {
+      if (id) mgr.destroySession(id)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('restoring the ledger after a refusal revives the session and delivers the next input', async () => {
+    const { dir, shimPath, markerPath, receivedPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+    const mgr = new SessionManager({
+      maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir(),
+      binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger,
+    })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      session.interrupt()
+      await waitFor(() => session._stoppedByUser === true, { label: 'stop settled' })
+
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+      const refusedAdmissions = []
+      await session.sendMessage('bounced', [], { onInputAdmission: (a) => refusedAdmissions.push(a) })
+      assert.equal(refusedAdmissions[0]?.reason, 'PROVIDER_BINARY_PROVENANCE', 'refused while the ledger is mismatched')
+      assert.equal(spawnCount(markerPath), 1, 'the refusal did not spawn')
+
+      // Restore the ledger — the NEXT input must revive the session.
+      ledger._records.set(process.execPath, { sha256: SPAWN_GATE_REAL_HASH })
+      const revivedAdmissions = []
+      await session.sendMessage('revived turn', [], { onInputAdmission: (a) => revivedAdmissions.push(a) })
+
+      await waitFor(() => spawnCount(markerPath) >= 2, { label: 'revival spawn' })
+      // The revival spawned a child synchronously, so the input is queued for
+      // its warmup drain — an exact value, not "anything but rejected", which
+      // an empty admissions list would also satisfy. (The drain re-dispatches
+      // with the same options, so a later `accepted` follows; production's
+      // callback is final after the first report, so only [0] is the verdict.)
+      assert.ok(revivedAdmissions.length >= 1, 'an admission was reported for the revived input')
+      assert.equal(revivedAdmissions[0].status, 'queued', 'the revived input was admitted for the new child')
+      await waitFor(
+        () => existsSync(receivedPath) && readFileSync(receivedPath, 'utf8').includes('revived turn'),
+        { label: 'revived message actually delivered to the child stdin' },
+      )
+    } finally {
+      if (id) mgr.destroySession(id)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('pinning: a PATH change after create never redirects a model-switch respawn away from the create-time-verified path', async () => {
+    const { dir, shimPath, markerPath } = makeCliGateShim()
+    TestCliSpawnGate.shimPath = shimPath
+    // No provenance mode configured (default 'off') — this proves pinning
+    // itself (existence/identity), independent of the opt-in hash gate.
+    const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+    let id = null
+    try {
+      id = mgr.createSession({ provider: 'test-cli-spawn-gate-8038', skipPersist: true })
+      const session = mgr.getSession(id).session
+      await waitFor(() => spawnCount(markerPath) >= 1, { label: 'first spawn' })
+
+      // Simulate a PATH change: resolvedBinary now points somewhere nonexistent.
+      // A fresh, unpinned `resolveClaudeBinary()`-style read would try (and fail)
+      // to spawn THAT path; the pinned gate must keep using the create-time-
+      // verified process.execPath regardless.
+      TestCliSpawnGate.resolvedOverride = join(tmpdir(), `chroxy-8038-elsewhere-${process.pid}`)
+
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      assert.equal(session.setModel('fixture-model-8038-b'), true)
+
+      await waitFor(() => spawnCount(markerPath) >= 2, { label: 'model-switch respawn spawned the pinned path' })
+      assert.equal(errors.length, 0, 'no error even though resolvedBinary now points nowhere')
+    } finally {
+      if (id) mgr.destroySession(id)
       rmSync(dir, { recursive: true, force: true })
     }
   })

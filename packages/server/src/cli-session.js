@@ -7,7 +7,7 @@ import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
-import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission, spawnRefusalAdmission } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
@@ -571,6 +571,12 @@ export class CliSession extends BaseSession {
   _spawnPersistentProcess(args) {
     this._cleanupReadlines()
     this._processReady = false
+    // #8038: clear any refusal latched by a PRIOR spawn attempt at the very
+    // top of every attempt (mirrors ClaudeTuiSession._spawnPty). A fresh
+    // attempt gets a fresh gate verdict — a stale latch from a prior crash
+    // respawn must never suppress a NEW attempt's own error or silently
+    // survive a revival that is about to succeed.
+    this._spawnRefusal = null
 
     // #4929: capture which `--resume <id>` (if any) this spawn attempted.
     // Read off the argv we're about to pass instead of `_sessionId` so the
@@ -590,7 +596,32 @@ export class CliSession extends BaseSession {
     // for a directly-runnable `.exe` and on POSIX. See utils/win-spawn.js.
     // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
     // attempt used, not a fresh re-resolve that could land on a different path.
-    const attemptedBinary = resolveClaudeBinary()
+    //
+    // #8038: routed through the shared binary gate instead of a bare
+    // `resolveClaudeBinary()` — this ONE method is what every (re)spawn funnels
+    // through (first start, `_killAndRespawn` for a model switch or permission-
+    // mode change, `_restartAfterStop`'s post-Stop revival, and `_scheduleRespawn`'s
+    // crash backoff), so gating it here covers every entry point in the #8038
+    // issue with no per-caller duplication. A refusal here means the gate
+    // rejected this attempt (provenance mismatch, quarantine, a vanished pinned
+    // path, …): nothing is spawned, the backoff chain resets (the NEXT spawn is
+    // user-initiated, mirroring `_killAndRespawn` zeroing `_respawnCount`), and
+    // `_scheduleRespawn` is deliberately NOT called — this is not "the child
+    // died", it is "we refused to start a child at all", and a timer retrying
+    // the same refused gate would just burn the bounded respawn budget into a
+    // misleading `respawn_exhausted` ("failed to stay alive"). Revival happens
+    // lazily on the next `sendMessage` instead (see there, and `_refuseSpawn`).
+    let attemptedBinary
+    try {
+      attemptedBinary = this._gatedSpawnBinary('claude')
+    } catch (err) {
+      // The chain that got us here (crash backoff, model switch, …) is over —
+      // the next spawn attempt is a fresh, user-initiated one, exactly as
+      // `_killAndRespawn` already resets this counter on its own respawn path.
+      this._respawnCount = 0
+      this._refuseSpawn(err, this._log || log)
+      return
+    }
     const spawnSpec = prepareSpawn(attemptedBinary, args)
     const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
@@ -765,6 +796,29 @@ export class CliSession extends BaseSession {
     }
 
     if (!this._processReady) {
+      // #8038: revive FIRST, before deciding whether THIS input can be
+      // admitted. `_restartAfterStop` now also fires on a latched spawn
+      // refusal (see its doc) so a session left idle by a gate refusal gets
+      // the same lazy on-next-input revival a user Stop already got via
+      // #7438 — moved ahead of the queue-full check / push below. It used to
+      // run AFTER queuing, which is fine when the restart spawns a child (the
+      // warmup drain delivers the push), but with a gate that can refuse it
+      // would admit this input as `queued` behind a child that never starts.
+      this._restartAfterStop()
+
+      // #8038: the revival attempt above may have hit the SAME gate refusal
+      // again (or a fresh one) — reject THIS input immediately with the coded
+      // admission instead of queuing it behind a child that is not coming
+      // back on its own. Messages already sitting in `_pendingQueue` from
+      // BEFORE this refusal are untouched (their admission was already
+      // reported as `queued`, and `onInputAdmission` is final after its first
+      // call) — they stay queued and are delivered FIFO by the warmup drain
+      // once a future revival actually spawns.
+      if (this._spawnRefusal) {
+        reportInputAdmission(options, spawnRefusalAdmission(this._spawnRefusal))
+        return
+      }
+
       if (this._pendingQueue.length >= 3) {
         this.emit('error', { message: 'Pending message queue full (max 3) — message discarded' })
         reportInputAdmission(options, {
@@ -778,10 +832,6 @@ export class CliSession extends BaseSession {
       ;(this._log || log).info(`Process not ready, queuing message (queue depth: ${this._pendingQueue.length + 1})`)
       this._pendingQueue.push({ prompt, attachments, options })
       reportInputAdmission(options, { status: 'queued', delivery: 'queued' })
-      // #7438: a user Stop leaves no child and no respawn, so without this the
-      // message just queued would sit there forever. Restart lazily, now that
-      // the user has asked for more work; the warmup drain delivers it.
-      this._restartAfterStop()
       return
     }
 
@@ -2237,9 +2287,18 @@ export class CliSession extends BaseSession {
    * _killAndRespawn) or is a considered terminal give-up — the respawn cap, the
    * rate cap, `resume_unknown_exhausted`. Typing into one of those must not
    * re-arm a flapping session behind the cap that just stopped it.
+   *
+   * #8038: ALSO fires on `_spawnRefusal` — a binary-gate refusal (model
+   * switch / permission-mode change / crash respawn the gate rejected) is
+   * revivable in exactly the same "nothing else will bring this child back"
+   * sense a user Stop is, unlike the terminal give-ups listed above: the gate
+   * refused a SPECIFIC verdict (this binary, right now), and a later input
+   * is a legitimate reason to ask it again (the operator may have restored
+   * the ledger, re-approved the hash, fixed the quarantine, …). Both flags
+   * share this one restart path rather than two near-identical copies.
    */
   _restartAfterStop() {
-    if (!this._stoppedByUser) return
+    if (!this._stoppedByUser && !this._spawnRefusal) return
     if (this._destroying) return
     if (this._respawning) return
     if (this._respawnScheduled) return

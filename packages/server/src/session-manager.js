@@ -1069,9 +1069,12 @@ export class SessionManager extends EventEmitter {
   //     directly), so every consumer that spawns more than once per session
   //     shares it — the Agent SDK (#8030, execs a new process per turn) and
   //     JsonlSubprocessSession's Gemini / Codex-exec subclasses (spawn once
-  //     per turn). claude-cli, claude-tui and codex app-server's default
-  //     route never call it: their spawns and respawns still re-resolve the
-  //     binary with no per-spawn gate (#8038).
+  //     per turn). #8038: claude-cli's `_spawnPersistentProcess`, claude-tui's
+  //     `_spawnPty` (non-native route; the native route's own
+  //     `connectionRuntimePreflight` re-check already counted) and codex
+  //     app-server's `start()` now call it too — every (re)spawn of every
+  //     provider that holds a `_spawnPreflight` is gated, not just the
+  //     per-turn ones.
   //   - `verifyOneShotExecutable()` is the same idea for a one-shot call that
   //     has NO create-time pin to reuse (the summarizer, the semantic-title
   //     generator) — it re-resolves AND re-verifies fresh every call.
@@ -1676,10 +1679,13 @@ export class SessionManager extends EventEmitter {
     // `BASE_SESSION_OPT_KEYS` — see base-session.js), so SdkSession AND
     // JsonlSubprocessSession's Gemini / Codex-exec subclasses both consume it
     // per spawn (each execs a NEW process every turn, so "verified once at
-    // create" doesn't cover turn two onward). claude-cli, claude-tui and codex
-    // app-server's default route inherit the opt through the same picker but
-    // never call `_gatedSpawnBinary`; their spawns and respawns still
-    // re-resolve with no per-spawn gate (#8038).
+    // create" doesn't cover turn two onward). #8038: claude-cli, claude-tui
+    // and codex app-server's default route also call `_gatedSpawnBinary` now
+    // — every (re)spawn on every route (first start, model switch,
+    // permission-mode change, post-Stop revival, crash respawn, PTY respawn,
+    // app-server's one-shot `start()`) re-verifies against this exact pinned
+    // path. A refusal on a respawn does not burn that provider's respawn
+    // budget — see `_refuseSpawn` on BaseSession.
     if (verifiedBinary) {
       providerOpts.spawnPreflight = () => this._verifyPinnedSpawn(ProviderClass, verifiedBinary)
     }

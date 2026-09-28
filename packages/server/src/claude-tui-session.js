@@ -22,7 +22,7 @@ import { homedir, tmpdir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts, reportInputAdmission, spawnRefusalAdmission } from './base-session.js'
 import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 // #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
@@ -2156,6 +2156,10 @@ export class ClaudeTuiSession extends BaseSession {
     // re-evaluates fresh (a re-login between attempts must let the session
     // recover; a still-logged-out respawn re-sets it via _spawnPty's scan).
     this._authFailureDetected = false
+    // #8038: capture BEFORE it is consumed below — a gate refusal needs to
+    // know whether THIS attempt was a fresh-retry attempt so it can re-arm
+    // the latch on the way out (see the catch block).
+    const wasFreshRetry = this._freshRetryPending
     // (2) continue the SAME upstream conversation via --resume — UNLESS
     // #5348's retry-FRESH fallback armed this attempt: then `_sessionId` is a
     // freshly-minted uuid claude has never seen, so the spawn must use
@@ -2171,8 +2175,30 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       await this._spawnPty(permissionsEnabled)
     } catch (err) {
-      ;(this._log || log).error(`PTY respawn threw: ${err?.message || err}`)
       this._respawning = false
+      // #8038: a binary-gate refusal is NOT "the PTY died" — nothing was
+      // spawned, so scheduling the backoff respawn here would burn the ≤5
+      // budget into a misleading `pty_respawn_exhausted` ("failed to stay
+      // alive") for a binary chroxy deliberately refused to launch. Revival
+      // happens lazily on the next `sendMessage` instead (see there) — same
+      // contract as CliSession's `_spawnPersistentProcess` gate refusal.
+      // Identity check (not error-code sniffing): `_spawnPty` sets
+      // `this._spawnRefusal = err` to this EXACT thrown object only on its
+      // two gate-refusal paths — any other throw (native auth-status /
+      // endpoint mismatch, node-pty import failure, …) leaves it unset.
+      if (err === this._spawnRefusal) {
+        // #5348: this attempt already consumed `_freshRetryPending` above to
+        // decide `--session-id` vs `--resume`, but the gate refused before
+        // claude ever saw either argv — the fresh-uuid decision this attempt
+        // was about to make is still owed. Re-arm it so the eventual revival
+        // still mints a new conversation instead of `--resume`-ing an id
+        // claude never learned about.
+        if (wasFreshRetry) this._freshRetryPending = true
+        this._respawnCount = 0
+        this._refuseSpawn(err, this._log || log)
+        return
+      }
+      ;(this._log || log).error(`PTY respawn threw: ${err?.message || err}`)
       // Treat a throw like a death: schedule the next attempt (respects the cap).
       this._scheduleRespawn()
       return
@@ -2416,6 +2442,10 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {boolean} permissionsEnabled
    */
   async _spawnPty(permissionsEnabled) {
+    // #8038: clear any refusal latched by a PRIOR spawn attempt at the top of
+    // every attempt (mirrors CliSession._spawnPersistentProcess). A fresh
+    // attempt gets a fresh gate verdict.
+    this._spawnRefusal = null
     if (this._connectionAuthRoute === 'native') {
       this._nativeRouteVerifiedForSpawn = false
       this._beginNativeRouteVerification()
@@ -2423,14 +2453,30 @@ export class ClaudeTuiSession extends BaseSession {
     const cwdReal = realpathSync(this.cwd)
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary
-    let nativeRouteNonce = null
+    // #8038: the binary-gate step gets its OWN try, split out from the nonce /
+    // hook-settings / native-auth-status step below. ONLY a failure HERE is a
+    // `_spawnRefusal` (this is the #8038 gate: the non-native route now goes
+    // through `_gatedSpawnBinary` — previously it read `_connectionVerifiedBinary`
+    // once at create time and never re-verified it on a respawn — and the native
+    // route's own `_connectionRuntimePreflight` re-check is unchanged but is
+    // ALSO the gate for that route). A failure in `_verifyNativeConnectionRoute`
+    // below is a different defect class (native auth-status / endpoint-route
+    // mismatch — out of scope for #8038) and must not latch a refusal or
+    // suppress the respawn backoff the way a real gate refusal does.
     try {
       attemptedBinary = this._connectionAuthRoute === 'native'
         ? this._connectionRuntimePreflight?.()
-        : this._connectionVerifiedBinary || resolveClaudeBinary()
+        : this._gatedSpawnBinary('claude')
       if (this._connectionAuthRoute === 'native' && attemptedBinary !== this._connectionVerifiedBinary) {
         throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'Claude Code native authentication requires the configured binary provenance check before every spawn.')
       }
+    } catch (err) {
+      this._spawnRefusal = err
+      this._blockNativeRouteVerification(err)
+      throw err
+    }
+    let nativeRouteNonce = null
+    try {
       nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
       if (nativeRouteNonce) {
         this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
@@ -2547,12 +2593,19 @@ export class ClaudeTuiSession extends BaseSession {
       args.push('--append-system-prompt', skillsPrefix)
     }
     if (this._connectionAuthRoute === 'native') {
+      // #8038: this second re-check is ALSO the gate for the native route — a
+      // provenance mutation landing in the window between the first gate call
+      // above and this one (nonce mint + settings write + auth-status probe
+      // all ran in between) must still be caught before argv ever names a
+      // binary to node-pty. A failure here latches `_spawnRefusal` exactly
+      // like the first gate call.
       try {
         const spawnBinary = this._connectionRuntimePreflight?.()
         if (spawnBinary !== attemptedBinary) {
           throw nativeConnectionError('NATIVE_RUNTIME_UNVERIFIED', 'The verified Claude Code binary changed between native authentication verification and PTY startup.')
         }
       } catch (err) {
+        this._spawnRefusal = err
         this._blockNativeRouteVerification(err)
         throw err
       }
@@ -3186,6 +3239,26 @@ export class ClaudeTuiSession extends BaseSession {
     // shape. input-handlers.js (the non-reinject caller) ignores the
     // resolved value entirely; it only attaches a defensive .catch, which a
     // resolved typed object never trips.
+    //
+    // #8038: revive a session parked on a latched spawn refusal BEFORE
+    // deciding anything else about this input — a model-switch / permission-
+    // mode-change / crash respawn the gate rejected leaves `_spawnRefusal`
+    // set and no PTY alive, and nothing else will retry the gate until a user
+    // asks for more work (mirrors CliSession's `_restartAfterStop` revival).
+    // Skip the retry when a respawn is already in flight or scheduled (it
+    // owns the next verdict) or the session is tearing down.
+    if (this._spawnRefusal && !this._respawning && !this._respawnScheduled && !this._destroying) {
+      await this._respawnPty()
+    }
+    if (this._spawnRefusal) {
+      // Still latched — the retry above either didn't run (already in
+      // flight/scheduled/destroying) or ran and the gate refused again.
+      // Reject THIS input with the coded admission rather than proceeding
+      // into a turn with no live PTY. `_respawnPty` already emitted the
+      // coded `error` event for this verdict, so no second emit here.
+      reportInputAdmission(sendOptions, spawnRefusalAdmission(this._spawnRefusal))
+      return { ok: false, reason: 'spawn_refused' }
+    }
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
       reportInputAdmission(sendOptions, {
