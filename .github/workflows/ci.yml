@@ -1641,6 +1641,15 @@ jobs:
         # The CALL SITES have their own coverage inside each package's suite.
         run: node scripts/__tests__/no-test-force-exit.test.mjs
 
+      - name: Run assert-match-payload-guard-wiring.mjs tests
+        # #7413 — extends the #7401 assert.match payload guard from
+        # server-only to every package that runs `node --test`. Pins the
+        # textual wiring in packages/protocol and packages/design-tokens
+        # (which have no setup module of their own) and the hook's mechanism.
+        # The server and claude-hooks CALL SITES have their own coverage
+        # inside each package's suite.
+        run: node scripts/__tests__/assert-match-payload-guard-wiring.test.mjs
+
       - name: Run lint-no-raw-color-literals golden test
         run: bash scripts/__tests__/lint-no-raw-color-literals.test.sh
 

@@ -76,10 +76,19 @@ import { createRequire } from 'node:module'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
+import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
 // Same refusal the server installs (#7400): `--test-force-exit` drops test
 // RESULTS, not tests, and still exits 0 with `# fail 0`.
 assertNoTestForceExit()
+
+// Same payload cap the server installs (#7401, extended to this package by
+// #7413): bounds a failing `assert.match`/`assert.doesNotMatch`'s `actual` so
+// a large subject never rides along on a TAP failure. Never changes a
+// pass/fail verdict. Safe before the fs sandbox arms below: the module
+// reaches `node:assert` through its own `createRequire` and never imports
+// `node:fs`, so it cannot disarm the sandbox (#7262).
+installAssertMatchPayloadGuard()
 
 const require = createRequire(import.meta.url)
 const fs = require('node:fs')
