@@ -471,6 +471,22 @@ describe('checkBinary recommendedVersion soft gate (#8031)', () => {
     assert.equal(result.status, 'pass')
   })
 
+  it('an unparseable recommendedVersion is ignored (pass), not failed closed into a warn', () => {
+    // compareSemver fails closed on a malformed floor — correct for minVersion,
+    // wrong for a soft advisory, which preflight silently ignores when it
+    // does not parse. Doctor must agree.
+    for (const recommendedVersion of ['not-a-version', '>=999.0.0', '999.0']) {
+      const result = checkBinary('node', ['--version'], {
+        parseVersion: (out) => out.trim(),
+        required: true,
+        candidates: [process.execPath],
+        installHint: 'install node',
+        recommendedVersion,
+      })
+      assert.equal(result.status, 'pass', `recommendedVersion ${JSON.stringify(recommendedVersion)} must be ignored`)
+    }
+  })
+
   it('ignores recommendedVersion when not declared (back-compat)', () => {
     const result = checkBinary('node', ['--version'], {
       parseVersion: (out) => out.trim(),

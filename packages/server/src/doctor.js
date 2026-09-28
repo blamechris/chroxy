@@ -760,8 +760,13 @@ export function checkBinary(name, args, { parseVersion, required, installHint, c
     // `recommendedVersion` is declared and `found` couldn't be parsed, this
     // is silently skipped — an unparseable version is not itself a defect
     // for a soft, advisory check (the hard-floor branch above already owns
-    // the "could not parse" warning when a min is also declared).
-    if (recommendedVersion && found !== null && compareSemver(found, recommendedVersion) < 0) {
+    // the "could not parse" warning when a min is also declared). A
+    // `recommendedVersion` that is itself unparseable is ignored the same
+    // way: compareSemver fails CLOSED on a malformed floor, which is right
+    // for minVersion but would turn a bad advisory into a spurious warn —
+    // preflight gates this check on a parsed recommended version too.
+    if (recommendedVersion && found !== null && parseLeadingSemver(recommendedVersion) !== null
+      && compareSemver(found, recommendedVersion) < 0) {
       return {
         name,
         status: 'warn',
