@@ -220,6 +220,17 @@ test('getStatus reports billingClass=subscription while the era is disabled (def
   })
 })
 
+test('getStatus reports billingClass=subscription before the era start date even with the flag on', () => {
+  // The same check the per-turn classifier uses (flag AND start date), at
+  // this snapshot's own `now` — not the env flag alone.
+  const BEFORE_ERA = Date.UTC(2026, 5, 10) // 2026-06-10, before PROGRAMMATIC_CREDIT_ERA_START
+  withEraEnabled(() => {
+    const m = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, now: BEFORE_ERA })
+    m.recordSpend(5, BEFORE_ERA)
+    assert.equal(m.getStatus(BEFORE_ERA).billingClass, BILLING_CLASSES.SUBSCRIPTION)
+  })
+})
+
 test('a stale total accrued while the era was (wrongly) on relabels as subscription once the flag flips off', () => {
   // Reproduces the exact #7377 scenario: spend recorded under the pre-#7361
   // classifier reads back as `subscription` the moment the era flag is off,

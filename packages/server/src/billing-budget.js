@@ -18,7 +18,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { toWireCount } from './utils/wire-counters.js'
-import { BILLING_CLASSES, programmaticCreditEraEnabled } from './billing-class.js'
+import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 /** Per-tier monthly programmatic-credit caps (USD), per Anthropic's 2026-06-15 change. */
 export const CREDIT_TIER_BUDGETS_USD = Object.freeze({
@@ -179,8 +179,10 @@ export class MonthlyProgrammaticBudgetManager {
    * running total only ever grows from programmatic-credit-billed turns
    * (`recordSpend`'s caller in session-manager.js gates on
    * `billingClass === 'programmatic-credit'` before calling in), so the
-   * meter's class today tracks the same machine-wide era flag that gate
-   * uses — `programmatic-credit` while the era is in force,
+   * meter's class tracks the same era check that gate's classifier uses —
+   * `isProgrammaticCreditEra(now)`: the operator flag AND the era start
+   * date, evaluated at this snapshot's `now` — `programmatic-credit` while
+   * the era is in force,
    * `subscription` while it is not (the era never started; #7333/#7361).
    * A stale `spentUsd` left over from a build that misclassified turns
    * before #7361 is real dollars once observed, but must not keep reading
@@ -194,7 +196,7 @@ export class MonthlyProgrammaticBudgetManager {
     const percent = budgetUsd != null && budgetUsd > 0 ? (spentUsd / budgetUsd) * 100 : null
     const warning = percent != null && percent >= this._warningPercent
     const exceeded = budgetUsd != null && spentUsd >= budgetUsd
-    const billingClass = programmaticCreditEraEnabled()
+    const billingClass = isProgrammaticCreditEra(now)
       ? BILLING_CLASSES.PROGRAMMATIC_CREDIT
       : BILLING_CLASSES.SUBSCRIPTION
     return {
