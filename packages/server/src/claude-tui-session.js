@@ -2197,9 +2197,15 @@ export class ClaudeTuiSession extends BaseSession {
       // contract as CliSession's `_spawnPersistentProcess` gate refusal.
       // Identity check (not error-code sniffing): `_spawnPty` sets
       // `this._spawnRefusal = err` to this EXACT thrown object only on its
-      // two gate-refusal paths — any other throw (native auth-status /
-      // endpoint mismatch, node-pty import failure, …) leaves it unset.
+      // refusal paths — the binary gate, the native re-check before the spawn,
+      // and (#8044) the native `claude auth status` verdict. Any other throw
+      // (the nonce / hook-settings write, the post-spawn endpoint-marker check
+      // — #8057, a node-pty import failure, …) leaves it unset.
       if (err === this._spawnRefusal) {
+        // A destroy() that landed while this respawn was awaiting (e.g. the
+        // native `claude auth status` probe) owns the session's end; a coded
+        // refusal error for a destroyed session would reach no client.
+        if (this._destroying) return
         // #5348: this attempt already consumed `_freshRetryPending` above to
         // decide `--session-id` vs `--resume`, but the gate refused before
         // claude ever saw either argv — the fresh-uuid decision this attempt
@@ -2475,15 +2481,14 @@ export class ClaudeTuiSession extends BaseSession {
     const env = this._buildPtyEnv(permissionsEnabled)
     let attemptedBinary
     // #8038: the binary-gate step gets its OWN try, split out from the nonce /
-    // hook-settings / native-auth-status step below. ONLY a failure HERE is a
-    // `_spawnRefusal` (this is the #8038 gate: the non-native route now goes
-    // through `_gatedSpawnBinary` — previously it read `_connectionVerifiedBinary`
-    // once at create time and never re-verified it on a respawn — and the native
-    // route's own `_connectionRuntimePreflight` re-check is unchanged but is
-    // ALSO the gate for that route). A failure in `_verifyNativeConnectionRoute`
-    // below is a different defect class (native auth-status / endpoint-route
-    // mismatch — out of scope for #8038) and must not latch a refusal or
-    // suppress the respawn backoff the way a real gate refusal does.
+    // hook-settings and native-auth-status steps below. A failure here latches
+    // `_spawnRefusal` (the non-native route goes through `_gatedSpawnBinary`,
+    // which previously read `_connectionVerifiedBinary` once at create time and
+    // never re-verified it on a respawn; the native route's own
+    // `_connectionRuntimePreflight` re-check is its gate). Three steps latch a
+    // refusal: this one, the native `claude auth status` verdict below (#8044),
+    // and the native re-check just before the spawn. The nonce / hook-settings
+    // write in between does not — that is a local I/O failure, not a verdict.
     try {
       attemptedBinary = this._connectionAuthRoute === 'native'
         ? this._connectionRuntimePreflight?.()
@@ -2502,8 +2507,25 @@ export class ClaudeTuiSession extends BaseSession {
       if (nativeRouteNonce) {
         this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
       }
+    } catch (err) {
+      this._blockNativeRouteVerification(err)
+      throw err
+    }
+    try {
       await this._verifyNativeConnectionRoute({ binary: attemptedBinary, cwd: cwdReal, env })
     } catch (err) {
+      // #8044: `claude auth status` reporting logged-out
+      // (NATIVE_LOGIN_REQUIRED) or a non-first-party route
+      // (NATIVE_AUTH_ROUTE_MISMATCH) is a verdict about the host's auth state,
+      // not a PTY that failed to stay up. NATIVE_AUTH_STATUS_UNVERIFIED also
+      // covers the probe itself failing (its 5s timeout, spawn/resource errors,
+      // oversized or unparseable output), which can be transient — latched all
+      // the same, deliberately: the next input re-runs the check, whereas the
+      // backoff it replaces re-ran it ≤5 times and then DESTROYED the session
+      // with a misleading `pty_respawn_exhausted`. Latch it exactly like a
+      // #8038 gate refusal: `_respawnPty` arms no backoff, emits the native
+      // code once, and a `claude login` recovers the session in place.
+      this._spawnRefusal = err
       this._blockNativeRouteVerification(err)
       throw err
     }

@@ -390,10 +390,10 @@ describe('ClaudeTuiSession', () => {
           candidate._ptyModOverride = { spawn: () => { ptySpawned = true; throw new Error('unexpected PTY spawn') } }
           await assert.rejects(origSpawnPty.call(candidate, false), (err) => err.code === code)
           assert.equal(ptySpawned, false)
-          // #8038: an auth-status failure is not a binary-gate refusal, so it must
-          // not latch one (that would suppress the respawn backoff; #8044 decides
-          // those semantics separately).
-          assert.equal(candidate._spawnRefusal, null, 'auth-status failures do not latch a spawn refusal')
+          // #8044: an auth-status verdict latches a spawn refusal (like a #8038
+          // gate refusal), so a respawn arms no backoff and the next input
+          // re-runs the check.
+          assert.equal(candidate._spawnRefusal?.code, code, 'the auth-status verdict is latched as a spawn refusal')
           assert.equal(candidate.agentConnection.readiness.state, 'blocked')
           assert.equal(candidate.agentConnection.readiness.reasonCode, code)
           assert.equal(candidate.agentConnection.provenance.observedAt, '2026-09-12T00:00:00.000Z')

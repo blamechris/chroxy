@@ -740,7 +740,9 @@ export class BaseSession extends EventEmitter {
    * when `_gatedSpawnBinary` (or, for the TUI native route, the equivalent
    * `_connectionRuntimePreflight` re-check) throws instead of returning a
    * verified path — nothing was spawned, so there is no child/PTY error to
-   * report through the normal exit-handling path.
+   * report through the normal exit-handling path. #8044: the TUI native
+   * route's `claude auth status` verdict (logged out, a non-first-party route,
+   * unreadable status) is refused the same way.
    *
    * Latches `this._spawnRefusal = err` so:
    *  - the provider's own respawn machinery can tell "the gate refused this
@@ -764,7 +766,7 @@ export class BaseSession extends EventEmitter {
    */
   _refuseSpawn(err, logger) {
     this._spawnRefusal = err
-    logger.error(`Spawn refused by the binary gate: ${err.message}`)
+    logger.error(`Spawn refused before launch: ${err.message}`)
     this.emit('error', { code: err?.code || 'SPAWN_REFUSED', message: err.message })
   }
 
