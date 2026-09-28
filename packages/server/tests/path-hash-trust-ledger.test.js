@@ -273,4 +273,109 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.equal(existsSync(ledgerPath), false, 'clean flush must not create the file')
     })
   })
+
+  // #8068: `binary-trust.json` gained a second writer PROCESS (`chroxy
+  // resume` alongside the daemon) — each a `PathHashTrustLedger` subclass
+  // instance loaded once, independently, from the same file. The old
+  // flush() re-serialised only its own in-memory snapshot, so whichever
+  // instance flushed LAST silently erased every pin the other had written
+  // since its own load. flush() now re-reads the file and merges in only
+  // the keys THIS instance actually changed.
+  describe('flush merges instead of overwriting another instance\'s writes (#8068)', () => {
+    it('a pin written by a second instance survives this instance\'s next flush (exact issue repro)', () => {
+      // daemon = new BinaryProvenanceLedger({ filePath })   // daemon start
+      // cli    = new BinaryProvenanceLedger({ filePath })   // chroxy resume, later
+      const daemon = new TestLedger({ filePath: ledgerPath })
+      const cli = new TestLedger({ filePath: ledgerPath })
+
+      cli.approve('/usr/local/bin/claude', sha('claude-binary'))
+      // Before #8068 this flush would have overwritten the file with only
+      // what `daemon` itself knew about, dropping the claude pin above.
+      daemon.approve('/opt/homebrew/bin/codex', sha('codex-binary'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/usr/local/bin/claude'], 'the CLI instance\'s pin must survive')
+      assert.ok(onDisk.records['/opt/homebrew/bin/codex'], 'the daemon instance\'s own pin is still there')
+    })
+
+    it('a revoke by one instance is not resurrected by another instance\'s flush', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/pinned', sha('v1'))
+      // `b` loaded before the approve above, so it never saw the record.
+      assert.equal(b.getRecord('/x/pinned'), null, 'b never loaded the record a wrote')
+
+      // c loads AFTER a's write, so it does see the record — and revokes it.
+      const c = new TestLedger({ filePath: ledgerPath })
+      assert.equal(c.revoke('/x/pinned'), true)
+      assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/pinned'], undefined)
+
+      // a still has the (now-revoked) record in memory but never itself
+      // touched it again — a's next flush must not resurrect it.
+      a.approve('/x/other', sha('v2'))
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/pinned'], undefined, 'revoke must stay revoked')
+      assert.ok(onDisk.records['/x/other'], 'the unrelated new pin still lands')
+    })
+
+    it('the same path approved by both — the LATER flusher\'s value wins', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/shared', sha('a-value'))
+      // b flushes second — by design, it wins: it re-reads first (picking
+      // up a's value) and then re-applies its own change on top.
+      b.approve('/x/shared', sha('b-value'))
+
+      assert.equal(b.isTrusted('/x/shared', sha('b-value')), true)
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/shared'].sha256, sha('b-value'),
+        'the later flush (b) must win over the earlier one (a)')
+    })
+
+    it('a change made by this instance keeps winning even after a later merge', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/a', sha('a'))
+      b.approve('/x/b', sha('b'))
+      // a flushes again for an unrelated path; its earlier '/x/a' write must
+      // not be lost just because it wasn't re-touched this time.
+      a.approve('/x/a2', sha('a2'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.ok(onDisk['/x/a'], 'a\'s first pin survives')
+      assert.ok(onDisk['/x/b'], 'b\'s pin survives')
+      assert.ok(onDisk['/x/a2'], 'a\'s second pin lands')
+    })
+
+    it('refreshes this instance\'s in-memory records from the merge, so a later read sees the other pin', () => {
+      const daemon = new TestLedger({ filePath: ledgerPath })
+      const cli = new TestLedger({ filePath: ledgerPath })
+
+      cli.approve('/usr/local/bin/claude', sha('claude-binary'))
+      daemon.approve('/opt/homebrew/bin/codex', sha('codex-binary'))
+
+      // The daemon instance never itself loaded or approved the claude pin,
+      // but its own flush must have refreshed its in-memory map from the
+      // merge so a subsequent in-process read (no reload) sees it too.
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('claude-binary')), true,
+        'flush() must refresh in-memory state from the merged result')
+    })
+
+    it('a corrupt on-disk file at flush time still self-heals (fail-open preserved)', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      // Corrupt the file directly, simulating another writer's crash mid-
+      // write (or an operator edit) landing between this instance's load
+      // and its next flush.
+      writeFileSync(ledgerPath, '{ this is not valid json, corrupted mid-write')
+
+      assert.doesNotThrow(() => l.approve('/x/file', sha('a')),
+        'flush must not throw on a corrupt on-disk file — same fail-open contract as load')
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/file'], 'the write must still land despite the prior corruption')
+    })
+  })
 })

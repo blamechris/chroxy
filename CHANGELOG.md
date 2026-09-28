@@ -489,6 +489,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   If you run the container **without** `CHROXY_CONFIG_DIR`, nothing changes.
 
+- **A pin `chroxy resume` writes to `binary-trust.json` is no longer lost at
+  the daemon's next flush, and the same fix applies to every other trust
+  ledger built on the shared `PathHashTrustLedger` (#8068).** Since `chroxy
+  resume` (#8065) became a second `BinaryProvenanceLedger` writer process
+  alongside the daemon's `SessionManager` on the same default ledger file,
+  `flush()` re-serialised only the flushing instance's own in-memory
+  snapshot — so a pin one process had just written was silently erased the
+  next time the other process flushed anything at all. `flush()` now
+  re-reads the file immediately before writing and merges it with only the
+  keys this instance itself changed, instead of overwriting the whole file:
+  a path this instance changed wins (including a revoke, which stays
+  revoked rather than being resurrected), a path it did not touch keeps
+  whatever is on disk (including a pin a different process wrote in the
+  meantime), and the same path changed by two processes resolves to
+  whichever one flushes last. The merged result also refreshes the
+  flushing instance's in-memory records, so a later read in that same
+  process sees the other writer's pins too. `SkillsTrustStore` (one
+  instance per session, so this bug's real-world blast radius was already
+  larger than the binary ledger's two processes) gets the same treatment
+  for its `communityTrust` sibling index. `SessionPresetTrustStore` and
+  `BinaryProvenanceLedger` inherit the fix with no changes of their own.
+  Atomicity, mode `0600`, and the existing fail-open handling of a
+  corrupt/missing ledger file are all unchanged.
+
 ### Changed
 
 - **`CHROXY_CONFIG_DIR` now relocates ALL daemon state (#7052).** It previously

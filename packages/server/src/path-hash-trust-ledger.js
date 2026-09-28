@@ -43,6 +43,18 @@
  *
  * On-disk formats are BYTE-COMPATIBLE with the pre-extraction files — existing
  * ledgers load unchanged and re-serialise to the same shape. No migration.
+ *
+ * Read-merge-write on flush (#8068): `binary-trust.json` gained a second
+ * writer PROCESS (the daemon and a standalone `chroxy resume` invocation, each
+ * a separate `BinaryProvenanceLedger` instance loaded once at construction) —
+ * see `flush()` for the merge rule. Every `PathHashTrustLedger` consumer
+ * inherits it; a subclass that mutates `_records` directly instead of through
+ * `approve`/`revoke` (skills' `inspect()`/`acceptHash`) must route those
+ * mutations through the protected `_setRecord`/`_deleteRecord` helpers so the
+ * merge can tell "this instance changed this key" from "unchanged since
+ * load" — see `skills-trust.js`. A subclass with its own sibling on-disk
+ * index (skills' `communityTrust`) overrides `_mergeExtra`/
+ * `_onFlushCommitted` to merge that index the same way.
  */
 import { readFileSync } from 'fs'
 import { randomBytes } from 'crypto'
@@ -83,6 +95,74 @@ export class PathHashTrustLedger {
     // can wire its constructor in whatever order it needs.
     this._records = Object.create(null)
     this._dirty = false
+    // Tracks which keys THIS instance has changed since its last successful
+    // flush (or since construction) — key -> 'set' | 'delete'. A `Map` so a
+    // key that is set then deleted (or vice versa) before the next flush
+    // keeps only its latest op. Read by flush()'s merge (#8068); populated by
+    // `_setRecord`/`_deleteRecord`, which `approve`/`revoke` and any
+    // subclass that mutates `_records` directly must go through.
+    this._changedKeys = new Map()
+  }
+
+  /**
+   * Set `_records[key]` and mark it as changed by THIS instance since the
+   * last flush. Every mutation of `_records` — base or subclass — must go
+   * through this (or `_deleteRecord`) rather than assigning `_records[key]`
+   * directly, or flush()'s merge won't know to prefer it over what's on
+   * disk.
+   *
+   * @param {string} key  Already-normalised key.
+   * @param {TrustRecord} record
+   * @protected
+   */
+  _setRecord(key, record) {
+    this._records[key] = record
+    this._changedKeys.set(key, 'set')
+    this._dirty = true
+  }
+
+  /**
+   * Delete `_records[key]` and mark the deletion as a change THIS instance
+   * made since the last flush, so flush()'s merge keeps it removed instead
+   * of resurrecting whatever another process's flush wrote for that key.
+   *
+   * @param {string} key  Already-normalised key.
+   * @protected
+   */
+  _deleteRecord(key) {
+    delete this._records[key]
+    this._changedKeys.set(key, 'delete')
+    this._dirty = true
+  }
+
+  /**
+   * Subclass hook: merge a sibling on-disk index (skills' `communityTrust`)
+   * with this instance's in-memory copy, using the freshly re-read `parsed`
+   * payload flush() just loaded. Called on every flush, right before
+   * `_serialize()`. Base no-op — only a subclass with extra persisted state
+   * needs it.
+   *
+   * @param {object|null} _parsed  Raw parsed JSON flush() just re-read (or
+   *   null on a read/parse failure — same fail-open shape `_loadRecords`
+   *   returns).
+   * @protected
+   */
+  _mergeExtra(_parsed) {
+    // no-op by default
+  }
+
+  /**
+   * Subclass hook: called once a flush's write has actually SUCCEEDED, after
+   * the base has cleared its own `_changedKeys`. A subclass that tracks its
+   * own extra change-set (skills' community-trust grants) clears it here —
+   * not inside `_mergeExtra`, which also runs on a flush that goes on to
+   * fail, and must leave the subclass's change-set intact for the retry.
+   * Base no-op.
+   *
+   * @protected
+   */
+  _onFlushCommitted() {
+    // no-op by default
   }
 
   /**
@@ -245,12 +325,11 @@ export class PathHashTrustLedger {
     const key = this._normalizeKey(absPath)
     const now = new Date().toISOString()
     const existing = this._records[key]
-    this._records[key] = {
+    this._setRecord(key, {
       sha256: hash,
       firstSeen: existing && typeof existing.firstSeen === 'string' ? existing.firstSeen : now,
       [this._approvalField]: now,
-    }
-    this._dirty = true
+    })
     this.flush()
     return true
   }
@@ -266,8 +345,7 @@ export class PathHashTrustLedger {
     if (typeof absPath !== 'string' || !absPath) return false
     const key = this._normalizeKey(absPath)
     if (!this._records[key]) return false
-    delete this._records[key]
-    this._dirty = true
+    this._deleteRecord(key)
     this.flush()
     return true
   }
@@ -294,15 +372,62 @@ export class PathHashTrustLedger {
    * #3238). The seam owns the fd/temp cleanup; this layer only adds the dirty
    * gate + the warn / conditional re-throw policy.
    *
+   * Read-merge-write (#8068): a flush used to re-serialise THIS instance's
+   * whole in-memory snapshot, clobbering any record a different writer
+   * process had persisted after this instance's own last load — exactly what
+   * happened once `chroxy resume` became a second `BinaryProvenanceLedger`
+   * writer alongside the daemon on the same `binary-trust.json`. `flush()`
+   * now re-reads the file right before writing and merges it with only the
+   * keys THIS instance actually changed (tracked in `_changedKeys` by
+   * `_setRecord`/`_deleteRecord`, which `approve`/`revoke` — and any
+   * subclass mutation of `_records` — must go through), rather than with the
+   * whole snapshot. Conflict rule:
+   *
+   *   - a path THIS instance changed: this instance's value wins (a revoke
+   *     stays removed — it's a tracked deletion, not merely "absent from
+   *     this instance's map")
+   *   - a path this instance did NOT change: whatever is on disk right now
+   *     wins, including a pin/grant a different process wrote after this
+   *     instance's own last load
+   *   - the SAME path changed by two processes: the LATER flush wins,
+   *     because it re-reads first (picking up the earlier flush's value)
+   *     and then re-applies its own change on top of that
+   *
+   * The merged result also replaces this instance's in-memory `_records` (and,
+   * via `_mergeExtra`, any subclass sibling index), so a later `isTrusted`/
+   * `getRecord` in this same process sees the other writer's pins too — not
+   * only the file.
+   *
+   * Known remaining window: the re-read and the eventual rename are not one
+   * atomic step, so two processes can both re-read the same pre-flush file,
+   * each merge their own change on top, and then race the rename — the
+   * second rename wins outright and the first process's merge (including
+   * whatever it freshly re-read from the other) is lost. That's strictly
+   * narrower than the bug this fixes — it needs two flushes inside the same
+   * read-to-rename window rather than merely two flushes ever — and this
+   * codebase has no file-lock helper to close it with (checked `src/utils`),
+   * so it's documented here rather than solved.
+   *
    * On failure: either re-throw (subclass set `throwOnFlushError`) or swallow
-   * with a warn. `_dirty` stays set on failure so a later flush retries.
+   * with a warn. `_dirty` and `_changedKeys` both stay set on failure so a
+   * later flush retries the same merge.
    */
   flush() {
     if (!this._dirty) return
     const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
+    const { records: diskRecords, parsed: diskParsed } = this._loadRecords()
+    const merged = { ...diskRecords }
+    for (const [key, op] of this._changedKeys) {
+      if (op === 'delete') delete merged[key]
+      else merged[key] = this._records[key]
+    }
+    this._records = merged
+    this._mergeExtra(diskParsed)
     try {
       saveJsonState(this._filePath, this._serialize(), { fsync: true, tmpSuffix })
       this._dirty = false
+      this._changedKeys.clear()
+      this._onFlushCommitted()
     } catch (err) {
       this._log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
       if (this._throwOnFlushError) throw err

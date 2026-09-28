@@ -112,4 +112,24 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     assert.equal(led.revoke('/opt/homebrew/bin/codex'), true)
     assert.equal(led.getRecord('/opt/homebrew/bin/codex'), null)
   })
+
+  // #8068: since #8065, `chroxy resume` opens its own BinaryProvenanceLedger
+  // on the same default `binary-trust.json` the daemon's SessionManager
+  // already holds — two independent writer PROCESSES, each loading the file
+  // once at construction. This is the issue's own repro (daemon started
+  // first, `chroxy resume` pins a path, the daemon then pins one of its own).
+  describe('two writer processes on the same file (#8068)', () => {
+    it('a pin the CLI process wrote is not lost at the daemon process\'s next flush', () => {
+      const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // daemon start
+      const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
+
+      cli.approve('/usr/local/bin/claude', HASH_A)
+      daemon.approve('/opt/homebrew/bin/codex', HASH_B) // first-sight pin of its own
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.binaries['/usr/local/bin/claude'], 'the chroxy-resume pin must survive the daemon\'s flush')
+      assert.equal(onDisk.binaries['/usr/local/bin/claude'].sha256, HASH_A)
+      assert.ok(onDisk.binaries['/opt/homebrew/bin/codex'], 'the daemon\'s own pin is still there too')
+    })
+  })
 })

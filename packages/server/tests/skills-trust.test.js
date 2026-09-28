@@ -468,11 +468,13 @@ describe('skills-trust', () => {
       storeA.flush()
       storeB.flush()
 
-      // Whichever writer landed last wins (they each only know about
-      // their own record). The key assertion is that NEITHER flush
-      // throws and the target ledger is parseable JSON.
+      // #8068: flush() now merges with what's on disk instead of
+      // overwriting it, so BOTH records survive the interleaving — not
+      // just whichever writer happened to land last.
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       assert.ok(persisted && typeof persisted === 'object', 'target must be valid JSON')
+      assert.ok(persisted.skills['/abs/skill-a.md'], 'storeA\'s record must survive storeB\'s flush')
+      assert.ok(persisted.skills['/abs/skill-b.md'], 'storeB\'s record must survive storeA\'s flush')
     })
 
     it('_load ignores a stale .tmp file (does not parse it as the ledger)', () => {
@@ -845,6 +847,46 @@ describe('skills-trust', () => {
       store.grantCommunityTrust(undefined)
       // No entries should have been recorded
       assert.equal(Object.keys(store.communityTrust.byAuthor).length, 0)
+    })
+
+    // #8068: BaseSession constructs one SkillsTrustStore PER SESSION against
+    // the same default ledger, so this is the same two-writer shape as the
+    // binary-trust.json bug — just with many more instances in practice. A
+    // grant from one session must not be lost at another session's next
+    // flush, the same way a records-map pin must not be.
+    it('a grant from one instance is not lost at another instance\'s next flush', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+
+      storeA.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      // storeB loaded before storeA's grant, so it never saw alice — but its
+      // own grant must not erase alice's on the flush that follows.
+      storeB.grantCommunityTrust('bob', { realPath: '/community/bob/skill.md' })
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust['by-author']['alice'], 'alice\'s grant must survive')
+      assert.ok(persisted.communityTrust['by-author']['bob'], 'bob\'s grant is still there too')
+      assert.ok(persisted.communityTrust['by-path']['/community/alice/skill.md'])
+      assert.ok(persisted.communityTrust['by-path']['/community/bob/skill.md'])
+    })
+  })
+
+  // #8068: `inspect()`'s first-seen / lastVerified-bump paths route through
+  // the base's `_setRecord` (not a direct `_records[key] = …` assignment) so
+  // they participate in flush()'s merge the same way `approve()` does.
+  describe('records merge across instances (#8068)', () => {
+    it('a first-seen record from one instance survives another instance\'s next flush', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+
+      storeA.inspect('/abs/a.md', 'body-a')
+      storeA.flush()
+      storeB.inspect('/abs/b.md', 'body-b')
+      storeB.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.skills['/abs/a.md'], 'storeA\'s record must survive storeB\'s flush')
+      assert.ok(persisted.skills['/abs/b.md'], 'storeB\'s record is still there too')
     })
   })
 })
