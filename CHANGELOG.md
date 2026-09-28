@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-tui` (the default provider) now reports the model a session is
+  actually running instead of showing a blank badge/header (#7327).**
+  `bootedModel` was never populated for claude-tui — the dashboard's model
+  badge (`SessionBar.tsx`) and header label (`App.tsx`) stayed blank for
+  every session started without an explicit `model` override (the common
+  path), because `session-manager.js`'s `entry.session.model ||
+  entry.session.bootedModel || null` fallback had nothing to fall back to.
+  Unlike `cli-session`/`sdk-session`, which learn their booted model from the
+  CLI/SDK's own structured init event, claude-tui is a PTY-driven interactive
+  TUI with no such signal — the only place the running model appears at all
+  is `message.model` on the session's own conversation transcript
+  (`~/.claude/projects/<slug>/<sessionId>.jsonl`). `TranscriptTaskScanner`
+  (the incremental transcript reader `getBackgroundTaskSnapshot()` already
+  used for background-task tracking, #5431) now also tracks the most
+  recently observed `message.model` as it reads, excluding the harness's own
+  `<synthetic>` placeholder entries (API-error stand-ins) so a transient
+  error never reports a fake model. `ClaudeTuiSession` adopts that
+  observation into `bootedModel` at every turn end and, only when it
+  actually changed, re-emits `ready` — the same event path CliSession/
+  SdkSession use to report their own booted model — so the badge/header
+  update live without a respawn. This is strictly an OBSERVATION: it is
+  never derived from the session's configured/requested `model` option, and
+  model *switching* remains unavailable for claude-tui (`modelSwitch:
+  false`, tracked separately by #7855); discovery of available models is
+  #7348.
+
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
   (#8038).** #8035 (below) closed the per-turn gap for `gemini` and `codex

@@ -202,6 +202,11 @@ export class ClaudeTuiSession extends BaseSession {
       inProcessPermissions: false,
       permissionFloor: true,
       autoPermissionMode: true,
+      // #7327: model *switching* stays unavailable — the TUI's model picker
+      // is outside chroxy's control surface (#7855 tracks that half).
+      // *Reporting* the booted model is unaffected by this flag: see
+      // `getBackgroundTaskSnapshot`/`_adoptObservedModel`, which observe it
+      // from the session transcript regardless.
       modelSwitch: false,
       // #4013: TUI supports mid-session permission switch via a sidecar
       // file the hook script re-reads on every tool call. No PTY restart
@@ -1495,7 +1500,8 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5431 — outstanding background work derived from the session transcript:
    * `{ backgroundTasks: [{ toolUseId, kind, description, startedAt }],
-   *    scheduledWakeup: { at, reason } | null }`, or null when no transcript
+   *    scheduledWakeup: { at, reason } | null,
+   *    observedModel: string | null }`, or null when no transcript
    * is resolvable (no PTY pid, no per-PID session file, parse failure — the
    * "degrade to plain ready" contract).
    *
@@ -1508,7 +1514,14 @@ export class ClaudeTuiSession extends BaseSession {
    * Side effect: arms/disarms the idle re-scan poll (`_backgroundTaskPollTimer`)
    * based on whether the snapshot reports outstanding work, so callers
    * (event-normalizer's `ready` / `result` handlers, ws-history replay)
-   * keep the watch fresh without extra wiring. Never throws.
+   * keep the watch fresh without extra wiring. Also (#7327) folds a fresh
+   * `observedModel` into `bootedModel` via `_adoptObservedModel` — assignment
+   * only, no client-facing emit, because this method is itself invoked FROM
+   * INSIDE the `ready` event handler (event-normalizer's `backgroundTaskFields`)
+   * on the plain per-session-start `ready` emits below; emitting another
+   * `ready` from here would recurse into that same handler. See
+   * `_refreshObservedModel` for the call site that reacts to the change.
+   * Never throws.
    */
   getBackgroundTaskSnapshot() {
     try {
@@ -1522,10 +1535,57 @@ export class ClaudeTuiSession extends BaseSession {
       const snapshot = this._transcriptTaskScanner.scan()
       this._lastBackgroundTaskKey = JSON.stringify(snapshot)
       this._refreshBackgroundTaskPoll(snapshot)
+      this._adoptObservedModel(snapshot.observedModel)
       return snapshot
     } catch (err) {
       ;(this._log || log).debug?.(`getBackgroundTaskSnapshot failed: ${err.message} — degrading to plain ready`)
       return null
+    }
+  }
+
+  /**
+   * #7327 — fold a freshly scanned transcript model observation into
+   * `bootedModel`. Assignment ONLY: never emits, so it is safe to call from
+   * `getBackgroundTaskSnapshot()` even when that runs re-entrantly inside the
+   * `ready` event handler's own call stack. Never derives from `this.model`
+   * (the configured/requested model, when the caller set one) — only a value
+   * actually seen in the transcript counts as an observation. No-ops on a
+   * falsy/unchanged value so a scan that hasn't seen a fresh line (or hit the
+   * transient-failure empty snapshot) can never blank out an already-known
+   * model.
+   * @param {string|null} observedModel
+   */
+  _adoptObservedModel(observedModel) {
+    if (typeof observedModel === 'string' && observedModel && observedModel !== this.bootedModel) {
+      this.bootedModel = observedModel
+    }
+  }
+
+  /**
+   * #7327 — turn-end readiness edge: re-scan the transcript (the SAME
+   * incremental TranscriptTaskScanner `getBackgroundTaskSnapshot()` drives —
+   * this is not a second journal reader) and, only when the observation
+   * actually moved `bootedModel`, re-emit `ready`. That is the exact path
+   * CliSession/SdkSession use to report their own booted model
+   * (event-normalizer's `ready` handler computes `model_changed` from
+   * `data.model || entry.session.model || entry.session.bootedModel`), so
+   * clients pick up the change the same way they pick up a CLI/SDK boot.
+   *
+   * Called from `_clearTurnEndState()` — i.e. OUTSIDE the `ready` handler's
+   * own call stack — so the re-emit here cannot recurse into itself the way
+   * emitting from inside `getBackgroundTaskSnapshot()` would.
+   *
+   * A no-op (no emit) when nothing changed — the common case once a model
+   * has been observed, since most turns don't change it — or when the
+   * transcript / PTY pid isn't resolvable yet (degrades silently, matching
+   * `getBackgroundTaskSnapshot()`'s own contract).
+   */
+  _refreshObservedModel() {
+    const before = this.bootedModel
+    this.getBackgroundTaskSnapshot()
+    if (this.bootedModel !== before) {
+      ;(this._log || log).info(`Observed model from transcript: ${this.bootedModel}`)
+      this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
     }
   }
 
@@ -4155,6 +4215,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._clearAskUserQuestionLock()
     this._clearAllAskUserQuestionWatchdogs()
     this._pendingBackgroundCommands.clear()
+    // #7327: the turn that just ended is the readiness edge most likely to
+    // have written a fresh `message.model` to the transcript — re-scan and
+    // tell clients if it changed. See `_refreshObservedModel` doc for why
+    // this lives here rather than inside `getBackgroundTaskSnapshot()`.
+    this._refreshObservedModel()
   }
 
   _finishTurnError(message, callerMessageId) {
