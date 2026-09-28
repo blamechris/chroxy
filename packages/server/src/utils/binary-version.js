@@ -47,11 +47,13 @@ import { statIdentity } from './stat-identity.js'
 // no observed need for a longer window on this path).
 const PROBE_TIMEOUT_MS = 5_000
 
-// stat-identity string (`path:dev:ino:size:mtimeMs`, see statIdentity) ->
-// parsed version string. Only successful reads are stored. Module-level so it
-// survives across preflight calls within one daemon process. The identity
-// starts with the RESOLVED path (not the binary name), since different
-// providers can resolve different paths for the "same" binary name.
+// RESOLVED path (not the binary name, since different providers can resolve
+// different paths for the "same" binary name) -> { identity, version }, where
+// identity is utils/stat-identity.js's `path:dev:ino:size:mtimeMs:ctimeMs`.
+// Only successful reads are stored. Module-level so it survives across
+// preflight calls within one daemon process. Keyed by path so a path holds at
+// most one entry: each `claude update` replaces the previous identity rather
+// than leaving a dead key behind (#8030 review).
 const versionCache = new Map()
 
 /**
@@ -159,8 +161,9 @@ export function probeBinaryVersion(path, args = ['--version'], {
   statSync: statFn = fsStatSync,
 } = {}) {
   const identity = statIdentity(path, statFn)
-  if (identity && versionCache.has(identity)) {
-    return versionCache.get(identity)
+  const cached = versionCache.get(path)
+  if (identity && cached && cached.identity === identity) {
+    return cached.version
   }
 
   let result
@@ -193,7 +196,7 @@ export function probeBinaryVersion(path, args = ['--version'], {
   // transient exec error, a non-zero exit) would otherwise pin "unreadable" to
   // this identity and refuse every later session-create until the binary
   // changed or the daemon restarted.
-  if (identity && version) versionCache.set(identity, version)
+  if (identity && version) versionCache.set(path, { identity, version })
   return version
 }
 

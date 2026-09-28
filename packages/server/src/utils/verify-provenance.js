@@ -42,9 +42,11 @@
  * checks are synchronous and would otherwise add real latency to every turn —
  * measured on this machine's 215 MB `claude`: ~100ms to SHA-256 hash, ~430ms
  * for `spctl --assess`. `sha256FileCached` and `assessMacSignatureCached` wrap
- * the two checks in module-level caches keyed by `statIdentity` (path + dev +
- * ino + size + mtimeMs + ctimeMs — see stat-identity.js) so a spawn against an
- * UNCHANGED binary is served from cache instead of re-hashing/re-assessing:
+ * the two checks in module-level caches that hold one entry per path, valid
+ * only while the path's `statIdentity` (path + dev + ino + size + mtimeMs +
+ * ctimeMs — see stat-identity.js) is unchanged, so a spawn against an
+ * UNCHANGED binary is served from cache instead of re-hashing/re-assessing,
+ * and a replaced binary overwrites its old entry instead of adding one:
  *
  *   - The hash cache takes the identity BEFORE and AFTER the read and caches
  *     only when both are non-null and equal — a file that changed mid-read
@@ -145,12 +147,15 @@ export function assessMacSignature(path, { platform = process.platform, execFile
   }
 }
 
-// stat-identity string -> sha256 hex digest. Module-level so it survives
-// across preflight/spawn-gate calls within one daemon process (#8030).
+// path -> { identity, hash }. Module-level so it survives across
+// preflight/spawn-gate calls within one daemon process (#8030). Keyed by PATH,
+// not by identity, so a path holds at most one entry: each `claude update`
+// mints a new identity that replaces the old one instead of leaving a dead
+// key behind for the daemon's lifetime.
 const hashCache = new Map()
-// stat-identity string -> { verdict, at } for a PASSING, non-skipped
-// signature verdict — see assessMacSignatureCached's docblock for why a
-// rejection/skip is never stored, and why a stored pass expires.
+// path -> { identity, verdict, at } for a PASSING, non-skipped signature
+// verdict — see assessMacSignatureCached's docblock for why a rejection/skip
+// is never stored, and why a stored pass expires. One entry per path, as above.
 const signatureCache = new Map()
 
 // A cached signature PASS expires after this long. Unlike a hash, a Gatekeeper
@@ -162,7 +167,8 @@ const signatureCache = new Map()
 export const SIGNATURE_CACHE_TTL_MS = 10 * 60 * 1000
 
 /**
- * Cached wrapper around {@link sha256File}, keyed by {@link statIdentity}.
+ * Cached wrapper around {@link sha256File}: one entry per path, served only
+ * while the path's {@link statIdentity} matches the one it was hashed under.
  *
  * Reads the identity BEFORE hashing and again AFTER — the hash is cached only
  * when both reads succeeded (non-null) AND agree, which means the file did
@@ -185,8 +191,9 @@ export const SIGNATURE_CACHE_TTL_MS = 10 * 60 * 1000
  */
 export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = fsReadFileSync } = {}) {
   const before = statIdentity(path, statSync)
-  if (before && hashCache.has(before)) {
-    return hashCache.get(before)
+  const cached = hashCache.get(path)
+  if (before && cached && cached.identity === before) {
+    return cached.hash
   }
 
   // Let a hash failure propagate uncaught — never cached (see docblock).
@@ -194,13 +201,14 @@ export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = f
 
   const after = statIdentity(path, statSync)
   if (before && after && before === after) {
-    hashCache.set(before, hash)
+    hashCache.set(path, { identity: before, hash })
   }
   return hash
 }
 
 /**
- * Cached wrapper around {@link assessMacSignature}, keyed by {@link statIdentity}.
+ * Cached wrapper around {@link assessMacSignature}: one entry per path, served
+ * only while the path's {@link statIdentity} matches and the TTL holds.
  *
  * Only caches an `{ ok: true, skipped: false }` verdict — a genuine Gatekeeper
  * PASS. A rejected verdict (`ok: false`) is re-assessed on every call so a
@@ -222,15 +230,15 @@ export function sha256FileCached(path, { statSync = fsStatSync, readFileSync = f
  */
 export function assessMacSignatureCached(path, { statSync = fsStatSync, now = Date.now, ...rest } = {}) {
   const identity = statIdentity(path, statSync)
-  if (identity && signatureCache.has(identity)) {
-    const entry = signatureCache.get(identity)
-    if (now() - entry.at < SIGNATURE_CACHE_TTL_MS) return entry.verdict
-    signatureCache.delete(identity)
+  const cached = signatureCache.get(path)
+  if (identity && cached && cached.identity === identity) {
+    if (now() - cached.at < SIGNATURE_CACHE_TTL_MS) return cached.verdict
+    signatureCache.delete(path)
   }
 
   const verdict = assessMacSignature(path, rest)
   if (identity && verdict && verdict.ok === true && !verdict.skipped) {
-    signatureCache.set(identity, { verdict, at: now() })
+    signatureCache.set(path, { identity, verdict, at: now() })
   }
   return verdict
 }

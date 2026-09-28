@@ -287,6 +287,27 @@ describe('sha256FileCached (#8030)', () => {
     assert.equal(reads, 1, 'the second call must be served from cache, not re-read')
   })
 
+  it('holds ONE entry per path — a new identity replaces the old one instead of accumulating (#8030 review)', () => {
+    let reads = 0
+    const readFileSync = () => { reads += 1; return Buffer.from(`v${reads}`) }
+    const idA = statOf({ ino: 30, mtimeMs: 300, ctimeMs: 300 })
+    const idB = statOf({ ino: 31, mtimeMs: 301, ctimeMs: 301 })
+    sha256FileCached('/fake/claude', { statSync: idA, readFileSync })
+    sha256FileCached('/fake/claude', { statSync: idB, readFileSync })
+    sha256FileCached('/fake/claude', { statSync: idA, readFileSync })
+    assert.equal(reads, 3, 'identity A must have been replaced by B, not retained alongside it')
+  })
+
+  it('keeps separate paths in separate entries — caching one path never evicts another', () => {
+    let reads = 0
+    const readFileSync = () => { reads += 1; return Buffer.from('x') }
+    const statSync = statOf({ ino: 32, mtimeMs: 302, ctimeMs: 302 })
+    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    sha256FileCached('/fake/codex', { statSync, readFileSync })
+    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    assert.equal(reads, 2, 'the /fake/claude entry must survive a /fake/codex insert')
+  })
+
   it('re-reads when ONLY ctimeMs changes — utimes can restore mtime but not ctime', () => {
     let reads = 0
     const readFileSync = () => { reads += 1; return Buffer.from(`v${reads}`) }
@@ -351,6 +372,17 @@ describe('assessMacSignatureCached (#8030)', () => {
     clock += 1
     assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile, now })
     assert.equal(calls, 2, 'at the TTL the pass must be re-assessed')
+  })
+
+  it('holds ONE entry per path — a new identity replaces the old one (#8030 review)', () => {
+    let calls = 0
+    const execFile = () => { calls += 1; return 'accepted' }
+    const idA = statOf({ ino: 55, mtimeMs: 550, ctimeMs: 550 })
+    const idB = statOf({ ino: 56, mtimeMs: 551, ctimeMs: 551 })
+    assessMacSignatureCached('/fake/claude', { statSync: idA, platform: 'darwin', execFile })
+    assessMacSignatureCached('/fake/claude', { statSync: idB, platform: 'darwin', execFile })
+    assessMacSignatureCached('/fake/claude', { statSync: idA, platform: 'darwin', execFile })
+    assert.equal(calls, 3, 'identity A must have been replaced by B, not retained alongside it')
   })
 
   it('re-assesses when the stat identity changes', () => {
