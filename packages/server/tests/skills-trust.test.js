@@ -17,6 +17,25 @@ import {
  * `~/.chroxy/skills-trust.json` is never touched.
  */
 
+// #8072 review S1: a SkillsTrustStore whose `_serialize()` throws exactly
+// once, so a test can force ONE failed flush and verify the retry recovers
+// every pending grant. Skills re-throws (`throwOnFlushError: true`), so the
+// failure surfaces to the caller instead of being swallowed.
+class FlakySkillsTrustStore extends SkillsTrustStore {
+  constructor(opts) {
+    super(opts)
+    this._failNextSerialize = false
+  }
+
+  _serialize() {
+    if (this._failNextSerialize) {
+      this._failNextSerialize = false
+      throw new Error('boom (forced failure)')
+    }
+    return super._serialize()
+  }
+}
+
 describe('skills-trust', () => {
   let dir
   let trustPath
@@ -468,11 +487,13 @@ describe('skills-trust', () => {
       storeA.flush()
       storeB.flush()
 
-      // Whichever writer landed last wins (they each only know about
-      // their own record). The key assertion is that NEITHER flush
-      // throws and the target ledger is parseable JSON.
+      // #8068: flush() now merges with what's on disk instead of
+      // overwriting it, so BOTH records survive the interleaving — not
+      // just whichever writer happened to land last.
       const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
       assert.ok(persisted && typeof persisted === 'object', 'target must be valid JSON')
+      assert.ok(persisted.skills['/abs/skill-a.md'], 'storeA\'s record must survive storeB\'s flush')
+      assert.ok(persisted.skills['/abs/skill-b.md'], 'storeB\'s record must survive storeA\'s flush')
     })
 
     it('_load ignores a stale .tmp file (does not parse it as the ledger)', () => {
@@ -845,6 +866,287 @@ describe('skills-trust', () => {
       store.grantCommunityTrust(undefined)
       // No entries should have been recorded
       assert.equal(Object.keys(store.communityTrust.byAuthor).length, 0)
+    })
+
+    // #8068: BaseSession constructs one SkillsTrustStore PER SESSION against
+    // the same default ledger, so this is the same two-writer shape as the
+    // binary-trust.json bug — just with many more instances in practice. A
+    // grant from one session must not be lost at another session's next
+    // flush, the same way a records-map pin must not be.
+    it('a grant from one instance is not lost at another instance\'s next flush', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+
+      storeA.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      // storeB loaded before storeA's grant, so it never saw alice — but its
+      // own grant must not erase alice's on the flush that follows.
+      storeB.grantCommunityTrust('bob', { realPath: '/community/bob/skill.md' })
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust['by-author']['alice'], 'alice\'s grant must survive')
+      assert.ok(persisted.communityTrust['by-author']['bob'], 'bob\'s grant is still there too')
+      assert.ok(persisted.communityTrust['by-path']['/community/alice/skill.md'])
+      assert.ok(persisted.communityTrust['by-path']['/community/bob/skill.md'])
+    })
+
+    // #8072 review round 2, S2: `_mergeExtra` must be SKIPPED on a
+    // `readFailed` flush the same way the base's `_records` merge falls
+    // back to memory — calling it anyway with a null `parsed` re-merges
+    // `communityTrust` from an EMPTY disk view, which drops every grant
+    // this instance holds but did not itself change this flush (alice's,
+    // below), in memory AND on disk, even though nothing about alice's
+    // grant was actually lost or corrupted.
+    it('a community grant this instance did not change survives a flush that hits a corrupt re-read', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      storeA.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+
+      // storeB is constructed AFTER storeA's grant, so it holds alice's
+      // grant in memory too — the exact shape that `_mergeExtra` must
+      // preserve when it can't reliably read what's on disk right now.
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(storeB.isCommunityTrusted('/community/alice/skill.md', 'alice'), true)
+
+      // Corrupt the file directly, simulating a crash mid-write from a
+      // THIRD process landing between storeB's load and its next flush.
+      writeFileSync(trustPath, '{ this is not valid json, corrupted mid-write')
+
+      // storeB grants bob — a change it DID make this flush.
+      storeB.grantCommunityTrust('bob', { realPath: '/community/bob/skill.md' })
+
+      // alice's grant — which storeB never touched — must survive, both in
+      // storeB's own memory and on disk.
+      assert.equal(storeB.isCommunityTrusted('/community/alice/skill.md', 'alice'), true,
+        'alice\'s grant must survive in memory even though the re-read failed')
+      assert.equal(storeB.isCommunityTrusted('/community/bob/skill.md', 'bob'), true)
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust['by-author']['alice'],
+        'alice\'s grant must survive ON DISK — a corrupt re-read must fall back to this instance\'s own records, not an empty communityTrust')
+      assert.ok(persisted.communityTrust['by-author']['bob'])
+    })
+  })
+
+  // #8068: `inspect()`'s first-seen / lastVerified-bump paths route through
+  // the base's `_setRecord` (not a direct `_records[key] = …` assignment) so
+  // they participate in flush()'s merge the same way `approve()` does.
+  describe('records merge across instances (#8068)', () => {
+    it('a first-seen record from one instance survives another instance\'s next flush', () => {
+      const storeA = new SkillsTrustStore({ filePath: trustPath })
+      const storeB = new SkillsTrustStore({ filePath: trustPath })
+
+      storeA.inspect('/abs/a.md', 'body-a')
+      storeA.flush()
+      storeB.inspect('/abs/b.md', 'body-b')
+      storeB.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.skills['/abs/a.md'], 'storeA\'s record must survive storeB\'s flush')
+      assert.ok(persisted.skills['/abs/b.md'], 'storeB\'s record is still there too')
+    })
+  })
+
+  // #8072 review C1: a plain-object merge target (`{ ...spread }`) lets an
+  // author/path named `constructor`/`toString`/`valueOf`/`__proto__` resolve
+  // through the prototype chain to a truthy value in `isCommunityTrusted`'s
+  // bracket-key check — a repo-local `community/constructor/*.md` would be
+  // trusted without ever being granted.
+  describe('the merge stays null-prototype (#8072 review C1)', () => {
+    it('does not trust prototype-named authors/paths after a flush', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // Any flush at all must exercise the merge path — a plain skill
+      // record is enough to dirty the store.
+      store.inspect('/abs/skill.md', 'body')
+      store.flush()
+
+      for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+        assert.equal(store.isCommunityTrusted('/x', name), false, `author "${name}" must not be trusted`)
+        assert.equal(store.isCommunityTrusted(name, 'nobody'), false, `path "${name}" must not be trusted`)
+      }
+      assert.equal(Object.getPrototypeOf(store._records), null,
+        '_records must stay null-prototype after a flush')
+      assert.equal(Object.getPrototypeOf(store.communityTrust.byAuthor), null,
+        'communityTrust.byAuthor must stay null-prototype after a flush')
+      assert.equal(Object.getPrototypeOf(store.communityTrust.byPath), null,
+        'communityTrust.byPath must stay null-prototype after a flush')
+    })
+  })
+
+  // #8072 review S1: mutant m3 ("clear the change-set before the write")
+  // killed by this test for skills' OWN `_changedAuthors`/`_changedByPaths`
+  // tracking — the base-class `_changedKeys` retention is covered in
+  // path-hash-trust-ledger.test.js, but `communityTrust` is skills-specific
+  // state the base's retry guarantee doesn't reach on its own.
+  describe('_changedAuthors/_changedByPaths retention across a failed write (#8072 review S1)', () => {
+    it('retains every pending grant across a failed write, so the next flush retries them all', () => {
+      const store = new FlakySkillsTrustStore({ filePath: trustPath })
+      store.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' }) // succeeds
+
+      store._failNextSerialize = true
+      // Skills re-throws on a failed flush (throwOnFlushError: true).
+      assert.throws(() => store.grantCommunityTrust('bob', { realPath: '/community/bob/skill.md' }), /boom/)
+
+      store.grantCommunityTrust('carol', { realPath: '/community/carol/skill.md' }) // retries
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.ok(persisted.communityTrust['by-author']['alice'])
+      assert.ok(persisted.communityTrust['by-author']['bob'],
+        'bob must land on the retry — _changedAuthors must not have been cleared before the failed write')
+      assert.ok(persisted.communityTrust['by-author']['carol'])
+      assert.ok(persisted.communityTrust['by-path']['/community/bob/skill.md'],
+        '_changedByPaths must also survive the failed write')
+    })
+  })
+
+  // #8072 review C3: TOFU first-sight pins (`inspect()`'s `recorded` branch)
+  // and `lastVerified` bumps (`inspect()`'s `verified` branch) are not
+  // operator decisions — they're written from a possibly-stale snapshot, so
+  // the merge must not let them override a pin/decision this instance never
+  // saw. Only `acceptHash`/`grantCommunityTrust` (explicit operator actions)
+  // are last-writer-wins.
+  describe('implicit writes never override an explicit decision (#8072 review C3)', () => {
+    it('a stale instance\'s TOFU of a tampered hash does not overwrite another instance\'s real pin (block mode)', () => {
+      // 1. A is constructed — before B's pin exists on disk.
+      const a = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
+      // 2. B pins s.md = v1 and flushes it.
+      const b = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
+      const v1 = 'v1 body'
+      assert.equal(b.inspect('/abs/s.md', v1).status, 'recorded')
+      b.flush()
+
+      // 3. s.md is tampered with (simulated: a different body from here on).
+      const tampered = 'tampered body'
+
+      // 4. A inspect()s the tampered body. A never loaded b's pin (it was
+      //    constructed before b flushed), so this looks like first sight to
+      //    A too — a TOFU record of the TAMPERED hash.
+      assert.equal(a.inspect('/abs/s.md', tampered).status, 'recorded')
+
+      // 5. B inspect()s the tampered body — B DOES have the v1 record, so
+      //    this is a genuine mismatch/blocked detection.
+      const bMismatch = b.inspect('/abs/s.md', tampered)
+      assert.equal(bMismatch.status, 'mismatch')
+      assert.equal(bMismatch.blocked, true)
+
+      // A's stale TOFU pin of the tampered hash reaches disk here — it must
+      // not override b's genuine v1 pin.
+      a.flush()
+
+      // 6. B flushes for an unrelated first-seen skill.
+      b.inspect('/abs/unrelated.md', 'unrelated body')
+      b.flush()
+
+      // 7. B inspect()s again — must still detect the mismatch, not
+      //    silently "verify" against whatever a's flush might have written.
+      const finalResult = b.inspect('/abs/s.md', tampered)
+      assert.equal(finalResult.status, 'mismatch', 'b must still detect the tampered content, not adopt it')
+      assert.equal(finalResult.blocked, true)
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'].sha256, sha256Hex(v1),
+        'disk must still hold the genuine v1 pin, not the tampered hash')
+    })
+
+    it('a lastVerified touch bump does not revert another session\'s acceptHash', () => {
+      const a = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      const original = 'original body'
+      assert.equal(a.inspect('/abs/s.md', original).status, 'recorded')
+      a.flush()
+
+      // b loads the same original hash (sees a's pin).
+      const b = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      assert.equal(b.getRecord('/abs/s.md').sha256, sha256Hex(original))
+
+      // An operator (via a's session) explicitly accepts a NEW hash for
+      // this path.
+      const accepted = 'accepted new body'
+      a.acceptHash('/abs/s.md', accepted)
+      a.flush()
+
+      // b, still holding the OLD hash in memory, re-inspects with the OLD
+      // body (its own copy of the skill hasn't been re-read from disk) and
+      // gets a "verified" bump against its own now-superseded hash — that
+      // bump must not revert a's explicit acceptHash on disk.
+      const bResult = b.inspect('/abs/s.md', original)
+      assert.equal(bResult.status, 'verified', 'b still thinks its own copy matches — expected, not the bug')
+      b.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'].sha256, sha256Hex(accepted),
+        'b\'s touch bump must not revert a\'s explicit acceptHash')
+    })
+
+    it('a TOFU record DOES apply when nobody else holds a record for that path', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      assert.equal(store.inspect('/abs/new.md', 'body').status, 'recorded')
+      store.flush()
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/new.md'].sha256, sha256Hex('body'))
+    })
+  })
+
+  // #8072 review round 2, S3: `_recordChange`'s "never downgrade" rule
+  // (set/delete outrank tofu outranks touch) is what keeps an explicit
+  // decision from being silently demoted to a skippable implicit write
+  // within the SAME dirty window. Mutants OWN1 (always take the latest op,
+  // no priority check) and OWN2 (rank tofu above set/delete) both break a
+  // real sequence without touching any of the other #8072 tests.
+  describe('a tracked op is never silently downgraded within one dirty window (#8072 review round 2, S3)', () => {
+    it('an acceptHash is not lost to a same-window touch bump checked against another instance\'s hash (kills OWN1)', () => {
+      const stale = new SkillsTrustStore({ filePath: trustPath, verifyThrottleMs: 0 })
+      assert.equal(stale.inspect('/abs/s.md', 'v0').status, 'recorded')
+      stale.flush() // disk: v0
+
+      // A different instance re-approves the path with its own hash first —
+      // `stale` never sees this.
+      const other = new SkillsTrustStore({ filePath: trustPath })
+      other.acceptHash('/abs/s.md', 'e0d274-body')
+      other.flush() // disk: e0d274-body's hash
+
+      // `stale`, unaware, makes its OWN explicit decision (acceptHash —
+      // tagged 'set') for the same path...
+      stale.acceptHash('/abs/s.md', 'fb04dc-body')
+      // ...then, in the SAME dirty window (before flushing), re-inspects
+      // with that SAME body it just accepted — a 'verified' hit against its
+      // own now-current record, which (with verifyThrottleMs: 0) always
+      // bumps `lastVerified`, a 'touch'. The tracked op for this key must
+      // NOT be demoted from 'set' to 'touch' by this — 'set' is an explicit
+      // decision and must keep winning the merge.
+      const verified = stale.inspect('/abs/s.md', 'fb04dc-body')
+      assert.equal(verified.status, 'verified')
+
+      stale.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'].sha256, sha256Hex('fb04dc-body'),
+        'the explicit acceptHash must win — a same-window touch must not silently downgrade it to a skippable implicit write')
+    })
+
+    it('a revoke is not lost to a same-window TOFU re-record after its own flush failed (kills OWN1 and OWN2)', () => {
+      const stale = new FlakySkillsTrustStore({ filePath: trustPath })
+      assert.equal(stale.inspect('/abs/s.md', 'body').status, 'recorded')
+      stale.flush() // disk: recorded
+
+      // The operator revokes the path — an explicit decision — but the
+      // write itself is forced to fail, so the blanket clear() on success
+      // does not run and the tracked 'delete' op is retained.
+      stale._failNextSerialize = true
+      assert.throws(() => stale.revoke('/abs/s.md'), /boom/) // skills re-throws
+      assert.equal(stale.getRecord('/abs/s.md'), null, 'the revoke\'s effect on OWN memory lands regardless of the write failure')
+
+      // In the SAME dirty window, the path is "seen" again (e.g. a re-load
+      // in the same session) — since `stale`'s own records no longer have
+      // it, this looks like first sight: a TOFU record. The tracked op for
+      // this key must NOT be demoted from 'delete' to 'tofu' by this — the
+      // operator's revoke is an explicit decision and must keep winning,
+      // even though disk (where the revoke never actually landed) still
+      // has the old record.
+      assert.equal(stale.inspect('/abs/s.md', 'body').status, 'recorded')
+
+      stale.flush()
+
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/s.md'], undefined,
+        'the revoke must eventually land — a same-window TOFU re-record must not silently downgrade it to a skippable implicit write')
     })
   })
 })

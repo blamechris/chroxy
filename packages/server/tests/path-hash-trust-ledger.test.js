@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -35,6 +35,25 @@ class TestLedger extends PathHashTrustLedger {
     this._records = loaded.records
     this._migrated = loaded.migratedLegacy
     this._dirty = loaded.migratedLegacy || false
+  }
+}
+
+// #8072 review S1: a TestLedger whose `_serialize()` throws exactly once, so
+// a test can force ONE failed flush (the write itself fails, not the re-read)
+// and then verify the retry recovers every pin, proving `_changedKeys` is not
+// cleared until the write actually succeeds.
+class FlakyLedger extends TestLedger {
+  constructor(opts) {
+    super(opts)
+    this._failNextSerialize = false
+  }
+
+  _serialize() {
+    if (this._failNextSerialize) {
+      this._failNextSerialize = false
+      throw new Error('boom (forced failure)')
+    }
+    return super._serialize()
   }
 }
 
@@ -271,6 +290,396 @@ describe('PathHashTrustLedger (#5580)', () => {
       const l = new TestLedger({ filePath: ledgerPath })
       l.flush()
       assert.equal(existsSync(ledgerPath), false, 'clean flush must not create the file')
+    })
+  })
+
+  // #8068: `binary-trust.json` gained a second writer PROCESS (`chroxy
+  // resume` alongside the daemon) — each a `PathHashTrustLedger` subclass
+  // instance loaded once, independently, from the same file. The old
+  // flush() re-serialised only its own in-memory snapshot, so whichever
+  // instance flushed LAST silently erased every pin the other had written
+  // since its own load. flush() now re-reads the file and merges in only
+  // the keys THIS instance actually changed.
+  describe('flush merges instead of overwriting another instance\'s writes (#8068)', () => {
+    it('a pin written by a second instance survives this instance\'s next flush (exact issue repro)', () => {
+      // daemon = new BinaryProvenanceLedger({ filePath })   // daemon start
+      // cli    = new BinaryProvenanceLedger({ filePath })   // chroxy resume, later
+      const daemon = new TestLedger({ filePath: ledgerPath })
+      const cli = new TestLedger({ filePath: ledgerPath })
+
+      cli.approve('/usr/local/bin/claude', sha('claude-binary'))
+      // Before #8068 this flush would have overwritten the file with only
+      // what `daemon` itself knew about, dropping the claude pin above.
+      daemon.approve('/opt/homebrew/bin/codex', sha('codex-binary'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/usr/local/bin/claude'], 'the CLI instance\'s pin must survive')
+      assert.ok(onDisk.records['/opt/homebrew/bin/codex'], 'the daemon instance\'s own pin is still there')
+    })
+
+    it('a revoke by one instance is not resurrected by another instance\'s flush', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/pinned', sha('v1'))
+      // `b` loaded before the approve above, so it never saw the record.
+      assert.equal(b.getRecord('/x/pinned'), null, 'b never loaded the record a wrote')
+
+      // c loads AFTER a's write, so it does see the record — and revokes it.
+      const c = new TestLedger({ filePath: ledgerPath })
+      assert.equal(c.revoke('/x/pinned'), true)
+      assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/pinned'], undefined)
+
+      // a still has the (now-revoked) record in memory but never itself
+      // touched it again — a's next flush must not resurrect it.
+      a.approve('/x/other', sha('v2'))
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/pinned'], undefined, 'revoke must stay revoked')
+      assert.ok(onDisk.records['/x/other'], 'the unrelated new pin still lands')
+    })
+
+    it('the same path approved by both — the LATER flusher\'s value wins', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/shared', sha('a-value'))
+      // b flushes second — by design, it wins: it re-reads first (picking
+      // up a's value) and then re-applies its own change on top.
+      b.approve('/x/shared', sha('b-value'))
+
+      assert.equal(b.isTrusted('/x/shared', sha('b-value')), true)
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/shared'].sha256, sha('b-value'),
+        'the later flush (b) must win over the earlier one (a)')
+    })
+
+    it('a change made by this instance keeps winning even after a later merge', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+
+      a.approve('/x/a', sha('a'))
+      b.approve('/x/b', sha('b'))
+      // a flushes again for an unrelated path; its earlier '/x/a' write must
+      // not be lost just because it wasn't re-touched this time.
+      a.approve('/x/a2', sha('a2'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.ok(onDisk['/x/a'], 'a\'s first pin survives')
+      assert.ok(onDisk['/x/b'], 'b\'s pin survives')
+      assert.ok(onDisk['/x/a2'], 'a\'s second pin lands')
+    })
+
+    it('refreshes this instance\'s in-memory records from the merge, so a later read sees the other pin', () => {
+      const daemon = new TestLedger({ filePath: ledgerPath })
+      const cli = new TestLedger({ filePath: ledgerPath })
+
+      cli.approve('/usr/local/bin/claude', sha('claude-binary'))
+      daemon.approve('/opt/homebrew/bin/codex', sha('codex-binary'))
+
+      // The daemon instance never itself loaded or approved the claude pin,
+      // but its own flush must have refreshed its in-memory map from the
+      // merge so a subsequent in-process read (no reload) sees it too.
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('claude-binary')), true,
+        'flush() must refresh in-memory state from the merged result')
+    })
+
+    // #8072 review C2/S2: the original version of this test only asserted
+    // "does not throw" and "the NEW write lands" — it passed even on the
+    // pre-#8072 whole-snapshot flush AND on the #8072-head bug where a
+    // failed re-read became an EMPTY merge base. The assertion that
+    // actually distinguishes correct behaviour is that a pin approved
+    // BEFORE the corruption survives the flush that hits it.
+    it('a corrupt on-disk file at flush time keeps this instance\'s own pins (fail-open, not fail-EMPTY)', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
+      // Corrupt the file directly, simulating another writer's crash mid-
+      // write (or an operator edit) landing between this instance's load
+      // and its next flush.
+      writeFileSync(ledgerPath, '{ this is not valid json, corrupted mid-write')
+
+      assert.doesNotThrow(() => l.approve('/x/file', sha('a')),
+        'flush must not throw on a corrupt on-disk file — same fail-open contract as load')
+
+      // The pin from BEFORE the corruption must survive — a failed re-read
+      // must fall back to this instance's own records, not an empty map.
+      assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
+        'a pin approved before the corruption must survive a flush that hits a corrupt re-read')
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/earlier'], 'the earlier pin must still be on disk, not wiped')
+      assert.ok(onDisk.records['/x/file'], 'the new write must still land despite the prior corruption')
+    })
+
+    // #8072 review S4 (round 2): an I/O error on the re-read (EACCES/EIO/
+    // EMFILE — the READ CALL failed) says nothing about whether disk's
+    // CURRENT content is good, unlike the malformed-JSON case above where
+    // the bytes came back but are known-bad. Repair-overwriting on an I/O
+    // error would risk clobbering a healthy pin a different process just
+    // wrote — the #8068 loss again, scoped to this one flush. So this flush
+    // SKIPS the write entirely instead of falling back to this instance's
+    // own records: `_dirty`/`_changedKeys` stay pending for a retry.
+    it('an unreadable (EACCES) file at flush time SKIPS the write and retries later, rather than repair-overwriting', { skip: process.platform === 'win32' }, () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
+      chmodSync(ledgerPath, 0o000)
+      try {
+        assert.doesNotThrow(() => l.approve('/x/file', sha('a')),
+          'a swallowed I/O-error flush must not throw (best-effort ledger)')
+      } finally {
+        // Restore permissions so afterEach's rmSync can clean up the dir.
+        chmodSync(ledgerPath, 0o600)
+      }
+
+      // The write must have been SKIPPED — on-disk content is untouched by
+      // this flush attempt, not repair-overwritten from memory.
+      const onDiskDuring = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDiskDuring.records['/x/earlier'], 'the file itself is untouched by the skipped flush')
+      assert.equal(onDiskDuring.records['/x/file'], undefined,
+        'the new pin must NOT land yet — an I/O error is not evidence disk is safe to overwrite')
+      assert.equal(l._dirty, true, 'the ledger must stay dirty so a retry is attempted')
+
+      // A later flush, once the file is readable again, retries and lands it.
+      l.flush()
+      const onDiskAfter = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDiskAfter.records['/x/earlier'])
+      assert.ok(onDiskAfter.records['/x/file'], 'the retried flush must land the pin once the file is readable again')
+    })
+
+    it('an I/O read error at flush time does not clobber a DIFFERENT writer\'s valid pin (#8072 review S4)', { skip: process.platform === 'win32' }, () => {
+      const other = new TestLedger({ filePath: ledgerPath })
+      other.approve('/x/other-writer', sha('genuine')) // a different process's pin, already on disk
+
+      const l = new TestLedger({ filePath: ledgerPath }) // this instance never loaded that pin
+      chmodSync(ledgerPath, 0o000)
+      try {
+        assert.doesNotThrow(() => l.approve('/x/mine', sha('mine')))
+      } finally {
+        chmodSync(ledgerPath, 0o600)
+      }
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/other-writer'],
+        'the other writer\'s pin must survive an I/O-error flush untouched — a repair-overwrite from `l`\'s own (incomplete) records would have erased it')
+      assert.equal(onDisk.records['/x/mine'], undefined, 'this instance\'s own change must not have been written yet')
+      assert.equal(l._dirty, true, 'the local change must stay pending for a retry')
+      assert.equal(l._changedKeys.get(l._normalizeKey('/x/mine')), 'set', 'the change is still tracked, not lost')
+    })
+
+    it('a genuinely missing file (ENOENT) still resets to empty — only a real failure keeps the in-memory base', () => {
+      // Distinguishes "no file at all" (an operator deleting the ledger to
+      // reset it — must behave as a clean reset) from "the file exists but
+      // failed to re-read" (must NOT reset — see the tests above).
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+      rmSync(ledgerPath, { force: true })
+
+      l.approve('/x/new', sha('new'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.ok(onDisk.records['/x/new'])
+      // Whether `/x/earlier` also survives is incidental here (this
+      // instance's own in-memory `_records` still has it, and the merge
+      // base for a genuine ENOENT is an empty DISK map, not this instance's
+      // memory) — the point of this test is only that ENOENT does not throw
+      // and does not need the readFailed fallback.
+    })
+  })
+
+  // #8072 review C1: a plain-object merge target (`{ ...spread }`) lets a
+  // key named `constructor`/`toString`/`valueOf`/`__proto__` resolve through
+  // the prototype chain to a truthy value instead of a real own-property
+  // miss — a security bypass for any caller doing a bracket-key truthiness
+  // check against the merged map (skills' `isCommunityTrusted`).
+  describe('the merge stays null-prototype (#8072 review C1)', () => {
+    it('_records stays null-prototype after a flush, so prototype-named keys are never "trusted"', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/file', sha('a')) // dirties + flushes, exercising the merge path
+
+      assert.equal(Object.getPrototypeOf(l._records), null,
+        '_records must stay a null-prototype object after a flush')
+      for (const name of ['constructor', 'toString', 'valueOf', '__proto__']) {
+        assert.equal(l.isTrusted(name, sha('anything')), false, `${name} must not resolve through the prototype chain`)
+        assert.equal(l.getRecord(name), null, `${name} must not resolve through the prototype chain`)
+      }
+    })
+  })
+
+  // #8072 review S1: mutant m3 ("clear _changedKeys before the write") killed
+  // by this test — moving the clear before `saveJsonState` throws away the
+  // pending change the moment the write fails, instead of only once it
+  // actually lands.
+  describe('_changedKeys retention across a failed write (#8072 review S1)', () => {
+    it('retains every pending pin across a failed write, so the next flush retries them all', () => {
+      const l = new FlakyLedger({ filePath: ledgerPath })
+      l.approve('/x/a', sha('a')) // succeeds and flushes cleanly
+
+      l._failNextSerialize = true
+      l.approve('/x/b', sha('b')) // this flush's write throws; best-effort swallows it
+
+      l.approve('/x/c', sha('c')) // retries — must include a, b AND c
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.ok(onDisk['/x/a'], 'a survives (flushed before the failure)')
+      assert.ok(onDisk['/x/b'],
+        'b must land on the retry — _changedKeys must not have been cleared before the failed write')
+      assert.ok(onDisk['/x/c'], 'c lands too (approved after the retry-triggering flush)')
+    })
+  })
+
+  // #8072 review C3: TOFU first-sight pins and lastVerified-style bumps are
+  // not operator decisions — they're written from a possibly-stale
+  // snapshot, so the merge must not let them override a pin/decision this
+  // instance never saw. Exercised at the base level via `approve(path, hash,
+  // { firstSight: true })`; the skills-specific inspect()/acceptHash
+  // scenarios live in skills-trust.test.js, and the binary-ledger scenario
+  // (this option's real caller) lives in binary-provenance-trust.test.js.
+  describe('a first-sight (TOFU) pin never overrides a pin this instance never saw (#8072 review C3)', () => {
+    it('a stale instance\'s TOFU write does not overwrite another instance\'s genuine pin for the same path', () => {
+      const cli = new TestLedger({ filePath: ledgerPath })
+      const daemon = new TestLedger({ filePath: ledgerPath }) // stale: constructed before cli's pin lands
+
+      cli.approve('/usr/local/bin/claude', sha('genuine'), { firstSight: true })
+      // daemon never reloaded, so from its perspective this also looks like
+      // first sight — but it must not clobber cli's now-genuine pin.
+      daemon.approve('/usr/local/bin/claude', sha('stale-swap'), { firstSight: true })
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/usr/local/bin/claude'].sha256, sha('genuine'),
+        'the genuine pin must survive the stale TOFU write')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('stale-swap')), false,
+        'the daemon\'s own in-memory state must self-heal to the genuine pin after its flush')
+      assert.equal(daemon.isTrusted('/usr/local/bin/claude', sha('genuine')), true)
+    })
+
+    it('a TOFU write DOES apply when nobody else holds a pin for that path', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/first', sha('a'), { firstSight: true })
+      assert.equal(l.isTrusted('/x/first', sha('a')), true)
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/first'].sha256, sha('a'))
+    })
+
+    it('an explicit approve (no firstSight) still always wins, even over another instance\'s pin', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath })
+      a.approve('/x/shared', sha('a'), { firstSight: true })
+      // An explicit (operator) approve is a decision, not a guess — it wins
+      // even though b never saw a's pin, unlike the TOFU case above.
+      b.approve('/x/shared', sha('b'))
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/shared'].sha256, sha('b'))
+    })
+  })
+
+  // #8072 review round 2, R2-C1: when the merge SKIPS a 'tofu'/'touch' write
+  // because disk already resolved that key, the tracked op must be FORGOTTEN
+  // — not merely left in place for a later flush to replay. Without this, a
+  // swallowed write failure on THIS flush leaves `_changedKeys` holding
+  // `key -> 'tofu'` while `_records[key]` already holds the OTHER process's
+  // record (adopted from disk during the skip). A LATER flush then
+  // re-evaluates that stale op against whatever disk shows AT THAT POINT —
+  // if the key was since revoked, disk no longer has it, the skip condition
+  // ("disk already has a record") no longer holds, and the stale op writes
+  // the removed pin back.
+  describe('a resolved implicit op is forgotten, not retried (#8072 review round 2, R2-C1)', () => {
+    it('a revoked pin is not resurrected by a stale first-sight write retained across a failed flush', () => {
+      const cli = new FlakyLedger({ filePath: ledgerPath })
+      const daemon = new FlakyLedger({ filePath: ledgerPath }) // stale: constructed before cli's pin lands
+
+      // 1. cli approves P.
+      cli.approve('/x/p', sha('genuine'))
+
+      // 2. The stale daemon runs a first-sight write for the SAME path (it
+      //    never saw cli's pin) — the merge skips it (disk already has P)
+      //    and self-heals daemon's memory, but the write itself is forced
+      //    to fail this once, so the blanket `_changedKeys.clear()` on a
+      //    successful flush does not run and mask the bug.
+      daemon._failNextSerialize = true
+      daemon.approve('/x/p', sha('stale-swap'), { firstSight: true })
+      // Sanity: the skip already self-healed daemon's in-memory state to
+      // the genuine pin, regardless of the write failure (the C3 guarantee,
+      // not R2-C1's — kept separate here so a future regression in either
+      // one is attributed correctly).
+      assert.equal(daemon.isTrusted('/x/p', sha('genuine')), true)
+
+      // 3. cli revokes P.
+      cli.revoke('/x/p')
+
+      // 4. The daemon approves an unrelated path Q — this flush would,
+      //    WITHOUT the R2-C1 fix, still be carrying a retained 'tofu' entry
+      //    for P from step 2's failed write, and would replay it now that
+      //    disk no longer has P.
+      daemon.approve('/x/q', sha('q'))
+
+      // 5. Assert P is absent on disk.
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/p'], undefined,
+        'a revoked pin must stay revoked, even through a stale instance\'s failed-then-retried flush')
+      assert.ok(onDisk.records['/x/q'], 'the unrelated later pin still lands')
+    })
+
+    // A skipped 'touch' only falls through to the resurrecting "apply" path
+    // when disk's hash happens to match this instance's stale hash again
+    // (a narrower case — see N2 in the round-2 review, filed separately as
+    // metadata staleness, not a trust bypass). This test instead asserts
+    // the mechanical fix directly: a skipped touch forgets its op the same
+    // way a skipped tofu does, so it is never available to be replayed
+    // against a different disk state on a later flush.
+    it('a skipped touch also forgets its retained op after a failed write (defensive symmetry with tofu)', () => {
+      const a = new FlakyLedger({ filePath: ledgerPath })
+      a.approve('/x/p', sha('v1'))
+      const bStale = new FlakyLedger({ filePath: ledgerPath }) // constructed after a's pin — sees v1
+
+      // Someone else re-approves P with a different hash — bStale never
+      // sees this.
+      const other = new FlakyLedger({ filePath: ledgerPath })
+      other.approve('/x/p', sha('v2'))
+
+      // bStale, unaware, tries to bump its (now-superseded) v1 record's
+      // approval timestamp — a 'touch', the way `inspect()`'s verified
+      // branch does it (TestLedger has no throttle-gated inspect() of its
+      // own, so the base `_setRecord` helper is used directly). The merge
+      // skips it (disk's hash differs from what bStale verified against),
+      // self-healing bStale to v2, but the write is forced to fail this once.
+      bStale._failNextSerialize = true
+      const key = bStale._normalizeKey('/x/p')
+      bStale._setRecord(key, { ...bStale._records[key], approvedAt: new Date().toISOString() }, 'touch')
+      bStale.flush()
+
+      assert.equal(bStale.isTrusted('/x/p', sha('v2')), true, 'the skip must self-heal bStale to v2 regardless of the write failure')
+      assert.equal(bStale._changedKeys.has(key), false,
+        'a skipped touch must forget its retained op — not just self-heal in memory — so a later flush cannot replay it against a different disk state')
+    })
+
+    // #8072 review round 3 S5 — pins round 2's N2 fix. A matching-hash touch
+    // applies ONLY the bumped approval timestamp on top of the BASE record;
+    // every other field comes from disk, which may reflect a revoke-then-
+    // re-approve (same hash) this instance never saw. Reverting to the
+    // wholesale `merged[key] = this._records[key]` write puts this
+    // instance's stale metadata back on disk.
+    it('a matching-hash touch applies only the approval timestamp on top of the disk record (#8072 review round 3 S5)', () => {
+      writeFileSync(ledgerPath, JSON.stringify({ records: {
+        '/x/p': { sha256: sha('v1'), approvedAt: '2026-01-01T00:00:00.000Z', firstSeen: 'stale-instance-view' },
+      } }))
+      const bStale = new TestLedger({ filePath: ledgerPath })
+
+      // Another process revokes and re-approves P with the SAME hash, which
+      // rewrites the record's metadata — bStale never reloads.
+      writeFileSync(ledgerPath, JSON.stringify({ records: {
+        '/x/p': { sha256: sha('v1'), approvedAt: '2026-06-01T00:00:00.000Z', firstSeen: 're-approved-elsewhere' },
+      } }))
+
+      const key = bStale._normalizeKey('/x/p')
+      const bumped = '2026-09-28T00:00:00.000Z'
+      bStale._setRecord(key, { ...bStale._records[key], approvedAt: bumped }, 'touch')
+      bStale.flush()
+
+      const rec = JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/p']
+      assert.equal(rec.sha256, sha('v1'))
+      assert.equal(rec.approvedAt, bumped, 'the touch\'s own bumped timestamp lands')
+      assert.equal(rec.firstSeen, 're-approved-elsewhere',
+        'every other field must come from the disk record, not this instance\'s stale copy')
     })
   })
 })

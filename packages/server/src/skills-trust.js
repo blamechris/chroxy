@@ -229,6 +229,13 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     // first-time records. A v1→v2 migration marks dirty so the rewritten
     // v2 shape is flushed on the next access.
     this._dirty = loaded.migratedLegacy || false
+    // #8068: one SkillsTrustStore instance per session means many
+    // same-process/cross-process writers to the same default ledger. Mirrors
+    // `_changedKeys` for the `communityTrust` sibling index (not part of
+    // `_records`, so the base's merge doesn't cover it) — which authors/paths
+    // THIS instance has granted since its last successful flush.
+    this._changedAuthors = new Set()
+    this._changedByPaths = new Set()
   }
 
   get mode() {
@@ -333,6 +340,59 @@ export class SkillsTrustStore extends PathHashTrustLedger {
   }
 
   /**
+   * #8068: merge the `communityTrust` sibling index with what's on disk
+   * right now — the base's `_changedKeys` merge only covers `_records`
+   * (the `skills` map), so this instance's grants would otherwise clobber a
+   * concurrent grant from a different SkillsTrustStore instance (one per
+   * session — see the class docstring) the exact same way the un-merged
+   * `_records` overwrite used to. Same conflict rule as the base: an
+   * author/path THIS instance granted since its last flush wins; anything
+   * else keeps whatever the fresh disk read has (including a grant a
+   * different instance wrote after this instance's own last load).
+   *
+   * Called by `flush()` before `_serialize()`, on every flush attempt
+   * (including one that goes on to fail) — see `_onFlushCommitted` for why
+   * the change-sets themselves are cleared separately, only after a
+   * successful write.
+   *
+   * #8072 review C1: `byAuthor`/`byPath` MUST be built with `Object.assign
+   * (Object.create(null), …)`, never `{ ...spread }`. `isCommunityTrusted`
+   * (below) is a bracket-key truthiness check, so a plain object lets an
+   * author/path named `constructor`/`toString`/`__proto__`/etc. resolve
+   * through the prototype chain to a truthy value — trusting a
+   * repo-local `community/constructor/*.md` that was never granted.
+   * `_parseCommunityTrust` already returns null-prototype maps; this must
+   * not silently reintroduce a prototype via the merge.
+   *
+   * @param {object|null} parsed
+   * @protected
+   */
+  _mergeExtra(parsed) {
+    const disk = this._parseCommunityTrust(parsed)
+    const byAuthor = Object.assign(Object.create(null), disk.byAuthor)
+    for (const author of this._changedAuthors) {
+      if (this.communityTrust.byAuthor[author]) byAuthor[author] = this.communityTrust.byAuthor[author]
+    }
+    const byPath = Object.assign(Object.create(null), disk.byPath)
+    for (const p of this._changedByPaths) {
+      if (this.communityTrust.byPath[p]) byPath[p] = this.communityTrust.byPath[p]
+    }
+    this.communityTrust = { byAuthor, byPath }
+  }
+
+  /**
+   * #8068: a flush's write actually succeeded — safe to forget which
+   * authors/paths this instance had pending, the same way the base clears
+   * `_changedKeys` only after `saveJsonState` returns.
+   *
+   * @protected
+   */
+  _onFlushCommitted() {
+    this._changedAuthors.clear()
+    this._changedByPaths.clear()
+  }
+
+  /**
    * Serialise to the v2 on-disk shape:
    * `{ skills: {...}, communityTrust: { "by-author": {...}, "by-path": {...} } }`.
    * Null-prototype objects are converted to plain objects before serialisation.
@@ -395,8 +455,12 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     const existing = this._records[key]
 
     if (!existing) {
-      this._records[key] = { sha256: newHash, firstSeen: now, lastVerified: now }
-      this._dirty = true
+      // #8072 review C3: trust-on-first-use, not an operator decision — a
+      // stale instance's first sight of a possibly-tampered hash must not
+      // override a pin/decision another process/instance already made for
+      // this path. Tagged `'tofu'` so flush()'s merge skips it when disk
+      // already has ANY record here.
+      this._setRecord(key, { sha256: newHash, firstSeen: now, lastVerified: now }, 'tofu')
       log.info(`Trust hash recorded for ${basename(absPath)}#${newHash.slice(0, 8)}`)
       return { status: 'recorded', hash: newHash }
     }
@@ -419,8 +483,11 @@ export class SkillsTrustStore extends PathHashTrustLedger {
         ? Date.parse(now) - lastMs
         : Number.POSITIVE_INFINITY
       if (elapsed >= this._verifyThrottleMs) {
-        existing.lastVerified = now
-        this._dirty = true
+        // #8072 review C3: informational, not a decision — tagged `'touch'`
+        // so flush()'s merge skips it if disk's hash no longer matches the
+        // one this instance just verified against (someone else's real
+        // acceptHash/approve superseded this instance since its last load).
+        this._setRecord(key, { ...existing, lastVerified: now }, 'touch')
       }
       return { status: 'verified', hash: newHash }
     }
@@ -470,8 +537,10 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     if (typeof author !== 'string' || !author) return
     const now = new Date().toISOString()
     this.communityTrust.byAuthor[author] = { grantedAt: now, grantedBy: 'user' }
+    this._changedAuthors.add(author)
     if (typeof realPath === 'string' && realPath) {
       this.communityTrust.byPath[realPath] = { grantedAt: now }
+      this._changedByPaths.add(realPath)
     }
     this._dirty = true
     this.flush()
@@ -491,12 +560,10 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     const key = _normalizePathKey(absPath)
     const existing = this._records[key]
     if (existing) {
-      existing.sha256 = newHash
-      existing.lastVerified = now
+      this._setRecord(key, { ...existing, sha256: newHash, lastVerified: now })
     } else {
-      this._records[key] = { sha256: newHash, firstSeen: now, lastVerified: now }
+      this._setRecord(key, { sha256: newHash, firstSeen: now, lastVerified: now })
     }
-    this._dirty = true
   }
 }
 
