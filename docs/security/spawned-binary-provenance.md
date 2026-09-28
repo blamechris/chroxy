@@ -289,8 +289,36 @@ when it's off. A blocked claude-tui-driving probe returns `null` rather than
 a second `fail` row — the SAME `claude` binary's own provider-preflight row
 already reports the identical refusal. `chroxy start -c <path>` gates from
 THAT file's `binaryProvenance`, the same way the `chroxy resume` row above
-honors its own `-c`; env vars still win over either file. The §5 table
-lists what each provider verifies and when.
+honors its own `-c`; env vars still win over either file. `chroxy tunnel
+setup` closed the same class of gap a fifth time (#8066): the interactive CLI
+subcommand (`cli/tunnel-cmd.js`) ran a bare `CloudflareTunnelAdapter.checkBinary()`
+— an unconditional, ungated `execFileSync('cloudflared', ['--version'])` that
+executed BEFORE any prompt — and then three more bare `execFileSync('cloudflared',
+…)` calls (`tunnel login`, `tunnel create`, `tunnel route dns`), all resolved by
+the OS's own PATH lookup with no existence, quarantine, or provenance check of
+any kind. Like `chroxy resume`, this is a foreground, user-invoked command with
+no `SessionManager` to reuse, so `resolveVerifiedCloudflaredBinary()`
+(`cli/tunnel-cmd.js`) builds the SAME provenance options bag from a loaded config
+file through the SAME `buildBinaryProvenanceOptions` normalizer, then runs
+`runProviderPreflight(ProviderClass, { provenance })` — reusing the identical
+gate `chroxy resume` and the daemon's tunnel adapter both run, against a minimal
+`preflight`-shaped stand-in for `cloudflared` (there is no session Provider for
+a network tunnel binary) whose `binary.candidates` are `CLOUDFLARED_CANDIDATES`,
+imported from `tunnel/cloudflare.js` rather than a second copy. The pre-#8066
+"is it available" check ran an unconditional `--version` exec; `verifyBinary`'s
+existence/quarantine check inside `runProviderPreflight` answers that question
+with a `stat`, so the probe is gone entirely rather than merely moved after the
+gate — every one of the THREE remaining execs (`login` / `create` / `route dns`)
+now runs the verified absolute path, never the bare string `'cloudflared'`. That
+config file defaults to `chroxy tunnel setup`'s own `<configDir>/config.json`
+but honors a new `-c, --config <path>` option, mirroring `chroxy resume -c` and
+`chroxy start -c`. A refusal prints the gate error's message and exits non-zero
+with nothing spawned — the existing-binary-not-found case is reported as the
+ordinary "not found" error (`ProviderBinaryNotFoundError`, never mislabeled as a
+provenance failure, and nothing in the current working directory is ever
+hashed for a binary the #6708 health check couldn't confirm exists). With gates
+off, the observable spawn outcome for a healthy binary is unchanged. The §5
+table lists what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -593,18 +621,18 @@ the same installed `claude` on the end user's machine.
 | Web tasks (`web-task-manager.js`) | n/a | a fresh full gate on every call, at all THREE no-session spawn sites (feature detection at daemon start, every `launch_web_task`, every teleport), via `SessionManager.verifyOneShotExecutable(CliSession)` — the same #8030/#8036 one-shot resolver the codex model-catalog probe uses; a refusal degrades feature detection to unavailable (logged at `warn`) and fails a launch/teleport with the gate's coded error — nothing is spawned either way (#8039) |
 | `chroxy resume` CLI subcommand (`cli/session-cmd.js`) | n/a | a fresh full gate on every invocation, via `runProviderPreflight(CliSession, { provenance })` — no create-time step to pin from, and no daemon `SessionManager` either, so the provenance options bag is built straight from a config file (`<configDir>/config.json`, or `-c <path>`, #8065 review S4) that must be readable/parseable if it exists (#8065 review S3) and the daemon's own `binary-trust.json` ledger, opened lazily only when a gate is on (#8065 review nitpick 3); a refusal prints the gate error's message and exits non-zero with nothing spawned (#8061) |
 | `chroxy start` dependency checks | n/a | a fresh provenance/signature gate on every run (`chroxy start` itself has no create-time session to pin from), via `checkBinary()` / `checkClaudeTuiCliVersion()` gating the SAME resolved path they then probe for `--version` — the configured provider's binary, `cloudflared`, and (for `claude-tui`) the version-pin probe all share one mode/signatureGate, resolved from `-c <path>`'s config (or `<configDir>/config.json`, #8065-review-S4-style — mirroring the `chroxy resume` row above) plus env, and one lazily-constructed `binary-trust.json` ledger. This is narrower than the daemon's per-provider "full gate": doctor's own existence/quarantine/shim/env-credential checks run as their own separate steps (not part of `verifyProvenance`), and the claude-tui probe only runs its existence/quarantine check when a provenance or signature gate is actually on. A refusal reports a doctor `fail` row naming the gate's status code and remediation, and `chroxy start` exits non-zero on it (unless `--skip-checks`) with nothing spawned; a `warn`-mode issue reports a `warn` row rather than only a log line (#8041, #8074) |
+| `chroxy tunnel setup` CLI subcommand (`cli/tunnel-cmd.js`) | n/a | a fresh full gate on every invocation, via `runProviderPreflight(ProviderClass, { provenance })` against a minimal `preflight`-shaped stand-in for `cloudflared` — no create-time step to pin from, and no daemon `SessionManager` either, so the provenance options bag is built straight from a config file (`<configDir>/config.json`, or `-c <path>`) the same way the `chroxy resume` row above does; the pre-#8066 unconditional `--version` existence probe is gone entirely (answered by the #6708 `stat`-based health check instead), and every remaining exec (`tunnel login` / `tunnel create` / `tunnel route dns`) runs the verified absolute path; a refusal prints the gate error's message and exits non-zero with nothing spawned (#8066) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than
 re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. The catalog
 probe has no create-time step to pin from (same as the other one-shots), so it
 re-resolves AND re-verifies fresh on every call instead — the web-task spawns
-closed by #8039, the `chroxy resume` gate closed by #8061, and the `chroxy
-start` dependency checks closed by #8041 all follow the identical pattern. A
-row marked "none" gets at most the create-time check; the known remaining
-spawn that runs with no gate of its own is `chroxy tunnel setup`'s four bare
-`cloudflared` execs (`tunnel-cmd.js` → `tunnel/cloudflare.js` — `--version`,
-`login`, and two more, #8066). Where a gate does run, it
+closed by #8039, the `chroxy resume` gate closed by #8061, the `chroxy
+start` dependency checks closed by #8041, and the `chroxy tunnel setup` gate
+closed by #8066 all follow the identical pattern. A row marked "none" gets at
+most the create-time check; there is no longer a known spawn that runs with
+no gate of its own. Where a gate does run, it
 hashes only the file at the pinned path (#8040).
 
 **Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not

@@ -18,6 +18,48 @@ export function configFile() {
 }
 
 /**
+ * Read a config file for an opt-in binary-provenance gate. Shared by every
+ * CLI subcommand that gates a spawn but has no `SessionManager` instance to
+ * read the gate's mode/signature-gate flags off of — `chroxy resume`
+ * (#8061/#8065) and `chroxy tunnel setup` (#8066) both call this rather than
+ * each keeping its own copy, so "how do we read the gate config file" is
+ * defined once.
+ *
+ * A MISSING file (`ENOENT`) returns `{}` — gates default off, matching every
+ * other soft config reader in this CLI (`worktree-gc-cmd.js`,
+ * `schedule-cmd.js`). An EXISTING file that can't be read or parsed THROWS
+ * instead — #8065 review S3: the prior soft-everything behaviour turned a
+ * hand-edited config.json with a trailing comma into a silently ungated
+ * resume, while `chroxy start` refuses to boot at all on that exact same
+ * file (this module's own config validation). Misreading THIS file has
+ * security consequences the worktree-gc/schedule precedent (repos, discovery
+ * root) does not, so it does not get the same "soft" treatment.
+ *
+ * @param {string} configPath
+ * @returns {object}
+ */
+export function readGateConfig(configPath) {
+  let bytes
+  try {
+    bytes = readFileSync(configPath, 'utf-8')
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {}
+    throw gateConfigUnreadable(configPath, err)
+  }
+  try {
+    return JSON.parse(bytes)
+  } catch (err) {
+    throw gateConfigUnreadable(configPath, err)
+  }
+}
+
+function gateConfigUnreadable(configPath, cause) {
+  const err = new Error(`cannot read ${configPath} to determine binaryProvenance mode (${cause.message})`)
+  err.code = 'GATE_CONFIG_UNREADABLE'
+  return err
+}
+
+/**
  * Interactive prompt helper
  */
 export function prompt(question) {

@@ -94,6 +94,15 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
     }
   }
 
+  // #8066: `chroxy tunnel setup` no longer calls this — an unconditional,
+  // ungated `execFileSync('cloudflared', ['--version'])` run before any gate
+  // or prompt. It now resolves + verifies through
+  // `resolveVerifiedCloudflaredBinary` (`cli/tunnel-cmd.js`), which answers
+  // "is it available" with a stat-based existence/quarantine check (no exec
+  // at all) and then runs the same provenance gate `_verifyCloudflaredProvenance`
+  // below does. Left in place as a general-purpose static check — no other
+  // caller in this repo — but a future caller should prefer the gated path
+  // for anything that isn't already behind an explicit opt-in gate itself.
   static checkBinary() {
     try {
       const output = execFileSync('cloudflared', ['--version'], { encoding: 'utf-8', stdio: 'pipe' })

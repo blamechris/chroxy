@@ -3,44 +3,11 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { configDir, configFile } from './shared.js'
+import { configDir, configFile, readGateConfig } from './shared.js'
 import { resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions } from '../utils/preflight.js'
 import { BinaryProvenanceLedger } from '../binary-provenance-trust.js'
 import { CliSession } from '../cli-session.js'
-
-/**
- * Read config.json for the #8061 binary-provenance gate. A MISSING file
- * (`ENOENT`) returns `{}` — gates default off, matching every other soft
- * config reader in this CLI (`worktree-gc-cmd.js`, `schedule-cmd.js`). An
- * EXISTING file that can't be read or parsed THROWS instead — #8065 review
- * S3: the prior soft-everything behaviour turned a hand-edited config.json
- * with a trailing comma into a silently ungated resume, while `chroxy start`
- * refuses to boot at all on that exact same file (`cli/shared.js`'s config
- * validation). Misreading THIS file has security consequences the
- * worktree-gc/schedule precedent (repos, discovery root) does not, so it
- * does not get the same "soft" treatment.
- */
-function readGateConfig(configPath) {
-  let bytes
-  try {
-    bytes = readFileSync(configPath, 'utf-8')
-  } catch (err) {
-    if (err?.code === 'ENOENT') return {}
-    throw gateConfigUnreadable(configPath, err)
-  }
-  try {
-    return JSON.parse(bytes)
-  } catch (err) {
-    throw gateConfigUnreadable(configPath, err)
-  }
-}
-
-function gateConfigUnreadable(configPath, cause) {
-  const err = new Error(`cannot read ${configPath} to determine binaryProvenance mode (${cause.message})`)
-  err.code = 'GATE_CONFIG_UNREADABLE'
-  return err
-}
 
 /**
  * #8061 — resolve AND verify the exact `claude` binary `chroxy resume`

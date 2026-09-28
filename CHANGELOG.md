@@ -23,6 +23,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`chroxy tunnel setup` now execs the same verified `cloudflared` binary the
+  daemon's tunnel adapter would use, instead of a bare, unverified PATH lookup
+  (#8066).** `cli/tunnel-cmd.js` ran an unconditional, ungated
+  `CloudflareTunnelAdapter.checkBinary()` — `execFileSync('cloudflared',
+  ['--version'])`, resolved off `PATH` and executed BEFORE any prompt — and
+  then three more bare `execFileSync('cloudflared', …)` calls (`tunnel login`,
+  `tunnel create`, `tunnel route dns`), none with an existence, quarantine, or
+  opt-in provenance check. In `binaryProvenance.mode: 'block'`, a `cloudflared`
+  whose pinned hash no longer matched still ran here unchecked, even though the
+  exact same binary would refuse a real tunnel start. Like `chroxy resume`,
+  this CLI subcommand runs standalone with no daemon `SessionManager` to read
+  the gate's mode/signature-gate flags or ledger off of, so
+  `resolveVerifiedCloudflaredBinary()` builds the same options bag from a
+  config file (`resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled`,
+  the same resolvers `chroxy start`/`chroxy resume` use — defaulting to
+  `<configDir>/config.json` but honoring a new `-c, --config <path>` option)
+  and the daemon's own pin ledger, then runs
+  `runProviderPreflight(ProviderClass, { provenance })` against a minimal
+  `preflight`-shaped stand-in for `cloudflared` (there is no session Provider
+  for a network tunnel binary), reusing the identical gate `chroxy resume` and
+  the tunnel adapter's own `_verifyCloudflaredProvenance` both run rather than
+  a third implementation. The pre-fix `--version` existence probe is gone
+  entirely — `verifyBinary`'s stat-based existence/quarantine check answers
+  "is it available" with no exec at all — so every remaining exec (`login` /
+  `create` / `route dns`) now runs the verified absolute path, never the bare
+  string `'cloudflared'`. A refusal prints the gate's labeled error and exits
+  non-zero with nothing spawned; a missing binary is reported as the ordinary
+  "not found" case, never mislabeled as a provenance failure, and nothing in
+  the current working directory is ever hashed for a binary the health check
+  couldn't confirm exists. With gates off, the observable spawn outcome is
+  unchanged.
+
 - **`chroxy start`'s dependency checks now run the same verified binaries a
   real session would use, instead of unchecked, no-gate `--version` probes
   (#8041).** `doctor.js`'s `runDoctorChecks()` — which runs BEFORE any session
