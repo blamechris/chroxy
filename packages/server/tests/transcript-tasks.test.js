@@ -63,6 +63,16 @@ function userLine({ text, ts }) {
   return JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: text } })
 }
 
+// #7327 — a plain assistant text response, the shape that carries
+// `message.model`. Mirrors verified live-journal entries: `<synthetic>` is
+// the harness's own placeholder for an injected assistant turn (e.g. an
+// API-error stand-in), never a real booted model.
+function assistantTextLine({ model, text = 'ok', ts = '2026-06-10T02:39:05.423Z' }) {
+  const message = { role: 'assistant', content: [{ type: 'text', text }] }
+  if (model !== undefined) message.model = model
+  return JSON.stringify({ type: 'assistant', timestamp: ts, message })
+}
+
 function writeTranscript(lines, name = 'session.jsonl') {
   const p = join(dir, name)
   writeFileSync(p, lines.map((l) => l + '\n').join(''))
@@ -337,12 +347,12 @@ describe('TranscriptTaskScanner — ScheduleWakeup', () => {
 describe('TranscriptTaskScanner — robustness', () => {
   it('returns the empty snapshot for a missing file (never throws)', () => {
     const scanner = new TranscriptTaskScanner(join(dir, 'does-not-exist.jsonl'))
-    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null })
+    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null })
   })
 
   it('returns the empty snapshot for an empty file', () => {
     const p = writeTranscript([])
-    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null })
+    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null })
   })
 
   it('skips malformed lines without losing surrounding entries', () => {
@@ -408,5 +418,84 @@ describe('TranscriptTaskScanner — robustness', () => {
 
   it('exposes a sane bounded-read cap', () => {
     assert.ok(MAX_SCAN_BYTES >= 8 * 1024 * 1024)
+  })
+})
+
+// #7327 — observedModel: the model a claude-tui session is ACTUALLY running,
+// read off the transcript's own `message.model` on assistant entries. Never
+// a stand-in for a configured/requested model — the scanner has no notion of
+// "requested" at all, only what it saw.
+describe('TranscriptTaskScanner — observedModel (#7327)', () => {
+  it('is null before any assistant entry has been seen', () => {
+    const p = writeTranscript([userLine({ text: 'hi', ts: '2026-06-10T02:39:00.000Z' })])
+    assert.equal(new TranscriptTaskScanner(p).scan().observedModel, null)
+  })
+
+  it('reports the model observed on an assistant entry', () => {
+    const p = writeTranscript([assistantTextLine({ model: 'claude-sonnet-5' })])
+    assert.equal(new TranscriptTaskScanner(p).scan().observedModel, 'claude-sonnet-5')
+  })
+
+  it('updates to a later entry’s model (e.g. the user ran /model mid-session)', () => {
+    const p = writeTranscript([assistantTextLine({ model: 'claude-sonnet-5', ts: '2026-06-10T02:39:00.000Z' })])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.scan().observedModel, 'claude-sonnet-5')
+
+    appendFileSync(p, assistantTextLine({ model: 'claude-opus-5', ts: '2026-06-10T02:40:00.000Z' }) + '\n')
+    assert.equal(scanner.scan().observedModel, 'claude-opus-5')
+  })
+
+  it('ignores the synthetic placeholder — never reports it as an observation', () => {
+    const p = writeTranscript([assistantTextLine({ model: '<synthetic>', text: 'API Error: 529 Overloaded' })])
+    assert.equal(new TranscriptTaskScanner(p).scan().observedModel, null)
+  })
+
+  it('a synthetic entry does not clobber an already-observed real model', () => {
+    const p = writeTranscript([assistantTextLine({ model: 'claude-sonnet-5', ts: '2026-06-10T02:39:00.000Z' })])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.scan().observedModel, 'claude-sonnet-5')
+
+    appendFileSync(p, assistantTextLine({ model: '<synthetic>', ts: '2026-06-10T02:40:00.000Z' }) + '\n')
+    assert.equal(scanner.scan().observedModel, 'claude-sonnet-5',
+      'a later synthetic entry must not blank out the real observation')
+  })
+
+  it('ignores a missing or non-string model field', () => {
+    const p = writeTranscript([
+      assistantTextLine({ model: undefined }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-06-10T02:39:01.000Z', message: { role: 'assistant', model: 42, content: [] } }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-06-10T02:39:02.000Z', message: { role: 'assistant', model: '', content: [] } }),
+    ])
+    assert.equal(new TranscriptTaskScanner(p).scan().observedModel, null)
+  })
+
+  it('coexists with background-task tracking on the same entry', () => {
+    // A tool_use launch and a model observation can land on the same
+    // assistant entry (the scanner's tool_use walk and model read are
+    // independent passes over the same parsed line).
+    const line = JSON.stringify({
+      type: 'assistant',
+      timestamp: '2026-06-10T02:39:05.423Z',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        content: [{ type: 'tool_use', id: 'toolu_both', name: 'Bash', input: { description: 'd', run_in_background: true } }],
+      },
+    })
+    const snap = new TranscriptTaskScanner(writeTranscript([line])).scan()
+    assert.equal(snap.observedModel, 'claude-opus-5')
+    assert.equal(snap.backgroundTasks.length, 1)
+  })
+
+  it('ignores a sidechain entry\'s model — a subagent turn can run a different model (review N2)', () => {
+    const main = assistantTextLine({ model: 'claude-sonnet-5', ts: '2026-06-10T02:39:00.000Z' })
+    const sidechain = JSON.stringify({
+      type: 'assistant',
+      isSidechain: true,
+      timestamp: '2026-06-10T02:39:30.000Z',
+      message: { role: 'assistant', model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'subagent output' }] },
+    })
+    const snap = new TranscriptTaskScanner(writeTranscript([main, sidechain])).scan()
+    assert.equal(snap.observedModel, 'claude-sonnet-5', 'the sidechain entry\'s model must not overwrite the main session\'s observation')
   })
 })

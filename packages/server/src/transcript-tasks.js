@@ -1,7 +1,13 @@
 // TranscriptTaskScanner (#5431) — incremental session-transcript scanner that
 // derives OUTSTANDING background work (run_in_background Bash/Agent calls,
-// Monitor streams) and a pending ScheduleWakeup from a Claude Code session
-// transcript (`~/.claude/projects/<slug>/<sessionId>.jsonl`).
+// Monitor streams), a pending ScheduleWakeup, and (#7327) the most recently
+// OBSERVED model from a Claude Code session transcript
+// (`~/.claude/projects/<slug>/<sessionId>.jsonl`). The model field exists
+// because claude-tui — the default provider — is a PTY-driven interactive
+// TUI with no structured init event of its own (unlike cli-session/sdk-
+// session, which learn their booted model from the CLI/SDK's own init
+// payload); the transcript's `message.model` on assistant entries is the
+// only place that information appears at all.
 //
 // Why a transcript scan: the per-PID session file (`~/.claude/sessions/
 // <pid>.json`) that drives the readiness probe carries only `status` — no
@@ -57,7 +63,16 @@ const log = createLogger('transcript-tasks')
 export const EMPTY_TASK_SNAPSHOT = Object.freeze({
   backgroundTasks: Object.freeze([]),
   scheduledWakeup: null,
+  observedModel: null,
 })
+
+// #7327: the harness writes this literal `message.model` on synthetic
+// assistant entries it injects itself (an API-error stand-in, a retry
+// placeholder, …) — verified against live transcripts: every `<synthetic>`
+// entry carries `usage.output_tokens: 0` and is not something the model
+// actually booted with. Reporting it as the observed model would show a
+// fake value instead of an honest "not yet observed" null.
+const SYNTHETIC_MODEL = '<synthetic>'
 
 // Cap a single incremental read so a pathological transcript (or a first
 // scan against an existing multi-MB file) can't balloon memory. 16 MiB is
@@ -106,7 +121,14 @@ const TOOL_USE_ID_TAG = /<tool-use-id>\s*([^<\s]+)\s*<\/tool-use-id>/g
  * call and returns the current outstanding-work snapshot:
  *
  *   { backgroundTasks: [{ toolUseId, kind, description, startedAt }],
- *     scheduledWakeup: { at, reason } | null }
+ *     scheduledWakeup: { at, reason } | null,
+ *     observedModel: string | null }
+ *
+ * `observedModel` (#7327) is the most recent real `message.model` seen on an
+ * `assistant` transcript entry — an OBSERVATION of what the session is
+ * actually running, never the configured/requested model. `null` until the
+ * first assistant entry lands (or when every entry seen so far carries only
+ * the synthetic placeholder — see `SYNTHETIC_MODEL`).
  *
  * `scan()` NEVER throws. A missing transcript yields the empty snapshot
  * (the file may simply not exist yet); any other failure logs at debug and
@@ -136,6 +158,12 @@ export class TranscriptTaskScanner {
     // Latest user/assistant entry timestamp seen (epoch ms) — used to decide
     // whether a scheduled wakeup has already fired (activity after its time).
     this._lastActivityTs = 0
+    // #7327: most recent real (non-synthetic) `message.model` seen on an
+    // assistant entry. Only ever moves forward to a newly-observed value —
+    // never reset to null except by `_reset()` itself (a rotated/truncated
+    // transcript), so a transient parse miss can't blank out an already-
+    // known model.
+    this._observedModel = null
   }
 
   /**
@@ -152,7 +180,7 @@ export class TranscriptTaskScanner {
       // still debug-logged, but state is preserved so a later scan picks
       // up where it left off if the file appears.
       this._log.debug?.(`transcript scan failed for ${this.path}: ${err.message} — degrading to empty snapshot`)
-      return { backgroundTasks: [], scheduledWakeup: null }
+      return { backgroundTasks: [], scheduledWakeup: null, observedModel: null }
     }
   }
 
@@ -234,6 +262,20 @@ export class TranscriptTaskScanner {
     }
 
     if (entry.type === 'assistant') {
+      // #7327: an OBSERVATION of the model this turn actually ran on — never
+      // a stand-in for the requested/configured model. Excludes the
+      // synthetic placeholder (see SYNTHETIC_MODEL), any non-string/empty
+      // value, and a sidechain entry (review N2) — a subagent turn can run a
+      // DIFFERENT model than the main conversation, and this scanner reports
+      // the main session's own model. A later real observation always
+      // supersedes an earlier one.
+      const observedModel = entry?.message?.model
+      if (
+        entry.isSidechain !== true &&
+        typeof observedModel === 'string' && observedModel && observedModel !== SYNTHETIC_MODEL
+      ) {
+        this._observedModel = observedModel
+      }
       const blocks = entry?.message?.content
       if (Array.isArray(blocks)) {
         for (const block of blocks) {
@@ -350,6 +392,7 @@ export class TranscriptTaskScanner {
     return {
       backgroundTasks: [...this._tasks.values()].map((t) => ({ ...t })),
       scheduledWakeup,
+      observedModel: this._observedModel,
     }
   }
 }
