@@ -61,11 +61,20 @@
  * `--import`s `assert-match-payload-guard-hook.mjs` instead — the same
  * side-effecting-entry-point pattern `no-test-force-exit-hook.mjs` uses for
  * the sibling `--test-force-exit` refusal. Each installation is pinned by a
- * test: `packages/server/tests/assert-match-payload-guard.test.js`,
- * `packages/claude-hooks/tests/setup-payload-guard.test.js`, and — for the two
- * `_setup`-less packages, whose wiring is a string in `package.json` rather
- * than a call site a suite can observe from inside — the package-walk in
- * `scripts/__tests__/assert-match-payload-guard-wiring.test.mjs`. As with
+ * call-site test running under that package's own test command:
+ * `packages/server/tests/assert-match-payload-guard.test.js`,
+ * `packages/claude-hooks/tests/setup-payload-guard.test.js`,
+ * `packages/protocol/tests/payload-guard-installed.test.js` and
+ * `packages/design-tokens/test/payload-guard-installed.test.js` — the last two
+ * exist precisely because `protocol` and `design-tokens` have no
+ * `tests/_setup.mjs` to hang an install call on, so their wiring is a STRING
+ * in `package.json` (`--import assert-match-payload-guard-hook.mjs`) that a
+ * one-token slip (importing this library file directly instead) can silently
+ * defeat; a call-site test needs no setup module, only to run under the
+ * package's own `test` script, which both already do. On top of those four,
+ * `scripts/__tests__/assert-match-payload-guard-wiring.test.mjs` walks
+ * `packages/*` and checks the same `--import` string textually, so a fifth
+ * package that never wires the guard at all fails there by name. As with
  * every guard installed this way, a run that skips `--import` altogether — a
  * bare `node --test tests/foo.test.js` — is out of reach; such a run also has
  * no fs write sandbox, which is the larger reason not to do it.

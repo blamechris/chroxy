@@ -351,11 +351,12 @@ The recurring causes:
 instead; `assert.deepEqual` against a large array wants the same treatment (map
 to the short field first). `#7401` swept the existing sites, and
 `scripts/lib/assert-match-payload-guard.mjs` — installed via each
-`tests/_setup.mjs` or the `--import` hook, in every package that runs
-`node --test` (`#7413` extended the original server-only install to
-`claude-hooks`, `protocol` and `design-tokens`) — bounds the payload for
-anything that lands later, without ever changing a verdict. Subjects a test
-wrote itself (a log, a generated script) are small and fine as-is.
+`tests/_setup.mjs` or `--import assert-match-payload-guard-hook.mjs`, in every
+package that runs `node --test` (`#7413` extended the original server-only
+install to `claude-hooks`, `protocol` and `design-tokens`) — bounds the
+payload for anything that lands later, without ever changing a verdict.
+Subjects a test wrote itself (a log, a generated script) are small and fine
+as-is.
 
 **Never pass `--test-force-exit`, and run what CI runs.** Every package that runs
 `node --test` refuses it now (`scripts/lib/no-test-force-exit.mjs`, installed via

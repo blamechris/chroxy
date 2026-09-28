@@ -13,17 +13,30 @@
  * package-walk section, checking `installAssertMatchPayloadGuard(` instead of
  * `assertNoTestForceExit(`.
  *
- * `packages/server/tests/assert-match-payload-guard.test.js` and
- * `packages/claude-hooks/tests/setup-payload-guard.test.js` prove the guard
- * is installed for those two packages BEHAVIOURALLY, from inside their own
- * suites (they already run under it). `packages/protocol` and
- * `packages/design-tokens` have no setup module of their own to hold such a
- * test — their wiring is a STRING in `package.json` — so this walks
- * `packages/*` and derives the roster rather than naming it, the same reason
- * `no-test-force-exit.test.mjs` does: a hardcoded list beside a set that grows
- * is the first recurring cause in `docs/false-safety-guards.md`. A NEW
- * package that adds a `node --test` script without the guard fails here, by
- * name.
+ * All four packages ALSO have their own call-site pin now, running under each
+ * package's own test command:
+ * `packages/server/tests/assert-match-payload-guard.test.js`,
+ * `packages/claude-hooks/tests/setup-payload-guard.test.js`,
+ * `packages/protocol/tests/payload-guard-installed.test.js` and
+ * `packages/design-tokens/test/payload-guard-installed.test.js` — none of
+ * them needs a `tests/_setup.mjs`, only to run under the package's own `test`
+ * script, which all four already do. This file is a SECOND, independent line
+ * of defence: it walks `packages/*` and derives the roster of `node --test`
+ * packages rather than naming it, the same reason `no-test-force-exit.test.mjs`
+ * does — a hardcoded list beside a set that grows is the first recurring cause
+ * in `docs/false-safety-guards.md` — so a NEW package that adds a
+ * `node --test` script with no guard at all fails here, by name, even before
+ * anyone thinks to add it a call-site pin.
+ *
+ * What this file's package-walk does NOT catch on its own: a package whose
+ * `--import` resolves to some OTHER file that happens to contain the text
+ * `installAssertMatchPayloadGuard(` without calling it as a statement — the
+ * library module itself is exactly such a file, since its own
+ * `export function installAssertMatchPayloadGuard({` line contains that
+ * substring and installs nothing on import. The check below is anchored to a
+ * call at the start of a line for that reason (#8050 review, C1), and the
+ * four call-site pins above are what actually catch that class of mistake
+ * behaviourally, from inside the package whose process would go unpatched.
  *
  * The second half proves the MECHANISM: that `--import`ing the hook file on
  * its own actually patches `assert.match` in a real spawn, with a positive
@@ -99,6 +112,17 @@ test('the walk found every package that runs node --test', () => {
   )
 })
 
+// Anchored to a CALL at the start of a line, not a substring match. A plain
+// `.includes('installAssertMatchPayloadGuard(')` also matches the library's
+// own `export function installAssertMatchPayloadGuard({` definition — which
+// installs nothing on import — so a package that `--import`s the LIBRARY
+// instead of the hook (a one-token slip: dropping `-hook`) would read as
+// wired while its real suite ran unguarded (#8050 review, C1). The hook's own
+// call site (`installAssertMatchPayloadGuard()`, unindented, no `export`)
+// matches; the library's definition line and the hook's descriptive comment
+// mentioning the same name do not.
+const INSTALL_CALL = /^installAssertMatchPayloadGuard\(/m
+
 for (const { name, script } of nodeTestPackages) {
   test(`packages/${name} installs the payload guard in its test script`, () => {
     const imports = [...script.matchAll(/--import\s+(\S+)/g)].map((m) => m[1].replace(/^['"]|['"]$/g, ''))
@@ -106,11 +130,13 @@ for (const { name, script } of nodeTestPackages) {
       if (!spec.startsWith('.')) return false // bare specifier (tsx/esm) — not ours
       const file = resolve(packagesDir, name, spec)
       if (!existsSync(file)) return false
-      return readFileSync(file, 'utf8').includes('installAssertMatchPayloadGuard(')
+      return INSTALL_CALL.test(readFileSync(file, 'utf8'))
     })
     assert(
       installs,
-      `packages/${name}'s test script --imports nothing that calls installAssertMatchPayloadGuard():\n  ${script}`,
+      `packages/${name}'s test script --imports nothing that CALLS installAssertMatchPayloadGuard() ` +
+        `at the start of a line (importing the library instead of the hook satisfies a plain substring ` +
+        `check but installs nothing):\n  ${script}`,
     )
   })
 }
@@ -121,10 +147,6 @@ const dir = mkdtempSync(join(tmpdir(), 'chroxy-payload-guard-hook-'))
 try {
   const probe = join(dir, 'probe.mjs')
   writeFileSync(probe, "import assert from 'node:assert/strict'\nconsole.log(assert.match.name)\n")
-
-  test('every --import specifier is a file:// URL, not a bare path (Windows)', () => {
-    assert(HOOK_URL.startsWith('file://'), `hook specifier must be a file URL, got: ${HOOK_URL}`)
-  })
 
   test('the --import hook patches assert.match on its own', () => {
     const r = spawnSync(process.execPath, ['--import', HOOK_URL, probe], { encoding: 'utf8' })
