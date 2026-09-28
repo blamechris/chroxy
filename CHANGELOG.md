@@ -54,6 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`chroxy-byok-<hex>`) — `docker compose ls -a` shows whether that project
   is still up before you touch its env-file.
 
+- **Dashboard chat scroller is now keyboard-focusable (#7406).** `.chat-messages`
+  had no `tabIndex`, so a keyboard-only reader could never move focus into it —
+  axe's `scrollable-region-focusable` rule, WCAG 2.1.1. `tabIndex={0}` puts the
+  container itself in the tab order, and `role="region"` + `aria-label="Conversation"`
+  give it an exposed, reliably-announced accessible name (a bare `aria-label` on
+  a generic `div` is not; `role="log"` was deliberately avoided — its implicit
+  `aria-live="polite"` would announce every streamed token). #7404's scroll-intent
+  `onKeyDown` handler now also fires with the container itself as
+  `document.activeElement` (previously reachable only from a focused descendant
+  like a row's copy button), so Arrow/PageUp/PageDown/Home/End scroll the
+  conversation once it holds focus directly. A `:focus-visible` outline using the
+  `--border-focus` design token (inset, matching the sidebar rows) makes the
+  focused state visible.
+
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
   (#8038).** #8035 (below) closed the per-turn gap for `gemini` and `codex

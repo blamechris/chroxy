@@ -282,6 +282,46 @@ describe('ChatView', () => {
     expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="error"\]\s*\{[^}]*--rail-color/)
   })
 
+  // #7406 — `.chat-messages` is a scrollable region a keyboard-only reader had
+  // no way to reach (axe `scrollable-region-focusable`, WCAG 2.1.1). These lock
+  // in the fix: the container itself joins the tab order and carries an
+  // exposed, accessible name — never `role="log"`, whose implicit
+  // `aria-live="polite"` would announce every streamed token.
+  describe('keyboard-focusable chat scroller (#7406)', () => {
+    it('is focusable and exposes an accessible name via role="region" (#7406)', () => {
+      render(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+
+      // Acceptance's own prove-it-red case: with `tabIndex` removed, `.focus()`
+      // on a plain, non-focusable div is a no-op in jsdom (as in real browsers)
+      // and `document.activeElement` stays `document.body` — this assertion
+      // goes red on that mutant.
+      container.focus()
+      expect(document.activeElement).toBe(container)
+
+      // `role="region"` + `aria-label` (not a bare `aria-label` on a generic
+      // div) is what makes the name reliably announced — asserted the same way
+      // assistive tech resolves it, via the accessible-name-aware role query.
+      expect(screen.getByRole('region', { name: 'Conversation' })).toBe(container)
+    })
+
+    it('does not use role="log" (its implicit aria-live would spam every streamed token) (#7406)', () => {
+      render(<ChatView messages={makeMessages(3)} isStreaming />)
+      const container = screen.getByTestId('chat-messages')
+      expect(container).not.toHaveAttribute('role', 'log')
+      expect(container).toHaveAttribute('role', 'region')
+    })
+
+    it('gives the focused scroller a visible, design-token focus outline (#7406)', () => {
+      // `.chat-view` clips with `overflow: hidden`, so the outline must be
+      // INSET (negative offset) like the sidebar rows use, not the global
+      // positive-offset default — a positive offset would be clipped on a
+      // full-bleed container. Asserted against components.css (the generated
+      // theme.css token file is never hand-edited — see CLAUDE.md).
+      expect(componentsCss).toMatch(/\.chat-messages:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--border-focus\)[^}]*outline-offset:\s*-2px/)
+    })
+  })
+
   it('numbers queued follow-ups by send order when more than one is queued (chat redesign #6392)', () => {
     render(
       <ChatView
@@ -652,14 +692,16 @@ describe('ChatView', () => {
     // Two things about the key cases, both learned the hard way.
     //
     // (1) The keydown is dispatched from a FOCUSED DESCENDANT, not from the
-    // container. A keydown targets `document.activeElement`, and `.chat-messages`
-    // is not itself focusable — so firing one straight at the container tests a
-    // path the browser never takes. The path it DOES take is a reader who has
-    // clicked something inside the list (a row's copy button, an expandable tool
-    // row): focus is then inside the scroller, the browser scrolls the nearest
-    // scrollable ancestor — this container — and the keydown bubbles to the
-    // handler. That is the case this covers. Making the scroller itself
-    // focusable is a separate a11y gap, tracked on its own issue.
+    // container — a reader who has clicked something inside the list (a row's
+    // copy button, an expandable tool row): focus is then inside the scroller,
+    // the browser scrolls the nearest scrollable ancestor — this container —
+    // and the keydown bubbles to the handler. That is the case this covers.
+    // #7406 made the scroller itself focusable too (`tabIndex={0}`, so a
+    // keydown can also target the container directly, with focus on `body`
+    // beforehand reachable by Tab) — see the "#7406" describe below for that
+    // sibling path; it is deliberately a separate case rather than folded in
+    // here, since #7404's fix and #7406's reachability fix landed separately
+    // and each has its own regression coverage.
     //
     // (2) No `scroll` event is fired. A page-sized jump lands well outside
     // SCROLL_THRESHOLD, so one would let the POSITION path set `userScrolledUp`
@@ -684,6 +726,36 @@ describe('ChatView', () => {
         await act(() => {
           scroller.drag(-360)
           fireEvent.keyDown(rowControl, { key })
+          vi.advanceTimersByTime(20)
+        })
+        expect(container.scrollTop).toBe(start - 360)
+
+        await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
+        expect(container.scrollTop).toBe(start - 360)
+        vi.useRealTimers()
+      })
+    }
+
+    // #7406 — the SAME key-intent path, now reachable from the state #7404
+    // could not cover: focus on the container itself (the common case — a
+    // reader who Tabbed to the scroller, or clicked its own background, never
+    // a descendant). Before #7406 this was unreachable: `.chat-messages` had no
+    // `tabIndex`, `container.focus()` was a no-op, and the keydown would have
+    // targeted `document.body` instead — reaching neither the browser's native
+    // scroll-the-focused-element behaviour nor this handler.
+    for (const key of ['ArrowUp', 'PageUp', 'Home']) {
+      it(`holds the reader in place after a ${key} key with the container itself focused (#7406)`, async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const start = scroller.bottom
+
+        await act(() => { container.focus() })
+        expect(document.activeElement).toBe(container)
+
+        await act(() => {
+          scroller.drag(-360)
+          fireEvent.keyDown(container, { key })
           vi.advanceTimersByTime(20)
         })
         expect(container.scrollTop).toBe(start - 360)

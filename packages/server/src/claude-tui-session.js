@@ -2148,6 +2148,19 @@ export class ClaudeTuiSession extends BaseSession {
   async _respawnPty() {
     if (this._destroying) return
     this._respawning = true
+    // #8043: drop the dead PTY's handle before anything below awaits. Every
+    // caller reaches here only after the old PTY was declared gone — the
+    // backoff timer, the post-spawn and non-refusal-catch reschedules, and
+    // #8038's sendMessage revival of a refused session — and `_onPtyGone`
+    // deliberately leaves `_term` pointing at the dead handle (destroy()'s
+    // #5351 note). Resetting `_ptyExited` below while keeping that handle made
+    // the two disagree: `_spawnPty`'s early returns (node-pty import failure,
+    // the argv guard, a sync spawn throw) assign no new `_term`, so the
+    // `!this._term || this._ptyExited` check after the spawn passed on the DEAD
+    // handle, emitted `ready`, reset the budget and armed no retry; and a
+    // destroy() landing mid-respawn SIGTERMed the reaped pid and armed SIGKILL
+    // against it. With the handle gone, both read "no live PTY", which is true.
+    this._term = null
     // (1) reset the teardown latches so a future death re-triggers _onPtyGone.
     this._ptyExited = false
     this._ptyExitInfo = null
@@ -2196,11 +2209,11 @@ export class ClaudeTuiSession extends BaseSession {
         if (wasFreshRetry) this._freshRetryPending = true
         // The PTY that died before this attempt is still dead and no new one
         // was spawned, so restore the latch the top of this method cleared.
-        // `_term` still holds the dead handle (_onPtyGone never nulls it), and
-        // with `_ptyExited` false destroy() would SIGTERM its long-reaped pid
-        // and arm the SIGKILL escalation against it (a recycled pid), and
-        // writes/repaints would target it as if it were live. On main that
-        // window lasted one backoff delay; a refusal lasts until the next input.
+        // The top of this method already dropped the dead handle (#8043), so
+        // destroy() has nothing to signal either way; the latch is kept true so
+        // every `_ptyExited` reader (sendMessage's runnable check, the
+        // `_onPtyGone` guard) agrees with the null `_term` that no PTY is live
+        // for as long as the refusal lasts — until the next input.
         this._ptyExited = true
         this._respawnCount = 0
         this._refuseSpawn(err, this._log || log)
@@ -4869,11 +4882,13 @@ export class ClaudeTuiSession extends BaseSession {
       const pid = term.pid
       this._term = null
       // #5351 review — only signal a PTY we believe is still alive. _onPtyGone
-      // does NOT null _term, so after an unexpected exit (crash / respawn
-      // exhaustion) destroy() sees `_term` non-null AND `_ptyExited` true. The
-      // process has already been reaped by then, so sending ANY signal — even
-      // SIGTERM — risks hitting a recycled pid. Skip the whole kill path; the
-      // PTY is already gone and there's nothing to reap.
+      // does NOT null _term, so after an unexpected exit destroy() can see
+      // `_term` non-null AND `_ptyExited` true. The process has already been
+      // reaped by then, so sending ANY signal — even SIGTERM — risks hitting a
+      // recycled pid. Skip the whole kill path; the PTY is already gone and
+      // there's nothing to reap. (Every respawn attempt drops the dead handle
+      // first — #8043 — so after one, whether in flight, refused, early-
+      // returned or exhausted, `_term` is null or the NEW PTY's handle.)
       if (!this._ptyExited) {
         try { term.kill('SIGTERM') } catch { /* already dead */ }
       }
