@@ -108,6 +108,17 @@ function makeGateShim() {
   return { dir, shimPath, markerPath }
 }
 
+// #8039 review (Copilot) — a `.mjs` shebang shim (`makeGateShim()` above) is
+// not directly executable via the REAL `execFile` on Windows: there is no
+// shebang interpretation the way POSIX `execve` provides, so `Server Windows
+// Tests` failed every case below that spawns one. Every case that instead
+// proves a REFUSAL (a block-mode ledger mismatch, no `sessionManager`
+// configured) never reaches `execFile` at all — those keep running,
+// unmodified, on every platform, including Windows.
+const WINDOWS_SHIM_EXEC_SKIP = process.platform === 'win32'
+  ? 'a .mjs shebang shim is not directly executable via execFile on Windows; the refusal/no-spawn cases still run there'
+  : false
+
 describe('WebTaskManager', () => {
   let manager
 
@@ -747,7 +758,7 @@ describe('WebTaskManager', () => {
         assert.equal(execCalls.length, 0, 'no verified gate available must refuse, not silently fall back to an unverified spawn')
       })
 
-      it('exercises the REAL default exec path end to end (no deps.exec override)', async () => {
+      it('exercises the REAL default exec path end to end (no deps.exec override)', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         // ws-server.js calls detectFeatures() with no deps at all — this
         // pins THAT exact path (the default `exec = deps.exec ||
         // execFileAsync` line), using a real gate-shim binary as the
@@ -796,7 +807,7 @@ describe('WebTaskManager', () => {
         assert.equal(errors[0].taskId, taskId)
       })
 
-      it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', async () => {
+      it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         const shim = makeGateShim()
         try {
           const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: hashFile(shim.shimPath) } })
@@ -815,7 +826,7 @@ describe('WebTaskManager', () => {
         }
       })
 
-      it('gates OFF: behaviour is unchanged — the task still spawns through the resolved path', async () => {
+      it('gates OFF: behaviour is unchanged — the task still spawns through the resolved path', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         const shim = makeGateShim()
         try {
           FixtureClaudeProvider.resolvedOverride = shim.shimPath
@@ -841,7 +852,7 @@ describe('WebTaskManager', () => {
         assert.match(task.error, /PROVIDER_BINARY_UNVERIFIED/)
       })
 
-      it('re-resolves fresh on every call rather than reusing a stale/cached path', async () => {
+      it('re-resolves fresh on every call rather than reusing a stale/cached path', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         // One-shot calls (this class has no create-time session to pin a
         // path from) re-run the FULL gate fresh each time, unlike a chat
         // session's pinned per-turn spawnPreflight. Two DIFFERENT shims prove
@@ -895,7 +906,7 @@ describe('WebTaskManager', () => {
         )
       })
 
-      it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', async () => {
+      it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         const shim = makeGateShim()
         try {
           const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: hashFile(shim.shimPath) } })
@@ -913,7 +924,7 @@ describe('WebTaskManager', () => {
         }
       })
 
-      it('gates OFF: behaviour is unchanged — teleport still spawns through the resolved path', async () => {
+      it('gates OFF: behaviour is unchanged — teleport still spawns through the resolved path', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
         const shim = makeGateShim()
         try {
           FixtureClaudeProvider.resolvedOverride = shim.shimPath
