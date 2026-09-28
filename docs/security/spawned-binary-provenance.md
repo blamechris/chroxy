@@ -529,9 +529,12 @@ re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. The catalog
 probe has no create-time step to pin from (same as the other one-shots), so it
 re-resolves AND re-verifies fresh on every call instead — the web-task spawns
 closed by #8039 follow the identical pattern. A row marked "none" gets at
-most the create-time check; the `chroxy start` dependency checks tracked in
-#8041 are the only remaining spawns that run with no gate of their own. Where
-a gate does run, it hashes only the file at the pinned path (#8040).
+most the create-time check; the known remaining spawns that run with no gate
+of their own are the `chroxy start` dependency checks (#8041) and the
+`chroxy session resume` CLI subcommand (`cli/session-cmd.js`), which runs a
+bare `execFileSync('claude', ['--resume', convId, …])` with no gate at all
+(#8061). Where a gate does run, it hashes only the file at the pinned path
+(#8040).
 
 **Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not
 treated as the process dying. `claude-cli` and `claude-tui` normally respond to

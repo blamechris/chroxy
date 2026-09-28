@@ -35,8 +35,17 @@ const log = createLogger('web-task-manager')
  * one-shot resolver, generalized by #8036 to take an explicit provider class
  * — reusing the SAME gate the codex model-catalog probe now uses rather than
  * writing a second one. This class has no create-time session to pin a path
- * from, so the full gate (existence, quarantine, the direct-exec shim
- * refusal, opt-in provenance, the version floor) re-runs fresh on every call.
+ * from, so the gate re-runs fresh on every call. What that gate actually
+ * checks depends on `CliSession.preflight` (`cli-session.js`): existence,
+ * quarantine, and the opt-in provenance/signature gate — CliSession declares
+ * no `requiresDirectExec` and no `minVersion`, so the direct-exec shim
+ * refusal and the version floor `runProviderPreflight` supports for OTHER
+ * providers are no-ops here (#8060 review — the earlier text overclaimed
+ * this). One concrete consequence: `execFile` is called directly here, with
+ * none of `CliSession`'s own spawn-time `.cmd`-shim routing, so on a
+ * `.cmd`-only Windows host the gate still passes and a launch/teleport then
+ * fails with an unlabeled `spawn EINVAL` rather than a diagnosed shim
+ * refusal — tracked as a follow-up, not fixed in this PR.
  */
 
 const POLL_INTERVAL_MS = 10_000 // 10s between status checks
@@ -132,17 +141,18 @@ export class WebTaskManager extends EventEmitter {
    * into the same silent false/false a missing CLI produces.
    *
    * @param {object} [deps] - test seam: { exec } promisified execFile
-   *   stand-in, { bin } a resolved binary path/thunk overriding the gate
-   *   (value or zero-arg function; used by tests that want to exercise the
-   *   `--help` parsing logic in isolation from the binary gate itself).
+   *   stand-in (used by tests that want to exercise the `--help` parsing
+   *   logic in isolation from the binary gate itself; the gate ALWAYS runs
+   *   via `_verifyBinary()` — #8060 review: an earlier draft also accepted a
+   *   `{ bin }` override that bypassed the gate entirely, with no caller in
+   *   `src/` or `tests/` — a bypass seam nobody used, in a security fix, is
+   *   attack surface. Removed).
    */
   async detectFeatures(deps = {}) {
     const exec = deps.exec || execFileAsync
     let bin
     try {
-      bin = 'bin' in deps
-        ? (typeof deps.bin === 'function' ? deps.bin() : deps.bin)
-        : this._verifyBinary()
+      bin = this._verifyBinary()
     } catch (err) {
       this._remoteAvailable = false
       this._teleportAvailable = false
@@ -284,8 +294,13 @@ export class WebTaskManager extends EventEmitter {
       const stdout = await execFileAsync(bin, ['--teleport', task.taskId], { cwd: task.cwd })
       return { success: true, output: stdout }
     } catch (err) {
-      const codeSuffix = err?.code ? ` (code=${err.code})` : ''
-      if (err?.code && /^PROVIDER_(BINARY|CREDENTIAL)_/.test(err.code)) {
+      // #8060 review nitpick: only a GATE refusal gets a `(code=…)` suffix —
+      // an ordinary execFile failure (a numeric exit code, ENOENT) also sets
+      // `err.code`, and appending that to every teleport failure changed the
+      // existing web_task_error text for failures unrelated to this PR.
+      const isGateRefusal = typeof err?.code === 'string' && /^PROVIDER_(BINARY|CREDENTIAL)_/.test(err.code)
+      const codeSuffix = isGateRefusal ? ` (code=${err.code})` : ''
+      if (isGateRefusal) {
         log.warn(`web task teleport refused: ${err.message}${codeSuffix}`)
       }
       throw new Error(`Teleport failed: ${err.message}${codeSuffix}`)

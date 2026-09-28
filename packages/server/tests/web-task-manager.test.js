@@ -785,26 +785,66 @@ describe('WebTaskManager', () => {
     })
 
     describe('launchTask / _spawnRemoteTask', () => {
-      it('a block-mode ledger mismatch refuses: task fails immediately, no spawn attempted', () => {
-        const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
-        manager = makeManager({ sessionManagerOpts: { binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger } })
-        manager._remoteAvailable = true
+      it('a block-mode ledger mismatch refuses: task fails immediately, no spawn attempted', async () => {
+        // #8060 review (Suggestion 2 / mutant R2): the status/message
+        // assertions below prove the refusal was REPORTED — they do NOT
+        // prove nothing was EXECUTED. A mutant that still runs
+        // execFile(this._providerClass.resolvedBinary, ...) before marking
+        // the task failed passed this test at 47/47 when the fixture
+        // resolved to process.execPath (running it with a bad flag leaves no
+        // trace). Pinning resolvedOverride at a REAL marker-writing shim
+        // closes that gap: if the mutant's fallback spawn ran, THIS shim's
+        // marker would exist.
+        const shimBad = makeGateShim()
+        try {
+          const ledger = fakeProvenanceLedger({ [shimBad.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+          manager = makeManager({ sessionManagerOpts: { binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger } })
+          FixtureClaudeProvider.resolvedOverride = shimBad.shimPath
+          manager._remoteAvailable = true
 
-        const errors = []
-        manager.on('task_error', (e) => errors.push(e))
+          const errors = []
+          manager.on('task_error', (e) => errors.push(e))
 
-        const { taskId, task } = manager.launchTask('build a site')
+          const { taskId, task } = manager.launchTask('build a site')
 
-        // Synchronous: _spawnRemoteTask's gate-refusal branch sets
-        // task.status BEFORE launchTask() returns. execFile's callback is
-        // always async (never before the call returns), so a task still
-        // 'pending' here would mean the gate was bypassed and a real spawn
-        // was attempted instead — this is the assertion that goes red if the
-        // #8039 gate is removed or its refusal swallowed.
-        assert.equal(task.status, 'failed')
-        assert.match(task.error, /PROVIDER_BINARY_PROVENANCE/)
-        assert.equal(errors.length, 1)
-        assert.equal(errors[0].taskId, taskId)
+          // Synchronous: _spawnRemoteTask's gate-refusal branch sets
+          // task.status BEFORE launchTask() returns. execFile's callback is
+          // always async (never before the call returns), so a task still
+          // 'pending' here would mean the gate was bypassed and a real spawn
+          // was attempted instead — this is the assertion that goes red if the
+          // #8039 gate is removed or its refusal swallowed. Runs on every
+          // platform, including Windows.
+          assert.equal(task.status, 'failed')
+          assert.match(task.error, /PROVIDER_BINARY_PROVENANCE/)
+          assert.equal(errors.length, 1)
+          assert.equal(errors[0].taskId, taskId)
+
+          // The direct "was a process actually spawned" observation is
+          // POSIX-only: Windows cannot execFile the .mjs shim at all
+          // (WINDOWS_SHIM_EXEC_SKIP), so an absent marker there would prove
+          // nothing about the gate — see the reviewer's "Windows gap" note.
+          if (!WINDOWS_SHIM_EXEC_SKIP) {
+            // Positive control FIRST: prove this environment can actually
+            // spawn a shim at all, so "the bad shim's marker is absent"
+            // below is evidence of a refusal, not of a broken test harness.
+            const shimGood = makeGateShim()
+            try {
+              ledger._records.set(shimGood.shimPath, { sha256: hashFile(shimGood.shimPath) })
+              FixtureClaudeProvider.resolvedOverride = shimGood.shimPath
+              manager.launchTask('positive control')
+              await waitFor(() => existsSync(shimGood.markerPath), { label: 'positive-control spawn marker' })
+              assert.equal(existsSync(shimGood.markerPath), true,
+                'positive control: a correctly-pinned shim must actually spawn in this environment')
+
+              assert.equal(existsSync(shimBad.markerPath), false,
+                'the WRONG-hash shim must NEVER have been spawned — this is the test that goes red under mutant R2 (exec the unverified resolvedBinary before reporting the refusal)')
+            } finally {
+              rmSync(shimGood.dir, { recursive: true, force: true })
+            }
+          }
+        } finally {
+          rmSync(shimBad.dir, { recursive: true, force: true })
+        }
       })
 
       it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
@@ -891,19 +931,51 @@ describe('WebTaskManager', () => {
       }
 
       it('a block-mode ledger mismatch refuses: rejects, no spawn attempted', async () => {
-        const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
-        manager = makeManager({ sessionManagerOpts: { binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger } })
-        const taskId = seedTask(manager)
+        // #8060 review (Suggestion 2 / mutant R2) — same gap as the launch
+        // refusal test above: rejecting with the right message proves the
+        // refusal was REPORTED, not that nothing was EXECUTED. Pin
+        // resolvedOverride at a real marker-writing shim so a mutant that
+        // execs the unverified resolvedBinary before rethrowing the gate
+        // error leaves a trace.
+        const shimBad = makeGateShim()
+        try {
+          const ledger = fakeProvenanceLedger({ [shimBad.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+          manager = makeManager({ sessionManagerOpts: { binaryProvenanceMode: 'block', binaryProvenanceLedger: ledger } })
+          FixtureClaudeProvider.resolvedOverride = shimBad.shimPath
+          const taskId = seedTask(manager)
 
-        await assert.rejects(
-          () => manager.teleportTask(taskId),
-          (err) => {
-            assert.match(err.message, /Teleport failed/)
-            assert.match(err.message, /PROVIDER_BINARY_PROVENANCE/,
-              'this is the test that goes red if the #8039 gate is removed — a bypassed gate would instead surface a spawn/argv error with no gate code')
-            return true
-          },
-        )
+          await assert.rejects(
+            () => manager.teleportTask(taskId),
+            (err) => {
+              assert.match(err.message, /Teleport failed/)
+              assert.match(err.message, /PROVIDER_BINARY_PROVENANCE/,
+                'this is the test that goes red if the #8039 gate is removed — a bypassed gate would instead surface a spawn/argv error with no gate code')
+              return true
+            },
+          )
+
+          // POSIX-only direct spawn observation — see the launch refusal
+          // test's comment above for why Windows cannot make this check.
+          if (!WINDOWS_SHIM_EXEC_SKIP) {
+            const shimGood = makeGateShim()
+            try {
+              ledger._records.set(shimGood.shimPath, { sha256: hashFile(shimGood.shimPath) })
+              FixtureClaudeProvider.resolvedOverride = shimGood.shimPath
+
+              const result = await manager.teleportTask(taskId)
+              assert.equal(result.success, true,
+                'positive control: teleport against a correctly-pinned shim must actually succeed in this environment')
+              assert.equal(existsSync(shimGood.markerPath), true)
+
+              assert.equal(existsSync(shimBad.markerPath), false,
+                'the WRONG-hash shim must NEVER have been spawned — this is the test that goes red under mutant R2 (exec the unverified resolvedBinary before rethrowing the gate error)')
+            } finally {
+              rmSync(shimGood.dir, { recursive: true, force: true })
+            }
+          }
+        } finally {
+          rmSync(shimBad.dir, { recursive: true, force: true })
+        }
       })
 
       it('a matching ledger entry spawns the VERIFIED absolute path, not the bare name', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {

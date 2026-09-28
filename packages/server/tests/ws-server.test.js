@@ -11,6 +11,7 @@ import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnection
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
+import { CliSession } from '../src/cli-session.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -4862,5 +4863,61 @@ describe('#5579: production handler ctx is deep-asserted at construction', () =>
         assert.equal(calls[calls.length - 1], false, 'last-viewer departure → OFF')
       } finally { srv.close() }
     })
+  })
+})
+
+// #8060 review (Suggestion 1 / mutant R1) — every #8039 test exercised
+// WebTaskManager directly, constructed with an explicit sessionManager +
+// providerClass. Nothing pinned the ONE production call site
+// (`ws-server.js`'s `new WebTaskManager({ cwd, sessionManager })`) actually
+// forwards the real daemon SessionManager. Dropping `sessionManager` from
+// that line stayed green across 737 tests in the reviewer's run: with it
+// gone, WebTaskManager falls back to its own `sessionManager = null`
+// default, and every web task in production silently fails closed forever
+// (detectFeatures reports unavailable; every launch/teleport refuses) — a
+// regression no existing suite would catch, the #7262 "wired to none of its
+// callers" class.
+describe('WsServer wires the real SessionManager into WebTaskManager (#8060 review — mutant R1)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('detectFeatures() at start() calls sessionManager.verifyOneShotExecutable(CliSession) — the production wiring', async () => {
+    // A stub sessionManager whose verifyOneShotExecutable RECORDS its
+    // argument and REFUSES (so nothing actually spawns during the test,
+    // hermetic on any machine/CI leg). A real WsServer.start() must reach
+    // it, with the real CliSession class — not SdkSession, not omitted.
+    const calls = []
+    const { manager } = createMockSessionManager([], {
+      verifyOneShotExecutable: (ProviderClass) => {
+        calls.push(ProviderClass)
+        const err = new Error('refused for test (#8060 R1)')
+        err.code = 'PROVIDER_BINARY_UNVERIFIED'
+        throw err
+      },
+    })
+
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-8060-r1',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    await startServerAndGetPort(server)
+
+    assert.equal(calls.length, 1,
+      'WebTaskManager.detectFeatures() must call sessionManager.verifyOneShotExecutable exactly once at daemon start — this is the assertion that goes red under mutant R1 (dropping sessionManager from the ws-server.js constructor call)')
+    assert.equal(calls[0], CliSession,
+      'the production wiring must verify CliSession — the class web tasks actually shell out through')
+
+    // Cheaper corroborating check (the reviewer's stated alternative): the
+    // WebTaskManager constructed in production holds the SAME sessionManager
+    // instance passed into WsServer, not a stub/omitted one.
+    assert.equal(server._webTaskManager._sessionManager, manager)
   })
 })

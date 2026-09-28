@@ -135,8 +135,22 @@ function handleLaunchWebTask(ws, client, msg, ctx) {
     }
   }
   try {
-    const { taskId } = ctx.services.webTaskManager.launchTask(msg.prompt, { cwd: effectiveCwd })
-    log.info(`Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
+    const { taskId, task } = ctx.services.webTaskManager.launchTask(msg.prompt, { cwd: effectiveCwd })
+    // #8060 review nitpick: launchTask() does NOT throw for a #8039 binary-
+    // gate refusal discovered at spawn time (it creates the task, then
+    // _spawnRemoteTask's own gate check fails it immediately) — only for an
+    // invalid prompt or an unavailable feature. Logging "launched" here
+    // regardless was misleading for a task that never actually spawned; the
+    // client still gets web_task_error via the task_error broadcast wired in
+    // ws-server.js, same as any other spawn failure. Optional-chained: a
+    // test double (or a future caller) that returns `{ taskId }` with no
+    // `task` field must not throw here — it falls back to the pre-existing
+    // "launched" log line, same as before this change.
+    if (task?.status === 'failed') {
+      log.warn(`Web task launch refused: ${taskId} — ${task.error}`)
+    } else {
+      log.info(`Web task launched: ${taskId} — "${msg.prompt.slice(0, 60)}"`)
+    }
   } catch (err) {
     const errorMsg = err instanceof WebTaskUnavailableError
       ? err.message

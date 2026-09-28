@@ -22,10 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same binary would refuse a fresh chat session. All three now resolve their
   binary through `SessionManager.verifyOneShotExecutable(CliSession)` — the
   same #8030/#8036 verified one-shot resolver the codex model-catalog probe
-  uses, reused rather than a second gate — re-running the full create-time
-  preflight (existence, quarantine, the direct-exec shim refusal, opt-in
-  provenance, the version floor) fresh on every call, since this class has no
-  create-time session of its own to pin a path from. A gate refusal degrades
+  uses, reused rather than a second gate — re-running `CliSession`'s
+  preflight (existence, quarantine, opt-in provenance/signature verification,
+  and its optional-credential check) fresh on every call, since this class
+  has no create-time session of its own to pin a path from. `CliSession`
+  declares neither `requiresDirectExec` nor a `minVersion`, so the
+  direct-exec shim refusal and version floor other providers get are no-ops
+  here — a `.cmd`-only Windows host still passes this gate and fails later
+  with an unlabeled spawn error, which is tracked as a follow-up rather than
+  fixed in this change. A gate refusal degrades
   `detectFeatures()` to "feature unavailable" (logged at `warn`, naming the
   refusal's code) and fails a launch or teleport with the gate's coded error,
   surfaced through the same `task_error`/`web_task_error` paths those
