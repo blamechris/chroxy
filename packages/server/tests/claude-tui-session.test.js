@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'child_process'
-import { chmodSync, fstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
+import { chmodSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, symlinkSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, sep } from 'path'
 import { fileURLToPath } from 'url'
@@ -7969,6 +7969,19 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     assert.deepEqual(leftovers, [], 'no temp file should survive a successful write')
   })
 
+  // #7415: the two checks above are satisfied by a bare truncating
+  // writeFileSync too — it lands the value, and it never creates a .tmp- file
+  // to begin with. Assert an observable side effect a plain writeFileSync(path,
+  // value) would NOT produce, bringing this suite to parity with the
+  // claude-cli side's "goes through the restricted-write helper" test (#7371).
+  it('the sidecar write is owner-only (0600), not the umask-dependent mode a plain writeFileSync leaves', { skip: process.platform === 'win32' }, () => {
+    session = makeSession()
+    const target = join(dir, 'permission-mode')
+    session._writePermissionModeSidecarAtomic(target, 'plan')
+    assert.equal(statSync(target).mode & 0o777, 0o600,
+      'this file decides whether a tool call is prompted — a bare writeFileSync leaves it at the umask-dependent default (typically 0o644), not 0o600')
+  })
+
   it('helper replaces an existing value cleanly (no torn intermediate left on disk)', () => {
     session = makeSession()
     const target = join(dir, 'permission-mode')
@@ -7977,6 +7990,29 @@ describe('ClaudeTuiSession — atomic permission-mode sidecar write (#5334)', ()
     assert.equal(readFileSync(target, 'utf8'), 'acceptEdits')
     const leftovers = readdirSync(dir).filter((f) => f.includes('.tmp-'))
     assert.deepEqual(leftovers, [], 'no temp file should survive replacing an existing value')
+  })
+
+  // #7415: the property #5334 actually exists to guarantee — a concurrent
+  // PreToolUse hook `cat` never observes a torn value — is closest to being
+  // proven by showing the write goes through a fresh temp file + rename(2)
+  // rather than an in-place truncate. A hard link to the pre-write file is a
+  // witness onto the OLD inode: rename(2) swaps the directory entry onto a new
+  // inode and never touches the old one's data, so the witness must still read
+  // the OLD value. A truncating writeFileSync instead opens and rewrites the
+  // SAME inode the witness points at, so the witness would observe the NEW
+  // value too — this is the one assertion in the suite actually sensitive to
+  // "temp file + rename" rather than to side effects (perms, .tmp- litter) a
+  // truncating write happens not to disturb.
+  it('replacing an existing value goes through temp-file + rename(2), not an in-place truncate (hard-link witness)', { skip: process.platform === 'win32' }, () => {
+    session = makeSession()
+    const target = join(dir, 'permission-mode')
+    writeFileSync(target, 'approve')
+    const witness = join(dir, 'permission-mode.witness')
+    linkSync(target, witness)
+    session._writePermissionModeSidecarAtomic(target, 'acceptEdits')
+    assert.equal(readFileSync(target, 'utf8'), 'acceptEdits', 'target sees the new value')
+    assert.equal(readFileSync(witness, 'utf8'), 'approve',
+      'the pre-write inode (reachable only via the hard link once rename(2) retargets the directory entry) must be untouched — an in-place truncate would mutate it too, and the witness would read the new value')
   })
 
   it('helper rethrows and orphans no tmp file when the write fails (target dir missing)', () => {
