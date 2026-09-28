@@ -8,7 +8,7 @@ import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
-import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
+import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
@@ -1088,13 +1088,15 @@ export class SessionManager extends EventEmitter {
    * @returns {{ mode: string, signatureGate: boolean, ledger: object|null }|null}
    */
   _binaryProvenanceOptions() {
-    return (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
-      ? {
-        mode: this._binaryProvenanceMode,
-        signatureGate: this._binarySignatureGate,
-        ledger: this.binaryProvenanceLedger,
-      }
-      : null
+    // #8061: the bag-shape normalization itself lives in
+    // `buildBinaryProvenanceOptions` (utils/preflight.js), shared with the
+    // `chroxy resume` CLI gate — this stays a thin instance-field
+    // reader so the two never drift on what counts as "off".
+    return buildBinaryProvenanceOptions({
+      mode: this._binaryProvenanceMode,
+      signatureGate: this._binarySignatureGate,
+      ledger: this.binaryProvenanceLedger,
+    })
   }
 
   /**

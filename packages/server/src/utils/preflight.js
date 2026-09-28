@@ -289,6 +289,31 @@ function versionRemediation(binarySpec) {
 }
 
 /**
+ * Build the `provenance` options bag `runProviderPreflight` expects from
+ * already-resolved `mode` / `signatureGate` / `ledger` values, or `null` when
+ * the operator has not opted into either gate (mode 'off' AND no signature
+ * gate) — passing `null` makes `runProviderPreflight` skip the whole
+ * provenance step, byte-identical to the pre-#6858 spawn path.
+ *
+ * This is the single normalization both `SessionManager._binaryProvenanceOptions()`
+ * (the daemon's create-time / per-turn / one-shot gate, reading its own
+ * `_binaryProvenanceMode` / `_binarySignatureGate` / `binaryProvenanceLedger`
+ * instance fields) and the `chroxy resume` CLI gate (#8061, which has
+ * no `SessionManager` to read those fields off of — it resolves mode and
+ * signatureGate straight from the loaded config instead) now share, so what
+ * counts as "the gate is off" is defined in exactly one place rather than two
+ * copies that could drift on the answer.
+ *
+ * @param {{ mode: string, signatureGate: boolean, ledger: object|null }} opts
+ * @returns {{ mode: string, signatureGate: boolean, ledger: object|null }|null}
+ */
+export function buildBinaryProvenanceOptions({ mode, signatureGate, ledger }) {
+  return (mode !== 'off' || signatureGate === true)
+    ? { mode, signatureGate: signatureGate === true, ledger: ledger || null }
+    : null
+}
+
+/**
  * Run binary + credential preflight for a provider class.
  *
  * Throws ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, or
