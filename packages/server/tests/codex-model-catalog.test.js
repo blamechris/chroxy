@@ -886,7 +886,14 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
     }
   })
 
-  it('DOES resolve the binary on the no-session spawn branch', async () => {
+  // #8059 review Suggestion 1 / S1 — this used to be "DOES resolve the binary
+  // on the no-session spawn branch", pinning that a no-`bin` call fell back to
+  // the UNVERIFIED `resolvedBinary` getter. #8036/S1 removed that fallback: a
+  // caller with neither a live `client` nor a verified `bin` now gets
+  // REFUSED, so the old `resolvedBinary` getter must never be consulted at
+  // all. Split in two: this pins the new refusal, the test after it pins that
+  // a caller-supplied `bin` is still resolved lazily on the spawn branch.
+  it('#8036/S1: no client and no bin refuses — the old unverified resolvedBinary getter is never consulted', async () => {
     const original = Object.getOwnPropertyDescriptor(CodexSession, 'resolvedBinary')
     let resolves = 0
     Object.defineProperty(CodexSession, 'resolvedBinary', {
@@ -895,12 +902,65 @@ describe('codex model refresh — the CodexSession / CodexAppServerSession bindi
     })
     try {
       const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
-      await getProvider('codex').refreshModels({
+      const out = await getProvider('codex').refreshModels({
         createClient: () => client,
         windows: new Map(),
       })
-      assert.equal(resolves, 1, 'the thunk is DEFERRED, not dropped — the spawn branch still needs a binary')
-      assert.deepEqual(getCodexCatalogRows().map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'])
+      assert.equal(out, null, 'no client and no verified bin must refuse, not spawn from an unverified resolve')
+      assert.equal(resolves, 0, 'the old unverified resolvedBinary getter must never be consulted by the new default')
+      assert.equal(getCodexCatalogState(), 'unset')
+    } finally {
+      Object.defineProperty(CodexSession, 'resolvedBinary', original)
+    }
+  })
+
+  it('a caller-supplied bin thunk is still resolved lazily, deferred to the spawn branch', async () => {
+    const client = stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST })
+    let binCalls = 0
+    await getProvider('codex').refreshModels({
+      bin: () => { binCalls++; return '/fake/codex' },
+      createClient: () => client,
+      windows: new Map(),
+    })
+    assert.equal(binCalls, 1, 'the caller-supplied bin thunk is DEFERRED to the spawn branch — called exactly once')
+    assert.deepEqual(getCodexCatalogRows().map((r) => r.id), ['gpt-6-astra', 'gpt-5.5'])
+  })
+
+  // #8059 review Critical 1 — the `'bin' in deps ? deps.bin : () => {...}`
+  // expression at codex-session.js ~:806-820 is the ONLY thing that carries a
+  // caller's gated `bin` into the real `probeCodexCatalog`. Every OTHER test
+  // in this file either supplies no `bin` at all (exercising the S1 default
+  // above) or supplies one that always resolves — none of them prove that a
+  // SUPPLIED `bin` actually wins over the default, or that the default is
+  // never consulted once one is supplied. This is that proof, direct against
+  // the real CodexSession/CodexAppServerSession binding — not a fake — so a
+  // one-line revert of the #8036 link (e.g. `bin: () => this.resolvedBinary`,
+  // unconditionally) is caught here even though every ws-history test (which
+  // exercises a hand-rolled fake of this same contract) would stay green.
+  it('#8036: a caller-supplied bin WINS over the unverified default, and a refusing one spawns nothing', async () => {
+    const original = Object.getOwnPropertyDescriptor(CodexSession, 'resolvedBinary')
+    let defaultReads = 0
+    Object.defineProperty(CodexSession, 'resolvedBinary', { configurable: true, get() { defaultReads++; return '/unverified/codex' } })
+    try {
+      const created = []
+      const refusal = Object.assign(new Error('pinned hash mismatch'), { code: 'PROVIDER_BINARY_PROVENANCE' })
+      const refused = await getProvider('codex').refreshModels({
+        bin: () => { throw refusal },
+        createClient: (o) => { created.push(o); return stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST }) },
+        windows: new Map(),
+      })
+      assert.equal(refused, null)
+      assert.equal(created.length, 0, 'a gate refusal must construct no client')
+      assert.equal(defaultReads, 0, 'the unverified default must never be consulted when bin is supplied')
+      _resetModelDiscoveryStateForTests()
+      await getProvider('codex').refreshModels({
+        bin: () => '/verified/codex',
+        createClient: (o) => { created.push(o); return stubClient({ [CODEX_CATALOG_METHOD]: LIVE_MODEL_LIST }) },
+        windows: new Map(),
+      })
+      assert.equal(created.length, 1)
+      assert.equal(created[0].bin, '/verified/codex', 'the spawn must use exactly the gate-verified path')
+      assert.equal(defaultReads, 0)
     } finally {
       Object.defineProperty(CodexSession, 'resolvedBinary', original)
     }

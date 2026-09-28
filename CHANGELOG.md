@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The codex model-catalog probe now spawns `codex app-server` through the
+  same verified one-shot binary gate as the summarizer and semantic-title
+  calls, instead of a fresh, unverified resolve (#8036).** On every post-auth
+  `available_models` push, `scheduleProviderModelsRefresh` called
+  `CodexSession.refreshModels()` with no live client, which spawned a
+  short-lived `codex app-server` from `resolvedBinary` — a plain PATH resolve
+  with no existence/quarantine check, no direct-exec shim refusal, and no
+  provenance verification. In `binaryProvenance.mode: 'block'`, a `codex`
+  binary whose pinned hash no longer matched was still executed by this path
+  on every dashboard auth, even though a fresh chat session with the same
+  binary would have been refused. `SessionManager.verifyOneShotExecutable()`
+  (#8030) is now generalized to accept an explicit provider class, and
+  `scheduleProviderModelsRefresh` threads a `bin` thunk built from it into
+  `refreshModels(deps)` — running the FULL create-time preflight (existence,
+  quarantine, the direct-exec shim refusal, provenance, and credentials) on
+  every no-session probe, not just the provenance check: a codex install with
+  no `OPENAI_API_KEY` and no `codex login` OAuth creds now no longer probes
+  either, matching what `createSession` already refuses for that same
+  configuration. A gate refusal (missing binary, quarantine, missing
+  credential, or a `block`-mode hash mismatch) spawns nothing, leaves the
+  previously discovered catalog untouched, and logs the refusing gate's error
+  code at `warn`; a live codex session's own probe (which reuses its
+  already-verified client) is unaffected. A refusal is TTL-cached for the same
+  5-minute window a success is (`CODEX_CATALOG_TTL_MS`), so e.g. a `codex
+  login` run to fix a credential refusal can take up to 5 minutes to show up
+  in the picker. `CodexSession.refreshModels`'s own default (no `client` and
+  no `bin` at all) now fails closed too, rather than falling back to an
+  unverified `resolvedBinary` — the same precedent #8030 set for the
+  summarizer/semantic-title one-shots.
+
 - **A `claude-tui` native session whose route marker is rejected no longer
   relaunches claude five times and dies with "failed to stay alive" (#8057).**
   On an explicit native agent-connection session, a PTY respawn whose
