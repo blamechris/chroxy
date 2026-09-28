@@ -67,11 +67,27 @@ function createSession(opts = {}) {
     const child = createMockChild()
     session.spawns.push({ args, child })
     session._child = child
-    session._processReady = true
-    session._drainPendingQueue()
+    // #8038 review: the REAL _spawnPersistentProcess flips _processReady and
+    // drains the pending queue from `child.once('spawn', ...)` — an event
+    // Node can never emit synchronously within the same call stack as
+    // `spawn()`. A synchronous flip+drain here let a caller's OWN message
+    // race the drain (sendMessage() hadn't pushed it into _pendingQueue yet
+    // when the drain ran), which stayed invisible only because the OLD
+    // sendMessage() pushed before calling _restartAfterStop(). #8038 moved
+    // that call earlier (a gate refusal must reject THIS input before it is
+    // ever admitted as queued) — mirror the real async ordering here so the
+    // tests below exercise the same race production code actually has.
+    process.nextTick(() => {
+      session._processReady = true
+      session._drainPendingQueue()
+    })
   }
   return session
 }
+
+/** Wait for one process.nextTick — long enough for the async spawn stub above
+ * (and the drain it triggers) to run. */
+const tick = () => new Promise((resolve) => process.nextTick(resolve))
 
 /** A session mid-conversation: a live child, ready, with a known resume id. */
 function createRunningSession(opts = {}) {
@@ -91,7 +107,7 @@ function sentPrompts(child) {
 }
 
 describe('#7438 — Stop then a follow-up restarts the session', () => {
-  it('respawns on the next input after a user Stop and resumes the same conversation', () => {
+  it('respawns on the next input after a user Stop and resumes the same conversation', async () => {
     const session = createRunningSession()
 
     // The real Stop path: SIGINT, then the child exits.
@@ -102,6 +118,7 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     assert.equal(session.spawns.length, 0, 'Stop itself must NOT respawn (#4602)')
 
     session.sendMessage('follow-up after stop')
+    await tick()
 
     assert.equal(session.spawns.length, 1, 'the next input must restart the child')
     const args = session.spawns[0].args
@@ -110,13 +127,14 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     assert.equal(args[idx + 1], 'conv-7438', 'restart must resume the SAME claude conversation')
   })
 
-  it('delivers the queued follow-up on warmup instead of stranding it', () => {
+  it('delivers the queued follow-up on warmup instead of stranding it', async () => {
     const session = createRunningSession()
 
     session.interrupt()
     session._handleChildClose(0)
 
     session.sendMessage('follow-up after stop')
+    await tick()
 
     assert.equal(session._pendingQueue.length, 0, 'follow-up must not be stranded in _pendingQueue')
     assert.equal(session.spawns.length, 1)
@@ -127,7 +145,7 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     )
   })
 
-  it('re-arms after a synchronous start() failure so the next input can retry, not strand forever', () => {
+  it('re-arms after a synchronous start() failure so the next input can retry, not strand forever', async () => {
     const session = createRunningSession()
     // The catch path emits 'error'; an EventEmitter with no 'error' listener
     // throws (Node special-case). Production always has one (session-manager);
@@ -152,14 +170,19 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     assert.equal(errors.length, 1, 'the start failure is surfaced as an error event')
 
     // Next input, start() now works: restart succeeds and drains the follow-up.
+    // Async, like the shared createSession() stub above (#8038 review) — the
+    // real _spawnPersistentProcess never flips ready synchronously either.
     session._spawnPersistentProcess = (args) => {
       const child = createMockChild()
       session.spawns.push({ args, child })
       session._child = child
-      session._processReady = true
-      session._drainPendingQueue()
+      process.nextTick(() => {
+        session._processReady = true
+        session._drainPendingQueue()
+      })
     }
     session.sendMessage('second input')
+    await tick()
     assert.equal(session.spawns.length, 1, 'the retry restarts the child')
     assert.notEqual(session._child, null, 'the session is alive again after the retry')
     // The restart delivers the previously-stranded follow-up (the point of the
@@ -171,7 +194,28 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     )
   })
 
-  it('restarts exactly once when several follow-ups arrive after a Stop', () => {
+  it('#8038: a synchronous start() failure during a refusal revival is reported as itself, not under the stale refusal code', () => {
+    const session = createSession()
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    // A prior respawn was refused by the binary gate: no child, latch set.
+    const refusal = new Error('pinned claude hash changed')
+    refusal.code = 'PROVIDER_BINARY_PROVENANCE'
+    session._spawnRefusal = refusal
+    // The revival's start() then fails for an unrelated reason, synchronously.
+    session._spawnPersistentProcess = () => { throw new Error('spawn boom') }
+
+    const admissions = []
+    session.sendMessage('after a refusal', [], { onInputAdmission: (a) => admissions.push(a) })
+
+    assert.equal(session._spawnRefusal, null, 'the revival consumed the stale refusal')
+    assert.equal(admissions[0]?.status, 'queued', 'not rejected under the previous refusal code')
+    assert.equal(session._stoppedByUser, true, 're-armed so the next input retries the restart')
+    assert.equal(errors.length, 1, 'only the real start failure is surfaced')
+    assert.ok(/spawn boom/.test(errors[0].message), 'the error names the real failure')
+  })
+
+  it('restarts exactly once when several follow-ups arrive after a Stop', async () => {
     const session = createRunningSession()
 
     session.interrupt()
@@ -180,9 +224,19 @@ describe('#7438 — Stop then a follow-up restarts the session', () => {
     session.sendMessage('first follow-up')
     session.sendMessage('second follow-up')
     session.sendMessage('third follow-up')
+    await tick()
 
     assert.equal(session.spawns.length, 1, 'only one restart for the whole burst')
-    assert.equal(session._pendingQueue.length, 0, 'nothing stranded in the pending queue')
+    // The respawned child handles one turn at a time (a live claude-cli process
+    // is not concurrent): the warmup drain delivers the FIRST follow-up
+    // immediately; the other two wait in _pendingQueue for that turn's `result`
+    // to drain them next — queued behind real work, not stranded (#5936).
+    assert.deepEqual(
+      sentPrompts(session.spawns[0].child),
+      ['first follow-up'],
+      'the warmup drain delivers exactly the first queued follow-up',
+    )
+    assert.equal(session._pendingQueue.length, 2, 'the remaining follow-ups wait for the in-flight turn, not lost')
   })
 })
 

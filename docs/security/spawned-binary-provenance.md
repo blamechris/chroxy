@@ -192,14 +192,18 @@ When a gate is ON, a verification failure blocks (`block` mode / signature gate)
 loudly surfaces (`warn` mode) — it **never silently spawns an unverified binary**
 at the point where the gate runs. For providers that spawn more than once per
 session, that is only as strong as how often the gate runs: `claude-sdk`,
-`gemini`, and `codex exec` all now re-run it before every turn (§5, #8035) —
-before #8035 only `claude-sdk` did, and the per-turn subprocess providers
-(gemini, `codex exec`) verified their binary only at create. Some spawns
-still run with no per-spawn gate: `claude-cli` and `claude-tui` respawns and
-`codex` app-server's `start()` (#8038), the `codex` model-catalog probe
-(#8036), web tasks (#8039), and the `chroxy start` dependency checks, which run
-the configured provider's binary and `cloudflared` with `--version` (#8041). The §5 table
-lists what each provider verifies and when.
+`gemini`, and `codex exec` all now re-run it before every turn (§5, #8035), and
+`claude-cli`, `claude-tui` and `codex` app-server now re-run it before every
+(re)spawn too (§5, #8038). Before #8035/#8038 only `claude-sdk` and the
+`claude-tui` explicit native auth route did; every other provider verified its
+binary only at create. A refusal on a respawn is NOT treated as the process
+dying: nothing is spawned, no further backoff is armed, and the session sits
+idle until the next spawn request re-runs the gate (see "Per-spawn refusal
+semantics" after the §5 table). Some spawns still run with
+no per-spawn gate: the `codex` model-catalog probe (#8036), web tasks (#8039),
+and the `chroxy start` dependency checks, which run the configured provider's
+binary and `cloudflared` with `--version` (#8041). The §5 table lists what each
+provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -306,11 +310,13 @@ platform package (removed from the desktop build), so `SdkSession` now sets
 
 **This closed the "checked one file, ran another" gap, but #7986 alone was a
 resolver-parity fix, not a per-turn re-verification — #8030 adds the latter.**
-The Agent SDK execs a brand-new process on every chat turn (`claude-tui` and
-`claude-cli` keep one PTY or child per session, respawned only on events such
-as a model switch or a crash; those respawns are #8038), so
-"verified once at session-create" covered turn one only. Three spawn paths now
-each get their own gate:
+The Agent SDK execs a brand-new process on every chat turn (`claude-cli` and
+`claude-tui` keep one child or PTY per session, respawned only on events: for
+`claude-cli` a model switch, a permission-mode change, the next input after
+Stop or a crash; for `claude-tui` a PTY death — those respawns are gated too,
+closing #8038),
+so "verified once at session-create" covered turn one only. Three spawn paths
+now each get their own gate:
 
 - **Chat turns.** `SessionManager` PINS the exact path create-time preflight
   verified (`verifiedBinary`, forwarded as `providerOpts.spawnPreflight`) and
@@ -490,9 +496,9 @@ the same installed `claude` on the end user's machine.
 | `claude-sdk` | create | every turn, pinned to the create-time path (#8030) |
 | `gemini` | create | every turn, pinned to the create-time path (#8035) |
 | `codex exec` (`CHROXY_CODEX_APPSERVER=0`, legacy) | create | every turn, pinned to the create-time path (#8035) |
-| `codex` app-server (default route) | create | none — one spawn per session, at `start()`, from a fresh resolve rather than the create-time path (#8038) |
-| `claude-cli` | create | none — the first spawn and every respawn (model switch, permission-mode change, the next message after Stop, crash restart) re-resolve `claude` fresh and unverified (#8038) |
-| `claude-tui` | create | none on the default route — every PTY spawn and respawn uses a fresh resolve, or the create-time path for an agent-connection session (#8038); the explicit native auth route re-runs preflight before every spawn |
+| `codex` app-server (default route) | create | its one spawn per session, at `start()`, re-verified and pinned to the create-time path (#8038) |
+| `claude-cli` | create | every (re)spawn, pinned to the create-time path — first spawn, model switch, permission-mode change, the next message after Stop, crash restart (#8038) |
+| `claude-tui` | create | every (re)spawn, pinned to the create-time path — first spawn, each PTY respawn (≤5 backoff attempts + the #5348 fresh-conversation retry), and the revival attempt on the next input after a refusal (#8038); the explicit native auth route's own `connectionRuntimePreflight` re-check counts as the same gate |
 | Containerised (`docker-sdk` and other `containerized` providers) | none on the host | none on the host — the binary runs inside the container; a `claude-sdk` turn with no in-container spawn hook is refused (`CONTAINER_SPAWN_UNAVAILABLE`, above) |
 | `acp` (config-driven ACP agents) | none | none — operator-configured `command`; a spawn-failure backstop labels a quarantined or not-executable ABSOLUTE command (§2) |
 | One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
@@ -503,19 +509,57 @@ the same installed `claude` on the end user's machine.
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than
 re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. A row marked
-"none" gets at most the create-time check; the respawns, the catalog probe,
-the web-task spawns and the startup checks tracked in #8036, #8038, #8039 and
-#8041 are the known spawns that run with no gate of their own. Where a gate
-does run, it hashes only the file at the pinned path (#8040).
+"none" gets at most the create-time check; the catalog probe, the web-task
+spawns and the startup checks tracked in #8036, #8039 and #8041 are the known
+spawns that still run with no gate of their own. Where a gate does run, it
+hashes only the file at the pinned path (#8040).
+
+**Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not
+treated as the process dying. `claude-cli` and `claude-tui` normally respond to
+a lost child/PTY with a bounded, backing-off auto-respawn (≤5 attempts) that
+gives up loudly (`respawn_exhausted` / `pty_respawn_exhausted`) if the process
+keeps failing to come back — but a binary the gate refuses to launch was never
+going to "come back" no matter how many times the backoff retried it, so
+scheduling that timer would just burn the bounded budget into a misleading
+"failed to stay alive" for a binary chroxy deliberately declined to run.
+Instead: nothing is spawned, exactly one coded `error` is emitted (the gate's
+own `code`, e.g. `PROVIDER_BINARY_PROVENANCE`; no error-text rewriter — a
+provenance message's hex hash prefix can spuriously match a `429`/`401`
+text-classification pattern), no further backoff is armed and the respawn count
+resets (the next attempt is user-initiated, mirroring how a model switch
+already resets it; a refused crash respawn does keep the one rolling
+rate-limit slot its scheduling took), and the session sits idle — not busy, not
+respawning — until something asks for a new spawn: the next input, or for
+`claude-cli` also a model or permission-mode change. That spawn re-runs the
+gate; an input it still refuses is rejected with the gate's code instead of
+being queued. `codex` app-server has no respawn loop at all: a
+refusal there throws out of `start()` before the client is created, and
+`SessionManager` handles it exactly like any other `start()` failure.
+
+The very first spawn is gated too, and a refusal there (possible only if the
+binary changes in the moment between create-time preflight and the spawn)
+differs by provider: `claude-tui` and `codex` app-server reject `start()`, so
+session creation fails with the gate's code (a restored session is parked as a
+failed restore); `claude-cli` latches the refusal like any respawn, so the
+session is listed but never becomes ready, and its first input re-runs the gate
+and is rejected with the code.
 
 **The pinned per-turn gate runs in every mode, not only in `block`.** It is
 wired whenever create-time preflight ran, whatever `binaryProvenance.mode`
-says. In the default `off` mode it still re-checks, on every turn, that the
-pinned path exists, is executable and is not quarantined, the direct-exec shim
-refusal, the version floor, and any required credentials. A pinned binary that
-disappears (`nvm uninstall`, a package removal) therefore refuses every later turn
-with a message saying to start a new session, rather than spawning whatever
-`PATH` now resolves.
+says. In the default `off` mode it still re-checks, on every turn — and, since
+#8038, on every respawn — that the pinned path exists, is executable and is
+not quarantined, the direct-exec shim refusal, the version floor, and any
+required credentials. A pinned binary that disappears (`nvm uninstall`, a
+package removal) therefore refuses every later turn AND every later respawn
+attempt with a message saying to start a new session, rather than spawning
+whatever `PATH` now resolves. The same holds for respawns (#8038): a `PATH`
+change after a session starts can no longer redirect a model switch, a
+permission-mode change, a post-Stop revival or a crash respawn to a different
+binary than create-time preflight verified. A binary replaced IN PLACE at the
+pinned path is a different case: the pinned path still exists, so in `off` and
+`warn` mode the respawn runs the new file; only `block` mode (a hash mismatch)
+or the signature gate refuses it, and even then only the file at the pinned
+path is hashed (#8040).
 
 ## 6. Operator remediation quick reference
 

@@ -431,7 +431,17 @@ export class CodexAppServerSession extends BaseSession {
     // Capture the EXACT binary the client will spawn so the spawn-time backstop
     // (#6708) verifies that path — in start()'s catch AND later in
     // _onClientExit — rather than a fresh re-resolve.
-    const attemptedBinary = CodexAppServerSession.resolvedBinary
+    //
+    // #8038: routed through the shared binary gate instead of the bare static
+    // read. app-server spawns exactly once per session (at `start()`), but that
+    // one spawn was STILL an unverified fresh resolve — `this._spawnPreflight`
+    // (wired by SessionManager whenever create-time preflight ran) was already
+    // sitting on this instance unused. A refusal here throws BEFORE
+    // `_createClient`, so no child process is spawned; SessionManager's
+    // `_handleAsyncStartFailure` handles the rejection the same way it handles
+    // any other start() failure (fresh → session_create_failed with the gate's
+    // code; restore → parked).
+    const attemptedBinary = this._gatedSpawnBinary('codex')
     this._spawnedBinary = attemptedBinary
     this._client = this._createClient({
       bin: attemptedBinary,

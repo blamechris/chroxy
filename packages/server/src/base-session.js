@@ -61,6 +61,28 @@ export function reportInputAdmission(sendOptions, admission) {
   return admission
 }
 
+/**
+ * #8038 (extracted from #8030's `_refuseTurnBeforeDispatch`): the shared
+ * admission shape for an input the binary gate refused before anything was
+ * dispatched — a per-turn provider's turn (SdkSession, JsonlSubprocessSession)
+ * OR a persistent provider's spawn/respawn (CliSession, ClaudeTuiSession).
+ * Exported so both refusal paths report the identical wire shape instead of a
+ * hand-rolled second literal drifting from this one.
+ *
+ * `_refuseTurnBeforeDispatch` below is the ORIGINAL caller and its wire shape
+ * must stay byte-identical — this is a pure extraction, not a behavior change.
+ *
+ * @param {Error & { code?: string }} [err]
+ * @returns {{status: string, delivery: string, retrySafe: boolean, reason: string, message: string}}
+ */
+export function spawnRefusalAdmission(err) {
+  return {
+    status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+    reason: err?.code || 'turn_refused',
+    message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
+  }
+}
+
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
 // resets the timer; the window only bounds *silent stretches*, not wall-
@@ -393,6 +415,12 @@ export class BaseSession extends EventEmitter {
     // exec and the per-turn subprocess spawn (Gemini/Codex-exec) share one
     // source of truth via `_gatedSpawnBinary` below.
     this._spawnPreflight = typeof spawnPreflight === 'function' ? spawnPreflight : null
+    // #8038 — latched by `_refuseSpawn` when a (re)spawn attempt's binary gate
+    // (CliSession._spawnPersistentProcess, ClaudeTuiSession._spawnPty /
+    // _respawnPty) throws instead of returning a verified path. null means
+    // "no refusal outstanding" — the normal state, and the state after a
+    // revival succeeds. See `_refuseSpawn`'s doc for the full contract.
+    this._spawnRefusal = null
     this.model = model || null
     // Actual model the underlying CLI/SDK reports at init time. May differ
     // from `this.model` (the user's requested override) when no override
@@ -698,11 +726,46 @@ export class BaseSession extends EventEmitter {
     // An uncoded throw (e.g. from a subclass's augment hook) is not a
     // binary-verification failure, so it gets a neutral code.
     this.emit('error', { code: err.code || 'TURN_REFUSED', message: err.message })
-    reportInputAdmission(sendOptions, {
-      status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
-      reason: err.code || 'turn_refused',
-      message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
-    })
+    // #8038: extracted to spawnRefusalAdmission() so CliSession/ClaudeTuiSession's
+    // spawn-refusal-on-send path reports the identical wire shape — see that
+    // function's doc. Byte-identical to the pre-#8038 inline literal.
+    reportInputAdmission(sendOptions, spawnRefusalAdmission(err))
+  }
+
+  /**
+   * #8038 — the shared refusal path for a (re)SPAWN the binary gate stopped,
+   * as opposed to `_refuseTurnBeforeDispatch` above (which refuses a single
+   * TURN on a provider that spawns fresh per turn). CliSession's
+   * `_spawnPersistentProcess` and ClaudeTuiSession's `_respawnPty` call this
+   * when `_gatedSpawnBinary` (or, for the TUI native route, the equivalent
+   * `_connectionRuntimePreflight` re-check) throws instead of returning a
+   * verified path — nothing was spawned, so there is no child/PTY error to
+   * report through the normal exit-handling path.
+   *
+   * Latches `this._spawnRefusal = err` so:
+   *  - the provider's own respawn machinery can tell "the gate refused this
+   *    attempt" apart from "the child/PTY actually died" and skip scheduling
+   *    a backoff timer for a spawn that was never going to happen anyway
+   *    (which would otherwise burn the bounded respawn budget into a
+   *    misleading `respawn_exhausted` / "failed to stay alive");
+   *  - the next `sendMessage` re-runs the gate once (CliSession via
+   *    `_restartAfterStop`, ClaudeTuiSession via `_respawnPty`) and, if it
+   *    refuses again, rejects THAT input with `spawnRefusalAdmission` instead
+   *    of queuing it behind a child that will never start.
+   *
+   * Emits the SAME coded `error` shape `_refuseTurnBeforeDispatch` does
+   * (`code: err.code || …, message: err.message`) with NO error-text
+   * rewriter — see that method's doc for why (a provenance message embeds a
+   * hex hash that can spuriously match a 429/401 text-classification
+   * pattern and get rewritten into a wrong, misleading message).
+   *
+   * @param {Error & { code?: string }} err
+   * @param {{ error: Function }} logger — the caller's logger (`this._log || log`)
+   */
+  _refuseSpawn(err, logger) {
+    this._spawnRefusal = err
+    logger.error(`Spawn refused by the binary gate: ${err.message}`)
+    this.emit('error', { code: err?.code || 'SPAWN_REFUSED', message: err.message })
   }
 
   /**

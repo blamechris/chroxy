@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-cli` and `claude-tui` now re-verify their binary before every
+  (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
+  (#8038).** #8035 (below) closed the per-turn gap for `gemini` and `codex
+  exec`, but `claude-cli` and `claude-tui` keep one long-lived child/PTY per
+  session and spawn it again later: `claude-cli` on a model switch, a
+  permission-mode change, the next message after the user clicks Stop, or a
+  crash; `claude-tui` whenever its PTY dies. Those respawns ran with no
+  existence, quarantine, provenance or version check — `claude-cli` and a
+  plain `claude-tui` session resolved `claude` afresh each time, and a
+  `claude-tui` agent-connection session reused its create-time path without
+  re-verifying it (only the explicit native auth route re-ran preflight). In
+  block mode, replacing the installed `claude` in place
+  (`npm i -g @anthropic-ai/claude-code`) therefore went unchecked until the
+  next such respawn ran it. `codex` app-server spawns once per session, but
+  from a fresh, unpinned resolve rather than the path create-time preflight
+  verified. All three now route through the same `_gatedSpawnBinary` seam
+  #8030/#8035 use, pinned to the exact create-time path. A refusal on a
+  (re)spawn is not treated as the process dying: nothing is spawned, one coded
+  `error` is emitted, no further auto-respawn backoff is armed and the respawn
+  count resets, so a refused binary can no longer burn that budget into a
+  misleading `respawn_exhausted` / `pty_respawn_exhausted` "failed to stay
+  alive" (this includes the `claude-tui` native route, whose binary-gate
+  refusals used to do exactly that; its auth-status refusals still take the
+  backoff path, #8044). The session sits idle until something asks for a new spawn
+  — the next input, or for `claude-cli` also a model or permission-mode change
+  — which re-runs the gate; an input the gate still refuses is rejected with
+  the gate's code rather than queued, and `claude-cli` messages queued before
+  the refusal are held and delivered once a later attempt succeeds. `codex`
+  app-server has no respawn loop; a refusal there fails `start()` before the
+  client is created, the same as any other start failure. Operator-visible:
+  with `binaryProvenance.mode: block`, a swapped `claude` now refuses the next
+  respawn of a live `claude-cli` or `claude-tui` session instead of running
+  it, and pinning applies in every mode, including the default `off` (a
+  vanished pinned binary refuses the respawn with a message to start a new
+  session, rather than spawning whatever `PATH` now resolves).
+
 - **`gemini` and `codex exec` sessions now re-verify their binary before
   every turn, not just at session create (#8035).** #8030 (below) closed this
   gap for the Agent SDK; the per-turn subprocess providers were the ones left
@@ -47,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing absolute command keeps Node's raw `ENOENT` (it names the configured
   path), and a bare (PATH-resolved) command keeps its raw error, since the
   binary-health check can't tell "not found" from other causes for a
-  non-absolute path. Spawns that are still ungated are tracked in #8036, #8038,
+  non-absolute path. Spawns that are still ungated are tracked in #8036,
   #8039 and #8041.
 
 - **Every Agent SDK spawn — chat turn, session summarizer, and semantic
