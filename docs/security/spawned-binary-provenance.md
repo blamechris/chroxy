@@ -277,7 +277,19 @@ the `claude-tui` version-pin probe. A `block`-mode hash mismatch or a failed
 signature gate now reports a `fail` doctor row naming the gate's status code
 and remediation, and the binary is NEVER exec'd; `chroxy start` treats that
 `fail` exactly like any other failed dependency check (a non-zero exit,
-unless `--skip-checks`). With gates off, behaviour is unchanged. The §5 table
+unless `--skip-checks`); a `warn`-mode issue reports a `warn` row (not only a
+log line) carrying the same status. With gates off, behaviour is unchanged.
+The gate runs ONLY on a path the #6708 health check confirmed healthy — never
+on a not-found bare name, which would otherwise hash relative to the current
+working directory and could mislabel a missing binary as a provenance
+failure, or TOFU-pin an unrelated same-named file under that bare, relative
+key; `checkClaudeTuiCliVersion()` shares this precondition, but only runs its
+own health check when a gate is actually on, matching its pre-#8041 shape
+when it's off. A blocked claude-tui-driving probe returns `null` rather than
+a second `fail` row — the SAME `claude` binary's own provider-preflight row
+already reports the identical refusal. `chroxy start -c <path>` gates from
+THAT file's `binaryProvenance`, the same way the `chroxy resume` row above
+honors its own `-c`; env vars still win over either file. The §5 table
 lists what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
@@ -580,7 +592,7 @@ the same installed `claude` on the end user's machine.
 | `codex` model-catalog probe (post-auth `available_models` refresh) | n/a | the FULL create-time preflight (existence, quarantine, the direct-exec shim refusal, provenance, credentials) fresh on every no-session probe, via `SessionManager.verifyOneShotExecutable(ProviderClass)` — the #8030 one-shot resolver generalized to take an explicit provider class (#8036); a codex install with no `OPENAI_API_KEY`/`codex login` now refuses to probe too, same as `createSession`; a refusal is TTL-cached for the same 5-minute window a success is; a live session's own probe (`CodexAppServerSession.start()`) reuses that session's already-verified client and spawns nothing new |
 | Web tasks (`web-task-manager.js`) | n/a | a fresh full gate on every call, at all THREE no-session spawn sites (feature detection at daemon start, every `launch_web_task`, every teleport), via `SessionManager.verifyOneShotExecutable(CliSession)` — the same #8030/#8036 one-shot resolver the codex model-catalog probe uses; a refusal degrades feature detection to unavailable (logged at `warn`) and fails a launch/teleport with the gate's coded error — nothing is spawned either way (#8039) |
 | `chroxy resume` CLI subcommand (`cli/session-cmd.js`) | n/a | a fresh full gate on every invocation, via `runProviderPreflight(CliSession, { provenance })` — no create-time step to pin from, and no daemon `SessionManager` either, so the provenance options bag is built straight from a config file (`<configDir>/config.json`, or `-c <path>`, #8065 review S4) that must be readable/parseable if it exists (#8065 review S3) and the daemon's own `binary-trust.json` ledger, opened lazily only when a gate is on (#8065 review nitpick 3); a refusal prints the gate error's message and exits non-zero with nothing spawned (#8061) |
-| `chroxy start` dependency checks | n/a | a fresh full gate on every run (`chroxy start` itself has no create-time session to pin from), via `checkBinary()` / `checkClaudeTuiCliVersion()` gating the SAME resolved path they then probe for `--version` — the configured provider's binary, `cloudflared`, and (for `claude-tui`) the version-pin probe all share one config+env-resolved mode/signatureGate and one lazily-constructed `binary-trust.json` ledger; a refusal reports a doctor `fail` row naming the gate's status code and remediation, and `chroxy start` exits non-zero on it (unless `--skip-checks`) with nothing spawned (#8041) |
+| `chroxy start` dependency checks | n/a | a fresh provenance/signature gate on every run (`chroxy start` itself has no create-time session to pin from), via `checkBinary()` / `checkClaudeTuiCliVersion()` gating the SAME resolved path they then probe for `--version` — the configured provider's binary, `cloudflared`, and (for `claude-tui`) the version-pin probe all share one mode/signatureGate, resolved from `-c <path>`'s config (or `<configDir>/config.json`, #8065-review-S4-style — mirroring the `chroxy resume` row above) plus env, and one lazily-constructed `binary-trust.json` ledger. This is narrower than the daemon's per-provider "full gate": doctor's own existence/quarantine/shim/env-credential checks run as their own separate steps (not part of `verifyProvenance`), and the claude-tui probe only runs its existence/quarantine check when a provenance or signature gate is actually on. A refusal reports a doctor `fail` row naming the gate's status code and remediation, and `chroxy start` exits non-zero on it (unless `--skip-checks`) with nothing spawned; a `warn`-mode issue reports a `warn` row rather than only a log line (#8041, #8074) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
 verified (when preflight ran and the provider isn't containerised) rather than

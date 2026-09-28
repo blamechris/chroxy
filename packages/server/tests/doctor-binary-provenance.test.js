@@ -23,11 +23,12 @@
  * Conventions (`fakeProvenanceLedger`, `SPAWN_GATE_*_HASH`, `makeGateShim`,
  * `WINDOWS_SHIM_EXEC_SKIP`) mirror `cli/session-cmd-binary-gate.test.js`'s
  * #8061 suite, so a regression in the shared gate machinery is caught by
- * either suite. Every fixture (shim, marker, fake HOME for the cloudflared
- * candidate-path test) lives under `os.tmpdir()`; the real
- * `~/.chroxy`/`~/.claude` trees are never touched (the fs-sandbox guard in
- * `tests/_setup.mjs` would throw if they were), and `CHROXY_CONFIG_DIR` is
- * already redirected to a per-process tmp dir by that same setup file.
+ * either suite. Every fixture (shim, marker) lives under `os.tmpdir()`; the
+ * real `~/.chroxy`/`~/.claude` trees are never touched (the fs-sandbox guard
+ * in `tests/_setup.mjs` would throw if they were), and `CHROXY_CONFIG_DIR` is
+ * already redirected to a per-process tmp dir by that same setup file — the
+ * one test that DOES write a real config file there (the C3(a) real-config
+ * test, #8074 review) saves and restores it explicitly.
  */
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
@@ -39,6 +40,7 @@ import { checkBinary, checkClaudeTuiCliVersion, runDoctorChecks } from '../src/d
 import { registerProvider } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { defaultBinaryTrustFile } from '../src/binary-provenance-trust.js'
+import { configPath } from '../src/config-dir.js'
 
 // ── shared tmp root ─────────────────────────────────────────────────────────
 
@@ -165,6 +167,48 @@ describe('checkBinary — opt-in provenance gate (#8041)', () => {
     }
   })
 
+  it('a missing binary in block mode reports "Not found" — never "provenance unreadable" (#8074 review C2)', () => {
+    const ledger = fakeProvenanceLedger()
+    const result = checkBinary('chroxy-8041-definitely-missing-xyz', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [],
+      installHint: 'install chroxy-8041-definitely-missing-xyz',
+      provenance: { mode: 'block', signatureGate: false, ledger },
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /^Not found — /, `expected a "Not found" message, got: ${result.message}`)
+    assert.doesNotMatch(result.message, /provenance/, 'a missing binary must never be reported as a provenance failure — the operator should never be told to disable a security control for a binary that was simply never installed')
+  })
+
+  it('a same-named file in the current working directory is never pinned by the ledger (#8074 review C2)', () => {
+    // Reproduces the exact defect the review found: a bare, unresolved name
+    // (no PATH match, no candidates) that happens to have a same-named file
+    // sitting in cwd used to get READ, HASHED, and TOFU-PINNED under that
+    // bare, relative key in warn mode — a path the real exec never runs,
+    // since the exec's OWN PATH lookup resolves independently. The binary
+    // is still reported "Not found" (the exec fails regardless — a bare
+    // name off PATH can't be spawned either way), but the ledger must never
+    // have been touched.
+    const bogusName = 'chroxy-8041-cwd-decoy-bin'
+    const decoyPath = join(process.cwd(), bogusName)
+    writeFileSync(decoyPath, 'not a real binary — a decoy for #8074 review C2')
+    const ledger = fakeProvenanceLedger()
+    try {
+      const result = checkBinary(bogusName, ['--version'], {
+        parseVersion: (out) => out.trim(),
+        required: false,
+        candidates: [],
+        installHint: `install ${bogusName}`,
+        provenance: { mode: 'warn', signatureGate: false, ledger },
+      })
+      assert.match(result.message, /^Not found — /, `expected a "Not found" message, got: ${result.status}: ${result.message}`)
+      assert.equal(ledger._records.size, 0, 'the cwd decoy must never be pinned under the bare, relative name — this is the test that goes red under a mutant that hashes/pins a not-found path')
+    } finally {
+      rmSync(decoyPath, { force: true })
+    }
+  })
+
   it('a matching-hash ledger in block mode execs the exact verified absolute path and returns pass', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
     const shim = makeGateShim()
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: hashFile(shim.shimPath) } })
@@ -214,7 +258,13 @@ describe('checkBinary — opt-in provenance gate (#8041)', () => {
         installHint: 'install chroxy-8041-fixture-bin',
         provenance: { mode: 'warn', signatureGate: false, ledger },
       })
-      assert.equal(result.status, 'pass', `warn mode must still allow the spawn, got ${result.status}: ${result.message}`)
+      // #8074 review S1: warn mode must surface as a `warn` row (not a silent
+      // `pass`) so `chroxy doctor`/`chroxy start` don't print a clean "[ OK ]"
+      // for a binary a provenance check just flagged — but it is still
+      // ALLOWED, so the version probe still runs for real.
+      assert.equal(result.status, 'warn', `warn mode must report a warn row, not pass, got ${result.status}: ${result.message}`)
+      assert.match(result.message, /hash_mismatch/, 'the warn row must carry the provenance status')
+      assert.match(result.message, /9\.9\.9/, 'the row must still carry the real probed version, proving the exec ran')
       assert.equal(existsSync(shim.markerPath), true, 'warn mode surfaces the mismatch but still execs')
     } finally {
       rmSync(shim.dir, { recursive: true, force: true })
@@ -223,7 +273,7 @@ describe('checkBinary — opt-in provenance gate (#8041)', () => {
 })
 
 describe('checkClaudeTuiCliVersion — opt-in provenance gate (#8041)', () => {
-  it('a block-mode ledger hash mismatch returns fail with the provenance code — never execs', () => {
+  it('a block-mode ledger hash mismatch returns null — never execs, and reports no duplicate fail row', () => {
     const shim = makeGateShim()
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
     try {
@@ -231,13 +281,29 @@ describe('checkClaudeTuiCliVersion — opt-in provenance gate (#8041)', () => {
         resolveBinary: () => shim.shimPath,
         provenance: { mode: 'block', signatureGate: false, ledger },
       })
-      assert.ok(result, 'expected a check result, not null')
-      assert.equal(result.status, 'fail', `expected fail, got ${result.status}: ${result.message}`)
-      assert.match(result.message, /hash_mismatch/)
+      // #8074 review S3: a blocked verdict returns `null`, not a second
+      // `fail` row — the claude binary's own provider-preflight row (via
+      // checkProvider → checkBinary against the SAME provenance options)
+      // already reports this exact refusal; this function's own docblock
+      // already promised "null when claude can't be run".
+      assert.equal(result, null, `expected null (the provider row already reports this refusal), got ${JSON.stringify(result)}`)
       assert.equal(existsSync(shim.markerPath), false, 'the claude-tui version probe must never exec an unverified binary')
     } finally {
       rmSync(shim.dir, { recursive: true, force: true })
     }
+  })
+
+  it('a missing binary (health check fails) returns null when a gate is on — never calls verifyProvenance at all (#8074 review C2)', () => {
+    // No shim at all — `resolveBinary` returns a path that doesn't exist.
+    const missingPath = join(tmpDir('missing-claude'), 'does-not-exist-claude')
+    let verifyProvenanceCalls = 0
+    const result = checkClaudeTuiCliVersion({
+      resolveBinary: () => missingPath,
+      provenance: { mode: 'block', signatureGate: false, ledger: fakeProvenanceLedger() },
+      verifyProvenance: () => { verifyProvenanceCalls++; return { ok: true, blocked: false, status: 'skipped' } },
+    })
+    assert.equal(result, null, `expected null for a not-found binary, got ${JSON.stringify(result)}`)
+    assert.equal(verifyProvenanceCalls, 0, 'verifyProvenance must never run on a path the health check never confirmed — this is the test that goes red under a mutant that hashes a not-found path relative to cwd')
   })
 
   it('a matching-hash ledger in block mode execs the exact verified absolute path', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
@@ -290,17 +356,19 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     return checks.find((c) => c.provider === provider && c.name === 'chroxy-8041-fixture-bin')
   }
 
-  // #8041 review: `binaryProvenanceMode`/`binarySignatureGate` are passed as
-  // PLAIN FUNCTION ARGUMENTS (a seam `runDoctorChecks` added specifically for
-  // this suite), never via `process.env.CHROXY_BINARY_PROVENANCE` mutation —
-  // this test runner schedules sibling `it()`s within one file concurrently,
-  // so a shared, mutated `process.env` var is a race (two tests observing
-  // each other's value mid-flight). The override still exercises the real
-  // `buildBinaryProvenanceOptions` normalization and the real lazy-ledger
-  // construction path in `runDoctorChecks` — only the mode/signatureGate
-  // RESOLUTION step (config file + env, already covered by config.js's own
-  // `resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled` tests) is
-  // bypassed.
+  // #8041 review, corrected by #8074 review N4: `binaryProvenanceMode`/
+  // `binarySignatureGate` are passed as PLAIN FUNCTION ARGUMENTS (a seam
+  // `runDoctorChecks` added specifically for this suite) in most of the
+  // tests below, rather than via a real config file or `process.env`
+  // mutation — this is NOT because sibling `it()`s in one file run
+  // concurrently (they don't; this runner's default is sequential), but
+  // because the override lets each test set the gate's mode directly,
+  // without needing a real config file on disk. It still exercises the
+  // real `buildBinaryProvenanceOptions` normalization and the real
+  // lazy-ledger construction path in `runDoctorChecks`; only the
+  // mode/signatureGate RESOLUTION step itself is bypassed for those tests —
+  // covered instead by the dedicated real-config-file test below (#8074
+  // review C3(a), which catches mutant R1).
   it('block mode: the provider binary row fails with the provenance code, doctor as a whole fails, and the binary is never exec\'d', async () => {
     const shim = makeGateShim()
     const providerName = 'test-8041-provider-block'
@@ -330,7 +398,13 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     registerFixtureProvider(providerName, [shim.shimPath])
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: hashFile(shim.shimPath) } })
     try {
-      const { checks, passed } = await runDoctorChecks({
+      // #8074 review C3(d): assert on the PROVIDER ROW only, never on the
+      // top-level `passed` — `passed` folds in the cloudflared check too,
+      // and a host with no cloudflared installed (every ubuntu-24.04 CI
+      // runner) makes `passed` false regardless of anything this test is
+      // actually about, which is exactly the assertion that made this test
+      // depend on the host.
+      const { checks } = await runDoctorChecks({
         providers: [providerName],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: ledger,
@@ -341,7 +415,6 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
       assert.equal(row.status, 'pass', `expected pass, got ${row.status}: ${row.message}`)
       assert.match(row.message, /9\.9\.9/, 'the printed version must come from the shim at the verified path, proving that exact path was probed')
       assert.equal(existsSync(shim.markerPath), true)
-      assert.equal(passed, true, `expected passed=true; failing checks: ${JSON.stringify(checks.filter(c => c.status === 'fail'))}`)
     } finally {
       rmSync(shim.dir, { recursive: true, force: true })
     }
@@ -355,7 +428,9 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     // explicit here (never inherited from ambient env/config).
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
     try {
-      const { checks, passed } = await runDoctorChecks({
+      // #8074 review C3(d): same reasoning as above — assert on the row, not
+      // on host-dependent `passed`.
+      const { checks } = await runDoctorChecks({
         providers: [providerName],
         binaryProvenanceMode: 'off',
         binarySignatureGate: false,
@@ -366,8 +441,42 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
       assert.ok(row)
       assert.equal(row.status, 'pass', `gates off must still pass a healthy binary, got ${row.status}: ${row.message}`)
       assert.equal(existsSync(shim.markerPath), true)
-      assert.equal(passed, true)
     } finally {
+      rmSync(shim.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('block mode resolved from a REAL config.json, with no mode override — proves the config+env wiring, not just the gate logic (#8074 review C3(a))', async () => {
+    // Unlike every OTHER test in this describe, this one passes NO
+    // `binaryProvenanceMode` override — it writes a real config file to the
+    // sandboxed `CHROXY_CONFIG_DIR` and lets `runDoctorChecks` resolve the
+    // mode from it via the REAL `resolveBinaryProvenanceMode`, exactly as
+    // `chroxy doctor` (and `chroxy start` with no `-c`) would. This is the
+    // test that catches mutant R1 (production mode resolution forced to
+    // `'off'`) — every other test in this file bypasses that resolution
+    // step entirely via the override seam, so R1 was invisible to them.
+    const shim = makeGateShim()
+    const providerName = 'test-8041-provider-real-config'
+    registerFixtureProvider(providerName, [shim.shimPath])
+    const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    const cfgPath = configPath('config.json')
+    const hadConfig = existsSync(cfgPath)
+    const priorConfig = hadConfig ? readFileSync(cfgPath, 'utf-8') : null
+    writeFileSync(cfgPath, JSON.stringify({ binaryProvenance: { mode: 'block' } }))
+    try {
+      const { checks } = await runDoctorChecks({
+        providers: [providerName],
+        binaryProvenanceLedger: ledger,
+        detectStranded: CLEAN_STRANDED_STATE,
+      })
+      const row = binaryRow(checks, providerName)
+      assert.ok(row, 'the provider binary row must be present')
+      assert.equal(row.status, 'fail', `expected fail (resolved from the real config file), got ${row.status}: ${row.message}`)
+      assert.match(row.message, /hash_mismatch/)
+      assert.equal(existsSync(shim.markerPath), false, 'the provider binary must never have been exec\'d')
+    } finally {
+      if (hadConfig) writeFileSync(cfgPath, priorConfig)
+      else rmSync(cfgPath, { force: true })
       rmSync(shim.dir, { recursive: true, force: true })
     }
   })
@@ -377,19 +486,81 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     registerFixtureProvider(providerName, [])
     // No `binaryProvenanceLedger` override AND no mode override — exercises
     // the REAL config+env resolution (ambient CHROXY_BINARY_PROVENANCE is
-    // cleared for this whole file by the outer before/after) and the REAL
-    // lazy-construct branch. If gate resolution were wrong (e.g. defaulting
-    // to "on"), this would create the real default-path ledger file. Checked
-    // via the filesystem rather than a mocked console.warn/log — a mock on
-    // the shared `console` global would itself race against any OTHER test
-    // in this file that legitimately warns (e.g. the "warn mode" cases
-    // above) under this runner's concurrent scheduling.
+    // cleared for this whole file by the outer before/after, and no test in
+    // this file leaves a real config.json behind — see the config-file
+    // save/restore in the test just above) and the REAL lazy-construct
+    // branch. If gate resolution were wrong (e.g. defaulting to "on"), this
+    // would create the real default-path ledger file. Checked via the
+    // filesystem rather than a mocked console.warn/log, since a mock on the
+    // shared `console` global would be a poor substitute for the dedicated
+    // construction-spy test in `doctor-binary-provenance-ledger-construction.test.js`
+    // (#8074 review N1) — this test only adds a filesystem-level check that
+    // the REAL ledger class never writes.
     await runDoctorChecks({ providers: [providerName] })
     assert.equal(
       existsSync(defaultBinaryTrustFile()),
       false,
       'gates off must never construct (or write) the real binary-trust.json — every OTHER test in this file that turns the gate on always supplies an explicit ledger override, so this file is the only writer and this check is race-free',
     )
+  })
+})
+
+describe('runDoctorChecks — claude-tui version-probe provenance wiring (#8074 review C3(c))', () => {
+  // `claudeTuiResolveBinary` (a #8074 test seam on `runDoctorChecks`) points
+  // ONLY the claude-tui-driving probe's resolution at a fixture, so this test
+  // is hermetic regardless of whether a real `claude` binary happens to
+  // resolve on the machine running the suite — with no seam, a machine with
+  // no claude-tui candidate installed would return `null` (not-found) under
+  // BOTH the correctly-gated code AND mutant R2 (the probe called with
+  // `provenance` dropped), making the two indistinguishable.
+  //
+  // `providers: ['claude-tui']` deliberately uses the REAL, already-registered
+  // 'claude-tui' provider class rather than a fixture — `runDoctorChecks`
+  // only runs the driving-probe when the resolved provider is literally
+  // named 'claude-tui', and overwriting that global registry entry (even
+  // temporarily) would risk corrupting it for every OTHER test that runs
+  // afterward in this process. The REAL provider's own binary-preflight row
+  // (a SEPARATE row, keyed by 'claude') is unaffected by these assertions,
+  // which only check for the presence/absence of the 'claude-tui driving' row.
+  it('a stub that blocks every path means the claude-tui driving row never appears — proves the gate is wired, not just present', async () => {
+    const shim = makeGateShim()
+    try {
+      const alwaysBlocked = () => ({ ok: false, blocked: true, status: 'hash_mismatch', message: 'stubbed refusal', remediation: null })
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-tui'],
+        binaryProvenanceMode: 'block',
+        binaryProvenanceLedger: fakeProvenanceLedger(),
+        verifyProvenance: alwaysBlocked,
+        claudeTuiResolveBinary: () => shim.shimPath,
+        detectStranded: CLEAN_STRANDED_STATE,
+      })
+      assert.equal(
+        checks.find((c) => c.name === 'claude-tui driving'),
+        undefined,
+        'a blocked verdict must return null from checkClaudeTuiCliVersion, so no row is pushed at all (#8074 review S3) — this is the test that goes red under mutant R2 (the probe called with provenance dropped), because R2 would exec the shim for real and produce a row',
+      )
+      assert.equal(existsSync(shim.markerPath), false, 'the shim must never have been exec\'d')
+    } finally {
+      rmSync(shim.dir, { recursive: true, force: true })
+    }
+  })
+
+  it('sanity check: with the gate off, the SAME shim DOES produce a claude-tui driving row — proves the test above is not vacuous', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
+    const shim = makeGateShim()
+    try {
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-tui'],
+        binaryProvenanceMode: 'off',
+        binarySignatureGate: false,
+        claudeTuiResolveBinary: () => shim.shimPath,
+        detectStranded: CLEAN_STRANDED_STATE,
+      })
+      const row = checks.find((c) => c.name === 'claude-tui driving')
+      assert.ok(row, 'expected a claude-tui driving row when the gate is off and the probe execs the shim for real')
+      assert.equal(existsSync(shim.markerPath), true)
+    } finally {
+      rmSync(shim.dir, { recursive: true, force: true })
+    }
   })
 })
 
@@ -403,12 +574,13 @@ describe('runDoctorChecks — cloudflared provenance gate, production wiring (#8
   // dependency this seam removes. `process.env.PATH` still needs emptying
   // for the same reason: `resolveBinary` tries a bare `which cloudflared`
   // BEFORE ever consulting `candidates`, and that dev machine also has
-  // cloudflared on PATH. `PATH` is process-global and this test runner
-  // schedules sibling `it()`s within a file concurrently, so — unlike the
+  // cloudflared on PATH. `PATH` is process-global, so — unlike the
   // `binaryProvenanceMode`/`cloudflaredCandidates` seams, which are plain
-  // function arguments — every scenario that needs an empty PATH runs as a
-  // sequential step inside ONE test, sharing ONE override installed and
-  // restored exactly once.
+  // function arguments needing no shared mutable state at all — every
+  // scenario that needs an empty PATH runs as a sequential step inside ONE
+  // test, sharing ONE override installed and restored exactly once (simpler
+  // than three separate save/restore dances, not a concurrency workaround —
+  // #8074 review N4: this runner's default is sequential `it()`s per file).
   class NoPreflightSession extends SdkSession {
     static get preflight() { return null }
   }

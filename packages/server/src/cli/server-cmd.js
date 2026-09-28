@@ -6,6 +6,7 @@
 import { addServerOptions, loadAndMergeConfig, parseExtraOverrides } from './shared.js'
 import { parseTunnelArg } from '../tunnel/index.js'
 import { runDoctorChecks } from '../doctor.js'
+import { resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
 
 export function registerServerCommands(program) {
   const startCmd = program
@@ -35,7 +36,22 @@ export function registerServerCommands(program) {
       const needsTunnel = !!parsedTunnel && !config.noAuth && !config.externalUrl
       if (!options.skipChecks) {
         const port = config.port || 8765
-        const { checks } = await runDoctorChecks({ port })
+        // #8074 review C1: resolve the binary-provenance gate from the SAME
+        // merged config `startCliServer`/`startSupervisor` below are about to
+        // use (loadAndMergeConfig, which honours `-c <path>`) — not doctor's
+        // own default `configPath('config.json')` read. Without this, `chroxy
+        // start -c other.json` gated its dependency checks against the
+        // OPERATOR'S DEFAULT config file while the daemon it then started
+        // read `other.json`, so a `-c` invocation's checks could silently
+        // gate against the wrong file's `binaryProvenance` settings (or none
+        // at all). Env vars still win inside the resolvers themselves, so
+        // CHROXY_BINARY_PROVENANCE / CHROXY_BINARY_SIGNATURE_GATE precedence
+        // is unchanged.
+        const { checks } = await runDoctorChecks({
+          port,
+          binaryProvenanceMode: resolveBinaryProvenanceMode(config),
+          binarySignatureGate: isBinarySignatureGateEnabled(config),
+        })
         const failures = checks.filter((c) => {
           if (c.status !== 'fail') return false
           // Only require cloudflared when a tunnel will actually be used

@@ -37,12 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now run the opt-in gate — `verifyProvenance`, the SAME function
   `runProviderPreflight` and the tunnel adapter's
   `_verifyCloudflaredProvenance` both call — on the resolved path BEFORE the
-  version-probe exec, sharing one config+env-resolved mode/signatureGate and
-  one lazily-constructed `binary-trust.json` ledger across every check. A
-  `block`-mode hash mismatch or failed signature gate now reports a doctor
-  `fail` row naming the gate's status code and remediation, and the binary is
-  never exec'd; `chroxy start` exits non-zero on it like any other failed
-  dependency check. With gates off, behaviour is unchanged.
+  version-probe exec, but ONLY once a binary is confirmed to exist: the gate
+  never runs on a not-found bare name (which would otherwise hash relative to
+  the current working directory and could mislabel a missing binary as a
+  provenance failure, or TOFU-pin an unrelated same-named file). `chroxy start
+  -c <path>` gates from that file's `binaryProvenance`, mirroring how `chroxy
+  resume -c` already does. Every check shares one config+env-resolved
+  mode/signatureGate and one lazily-constructed `binary-trust.json` ledger,
+  and cloudflared's candidate paths are imported from the tunnel adapter's own
+  list rather than a second copy. A `block`-mode hash mismatch or failed
+  signature gate reports a doctor `fail` row naming the gate's status code and
+  remediation, and the binary is never exec'd; `chroxy start` exits non-zero on
+  it like any other failed dependency check. A `warn`-mode issue now reports a
+  `warn` row (not only a log line), and a blocked claude-tui version-pin probe
+  returns `null` rather than a second, duplicate `fail` row for the same
+  binary. With gates off, behaviour is unchanged.
 
 - **`chroxy resume` now execs the same verified `claude` binary a
   fresh chat session would use, instead of a bare, unverified PATH lookup
