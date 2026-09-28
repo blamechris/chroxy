@@ -298,7 +298,7 @@ function versionRemediation(binarySpec) {
  * This is the single normalization both `SessionManager._binaryProvenanceOptions()`
  * (the daemon's create-time / per-turn / one-shot gate, reading its own
  * `_binaryProvenanceMode` / `_binarySignatureGate` / `binaryProvenanceLedger`
- * instance fields) and the `chroxy session resume` CLI gate (#8061, which has
+ * instance fields) and the `chroxy resume` CLI gate (#8061, which has
  * no `SessionManager` to read those fields off of — it resolves mode and
  * signatureGate straight from the loaded config instead) now share, so what
  * counts as "the gate is off" is defined in exactly one place rather than two

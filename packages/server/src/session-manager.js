@@ -1090,7 +1090,7 @@ export class SessionManager extends EventEmitter {
   _binaryProvenanceOptions() {
     // #8061: the bag-shape normalization itself lives in
     // `buildBinaryProvenanceOptions` (utils/preflight.js), shared with the
-    // `chroxy session resume` CLI gate — this stays a thin instance-field
+    // `chroxy resume` CLI gate — this stays a thin instance-field
     // reader so the two never drift on what counts as "off".
     return buildBinaryProvenanceOptions({
       mode: this._binaryProvenanceMode,

@@ -1,5 +1,5 @@
 /**
- * #8061 — `chroxy session resume` no longer execs a bare, unverified `claude`
+ * #8061 — `chroxy resume` no longer execs a bare, unverified `claude`
  * from PATH. It now resolves AND verifies the binary through the same
  * `runProviderPreflight(CliSession, { provenance })` machinery
  * `SessionManager.verifyOneShotExecutable()` wraps (#8030/#8036), built from
@@ -18,7 +18,7 @@
  * `ledger` are always injected fakes, never the real config.json / the real
  * `BinaryProvenanceLedger`.
  */
-import { describe, it, after } from 'node:test'
+import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { createHash } from 'crypto'
@@ -36,6 +36,30 @@ function tmpDir(prefix) {
 }
 after(() => {
   if (_tmpRoot) rmSync(_tmpRoot, { recursive: true, force: true })
+})
+
+// #8065 review nitpick 1: isolate from an ambient CHROXY_BINARY_PROVENANCE /
+// CHROXY_BINARY_SIGNATURE_GATE in the shell this suite happens to run under.
+// Both env vars OUTRANK the injected `readConfig` fake inside
+// `resolveVerifiedClaudeBinary` (the same precedence `chroxy start` uses —
+// `resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled`), so a stray
+// `CHROXY_BINARY_PROVENANCE=off` in the invoking shell would silently flip
+// every "block mode" case below to pass for the wrong reason, and a stray
+// `=block` would flip every "gates off" case to refuse unexpectedly. This
+// matters whenever this suite runs inside a chroxy-spawned shell (e.g. a
+// nested `chroxy resume` dev session) where these vars are commonly set.
+const _savedProvenanceEnv = {}
+before(() => {
+  for (const key of ['CHROXY_BINARY_PROVENANCE', 'CHROXY_BINARY_SIGNATURE_GATE']) {
+    _savedProvenanceEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+})
+after(() => {
+  for (const [key, value] of Object.entries(_savedProvenanceEnv)) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
 })
 
 // The REAL hash of the running Node binary, and a hash that can never match
@@ -158,10 +182,25 @@ describe('resolveVerifiedClaudeBinary (#8061)', () => {
     })
     assert.equal(resolved, process.execPath)
   })
+
+  it('gates off + no ledger override never opens (or warns about) the real ledger file (#8065 review nitpick 3 — Copilot thread 1)', (t) => {
+    FixtureClaudeProvider.resolvedOverride = null // process.execPath
+    const warnMock = t.mock.method(console, 'warn')
+    // No `ledger` key at all — the gate being off must short-circuit BEFORE
+    // the lazy default (`new BinaryProvenanceLedger()`, the daemon's real
+    // default-path trust file, itself sandboxed to a tmp CHROXY_CONFIG_DIR by
+    // tests/_setup.mjs but still real disk I/O) ever runs.
+    const resolved = resolveVerifiedClaudeBinary({
+      ProviderClass: FixtureClaudeProvider,
+      readConfig: () => ({}),
+    })
+    assert.equal(resolved, process.execPath)
+    assert.equal(warnMock.mock.callCount(), 0, 'gates off must never open (or warn about) the ledger file — constructing it unconditionally is what produced the spurious warning Copilot flagged')
+  })
 })
 
 describe('runSessionResume — the exec is gated (#8061)', () => {
-  it('a block-mode ledger mismatch refuses: no claude spawn attempted, non-zero exit, no "Resuming" banner', async () => {
+  it('a block-mode ledger mismatch refuses: no claude spawn attempted, non-zero exit, and no "Resuming" banner (#8065 review nitpick 2)', async (t) => {
     const shim = makeGateShim()
     // Point the fixture at the shim so a mutant that swallows the refusal
     // and execs anyway would spawn THIS shim and flip the marker-absence
@@ -172,6 +211,12 @@ describe('runSessionResume — the exec is gated (#8061)', () => {
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
     const savedExitCode = process.exitCode
     process.exitCode = 0
+    // #8065 review nitpick 2: the title claimed 'no "Resuming" banner' but
+    // nothing asserted it — mutant R6 (the banner moved above the gate)
+    // survived. Mock console.log/console.error (default implementation still
+    // calls through, so output isn't lost) and check the actual calls.
+    const logMock = t.mock.method(console, 'log')
+    const errorMock = t.mock.method(console, 'error')
     try {
       await runSessionResume('1', {}, {
         stateFile,
@@ -183,6 +228,16 @@ describe('runSessionResume — the exec is gated (#8061)', () => {
       })
       assert.equal(process.exitCode, 1, 'a gate refusal must set a non-zero exit code')
       assert.equal(existsSync(shim.markerPath), false, 'the shim must never have been spawned — this is the test that goes red under a mutant that swallows the refusal and execs anyway')
+      const errorMessages = errorMock.mock.calls.map(c => String(c.arguments[0]))
+      assert.ok(
+        errorMessages.some(msg => /Refusing to resume:.*hash changed/.test(msg)),
+        `expected a "Refusing to resume: ... hash changed" console.error call, got: ${JSON.stringify(errorMessages)}`,
+      )
+      const logMessages = logMock.mock.calls.map(c => String(c.arguments[0]))
+      assert.ok(
+        !logMessages.some(msg => /Resuming/.test(msg)),
+        `no "Resuming" banner may print before a refusal — this is the test that goes red under mutant R6 (banner moved above the gate); got console.log calls: ${JSON.stringify(logMessages)}`,
+      )
     } finally {
       process.exitCode = savedExitCode
       FixtureClaudeProvider.resolvedOverride = null
@@ -217,7 +272,7 @@ describe('runSessionResume — the exec is gated (#8061)', () => {
     }
   })
 
-  it('with gates off, behaviour is unchanged: the resolved binary still spawns, even against a ledger that would otherwise block', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
+  it('with gates off, a healthy binary still resolves and spawns — the observable outcome matches pre-#8061, even though an existence/quarantine check now runs first (#8065 review nitpick 5)', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
     const shim = makeGateShim()
     FixtureClaudeProvider.resolvedOverride = shim.shimPath
     const stateFile = makeStateFile()
@@ -232,7 +287,13 @@ describe('runSessionResume — the exec is gated (#8061)', () => {
           readConfig: () => ({}),
         }),
       })
-      assert.equal(existsSync(shim.markerPath), true, 'gates off must still spawn the resolved binary, exactly as before #8061')
+      // #8065 review nitpick 5: this is NOT literally "unchanged" — with
+      // gates off, resume now still runs `runProviderPreflight`'s
+      // existence/quarantine check (only the provenance step is skipped), so
+      // a MISSING or quarantined binary now refuses with a labeled error
+      // instead of throwing a raw ENOENT/EPERM. For a HEALTHY binary (this
+      // case) the observable result is the same as pre-#8061: it spawns.
+      assert.equal(existsSync(shim.markerPath), true, 'gates off: a healthy binary must still spawn — the same observable outcome as before #8061')
     } finally {
       FixtureClaudeProvider.resolvedOverride = null
       rmSync(shim.dir, { recursive: true, force: true })

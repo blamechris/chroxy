@@ -9,18 +9,41 @@ import { runProviderPreflight, buildBinaryProvenanceOptions } from '../utils/pre
 import { BinaryProvenanceLedger } from '../binary-provenance-trust.js'
 import { CliSession } from '../cli-session.js'
 
-/** Read config.json best-effort — never throws, never exits (mirrors worktree-gc-cmd.js / schedule-cmd.js). */
-function readConfigSoft(configPath) {
+/**
+ * Read config.json for the #8061 binary-provenance gate. A MISSING file
+ * (`ENOENT`) returns `{}` — gates default off, matching every other soft
+ * config reader in this CLI (`worktree-gc-cmd.js`, `schedule-cmd.js`). An
+ * EXISTING file that can't be read or parsed THROWS instead — #8065 review
+ * S3: the prior soft-everything behaviour turned a hand-edited config.json
+ * with a trailing comma into a silently ungated resume, while `chroxy start`
+ * refuses to boot at all on that exact same file (`cli/shared.js`'s config
+ * validation). Misreading THIS file has security consequences the
+ * worktree-gc/schedule precedent (repos, discovery root) does not, so it
+ * does not get the same "soft" treatment.
+ */
+function readGateConfig(configPath) {
+  let bytes
   try {
-    if (!existsSync(configPath)) return {}
-    return JSON.parse(readFileSync(configPath, 'utf-8')) || {}
-  } catch {
-    return {}
+    bytes = readFileSync(configPath, 'utf-8')
+  } catch (err) {
+    if (err?.code === 'ENOENT') return {}
+    throw gateConfigUnreadable(configPath, err)
+  }
+  try {
+    return JSON.parse(bytes)
+  } catch (err) {
+    throw gateConfigUnreadable(configPath, err)
   }
 }
 
+function gateConfigUnreadable(configPath, cause) {
+  const err = new Error(`cannot read ${configPath} to determine binaryProvenance mode (${cause.message})`)
+  err.code = 'GATE_CONFIG_UNREADABLE'
+  return err
+}
+
 /**
- * #8061 — resolve AND verify the exact `claude` binary `chroxy session resume`
+ * #8061 — resolve AND verify the exact `claude` binary `chroxy resume`
  * is about to exec, through the SAME opt-in provenance gate a fresh chat
  * session (or the summarizer/web-task one-shots) would run:
  * `runProviderPreflight(ProviderClass, { provenance })`, the machinery
@@ -35,13 +58,32 @@ function readConfigSoft(configPath) {
  * into the options bag through the SAME normalizer
  * `SessionManager._binaryProvenanceOptions()` uses
  * (`buildBinaryProvenanceOptions`, utils/preflight.js) — so "the gate is off"
- * is defined once, not twice — and the ledger opens at its default path
- * (`BinaryProvenanceLedger()` → `~/.chroxy/binary-trust.json`, or
- * `$CHROXY_CONFIG_DIR/binary-trust.json`): the SAME file the daemon
- * pins/approves against, so a hash already trusted (or already refused) by
- * the daemon is honored here too.
+ * is defined once, not twice.
  *
- * `chroxy session resume` always shells out to the `claude` CLI directly —
+ * #8065 review S4: `configPath` defaults to the CLI's normal config file
+ * (`configFile()`) but is overridable — `chroxy resume -c <path>` reads
+ * `binaryProvenance` from THAT file, mirroring how a daemon started with
+ * `chroxy start -c <path>` reads its own gate config. `CHROXY_BINARY_PROVENANCE`
+ * / `CHROXY_BINARY_SIGNATURE_GATE` still take precedence over either file
+ * (`resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled`'s own
+ * precedence) — but those are read from THIS process's environment, i.e. the
+ * invoking shell's, which is NOT the same environment a `chroxy start`
+ * daemon (a background service, a desktop app, a different shell) was
+ * launched under. An env-only gate set on that daemon is invisible here;
+ * only its config FILE is shared ground truth.
+ *
+ * #8065 review nitpick 3: the ledger is opened LAZILY, only when a gate is
+ * actually on (`mode !== 'off'` or `signatureGate`). `chroxy resume`'s
+ * default mode is off, so opening — and potentially warning on — the ledger
+ * file on every single invocation regardless would be pointless disk I/O and
+ * a confusing warning for a file the resolved options bag is about to
+ * discard anyway (`buildBinaryProvenanceOptions` returns `null` in that
+ * case). This differs from the daemon, which constructs its one ledger
+ * instance once at startup and can be re-armed to `warn`/`block` at runtime
+ * without a restart (so it always keeps the ledger warm) — a short-lived CLI
+ * invocation with gates off will never touch the ledger at all.
+ *
+ * `chroxy resume` always shells out to the `claude` CLI directly —
  * never the Agent SDK, never claude-tui's PTY — so `CliSession` (whose
  * `preflight` / `resolvedBinary` describe exactly that binary, the same
  * class `web-task-manager.js`'s one-shot spawns gate against, #8039) is the
@@ -49,31 +91,39 @@ function readConfigSoft(configPath) {
  * would refuse under `binaryProvenance.mode: 'block'` is refused here too.
  *
  * Fails CLOSED: any thrown error — one of `runProviderPreflight`'s typed
- * errors (`ProviderBinaryProvenanceError`, `ProviderBinaryNotFoundError`, …)
- * or the `PROVIDER_BINARY_UNVERIFIED` this throws itself when preflight
- * resolves no path — propagates to the caller, which must print it and exit
- * non-zero WITHOUT spawning anything. Never calls `process.exit` itself, so
- * it stays safely unit-testable in-process (#8061 tests).
+ * errors (`ProviderBinaryProvenanceError`, `ProviderBinaryNotFoundError`, …),
+ * `readGateConfig`'s `GATE_CONFIG_UNREADABLE`, or the
+ * `PROVIDER_BINARY_UNVERIFIED` this throws itself when preflight resolves no
+ * path — propagates to the caller (`runSessionResume`), which prints it and
+ * exits non-zero WITHOUT spawning anything. This function itself never calls
+ * `process.exit`, so it stays safely unit-testable in-process (#8061 tests).
  *
  * @param {object} [deps] - test seams; production supplies none of them.
- * @param {Function} [deps.readConfig] - defaults to reading config.json soft.
- * @param {object} [deps.ledger] - defaults to the real, default-path ledger.
+ * @param {string} [deps.configPath] - defaults to `configFile()`; the config
+ *   file `binaryProvenance` is read from (#8065 review S4).
+ * @param {Function} [deps.readConfig] - defaults to `readGateConfig(configPath)`.
+ * @param {object} [deps.ledger] - defaults to a lazily-opened, default-path
+ *   ledger (see nitpick 3 above); pass one explicitly to override, including
+ *   `null`.
  * @param {Function} [deps.preflight] - defaults to `runProviderPreflight`.
  * @param {Function} [deps.ProviderClass] - defaults to `CliSession`.
  * @returns {string} the verified, spawnable absolute path to `claude`.
  */
 export function resolveVerifiedClaudeBinary({
-  readConfig = () => readConfigSoft(configFile()),
-  ledger = new BinaryProvenanceLedger(),
+  configPath = configFile(),
+  readConfig = () => readGateConfig(configPath),
+  ledger: ledgerOverride,
   preflight = runProviderPreflight,
   ProviderClass = CliSession,
 } = {}) {
   const config = readConfig()
-  const provenance = buildBinaryProvenanceOptions({
-    mode: resolveBinaryProvenanceMode(config),
-    signatureGate: isBinarySignatureGateEnabled(config),
-    ledger,
-  })
+  const mode = resolveBinaryProvenanceMode(config)
+  const signatureGate = isBinarySignatureGateEnabled(config)
+  const gateIsOn = mode !== 'off' || signatureGate === true
+  const ledger = ledgerOverride !== undefined
+    ? ledgerOverride
+    : (gateIsOn ? new BinaryProvenanceLedger() : null)
+  const provenance = buildBinaryProvenanceOptions({ mode, signatureGate, ledger })
   const result = preflight(ProviderClass, { provenance })
   if (!result.binaryPath) {
     const err = new Error(`Could not verify a spawnable binary for provider "${ProviderClass.displayLabel || ProviderClass.name || 'claude-cli'}".`)
@@ -135,26 +185,36 @@ export function registerSessionCommands(program) {
     .description('Resume a Chroxy session in your terminal')
     .argument('[session]', 'Session name or number (default: most recent)')
     .option('--dangerously-skip-permissions', 'Pass --dangerously-skip-permissions to claude')
+    // #8065 review S4: mirrors `providers-cmd.js`'s `-c, --config` — lets the
+    // binary-provenance gate read the SAME config file a `chroxy start -c
+    // <path>` daemon reads its own gate settings from, instead of always
+    // reading `<configDir>/config.json`. Only affects the gate (mode /
+    // signatureGate); CHROXY_BINARY_PROVENANCE / CHROXY_BINARY_SIGNATURE_GATE
+    // env vars still win when set, but they are read from THIS invocation's
+    // own shell, not from whatever environment a running daemon started in.
+    .option('-c, --config <path>', 'Path to config file (only affects the binary-provenance gate; env overrides come from the invoking shell, not a running daemon)', configFile())
     .action(async (sessionArg, options) => {
       await runSessionResume(sessionArg, options)
     })
 }
 
 /**
- * Core `chroxy session resume` logic, extracted from the Commander `.action()`
+ * Core `chroxy resume` logic, extracted from the Commander `.action()`
  * above so it is directly callable — with injectable deps — from tests
  * without spawning a subprocess (#8061). Production callers (the `.action()`
  * above) pass no `deps`, so every seam below resolves to the exact same
  * behaviour this command always had, plus the #8061 binary-verification gate.
  *
  * @param {string|undefined} sessionArg - session name or 1-based index.
- * @param {{ dangerouslySkipPermissions?: boolean }} options - Commander options.
+ * @param {{ dangerouslySkipPermissions?: boolean, config?: string }} options - Commander options.
  * @param {object} [deps]
  * @param {string} [deps.stateFile] - defaults to `<configDir>/session-state.json`.
- * @param {Function} [deps.resolveBinary] - defaults to `resolveVerifiedClaudeBinary`
- *   (called with no args, i.e. every production default). Tests inject a
- *   thunk that calls `resolveVerifiedClaudeBinary` with a fixture provider /
- *   ledger / config instead of exercising the real host `claude` install.
+ * @param {Function} [deps.resolveBinary] - defaults to `resolveVerifiedClaudeBinary`,
+ *   called as `resolveBinary({ configPath: options.config })` in production.
+ *   Tests inject a thunk that calls `resolveVerifiedClaudeBinary` with a
+ *   fixture provider / ledger / config instead of exercising the real host
+ *   `claude` install (the thunk's own arity decides whether it even looks at
+ *   the argument passed here).
  */
 export async function runSessionResume(sessionArg, options, deps = {}) {
   const {
@@ -227,13 +287,16 @@ export async function runSessionResume(sessionArg, options, deps = {}) {
 
   // #8061 — resolve AND verify the exact binary before printing anything that
   // implies a resume is actually happening, and before touching execFileSync
-  // at all. A refusal here fails CLOSED: nothing is spawned, and this
-  // function never calls `process.exit` itself (see `runSessionResume`'s
-  // docblock) so it stays unit-testable in-process — `process.exitCode` is
-  // set instead, which the real CLI process exits with exactly the same way.
+  // at all. A refusal here fails CLOSED: nothing is spawned. #8065 review
+  // nitpick 4: this REFUSAL path is the one that avoids `process.exit` (sets
+  // `process.exitCode` and returns instead), which is what keeps it
+  // unit-testable in-process — several OTHER paths in this function (above
+  // and below) do call `process.exit` directly, matching this command's
+  // pre-existing early-exit conventions; only this path and the docblock
+  // above describe promise not to.
   let verifiedClaudePath
   try {
-    verifiedClaudePath = resolveBinary()
+    verifiedClaudePath = resolveBinary({ configPath: options.config })
   } catch (err) {
     console.error(`\nRefusing to resume: ${err.message}`)
     process.exitCode = 1
@@ -254,7 +317,13 @@ export async function runSessionResume(sessionArg, options, deps = {}) {
       cwd: target.cwd,
     })
   } catch (err) {
-    if (err.status != null) process.exit(err.status)
+    // #8065 review nitpick 4: `process.exitCode = ...; return` rather than
+    // `process.exit(...)` — a test shim that exits non-zero here now fails
+    // its assertion legibly instead of killing the whole test file.
+    if (err.status != null) {
+      process.exitCode = err.status
+      return
+    }
     throw err
   }
 }

@@ -220,25 +220,41 @@ operations already use for any other spawn failure — nothing is spawned in
 either case. `CliSession` (`claude-cli`), not `claude-sdk`, because web tasks
 always shell out to the `claude` CLI binary via `execFile`, never the
 in-process Agent SDK, regardless of which provider the daemon's chat sessions
-currently use. `chroxy session resume` closed the same class of gap a third
+currently use. `chroxy resume` closed the same class of gap a third
 time (#8061): the CLI subcommand (`cli/session-cmd.js`) ran a bare
 `execFileSync('claude', ['--resume', convId, …])`, resolved by the OS's own
 PATH lookup, with no existence, quarantine, or provenance check of any kind —
 unlike the daemon spawns above, this is a foreground, user-invoked command
 with no `SessionManager` instance to reuse, so `resolveVerifiedClaudeBinary()`
-builds the provenance options bag straight from the loaded config
+builds the provenance options bag straight from a loaded config file
 (`resolveBinaryProvenanceMode` / `isBinarySignatureGateEnabled`, the same
 resolvers `chroxy start` uses) through the SAME normalizer
 `SessionManager._binaryProvenanceOptions()` uses
 (`buildBinaryProvenanceOptions`, factored out to `utils/preflight.js` so the
-two never define "the gate is off" two different ways), opens the ledger at
-its default path (the daemon's own `binary-trust.json`), and runs
-`runProviderPreflight(CliSession, { provenance })` — `CliSession`, not
-`claude-sdk`, for the same reason web tasks gate against it: `chroxy session
-resume` always execs the `claude` CLI directly. A refusal prints the gate's
-labeled error and exits non-zero with nothing spawned; the binary actually
+two never define "the gate is off" two different ways). That config file
+defaults to `chroxy resume`'s own `<configDir>/config.json` but honors `-c
+<path>` (#8065 review S4), so a daemon started with `chroxy start -c <path>`
+is gated from the same file it reads its own settings from — though
+`CHROXY_BINARY_PROVENANCE` / `CHROXY_BINARY_SIGNATURE_GATE` still come from
+THIS invocation's own environment, not a running daemon's, since a foreground
+command has no way to read another process's env. An existing config file
+that can't be read or parsed refuses outright rather than silently defaulting
+to gates-off (#8065 review S3) — a hand-edited config.json with a trailing
+comma no longer leaves `chroxy resume` ungated while `chroxy start` refuses
+to boot on the identical file. The ledger opens at its default path (the
+daemon's own `binary-trust.json`) only when a gate is actually on, not on
+every invocation regardless (#8065 review nitpick 3 — this command runs and
+exits per invocation, unlike the daemon's one long-lived ledger instance).
+`runProviderPreflight(CliSession, { provenance })` then runs — `CliSession`,
+not `claude-sdk`, for the same reason web tasks gate against it: `chroxy
+resume` always execs the `claude` CLI directly. A refusal prints the gate
+error's message and exits non-zero with nothing spawned; the binary actually
 executed is the verified absolute path preflight resolved, never the bare
-string `'claude'`. With gates off, behaviour is unchanged. The §5 table lists
+string `'claude'`. With gates off, the SPAWN OUTCOME for a healthy binary is
+unchanged — but the command now also runs the existence/quarantine check
+every other one-shot gate in this fleet runs regardless of `binaryProvenance`
+mode, so a missing or quarantined `claude` now refuses with a labeled error
+instead of throwing a raw `ENOENT`/`EACCES`. The §5 table lists
 what each provider verifies and when.
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
@@ -540,7 +556,7 @@ the same installed `claude` on the end user's machine.
 | One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
 | `codex` model-catalog probe (post-auth `available_models` refresh) | n/a | the FULL create-time preflight (existence, quarantine, the direct-exec shim refusal, provenance, credentials) fresh on every no-session probe, via `SessionManager.verifyOneShotExecutable(ProviderClass)` — the #8030 one-shot resolver generalized to take an explicit provider class (#8036); a codex install with no `OPENAI_API_KEY`/`codex login` now refuses to probe too, same as `createSession`; a refusal is TTL-cached for the same 5-minute window a success is; a live session's own probe (`CodexAppServerSession.start()`) reuses that session's already-verified client and spawns nothing new |
 | Web tasks (`web-task-manager.js`) | n/a | a fresh full gate on every call, at all THREE no-session spawn sites (feature detection at daemon start, every `launch_web_task`, every teleport), via `SessionManager.verifyOneShotExecutable(CliSession)` — the same #8030/#8036 one-shot resolver the codex model-catalog probe uses; a refusal degrades feature detection to unavailable (logged at `warn`) and fails a launch/teleport with the gate's coded error — nothing is spawned either way (#8039) |
-| `chroxy session resume` CLI subcommand (`cli/session-cmd.js`) | n/a | a fresh full gate on every invocation, via `runProviderPreflight(CliSession, { provenance })` — no create-time step to pin from, and no daemon `SessionManager` either, so the provenance options bag is built straight from the loaded config (mode/signatureGate) and the daemon's own `binary-trust.json` ledger; a refusal prints the gate's coded error and exits non-zero with nothing spawned (#8061) |
+| `chroxy resume` CLI subcommand (`cli/session-cmd.js`) | n/a | a fresh full gate on every invocation, via `runProviderPreflight(CliSession, { provenance })` — no create-time step to pin from, and no daemon `SessionManager` either, so the provenance options bag is built straight from a config file (`<configDir>/config.json`, or `-c <path>`, #8065 review S4) that must be readable/parseable if it exists (#8065 review S3) and the daemon's own `binary-trust.json` ledger, opened lazily only when a gate is on (#8065 review nitpick 3); a refusal prints the gate error's message and exits non-zero with nothing spawned (#8061) |
 | `chroxy start` dependency checks | none | none — runs the configured provider's binary (plus `claude` for `claude-tui`) and `cloudflared` with `--version`, with no provenance or signature gate, before any session exists; the desktop app runs these on every launch (#8041) |
 
 "Per-spawn re-verification" pins to the exact path create-time preflight
@@ -548,11 +564,13 @@ verified (when preflight ran and the provider isn't containerised) rather than
 re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. The catalog
 probe has no create-time step to pin from (same as the other one-shots), so it
 re-resolves AND re-verifies fresh on every call instead — the web-task spawns
-closed by #8039 and the `chroxy session resume` gate closed by #8061 both
+closed by #8039 and the `chroxy resume` gate closed by #8061 both
 follow the identical pattern. A row marked "none" gets at most the
-create-time check; the known remaining spawn that runs with no gate of its
-own is the `chroxy start` dependency checks (#8041). Where a gate does run,
-it hashes only the file at the pinned path (#8040).
+create-time check; the known remaining spawns that run with no gate of their
+own are the `chroxy start` dependency checks (#8041) and `chroxy tunnel
+setup`'s four bare `cloudflared` execs (`tunnel-cmd.js` → `tunnel/cloudflare.js`
+— `--version`, `login`, and two more, #8066). Where a gate does run, it
+hashes only the file at the pinned path (#8040).
 
 **Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not
 treated as the process dying. `claude-cli` and `claude-tui` normally respond to

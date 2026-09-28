@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`chroxy session resume` now execs the same verified `claude` binary a
+- **`chroxy resume` now execs the same verified `claude` binary a
   fresh chat session would use, instead of a bare, unverified PATH lookup
   (#8061).** `cli/session-cmd.js` ran `execFileSync('claude', ['--resume',
   convId, …])` resolved by the OS's own PATH lookup, with no existence,
@@ -19,19 +19,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refuse a new chat session, and the path could differ from the one every
   claude-family provider resolves. This CLI subcommand runs standalone, with
   no daemon `SessionManager` to read the provenance mode/signature-gate flags
-  or ledger off of, so it now builds the same options bag from the loaded
-  config (`resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled`, the
-  same resolvers `chroxy start` uses) and the daemon's own pin ledger
-  (`binary-trust.json`), then runs `runProviderPreflight(CliSession, {
-  provenance })` — `CliSession` because `chroxy session resume` always execs
-  the `claude` CLI directly, never the Agent SDK or claude-tui's PTY. The bag
-  builder (`buildBinaryProvenanceOptions`) is now shared with
-  `SessionManager._binaryProvenanceOptions()` rather than reimplemented, so
-  "the gate is off" is defined in exactly one place. A gate refusal prints
-  the gate's labeled error and exits non-zero with nothing spawned; the
-  binary actually executed is the verified absolute path preflight resolved,
-  never the bare string `'claude'`. With gates off (the default), behaviour
-  is unchanged.
+  or ledger off of, so it now builds the same options bag from a config file
+  (`resolveBinaryProvenanceMode`/`isBinarySignatureGateEnabled`, the same
+  resolvers `chroxy start` uses — defaulting to `<configDir>/config.json` but
+  honoring a new `-c, --config <path>` option, so a daemon started with
+  `chroxy start -c <path>` is gated from the same file it reads its own
+  settings from) and the daemon's own pin ledger (`binary-trust.json`,
+  opened only when a gate is actually on), then runs
+  `runProviderPreflight(CliSession, { provenance })` — `CliSession` because
+  `chroxy resume` always execs the `claude` CLI directly, never the Agent SDK
+  or claude-tui's PTY. The bag builder (`buildBinaryProvenanceOptions`) is
+  now shared with `SessionManager._binaryProvenanceOptions()` rather than
+  reimplemented, so "the gate is off" is defined in exactly one place. An
+  existing config file that can't be read or parsed now refuses outright
+  (matching `chroxy start`'s own refusal on the same file) instead of
+  silently falling back to gates-off, which is what a corrupt
+  `config.json` used to do. A gate refusal prints the gate error's message
+  and exits non-zero with nothing spawned; the binary actually executed is
+  the verified absolute path preflight resolved, never the bare string
+  `'claude'`. With gates off (the default), a healthy binary still spawns —
+  the same observable outcome as before — but the command now also runs the
+  existence/quarantine check every other one-shot gate in this fleet runs
+  regardless of mode, so a missing or quarantined `claude` refuses with a
+  labeled error instead of throwing a raw `ENOENT`/`EACCES`.
 
 - **Web tasks (feature detection, launch, and teleport) now spawn `claude`
   through the same verified one-shot binary gate as the codex model-catalog
