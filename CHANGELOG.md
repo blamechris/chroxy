@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gemini` and `codex exec` sessions now re-verify their binary before
+  every turn, not just at session create (#8035).** #8030 (below) closed this
+  gap for the Agent SDK; the per-turn subprocess providers were the ones left
+  — `JsonlSubprocessSession.sendMessage` (the shared base class for
+  `GeminiSession` and the legacy `CodexSession`) spawned a fresh, unverified
+  `resolvedBinary` read on every turn, so a binary swapped, quarantined, or
+  hash-mismatched after session create ran unchecked until the session was
+  recreated. `spawnPreflight` — the same per-spawn re-verification gate #8030
+  wired for the SDK — is now a `BaseSession` constructor opt, so every
+  session type built through the `buildBaseSessionOpts` picker inherits it
+  automatically instead of the middle layer (`GeminiSession`/`CodexSession`)
+  having to read it off `opts` by hand and risk silently dropping it (the
+  "middle-layer trap" that has bitten three times before). Two shared
+  `BaseSession` helpers now back both consumers: `_gatedSpawnBinary` (re-runs
+  the pinned gate or falls back to a plain `resolvedBinary` read when no gate
+  is wired) and `_refuseTurnBeforeDispatch` (the byte-identical refusal wire
+  shape #8030 shipped for the SDK — an `error` event with the gate's own code,
+  never routed through an error-text rewriter that could mis-rewrite a
+  provenance message's hex hash as a rate-limit/auth error). A refusal here
+  leaves the session idle: no child spawned, `_isBusy` stays false, and a
+  skills-prepend retry still injects the skills text on the next attempt.
+  Operator-visible: with `binaryProvenance.mode: block`, an in-place update of
+  `gemini` or `codex` now refuses the next turn of a live session
+  (`PROVIDER_BINARY_PROVENANCE`) instead of only the next session create,
+  matching what #8030 already did for `claude-sdk`. Also adds a narrower
+  spawn-failure backstop to `acp-session.js`: a configured ACP agent `command`
+  that is an absolute path gets the same labeled quarantine/not-executable
+  diagnosis as the other providers; a bare (PATH-resolved) command keeps its
+  raw error, since the binary-health check can't distinguish "not found" from
+  other causes for a non-absolute path.
+
 - **Every Agent SDK spawn — chat turn, session summarizer, and semantic
   title — now goes through the same binary-verification gate, not just
   session create (#8030).** #7986 (below) fixed the SDK spawning a different

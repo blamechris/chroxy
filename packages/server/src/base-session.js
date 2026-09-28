@@ -148,6 +148,9 @@ export const BASE_SESSION_OPT_KEYS = [
   'streamStallTimeoutMs',
   'backgroundShellHardQuiesceMs',
   'permissionRuleStore',
+  // #8035: see the ctor param doc below — closes the middle-layer trap for
+  // JsonlSubprocessSession's picker subclasses (Gemini/Codex-exec).
+  'spawnPreflight',
 ]
 
 // #5367: pick the BaseSession opts out of a subclass's full opts bag and merge
@@ -364,6 +367,20 @@ export class BaseSession extends EventEmitter {
     // hand it to their PermissionManager so an `allowAlways` decision persists a
     // project-scoped rule and new sessions in the same cwd seed from it.
     permissionRuleStore,
+    // #8035: per-spawn binary re-verification gate. SessionManager wires this
+    // to `_verifyPinnedSpawn` (re-runs the full binary gate against the EXACT
+    // path create-time preflight verified) whenever preflight ran and the
+    // provider isn't containerised. Lives on BaseSession — not read directly
+    // by a subclass's opts bag — so every picker subclass built via
+    // `buildBaseSessionOpts` (GeminiSession, CodexSession, …) inherits it for
+    // free; reading `opts.spawnPreflight` in a middle layer instead would hit
+    // the trap documented in [[feedback_jsonl_subprocess_middle_layer]] and
+    // `BASE_SESSION_OPT_KEYS` above is what the opt-forwarding lint checks.
+    // null when absent — callers fall back to a plain
+    // `this.constructor.resolvedBinary` read via `_gatedSpawnBinary` below,
+    // same as pre-#8030/#8035 (a direct constructor call that bypasses
+    // SessionManager, or a test).
+    spawnPreflight,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -371,6 +388,11 @@ export class BaseSession extends EventEmitter {
     // Read by the in-process permission providers when they build their
     // PermissionManager; null on providers/tests that don't wire it.
     this._permissionRuleStore = permissionRuleStore || null
+    // #8035 — see the ctor param doc above. Stored here (not in SdkSession, not
+    // read ad hoc off `opts` in JsonlSubprocessSession) so both the per-turn SDK
+    // exec and the per-turn subprocess spawn (Gemini/Codex-exec) share one
+    // source of truth via `_gatedSpawnBinary` below.
+    this._spawnPreflight = typeof spawnPreflight === 'function' ? spawnPreflight : null
     this.model = model || null
     // Actual model the underlying CLI/SDK reports at init time. May differ
     // from `this.model` (the user's requested override) when no override
@@ -618,6 +640,69 @@ export class BaseSession extends EventEmitter {
         }
       })
     }
+  }
+
+  /**
+   * #8035 — the one spawn-path helper every per-turn provider (SdkSession,
+   * JsonlSubprocessSession's Gemini/Codex-exec subclasses) uses instead of
+   * reading `this.constructor.resolvedBinary` directly. With a gate wired
+   * (`_spawnPreflight`, set from SessionManager's `spawnPreflight` opt — see
+   * the ctor doc above), it re-runs the full binary-provenance gate against
+   * the exact path create-time preflight verified and returns THAT path,
+   * pinned regardless of what `resolvedBinary` would resolve to right now.
+   * Without a gate (no SessionManager, a direct constructor call, most
+   * tests), it falls back to the plain static read — the pre-#8030 behavior.
+   *
+   * A non-string or empty result would leave the caller launching an
+   * unverified binary (e.g. the SDK falling back to its own bundled claude),
+   * so that case throws instead of returning — `PROVIDER_BINARY_UNVERIFIED`,
+   * with `binaryLabel` in the message so the two callers keep their own
+   * wording (SdkSession passes 'claude'; JsonlSubprocessSession passes
+   * `Klass.providerName`). Any error the gate itself throws (
+   * `PROVIDER_BINARY_PROVENANCE`, `PROVIDER_BINARY_QUARANTINED`,
+   * `PROVIDER_BINARY_NOT_FOUND`, …) propagates unchanged — this method adds
+   * exactly one new failure mode, it doesn't wrap existing ones.
+   *
+   * @param {string} binaryLabel — human name for the empty-path error text
+   * @returns {string} the verified path to spawn
+   * @throws {Error} PROVIDER_BINARY_UNVERIFIED, or whatever the gate throws
+   */
+  _gatedSpawnBinary(binaryLabel) {
+    const path = this._spawnPreflight ? this._spawnPreflight() : this.constructor.resolvedBinary
+    if (typeof path !== 'string' || path.length === 0) {
+      const err = new Error(`No verified ${binaryLabel} binary path is available for this turn.`)
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
+    return path
+  }
+
+  /**
+   * #8035 — the shared refusal path for a turn the binary gate stopped
+   * BEFORE dispatch (paired with `_gatedSpawnBinary` above). Hoisted out of
+   * SdkSession (#8030) so JsonlSubprocessSession's per-turn spawn gets the
+   * same wire shape rather than a hand-rolled second copy.
+   *
+   * Deliberately does NOT run any error-text rewriter: a provenance message
+   * embeds a hex hash prefix (e.g. "...a4291b0c...") that can match a
+   * rate-limit ("429") or auth ("401") pattern in a text-classification table
+   * and get silently rewritten into a wrong, misleading message instead of
+   * the real cause (see SdkSession's #8030 comment on `_enrichErrorMessage`).
+   *
+   * @param {Error & { code?: string }} err
+   * @param {object} sendOptions — this turn's sendMessage options (for the admission callback)
+   * @param {{ error: Function }} logger — the caller's logger (`this._log || log`)
+   */
+  _refuseTurnBeforeDispatch(err, sendOptions, logger) {
+    logger.error(`Turn refused before dispatch: ${err.message}`)
+    // An uncoded throw (e.g. from a subclass's augment hook) is not a
+    // binary-verification failure, so it gets a neutral code.
+    this.emit('error', { code: err.code || 'TURN_REFUSED', message: err.message })
+    reportInputAdmission(sendOptions, {
+      status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+      reason: err.code || 'turn_refused',
+      message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
+    })
   }
 
   /**

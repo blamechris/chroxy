@@ -38,9 +38,11 @@
  */
 import { spawn } from 'child_process'
 import { Readable, Writable } from 'stream'
+import { isAbsolute } from 'node:path'
 import * as acp from '@agentclientprotocol/sdk'
 import { BaseSession, buildBaseSessionOpts, CHROXY_CONTEXT_HINT_TEXT, reportInputAdmission } from './base-session.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { killProcessTree } from './platform.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
@@ -278,7 +280,22 @@ export function createAcpSessionClass(rawEntry) {
           ...spawnSpec.options,
         })
       } catch (err) {
-        throw new Error(`Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
+        // #8035 — an ABSOLUTE configured `command` gets a labeled diagnosis
+        // (not executable / quarantined / vanished) via the same gate the
+        // resolved-binary providers use for their #6708 spawn-time backstop.
+        // A BARE command (resolved via PATH lookup) is excluded on purpose:
+        // `verifyBinary` reports any NON-ABSOLUTE path as not_found regardless
+        // of the real cause (e.g. Node's own ENOENT for a missing `cwd`), so
+        // labeling a bare name here would misdiagnose — the raw error stays
+        // the more honest one for that case.
+        const labeled = isAbsolute(entryRef.command)
+          ? labelBinarySpawnFailure({
+            attemptedPath: entryRef.command,
+            binary: entryRef.label,
+            prefix: `Failed to spawn ACP agent "${entryRef.label}"`,
+          })
+          : null
+        throw new Error(labeled || `Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
       }
       this._child = child
 
@@ -725,7 +742,16 @@ export function createAcpSessionClass(rawEntry) {
 
     _onChildError(err) {
       if (this._destroying) return
-      this._reportTeardown(`Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
+      // #8035 — same absolute-only labeled backstop as start()'s sync spawn
+      // catch above (see that comment for why a bare command is excluded).
+      const labeled = isAbsolute(this._acpEntry.command)
+        ? labelBinarySpawnFailure({
+          attemptedPath: this._acpEntry.command,
+          binary: this._acpEntry.label,
+          prefix: `Failed to run ACP agent "${this._acpEntry.label}"`,
+        })
+        : null
+      this._reportTeardown(labeled || `Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
     }
 
     /**

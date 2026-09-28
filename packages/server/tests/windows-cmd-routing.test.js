@@ -64,10 +64,12 @@ describe('Windows .cmd routing — prepareSpawn on provider binaries (#6484)', (
 })
 
 describe('Windows .cmd routing — call sites invoke prepareSpawn (#6484)', () => {
-  it('jsonl-subprocess-session spawns prepareSpawn(resolvedBinary) output', () => {
+  it('jsonl-subprocess-session spawns prepareSpawn(spawnBinary) output', () => {
     const s = src('jsonl-subprocess-session.js')
     assert.match(s, /import \{ prepareSpawn \} from '\.\/utils\/win-spawn\.js'/, 'imports prepareSpawn')
-    assert.match(s, /prepareSpawn\(Klass\.resolvedBinary, args\)/, 'routes the resolved binary')
+    // #8035: spawnBinary is the gate-verified path (_gatedSpawnBinary), not a
+    // fresh Klass.resolvedBinary read — see jsonl-subprocess-session.js.
+    assert.match(s, /prepareSpawn\(spawnBinary, args\)/, 'routes the gate-verified binary')
     // Spawns the ROUTED command/args (not the originals), spreading its options.
     assert.match(s, /spawn\(spawnSpec\.command, spawnSpec\.args/, 'spawns spawnSpec.command/.args')
     assert.match(s, /\.\.\.spawnSpec\.options/, 'spreads spawnSpec.options')

@@ -48,7 +48,8 @@ unverified-binaries gap it exposed is real regardless.)
 | `not_executable` | present but no `X` bit for this process | `ProviderBinaryNotFoundError` / doctor `fail` |
 | `quarantined` | macOS: present + executable but carries a **blocking** `com.apple.quarantine` xattr | `ProviderBinaryQuarantinedError` / doctor `fail` |
 
-- **Preflight gate (per session-create; per turn for `claude-sdk`, §5).** `runProviderPreflight` re-resolves the
+- **Preflight gate (per session-create; per turn for `claude-sdk`, `gemini`, and
+  `codex exec`, §5).** `runProviderPreflight` re-resolves the
   binary fresh and prefers the provider's live `resolvedBinary` — the exact path
   the spawn will use — so the existence gate and the spawn can no longer diverge.
   A quarantined binary throws `ProviderBinaryQuarantinedError`
@@ -69,10 +70,26 @@ unverified-binaries gap it exposed is real regardless.)
   `codex-app-server-session.js`) on a real `child_process`/PTY spawn error, and
   (since #8030) `claude-sdk`'s in-process `SdkSession` on a pre-first-message
   turn failure, since it has no child process of its own to catch an `error`
-  event from. The exception is `acp-session.js`, whose agent spawn has no
-  backstop yet (#8035). A backstop labels a spawn that FAILS; it does not stop
-  one that succeeds. The per-turn subprocess providers (gemini, `codex exec`)
-  still verify their binary only at create — also #8035.
+  event from. A backstop labels a spawn that FAILS; it does not stop one that
+  succeeds.
+  `acp-session.js` (#8035) gets a narrower version: the configured `command`
+  is operator-chosen, not a binary Chroxy resolves itself, so it is
+  labeled ONLY when `command` is an absolute path — `verifyBinary` reports any
+  non-absolute path as `not_found` regardless of the real cause (e.g. Node's
+  own `ENOENT` for a missing `cwd`), so labeling a bare PATH-resolved command
+  would misdiagnose it; a bare command's spawn failure keeps its raw text.
+- **Per-turn re-verification (#8035).** Preflight alone only covers session-
+  create. `gemini` and `codex exec` spawn a fresh child EVERY turn
+  (`jsonl-subprocess-session.js`'s `sendMessage`, the same shape `claude-sdk`
+  has had since #8030) — before #8035 that per-turn spawn read a fresh,
+  unverified `Klass.resolvedBinary` every time, so a create-time gate could
+  pass and every subsequent turn would still run whatever the binary
+  currently resolves to, gate or no gate. `_gatedSpawnBinary` (`base-session.js`)
+  closes that: with a `spawnPreflight` wired (see §5), it re-runs the full
+  gate against the create-time-pinned path before every spawn, exactly like
+  `claude-sdk`'s per-turn re-verification; a refusal here (`PROVIDER_BINARY_PROVENANCE`,
+  `PROVIDER_BINARY_QUARANTINED`, `PROVIDER_BINARY_UNVERIFIED`, …) leaves the
+  session idle rather than spawning — see `_refuseTurnBeforeDispatch`.
 - **`chroxy doctor`.** The provider-binary and `cloudflared` health checks report
   a quarantined binary distinctly from a missing one, with a copy-pasteable fix:
   `xattr -d com.apple.quarantine <path>` (after verifying provenance) or
@@ -169,9 +186,12 @@ Authenticode signature gating is tracked in #6932.
 When a gate is ON, a verification failure blocks (`block` mode / signature gate) or
 loudly surfaces (`warn` mode) — it **never silently spawns an unverified binary**
 at the point where the gate runs. For providers that spawn more than once per
-session, that is only as strong as how often the gate runs: `claude-sdk`
-re-runs it before every turn (§5), while the per-turn subprocess providers
-(gemini, `codex exec`) still run it only at create (#8035).
+session, that is only as strong as how often the gate runs: `claude-sdk`,
+`gemini`, and `codex exec` all now re-run it before every turn (§5, #8035) —
+before #8035 only `claude-sdk` did, and the per-turn subprocess providers
+(gemini, `codex exec`) verified their binary only at create. One known spawn
+still runs with no gate at all: the `codex` model-catalog probe (#8036, see the
+§5 table).
 A binary that can't even be hashed is treated as unverifiable: blocked in `block`
 mode, surfaced-but-allowed in `warn` mode. A `block`-mode failure throws
 `ProviderBinaryProvenanceError` (`code: PROVIDER_BINARY_PROVENANCE`) from preflight,
@@ -364,9 +384,12 @@ before each test.
 now refuses the NEXT TURN of every live `claude-sdk` session with
 `PROVIDER_BINARY_PROVENANCE`, not only the next session create, until the new
 hash is re-approved. That is the promise `block` mode makes, now kept for a
-provider that spawns per turn. In `warn` mode the mismatch is logged on every
-turn until it is re-approved, since `verifyProvenance` deliberately never
-re-pins a mismatch on its own.
+provider that spawns per turn. Since #8035 the same is true of every live
+`gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session too — an
+in-place `npm i -g` over either binary now refuses the next turn instead of
+silently spawning the swapped binary until the session is recreated. In `warn`
+mode the mismatch is logged on every turn until it is re-approved, since
+`verifyProvenance` deliberately never re-pins a mismatch on its own.
 
 **What is still NOT covered.** A TOCTOU window between the gate's checks and
 the actual `exec()` remains, exactly as it does for every other provider this
@@ -443,6 +466,26 @@ pruned from `packages/desktop`'s staged server, and the Mach-O bundle guard
 extension, so an unpruned platform binary fails the build rather than
 shipping silently. Every Claude Code provider — SDK included — now requires
 the same installed `claude` on the end user's machine.
+
+### What is verified, and when
+
+| Provider | Preflight | Per-spawn re-verification |
+| --- | --- | --- |
+| `claude-sdk` | create | every turn, pinned to the create-time path (#8030) |
+| `gemini` | create | every turn, pinned to the create-time path (#8035) |
+| `codex exec` (`CHROXY_CODEX_APPSERVER=0`, legacy) | create | every turn, pinned to the create-time path (#8035) |
+| `codex` app-server (default route) | create | none — one spawn per session, at `start()`, from a fresh resolve |
+| `claude-cli` / `claude-tui` | create | none — one long-lived child process / PTY for the session's lifetime |
+| `acp` (config-driven ACP agents) | none | none — operator-configured `command`; a spawn-failure backstop labels the error for an ABSOLUTE command only (§2) |
+| One-shots (summarizer, semantic-title generator) | n/a | a fresh full gate on every call — no create-time step to pin from |
+| `codex` model-catalog probe (post-auth `available_models` refresh) | none | none — spawns `codex app-server` from a fresh, unverified resolve with no session involved; tracked as #8036 |
+
+"Per-spawn re-verification" pins to the exact path create-time preflight
+verified (when preflight ran and the provider isn't containerised) rather than
+re-resolving — see `_gatedSpawnBinary` / `_verifyPinnedSpawn`. The
+`codex` app-server, `claude-cli` and `claude-tui` rows spawn once per session,
+right after the create-time preflight, so that one check covers their only
+spawn. The `acp` row and the catalog probe run no binary gate at all.
 
 ## 6. Operator remediation quick reference
 

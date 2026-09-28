@@ -1,6 +1,6 @@
 import { describe, it, after, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, existsSync, unlinkSync } from 'fs'
 import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -13,6 +13,9 @@ import {
 } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { GeminiSession } from '../src/gemini-session.js'
+import { CodexSession } from '../src/codex-session.js'
+import { waitFor } from './test-helpers.js'
 
 /**
  * Pre-flight check integration tests for SessionManager.createSession.
@@ -174,6 +177,72 @@ class DisposableBinaryProvider extends SpawnGateFixtureProvider {
   }
 }
 registerProvider('test-spawn-gate-disposable-8030', DisposableBinaryProvider)
+
+// #8035 — end-to-end fixtures for the REAL Gemini/Codex per-turn spawn gate,
+// exercised through actual GeminiSession/CodexSession subclasses (not a
+// hand-rolled fake) so the test goes red if `spawnPreflight` is ever dropped
+// from BASE_SESSION_OPT_KEYS or the middle layer stops forwarding it. Mirrors
+// SpawnGateFixtureProvider above: a mutable `resolvedOverride` proves pinning
+// survives a PATH change, and `preflight` drops credentials/version fields so
+// create-time preflight needs nothing beyond the always-present `node`.
+class TestGeminiSpawnGate extends GeminiSession {
+  static resolvedOverride = null
+  static shimPath = null
+  static get resolvedBinary() { return TestGeminiSpawnGate.resolvedOverride || process.execPath }
+  static get preflight() {
+    return {
+      label: 'Test Gemini Spawn Gate',
+      binary: { name: 'node', candidates: [] },
+      // GeminiSession.resolveAuth() (inherited, unchanged) reads
+      // `this.preflight.credentials` unconditionally — an empty-but-present
+      // block keeps that call from throwing without requiring any real key.
+      credentials: { envVars: [], hint: '', optional: true },
+    }
+  }
+  // Bypass the real Gemini CLI argv shape — just run the shim under node.
+  _buildArgs(text) { return [TestGeminiSpawnGate.shimPath, text] }
+  _buildChildEnv() { return process.env }
+}
+registerProvider('test-gemini-spawn-gate-8035', TestGeminiSpawnGate)
+
+class TestCodexSpawnGate extends CodexSession {
+  static resolvedOverride = null
+  static shimPath = null
+  static get resolvedBinary() { return TestCodexSpawnGate.resolvedOverride || process.execPath }
+  static get preflight() {
+    return {
+      label: 'Test Codex Spawn Gate',
+      binary: { name: 'node', candidates: [] },
+      // CodexSession.resolveAuth() (inherited, unchanged) reads
+      // `this.preflight.credentials` unconditionally — see the identical note
+      // on TestGeminiSpawnGate above.
+      credentials: { envVars: [], hint: '', optional: true },
+    }
+  }
+  _buildArgs(text) { return [TestCodexSpawnGate.shimPath, text] }
+  _buildChildEnv() { return process.env }
+}
+registerProvider('test-codex-spawn-gate-8035', TestCodexSpawnGate)
+
+// A shim that writes a MARKER the instant it actually runs, so a refused turn
+// can be proven to have never spawned (marker absent) rather than only
+// inferred. No JSONL output needed — JsonlSubprocessSession's default
+// `_emitFallbackResult` fires a `result` on a clean close with no parsed
+// `done`-equivalent event, which is enough to prove the turn completed.
+function makeGateShim() {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-8035-shim-'))
+  const shimPath = join(dir, 'gate-shim.mjs')
+  const markerPath = join(dir, 'marker.txt')
+  const body = [
+    '#!/usr/bin/env node',
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(${JSON.stringify(markerPath)}, 'ran')`,
+    'process.exit(0)',
+  ].join('\n')
+  writeFileSync(shimPath, body)
+  chmodSync(shimPath, 0o755)
+  return { dir, shimPath, markerPath }
+}
 
 // #8030 — in-memory pin ledger (the surface verifyProvenance consults:
 // getRecord + approve), matching the shape used in agent-connections.test.js.
@@ -538,4 +607,118 @@ describe('SessionManager._binaryProvenanceOptions (#8030 review)', () => {
     assert.equal(make({ binaryProvenanceMode: 'warn' })._binaryProvenanceOptions().mode, 'warn')
     assert.equal(make({ binaryProvenanceMode: 'block' })._binaryProvenanceOptions().mode, 'block')
   })
+})
+
+describe('SessionManager end-to-end — per-turn subprocess spawn gate, Gemini + Codex-exec (#8035)', () => {
+  let savedGeminiKey
+  let savedOpenaiKey
+
+  beforeEach(() => {
+    savedGeminiKey = process.env.GEMINI_API_KEY
+    savedOpenaiKey = process.env.OPENAI_API_KEY
+    // start() only checks the REAL apiKeyEnv static (GEMINI_API_KEY /
+    // OPENAI_API_KEY, inherited unchanged from GeminiSession/CodexSession).
+    // The fixture's `preflight` credentials block is empty and optional, so
+    // preflight never asks for a key; only start() does.
+    process.env.GEMINI_API_KEY = 'test-gemini-key'
+    process.env.OPENAI_API_KEY = 'test-openai-key'
+    TestGeminiSpawnGate.resolvedOverride = null
+    TestCodexSpawnGate.resolvedOverride = null
+  })
+
+  afterEach(() => {
+    if (savedGeminiKey === undefined) delete process.env.GEMINI_API_KEY
+    else process.env.GEMINI_API_KEY = savedGeminiKey
+    if (savedOpenaiKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = savedOpenaiKey
+  })
+
+  const PROVIDERS = [
+    { label: 'GeminiSession', ProviderClass: TestGeminiSpawnGate, providerId: 'test-gemini-spawn-gate-8035' },
+    { label: 'CodexSession (codex exec)', ProviderClass: TestCodexSpawnGate, providerId: 'test-codex-spawn-gate-8035' },
+  ]
+
+  for (const { label, ProviderClass, providerId } of PROVIDERS) {
+    it(`${label}: turn 1 spawns and completes on a matching ledger hash; turn 2 is refused after the ledger is mutated`, async () => {
+      const { dir, shimPath, markerPath } = makeGateShim()
+      ProviderClass.shimPath = shimPath
+      const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: SPAWN_GATE_REAL_HASH } })
+      const mgr = new SessionManager({
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        defaultCwd: tmpdir(),
+        binaryProvenanceMode: 'block',
+        binaryProvenanceLedger: ledger,
+      })
+      let id = null
+      try {
+        id = mgr.createSession({ provider: providerId, skipPersist: true })
+        assert.ok(id, 'session id should be returned')
+        const session = mgr.getSession(id).session
+
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+
+        // Turn 1 — the ledger matches the pinned path: spawns and completes.
+        const results = []
+        session.on('result', (d) => results.push(d))
+        const admissions = []
+        await session.sendMessage('turn one', [], { onInputAdmission: (a) => admissions.push(a) })
+        await waitFor(() => results.length >= 1 || errors.length >= 1, { label: 'turn 1 settle' })
+        assert.equal(errors.length, 0, 'turn 1 must not error')
+        assert.equal(existsSync(markerPath), true, 'turn 1 actually spawned the pinned binary')
+        assert.equal(admissions[0]?.status, 'accepted')
+        // _isBusy only clears once the child's `close` fires (can land after
+        // the marker write above) — wait for it before sending turn 2.
+        await waitFor(() => !session.isRunning, { label: 'turn 1 fully closed' })
+
+        // Mutate the ledger — turn 2 must now be refused BEFORE any spawn.
+        unlinkSync(markerPath)
+        ledger._records.set(process.execPath, { sha256: SPAWN_GATE_WRONG_HASH })
+        await session.sendMessage('turn two', [], { onInputAdmission: (a) => admissions.push(a) })
+
+        assert.equal(errors.length, 1, 'turn 2 produced exactly one refusal error')
+        assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
+        assert.equal(existsSync(markerPath), false, 'turn 2 never spawned a child — no marker written')
+        const rejected = admissions[admissions.length - 1]
+        assert.equal(rejected.status, 'rejected')
+        assert.equal(rejected.delivery, 'not_dispatched')
+        assert.equal(rejected.reason, 'PROVIDER_BINARY_PROVENANCE')
+
+      } finally {
+        if (id) mgr.destroySession(id)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it(`${label}: a PATH change after create never redirects the spawn away from the create-time-pinned path`, async () => {
+      const { dir, shimPath, markerPath } = makeGateShim()
+      ProviderClass.shimPath = shimPath
+      const mgr = new SessionManager({ maxSessions: 5, stateFilePath: tmpStateFile(), defaultCwd: tmpdir() })
+      let id = null
+      try {
+        id = mgr.createSession({ provider: providerId, skipPersist: true })
+        const session = mgr.getSession(id).session
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+        const results = []
+        session.on('result', (d) => results.push(d))
+
+        // Simulate the provider now resolving to a path that does not exist —
+        // a fresh Klass.resolvedBinary read would ENOENT; the pinned gate must
+        // not look there.
+        ProviderClass.resolvedOverride = join(tmpdir(), `chroxy-8035-elsewhere-${process.pid}`)
+
+        await session.sendMessage('hi')
+        await waitFor(() => results.length >= 1 || errors.length >= 1, { label: 'turn settle' })
+
+        assert.equal(errors.length, 0, 'the turn must not fail even though resolvedBinary now points nowhere')
+        assert.equal(existsSync(markerPath), true, 'the pinned process.execPath was spawned, not the new (nonexistent) resolve')
+
+      } finally {
+        if (id) mgr.destroySession(id)
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
 })

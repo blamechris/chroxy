@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
@@ -617,5 +617,78 @@ describe('AcpSession — exactly one teardown report per failure (#7319 review f
       `expected exactly one error event, got ${ev.length}: ${JSON.stringify(ev.map(([, p]) => p.message))}`,
     )
     assert.match(ev[0][1].message, /exited unexpectedly/, 'the informative exit-code message must win, not the generic one')
+  })
+})
+
+// #8035 — a narrower spawn-failure backstop than the resolved-binary providers
+// get: an ACP agent's `command` is entirely operator-configured, so it is
+// labeled ONLY when absolute (see acp-session.js's `_onChildError` / start()'s
+// sync catch). All three spawn failures below arrive ASYNCHRONOUSLY via
+// child.on('error') (verified empirically: ENOENT/EACCES from spawn() are
+// never a synchronous throw on this platform), so they exercise
+// `_onChildError`, not the sync catch in start() — both call the identical
+// labeling logic, so this is still full coverage of the shared helper.
+describe('AcpSession — spawn-failure backstop is absolute-command-only (#8035)', () => {
+  it('an absolute command that exists but is not executable gets the labeled diagnosis', {
+    skip: process.platform === 'win32'
+      ? 'POSIX-only premise: Windows has no execute bit, so chmod 0o644 cannot make the file not-executable and verifyBinary reports it ok'
+      : false,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-acp-8035-'))
+    const notExecutable = join(dir, 'not-executable')
+    writeFileSync(notExecutable, '#!/bin/sh\necho hi\n')
+    chmodSync(notExecutable, 0o644)
+    const { s, cleanup } = mkSession({}, { command: notExecutable, args: [] })
+
+    const errorP = waitFor(s, 'error')
+    // start() itself may hang or reject depending on how the ACP transport
+    // reacts to a child that never spawned — the observable this test cares
+    // about is the teardown `error` event `_onChildError` reports, which
+    // fires independently of what start()'s own promise does.
+    s.start().catch(() => {})
+    const payload = await errorP
+
+    assert.match(payload.message, /not executable/i, 'labeled not-executable diagnosis')
+    assert.match(payload.message, /chmod \+x/, 'includes the remediation command')
+    assert.ok(payload.message.includes(notExecutable), 'names the actual attempted path')
+
+    await s.destroy().catch(() => {})
+    cleanup()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('an absolute, healthy command that fails to spawn for an unrelated reason keeps the raw error text', async () => {
+    // process.execPath is absolute and perfectly healthy — verifyBinary would
+    // report it `ok`, so labelBinarySpawnFailure must return null and the raw
+    // spawn error (ENOENT on the nonexistent cwd) must pass through unlabeled.
+    const { s, cleanup } = mkSession({ cwd: join(tmpdir(), `chroxy-acp-8035-no-such-cwd-${Date.now()}`) })
+
+    const errorP = waitFor(s, 'error')
+    s.start().catch(() => {})
+    const payload = await errorP
+
+    assert.doesNotMatch(payload.message, /not executable|quarantined|not found/i, 'must not be mislabeled — the binary itself is healthy')
+    assert.match(payload.message, /ENOENT/, 'the raw spawn error must still be visible')
+
+    await s.destroy().catch(() => {})
+    cleanup()
+  })
+
+  it('a bare (PATH-resolved) command name never gets labeled, even when it does not exist', async () => {
+    // verifyBinary reports ANY non-absolute path as not_found regardless of
+    // the real cause — labeling a bare name here would misdiagnose (e.g. a
+    // real ENOENT-for-missing-cwd could get mislabeled "not found: install
+    // it"). isAbsolute(command) is false here, so no label is even attempted.
+    const { s, cleanup } = mkSession({}, { command: 'chroxy-8035-bare-command-does-not-exist', args: [] })
+
+    const errorP = waitFor(s, 'error')
+    s.start().catch(() => {})
+    const payload = await errorP
+
+    assert.doesNotMatch(payload.message, /not executable|quarantined|not found —/i, 'a bare command must never receive the labeled diagnosis')
+    assert.match(payload.message, /ENOENT/, 'the raw spawn error must still be visible')
+
+    await s.destroy().catch(() => {})
+    cleanup()
   })
 })
