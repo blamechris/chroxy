@@ -10,6 +10,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { Checkpoint, RestoreCheckpointMode } from '../store/types'
+import { isImeComposing } from '../utils/ime'
 
 // #6767: selective restore-mode picker. Order = display order (default first).
 const RESTORE_MODES: RestoreCheckpointMode[] = ['both', 'files', 'conversation']
@@ -263,7 +264,7 @@ export function CheckpointTimeline() {
                 // Enter) get read as "create the checkpoint". `keyCode ===
                 // 229` is the Safari fallback for browsers that don't set
                 // `isComposing` reliably.
-                if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                if (isImeComposing(e)) return
                 if (e.key === 'Enter') handleCreate()
                 if (e.key === 'Escape') setCreating(false)
               }}

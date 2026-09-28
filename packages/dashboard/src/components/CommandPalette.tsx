@@ -3,6 +3,7 @@
  */
 import { useState, useEffect, useRef, useMemo } from 'react'
 import { formatShortcutKeys } from '../utils/platform'
+import { isImeComposing } from '../utils/ime'
 
 export interface Command {
   id: string
@@ -85,7 +86,7 @@ export function CommandPalette({ commands, isOpen, onClose, mruList }: CommandPa
     // #8064 — don't let an IME composition's commit key (usually Enter) get
     // read as "run the highlighted command". `keyCode === 229` is the
     // Safari fallback for browsers that don't set `isComposing` reliably.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (isImeComposing(e)) return
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault()

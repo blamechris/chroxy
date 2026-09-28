@@ -13,6 +13,7 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { Modal } from './Modal'
 import type { ModelInfo } from '../store/types'
+import { isImeComposing } from '../utils/ime'
 
 export interface ModelPickerModalProps {
   open: boolean
@@ -99,7 +100,7 @@ export function ModelPickerModal({
       // get read as "select the single matching model". `keyCode === 229`
       // is the Safari fallback for browsers that don't set `isComposing`
       // reliably.
-      if (e.nativeEvent.isComposing || e.keyCode === 229) return
+      if (isImeComposing(e)) return
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         listRef.current

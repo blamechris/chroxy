@@ -45,6 +45,7 @@ import {
   type OtherFreeformAnswer,
   type MultiQuestionAnswersMap as SharedMultiQuestionAnswersMap,
 } from '@chroxy/store-core'
+import { isImeComposing } from '../utils/ime'
 
 /**
  * #4735 — per-question answer payload emitted by the multi-question form.
@@ -402,7 +403,7 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
     // (Japanese/Chinese/Korean, …). `isComposing` is the standard signal;
     // `keyCode === 229` is the Safari fallback (its "still composing"
     // sentinel keyCode).
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (isImeComposing(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       handleSubmit()

@@ -15,6 +15,7 @@ import { filterImageFiles } from '../utils/image-utils'
 import { shouldCollapsePaste, findActiveMarkerIds, formatComposerLozenge, type ChatActivityState } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
 import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
+import { isImeComposing } from '../utils/ime'
 
 /**
  * Convert a clipboard HTML payload to plain text. Used as a fallback when
@@ -722,7 +723,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     // sentinel) is checked as a fallback. Bail out before any Enter/Tab/
     // arrow/Escape handling below — pickers, history recall, send, and
     // interrupt all live after this point.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (isImeComposing(e)) return
 
     if (e.key === 'Control') {
       if (handleControlPttKeyDown(e)) return
