@@ -455,6 +455,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   If you run the container **without** `CHROXY_CONFIG_DIR`, nothing changes.
 
+- **`chroxy start --skip-checks` no longer crashes when the default provider
+  fails preflight (#8029).** `startCliServer` created the startup "Default"
+  session unconditionally; `createSession` runs the same provider preflight
+  `chroxy start`'s doctor pass runs (missing/quarantined/unsupported/wrong-
+  provenance/wrong-version binary, or missing credentials), and without
+  `--skip-checks` doctor catches it first and refuses cleanly. With
+  `--skip-checks`, the doctor pass is skipped and the preflight error was
+  thrown uncaught, crashing the daemon. The default-session step now catches
+  only that typed preflight error class — the same class the session-restore
+  path a few lines above it already treats as recoverable — logs a readable
+  warning, and keeps the daemon running with no default session; the
+  dashboard, app and desktop clients already render a clean "no sessions"
+  state. Any other error still propagates unchanged.
+
 ### Changed
 
 - **`CHROXY_CONFIG_DIR` now relocates ALL daemon state (#7052).** It previously
