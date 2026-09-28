@@ -48,6 +48,7 @@ import { createLogger } from '../logger.js'
 import { sleep } from '../utils/sleep.js'
 import { NotificationSink } from './sink.js'
 import { configPath } from '../config-dir.js'
+import { MAX_EXTERNAL_PROJECT_CHARS } from '../external-session-registry.js'
 import {
   cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
@@ -354,12 +355,31 @@ export class DiscordWebhookSink extends NotificationSink {
    * pipeline notification carries (Phase 3 ingest events will carry an
    * explicit `project`). Sanitized the same way the bash original sanitized
    * project names so state keys stay filesystem/log safe.
+   *
+   * #8063 review (found while closing #7123): every fallback in the chain
+   * above — `data.project`, `data.sessionName`, `data.sessionId` — is a raw
+   * `IngestEventDataSchema` value, wire-legal up to 4096 chars (16x
+   * `MAX_EXTERNAL_PROJECT_CHARS`). #7123 stripped `data.project` from the
+   * ingest-side spread, but `sessionName`/`sessionId` reach this function
+   * unclamped the same way `project` did, and `event.sessionId`'s envelope
+   * override in event-ingest.js only fires when it's truthy — sessionId is
+   * optional. Clamping HERE, on the OUTPUT, closes every current fallback in
+   * one place and any future one added to the chain, rather than chasing
+   * each raw field at its source. `MAX_EXTERNAL_PROJECT_CHARS` (not
+   * `MAX_EXTERNAL_SESSION_ID_CHARS`) is the right bound: whichever field
+   * produced it, this function's return value is always used downstream as
+   * a PROJECT identifier — the state-file map key and the per-project color
+   * override lookup — never as a session id in its own right. Slicing the
+   * already-sanitized string (not the raw input) means a short key is
+   * returned byte-for-byte unchanged — existing on-disk state-file entries
+   * for values under the cap are not rewritten or orphaned.
    */
   _projectKey(notification) {
     const data = notification?.data || {}
     const raw = data.project || data.sessionName || data.sessionId || 'chroxy'
     const sanitized = String(raw).replace(/[^A-Za-z0-9._-]/g, '')
-    return sanitized.length > 0 ? sanitized : 'unknown'
+    const key = sanitized.length > 0 ? sanitized : 'unknown'
+    return key.length > MAX_EXTERNAL_PROJECT_CHARS ? key.slice(0, MAX_EXTERNAL_PROJECT_CHARS) : key
   }
 
   // -- Sink contract --------------------------------------------------------

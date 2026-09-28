@@ -592,12 +592,22 @@ export function handleEventIngest(server, req, res) {
         }
       }
 
+      // #7123: `data` may carry its own `project` key (schema-legal up to
+      // 4096 chars — 16x the 256 cap `event.project` gets from
+      // IngestEventSchema). The clamped/derived `project` above is the only
+      // value that may reach the payload under that name; when it is absent
+      // (no envelope project AND no derivable data.cwd), the raw
+      // `data.project` must not leak through in its place via the spread
+      // below — strip it here rather than relying on the conditional
+      // override to always win.
+      const { project: _rawDataProject, ...dataWithoutProject } = data
+
       // Fire-and-forget: the pipeline owns delivery (category rate limits,
       // prefs, sink retries). A hard sink failure is logged, not surfaced —
       // emitters can't act on it anyway.
       Promise.resolve(
         pushManager.send(mapping.category, title, notifyBody, {
-          ...data,
+          ...dataWithoutProject,
           source: event.source,
           external: true,
           ...(event.sessionId ? { sessionId: event.sessionId } : {}),

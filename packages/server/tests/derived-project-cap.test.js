@@ -205,13 +205,18 @@ describe('#7105 the Discord embed title is capped', () => {
 
   const entry = (state) => ({ state, body: 'Ready for next message', firstSeenTs: 1_000_000 })
 
-  it('PREMISE: _projectKey passes an over-long project through untouched', () => {
-    // The charset sanitizer is not a length bound: a run of 4000 `p` is already
-    // in the allowed set, so it survives whole.
-    assert.equal(sink._projectKey({ data: { project: LONG_COMPONENT } }).length, 4000)
+  it('PREMISE: _buildPayload does not itself bound the length of the project it is handed', () => {
+    // #8063 review clamped _projectKey's OUTPUT (see discord-projectkey-clamp.test.js),
+    // so in the real pipeline _buildPayload now only ever receives a
+    // MAX_EXTERNAL_PROJECT_CHARS-bounded project. This test exercises
+    // _buildPayload directly, bypassing _projectKey, to pin that its OWN
+    // title-truncation logic below is independent defense-in-depth — not
+    // reliant on its caller having already bounded the input.
+    const sanitized = LONG_COMPONENT.replace(/[^A-Za-z0-9._-]/g, '')
+    assert.equal(sanitized.length, 4000, 'the charset sanitizer is not a length bound')
   })
 
-  it('caps the title of every state, however long the project', () => {
+  it('caps the title of every state, however long the project passed directly to _buildPayload', () => {
     for (const state of ['idle', 'permission', 'error', 'stale', 'online', 'offline']) {
       const payload = sink._buildPayload(LONG_COMPONENT, entry(state))
       assertDiscordLegal(payload)

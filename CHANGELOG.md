@@ -51,6 +51,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operations already use for any other spawn failure — nothing is spawned in
   either case. With gates off (the default), behaviour is unchanged.
 
+- **A raw `data.project` from an external event can no longer bypass the
+  ingest project clamp (#7123).** `event-ingest.js`'s `POST /api/events`
+  handler computes a clamped `project` (`event.project`, or a #7121-clamped
+  derivation from `data.cwd`) and only overrode the push payload's `project`
+  key with it when that value was truthy — but the payload was built by
+  spreading the raw `data` bag first, so when neither an envelope `project`
+  nor a `data.cwd` was given, a `data.project` supplied directly in the data
+  bag (schema-legal up to 4096 chars — 16x the 256-char cap `event.project`
+  itself gets) passed straight through untouched, reaching
+  `pushManager.send` and, from there, `DiscordWebhookSink._projectKey`,
+  which uses it as the Discord state-file map key. `data.project` is now
+  stripped from the spread unconditionally — the clamped/derived `project`
+  is the only value that can ever reach the payload under that key, and it
+  is simply absent when none is derivable, rather than falling back to the
+  raw field. Checked every other `...data`-shaped raw spread in the ingest
+  handler and the notification sinks for the same pattern; none exists —
+  this was the only site.
+  **Review follow-up:** `DiscordWebhookSink._projectKey()`'s own fallback
+  chain (`data.project || data.sessionName || data.sessionId || 'chroxy'`)
+  left `data.sessionName` and `data.sessionId` open to the identical
+  bypass — both are raw, wire-legal-to-4096-char `IngestEventDataSchema`
+  values, untouched by the ingest-side strip above, and the envelope
+  `sessionId` override only fires when `event.sessionId` is truthy.
+  `_projectKey()` now clamps its own OUTPUT to `MAX_EXTERNAL_PROJECT_CHARS`
+  (reused from `external-session-registry.js`, since the return value is
+  always used downstream as a project identifier — the state-file map key
+  and the per-project color-override lookup — regardless of which fallback
+  field produced it), closing `project`, `sessionName`, `sessionId`, and
+  any future fallback added to that chain in one place. The clamp runs on
+  the already-sanitized string, so every existing state-file key under the
+  cap is returned byte-for-byte unchanged.
+
 - **The codex model-catalog probe now spawns `codex app-server` through the
   same verified one-shot binary gate as the summarizer and semantic-title
   calls, instead of a fresh, unverified resolve (#8036).** On every post-auth
