@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`codex-app-server`'s attachment dir and `docker-byok`'s compose env-file —
+  which HOLDS `ANTHROPIC_API_KEY` — now leak no differently than the two
+  session-dir classes #5323/#7337 already fixed (#7373).** Both sites wrote
+  a per-session tmp artifact removed on `destroy()` but never on a crash:
+  `codex-app-server-session.js`'s materialized-attachment dir was a bare
+  `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))`, and
+  `docker-byok-session.js`'s `ANTHROPIC_API_KEY` tmpfile sat flat under
+  `tmpdir()` as `chroxy-byok-<project>.env`. Neither carried an ownership
+  signal, so a boot-time reaper could never tell a crashed session's leftover
+  apart from a live one's — deleting on age alone would have removed a live
+  session's credential file mid-use. Both now follow the shared shape
+  `sweepStaleOwnedDirs`/`ensureOwnedBaseDir` already established: a
+  dedicated, owned base dir (`ATTACH_BASE` / `ENV_FILE_BASE`), an
+  `s`-prefixed per-session dir stamped with `owner.pid`, and the artifact
+  written inside it. `destroy()` removes the whole dir (was: just the file),
+  and a new boot sweep entry in `sweep-stale-provider-dirs.js`
+  (`CodexAppServerSession.sweepStaleAttachDirs` /
+  `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
+  including the API-key file — while a live owner's are never touched. No
+  second reaper implementation was added; both route through the existing
+  `sweepStaleOwnedDirs`.
+
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
   (#8038).** #8035 (below) closed the per-turn gap for `gemini` and `codex

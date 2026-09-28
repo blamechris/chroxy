@@ -44,6 +44,19 @@ export const DEFAULT_SWEEP_LOADERS = {
     const { CliSession } = await import('./cli-session.js')
     return (log) => CliSession.sweepStaleSidecarDirs(log)
   },
+  // #7373 — codex app-server's per-session materialized-attachment dirs,
+  // same crash-leak shape as the two sweeps above.
+  'codex attach-dir': async () => {
+    const { CodexAppServerSession } = await import('./codex-app-server-session.js')
+    return (log) => CodexAppServerSession.sweepStaleAttachDirs(log)
+  },
+  // #7373 — docker-byok's per-session compose env-file dirs. This one is
+  // materially worse than a plain directory leak: the file holds
+  // ANTHROPIC_API_KEY, so an unswept orphan is a credential left in /tmp.
+  'docker-byok env-file-dir': async () => {
+    const { DockerByokSession } = await import('./docker-byok-session.js')
+    return (log) => DockerByokSession.sweepStaleEnvDirs(log)
+  },
 }
 
 /**

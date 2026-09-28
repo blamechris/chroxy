@@ -1,10 +1,11 @@
-import { describe, it, mock } from 'node:test'
+import { describe, it, mock, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { join, dirname, basename } from 'path'
 import { EventEmitter } from 'node:events'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
 import { CodexSession, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
 import {
@@ -1483,6 +1484,24 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     cleanup()
   })
 
+  it('the attach dir is an owner.pid-stamped session dir under ATTACH_BASE, not a bare mkdtemp (#7373)', async () => {
+    const { s, cleanup } = mkSession()
+    s._buildTurnInput('x', [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'a.png' }], 'm5')
+    const dir = s._attachDir
+    // #7373 — a bare `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))` left
+    // no liveness signal at all, so a crash-orphaned dir could never be told
+    // apart from a live session's. It now lives directly under the dedicated,
+    // owned ATTACH_BASE with an owner.pid stamp, the same shape ClaudeTuiSession
+    // and CliSession use for their own crash-leaked dirs.
+    assert.equal(dirname(dir), CodexAppServerSession.ATTACH_BASE, 'attach dir lives directly under ATTACH_BASE')
+    assert.match(basename(dir), /^s-/, 'attach dir is s-prefixed')
+    const pidFile = join(dir, OWNER_PID_FILE)
+    assert.ok(existsSync(pidFile), 'owner.pid stamped in the attach dir')
+    assert.equal(readFileSync(pidFile, 'utf8').trim(), String(process.pid))
+    await s.destroy()
+    cleanup()
+  })
+
   it('skips an absolute / parent-traversing file_ref path (defence-in-depth, #6614)', () => {
     const { s, cleanup } = mkSession()
     for (const bad of ['/etc/passwd.jpg', '../secrets/key.png']) {
@@ -1499,6 +1518,67 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     const input = s._buildTurnInput('hi', [{ type: 'image', mediaType: 'image/png', name: 'nodata.png' }], 'm7')
     assert.deepEqual(input, [{ type: 'text', text: 'hi' }], 'malformed attachment omitted, prompt preserved')
     cleanup()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #7373 — boot-time sweep of materialized-attachment dirs orphaned by a
+// crash. Same ownership rule and test shape as
+// ClaudeTuiSession.sweepStaleSinkDirs / CliSession.sweepStaleSidecarDirs.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('CodexAppServerSession.sweepStaleAttachDirs (#7373)', () => {
+  const DEAD_PID = 999999
+  let created = []
+  let realKill
+
+  beforeEach(() => {
+    created = []
+    // Deterministic dead-pid stub, matching the sibling sink-dir/sidecar-dir
+    // sweep suites: don't rely on 999999 being unused, delegate everything
+    // else to the real probe so our own live pid still reads alive.
+    realKill = process.kill.bind(process)
+    mock.method(process, 'kill', (pid, sig) => {
+      if (pid === DEAD_PID) { const e = new Error('ESRCH'); e.code = 'ESRCH'; throw e }
+      return realKill(pid, sig)
+    })
+  })
+
+  afterEach(() => {
+    mock.restoreAll()
+    for (const d of created) rmSync(d, { recursive: true, force: true })
+  })
+
+  function makeAttachDir(suffix, pidContent) {
+    const base = CodexAppServerSession.ATTACH_BASE
+    mkdirSync(base, { recursive: true })
+    const dir = join(base, `s-test-${suffix}-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    if (pidContent !== undefined) writeFileSync(join(dir, OWNER_PID_FILE), pidContent)
+    created.push(dir)
+    return dir
+  }
+
+  it('sweeps a DEAD-owner attach dir', () => {
+    const dir = makeAttachDir('dead', String(DEAD_PID))
+    const result = CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(!existsSync(dir), 'dead-owner attach dir swept')
+    assert.ok(result.swept >= 1)
+  })
+
+  it('keeps a LIVE-owner attach dir', () => {
+    const dir = makeAttachDir('live', String(process.pid))
+    const result = CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(existsSync(dir), 'live-owner attach dir kept')
+    assert.ok(result.kept >= 1)
+  })
+
+  it('sweeps a pidfile-less orphan once past the grace window', () => {
+    const dir = makeAttachDir('orphan', undefined)
+    const past = new Date(Date.now() - 120_000)
+    utimesSync(dir, past, past)
+    CodexAppServerSession.sweepStaleAttachDirs({ info() {}, warn() {} })
+    assert.ok(!existsSync(dir), 'aged pidfile-less attach dir swept')
   })
 })
 

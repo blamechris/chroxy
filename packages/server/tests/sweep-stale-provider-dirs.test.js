@@ -103,10 +103,12 @@ describe('sweepStaleProviderDirs (#7374)', () => {
   // wiring behavioural rather than a claim: it imports the actual provider
   // modules and reaches the actual static sweep methods.
   describe('DEFAULT_SWEEP_LOADERS — the real wiring', () => {
-    it('covers both providers', () => {
+    it('covers every provider', () => {
       assert.deepEqual(Object.keys(DEFAULT_SWEEP_LOADERS).sort(), [
         'claude-cli sidecar-dir',
         'claude-tui sink-dir',
+        'codex attach-dir',
+        'docker-byok env-file-dir',
       ])
     })
 
@@ -138,6 +140,8 @@ describe('sweepStaleProviderDirs (#7374)', () => {
     for (const [label, modulePath, className, method] of [
       ['claude-tui sink-dir', '../src/claude-tui-session.js', 'ClaudeTuiSession', 'sweepStaleSinkDirs'],
       ['claude-cli sidecar-dir', '../src/cli-session.js', 'CliSession', 'sweepStaleSidecarDirs'],
+      ['codex attach-dir', '../src/codex-app-server-session.js', 'CodexAppServerSession', 'sweepStaleAttachDirs'],
+      ['docker-byok env-file-dir', '../src/docker-byok-session.js', 'DockerByokSession', 'sweepStaleEnvDirs'],
     ]) {
       it(`${label}: routes to ${className}.${method} and returns its tally`, async () => {
         const ns = await import(modulePath)

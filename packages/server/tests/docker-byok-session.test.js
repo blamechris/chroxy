@@ -1,14 +1,15 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
 
 import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
 import { CONTAINER_CONFINE_OK } from '../src/built-in-tools/tool-transforms.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
+import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -3715,7 +3716,7 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
   // already forwards via `docker run --env`; these tests pin the
   // symmetric compose behaviour.
 
-  it('writes an --env-file tmpfile with ANTHROPIC_API_KEY at compose-up and unlinks on destroy (#5079)', async () => {
+  it('writes an --env-file tmpfile with ANTHROPIC_API_KEY inside an owned session dir and removes that dir on destroy (#5079/#7373)', async () => {
     const _execFile = execFileStub({ info: { stdout: 'ok' } })
     const writes = []
     const unlinks = []
@@ -3738,6 +3739,17 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     assert.equal(writes[0].content, 'ANTHROPIC_API_KEY=sk-ant-tmpfile-secret\n')
     // The session tracks the path so destroy can clean it up.
     assert.equal(session._composeEnvFile, writes[0].path)
+    // #7373 — the credential file lives inside a dedicated, owner.pid-stamped
+    // per-session dir under ENV_FILE_BASE rather than flat in tmpdir(), so a
+    // crash leaves the boot-time sweep able to remove it. This is the fix
+    // for the leak: no liveness signal at all meant no orphan could ever be
+    // told apart from a live session's file.
+    assert.ok(session._composeEnvDir, 'session tracks the owning dir')
+    assert.equal(dirname(writes[0].path), session._composeEnvDir, 'env-file lives inside the owning dir')
+    assert.equal(dirname(session._composeEnvDir), DockerByokSession.ENV_FILE_BASE, 'owning dir lives directly under ENV_FILE_BASE')
+    const pidFile = join(session._composeEnvDir, OWNER_PID_FILE)
+    assert.ok(existsSync(pidFile), 'owner.pid stamped in the owning dir')
+    assert.equal(readFileSync(pidFile, 'utf8').trim(), String(process.pid), 'owner.pid holds THIS process\'s pid')
     // Backend received the file via the documented opt.
     assert.equal(backend.createCalls[0].envFile, writes[0].path)
     // No --env flag in argv — confirm the key never appears in any
@@ -3747,9 +3759,14 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
       argvDump.includes('sk-ant-tmpfile-secret'), false,
       'ANTHROPIC_API_KEY must not appear in host argv',
     )
+    const dir = session._composeEnvDir
     await session.destroy()
-    // File is unlinked on destroy (best-effort, idempotent).
-    assert.deepEqual(unlinks, [writes[0].path], 'env-file should be unlinked on destroy')
+    // The WHOLE owning dir (credential file + owner.pid) is removed on
+    // destroy (best-effort, idempotent) — not just the bare file, so no
+    // liveness stamp is left behind either.
+    assert.deepEqual(unlinks, [dir], 'the owning dir should be removed on destroy')
+    assert.equal(session._composeEnvDir, null)
+    assert.equal(session._composeEnvFile, null)
   })
 
   it('skips the env-file when ANTHROPIC_API_KEY is absent (#5079)', async () => {
@@ -3841,6 +3858,10 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     assert.equal(writes.length, 1, 'tmpfile written before compose up')
     assert.equal(unlinks.length >= 1, true, 'tmpfile unlinked on start failure')
     assert.equal(session._composeEnvFile, null, 'env-file path cleared on failure')
+    // #7373 — the owning dir is cleared too, or the credential-file's
+    // liveness stamp (owner.pid) survives a start failure right alongside
+    // an orphaned dir with nothing tracking it.
+    assert.equal(session._composeEnvDir, null, 'owning dir cleared on failure')
   })
 
   // #5081 — persist compose project IDs to disk so a daemon crash
@@ -3954,6 +3975,88 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
     // on-disk paper trail has to survive so the next boot's sweep can
     // retry the teardown.
     assert.deepEqual(store.forgets, [])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #7373 — boot-time sweep of compose env-file dirs orphaned by a crash.
+// The credential (ANTHROPIC_API_KEY) sits INSIDE the swept dir, so this is
+// the mutation-tested proof that a dead owner's key is actually removed and
+// a live owner's is never touched — not just that a directory disappears.
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DockerByokSession.sweepStaleEnvDirs (#7373)', () => {
+  const DEAD_PID = 999999
+  let created = []
+  let realKill
+
+  beforeEach(() => {
+    created = []
+    // Deterministic dead-pid stub — mirrors ClaudeTuiSession's sink-dir sweep
+    // tests (#5359 review): don't rely on 999999 being unused (pid_max can be
+    // in the millions), delegate everything else to the real probe so our OWN
+    // live pid still reads alive.
+    realKill = process.kill.bind(process)
+    mock.method(process, 'kill', (pid, sig) => {
+      if (pid === DEAD_PID) { const e = new Error('ESRCH'); e.code = 'ESRCH'; throw e }
+      return realKill(pid, sig)
+    })
+  })
+
+  afterEach(() => {
+    mock.restoreAll()
+    for (const d of created) rmSync(d, { recursive: true, force: true })
+  })
+
+  // Builds a dir directly under the REAL ENV_FILE_BASE (read off the class
+  // per #7372's lesson — a hardcoded second copy of the path is exactly the
+  // drift this dir naming exists to prevent), containing both an owner.pid
+  // stamp and a fake .env credential file, so the sweep is exercised against
+  // the actual shape _startComposeStack() creates.
+  function makeEnvDir(suffix, pidContent) {
+    const base = DockerByokSession.ENV_FILE_BASE
+    mkdirSync(base, { recursive: true })
+    const dir = join(base, `s-chroxy-byok-test-${suffix}-${process.pid}-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(dir, { recursive: true })
+    if (pidContent !== undefined) writeFileSync(join(dir, OWNER_PID_FILE), pidContent)
+    const envFile = join(dir, 'fake-project.env')
+    writeFileSync(envFile, 'ANTHROPIC_API_KEY=sk-ant-should-not-survive-a-dead-owner\n')
+    created.push(dir)
+    return { dir, envFile }
+  }
+
+  it('sweeps a DEAD-owner dir — including its .env credential file', () => {
+    const { dir, envFile } = makeEnvDir('dead', String(DEAD_PID))
+    assert.ok(existsSync(envFile), 'sanity: the credential file exists before the sweep')
+
+    const result = DockerByokSession.sweepStaleEnvDirs({ info() {}, warn() {} })
+
+    assert.ok(!existsSync(dir), 'dead-owner dir removed')
+    assert.ok(!existsSync(envFile), 'the API-key file inside it is gone too — the actual leak this issue is about')
+    assert.ok(result.swept >= 1, 'reported the swept dir')
+  })
+
+  it('keeps a LIVE-owner dir — its .env credential file is never touched', () => {
+    const { dir, envFile } = makeEnvDir('live', String(process.pid))
+
+    const result = DockerByokSession.sweepStaleEnvDirs({ info() {}, warn() {} })
+
+    assert.ok(existsSync(dir), 'live-owner dir kept')
+    assert.ok(existsSync(envFile), 'the API key is still on disk — the session using it is still running')
+    assert.ok(result.kept >= 1, 'reported the kept dir')
+  })
+
+  it('sweeps a pidfile-less orphan once past the grace window (crash before the pidfile write)', () => {
+    const { dir, envFile } = makeEnvDir('orphan', undefined)
+    // Backdate past the default grace window so it reads as a genuine orphan
+    // rather than a dir caught mid-creation.
+    const past = new Date(Date.now() - 120_000)
+    utimesSync(dir, past, past)
+
+    DockerByokSession.sweepStaleEnvDirs({ info() {}, warn() {} })
+
+    assert.ok(!existsSync(dir), 'aged pidfile-less dir swept')
+    assert.ok(!existsSync(envFile), 'its credential file is gone too')
   })
 })
 

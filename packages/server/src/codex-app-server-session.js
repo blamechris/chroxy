@@ -1,7 +1,9 @@
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, writeFileSync, rmSync } from 'fs'
+import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
 import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
 import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS, reportInputAdmission } from './base-session.js'
+import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
 import { CodexSession, resolveCodexSandbox } from './codex-session.js'
@@ -945,7 +947,23 @@ export class CodexAppServerSession extends BaseSession {
           }
           return true
         })
-        if (binary.length && !this._attachDir) this._attachDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))
+        // #7373 — the attach dir lives inside a dedicated, `owner.pid`-stamped
+        // per-session dir under ATTACH_BASE rather than a bare mkdtemp under
+        // os.tmpdir(), so a crash leaves the boot-time sweep able to tell a
+        // dead session's leftover attachment files from a live one's and
+        // remove only the dead one (same shape as ClaudeTuiSession's sink
+        // dirs and CliSession's permission-mode sidecar).
+        if (binary.length && !this._attachDir) {
+          const base = ensureOwnedBaseDir(CodexAppServerSession.ATTACH_BASE)
+          const dir = join(base, `s-${randomUUID()}`)
+          mkdirSync(dir, { recursive: true, mode: 0o700 })
+          // Stamp the owning pid so the boot-time sweep can tell a live
+          // daemon's dir from one orphaned by a crash. Best-effort: a
+          // missing pidfile just makes the dir sweep-eligible after a grace
+          // window — the safe default for an orphan.
+          try { writeFileSync(join(dir, OWNER_PID_FILE), String(process.pid)) } catch { /* best effort */ }
+          this._attachDir = dir
+        }
         const materialized = binary.length ? materializeAttachments(binary, this._attachDir, messageId) : []
         const refFiles = fileRefs.map((a) => ({ path: a.path, name: a.name || basename(a.path), mediaType: '', size: 0 }))
         const all = [...materialized, ...refFiles]
@@ -2029,6 +2047,34 @@ export class CodexAppServerSession extends BaseSession {
   // the protected-path floor.
   _onPermissionModeChanged(mode) {
     if (mode === 'auto') this._permissions.autoAllowPending()
+  }
+
+  /**
+   * Base dir the per-session materialized-attachment dirs live under
+   * (#7373). Named once so `_buildTurnInput()`'s lazy creation and the boot
+   * sweep cannot drift onto two different paths. Mirrors
+   * `CliSession.PERMISSION_MODE_SIDECAR_BASE` and `ClaudeTuiSession.SINK_BASE`.
+   */
+  static get ATTACH_BASE() { return join(tmpdir(), 'chroxy-codex-attach') }
+
+  /**
+   * #7373 — boot-time sweep of materialized-attachment dirs orphaned by a
+   * crash. destroy() removes a session's own dir, but a SIGKILL leaks it, so
+   * a long-lived host accumulates one per crashed session that ever
+   * materialized a binary attachment. Same ownership rule and implementation
+   * as the claude-tui sink sweep and the claude-cli sidecar sweep — only
+   * dirs whose `owner.pid` is DEAD are removed, so a live daemon's dirs
+   * (including this one's) are kept and the sweep is safe to run
+   * unconditionally at boot.
+   *
+   * @param {object} [logger] - logger with info/warn (defaults to module log)
+   * @returns {{swept:number, kept:number}}
+   */
+  static sweepStaleAttachDirs(logger = log) {
+    return sweepStaleOwnedDirs(CodexAppServerSession.ATTACH_BASE, {
+      logger,
+      label: 'codex attach',
+    })
   }
 
   async destroy() {
