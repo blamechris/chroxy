@@ -68,6 +68,17 @@ describe('FileOpenPalette (#6473)', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "open the highlighted file".
+  it('does not open the highlighted file on Enter during IME composition', async () => {
+    const onClose = vi.fn()
+    render(<FileOpenPalette isOpen={true} onClose={onClose} />)
+    const input = await screen.findByTestId('file-open-palette-input')
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(mockOpenFileInBrowser).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
   it('arrow-down then Enter opens the second file', async () => {
     const onClose = vi.fn()
     render(<FileOpenPalette isOpen={true} onClose={onClose} />)

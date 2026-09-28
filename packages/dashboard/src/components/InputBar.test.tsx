@@ -3038,3 +3038,92 @@ describe('InputBar voice shortcut (#5668)', () => {
     expect(button).toHaveAttribute('title', 'Hold Control to dictate, or Cmd/Ctrl+Shift+M to toggle')
   })
 })
+
+// #8064 — while an IME composition is in progress, the key that commits the
+// candidate (Enter, in every tested layout) must not be read as a composer
+// command: it must not send, must not select/complete a picker item, and
+// must not fire any other Enter/Tab/arrow/Escape handling below the guard.
+// `isComposing` is the standard signal; `keyCode === 229` is the Safari
+// fallback checked alongside it.
+describe('InputBar composer IME guard (#8064)', () => {
+  const mockCommands = [
+    { name: 'commit', description: 'Create a git commit', source: 'project' as const },
+    { name: 'review-pr', description: 'Review a pull request', source: 'project' as const },
+  ]
+
+  it('Enter during IME composition does not send (Cmd+Enter)', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'こんにちは' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true, isComposing: true })
+    expect(onSend).not.toHaveBeenCalled()
+    expect(textarea.value).toBe('こんにちは')
+  })
+
+  it('Enter during IME composition does not send (sendOnEnter)', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} sendOnEnter />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'test' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', isComposing: true })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('Enter during IME composition does not select a highlighted slash command', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} slashCommands={mockCommands} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    fireEvent.keyDown(textarea, { key: 'Enter', isComposing: true })
+    expect(textarea.value).toBe('/')
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('Tab during IME composition does not complete a highlighted slash command', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={mockCommands} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    const event = createEvent.keyDown(textarea, { key: 'Tab', isComposing: true })
+    fireEvent(textarea, event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(textarea.value).toBe('/')
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+  })
+
+  it('keyCode 229 (Safari composing fallback) suppresses Enter send even without isComposing', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} sendOnEnter />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'test' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', keyCode: 229 })
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('keyCode 229 (Safari composing fallback) suppresses Tab picker completion', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={mockCommands} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '/' } })
+    fireEvent.keyDown(textarea, { key: 'Tab', keyCode: 229 })
+    expect(textarea.value).toBe('/')
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+  })
+
+  it('normal (non-composing) Enter still sends and Tab still completes', () => {
+    const onSend = vi.fn()
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} sendOnEnter slashCommands={mockCommands} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.change(textarea, { target: { value: '/' } })
+    fireEvent.keyDown(textarea, { key: 'Tab' })
+    expect(textarea.value).toBe('/commit ')
+    expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledWith('hello')
+  })
+})

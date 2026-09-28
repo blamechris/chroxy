@@ -107,6 +107,16 @@ describe('CreateSessionPanel', () => {
     expect(onCreate).toHaveBeenCalledTimes(2)
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "submit the form".
+  it('does not submit on Enter during IME composition', () => {
+    const onCreate = vi.fn()
+    render(<CreateSessionPanel {...defaultProps} onCreate={onCreate} />)
+
+    fireEvent.keyDown(screen.getByLabelText(/working directory/i), { key: 'Enter', isComposing: true })
+    expect(onCreate).not.toHaveBeenCalled()
+  })
+
   it('cancels on Escape key from any field', () => {
     const onCancel = vi.fn()
     render(<CreateSessionPanel {...defaultProps} onCancel={onCancel} />)

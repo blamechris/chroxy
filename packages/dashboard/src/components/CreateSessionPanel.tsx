@@ -6,6 +6,7 @@
  * Submits on Enter, cancels on Escape.
  */
 import { useState, useCallback, type KeyboardEvent } from 'react'
+import { isImeComposing } from '../utils/ime'
 
 export interface CreateSessionData {
   cwd: string
@@ -42,6 +43,10 @@ export function CreateSessionPanel({
   }, [cwdValue, cwd, model, permMode, onCreate])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "submit the form". `keyCode === 229` is the Safari fallback
+    // for browsers that don't set `isComposing` reliably.
+    if (isImeComposing(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       submit()

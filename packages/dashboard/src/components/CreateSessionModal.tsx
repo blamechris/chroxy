@@ -19,6 +19,7 @@ import {
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { isImeComposing } from '../utils/ime'
 
 export interface CreateSessionData {
   name: string
@@ -577,6 +578,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [setDirectoryListingCallback])
 
   const handleCwdKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter, but
+    // Tab-completion lives here too) get read as "complete/submit the path".
+    // `keyCode === 229` is the Safari fallback for browsers that don't set
+    // `isComposing` reliably.
+    if (isImeComposing(e)) return
     // Tab completion — only when dropdown is visible to avoid trapping keyboard focus
     if (e.key === 'Tab' && showSuggestions && suggestions.length > 0) {
       e.preventDefault()
@@ -615,6 +621,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [showSuggestions, suggestions, selectedSuggestion, selectSuggestion, submit])
 
   const handleNameKeyDown = useCallback((e: KeyboardEvent) => {
+    // #8064 — don't let an IME composition's commit key (usually Enter) get
+    // read as "submit the session name". `keyCode === 229` is the Safari
+    // fallback for browsers that don't set `isComposing` reliably.
+    if (isImeComposing(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       submit()

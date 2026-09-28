@@ -246,6 +246,27 @@ describe('SessionBar', () => {
     expect(screen.getByText('Backend')).toBeInTheDocument()
   })
 
+  // #8064 — the Enter that commits an IME composition must not be read as
+  // "commit the rename".
+  it('does not commit the rename on Enter during IME composition', () => {
+    const onRename = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={onRename}
+        onNewSession={vi.fn()}
+      />
+    )
+    const nameEl = screen.getByText('Default')
+    fireEvent.doubleClick(nameEl)
+    const input = screen.getByDisplayValue('Default')
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    expect(onRename).not.toHaveBeenCalled()
+  })
+
   it('does not call onRename when name is unchanged', () => {
     const onRename = vi.fn()
     render(

@@ -472,6 +472,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   If you do not set `CHROXY_CONFIG_DIR`, nothing changes.
 
+- **Dashboard: composer and form keyboard handlers no longer act on the key
+  that commits an IME composition (#8064).** While typing with an input
+  method editor (Japanese, Chinese, Korean, …), `InputBar.tsx` checked
+  `isComposing` / `keyCode === 229` nowhere: the Enter that commits a
+  composed candidate could send the message or select a highlighted `/` or
+  `@` picker item instead, and — since #7370 — Tab could complete a picker
+  item the same way. Every affected handler now returns early when
+  `e.nativeEvent.isComposing` (or, as a Safari fallback, `e.keyCode === 229`)
+  is true, before any Enter/Tab/arrow/Escape handling runs, so the IME gets
+  the key first. Fixed in the message composer (send, Tab-complete slash
+  command/`@`-file) and every other composer-adjacent field with the same
+  submit/select-on-Enter shape: the `AskUserQuestion` free-text input and the
+  prompt-evaluator clarify textarea, the Cmd+P / Cmd+Shift+O / Cmd+Shift+F /
+  command-palette / model-picker search boxes and the in-conversation find
+  bar, and the session-name/working-directory/checkpoint-name/tab-rename
+  text fields. Left unchanged: widgets where Enter/Space merely activates a
+  focused button-like control (no text composition involved), and the chat
+  scroller's Arrow/PageUp/PageDown keydown handler, which already bows out
+  on any text-entry target.
+
 - **Docker: `CHROXY_CONFIG_DIR` is now honoured by the entrypoint (#7239).**
   `scripts/docker-entrypoint.sh` hardcoded `$HOME/.chroxy` while the daemon
   honours the override, so `docker run -e CHROXY_CONFIG_DIR=/data` split the
