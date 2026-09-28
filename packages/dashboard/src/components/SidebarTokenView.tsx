@@ -421,12 +421,41 @@ export interface SidebarTokenViewProps {
   onSessionClick?: (sessionId: string) => void
   /**
    * #5665 — machine-wide monthly programmatic-credit meter snapshot. When
-   * present (and there's a cap or some spend), a "Credit spend (chroxy-observed)"
-   * meter renders. Omitted/null → no meter (pre-era, pre-#5665 server, or no
-   * programmatic-credit activity).
+   * present (and there's a cap or some spend), a meter renders. Omitted/null
+   * → no meter (pre-era, pre-#5665 server, or no programmatic-credit
+   * activity). #7377: the meter's label/framing is resolved from
+   * `monthlyBudget.billingClass` through the same `BILLING_CLASS_LABEL` map
+   * the per-session/per-provider rows use — see the `MONTHLY_METER_*`
+   * constants below.
    */
   monthlyBudget?: MonthlyBudgetState | null
 }
+
+// #7377: the monthly meter's label/tooltip resolve through the SAME
+// BILLING_CLASS_LABEL map used by the per-session and per-provider rows
+// above — a third caller joining an existing resolution, not a fourth
+// hand-written copy of "Credit spend". Only the meter-specific SCOPE
+// caveat ("chroxy-observed, this UTC month, not your full balance") is
+// layered on top, since that's about the meter's aggregation window, not
+// the billing class.
+const MONTHLY_METER_SCOPE_CAVEAT =
+  'Chroxy-observed (claude -p / SDK) this UTC month — only sessions THIS daemon ran. Not your full Anthropic account/credit-pool balance; sessions on other machines or outside chroxy aren’t counted.'
+
+const MONTHLY_METER_CLASS_FRAMING: Record<BillingClass, string> = {
+  'api-key': 'Real per-token API spend.',
+  'programmatic-credit':
+    'Drawn from Anthropic’s monthly programmatic-credit pool (metered credits, effective 2026-06-15). The dollar figure is the metered credit spend for these turns.',
+  subscription:
+    'Included in your flat Claude subscription — no per-turn dollar charge. The programmatic-credit era (#7333/#7361) is not in force, so this UTC month’s claude -p / SDK usage bills as subscription, not metered credit.',
+}
+
+// #7377: an older server that omits `billingClass` on the wire (or a
+// payload that fails the narrowing) must not fall back to asserting
+// "Credit spend" — that's the exact framing error this issue exists to
+// fix. Falls back to a neutral, explicitly-hedged label instead.
+const MONTHLY_METER_UNKNOWN_LABEL = 'API-equivalent estimate'
+const MONTHLY_METER_UNKNOWN_TOOLTIP =
+  `This server didn’t report which billing class this figure reflects (older chroxy version) — treat it as an API-equivalent estimate, not confirmed spend. ${MONTHLY_METER_SCOPE_CAVEAT}`
 
 export function SidebarTokenView({
   sessions,
@@ -540,39 +569,64 @@ export function SidebarTokenView({
         })}
 
         {/* #5665 — machine-wide monthly programmatic-credit meter. Shows once
-            there's a configured cap or some observed spend this month. */}
+            there's a configured cap or some observed spend this month.
+            #7377: label/framing resolved from `billingClass` (see the
+            MONTHLY_METER_* constants above) instead of a hardcoded "Credit
+            spend" — the fourth site of the #5630 rule, joining the
+            per-session/per-provider rows. */}
         {monthlyBudget && (monthlyBudget.budgetUsd != null || monthlyBudget.spentUsd > 0) && (() => {
-          const { spentUsd, budgetUsd, percent, warning, exceeded } = monthlyBudget
+          const { spentUsd, budgetUsd, percent, warning, exceeded, billingClass } = monthlyBudget
           const clampedPercent = percent == null ? null : Math.min(100, Math.max(0, percent))
-          const state = exceeded ? 'exceeded' : warning ? 'warning' : 'ok'
+          // Under `subscription`, this month's chroxy-observed programmatic
+          // spend is $0 by construction (the server only feeds this meter
+          // from programmatic-credit-billed turns) — any nonzero figure is a
+          // stale carry-over from before #7361. Neither case is a live
+          // credit-pool balance approaching a cap, so the warning/exceeded
+          // styling (and the progress bar) don't apply — only "ok" framing.
+          const isSubscription = billingClass === 'subscription'
+          const state = isSubscription ? 'ok' : exceeded ? 'exceeded' : warning ? 'warning' : 'ok'
+          const label = billingClass ? BILLING_CLASS_LABEL[billingClass] : MONTHLY_METER_UNKNOWN_LABEL
+          const tooltip = billingClass
+            ? `${MONTHLY_METER_CLASS_FRAMING[billingClass]} ${MONTHLY_METER_SCOPE_CAVEAT}`
+            : MONTHLY_METER_UNKNOWN_TOOLTIP
           return (
             <div
               className={`sidebar-token-view-credit-meter sidebar-token-view-credit-meter-${state}`}
               data-testid="sidebar-token-view-credit-meter"
               data-meter-state={state}
+              data-billing-class={billingClass ?? 'unknown'}
             >
               <div className="sidebar-token-view-aggregate-row">
                 <span className="sidebar-token-view-label">
-                  Credit spend{' '}
+                  {label}{' '}
                   <InfoDisclosure
                     triggerText={'ⓘ'}
-                    ariaLabel="What does the credit spend meter count?"
+                    ariaLabel={`What does "${label}" mean for the monthly meter?`}
                     triggerClassName="sidebar-token-view-info"
                     testIdBase="sidebar-token-view-credit-meter-info"
                   >
-                    Chroxy-observed programmatic-credit spend (claude -p / SDK) this UTC month — only sessions THIS daemon ran. Not your full Anthropic credit-pool balance; sessions on other machines or outside chroxy aren't counted.
+                    {tooltip}
                   </InfoDisclosure>
                 </span>
-                <span
-                  className="sidebar-token-view-value-secondary"
-                  data-testid="sidebar-token-view-credit-meter-value"
-                >
-                  {budgetUsd != null
-                    ? `${formatCostBadge(spentUsd)} / ${formatCostBadge(budgetUsd)}${clampedPercent != null ? ` · ${Math.round(clampedPercent)}%` : ''}`
-                    : `${formatCostBadge(spentUsd)} this month`}
-                </span>
+                {isSubscription ? (
+                  <span
+                    className="sidebar-token-view-value-secondary sidebar-token-view-included-chip"
+                    data-testid="sidebar-token-view-credit-meter-value"
+                  >
+                    Included
+                  </span>
+                ) : (
+                  <span
+                    className="sidebar-token-view-value-secondary"
+                    data-testid="sidebar-token-view-credit-meter-value"
+                  >
+                    {budgetUsd != null
+                      ? `${formatCostBadge(spentUsd)} / ${formatCostBadge(budgetUsd)}${clampedPercent != null ? ` · ${Math.round(clampedPercent)}%` : ''}`
+                      : `${formatCostBadge(spentUsd)} this month`}
+                  </span>
+                )}
               </div>
-              {budgetUsd != null && clampedPercent != null && (
+              {!isSubscription && budgetUsd != null && clampedPercent != null && (
                 <div
                   className="sidebar-token-view-credit-bar"
                   role="progressbar"

@@ -286,6 +286,18 @@ export const ServerMonthlyBudgetSchema = z.object({
   exceeded: z.boolean(),
   justWarned: z.boolean().optional(),
   justExceeded: z.boolean().optional(),
+  // #7377: the meter only ever accumulates programmatic-credit-billed spend
+  // (the server-side gate on `billingClass === 'programmatic-credit'` in
+  // session-manager.js's `_trackUsage`), so its class tracks the
+  // machine-wide programmatic-credit era flag — `programmatic-credit` when
+  // `CHROXY_PROGRAMMATIC_CREDIT_ERA=1` is in force, `subscription`
+  // otherwise (the era never started — #7333/#7361). Lets the dashboard
+  // resolve the meter's label through the SAME per-billing-class map the
+  // per-session/per-provider rows use, instead of a hand-written fourth
+  // copy of the "Credit spend" string. Optional so older servers that omit
+  // it still parse; the client falls back to a neutral, non-"Credit spend"
+  // label rather than assuming a class it was never told.
+  billingClass: z.enum(['api-key', 'subscription', 'programmatic-credit']).optional(),
 })
 
 // -- Web task schemas --

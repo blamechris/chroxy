@@ -11,9 +11,54 @@ import {
   resolveWarningPercent,
   MonthlyProgrammaticBudgetManager,
 } from '../src/billing-budget.js'
+import { BILLING_CLASSES } from '../src/billing-class.js'
 
 const JUN_2026 = Date.UTC(2026, 5, 20) // 2026-06-20
 const JUL_2026 = Date.UTC(2026, 6, 3) //  2026-07-03
+
+/**
+ * #7377 — same guarded-env-var pattern as billing-class.test.js /
+ * doctor-billing.test.js / billing-canary-monitor.test.js. Promise-aware:
+ * a plain try/finally restores the flag before an async body has actually
+ * run, so the wrapper silently no-ops for async callers.
+ */
+function withEraEnabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = '1'
+  const restore = () => {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
+}
+
+function withEraDisabled(body) {
+  const saved = process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+  const restore = () => {
+    if (saved === undefined) delete process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA
+    else process.env.CHROXY_PROGRAMMATIC_CREDIT_ERA = saved
+  }
+  let out
+  try {
+    out = body()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(restore)
+  restore()
+  return out
+}
 
 test('monthKeyUtc formats YYYY-MM in UTC', () => {
   assert.equal(monthKeyUtc(Date.UTC(2026, 5, 20)), '2026-06')
@@ -146,6 +191,53 @@ test('persists the running total across instances and resets a stale month', () 
     const c = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'max5x' }, statePath, now: JUL_2026 })
     assert.equal(c.getStatus(JUL_2026).spentUsd, 0)
     assert.equal(c.getStatus(JUL_2026).month, '2026-07')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// #7377 — the monthly meter's wire `billingClass` field. The dashboard uses
+// it to resolve the meter's label through the SAME BILLING_CLASS_LABEL map
+// the per-session/per-provider rows use, instead of a hardcoded "Credit
+// spend" string. `getStatus` computes it from the CURRENT era flag, not from
+// whatever was true when the spend was recorded — a stale total left over
+// from before #7361 must read as `subscription`, not `programmatic-credit`,
+// once the flag says the era isn't in force.
+
+test('getStatus reports billingClass=programmatic-credit while the era is enabled', () => {
+  withEraEnabled(() => {
+    const m = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, now: JUN_2026 })
+    m.recordSpend(5, JUN_2026)
+    assert.equal(m.getStatus(JUN_2026).billingClass, BILLING_CLASSES.PROGRAMMATIC_CREDIT)
+  })
+})
+
+test('getStatus reports billingClass=subscription while the era is disabled (default — #7333/#7361)', () => {
+  withEraDisabled(() => {
+    const m = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, now: JUN_2026 })
+    m.recordSpend(5, JUN_2026)
+    assert.equal(m.getStatus(JUN_2026).billingClass, BILLING_CLASSES.SUBSCRIPTION)
+  })
+})
+
+test('a stale total accrued while the era was (wrongly) on relabels as subscription once the flag flips off', () => {
+  // Reproduces the exact #7377 scenario: spend recorded under the pre-#7361
+  // classifier reads back as `subscription` the moment the era flag is off,
+  // even though the manager itself never re-evaluates or discards the total.
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-budget-'))
+  const statePath = join(dir, 'monthly-budget-state.json')
+  try {
+    withEraEnabled(() => {
+      const a = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, statePath, now: JUN_2026 })
+      a.recordSpend(18, JUN_2026)
+      assert.equal(a.getStatus(JUN_2026).billingClass, BILLING_CLASSES.PROGRAMMATIC_CREDIT)
+    })
+    withEraDisabled(() => {
+      const b = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, statePath, now: JUN_2026 })
+      const status = b.getStatus(JUN_2026)
+      assert.equal(status.spentUsd, 18, 'the persisted total is unchanged')
+      assert.equal(status.billingClass, BILLING_CLASSES.SUBSCRIPTION, 'but its class now reads subscription')
+    })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

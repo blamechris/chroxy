@@ -257,6 +257,62 @@ describe('SidebarTokenView (#4303 v0)', () => {
       )
       expect(screen.queryByTestId('sidebar-token-view-credit-meter')).toBeNull()
     })
+
+    // #7377 — the meter's label/framing now resolves from `billingClass`
+    // through the SAME BILLING_CLASS_LABEL map the per-session/per-provider
+    // rows use, instead of a hardcoded "Credit spend" string. Three cases:
+    // the era-enabled programmatic-credit class (positive control — must
+    // keep reading "Credit spend" with its figure), the default
+    // subscription class (must read "Included (subscription)" with no
+    // dollar-spend "credit" framing), and an absent/unrecognized class
+    // (must not claim "Credit spend" either way — a neutral label instead).
+    describe('billing-class-driven label (#7377)', () => {
+      it('programmatic-credit class: "Credit spend" label with its dollar figure (era-enabled positive control)', () => {
+        render(
+          <SidebarTokenView
+            sessions={[]}
+            monthlyBudget={budget({ billingClass: 'programmatic-credit' })}
+          />,
+        )
+        const meter = screen.getByTestId('sidebar-token-view-credit-meter')
+        expect(meter).toHaveAttribute('data-billing-class', 'programmatic-credit')
+        expect(meter).toHaveTextContent('Credit spend')
+        expect(screen.getByTestId('sidebar-token-view-credit-meter-value')).toHaveTextContent(
+          '$23.45 / $100.00 · 23%',
+        )
+        // A progress bar is meaningful for the real credit-pool cap.
+        expect(screen.getByTestId('sidebar-token-view-credit-bar-fill')).toBeInTheDocument()
+      })
+
+      it('subscription class: "Included (subscription)" label, no dollar-spend "credit" framing', () => {
+        render(
+          <SidebarTokenView
+            sessions={[]}
+            monthlyBudget={budget({ billingClass: 'subscription' })}
+          />,
+        )
+        const meter = screen.getByTestId('sidebar-token-view-credit-meter')
+        expect(meter).toHaveAttribute('data-billing-class', 'subscription')
+        expect(meter).toHaveTextContent('Included (subscription)')
+        expect(meter).not.toHaveTextContent('Credit spend')
+        const value = screen.getByTestId('sidebar-token-view-credit-meter-value')
+        expect(value).toHaveTextContent('Included')
+        expect(value).not.toHaveTextContent('$')
+        // No progress bar — there's no credit-pool cap being approached.
+        expect(screen.queryByTestId('sidebar-token-view-credit-bar-fill')).toBeNull()
+      })
+
+      it('unknown/absent class: neutral label, never claims "Credit spend"', () => {
+        // budget() omits billingClass entirely — the shape an older server
+        // (pre-#7377) sends on the wire.
+        render(<SidebarTokenView sessions={[]} monthlyBudget={budget()} />)
+        const meter = screen.getByTestId('sidebar-token-view-credit-meter')
+        expect(meter).toHaveAttribute('data-billing-class', 'unknown')
+        expect(meter).not.toHaveTextContent('Credit spend')
+        expect(meter).not.toHaveTextContent('Included (subscription)')
+        expect(meter).toHaveTextContent('API-equivalent estimate')
+      })
+    })
   })
 
   describe('per-session breakdown', () => {

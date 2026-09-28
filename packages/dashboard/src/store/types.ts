@@ -559,6 +559,14 @@ export interface MonthlyBudgetState {
   percent: number | null;
   warning: boolean;
   exceeded: boolean;
+  /**
+   * #7377: the billing class this snapshot's spend reflects — resolved
+   * server-side from the programmatic-credit era flag (see
+   * `billing-budget.js`'s `getStatus`). `undefined` when the server predates
+   * this field; the sidebar meter then falls back to a neutral label rather
+   * than assuming "Credit spend".
+   */
+  billingClass?: BillingClass;
 }
 
 export interface SessionNotification {
