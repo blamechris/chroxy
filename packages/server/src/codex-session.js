@@ -803,7 +803,25 @@ export class CodexSession extends JsonlSubprocessSession {
       return refreshCodexModels({
         ...deps,
         registry: deps.registry || getRegistryForProvider('codex'),
-        bin: 'bin' in deps ? deps.bin : () => this.resolvedBinary,
+        // #8059 review (Suggestion 1 / S1) — a caller with NEITHER a live
+        // `client` NOR a verified `bin` thunk now gets REFUSED, not a silent
+        // unverified spawn off `this.resolvedBinary`. #8030 set this precedent
+        // for the one-shot summarizer/title calls (`defaultRunOneShot` throws
+        // when no verified `resolveExecutable` is supplied,
+        // summarize-session.js:207-210); this no-session probe has the exact
+        // same shape and the exact same risk, so it gets the same default.
+        // `bin` is only ever CALLED on the no-client spawn branch
+        // (`probeCodexCatalog`) — a `client`-carrying caller (the live
+        // session's own refresh) never reaches it, so this default is inert
+        // for that path. Today's only no-client caller (`ws-history.js`'s
+        // `scheduleProviderModelsRefresh`) always supplies `bin`, so this is
+        // a safety net for the NEXT no-client caller that forgets to, not a
+        // behaviour change for any caller that exists today.
+        bin: 'bin' in deps ? deps.bin : () => {
+          const err = new Error('CodexSession.refreshModels: no live client and no verified `bin` were supplied — refusing an unverified spawn (#8036/S1). Pass a `client`, or a `bin` built from a verified resolver (e.g. SessionManager.verifyOneShotExecutable).')
+          err.code = 'PROVIDER_BINARY_UNVERIFIED'
+          throw err
+        },
         cwd: 'cwd' in deps ? deps.cwd : undefined,
         env: 'env' in deps ? deps.env : () => buildSpawnEnv('codex'),
       })

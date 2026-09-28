@@ -465,7 +465,19 @@ export async function probeCodexCatalog({ bin, cwd, env, createClient = defaultC
     // trace instead of collapsing into the same generic line every other
     // probe failure (a timeout, a transport error) produces.
     const codeSuffix = err?.code ? ` (code=${err.code})` : ''
-    log.debug(`codex catalog probe failed: ${err?.message || err}${codeSuffix}`)
+    const message = `codex catalog probe failed: ${err?.message || err}${codeSuffix}`
+    // #8059 review S2 — a spawn-gate refusal is promoted to `warn`.
+    // `runProviderPreflight` itself never logs a block-mode throw (the
+    // provenance branch in preflight.js throws with no log line of its own),
+    // so leaving this at `debug` meant a `block`-mode hash mismatch on this
+    // path left NO trace at the default log level, despite the comment above
+    // calling it "legible". Everything else here (a timeout, a transport
+    // error, an unexpected response shape) is routine probe noise and stays
+    // at `debug`. The discovery slot's TTL (`CODEX_CATALOG_TTL_MS`, 5 min)
+    // already bounds this to at most one line per window, success or failure.
+    const isGateRefusal = typeof err?.code === 'string' && /^PROVIDER_(BINARY|CREDENTIAL)_/.test(err.code)
+    if (isGateRefusal) log.warn(message)
+    else log.debug(message)
     return null
   } finally {
     try { client?.kill() } catch { /* already gone */ }

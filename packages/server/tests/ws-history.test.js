@@ -4015,9 +4015,19 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
      * A fake "codex-shaped" provider: `preflight` verifies `process.execPath`
      * under the name 'node' (no real codex binary or credential needed, so
      * the provenance gate is the only thing exercised), and `refreshModels`
-     * mirrors `probeCodexCatalog`'s contract exactly — resolve `deps.bin`
-     * FIRST inside a try; a throw is the gate's refusal and degrades to null
-     * with NO spawn; a resolved path records one "spawn" and returns a
+     * mirrors `CodexSession.refreshModels`'s REAL contract exactly —
+     * including its fallback when the caller supplies NO `bin` key at all
+     * (`codex-session.js` ~:806, `'bin' in deps ? deps.bin : () => this.
+     * resolvedBinary` pre-#8036/S1). A fake that instead returned `null` on
+     * "no bin" could not tell "the gate was wired and refused" apart from
+     * "the gate was never wired at all" — the #8059 review's Critical 2: it
+     * let mutant R1 (`codex-session.js` ignores the caller's `bin`) and R2
+     * (`ws-history.js` omits the `bin` key when `sessionManager` lacks the
+     * gate) survive, because both mutations landed on a fallback this fake
+     * had already special-cased to "no spawn" for an unrelated reason. `bin`
+     * is still resolved FIRST inside a try, exactly like `probeCodexCatalog`
+     * — a throw (from either the caller's `bin` OR the fallback) degrades to
+     * null with NO spawn; a resolved path records one "spawn" and returns a
      * changed model list.
      */
     function registerSpawnGateFakeProvider(name) {
@@ -4040,10 +4050,16 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
         static async refreshModels(deps = {}) {
           let resolvedBin
           try {
-            resolvedBin = typeof deps.bin === 'function' ? deps.bin() : deps.bin
+            // #8059 review Critical 2 — mirror codex-session.js's real
+            // fallback: a MISSING `bin` key is not the same as a `bin` that
+            // refuses. Only an ABSENT key falls back to (the fake's own)
+            // unverified resolvedBinary; a present `bin` — whatever it does —
+            // is what actually runs.
+            const binDep = 'bin' in deps ? deps.bin : () => FakeCodexShapedSession.resolvedBinary
+            resolvedBin = typeof binDep === 'function' ? binDep() : binDep
           } catch {
-            // #8036: exactly probeCodexCatalog's degrade-to-null on a thrown
-            // gate refusal — no client/spawn is ever attempted.
+            // exactly probeCodexCatalog's degrade-to-null on a thrown gate
+            // refusal — no client/spawn is ever attempted.
             return null
           }
           if (typeof resolvedBin !== 'string' || resolvedBin.length === 0) return null
@@ -4103,7 +4119,13 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
       assert.deepEqual(getRegistryForProvider(name).getModels().map(m => m.id), ['fake-discovered'])
     })
 
-    it('a quarantine/missing-binary case degrades to null with no spawn attempt', async () => {
+    // #8059 review Nitpick — this exercises a MISSING binary specifically
+    // (`resolveBinary` finds nothing under `candidates: []`); a quarantined
+    // binary is a different `verifyBinary` status but throws through the
+    // exact same `sessionManager.verifyOneShotExecutable` → `bin()` → catch
+    // path, so it is covered by the preflight suite's own quarantine tests
+    // (`session-manager-preflight.test.js`), not re-exercised here.
+    it('a missing-binary case degrades to null with no spawn attempt', async () => {
       const name = 'fake-spawn-gate-missing-8036'
       class MissingBinaryFake {
         sendMessage() {}
@@ -4124,7 +4146,10 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
         static async refreshModels(deps = {}) {
           let resolvedBin
           try {
-            resolvedBin = typeof deps.bin === 'function' ? deps.bin() : deps.bin
+            // #8059 review Critical 2 — same real-fallback mirror as
+            // FakeCodexShapedSession above.
+            const binDep = 'bin' in deps ? deps.bin : () => MissingBinaryFake.resolvedBinary
+            resolvedBin = typeof binDep === 'function' ? binDep() : binDep
           } catch {
             return null
           }
