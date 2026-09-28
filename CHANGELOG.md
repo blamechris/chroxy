@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The sidebar's machine-wide monthly meter no longer asserts "Credit
+  spend" for a subscription session (#7377).** #7333/#7361 fixed the
+  per-session and per-provider rows to resolve their cost label from the
+  billing class (`subscription` → "Included (subscription)", no dollar
+  figure; `programmatic-credit` → "Credit spend" with one), but the
+  machine-wide monthly meter (`SidebarTokenView.tsx`, #5665) kept a
+  hardcoded "Credit spend" label gated only on "is there a budget or some
+  spend" — the fourth site of the #5630 rule, missed by #7333's sweep of
+  the other three. The server's `monthly_budget` payload now carries a
+  `billingClass` (derived from the same programmatic-credit-era check — the
+  operator flag and the era start date — that already gates what feeds the meter — `programmatic-credit` while the era
+  is in force, `subscription` while it is not, which is the default since
+  the era never started), and the dashboard resolves the meter's label
+  through the same `BILLING_CLASS_LABEL` map the per-session/per-provider
+  rows use instead of a fourth hand-written copy. A `subscription` snapshot
+  now reads "Included (subscription)" with no dollar figure and no
+  progress bar (a stale total left over from before #7361 no longer reads
+  as live credit spend); a `programmatic-credit` snapshot is unchanged; a
+  server that predates this field falls back to a neutral "API-equivalent
+  estimate" label rather than asserting either claim.
+
 - **`claude-tui` (the default provider) now reports the model a session is
   actually running instead of showing a blank badge/header (#7327).**
   `bootedModel` was never populated for claude-tui — the dashboard's model
