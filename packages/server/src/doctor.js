@@ -271,6 +271,10 @@ export function checkClaudeTuiCliVersion(deps = {}) {
         + `${verdict.remediation ? ` — ${verdict.remediation}` : ''} (allowed — mode=${provenance.mode})`
     }
   }
+  // #8074 round-2 review: EVERY row this probe returns carries a pending
+  // warn-mode advisory, not only the clean-baseline one — an earlier warn
+  // (unparseable version, baseline drift) must not swallow it.
+  const withAdvisory = (msg) => (provenanceAdvisory ? `${msg} — ${provenanceAdvisory}` : msg)
   let output
   try {
     output = exec(execPath, ['--version'])
@@ -281,21 +285,21 @@ export function checkClaudeTuiCliVersion(deps = {}) {
   const found = parseLeadingSemver(output)
   const testedSemver = parseLeadingSemver(tested)
   if (found === null) {
-    return { name: NAME, status: 'warn', message: `Could not parse 'claude --version'; TUI form-driving is validated against ${tested}` }
+    return { name: NAME, status: 'warn', message: withAdvisory(`Could not parse 'claude --version'; TUI form-driving is validated against ${tested}`) }
   }
   const foundStr = `${found[0]}.${found[1]}.${found[2]}`
   if (testedSemver && found[0] === testedSemver[0] && found[1] === testedSemver[1]) {
     // #8074 review S1: a pending provenance advisory (warn mode) must not be
     // silently absorbed into an otherwise-clean `pass` row.
     if (provenanceAdvisory) {
-      return { name: NAME, status: 'warn', message: `claude ${foundStr} matches the tested TUI-driving baseline (${tested}) — ${provenanceAdvisory}` }
+      return { name: NAME, status: 'warn', message: withAdvisory(`claude ${foundStr} matches the tested TUI-driving baseline (${tested})`) }
     }
     return { name: NAME, status: 'pass', message: `claude ${foundStr} matches the tested TUI-driving baseline (${tested})` }
   }
   return {
     name: NAME,
     status: 'warn',
-    message: `claude ${foundStr} differs from the tested TUI-driving baseline (${tested}) — chroxy drives the TUI by screen-scraping pinned keystrokes, so a CLI UI change can mis-drive AskUserQuestion forms silently. If question prompts misbehave, report it; re-validation will bump the baseline.`,
+    message: withAdvisory(`claude ${foundStr} differs from the tested TUI-driving baseline (${tested}) — chroxy drives the TUI by screen-scraping pinned keystrokes, so a CLI UI change can mis-drive AskUserQuestion forms silently. If question prompts misbehave, report it; re-validation will bump the baseline.`),
   }
 }
 
@@ -1001,6 +1005,9 @@ export function checkBinary(name, args, {
         + `${verdict.remediation ? ` — ${verdict.remediation}` : ''} (allowed — mode=${provenance.mode})`
     }
   }
+  // #8074 round-2 review: every version row below carries the advisory — a
+  // min/recommended-version warn or fail returning first must not drop it.
+  const withAdvisory = (msg) => (provenanceAdvisory ? `${msg} — ${provenanceAdvisory}` : msg)
   try {
     // #6484 — a resolved `.cmd` shim (npm-only Windows host) can't be spawned
     // directly on Node 24; route it through cmd.exe via prepareSpawn. No-op for
@@ -1027,14 +1034,14 @@ export function checkBinary(name, args, {
         return {
           name,
           status: 'warn',
-          message: `${message} — could not parse version to verify ≥ ${minVersion}`,
+          message: withAdvisory(`${message} — could not parse version to verify ≥ ${minVersion}`),
         }
       }
       if (compareSemver(found, minVersion) < 0) {
         return {
           name,
           status: required ? 'fail' : 'warn',
-          message: `${message} — requires ${name} ≥ ${minVersion}; ${installHint}`,
+          message: withAdvisory(`${message} — requires ${name} ≥ ${minVersion}; ${installHint}`),
         }
       }
     }
@@ -1052,11 +1059,11 @@ export function checkBinary(name, args, {
       return {
         name,
         status: 'warn',
-        message: `${message} — older than the recommended ${name} ${recommendedVersion}; ${updateHint || installHint}`,
+        message: withAdvisory(`${message} — older than the recommended ${name} ${recommendedVersion}; ${updateHint || installHint}`),
       }
     }
     if (provenanceAdvisory) {
-      return { name, status: 'warn', message: `${message} — ${provenanceAdvisory}` }
+      return { name, status: 'warn', message: withAdvisory(message) }
     }
     return { name, status: 'pass', message }
   } catch (err) {

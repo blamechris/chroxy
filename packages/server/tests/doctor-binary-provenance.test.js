@@ -209,6 +209,29 @@ describe('checkBinary — opt-in provenance gate (#8041)', () => {
     }
   })
 
+  it('a warn-mode advisory survives an earlier recommended-version warn row (#8074 round-2 review)', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
+    // The shim reports 9.9.9, below this recommendedVersion — so the
+    // "older than the recommended" warn returns BEFORE the clean-row branch
+    // that used to be the only place the advisory was attached.
+    const shim = makeGateShim()
+    const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
+    try {
+      const result = checkBinary('chroxy-8041-fixture-bin', ['--version'], {
+        parseVersion: (out) => out.trim(),
+        required: true,
+        candidates: [shim.shimPath],
+        installHint: 'install chroxy-8041-fixture-bin',
+        recommendedVersion: '10.0.0',
+        provenance: { mode: 'warn', signatureGate: false, ledger },
+      })
+      assert.equal(result.status, 'warn', `expected warn, got ${result.status}: ${result.message}`)
+      assert.ok(result.message.includes('older than the recommended'), `expected the recommended-version warn, got: ${result.message}`)
+      assert.ok(/provenance hash_mismatch/.test(result.message), `the warn-mode provenance advisory must ride along on an earlier warn row, got: ${result.message}`)
+    } finally {
+      rmSync(shim.dir, { recursive: true, force: true })
+    }
+  })
+
   it('a matching-hash ledger in block mode execs the exact verified absolute path and returns pass', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
     const shim = makeGateShim()
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: hashFile(shim.shimPath) } })
@@ -304,6 +327,40 @@ describe('checkClaudeTuiCliVersion — opt-in provenance gate (#8041)', () => {
     })
     assert.equal(result, null, `expected null for a not-found binary, got ${JSON.stringify(result)}`)
     assert.equal(verifyProvenanceCalls, 0, 'verifyProvenance must never run on a path the health check never confirmed — this is the test that goes red under a mutant that hashes a not-found path relative to cwd')
+  })
+
+  describe('warn-mode advisory on every row (#8074 review S1 + round-2 review)', () => {
+    // Hermetic: resolution, health, provenance and exec are all injected, so
+    // these run on every platform and never touch a real `claude`.
+    const advisoryDeps = (execOutput) => ({
+      resolveBinary: () => '/abs/fixture/claude',
+      verify: () => ({ ok: true, path: '/abs/fixture/claude' }),
+      provenance: { mode: 'warn', signatureGate: false, ledger: fakeProvenanceLedger() },
+      verifyProvenance: () => ({ ok: false, blocked: false, status: 'hash_mismatch', message: 'fixture mismatch' }),
+      exec: () => execOutput,
+      tested: '2.1.100',
+    })
+
+    it('a version matching the tested baseline is a warn row carrying the advisory, never a clean pass', () => {
+      const result = checkClaudeTuiCliVersion(advisoryDeps('2.1.100 (Claude Code)'))
+      assert.equal(result.status, 'warn', `expected warn, got ${result.status}: ${result.message}`)
+      assert.ok(/matches the tested TUI-driving baseline/.test(result.message), `got: ${result.message}`)
+      assert.ok(/provenance hash_mismatch: fixture mismatch/.test(result.message), `got: ${result.message}`)
+    })
+
+    it('a baseline-drift warn still carries the advisory', () => {
+      const result = checkClaudeTuiCliVersion(advisoryDeps('2.2.0 (Claude Code)'))
+      assert.equal(result.status, 'warn')
+      assert.ok(/differs from the tested TUI-driving baseline/.test(result.message), `got: ${result.message}`)
+      assert.ok(/provenance hash_mismatch: fixture mismatch/.test(result.message), `got: ${result.message}`)
+    })
+
+    it('an unparseable-version warn still carries the advisory', () => {
+      const result = checkClaudeTuiCliVersion(advisoryDeps('not a version'))
+      assert.equal(result.status, 'warn')
+      assert.ok(/Could not parse/.test(result.message), `got: ${result.message}`)
+      assert.ok(/provenance hash_mismatch: fixture mismatch/.test(result.message), `got: ${result.message}`)
+    })
   })
 
   it('a matching-hash ledger in block mode execs the exact verified absolute path', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {

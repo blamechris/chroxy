@@ -9,7 +9,7 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, delimiter } from 'node:path'
 import { runCli, makeTempHome } from './__helpers/spawn-cli.js'
 
 describe('chroxy start / dev', () => {
@@ -66,7 +66,16 @@ describe('chroxy start -c <path> gates from the merged config (#8074 review C1)'
   const { home, cleanup } = makeTempHome()
   after(cleanup)
 
-  it('a block-mode "-c" config with a mismatched pin refuses — the shim binary is never exec\'d', async () => {
+  // An extensionless shebang shim named `claude` is never resolved on
+  // Windows (binary lookup there requires a PATHEXT extension), so the check
+  // reports "Not found" before the gate is consulted. The C1 fix — which
+  // config file the gate mode is read from — is platform-independent and is
+  // proven on the POSIX legs.
+  const C1_SHIM_SKIP = process.platform === 'win32'
+    ? 'an extensionless shebang shim is not resolvable as `claude` on Windows (PATHEXT); the config-source fix is platform-independent'
+    : false
+
+  it('a block-mode "-c" config with a mismatched pin refuses — the shim binary is never exec\'d', { skip: C1_SHIM_SKIP }, async () => {
     // A real, tiny executable masquerading as `claude` (cli-session.js's
     // provider binary name), written to a directory prepended onto PATH for
     // this one child process — so `which claude` finds THIS shim first,
@@ -123,7 +132,7 @@ describe('chroxy start -c <path> gates from the merged config (#8074 review C1)'
 
     const r = await runCli(
       ['start', '-c', otherConfigPath],
-      { home, timeoutMs: 15000, env: { PATH: `${shimDir}:${process.env.PATH}` } },
+      { home, timeoutMs: 15000, env: { PATH: `${shimDir}${delimiter}${process.env.PATH}` } },
     )
     try {
       assert.equal(r.code, 1, `expected a non-zero exit, got ${r.code}. stdout: ${r.stdout} stderr: ${r.stderr}`)
