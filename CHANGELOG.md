@@ -23,6 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`chroxy start`'s dependency checks now run the same verified binaries a
+  real session would use, instead of unchecked, no-gate `--version` probes
+  (#8041).** `doctor.js`'s `runDoctorChecks()` — which runs BEFORE any session
+  or tunnel exists, on every `chroxy start` and every desktop-app launch
+  unless `--skip-checks` — ran the configured provider's binary (plus
+  `claude` for `claude-tui`) and `cloudflared` with a bare `--version` probe
+  and no provenance or signature gate at all: in `binaryProvenance.mode:
+  'block'`, a binary whose pinned hash no longer matched the ledger still
+  executed here unchecked, even though the exact same binary would refuse a
+  real chat session or tunnel start. `checkBinary()` (shared by the
+  provider-binary and `cloudflared` checks) and `checkClaudeTuiCliVersion()`
+  now run the opt-in gate — `verifyProvenance`, the SAME function
+  `runProviderPreflight` and the tunnel adapter's
+  `_verifyCloudflaredProvenance` both call — on the resolved path BEFORE the
+  version-probe exec, sharing one config+env-resolved mode/signatureGate and
+  one lazily-constructed `binary-trust.json` ledger across every check. A
+  `block`-mode hash mismatch or failed signature gate now reports a doctor
+  `fail` row naming the gate's status code and remediation, and the binary is
+  never exec'd; `chroxy start` exits non-zero on it like any other failed
+  dependency check. With gates off, behaviour is unchanged.
+
 - **`chroxy resume` now execs the same verified `claude` binary a
   fresh chat session would use, instead of a bare, unverified PATH lookup
   (#8061).** `cli/session-cmd.js` ran `execFileSync('claude', ['--resume',

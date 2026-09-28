@@ -4,11 +4,12 @@ import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { createServer } from 'net'
-import { validateConfig } from './config.js'
+import { validateConfig, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
 import { resolveDeclaredMinVersion } from './utils/binary-version.js'
-import { isShellShim } from './utils/preflight.js'
+import { isShellShim, buildBinaryProvenanceOptions } from './utils/preflight.js'
+import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './utils/verify-provenance.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { cloudflaredInstallHint } from './platform.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
@@ -27,6 +28,10 @@ import {
 import { checkDependencies } from './utils/check-dependencies.js'
 import { configPath } from './config-dir.js'
 import { detectStrandedState } from './config-dir-migration.js'
+import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('doctor')
 
 // Resolve the server package root (the directory containing package.json
 // and node_modules) so dependency checks work regardless of where the
@@ -148,6 +153,32 @@ function claudeTuiBinaryCandidates() {
 }
 
 /**
+ * Build a doctor `fail` check for a binary the opt-in provenance gate refused
+ * (#8041) — a `block`-mode hash mismatch or a failed signature-gate
+ * assessment. Doctor checks report status objects rather than throwing, so
+ * this is the doctor-shaped equivalent of `ProviderBinaryProvenanceError` /
+ * `TunnelBinaryProvenanceError`: same message shape (path, verdict status,
+ * message, remediation), returned instead of thrown. Always a hard `fail`
+ * regardless of whether the binary itself is `required` — a provenance
+ * refusal is a security decision (the daemon never downgrades it), not an
+ * advisory floor like a missing optional binary.
+ *
+ * @param {string} name - the doctor check's display name
+ * @param {string} resolved - the resolved absolute path that was refused
+ * @param {{ status: string, message?: string, remediation?: string }} verdict
+ *   - the blocked verdict returned by `verifyProvenance`
+ * @returns {{ name: string, status: 'fail', message: string }}
+ */
+function provenanceBlockedCheck(name, resolved, verdict) {
+  return {
+    name,
+    status: 'fail',
+    message: `${resolved} — provenance ${verdict.status}: ${verdict.message || 'failed provenance verification'}`
+      + `${verdict.remediation ? ` — ${verdict.remediation}` : ''}`,
+  }
+}
+
+/**
  * audit P1-3 / #5821: compare the installed claude CLI version against the
  * version chroxy's claude-tui form-driving was validated against
  * (TESTED_CLAUDE_TUI_CLI_VERSION). A major.minor drift is a `warn` — the
@@ -160,7 +191,13 @@ function claudeTuiBinaryCandidates() {
  * @param {(bin: string, args: string[]) => string} [deps.exec]
  * @param {string} [deps.tested]
  * @param {string[]} [deps.candidates] - fallback absolute paths for resolveBinary
- * @returns {{ name: string, status: 'pass'|'warn', message: string } | null}
+ * @param {(name: string, candidates: string[]) => string} [deps.resolveBinary] -
+ *   injectable resolver (test seam; defaults to the real PATH/candidate resolve)
+ * @param {{ mode: string, signatureGate: boolean, ledger: object|null }|null} [deps.provenance]
+ *   - #8041: opt-in provenance options bag (`buildBinaryProvenanceOptions`); null
+ *   (the default) skips the gate entirely, matching pre-#8041 behaviour.
+ * @param {Function} [deps.verifyProvenance] - provenance checker (injected in tests)
+ * @returns {{ name: string, status: 'pass'|'warn'|'fail', message: string } | null}
  */
 export function checkClaudeTuiCliVersion(deps = {}) {
   const {
@@ -179,10 +216,38 @@ export function checkClaudeTuiCliVersion(deps = {}) {
     // claude via its candidate list — exactly the bundled context where a
     // silent mis-drive would otherwise go unnoticed.
     candidates = claudeTuiBinaryCandidates(),
+    resolveBinary: resolveClaudeBinary = resolveBinary,
+    provenance = null,
+    verifyProvenance = defaultVerifyProvenance,
   } = deps
+  const resolved = resolveClaudeBinary('claude', candidates)
+  // #8041: this exec previously ran the OS-PATH-resolved binary with no
+  // provenance check at all (unlike checkBinary, it didn't even run the #6708
+  // verifyBinary health gate). Route it through the same opt-in gate — skipped
+  // (provenance === null) unless the operator opted in, in which case a
+  // `block`-mode hash mismatch or failed signature gate refuses the check
+  // outright, and the binary at `resolved` is NEVER exec'd.
+  if (provenance) {
+    const verdict = verifyProvenance({
+      resolvedPath: resolved,
+      mode: provenance.mode,
+      signatureGate: provenance.signatureGate === true,
+      ledger: provenance.ledger || null,
+    })
+    if (verdict.blocked) {
+      return provenanceBlockedCheck('claude-tui driving', resolved, verdict)
+    }
+    if (
+      verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
+      || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
+      || verdict.status === PROVENANCE_STATUS.UNREADABLE
+    ) {
+      log.warn(`Binary "claude" (claude-tui driving probe) provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${provenance.mode})`)
+    }
+  }
   let output
   try {
-    output = exec(resolveBinary('claude', candidates), ['--version'])
+    output = exec(resolved, ['--version'])
   } catch {
     return null // claude missing/hung — the provider binary check surfaces that
   }
@@ -298,7 +363,37 @@ export async function checkTunnelRoutability(deps = {}) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe, detectStranded = detectStrandedState, platform = process.platform } = {}) {
+export async function runDoctorChecks({
+  port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
+  tunnelProbe, detectStranded = detectStrandedState, platform = process.platform,
+  // #8041 — test seams for the opt-in binary-provenance gate applied to the
+  // cloudflared / provider-binary / claude-tui version probes below. All
+  // default to the real production resolution so `chroxy doctor` / `chroxy
+  // start` are unaffected:
+  //   - `binaryProvenanceMode` / `binarySignatureGate` override the config +
+  //     env resolution (`resolveBinaryProvenanceMode` / `isBinarySignatureGateEnabled`)
+  //     entirely when supplied — a plain function-argument seam so tests can
+  //     set the gate's mode without mutating shared `process.env` state
+  //     (which is unsafe under this test runner's default concurrent
+  //     scheduling of sibling `it()`s within one file).
+  //   - `binaryProvenanceLedger` overrides the lazily-constructed default-path
+  //     ledger (undefined ⇒ construct one only when the gate resolves on,
+  //     same as `resolveVerifiedClaudeBinary` in cli/session-cmd.js).
+  verifyProvenance = defaultVerifyProvenance,
+  binaryProvenanceLedger: binaryProvenanceLedgerOverride,
+  binaryProvenanceMode: binaryProvenanceModeOverride,
+  binarySignatureGate: binarySignatureGateOverride,
+  // #8041 test seam: cloudflared's fallback candidate paths, so a test can
+  // point resolution at a fixture without depending on whether a REAL
+  // cloudflared happens to be installed at one of the fixed production
+  // candidates (`/opt/homebrew/bin/cloudflared`, …) on the machine running
+  // the suite. Defaults to the real production list.
+  cloudflaredCandidates = [
+    '/opt/homebrew/bin/cloudflared',
+    '/usr/local/bin/cloudflared',
+    join(homedir(), '.local/bin/cloudflared'),
+  ],
+} = {}) {
   const checks = []
 
   // 1. Node.js version
@@ -312,27 +407,28 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
     checks.push({ name: 'Node.js', status: 'fail', message: `v${nodeVersion} — Node 22 required` })
   }
 
-  // 2. cloudflared
-  checks.push(checkBinary('cloudflared', ['--version'], {
-    parseVersion: (out) => out.trim().split('\n')[0],
-    required: true,
-    candidates: [
-      '/opt/homebrew/bin/cloudflared',
-      '/usr/local/bin/cloudflared',
-      join(homedir(), '.local/bin/cloudflared'),
-    ],
-    installHint: cloudflaredInstallHint(),
-  }))
-
-  // 3. Load config (once) — used for both the Config check and provider resolution.
+  // 2. Load config (once) — used for the Config check, provider resolution,
+  // AND (#8041) the binary-provenance gate below. Moved ahead of the
+  // cloudflared check (previously step 2) because that check now needs the
+  // gate's resolved mode/signatureGate before it can run.
   let configProvider = null
   let configCheck = null
   // #5328 (WP-5.6): named-tunnel coordinates for the routability probe (step 5.6).
   let tunnelMode = null
   let tunnelHostname = null
+  // #8041: the raw parsed config object, kept around (in addition to the
+  // narrower locals above) so resolveBinaryProvenanceMode /
+  // isBinarySignatureGateEnabled can read config.binaryProvenance the same
+  // way chroxy start / chroxy resume do. Stays null when the file is
+  // missing or fails to parse — both resolvers treat a missing
+  // `binaryProvenance` key as gate-off, matching every other check in this
+  // function's existing "a corrupt config degrades gracefully" behaviour
+  // rather than hard-failing doctor itself.
+  let parsedConfig = null
   if (existsSync(configFile())) {
     try {
       const config = JSON.parse(readFileSync(configFile(), 'utf-8'))
+      parsedConfig = config
       if (typeof config.provider === 'string') configProvider = config.provider
       // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
       // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
@@ -373,6 +469,51 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   } else {
     configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'chroxy init' to create` }
   }
+
+  // 3. #8041 — resolve the opt-in binary-provenance gate ONCE, from the SAME
+  // config + env precedence `chroxy start` / `chroxy resume` use
+  // (resolveBinaryProvenanceMode / isBinarySignatureGateEnabled — env vars
+  // CHROXY_BINARY_PROVENANCE / CHROXY_BINARY_SIGNATURE_GATE outrank the
+  // config file), normalized through the SAME `buildBinaryProvenanceOptions`
+  // helper #8065 added (utils/preflight.js) so "the gate is off" is defined
+  // in exactly one place, not a second copy for doctor. The resolved bag is
+  // shared by the cloudflared check below, every provider's binary check
+  // (step 5), and the claude-tui version-pin probe (step 5.6) — one gate
+  // resolution, one ledger instance, not three.
+  //
+  // The ledger is opened lazily, and only when a gate is actually ON
+  // (#8065 review nitpick 3's rationale, reapplied here): a default
+  // `chroxy doctor` / `chroxy start` run with gates off must never touch —
+  // or warn about — the real `binary-trust.json`, since `buildBinaryProvenanceOptions`
+  // is about to discard it anyway (returns null when the gate is off).
+  const provenanceMode = binaryProvenanceModeOverride !== undefined
+    ? binaryProvenanceModeOverride
+    : resolveBinaryProvenanceMode(parsedConfig || {})
+  const provenanceSignatureGate = binarySignatureGateOverride !== undefined
+    ? binarySignatureGateOverride
+    : isBinarySignatureGateEnabled(parsedConfig || {})
+  const provenanceGateOn = provenanceMode !== 'off' || provenanceSignatureGate === true
+  const binaryProvenanceLedger = binaryProvenanceLedgerOverride !== undefined
+    ? binaryProvenanceLedgerOverride
+    : (provenanceGateOn ? new BinaryProvenanceLedger() : null)
+  const provenanceOptions = buildBinaryProvenanceOptions({
+    mode: provenanceMode,
+    signatureGate: provenanceSignatureGate,
+    ledger: binaryProvenanceLedger,
+  })
+
+  // 4. cloudflared. #8041: gated through the SAME opt-in provenance options
+  // the daemon's tunnel adapter uses (`_verifyCloudflaredProvenance`,
+  // tunnel/cloudflare.js) — a block-mode hash mismatch or failed signature
+  // gate now reports `fail` here WITHOUT ever exec'ing `cloudflared --version`.
+  checks.push(checkBinary('cloudflared', ['--version'], {
+    parseVersion: (out) => out.trim().split('\n')[0],
+    required: true,
+    candidates: cloudflaredCandidates,
+    installHint: cloudflaredInstallHint(),
+    provenance: provenanceOptions,
+    verifyProvenance,
+  }))
 
   // #7240 — state stranded at ~/.chroxy by a CHROXY_CONFIG_DIR relocation.
   // Computed before the Config check is pushed so the "Not found" branch above
@@ -431,13 +572,13 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
     strandedCheck = { name: 'Config/state root', status: 'warn', message: `Check failed: ${err.message}` }
   }
 
-  // 4. Provider-specific checks. Each configured provider contributes its
+  // 5. Provider-specific checks. Each configured provider contributes its
   // own binary and credential checks. Providers not in the user's config
   // are skipped entirely — a Gemini-only install does NOT fail because
   // `claude` is missing (#2951).
   const resolvedProviders = resolveProviders({ providers, configProvider })
   for (const providerName of resolvedProviders) {
-    const providerChecks = checkProvider(providerName, { platform })
+    const providerChecks = checkProvider(providerName, { platform, provenance: provenanceOptions, verifyProvenance })
     for (const c of providerChecks) checks.push(c)
   }
 
@@ -523,7 +664,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // version as a measured warning instead. Only meaningful when the default
   // provider actually drives the TUI.
   if (effectiveDefault === 'claude-tui') {
-    const tuiCheck = checkClaudeTuiCliVersion()
+    const tuiCheck = checkClaudeTuiCliVersion({ provenance: provenanceOptions, verifyProvenance })
     if (tuiCheck) checks.push(tuiCheck)
   }
 
@@ -595,9 +736,13 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
  * @param {object} [opts]
  * @param {string} [opts.platform] - defaults to `process.platform`; injectable
  *   for tests exercising the `requiresDirectExec` shim refusal (#7986 review S2)
+ * @param {{ mode: string, signatureGate: boolean, ledger: object|null }|null} [opts.provenance]
+ *   - #8041: opt-in provenance options (`buildBinaryProvenanceOptions`); forwarded
+ *   to `checkBinary`. null (the default) skips the gate entirely.
+ * @param {Function} [opts.verifyProvenance] - provenance checker (injected in tests)
  * @returns {Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider: string }>}
  */
-function checkProvider(providerName, { platform = process.platform } = {}) {
+function checkProvider(providerName, { platform = process.platform, provenance = null, verifyProvenance = defaultVerifyProvenance } = {}) {
   let ProviderClass
   try {
     ProviderClass = getProvider(providerName)
@@ -665,6 +810,10 @@ function checkProvider(providerName, { platform = process.platform } = {}) {
         // (never blocks server startup), same resolve helper as minVersion.
         recommendedVersion: resolveDeclaredMinVersion(spec.binary.recommendedVersion),
         updateHint: spec.binary.updateHint,
+        // #8041: opt-in provenance gate, forwarded straight through to
+        // checkBinary — see its docblock for the gate's shape.
+        provenance,
+        verifyProvenance,
       })
       bin.provider = providerName
       out.push(bin)
@@ -702,9 +851,24 @@ function checkProvider(providerName, { platform = process.platform } = {}) {
  * on PATH — important for GUI-launched processes (e.g. Tauri) whose
  * inherited PATH excludes user-local install dirs.
  *
+ * #8041: `provenance` is the opt-in provenance options bag
+ * (`buildBinaryProvenanceOptions`, utils/preflight.js) — null (the default)
+ * skips the gate entirely, byte-identical to pre-#8041 behaviour. When
+ * supplied and enabled, the SAME `verifyProvenance` (utils/verify-provenance.js)
+ * the daemon's `runProviderPreflight` and the tunnel adapter's
+ * `_verifyCloudflaredProvenance` both call is run against `resolved`, BEFORE
+ * the version-probe exec below: a `block`-mode hash mismatch or failed
+ * signature gate returns a `fail` check and the binary is NEVER exec'd. A
+ * `warn`-mode (or unverifiable-but-allowed) issue is logged and the check
+ * proceeds to exec as normal.
+ *
  * Exported for tests — callers in production should use `runDoctorChecks`.
  */
-export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null, recommendedVersion = null, updateHint = null, verify = defaultVerifyBinary }) {
+export function checkBinary(name, args, {
+  parseVersion, required, installHint, candidates = [], minVersion = null,
+  recommendedVersion = null, updateHint = null, verify = defaultVerifyBinary,
+  provenance = null, verifyProvenance = defaultVerifyProvenance,
+}) {
   const resolved = resolveBinary(name, candidates)
   // #6708 — integrity gate BEFORE we try to exec for a version. A macOS
   // Gatekeeper-quarantined binary keeps its X bit, and a present-but-non-
@@ -718,6 +882,30 @@ export function checkBinary(name, args, { parseVersion, required, installHint, c
   if (health.status === BINARY_STATUS.QUARANTINED || health.status === BINARY_STATUS.NOT_EXECUTABLE) {
     const { message } = describeBinaryHealth(health, { binary: name, installHint })
     return { name, status: required ? 'fail' : 'warn', message }
+  }
+  // #8041 — opt-in provenance gate, on the SAME healthy `resolved` path,
+  // BEFORE the version-probe exec below. Fail-safe: a `block`-mode hash
+  // mismatch or a failed signature gate reports `fail` here and returns
+  // immediately — the try block below (the only exec in this function) never
+  // runs. Always a hard `fail` (never downgraded by `required`) — see
+  // `provenanceBlockedCheck`'s docblock.
+  if (provenance) {
+    const verdict = verifyProvenance({
+      resolvedPath: resolved,
+      mode: provenance.mode,
+      signatureGate: provenance.signatureGate === true,
+      ledger: provenance.ledger || null,
+    })
+    if (verdict.blocked) {
+      return provenanceBlockedCheck(name, resolved, verdict)
+    }
+    if (
+      verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
+      || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
+      || verdict.status === PROVENANCE_STATUS.UNREADABLE
+    ) {
+      log.warn(`Binary "${name}" provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${provenance.mode})`)
+    }
   }
   try {
     // #6484 — a resolved `.cmd` shim (npm-only Windows host) can't be spawned
