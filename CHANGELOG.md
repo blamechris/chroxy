@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tab now completes the highlighted slash command or `@`-file into the
+  composer without sending it (#7370).** The picker already highlighted a
+  selected item on Up/Down navigation, but there was no way to accept it
+  without also sending — Enter both selects and can dispatch, so the only
+  way to complete a command by hand was to type the rest of it. Tab is now
+  the explicit two-step affordance: it inserts the highlighted command (or
+  file) via the same insertion path Enter/click already use, closes the
+  picker, and leaves focus in the composer — the user still presses Enter to
+  send. Tab falls through to default browser focus behaviour whenever no
+  picker is open, and Shift+Tab never completes, so keyboard/screen-reader
+  users can still Tab out of the composer normally.
+
 ### Fixed
 
 - **Web tasks (feature detection, launch, and teleport) now spawn `claude`

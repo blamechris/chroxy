@@ -864,6 +864,49 @@ describe('InputBar file picker (#1286)', () => {
     fireEvent.change(textarea, { target: { value: '@' } })
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
   })
+
+  // #7370 — same Tab-completes-without-sending affordance as the slash
+  // picker, so the two pickers behave identically.
+  describe('Tab completes the highlighted file without sending (#7370)', () => {
+    it('Tab with a highlighted file inserts it, does not send, closes the picker, and keeps focus', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '@' } })
+      // Mirrors real usage: the composer already has focus when the user
+      // presses Tab. Tab's default action (moving focus) is what preventDefault
+      // suppresses, so focus retention depends on it already being here.
+      textarea.focus()
+      fireEvent.keyDown(textarea, { key: 'Tab' })
+      expect(textarea.value).toContain('src/index.ts')
+      expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+      expect(textarea).toHaveFocus()
+    })
+
+    it('Tab with no picker open does not preventDefault and does not alter the input', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'hello' } })
+      const event = createEvent.keyDown(textarea, { key: 'Tab' })
+      fireEvent(textarea, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(textarea.value).toBe('hello')
+    })
+
+    it('Shift+Tab does not complete the highlighted file', () => {
+      const onSend = vi.fn()
+      render(<InputBar onSend={onSend} onInterrupt={vi.fn()} filePickerFiles={mockFiles} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '@' } })
+      const event = createEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+      fireEvent(textarea, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(textarea.value).toBe('@')
+      expect(screen.getByRole('listbox')).toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+    })
+  })
 })
 
 describe('InputBar slash command picker (#1281)', () => {
@@ -1137,6 +1180,108 @@ describe('InputBar slash command picker (#1281)', () => {
       // Escape inside the slash picker is consumed by the picker handler — it
       // closes the picker and returns early, so onInterrupt must NOT fire.
       expect(onInterrupt).not.toHaveBeenCalled()
+    })
+  })
+
+  // #7370 — Tab completes the highlighted command into the composer WITHOUT
+  // sending, closes the picker, and keeps focus in the textarea. Unlike Enter
+  // (which sends when the picker is closed/empty), Tab is a deliberate
+  // two-step "accept, don't send" affordance.
+  describe('Tab completes the highlighted command without sending (#7370)', () => {
+    it('Tab with a highlighted command inserts it, does not send, closes the picker, and keeps focus', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      // Default selectedIndex is 0 → 'commit' is highlighted.
+      fireEvent.keyDown(textarea, { key: 'Tab' })
+      expect(textarea.value).toBe('/commit ')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+      expect(textarea).toHaveFocus()
+    })
+
+    it('Tab completes whichever command is currently highlighted after Down navigation', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/' } })
+      fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+      fireEvent.keyDown(textarea, { key: 'Tab' })
+      expect(textarea.value).toBe('/review-pr ')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Tab preventDefaults so focus does not leave the composer while completing', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/' } })
+      const event = createEvent.keyDown(textarea, { key: 'Tab' })
+      fireEvent(textarea, event)
+      expect(event.defaultPrevented).toBe(true)
+    })
+
+    it('Tab with no picker open does not preventDefault and does not alter the input', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} slashCommands={mockCommands} />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: 'hello' } })
+      const event = createEvent.keyDown(textarea, { key: 'Tab' })
+      fireEvent(textarea, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(textarea.value).toBe('hello')
+    })
+
+    it('Shift+Tab does not complete the highlighted command', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/' } })
+      const event = createEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+      fireEvent(textarea, event)
+      expect(event.defaultPrevented).toBe(false)
+      expect(textarea.value).toBe('/')
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('Tab on an empty-filter list ("No commands found") closes the picker without inserting', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Tab' })
+      expect(textarea.value).toBe('/unknown')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
     })
   })
 })
