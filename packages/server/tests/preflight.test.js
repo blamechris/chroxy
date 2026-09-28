@@ -12,7 +12,9 @@ import {
 import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
 import { SdkSession } from '../src/sdk-session.js'
-import { CLAUDE_SDK_MIN_CLI_VERSION, sdkClaudeCodeVersion } from '../src/utils/agent-sdk-version.js'
+import { CLAUDE_SDK_MIN_CLI_VERSION, sdkClaudeCodeVersion, _resetAgentSdkVersionCacheForTest } from '../src/utils/agent-sdk-version.js'
+import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
  * Tests for runProviderPreflight — verifies binary + credential checks
@@ -711,6 +713,76 @@ describe('runProviderPreflight — recommended version advisory (#8031)', () => 
   })
 })
 
+// #8031: the advisory branch's `log.warn(...)` call is itself part of the
+// observable contract (operators triaging "why did chroxy warn about my
+// claude version" read this line) — assert it fires exactly once when a gap
+// exists, and never fires for any of the "silently ignored" cases.
+describe('runProviderPreflight — recommended version advisory warn log (#8031)', () => {
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+
+  function makeHybridProvider({ minVersion, recommendedVersion } = {}) {
+    const binary = { name: 'claude', args: ['--version'], candidates: [] }
+    if (minVersion !== undefined) binary.minVersion = minVersion
+    if (recommendedVersion !== undefined) binary.recommendedVersion = recommendedVersion
+    return makeProvider({
+      preflight: { label: 'Claude SDK', binary },
+    })
+  }
+
+  // Filtered to the preflight logger's own advisory line (component +
+  // 'recommended' substring) so an unrelated warn elsewhere in the process
+  // can't flake this assertion.
+  function captureAdvisoryWarnLogs(fn) {
+    const entries = []
+    const listener = (entry) => {
+      if (entry.component === 'preflight' && entry.level === 'warn' && entry.message.includes('recommended')) {
+        entries.push(entry)
+      }
+    }
+    addLogListener(listener)
+    try {
+      fn()
+    } finally {
+      removeLogListener(listener)
+    }
+    return entries
+  }
+
+  it('(a) found >= min and < recommended: emits exactly one warn log naming found and recommended', () => {
+    const Provider = makeHybridProvider({ minVersion: '2.1.141', recommendedVersion: '2.1.283' })
+    const entries = captureAdvisoryWarnLogs(() => {
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.200' })
+    })
+    assert.equal(entries.length, 1, `expected exactly one advisory warn log, got ${entries.length}`)
+    assert.ok(entries[0].message.includes('2.1.200'), entries[0].message)
+    assert.ok(entries[0].message.includes('2.1.283'), entries[0].message)
+  })
+
+  it('(c) found >= recommended: no advisory warn log', () => {
+    const Provider = makeHybridProvider({ minVersion: '2.1.141', recommendedVersion: '2.1.283' })
+    const entries = captureAdvisoryWarnLogs(() => {
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.283' })
+    })
+    assert.equal(entries.length, 0, `expected no advisory warn log, got ${entries.length}`)
+  })
+
+  it('(d) recommended thunk returning null: no advisory warn log', () => {
+    const Provider = makeHybridProvider({ minVersion: '2.1.141', recommendedVersion: () => null })
+    const entries = captureAdvisoryWarnLogs(() => {
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.141' })
+    })
+    assert.equal(entries.length, 0, `expected no advisory warn log, got ${entries.length}`)
+  })
+
+  it('(e) only recommendedVersion declared, probe unreadable (null): no advisory warn log', () => {
+    const Provider = makeHybridProvider({ recommendedVersion: '2.1.283' })
+    const entries = captureAdvisoryWarnLogs(() => {
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => null })
+    })
+    assert.equal(entries.length, 0, `expected no advisory warn log, got ${entries.length}`)
+  })
+})
+
 describe('runProviderPreflight — direct-exec shim refusal (#7986 review S2)', () => {
   function makeDirectExecProvider({ requiresDirectExec = true, minVersion } = {}) {
     return makeProvider({
@@ -980,7 +1052,7 @@ describe('SdkSession — hybrid hard-min / soft-recommended version floor (#8031
   it('against the real spec: one patch below CLAUDE_SDK_MIN_CLI_VERSION throws (the hard floor still blocks)', () => {
     const found = decrementPatch(CLAUDE_SDK_MIN_CLI_VERSION)
     assert.throws(
-      () => runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => found }),
+      () => runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => found, platform: 'linux' }),
       (err) => {
         assert.ok(err instanceof ProviderBinaryVersionError, `got ${err?.name}`)
         assert.equal(err.reason, 'too_old')
@@ -996,7 +1068,7 @@ describe('SdkSession — hybrid hard-min / soft-recommended version floor (#8031
     assert.ok(pairing, 'the installed Agent SDK must carry a claudeCodeVersion field for this test to be meaningful')
     let result
     assert.doesNotThrow(() => {
-      result = runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => pairing })
+      result = runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => pairing, platform: 'linux' })
     })
     assert.equal(result.versionAdvisory, null, 'a claude exactly at the SDK\'s own pairing is never below the soft floor')
   })
@@ -1060,7 +1132,41 @@ describe('SdkSession — hybrid hard-min / soft-recommended version floor (#8031
     // treats any path as healthy, so the version gate below still exercises
     // real SdkSession machinery end-to-end regardless of what's installed.
     assert.doesNotThrow(() => {
-      runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => sdkClaudeCodeVersion() })
+      runProviderPreflight(SdkSession, { env: {}, verifyBinary: okVerify, probeVersion: () => sdkClaudeCodeVersion(), platform: 'linux' })
     })
+  })
+
+  // #8031: a seeded pairing DIFFERENT from CLAUDE_SDK_MIN_CLI_VERSION, run
+  // through the real SdkSession.preflight getter (not a synthetic spec) — this
+  // is what proves `recommendedVersion: () => sdkClaudeCodeVersion()` in
+  // sdk-session.js actually feeds the live SDK pairing into the advisory,
+  // rather than e.g. the hard floor constant.
+  it("seeded pairing: recommendedVersion resolves to the seeded sdkClaudeCodeVersion(), and a found version between the hard floor and that seeded pairing gets an advisory", () => {
+    _resetAgentSdkVersionCacheForTest()
+    try {
+      const seeded = sdkClaudeCodeVersion({
+        requireFn: { resolve: () => '/fake/sdk/sdk.mjs' },
+        readFileSync: () => JSON.stringify({ claudeCodeVersion: '2.1.999' }),
+      })
+      assert.equal(seeded, '2.1.999')
+      assert.equal(resolveDeclaredMinVersion(SdkSession.preflight.binary.recommendedVersion), '2.1.999')
+
+      let result
+      assert.doesNotThrow(() => {
+        result = runProviderPreflight(SdkSession, {
+          env: {},
+          verifyBinary: okVerify,
+          probeVersion: () => '2.1.500',
+          platform: 'linux',
+        })
+      })
+      assert.ok(result.versionAdvisory, 'expected a non-null versionAdvisory')
+      assert.equal(result.versionAdvisory.found, '2.1.500')
+      assert.equal(result.versionAdvisory.recommended, '2.1.999')
+    } finally {
+      // Never let the seeded fixture value leak into later tests in this
+      // process — real reads are re-resolved on the next call.
+      _resetAgentSdkVersionCacheForTest()
+    }
   })
 })

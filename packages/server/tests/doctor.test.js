@@ -552,6 +552,49 @@ describe('provider minVersion declared as a thunk (#7986)', () => {
     assert.equal(recommendedFloor, sdkClaudeCodeVersion())
     assert.ok(/^\d+\.\d+\.\d+/.test(recommendedFloor || ''), `expected a semver recommended floor, got ${JSON.stringify(recommendedFloor)}`)
   })
+
+  // #8031: doctor's checkProvider must actually WIRE spec.binary.recommendedVersion
+  // through to checkBinary (resolved via the same resolveDeclaredMinVersion helper
+  // minVersion uses) — a provider whose binary is below the recommended floor
+  // must report `warn` with the updateHint and the recommended version in the
+  // message, whether recommendedVersion is declared as a plain string or a thunk.
+  function registerRecommendedVersionProvider(name, recommendedVersion) {
+    class RecommendedVersionSession extends SdkSession {
+      static get preflight() {
+        return {
+          label: name,
+          binary: {
+            name: 'node',
+            args: ['--version'],
+            candidates: [process.execPath],
+            recommendedVersion,
+            updateHint: 'UPDATE-HINT-MARKER',
+          },
+        }
+      }
+    }
+    registerProvider(name, RecommendedVersionSession)
+  }
+
+  it('warns with the updateHint and the recommended version when recommendedVersion is a plain string', async () => {
+    registerRecommendedVersionProvider('test-8031-recommended-string', '999.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-8031-recommended-string'] })
+    const row = binaryRow(checks, 'test-8031-recommended-string')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'warn', `expected warn, got ${row.status}: ${row.message}`)
+    assert.ok(row.message.includes('UPDATE-HINT-MARKER'), row.message)
+    assert.ok(row.message.includes('999.0.0'), row.message)
+  })
+
+  it('warns the same way when recommendedVersion is declared as a thunk', async () => {
+    registerRecommendedVersionProvider('test-8031-recommended-thunk', () => '999.0.0')
+    const { checks } = await runDoctorChecks({ providers: ['test-8031-recommended-thunk'] })
+    const row = binaryRow(checks, 'test-8031-recommended-thunk')
+    assert.ok(row, 'the provider binary row must be present')
+    assert.equal(row.status, 'warn', `expected warn, got ${row.status}: ${row.message}`)
+    assert.ok(row.message.includes('UPDATE-HINT-MARKER'), row.message)
+    assert.ok(row.message.includes('999.0.0'), row.message)
+  })
 })
 
 // #7986 review S2 — `chroxy start`'s preflight refuses a `requiresDirectExec`

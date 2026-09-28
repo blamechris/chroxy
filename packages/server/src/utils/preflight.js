@@ -32,16 +32,18 @@
  * ## Optional minimum-version gate (#7986), and a soft advisory floor (#8031)
  *
  * `spec.binary.minVersion` — a version string, or a thunk `() => string|null`
- * (e.g. `() => sdkClaudeCodeVersion()`, resolved once per call so a derived
- * floor stays current) — runs a cached `--version` probe against the SAME
- * healthy path verifyBinary + the provenance gate just approved, and throws
- * `ProviderBinaryVersionError` when the installed binary is older. This runs
- * strictly AFTER both of those gates: a binary that failed verification or
- * provenance is never exec'd for a version probe. A `minVersion` that resolves
- * to `null`/unparseable logs a warning and skips the check rather than
- * blocking — an SDK field that goes missing on a dependency bump must not
- * silently disable the gate, but it also must not turn into a hard failure
- * for something the operator can't fix by reinstalling a binary.
+ * (resolved once per call so a derived floor stays current) — runs a cached
+ * `--version` probe against the SAME healthy path verifyBinary + the
+ * provenance gate just approved, and throws `ProviderBinaryVersionError` when
+ * the installed binary is older. This runs strictly AFTER both of those
+ * gates: a binary that failed verification or provenance is never exec'd for
+ * a version probe. A `minVersion` that resolves to `null`/unparseable logs a
+ * warning and skips the check rather than blocking — a value that goes
+ * missing on a dependency bump must not silently disable the gate, but it
+ * also must not turn into a hard failure for something the operator can't
+ * fix by reinstalling a binary. (`claude-sdk` itself declares a hand-kept
+ * constant, `CLAUDE_SDK_MIN_CLI_VERSION`, as its `minVersion` — the thunk
+ * form is what it uses for `recommendedVersion` instead, below.)
  *
  * `spec.binary.recommendedVersion` — same shape (string or thunk), resolved
  * through the same `resolveDeclaredMinVersion` helper — is a SOFT floor: when

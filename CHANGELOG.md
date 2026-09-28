@@ -28,9 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an SDK bump moves its pairing, and Renovate now throttles
   `@anthropic-ai/claude-agent-sdk` bumps the same way it already throttles
   `@anthropic-ai/claude-code`, so a lagging CLI channel gets real time to
-  catch up between bumps. This replaces the "installed SDK's own
-  `claudeCodeVersion`, not a hand-kept constant" minimum-version rule #7986
-  originally shipped.
+  catch up between bumps.
 
 - **The `claude-sdk` provider now spawns your installed `claude`, resolved through
   the same candidate list preflight verifies at session create (#7986).**
@@ -45,13 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   titles also use, sets the same resolved path but is not preflighted or
   provenance-checked at all. See #8030.
 
-  Preflight also enforces a minimum `claude` version for the SDK provider:
-  the installed SDK's own `claudeCodeVersion`, not a hand-kept constant.
-  A binary below it gets a `claude update` remediation instead of a mid-turn
-  failure. On Windows, the SDK spawns without a shell, so it needs the native
-  `claude.exe`; an npm `.cmd` shim is refused before any probe with its own
-  error, `PROVIDER_BINARY_UNSUPPORTED`, and `chroxy doctor` fails it the same way.
-  `chroxy doctor` resolves the same derived minimum.
+  Preflight also enforces a minimum `claude` version for the SDK provider: a
+  hand-kept `CLAUDE_SDK_MIN_CLI_VERSION` hard floor, with the installed SDK's
+  own `claudeCodeVersion` field as a soft, advisory floor on top of it (see
+  #8031). A binary below the hard floor gets a `claude update` remediation
+  instead of a mid-turn failure. On Windows, the SDK spawns without a shell,
+  so it needs the native `claude.exe`; an npm `.cmd` shim is refused before
+  any probe with its own error, `PROVIDER_BINARY_UNSUPPORTED`, and
+  `chroxy doctor` fails it the same way. `chroxy doctor` resolves the same
+  hybrid floor.
 
   The generic minimum-version gate also makes preflight enforce
   `claude-channel`'s existing `claude >= 2.1.80` floor at session creation.
