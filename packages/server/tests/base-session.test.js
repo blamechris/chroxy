@@ -2278,6 +2278,8 @@ describe('subclass opt forwarding — no opt dropped (#5367)', () => {
   let trustStore
   // #6771 — an opaque runtime handle checked by identity (no file I/O needed).
   const sentinelRuleStore = { addRule() { return false }, getRules() { return [] } }
+  // #8035 — a plain function sentinel for spawnPreflight (identity-checked below).
+  const sentinelSpawnPreflight = () => '/sentinel/binary/path'
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-opt-fwd-'))
     trustStore = new SkillsTrustStore({ filePath: join(tmpDir, 'trust.json'), mode: 'warn' })
@@ -2317,6 +2319,10 @@ describe('subclass opt forwarding — no opt dropped (#5367)', () => {
       // #6771 — durable per-project rule store (runtime handle). A truthy
       // sentinel object survives BaseSession's `|| null`, so it lands verbatim.
       permissionRuleStore: sentinelRuleStore,
+      // #8035 — per-spawn binary re-verification gate. A truthy function
+      // sentinel survives BaseSession's `typeof spawnPreflight === 'function'`
+      // check, so it lands verbatim.
+      spawnPreflight: sentinelSpawnPreflight,
     }
   }
 
@@ -2351,6 +2357,8 @@ describe('subclass opt forwarding — no opt dropped (#5367)', () => {
     backgroundShellHardQuiesceMs: (s) => assert.equal(s._backgroundShellHardQuiesceMs, 0),
     // #6771 — the durable rule store handle lands on _permissionRuleStore.
     permissionRuleStore: (s) => assert.equal(s._permissionRuleStore, sentinelRuleStore),
+    // #8035 — the spawn-gate function lands on _spawnPreflight, by identity.
+    spawnPreflight: (s) => assert.equal(s._spawnPreflight, sentinelSpawnPreflight),
   }
 
   // Guard: the assertion table must cover exactly the canonical opt set, so a

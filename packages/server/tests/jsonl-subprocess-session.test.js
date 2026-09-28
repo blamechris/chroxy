@@ -4,6 +4,8 @@ import { writeFileSync, unlinkSync, existsSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
+import { GeminiSession } from '../src/gemini-session.js'
+import { CodexSession } from '../src/codex-session.js'
 import { isWindows } from '../src/platform.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import { waitFor } from './test-helpers.js'
@@ -30,6 +32,30 @@ function writeShim(lines, { exitCode = 0, stderr = '' } = {}) {
 
 function cleanupShim() {
   if (existsSync(shimPath)) unlinkSync(shimPath)
+}
+
+// #8035 — a shim variant that writes a MARKER file the instant it actually
+// runs, so a spawn-gate refusal test can prove "no child spawned" by
+// asserting the marker's absence rather than only inferring it from
+// `s._process` staying null.
+const markerPath = join(tmpdir(), `jsonl-marker-${process.pid}-${Date.now()}.txt`)
+
+function writeMarkerShim() {
+  // shimPath ends in `.mjs`, so the shim runs as an ES module — `require` is
+  // not a global there. Use a real import, not `require('fs')`.
+  const body = [
+    '#!/usr/bin/env node',
+    `import { writeFileSync } from 'node:fs'`,
+    `writeFileSync(${JSON.stringify(markerPath)}, 'ran')`,
+    `process.stdout.write(${JSON.stringify(JSON.stringify({ type: 'done' }) + '\n')})`,
+    'process.exit(0)',
+  ].join('\n')
+  writeFileSync(shimPath, body)
+  chmodSync(shimPath, 0o755)
+}
+
+function cleanupMarker() {
+  if (existsSync(markerPath)) unlinkSync(markerPath)
 }
 
 /**
@@ -109,6 +135,7 @@ describe('JsonlSubprocessSession (base)', () => {
     if (SAVED_ENV !== undefined) process.env.TEST_API_KEY = SAVED_ENV
     else delete process.env.TEST_API_KEY
     cleanupShim()
+    cleanupMarker()
   })
 
   describe('static overrides', () => {
@@ -785,6 +812,177 @@ describe('JsonlSubprocessSession (base)', () => {
 
       assert.equal(s._skillsPrepended, true,
         'flag must flip to true once spawn argv is committed')
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #8035: the per-turn spawn gate. Every per-turn subprocess provider
+  // (Gemini, legacy `codex exec`) shares this via `_gatedSpawnBinary` /
+  // `_refuseTurnBeforeDispatch` on BaseSession — see base-session.js.
+  // -----------------------------------------------------------------------
+
+  describe('spawn gate (#8035)', () => {
+    it('spawns the injected spawnPreflight path (not the static resolvedBinary), called once per turn', async () => {
+      writeShim([{ type: 'done' }])
+      let calls = 0
+      const gate = () => { calls++; return process.execPath }
+      // resolvedBinary points at a path that can never spawn — the turn only
+      // succeeds if _gatedSpawnBinary actually used the gate's path instead.
+      const P = makeTestProviderClass({ binary: '/nonexistent/no/such/binary' })
+      const s = new P({ cwd: '/tmp', spawnPreflight: gate })
+      s._processReady = true
+      // #8035 review: collected, not swallowed. A spawn of the missing
+      // resolvedBinary still ends in a fallback `result`, so a result alone
+      // does not prove the gate path was spawned; zero errors does.
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+
+      const results = []
+      s.on('result', (d) => results.push(d))
+
+      await s.sendMessage('turn one')
+      await waitFor(() => results.length >= 1, { label: 'result 1' })
+      assert.deepEqual(errors.map((e) => e.message), [], 'turn 1 spawned the gate path without error')
+      // _isBusy only clears once the child's `close` event fires, which can
+      // land after the JSONL `done` line that produced `result` above — wait
+      // for it explicitly, or turn two is rejected as "busy" instead of
+      // re-spawning.
+      await waitFor(() => !s.isRunning, { label: 'turn 1 fully closed' })
+      assert.equal(calls, 1, 'gate called for turn 1')
+
+      await s.sendMessage('turn two')
+      await waitFor(() => results.length >= 2, { label: 'result 2' })
+      assert.equal(calls, 2, 'gate re-called for turn 2, not cached')
+      assert.deepEqual(errors.map((e) => e.message), [], 'turn 2 spawned the gate path without error')
+    })
+
+    it('a gate throw with a provenance code refuses before spawn, then a later turn succeeds once the gate is fixed', async () => {
+      writeMarkerShim()
+      let shouldFail = true
+      const gate = () => {
+        if (shouldFail) {
+          // Hex-hash-shaped text plus a bare "429" — proves the message is
+          // surfaced VERBATIM and never routed through an error-text
+          // rewriter that could mis-match "429" as a rate-limit pattern.
+          const err = new Error('binary hash mismatch at a4291b0cdeadbeef (expected 429abc00) — re-approve to continue')
+          err.code = 'PROVIDER_BINARY_PROVENANCE'
+          throw err
+        }
+        return process.execPath
+      }
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', spawnPreflight: gate })
+      s._processReady = true
+
+      const errors = []
+      const admissions = []
+      s.on('error', (e) => errors.push(e))
+
+      await s.sendMessage('hi', [], { onInputAdmission: (a) => admissions.push(a) })
+
+      assert.equal(errors.length, 1, 'exactly one error event')
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
+      assert.match(errors[0].message, /a4291b0cdeadbeef/, 'hex hash preserved verbatim')
+      assert.match(errors[0].message, /429abc00/, 'the "429"-shaped text is NOT rewritten into a rate-limit message')
+
+      assert.equal(admissions.length, 1)
+      assert.equal(admissions[0].status, 'rejected')
+      assert.equal(admissions[0].delivery, 'not_dispatched')
+      assert.equal(admissions[0].reason, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(admissions[0].retrySafe, true, 'nothing was dispatched, so a retry is safe')
+
+      assert.equal(s._isBusy, false, 'refusal leaves the session idle')
+      assert.equal(s._skillsPrepended, false, 'refusal never commits the skills-prepend flag')
+      assert.equal(s._process, null, 'no child process was ever attached')
+      assert.equal(existsSync(markerPath), false, 'the shim never ran — no marker file was written')
+
+      // Fix the gate and confirm a later turn is unaffected by the refusal.
+      shouldFail = false
+      const results = []
+      s.on('result', (d) => results.push(d))
+      await s.sendMessage('hi again')
+      await waitFor(() => results.length >= 1, { label: 'result after gate fixed' })
+      assert.equal(existsSync(markerPath), true, 'the shim ran once the gate passed')
+    })
+
+    it('an uncoded gate throw refuses with the neutral TURN_REFUSED code', async () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', spawnPreflight: () => { throw new Error('boom, no code') } })
+      s._processReady = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await s.sendMessage('hi')
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'TURN_REFUSED')
+      assert.match(errors[0].message, /boom, no code/)
+      assert.equal(s._isBusy, false)
+    })
+
+    it('a gate returning an empty string refuses with PROVIDER_BINARY_UNVERIFIED', async () => {
+      const P = makeTestProviderClass({ providerName: 'fake-provider' })
+      const s = new P({ cwd: '/tmp', spawnPreflight: () => '' })
+      s._processReady = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await s.sendMessage('hi')
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED')
+      assert.match(errors[0].message, /fake-provider/, 'uses providerName as the binary label')
+      assert.equal(s._isBusy, false)
+    })
+
+    it('a gate returning a non-string refuses with PROVIDER_BINARY_UNVERIFIED', async () => {
+      for (const bad of [null, undefined, 42, {}]) {
+        const P = makeTestProviderClass()
+        const s = new P({ cwd: '/tmp', spawnPreflight: () => bad })
+        s._processReady = true
+        const errors = []
+        s.on('error', (e) => errors.push(e))
+        await s.sendMessage('hi')
+        assert.equal(errors.length, 1, `one refusal for ${String(bad)}`)
+        assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED', `refused ${String(bad)}`)
+        assert.equal(s._process, null, `nothing spawned for ${String(bad)}`)
+      }
+    })
+
+    it('falls back to the static resolvedBinary when no gate is wired (pre-#8035 behavior)', async () => {
+      writeShim([{ type: 'done' }])
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      assert.equal(s._spawnPreflight, null, 'no gate wired by default')
+      s._processReady = true
+
+      const results = []
+      s.on('result', (d) => results.push(d))
+      await s.sendMessage('hi')
+      await waitFor(() => results.length >= 1, { label: 'result' })
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // #8035: `spawnPreflight` is a BaseSession opt now, forwarded to every
+  // picker subclass via BASE_SESSION_OPT_KEYS. Exercised against the REAL
+  // Gemini/Codex constructors (not the test fixture above) so this goes red
+  // if `spawnPreflight` is ever dropped from BASE_SESSION_OPT_KEYS — the
+  // exact middle-layer trap this issue closes (see
+  // [[feedback_jsonl_subprocess_middle_layer]]).
+  // -----------------------------------------------------------------------
+
+  describe('spawnPreflight opt forwarding through real subclasses (#8035)', () => {
+    it('GeminiSession forwards opts.spawnPreflight to _spawnPreflight', () => {
+      const fn = () => '/usr/bin/gemini'
+      const s = new GeminiSession({ cwd: '/tmp', spawnPreflight: fn })
+      assert.equal(s._spawnPreflight, fn)
+    })
+
+    it('CodexSession forwards opts.spawnPreflight to _spawnPreflight', () => {
+      const fn = () => '/usr/bin/codex'
+      const s = new CodexSession({ cwd: '/tmp', spawnPreflight: fn })
+      assert.equal(s._spawnPreflight, fn)
     })
   })
 })

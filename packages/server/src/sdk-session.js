@@ -418,13 +418,12 @@ export class SdkSession extends BaseSession {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-sdk' }))
     // SdkSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
     const { resumeSessionId, transforms, maxToolInput, sandbox, stdinForwardingDisabled } = opts
-    // #8030: per-spawn re-verification gate. SessionManager wires this to
-    // `_verifyPinnedSpawn` (re-runs the binary gate against the EXACT path
-    // create-time preflight verified) whenever preflight ran and the provider
-    // isn't containerised. null when absent — the turn then falls back to a
-    // plain `this.constructor.resolvedBinary` read, same as before #8030 (a
-    // direct `new SdkSession(...)` caller that skips SessionManager, or a test).
-    this._spawnPreflight = typeof opts.spawnPreflight === 'function' ? opts.spawnPreflight : null
+    // #8030 / #8035: per-spawn re-verification gate. Stored by BaseSession's
+    // constructor as `this._spawnPreflight` (see base-session.js's ctor param
+    // doc and `_gatedSpawnBinary`) — moved there so JsonlSubprocessSession's
+    // picker subclasses (Gemini/Codex-exec) inherit the same wiring instead of
+    // this middle layer reading `opts.spawnPreflight` on its own and silently
+    // dropping it for every subclass that forwards opts via the picker.
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -924,10 +923,9 @@ export class SdkSession extends BaseSession {
       // turn. The desktop bundle does not ship the SDK's own platform binary,
       // and without pathToClaudeCodeExecutable query() throws ("Native CLI
       // binary ... not found") even when a subclass supplies
-      // spawnClaudeCodeProcess. The SDK execs a NEW process per turn (unlike
-      // claude-tui's one PTY or claude-cli's one persistent child), so
-      // "verified at session-create" only covers turn one — `_spawnPreflight`
-      // (set in the constructor from SessionManager's `spawnPreflight` opt)
+      // spawnClaudeCodeProcess. The SDK execs a NEW process per turn, so
+      // "verified at session-create" only covers turn one — `_gatedSpawnBinary`
+      // (BaseSession; the gate is SessionManager's `spawnPreflight` opt)
       // re-runs the full binary gate against the create-time-pinned path
       // before every subsequent spawn too. Falls back to a plain
       // `resolvedBinary` read when no gate was wired (a direct `new
@@ -938,14 +936,12 @@ export class SdkSession extends BaseSession {
       // Everything in this inner try runs before query() and decides WHAT would
       // be exec'd, so any throw here is a pre-dispatch refusal (spawnRefused).
       try {
-        spawnPath = this._spawnPreflight ? this._spawnPreflight() : this.constructor.resolvedBinary
-        // An empty path would leave pathToClaudeCodeExecutable unset, and the
-        // SDK would then fall back to its own bundled binary — unverified.
-        if (typeof spawnPath !== 'string' || spawnPath.length === 0) {
-          const err = new Error('No verified claude binary path is available for this turn.')
-          err.code = 'PROVIDER_BINARY_UNVERIFIED'
-          throw err
-        }
+        // #8035: an empty path would leave pathToClaudeCodeExecutable unset,
+        // and the SDK would then fall back to its own bundled binary —
+        // unverified. `_gatedSpawnBinary` (BaseSession) throws
+        // PROVIDER_BINARY_UNVERIFIED for that case; any error the gate itself
+        // throws propagates unchanged.
+        spawnPath = this._gatedSpawnBinary('claude')
         options.pathToClaudeCodeExecutable = spawnPath
 
         // Allow subclasses to augment query options (e.g. DockerSdkSession
@@ -1426,15 +1422,10 @@ export class SdkSession extends BaseSession {
           //     real cause.
           //   - run container classification: the turn never reached the
           //     SDK, so there is no container to have vanished.
-          ;(this._log || log).error(`Turn refused before dispatch: ${err.message}`)
-          // An uncoded throw (e.g. from a subclass's augment hook) is not a
-          // binary-verification failure, so it gets a neutral code.
-          this.emit('error', { code: err.code || 'TURN_REFUSED', message: err.message })
-          reportInputAdmission(sendOptions, {
-            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
-            reason: err.code || 'turn_refused',
-            message: 'The provider refused this turn before it was dispatched; see the session error for the cause.',
-          })
+          // #8035: hoisted onto BaseSession (`_refuseTurnBeforeDispatch`) so
+          // JsonlSubprocessSession's per-turn spawn gets byte-identical wire
+          // shape instead of a second hand-rolled copy.
+          this._refuseTurnBeforeDispatch(err, sendOptions, this._log || log)
         } else {
           // #7599: let a containerized subclass classify this turn failure as a
           // vanished container (a distinct, recoverable state) before the

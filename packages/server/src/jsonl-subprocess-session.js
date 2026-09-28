@@ -264,6 +264,25 @@ export class JsonlSubprocessSession extends BaseSession {
     }
 
     const Klass = this.constructor
+    // #8035: re-verify the binary before every turn, not just at session
+    // create. `_gatedSpawnBinary` (BaseSession) re-runs the full binary gate
+    // against the create-time-pinned path when SessionManager wired a
+    // `spawnPreflight` (block-mode hash mismatch, quarantine, a vanished
+    // pinned binary, … all refuse here), and falls back to a plain
+    // `Klass.resolvedBinary` read when no gate was wired (a direct
+    // constructor call that bypassed SessionManager, or a test) — the
+    // pre-#8035 behavior for that case. Deliberately BEFORE `_isBusy = true`
+    // and the skills-prepend bookkeeping below: a refusal here must leave the
+    // session idle and untouched, exactly as if sendMessage had never been
+    // called, so a retry (once the binary is fixed) behaves like a first
+    // attempt rather than a resumed one.
+    let spawnBinary
+    try {
+      spawnBinary = this._gatedSpawnBinary(Klass.providerName)
+    } catch (err) {
+      this._refuseTurnBeforeDispatch(err, sendOptions, log)
+      return
+    }
     this._isBusy = true
     // `{providerLabel}-msg-{bootPrefix}-{counter}` — the bootPrefix from
     // BaseSession ensures messageIds from different server boots can never
@@ -320,12 +339,15 @@ export class JsonlSubprocessSession extends BaseSession {
       // no native `.exe`); spawning a `.cmd` via child_process throws EINVAL on
       // Node 24, so route it through cmd.exe with proper escaping — the same
       // prepareSpawn cli-session.js uses. No-op for a `.exe` and on POSIX.
-      // The prepareSpawn(Klass.resolvedBinary, args) call is kept verbatim (the
-      // #6484 source guard scans for it); attemptedBinary captures the same
-      // binary for the #6708 spawn-time backstop (err.path is preferred at the
-      // catch sites, this is only the fallback).
-      attemptedBinary = Klass.resolvedBinary
-      const spawnSpec = prepareSpawn(Klass.resolvedBinary, args)
+      // The prepareSpawn(spawnBinary, args) call is kept verbatim (the #6484
+      // source guard scans for it, updated by #8035 to the gated spelling);
+      // attemptedBinary captures the same binary for the #6708 spawn-time
+      // backstop (err.path is preferred at the catch sites, this is only the
+      // fallback). #8035: `spawnBinary` is the gate-verified path resolved
+      // above, not a fresh `Klass.resolvedBinary` read — see the comment at
+      // its declaration.
+      attemptedBinary = spawnBinary
+      const spawnSpec = prepareSpawn(spawnBinary, args)
       proc = spawn(spawnSpec.command, spawnSpec.args, {
         cwd: this.cwd,
         // We pass the prompt as argv, not stdin. Some CLIs, notably

@@ -38,9 +38,11 @@
  */
 import { spawn } from 'child_process'
 import { Readable, Writable } from 'stream'
+import { isAbsolute } from 'node:path'
 import * as acp from '@agentclientprotocol/sdk'
 import { BaseSession, buildBaseSessionOpts, CHROXY_CONTEXT_HINT_TEXT, reportInputAdmission } from './base-session.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { labelBinarySpawnFailure, verifyBinary, BINARY_STATUS } from './utils/verify-binary.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { killProcessTree } from './platform.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
@@ -140,6 +142,35 @@ function summarizeToolCallContent(content) {
   const text = parts.join('\n')
   if (text.length > MAX_TOOL_RESULT_CHARS) return { result: text.slice(0, MAX_TOOL_RESULT_CHARS), truncated: true }
   return { result: text, truncated: false }
+}
+
+/**
+ * #8035 — the spawn-failure backstop for an ACP agent, narrower than the one
+ * the resolved-binary providers get (#6708), because the `command` is
+ * operator-configured rather than resolved by Chroxy:
+ *   - a BARE command (PATH lookup) is never labeled: `verifyBinary` reports
+ *     any non-absolute path as not_found whatever the real cause (Node's own
+ *     ENOENT for a missing `cwd`, say), so a label would misdiagnose it;
+ *   - an ABSOLUTE command is labeled only when it is quarantined or not
+ *     executable. A missing one keeps Node's raw `spawn <path> ENOENT`, which
+ *     names the configured path; the generic "not found — install it" label
+ *     would not, and there is nothing for the operator to install.
+ *
+ * @param {{ command: string, label: string }} entry - the validated ACP entry
+ * @param {string} prefix - message prefix naming the failed operation
+ * @param {Function} [verify=verifyBinary] - integrity checker (test seam)
+ * @returns {string|null} the labeled message, or null to keep the raw error
+ */
+export function labelAcpSpawnFailure(entry, prefix, verify = verifyBinary) {
+  if (typeof entry?.command !== 'string' || !isAbsolute(entry.command)) return null
+  let health
+  try {
+    health = verify(entry.command)
+  } catch {
+    return null
+  }
+  if (health?.status !== BINARY_STATUS.QUARANTINED && health?.status !== BINARY_STATUS.NOT_EXECUTABLE) return null
+  return labelBinarySpawnFailure({ attemptedPath: entry.command, binary: entry.label, prefix, verify: () => health })
 }
 
 /**
@@ -278,7 +309,12 @@ export function createAcpSessionClass(rawEntry) {
           ...spawnSpec.options,
         })
       } catch (err) {
-        throw new Error(`Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
+        // #8035 — see labelAcpSpawnFailure for which failures get a label. The
+        // label keeps the spawn error's own code, which may be the real cause.
+        const labeled = labelAcpSpawnFailure(entryRef, `Failed to spawn ACP agent "${entryRef.label}"`)
+        throw new Error(labeled
+          ? `${labeled} (${err?.code || err?.message})`
+          : `Failed to spawn ACP agent "${entryRef.label}" (${entryRef.command}): ${err.message}`)
       }
       this._child = child
 
@@ -725,7 +761,11 @@ export function createAcpSessionClass(rawEntry) {
 
     _onChildError(err) {
       if (this._destroying) return
-      this._reportTeardown(`Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
+      // #8035 — same backstop as start()'s sync spawn catch.
+      const labeled = labelAcpSpawnFailure(this._acpEntry, `Failed to run ACP agent "${this._acpEntry.label}"`)
+      this._reportTeardown(labeled
+        ? `${labeled} (${err?.code || err?.message})`
+        : `Failed to run ACP agent "${this._acpEntry.label}": ${err.message}`)
     }
 
     /**

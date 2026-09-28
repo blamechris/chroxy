@@ -1063,8 +1063,15 @@ export class SessionManager extends EventEmitter {
   //     errors (e.g. `ProviderBinaryProvenanceError`) propagate as-is, and a
   //     result whose `binaryPath` doesn't match `pinnedPath` is itself an
   //     error. Wired as `providerOpts.spawnPreflight` (see createSession
-  //     below) so a per-turn provider (the Agent SDK) can re-verify its
-  //     pinned binary before every spawn, not just once at session-create.
+  //     below) so a per-turn provider can re-verify its pinned binary before
+  //     every spawn, not just once at session-create. #8035: BaseSession
+  //     stores this as `this._spawnPreflight` (not read by a subclass
+  //     directly), so every consumer that spawns more than once per session
+  //     shares it — the Agent SDK (#8030, execs a new process per turn) and
+  //     JsonlSubprocessSession's Gemini / Codex-exec subclasses (spawn once
+  //     per turn). claude-cli, claude-tui and codex app-server's default
+  //     route never call it: their spawns and respawns still re-resolve the
+  //     binary with no per-spawn gate (#8038).
   //   - `verifyOneShotExecutable()` is the same idea for a one-shot call that
   //     has NO create-time pin to reuse (the summarizer, the semantic-title
   //     generator) — it re-resolves AND re-verifies fresh every call.
@@ -1088,12 +1095,14 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * #8030 — re-verify an EXACT, already-resolved binary path before a spawn.
-   * Used as the `spawnPreflight` seam a per-turn provider (SdkSession) calls
-   * before every `query()`: the SDK execs a NEW process per turn, so a binary
-   * verified once at session-create is not automatically still the same,
-   * still-healthy binary on turn two. `pinnedPath` is the path THIS session
-   * verified at create time — passing it as `options.pinnedPath` to
+   * #8030 / #8035 — re-verify an EXACT, already-resolved binary path before a
+   * spawn. Used as the `spawnPreflight` seam a per-turn provider calls before
+   * every spawn — SdkSession before every `query()` (the SDK execs a NEW
+   * process per turn), JsonlSubprocessSession's Gemini/Codex-exec subclasses
+   * before every child spawn — since a binary verified once at session-create
+   * is not automatically still the same, still-healthy binary on turn two.
+   * `pinnedPath` is the path THIS session verified at create time — passing
+   * it as `options.pinnedPath` to
    * `runProviderPreflight` skips re-resolution entirely (a PATH change mid-
    * session can never redirect the spawn to a different binary) while still
    * re-running existence / quarantine / shim / provenance / version checks
@@ -1662,10 +1671,15 @@ export class SessionManager extends EventEmitter {
     // (this._skipPreflight, test-only) or the provider is containerised
     // (runProviderPreflight returns binaryPath:null for those; the binary
     // lives inside the container, unreachable to a host-side re-verify).
-    // Currently only SdkSession's constructor reads `opts.spawnPreflight` (it
-    // execs a NEW process every turn, so "verified once at create" doesn't
-    // cover turn two onward); every other provider's opt destructure simply
-    // ignores this key, same as any opt a given provider doesn't consume.
+    // #8035: `spawnPreflight` is a BaseSession opt now (stored as
+    // `this._spawnPreflight`, forwarded to every picker subclass via
+    // `BASE_SESSION_OPT_KEYS` — see base-session.js), so SdkSession AND
+    // JsonlSubprocessSession's Gemini / Codex-exec subclasses both consume it
+    // per spawn (each execs a NEW process every turn, so "verified once at
+    // create" doesn't cover turn two onward). claude-cli, claude-tui and codex
+    // app-server's default route inherit the opt through the same picker but
+    // never call `_gatedSpawnBinary`; their spawns and respawns still
+    // re-resolve with no per-spawn gate (#8038).
     if (verifiedBinary) {
       providerOpts.spawnPreflight = () => this._verifyPinnedSpawn(ProviderClass, verifiedBinary)
     }
