@@ -2148,6 +2148,19 @@ export class ClaudeTuiSession extends BaseSession {
   async _respawnPty() {
     if (this._destroying) return
     this._respawning = true
+    // #8043: drop the dead PTY's handle before anything below awaits. Every
+    // caller reaches here only after the old PTY was declared gone — the
+    // backoff timer, the post-spawn and non-refusal-catch reschedules, and
+    // #8038's sendMessage revival of a refused session — and `_onPtyGone`
+    // deliberately leaves `_term` pointing at the dead handle (destroy()'s
+    // #5351 note). Resetting `_ptyExited` below while keeping that handle made
+    // the two disagree: `_spawnPty`'s early returns (node-pty import failure,
+    // the argv guard, a sync spawn throw) assign no new `_term`, so the
+    // `!this._term || this._ptyExited` check after the spawn passed on the DEAD
+    // handle, emitted `ready`, reset the budget and armed no retry; and a
+    // destroy() landing mid-respawn SIGTERMed the reaped pid and armed SIGKILL
+    // against it. With the handle gone, both read "no live PTY", which is true.
+    this._term = null
     // (1) reset the teardown latches so a future death re-triggers _onPtyGone.
     this._ptyExited = false
     this._ptyExitInfo = null
