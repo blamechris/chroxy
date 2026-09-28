@@ -281,24 +281,52 @@ P1/P2 already cover for `claude-cli`/`claude-tui`/`claude-channel`: quarantine
 detection, and (opt-in) the SHA-256 pin ledger + signature gate, both checked
 at session create. Nothing provider-specific was added for the version gate
 below — it is generic `runProviderPreflight` machinery any provider can opt
-into via `spec.binary.minVersion`.
+into via `spec.binary.minVersion` and/or `spec.binary.recommendedVersion`.
 
-**Version gate, and where it sits relative to the other gates.** `claude-sdk`
-declares `minVersion: () => sdkClaudeCodeVersion()` — the installed
-`@anthropic-ai/claude-agent-sdk` package's own `claudeCodeVersion` field (the
-`claude` version that SDK build was tested against), read fresh from
-`node_modules` rather than hand-kept as a constant that could drift on an SDK
-bump. `runProviderPreflight` runs this probe **strictly after** verifyBinary
-and the provenance gate both pass: a binary that's missing, quarantined, or
-blocked by `block`-mode provenance is never exec'd for a `--version` probe.
-An installed `claude` older than the required floor throws
+**Version gate, and where it sits relative to the other gates.** `claude-sdk`'s
+version floor is a HYBRID pair (#8031), replacing the single hard
+`minVersion` that #7986 originally shipped. That original design declared
+`minVersion: () => sdkClaudeCodeVersion()` — the installed
+`@anthropic-ai/claude-agent-sdk` package's own `claudeCodeVersion` field — as
+a hard floor. That field is a **pairing**, not a minimum: it names the
+`claude` CLI build the SDK release was *published alongside*, and the CLI's
+patch number is its release counter, so a user on a lagging release channel
+(npm `stable` trails `latest`) can be several patches behind whatever the SDK
+happened to ship next to without their install being broken in any way.
+Treating it as a hard floor meant every SDK bump instantly hard-blocked any
+`claude` that hadn't also updated — the failure mode #8031 fixes. Now:
+  - **Hard floor** — `minVersion: CLAUDE_SDK_MIN_CLI_VERSION`
+    (`utils/agent-sdk-version.js`), a small, hand-raised constant reviewed
+    and bumped by a maintainer, never automatically. Below it, preflight still
+    throws `ProviderBinaryVersionError` exactly as before.
+  - **Soft floor** — `recommendedVersion: () => sdkClaudeCodeVersion()`, the
+    SDK's own pairing. At/above the hard floor but below this, preflight does
+    NOT throw: it logs a warning and returns a `versionAdvisory` describing
+    the gap (`{ provider, binary, path, found, recommended, remediation }`).
+  - A **tripwire test** (`agent-sdk-version.test.js`) asserts
+    `sdkClaudeCodeVersion() === CLAUDE_SDK_FLOOR_REVIEWED_AGAINST`, so an SDK
+    bump that moves the pairing forces a maintainer to consciously re-check
+    (and, if needed, raise) `CLAUDE_SDK_MIN_CLI_VERSION` rather than letting
+    the hard floor silently drift further behind the SDK's own pairing.
+  - Renovate throttles `@anthropic-ai/claude-agent-sdk` bumps the same way it
+    already throttles `@anthropic-ai/claude-code` (`renovate.json`), so a
+    lagging CLI channel gets real time to catch up between SDK bumps rather
+    than the pairing moving out from under it every week.
+
+`runProviderPreflight` probes the installed binary's version **at most once**
+per call — the SAME probed version feeds both checks — and only **strictly
+after** verifyBinary and the provenance gate both pass: a binary that's
+missing, quarantined, or blocked by `block`-mode provenance is never exec'd
+for a `--version` probe. An installed `claude` below the hard floor throws
 `ProviderBinaryVersionError` (`code: PROVIDER_BINARY_VERSION`) with a
 `claude update` remediation — this is a version-skew problem, not a
-"reinstall from scratch" one. Before either gate, a provider that declares
-`binary.requiresDirectExec` (the SDK provider does, because the Agent SDK
-spawns `claude` with no shell) refuses a Windows `.cmd`/`.bat` npm shim with
-`ProviderBinaryUnsupportedError` (`code: PROVIDER_BINARY_UNSUPPORTED`): such a
-shim can never be spawned that way, and it is never exec'd. The probe itself
+"reinstall from scratch" one; below the soft floor only, it warns with the
+same remediation text but never blocks the session. Before either gate, a
+provider that declares `binary.requiresDirectExec` (the SDK provider does,
+because the Agent SDK spawns `claude` with no shell) refuses a Windows
+`.cmd`/`.bat` npm shim with `ProviderBinaryUnsupportedError`
+(`code: PROVIDER_BINARY_UNSUPPORTED`): such a shim can never be spawned that
+way, and it is never exec'd. The probe itself
 (`utils/binary-version.js#probeBinaryVersion`) is cached by stat identity
 (path + dev + ino + size + mtimeMs) so a `claude update` invalidates the
 cache and repeated session-creates against an unchanged binary don't.

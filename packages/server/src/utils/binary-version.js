@@ -96,15 +96,19 @@ export function compareSemver(a, b) {
 }
 
 /**
- * Resolve a provider's declared `preflight.binary.minVersion` — a version
- * string, or a thunk returning one (e.g. `() => sdkClaudeCodeVersion()`) — to
- * a non-empty string, or null when there is no usable floor.
+ * Resolve ANY of a provider's declared version fields on
+ * `preflight.binary` — `minVersion` (the hard floor) or `recommendedVersion`
+ * (the soft, advisory floor, #8031) — a version string, or a thunk returning
+ * one (e.g. `() => sdkClaudeCodeVersion()`) — to a non-empty string, or null
+ * when there is no usable value. Both fields share the same shape (string or
+ * thunk), so both preflight and doctor resolve either one through this same
+ * function rather than two independently-maintained readers.
  *
- * Preflight AND doctor read that one field, so both resolve it here: a second
+ * Preflight AND doctor read these fields, so both resolve them here: a second
  * reader that assumed a plain string handed the thunk itself to a semver
  * comparator, and `chroxy doctor` / `chroxy start` then failed every claude-sdk
  * install with "requires claude ≥ () => sdkClaudeCodeVersion()" (#7986). A
- * thunk that throws resolves to null, the same "no usable floor" outcome as a
+ * thunk that throws resolves to null, the same "no usable value" outcome as a
  * thunk that returns null.
  *
  * @param {string|(() => string|null)|null|undefined} declared

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `claude-sdk` provider's minimum-version floor no longer hard-blocks
+  every install after an SDK bump — it is now a hand-kept hard floor plus a
+  soft, advisory floor (#8031).** #7986 (below) enforced a minimum `claude`
+  version equal to the installed Agent SDK's own `claudeCodeVersion` field.
+  That field names the CLI build the SDK release was *published alongside*,
+  not a genuine minimum — the CLI's patch number is its release counter, so
+  a `claude` on a lagging release channel (e.g. npm `stable`, which trails
+  `latest`) could be several patches behind without being broken in any way,
+  and every SDK bump instantly hard-blocked it regardless. Preflight now
+  enforces a small, hand-raised `CLAUDE_SDK_MIN_CLI_VERSION` constant as the
+  hard floor (below it: `ProviderBinaryVersionError`/`PROVIDER_BINARY_VERSION`,
+  unchanged), and treats the SDK's own `claudeCodeVersion` as a soft,
+  advisory floor instead: at/above the hard floor but below the SDK's
+  pairing, preflight logs a warning and `chroxy doctor` reports `warn`
+  (never aborts `chroxy start`) rather than throwing. A tripwire test forces
+  a maintainer to re-verify (and, if needed, raise) the hard floor whenever
+  an SDK bump moves its pairing, and Renovate now throttles
+  `@anthropic-ai/claude-agent-sdk` bumps the same way it already throttles
+  `@anthropic-ai/claude-code`, so a lagging CLI channel gets real time to
+  catch up between bumps.
+
 - **The `claude-sdk` provider now spawns your installed `claude`, resolved through
   the same candidate list preflight verifies at session create (#7986).**
   The Agent SDK's `query()` spawns its own bundled platform binary unless told
@@ -22,13 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   titles also use, sets the same resolved path but is not preflighted or
   provenance-checked at all. See #8030.
 
-  Preflight also enforces a minimum `claude` version for the SDK provider:
-  the installed SDK's own `claudeCodeVersion`, not a hand-kept constant.
-  A binary below it gets a `claude update` remediation instead of a mid-turn
-  failure. On Windows, the SDK spawns without a shell, so it needs the native
-  `claude.exe`; an npm `.cmd` shim is refused before any probe with its own
-  error, `PROVIDER_BINARY_UNSUPPORTED`, and `chroxy doctor` fails it the same way.
-  `chroxy doctor` resolves the same derived minimum.
+  Preflight also enforces a minimum `claude` version for the SDK provider: a
+  hand-kept `CLAUDE_SDK_MIN_CLI_VERSION` hard floor, with the installed SDK's
+  own `claudeCodeVersion` field as a soft, advisory floor on top of it (see
+  #8031). A binary below the hard floor gets a `claude update` remediation
+  instead of a mid-turn failure. On Windows, the SDK spawns without a shell,
+  so it needs the native `claude.exe`; an npm `.cmd` shim is refused before
+  any probe with its own error, `PROVIDER_BINARY_UNSUPPORTED`, and
+  `chroxy doctor` fails it the same way. `chroxy doctor` resolves the same
+  hybrid floor.
 
   The generic minimum-version gate also makes preflight enforce
   `claude-channel`'s existing `claude >= 2.1.80` floor at session creation.

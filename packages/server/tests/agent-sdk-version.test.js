@@ -3,12 +3,16 @@ import assert from 'node:assert/strict'
 import {
   sdkClaudeCodeVersion,
   _resetAgentSdkVersionCacheForTest,
+  CLAUDE_SDK_MIN_CLI_VERSION,
+  CLAUDE_SDK_FLOOR_REVIEWED_AGAINST,
 } from '../src/utils/agent-sdk-version.js'
+import { compareSemver, parseSemver } from '../src/utils/binary-version.js'
 
 /**
  * Unit tests for reading the installed @anthropic-ai/claude-agent-sdk
- * package's own `claudeCodeVersion` field (#7986) — SdkSession's derived
- * minimum-version floor.
+ * package's own `claudeCodeVersion` field (#7986) — the SDK/CLI pairing that
+ * feeds `claude-sdk`'s SOFT `recommendedVersion` advisory (#8031). A missing
+ * field here no longer disables a hard floor; it only drops the advisory.
  */
 
 describe('sdkClaudeCodeVersion', () => {
@@ -144,12 +148,13 @@ describe('sdkClaudeCodeVersion', () => {
 })
 
 // #7986 — a PIN test against the REAL installed SDK (no injected seams). This
-// is deliberately NOT mocked: the whole point of minVersion gating is that a
-// Renovate bump of @anthropic-ai/claude-agent-sdk could drop or rename the
-// `claudeCodeVersion` field, which would silently disable the version gate
-// (preflight treats a null minimum as "skip, with a warning" rather than a
-// hard failure — see preflight.js). Without this test, that regression would
-// be invisible: every mocked unit test above would keep passing.
+// is deliberately NOT mocked: the whole point of reading this pairing is that
+// a Renovate bump of @anthropic-ai/claude-agent-sdk could drop or rename the
+// `claudeCodeVersion` field, which would silently drop `claude-sdk`'s SOFT
+// `recommendedVersion` advisory (#8031) — preflight treats a null/unparseable
+// recommendedVersion as "skip the advisory silently", never a hard failure
+// (see preflight.js). Without this test, that regression would be invisible:
+// every mocked unit test above would keep passing.
 describe('sdkClaudeCodeVersion — pin against the real installed SDK', () => {
   beforeEach(() => {
     _resetAgentSdkVersionCacheForTest()
@@ -159,5 +164,57 @@ describe('sdkClaudeCodeVersion — pin against the real installed SDK', () => {
     const version = sdkClaudeCodeVersion()
     assert.equal(typeof version, 'string', 'the installed @anthropic-ai/claude-agent-sdk must carry a claudeCodeVersion field')
     assert.match(version, /^\d+\.\d+\.\d+/, `expected a leading major.minor.patch, got: ${JSON.stringify(version)}`)
+  })
+})
+
+// #8031 — the hybrid hard-min / soft-recommended version floor for
+// `claude-sdk`. `CLAUDE_SDK_MIN_CLI_VERSION` is a hand-raised constant that
+// must never exceed the SDK's own pairing (that would make the hard floor
+// stricter than the version the installed SDK itself was published
+// alongside — an invalid floor by construction) — and
+// `CLAUDE_SDK_FLOOR_REVIEWED_AGAINST` is a tripwire marker that forces a
+// conscious re-review whenever the installed SDK's pairing moves past it.
+describe('CLAUDE_SDK_MIN_CLI_VERSION invariant + CLAUDE_SDK_FLOOR_REVIEWED_AGAINST tripwire (#8031)', () => {
+  beforeEach(() => {
+    // Real reads only — drop any memoized value an earlier test in this file
+    // injected via seams (e.g. '9.9.9') so these two tests see the actual
+    // installed SDK's pairing, not a leftover fixture value.
+    _resetAgentSdkVersionCacheForTest()
+  })
+
+  it('invariant: CLAUDE_SDK_MIN_CLI_VERSION <= the real installed SDK\'s claudeCodeVersion pairing', () => {
+    // compareSemver fails CLOSED on an unparseable side — a malformed floor
+    // like '2.1' would make `compareSemver(CLAUDE_SDK_MIN_CLI_VERSION, pairing)`
+    // return -1 (satisfying `<= 0`) without ever comparing real versions.
+    // Assert the floor itself is a parseable major.minor.patch first so this
+    // test cannot pass vacuously against a malformed constant.
+    assert.ok(
+      parseSemver(CLAUDE_SDK_MIN_CLI_VERSION),
+      `CLAUDE_SDK_MIN_CLI_VERSION (${JSON.stringify(CLAUDE_SDK_MIN_CLI_VERSION)}) must itself be a parseable major.minor.patch`,
+    )
+
+    const pairing = sdkClaudeCodeVersion()
+    // A null pairing would make `compareSemver(..., null) <= 0` trivially
+    // true — assert non-null first so this test cannot pass vacuously
+    // against a broken/uninstalled SDK.
+    assert.ok(pairing, 'the installed Agent SDK must carry a claudeCodeVersion field for this invariant to mean anything')
+    assert.ok(
+      compareSemver(CLAUDE_SDK_MIN_CLI_VERSION, pairing) <= 0,
+      `CLAUDE_SDK_MIN_CLI_VERSION (${CLAUDE_SDK_MIN_CLI_VERSION}) must not exceed the installed SDK's own pairing (${pairing}) — `
+        + 'the hard floor can never be stricter than the version the installed SDK was published alongside',
+    )
+  })
+
+  it('tripwire: sdkClaudeCodeVersion() === CLAUDE_SDK_FLOOR_REVIEWED_AGAINST — re-review the floor on an SDK bump', () => {
+    const pairing = sdkClaudeCodeVersion()
+    assert.equal(
+      pairing,
+      CLAUDE_SDK_FLOOR_REVIEWED_AGAINST,
+      `The installed @anthropic-ai/claude-agent-sdk's claudeCodeVersion (${pairing}) differs from `
+        + `CLAUDE_SDK_FLOOR_REVIEWED_AGAINST (${CLAUDE_SDK_FLOOR_REVIEWED_AGAINST}) in packages/server/src/utils/agent-sdk-version.js. `
+        + `This is expected after an SDK bump — but it means CLAUDE_SDK_MIN_CLI_VERSION (currently ${CLAUDE_SDK_MIN_CLI_VERSION}) `
+        + 'has NOT been reviewed against the new SDK. Verify the new SDK still works against a `claude` at the current '
+        + 'CLAUDE_SDK_MIN_CLI_VERSION (raise it if not), then set CLAUDE_SDK_FLOOR_REVIEWED_AGAINST to the new pairing. See #8031.',
+    )
   })
 })

@@ -3,7 +3,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
-import { sdkClaudeCodeVersion } from './utils/agent-sdk-version.js'
+import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-sdk-version.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
@@ -228,13 +228,26 @@ export class SdkSession extends BaseSession {
    * SDK mode spawns the user's INSTALLED `claude` binary under the hood via
    * `pathToClaudeCodeExecutable` (#7986) — the desktop bundle does not ship
    * the Agent SDK's own platform binary, and `query()` throws if neither is
-   * available. So
-   * the same binary check every other claude-family provider runs applies
-   * here too, using the shared candidate list. `minVersion` is derived from
-   * the installed SDK's own `claudeCodeVersion` field (no hand-kept
-   * constant to drift): a `claude` older than what this SDK build was
-   * tested against fails preflight with a `claude update` remediation
-   * instead of an opaque mid-turn spawn error. Credentials can come from
+   * available. So the same binary check every other claude-family provider
+   * runs applies here too, using the shared candidate list.
+   *
+   * Version floor is a HYBRID, hard-min + soft-advisory pair (#8031),
+   * replacing the single hard `minVersion` derived straight from the
+   * installed SDK's `claudeCodeVersion` field that #7986 originally shipped.
+   * That field is the `claude` CLI build the SDK release was *published
+   * alongside* — a pairing, not a genuine minimum — and the CLI's patch
+   * number is its release counter, so every SDK bump instantly hard-blocked
+   * any `claude` on a release channel that hadn't also updated yet (e.g. npm
+   * `stable`, which trails `latest`). Now:
+   *   - `minVersion: CLAUDE_SDK_MIN_CLI_VERSION` — a small, hand-raised,
+   *     deliberately-conservative constant — is the HARD floor: below it,
+   *     preflight still throws `ProviderBinaryVersionError` exactly as before.
+   *   - `recommendedVersion: () => sdkClaudeCodeVersion()` — the SDK's own
+   *     pairing — is a SOFT floor: below it (but at/above the hard floor),
+   *     preflight logs a warning and returns an advisory instead of blocking.
+   * A `claude` older than what this SDK build was tested against still gets
+   * a `claude update` remediation either way — just a throw below the hard
+   * floor, an advisory otherwise. Credentials can come from
    * ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or a prior `claude login`
    * subscription.
    */
@@ -245,7 +258,8 @@ export class SdkSession extends BaseSession {
         name: 'claude',
         args: ['--version'],
         candidates: CLAUDE_BINARY_CANDIDATES,
-        minVersion: () => sdkClaudeCodeVersion(),
+        minVersion: CLAUDE_SDK_MIN_CLI_VERSION,
+        recommendedVersion: () => sdkClaudeCodeVersion(),
         // #7986 review S2: the Agent SDK spawns `pathToClaudeCodeExecutable`
         // directly via `child_process.spawn`, no shell — a Windows npm shim
         // (`claude.cmd`/`claude.bat`) can never actually run under that. This

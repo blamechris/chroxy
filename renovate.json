@@ -18,8 +18,8 @@
   ],
   "packageRules": [
     {
-      "description": "Throttle @anthropic-ai/claude-code bumps: weekly window + stability delay to avoid yanked releases",
-      "matchPackageNames": ["@anthropic-ai/claude-code"],
+      "description": "Throttle @anthropic-ai/claude-code and @anthropic-ai/claude-agent-sdk bumps: weekly window + stability delay to avoid yanked releases. The SDK bump moves the `claude` CLI version it is paired with (claudeCodeVersion) — the soft advisory floor claude-sdk warns against, #8031 — so throttling it the same way gives CLI release channels that lag behind `latest` (e.g. npm `stable`) time to catch up before the pairing moves again.",
+      "matchPackageNames": ["@anthropic-ai/claude-code", "@anthropic-ai/claude-agent-sdk"],
       "schedule": ["before 9am on Monday"],
       "prCreation": "not-pending",
       "minimumReleaseAge": "3 days"
