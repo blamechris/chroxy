@@ -2328,21 +2328,29 @@ export class ClaudeTuiSession extends BaseSession {
       // Identity check (not error-code sniffing): `_spawnPty` sets
       // `this._spawnRefusal = err` to this EXACT thrown object only on its
       // refusal paths — the binary gate, the native re-check before the spawn,
-      // and (#8044) the native `claude auth status` verdict. Any other throw
-      // (the nonce / hook-settings write, the post-spawn endpoint-marker check
-      // — #8057, a node-pty import failure, …) leaves it unset.
+      // (#8044) the native `claude auth status` verdict, and (#8057) the
+      // post-spawn endpoint-marker verdict. Any other throw (the nonce /
+      // hook-settings write, a node-pty import failure, …) leaves it unset.
       if (err === this._spawnRefusal) {
         // A destroy() that landed while this respawn was awaiting (e.g. the
         // native `claude auth status` probe) owns the session's end; a coded
         // refusal error for a destroyed session would reach no client.
         if (this._destroying) return
         // #5348: this attempt already consumed `_freshRetryPending` above to
-        // decide `--session-id` vs `--resume`, but the gate refused before
-        // claude ever saw either argv — the fresh-uuid decision this attempt
-        // was about to make is still owed. Re-arm it so the eventual revival
-        // still mints a new conversation instead of `--resume`-ing an id
-        // claude never learned about.
-        if (wasFreshRetry) this._freshRetryPending = true
+        // decide `--session-id` vs `--resume`, and the fresh-uuid decision it
+        // was making is still owed. Re-arm it so the eventual revival still
+        // starts a NEW conversation instead of `--resume`-ing an id claude may
+        // never have learned about — and give that revival a NEW uuid: a
+        // post-spawn refusal (#8057, the endpoint marker) DID launch claude
+        // with this `--session-id`, which claude may now hold, so reusing it
+        // could die "already in use" and, with the fallback latch still set,
+        // exhaust the session. For a pre-spawn refusal the old uuid was never
+        // used, so replacing it costs nothing.
+        if (wasFreshRetry) {
+          this._freshRetryPending = true
+          this._sessionId = randomUUID()
+          this._log = loggerForSession('claude-tui-session', this._sessionId)
+        }
         // The PTY that died before this attempt is still dead and no new one
         // was spawned, so restore the latch the top of this method cleared.
         // The top of this method already dropped the dead handle (#8043), so
@@ -2615,10 +2623,11 @@ export class ClaudeTuiSession extends BaseSession {
     // `_spawnRefusal` (the non-native route goes through `_gatedSpawnBinary`,
     // which previously read `_connectionVerifiedBinary` once at create time and
     // never re-verified it on a respawn; the native route's own
-    // `_connectionRuntimePreflight` re-check is its gate). Three steps latch a
+    // `_connectionRuntimePreflight` re-check is its gate). Four steps latch a
     // refusal: this one, the native `claude auth status` verdict below (#8044),
-    // and the native re-check just before the spawn. The nonce / hook-settings
-    // write in between does not — that is a local I/O failure, not a verdict.
+    // the native re-check just before the spawn, and the post-spawn endpoint
+    // marker (#8057). The nonce / hook-settings write in between does not —
+    // that is a local I/O failure, not a verdict.
     try {
       attemptedBinary = this._connectionAuthRoute === 'native'
         ? this._connectionRuntimePreflight?.()
@@ -2905,6 +2914,19 @@ export class ClaudeTuiSession extends BaseSession {
       try {
         this._verifyNativeRouteMarker(nativeRouteNonce)
       } catch (err) {
+        // #8057: the SessionStart route marker is the native route's last
+        // verdict — a custom endpoint / token / gateway / cloud selector
+        // (NATIVE_ENDPOINT_ROUTE_MISMATCH) comes from configuration, so a
+        // backoff retry cannot change it, and a missing marker
+        // (NATIVE_ENDPOINT_UNVERIFIED — the hook never ran, or warmup timed
+        // out before it wrote) is latched the same way, matching #8044's
+        // NATIVE_AUTH_STATUS_UNVERIFIED: the next input retries, where the
+        // backoff relaunched claude under the rejected configuration up to
+        // five times (each paying the warmup) and then destroyed the session
+        // with an uncoded "failed to stay alive". Unlike the pre-spawn
+        // refusals the PTY DID launch, so it is killed and dropped here and
+        // `_ptyExited` / `_term` stay consistent with #8043.
+        this._spawnRefusal = err
         this._blockNativeRouteVerification(err)
         this._ptyExited = true
         try { this._term?.kill?.('SIGTERM') } catch {}

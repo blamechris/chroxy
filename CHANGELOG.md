@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `claude-tui` native session whose route marker is rejected no longer
+  relaunches claude five times and dies with "failed to stay alive" (#8057).**
+  On an explicit native agent-connection session, a PTY respawn whose
+  SessionStart route marker reports a custom endpoint, token, gateway or cloud
+  selector (`NATIVE_ENDPOINT_ROUTE_MISMATCH`) or is missing
+  (`NATIVE_ENDPOINT_UNVERIFIED`) is now refused like #8044's auth-status
+  verdict: the rejected PTY is killed, the native code is emitted once, no
+  backoff is armed, and the session stays listed. The next input relaunches
+  and re-checks, so fixing the configuration and sending again recovers the
+  session in place. Previously each attempt emitted no coded error at all.
+
 - **A logged-out `claude-tui` native session no longer burns its respawn
   budget into "failed to stay alive" (#8044).** On an explicit native
   agent-connection session, a PTY respawn whose `claude auth status` reports

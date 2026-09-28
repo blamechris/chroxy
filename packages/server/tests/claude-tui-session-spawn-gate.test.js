@@ -447,6 +447,145 @@ describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)',
   })
 })
 
+describe('ClaudeTuiSession — native endpoint-marker refusal on a respawn (#8057)', () => {
+  // A native session whose `claude auth status` passes, driven through the real
+  // `_respawnPty` / `_spawnPty`; `markerMode` decides what the stand-in's
+  // SessionStart hook "writes": a clean first-party marker, a marker reporting
+  // a custom endpoint, or none at all.
+  function makeNativeMarkerSession(sinkDir, control) {
+    const gated = makeGatedSession({
+      ctorOpts: {
+        connectionAuthRoute: 'native',
+        connectionChildEnv: { PATH: process.env.PATH },
+        connectionVerifiedBinary: '/fixture/native/claude',
+        connectionRuntimePreflight: () => '/fixture/native/claude',
+        connectionAuthStatusRunner: async () => ({
+          status: 0,
+          stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }),
+        }),
+      },
+    })
+    const { session } = gated
+    const standIn = session._ptyModOverride
+    const terms = []
+    session._ptyModOverride = {
+      spawn: (cmd, args, opts) => {
+        const settings = JSON.parse(readFileSync(session._settingsPath, 'utf8'))
+        const nonce = settings.hooks.SessionStart[0].hooks[0].args[2]
+        if (control.markerMode !== 'missing') {
+          const mismatch = control.markerMode === 'mismatch'
+          writeFileSync(join(sinkDir, 'native-route.json'), JSON.stringify({
+            version: 1, nonce, safe: !mismatch, firstPartyEndpoint: !mismatch,
+            blockedKeys: mismatch ? ['ANTHROPIC_BASE_URL'] : [],
+          }))
+        }
+        const term = standIn.spawn(cmd, args, opts)
+        term.kills = []
+        term.kill = (sig) => { term.kills.push(sig) }
+        terms.push(term)
+        return term
+      },
+    }
+    session._sessionId = 'fixture-uuid-8057'
+    session._sinkDir = sinkDir
+    session._settingsPath = join(sinkDir, 'settings.json')
+    session._resumedFromPersisted = true
+    return { ...gated, terms }
+  }
+
+  for (const [markerMode, code] of [['mismatch', 'NATIVE_ENDPOINT_ROUTE_MISMATCH'], ['missing', 'NATIVE_ENDPOINT_UNVERIFIED']]) {
+    it(`a ${markerMode} route marker on a respawn latches ${code}: the launched PTY is killed, no backoff, one coded error`, async () => {
+      const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
+      const control = { markerMode }
+      const { session, spawnCalls, terms, cleanup } = makeNativeMarkerSession(sinkDir, control)
+      try {
+        session._respawnCount = 2
+        const errors = []
+        session.on('error', (e) => errors.push(e))
+        const exhausted = []
+        session.on('respawn_exhausted', (e) => exhausted.push(e))
+
+        await session._respawnPty()
+
+        assert.equal(spawnCalls.length, 1, 'this verdict comes after the PTY launched')
+        assert.deepEqual(terms[0].kills, ['SIGTERM'], 'the rejected PTY was killed')
+        assert.equal(session._term, null, 'and dropped (#8043)')
+        assert.equal(session._ptyExited, true)
+        assert.equal(session._spawnRefusal?.code, code, 'the verdict is latched')
+        assert.deepEqual(errors.map((e) => e.code), [code], 'exactly one coded error')
+        assert.equal(session._respawnScheduled, false, 'no backoff relaunches claude under the rejected route')
+        assert.equal(session._respawnCount, 0)
+        assert.deepEqual(exhausted, [], 'never pty_respawn_exhausted')
+      } finally {
+        await cleanup()
+        rmSync(sinkDir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it('a post-spawn refusal of a fresh-retry attempt re-arms the retry with a NEW uuid, so the revival never reuses the id claude was launched with', async () => {
+    const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
+    const control = { markerMode: 'mismatch' }
+    const { session, spawnCalls, cleanup } = makeNativeMarkerSession(sinkDir, control)
+    try {
+      // #5348 retry-FRESH attempt: a brand-new uuid, spawned with --session-id.
+      session._freshRetryPending = true
+      session._resumedFromPersisted = false
+      session._didFallbackFromUnknownResume = true
+      const launchedId = session._sessionId
+
+      await session._respawnPty()
+
+      assert.equal(spawnCalls.length, 1)
+      const firstArgs = spawnCalls[0].args
+      assert.equal(firstArgs[firstArgs.indexOf('--session-id') + 1], launchedId, 'claude was launched with the fresh id')
+      assert.equal(session._spawnRefusal?.code, 'NATIVE_ENDPOINT_ROUTE_MISMATCH')
+      assert.equal(session._freshRetryPending, true, 'the fresh retry is still owed')
+      assert.notEqual(session._sessionId, launchedId, 'but with a new uuid, not the one claude may now hold')
+
+      // Route fixed: the revival starts a new conversation with the NEW id.
+      control.markerMode = 'clean'
+      await session.sendMessage('hello again')
+      const reviveArgs = spawnCalls[1].args
+      assert.ok(reviveArgs.includes('--session-id'), 'still a fresh conversation, not --resume')
+      assert.notEqual(reviveArgs[reviveArgs.indexOf('--session-id') + 1], launchedId)
+      assert.equal(session._spawnRefusal, null)
+    } finally {
+      await cleanup()
+      rmSync(sinkDir, { recursive: true, force: true })
+    }
+  })
+
+  it('after a route-mismatch refusal, the next input re-runs the spawn and a corrected route revives the session', async () => {
+    const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-gate-sink-'))
+    const control = { markerMode: 'mismatch' }
+    const { session, spawnCalls, writes, cleanup } = makeNativeMarkerSession(sinkDir, control)
+    try {
+      await session._respawnPty()
+      assert.equal(session._spawnRefusal?.code, 'NATIVE_ENDPOINT_ROUTE_MISMATCH', 'precondition: refused')
+
+      // Still misconfigured: the input re-runs the spawn and is rejected with the code.
+      const refused = []
+      const r1 = await session.sendMessage('hello', [], { onInputAdmission: (a) => refused.push(a) })
+      assert.equal(spawnCalls.length, 2, 'the input relaunched the PTY to re-check the route')
+      assert.deepEqual(r1, { ok: false, reason: 'spawn_refused' })
+      assert.equal(refused[0]?.reason, 'NATIVE_ENDPOINT_ROUTE_MISMATCH')
+
+      // Configuration fixed: the next input revives the session in place.
+      control.markerMode = 'clean'
+      const accepted = []
+      await session.sendMessage('hello again', [], { onInputAdmission: (a) => accepted.push(a) })
+      assert.equal(spawnCalls.length, 3)
+      assert.equal(session._spawnRefusal, null)
+      assert.equal(accepted[0]?.status, 'accepted')
+      assert.ok(writes.join('').includes('hello again'), 'the input was typed into the revived PTY')
+    } finally {
+      await cleanup()
+      rmSync(sinkDir, { recursive: true, force: true })
+    }
+  })
+})
+
 // #8038 — SessionManager wiring: a claude-tui session created through a real
 // SessionManager (not a hand-built ClaudeTuiSession) holds a `_spawnPreflight`
 // that runs the REAL per-spawn gate machinery, and that gate refuses once the
