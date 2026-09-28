@@ -748,6 +748,25 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
         // preventDefault'd + return'd, trapping the user with no way to send.
         closePicker()
       }
+      // #7370 — Tab completes the highlighted command into the composer
+      // WITHOUT sending (unlike Enter, which selects-and-sends nothing itself
+      // but leaves the user one Enter away from dispatch — Tab is the
+      // explicit two-step "accept, don't send" affordance). Reuses the exact
+      // same insertion path as Enter/click (`selectCommand`) rather than a
+      // second copy. Shift+Tab is excluded so it keeps moving focus backward
+      // (never completes) — the picker only ever intercepts plain Tab.
+      if (e.key === 'Tab' && !e.shiftKey) {
+        if (filteredCommands.length > 0) {
+          e.preventDefault()
+          const idx = Math.min(selectedIndex, filteredCommands.length - 1)
+          selectCommand(filteredCommands[idx]!.name)
+          return
+        }
+        // Nothing to complete (e.g. "No commands found") — close the picker
+        // and let Tab fall through to default focus behaviour, mirroring the
+        // #4342 empty-filter Enter handling above.
+        closePicker()
+      }
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         setSelectedIndex(i => Math.min(i + 1, filteredCommands.length - 1))
@@ -785,6 +804,21 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
         setFilePickerOpen(false)
         setFileSelectedIndex(0)
         return
+      }
+      // #7370 — same Tab-completes-without-sending affordance as the slash
+      // picker above, so the two pickers behave identically. Reuses the
+      // Enter/click insertion path (`selectPickerIndex`). Shift+Tab is
+      // excluded so it keeps moving focus backward.
+      if (e.key === 'Tab' && !e.shiftKey) {
+        if (pickerItemCount > 0) {
+          e.preventDefault()
+          selectPickerIndex(fileSelectedIndex)
+          return
+        }
+        // Nothing to complete (e.g. still loading, or no matches) — close
+        // the picker and let Tab fall through to default focus behaviour.
+        setFilePickerOpen(false)
+        setFileSelectedIndex(0)
       }
     }
 
@@ -883,7 +917,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
         e.preventDefault()
       }
     }
-  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue])
+  }, [handleControlPttKeyDown, cancelControlPttArm, stopControlPttRecording, voiceInput?.isAvailable, disabled, isVoiceShortcut, toggleVoiceFromKeyboard, pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, pickerItemCount, selectPickerIndex])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
