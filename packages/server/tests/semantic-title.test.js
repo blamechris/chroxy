@@ -1,6 +1,7 @@
 import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync } from 'fs'
+import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { EventEmitter } from 'events'
@@ -213,5 +214,87 @@ describe('SessionManager semantic titles (#6764)', () => {
 
     assert.equal(calls, 0)
     assert.equal(mgr.getSession('s1').name, 'My Custom Session')
+  })
+})
+
+// #8030 — the semantic-title one-shot spawn goes through the SAME per-spawn
+// binary gate a fresh chat session or the summarizer would
+// (SessionManager.verifyOneShotExecutable), via the `resolveExecutable` seam
+// _generateSemanticTitle now threads into whichever runner is in play
+// (titleRunOneShot here; the real defaultRunOneShot in production).
+class SemanticTitleGateFixture extends EventEmitter {
+  static get resolvedBinary() { return process.execPath }
+  static get preflight() {
+    return { label: 'Fixture SDK', binary: { name: 'node', candidates: [] } }
+  }
+}
+
+function fakeProvenanceLedger(seed = {}) {
+  const records = new Map(Object.entries(seed))
+  return {
+    getRecord: (p) => (records.has(p) ? { ...records.get(p) } : null),
+    approve: (p, sha256) => { records.set(p, { sha256 }); return true },
+  }
+}
+
+const TITLE_GATE_REAL_HASH = createHash('sha256').update(readFileSync(process.execPath)).digest('hex')
+const TITLE_GATE_WRONG_HASH = 'f'.repeat(64)
+
+describe('SessionManager semantic titles — per-spawn binary gate (#8030)', () => {
+  it('a block-mode mismatch refuses the title spawn before the runner ever spawns; the title stays the truncation label', async () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: TITLE_GATE_WRONG_HASH } })
+    let spawned = 0
+    let sawResolveExecutable = false
+    const mgr = new SessionManager({
+      stateFilePath: tmpStateFile(),
+      semanticTitlesEnabled: true,
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      oneShotProviderClass: SemanticTitleGateFixture,
+      titleRunOneShot: async ({ resolveExecutable }) => {
+        sawResolveExecutable = typeof resolveExecutable === 'function'
+        // The fixture's contract: a real runner only "spawns" AFTER
+        // resolveExecutable() returns a verified path. Here it throws, so
+        // `spawned` below must never increment.
+        resolveExecutable()
+        spawned++
+        return 'Should not happen'
+      },
+    })
+    mgr._sessions.set('s1', { session: makeMockSession(), name: 'Session 1', cwd: '/tmp' })
+
+    const names = []
+    mgr.on('session_updated', (d) => names.push(d.name))
+
+    mgr.recordUserInput('s1', 'please help me fix the flaky WebSocket reconnect test in ws-server.js')
+    await flush()
+
+    assert.ok(sawResolveExecutable, 'the runner must receive a resolveExecutable function')
+    assert.equal(spawned, 0, 'the runner must never spawn once resolveExecutable throws')
+    assert.equal(mgr.getSession('s1').name, 'please help me fix the flaky WebSocket...', 'title stays the truncation label — fail-open')
+    assert.equal(names.length, 1, 'only the truncation update was broadcast')
+  })
+
+  it('a matching hash lets resolveExecutable return the verified path and the model title lands', async () => {
+    const ledger = fakeProvenanceLedger({ [process.execPath]: { sha256: TITLE_GATE_REAL_HASH } })
+    let spawnedWith = null
+    const mgr = new SessionManager({
+      stateFilePath: tmpStateFile(),
+      semanticTitlesEnabled: true,
+      binaryProvenanceMode: 'block',
+      binaryProvenanceLedger: ledger,
+      oneShotProviderClass: SemanticTitleGateFixture,
+      titleRunOneShot: async ({ resolveExecutable }) => {
+        spawnedWith = resolveExecutable()
+        return 'Fix flaky reconnect test'
+      },
+    })
+    mgr._sessions.set('s1', { session: makeMockSession(), name: 'Session 1', cwd: '/tmp' })
+
+    mgr.recordUserInput('s1', 'please help me fix the flaky WebSocket reconnect test in ws-server.js')
+    await flush()
+
+    assert.equal(spawnedWith, process.execPath)
+    assert.equal(mgr.getSession('s1').name, 'Fix flaky reconnect test')
   })
 })

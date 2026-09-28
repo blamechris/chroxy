@@ -175,6 +175,107 @@ describe('runProviderPreflight — quarantine detection (#6708)', () => {
   })
 })
 
+describe('runProviderPreflight — pinnedPath re-verification (#8030)', () => {
+  const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })
+
+  it('verifies EXACTLY pinnedPath — resolvedBinary is never read and resolveBinary/candidates are skipped', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'Claude SDK', binary: { name: 'claude', candidates: ['/var/empty/nope'] } },
+    })
+    // A throwing getter PROVES resolvedBinary is never read when pinnedPath is
+    // supplied — if runProviderPreflight fell through to its normal
+    // resolution order, this getter access would throw and fail the test.
+    Object.defineProperty(Provider, 'resolvedBinary', {
+      get() { throw new Error('resolvedBinary must not be read when pinnedPath is supplied') },
+    })
+    const seenPaths = []
+    const result = runProviderPreflight(Provider, {
+      env: {},
+      pinnedPath: '/pinned/exact/claude',
+      verifyBinary: (path) => { seenPaths.push(path); return okVerify(path) },
+    })
+    // verifyBinary was called exactly once, with the pinned path — never with
+    // the bare binary name ('claude', resolveBinary's not-found fallback) or
+    // any candidate path, which proves resolveBinary was skipped too.
+    assert.deepEqual(seenPaths, ['/pinned/exact/claude'])
+    assert.equal(result.binaryPath, '/pinned/exact/claude')
+  })
+
+  it('runs the provenance gate against the pinned path unchanged', () => {
+    const Provider = makeProvider({
+      preflight: { label: 'Claude SDK', binary: { name: 'claude', candidates: [] } },
+    })
+    let seenResolvedPath = null
+    assert.throws(
+      () => runProviderPreflight(Provider, {
+        env: {},
+        pinnedPath: '/pinned/claude',
+        verifyBinary: okVerify,
+        provenance: { mode: 'block', signatureGate: false, ledger: { getRecord: () => ({ sha256: 'a'.repeat(64) }), approve: () => {} } },
+        verifyProvenance: (opts) => {
+          seenResolvedPath = opts.resolvedPath
+          return { ok: false, blocked: true, status: PROVENANCE_STATUS.HASH_MISMATCH, path: opts.resolvedPath, hash: 'b'.repeat(64), pinnedHash: 'a'.repeat(64), message: 'mismatch' }
+        },
+      }),
+      ProviderBinaryProvenanceError,
+    )
+    assert.equal(seenResolvedPath, '/pinned/claude')
+  })
+
+  it('warnAdvisory:false suppresses the #8031 soft-floor warn log but still returns versionAdvisory', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: { name: 'claude', candidates: [], minVersion: '2.1.141', recommendedVersion: '2.1.283' },
+      },
+    })
+    const entries = []
+    const listener = (entry) => {
+      if (entry.component === 'preflight' && entry.level === 'warn' && entry.message.includes('recommended')) {
+        entries.push(entry)
+      }
+    }
+    addLogListener(listener)
+    let result
+    try {
+      result = runProviderPreflight(Provider, {
+        env: {},
+        verifyBinary: okVerify,
+        probeVersion: () => '2.1.200',
+        warnAdvisory: false,
+      })
+    } finally {
+      removeLogListener(listener)
+    }
+    assert.equal(entries.length, 0, 'warnAdvisory:false must suppress the advisory log line')
+    assert.ok(result.versionAdvisory, 'the advisory value itself must still be computed and returned')
+    assert.equal(result.versionAdvisory.found, '2.1.200')
+    assert.equal(result.versionAdvisory.recommended, '2.1.283')
+  })
+
+  it('warnAdvisory defaults to true (unchanged behaviour when omitted)', () => {
+    const Provider = makeProvider({
+      preflight: {
+        label: 'Claude SDK',
+        binary: { name: 'claude', candidates: [], minVersion: '2.1.141', recommendedVersion: '2.1.283' },
+      },
+    })
+    const entries = []
+    const listener = (entry) => {
+      if (entry.component === 'preflight' && entry.level === 'warn' && entry.message.includes('recommended')) {
+        entries.push(entry)
+      }
+    }
+    addLogListener(listener)
+    try {
+      runProviderPreflight(Provider, { env: {}, verifyBinary: okVerify, probeVersion: () => '2.1.200' })
+    } finally {
+      removeLogListener(listener)
+    }
+    assert.equal(entries.length, 1, 'omitting warnAdvisory must preserve the existing warn-log behaviour')
+  })
+})
+
 describe('runProviderPreflight — opt-in provenance gate (#6858)', () => {
   // A healthy binary so we always reach the provenance step.
   const okVerify = (path) => ({ ok: true, status: BINARY_STATUS.OK, path, quarantine: null })

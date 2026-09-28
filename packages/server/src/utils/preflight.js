@@ -77,6 +77,31 @@
  * BEFORE provenance and the version probe (a shim is refused before it is
  * ever exec'd for anything), and throws `ProviderBinaryUnsupportedError`
  * regardless of whether the provider declares a `minVersion` at all.
+ *
+ * ## Per-spawn re-verification (#8030)
+ *
+ * A provider that execs a NEW process on every turn (the Agent SDK) can't rely
+ * on "verified once at session-create" — a background auto-update or a PATH
+ * change between turns would spawn an unverified binary on turn two onward.
+ * Two options thread that need through this same function rather than adding
+ * a parallel code path:
+ *
+ *   - `options.pinnedPath` (string|null, default null): when supplied as a
+ *     non-empty string, verify EXACTLY that path instead of resolving one.
+ *     Both `ProviderClass.resolvedBinary` and a fresh `resolveBinary()` call
+ *     are skipped entirely — the caller has already decided which path this
+ *     spawn must use (typically the exact path preflight verified at
+ *     session-create), and this call's job is only to re-run the existence /
+ *     quarantine / shim / provenance / version gates against THAT path. Every
+ *     gate downstream of resolution runs unchanged, so a pinned path that
+ *     fails any of them throws the same errors a resolved path would.
+ *   - `options.warnAdvisory` (boolean, default true): when false, the #8031
+ *     soft-floor `log.warn` for a `recommendedVersion` gap is suppressed —
+ *     re-logging that advisory on every single turn would spam the log for a
+ *     condition that hasn't changed since the last turn. The `versionAdvisory`
+ *     return value is unaffected; only the log line is gated. A hard
+ *     `minVersion` failure still throws regardless of this flag — it is
+ *     never merely advisory.
  */
 
 import { resolveBinary } from './resolve-binary.js'
@@ -303,6 +328,11 @@ function versionRemediation(binarySpec) {
  *   #8031)
  * @param {string} [options.platform] - defaults to `process.platform`; injectable
  *   for tests exercising the `requiresDirectExec` shim refusal (#7986 review S2)
+ * @param {string|null} [options.pinnedPath=null] - #8030: when a non-empty
+ *   string, verify EXACTLY this path (skip `ProviderClass.resolvedBinary` AND
+ *   `resolveBinary`) — see the "Per-spawn re-verification" docblock section.
+ * @param {boolean} [options.warnAdvisory=true] - #8030: when false, suppress the
+ *   #8031 soft-floor `log.warn` (the returned `versionAdvisory` is unaffected).
  * @returns {{ binaryPath: string|null, versionAdvisory: object|null }} the exact
  *   healthy path allowed by all enabled gates, plus a soft-floor advisory
  *   (#8031) — `{ provider, binary, path, found, recommended, remediation }` —
@@ -318,6 +348,8 @@ export function runProviderPreflight(ProviderClass, {
   verifyProvenance = defaultVerifyProvenance,
   probeVersion = defaultProbeBinaryVersion,
   platform = process.platform,
+  pinnedPath = null,
+  warnAdvisory = true,
 } = {}) {
   if (!ProviderClass) return { binaryPath: null, versionAdvisory: null }
 
@@ -335,15 +367,23 @@ export function runProviderPreflight(ProviderClass, {
 
   if (spec.binary && spec.binary.name) {
     const candidates = spec.binary.candidates || []
-    // Prefer the provider's live spawn path when it exposes one — that is the
-    // exact path child_process.spawn will exec — so the existence gate and the
-    // real spawn always agree. Fall back to a fresh PATH/candidate resolve.
-    let resolved
-    try {
-      resolved = ProviderClass.resolvedBinary
-    } catch { /* subclass throws if unset — fall through */ }
-    if (typeof resolved !== 'string' || resolved.length === 0) {
-      resolved = resolveBinary(spec.binary.name, candidates)
+    const hasPinnedPath = typeof pinnedPath === 'string' && pinnedPath.length > 0
+    // #8030: a pinned path means the caller already decided which exact path
+    // this spawn must re-verify (typically the path preflight verified at
+    // session-create) — skip BOTH the live-spawn-path read and a fresh
+    // resolve so a PATH change or a resolver quirk can never substitute a
+    // different binary than the one being pinned.
+    let resolved = hasPinnedPath ? pinnedPath : undefined
+    if (!hasPinnedPath) {
+      // Prefer the provider's live spawn path when it exposes one — that is the
+      // exact path child_process.spawn will exec — so the existence gate and the
+      // real spawn always agree. Fall back to a fresh PATH/candidate resolve.
+      try {
+        resolved = ProviderClass.resolvedBinary
+      } catch { /* subclass throws if unset — fall through */ }
+      if (typeof resolved !== 'string' || resolved.length === 0) {
+        resolved = resolveBinary(spec.binary.name, candidates)
+      }
     }
     const health = verifyBinary(resolved)
     if (health.status === BINARY_STATUS.QUARANTINED) {
@@ -499,7 +539,12 @@ export function runProviderPreflight(ProviderClass, {
           recommended: rawRecommendedVersion,
           remediation,
         }
-        log.warn(`Provider "${providerLabel}" (binary "${spec.binary.name}") at ${binaryPath} is version ${found}, older than the recommended ${rawRecommendedVersion} — ${remediation}`)
+        // #8030: a per-turn re-verification call passes warnAdvisory:false so
+        // this doesn't re-log the same gap on every turn — the advisory is
+        // still computed and returned either way.
+        if (warnAdvisory) {
+          log.warn(`Provider "${providerLabel}" (binary "${spec.binary.name}") at ${binaryPath} is version ${found}, older than the recommended ${rawRecommendedVersion} — ${remediation}`)
+        }
       }
     }
   }

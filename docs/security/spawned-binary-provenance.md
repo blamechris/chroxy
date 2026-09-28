@@ -61,8 +61,15 @@ unverified-binaries gap it exposed is real regardless.)
   `const`, so a binary that changed after boot is spawned from its current
   path.
 - **Spawn-time backstop.** If a spawn still fails after preflight passed (the
-  binary changed between create and turn), the subprocess catch re-verifies and
-  labels the error (quarantine vs vanished) instead of an opaque `ENOENT`.
+  binary changed between create and turn), the catch re-verifies the attempted
+  path and labels the error (quarantine vs vanished) instead of an opaque
+  `ENOENT` / generic SDK text. Every provider spawn site now shares this via
+  `labelBinarySpawnFailure`: the subprocess providers (`cli-session.js`,
+  `jsonl-subprocess-session.js`, `claude-tui-session.js`,
+  `codex-app-server-session.js`) on a real `child_process`/PTY spawn error, and
+  (since #8030) `claude-sdk`'s in-process `SdkSession` on a pre-first-message
+  turn failure, since it has no child process of its own to catch an `error`
+  event from.
 - **`chroxy doctor`.** The provider-binary and `cloudflared` health checks report
   a quarantined binary distinctly from a missing one, with a copy-pasteable fix:
   `xattr -d com.apple.quarantine <path>` (after verifying provenance) or
@@ -262,26 +269,88 @@ any subclass hook (`_augmentQueryOptions`) runs — the SAME resolver
 `static get resolvedBinary` hands to preflight, so both read the shared
 candidate list rather than two independently-maintained ones.
 
-**This closes the "checked one file, ran another" gap, but it is a
-resolver-parity fix, not a per-turn re-verification.** Preflight's
-quarantine/provenance/version gates run ONCE, at session create, against
-whatever `resolveClaudeBinary()` returns at that moment. Every subsequent
-turn calls the same resolver again — not the cached, already-verified path —
-so if the binary at that path is swapped, quarantined, or hash-mismatched
-*between* session create and a later turn, that turn spawns it unverified;
-the next session create is what re-checks. The session summarizer's one-shot
-`query()` (`defaultRunOneShot` in `summarize-session.js`) sets the same
-resolved path but has no session-create step at all — it is never preflighted
-or provenance-checked, in any mode. Both gaps are pre-existing (the summarizer
-already ran an unverified bundled binary before this PR) and are tracked in
-#8030, not fixed here.
+**This closed the "checked one file, ran another" gap, but #7986 alone was a
+resolver-parity fix, not a per-turn re-verification — #8030 adds the latter.**
+The Agent SDK execs a brand-new process on every chat turn (unlike
+`claude-tui`'s one long-lived PTY or `claude-cli`'s one persistent child), so
+"verified once at session-create" covered turn one only. Three spawn paths now
+each get their own gate:
 
-This closes the gap but also means `claude-sdk` inherits the SAME exposure
-P1/P2 already cover for `claude-cli`/`claude-tui`/`claude-channel`: quarantine
-detection, and (opt-in) the SHA-256 pin ledger + signature gate, both checked
-at session create. Nothing provider-specific was added for the version gate
-below — it is generic `runProviderPreflight` machinery any provider can opt
-into via `spec.binary.minVersion` and/or `spec.binary.recommendedVersion`.
+- **Chat turns.** `SessionManager` PINS the exact path create-time preflight
+  verified (`verifiedBinary`, forwarded as `providerOpts.spawnPreflight`) and
+  `SdkSession` calls it — `_verifyPinnedSpawn` — **before every `query()`**, not
+  just the first. It re-runs the FULL gate (existence, quarantine, the
+  direct-exec shim refusal, provenance, the version floor) against that EXACT
+  path: `runProviderPreflight`'s `pinnedPath` option skips re-resolution
+  entirely, so a `PATH` change mid-session can never redirect the spawn to a
+  different binary, while a content change AT that path (an in-place
+  `claude update`, quarantine, or removal) is still caught on the very next
+  turn. A gate refusal never reaches `query()` — it fails closed with a typed
+  error (`PROVIDER_BINARY_PROVENANCE`, `PROVIDER_BINARY_QUARANTINED`, …) that
+  `SdkSession` surfaces verbatim (see below) and reports as a rejected,
+  not-dispatched turn.
+- **One-shots (the `summarize_session` handler, the semantic-title
+  generator).** Neither has a session-create step to pin a path from, so each
+  call runs the SAME preflight gate `createSession` runs, with a FRESH
+  resolve, through `SessionManager.verifyOneShotExecutable()`.
+  `summarize-session.js`'s `defaultRunOneShot` no longer defaults
+  `resolveExecutable` to a bare, unverified `resolveClaudeBinary()` call — the
+  parameter is required, and every caller must supply a verified resolver.
+  `handlers/summarize-handlers.js` wires `verifyOneShotExecutable`; a
+  `sessionManager` too old/stubbed to have that method fails CLOSED (throws)
+  rather than silently falling back to an unverified spawn.
+  `SessionManager._generateSemanticTitle` wraps whichever one-shot runner is
+  in play (the real `defaultRunOneShot`, or an injected test double) with the
+  same `resolveExecutable`, and logs a warning naming the session before
+  rethrowing — `generateSessionTitle` otherwise swallows the runner's error
+  and fails open to the truncation label, so that log line is the only trace
+  a title spawn was ever refused.
+- **Spawn-time backstop.** `SdkSession` now calls `labelBinarySpawnFailure`
+  too, the same backstop `cli-session.js` / `jsonl-subprocess-session.js` /
+  `claude-tui-session.js` / `codex-app-server-session.js` already run: when a
+  turn fails BEFORE any SDK message arrived and the provider isn't
+  containerised, the attempted path is re-verified and a quarantined/missing/
+  not-executable binary gets the same labeled diagnosis those other providers
+  give, instead of the SDK's generic "native binary … failed to launch" text.
+  A failure after streaming started is never relabeled — the binary plainly
+  launched fine.
+
+**Stat-identity caches keep this cheap.** A per-turn gate that re-hashed and
+re-`spctl`'d on every call would add real, synchronous latency (measured on
+this Mac's 215&nbsp;MB `claude`: ~100&nbsp;ms to SHA-256 hash, ~430&nbsp;ms for
+`spctl --assess`) to every single turn in provenance mode. `sha256FileCached`
+and `assessMacSignatureCached` (`utils/verify-provenance.js`) cache by
+**stat identity** — `utils/stat-identity.js`'s `path:dev:ino:size:mtimeMs:ctimeMs`
+— the same shape `probeBinaryVersion` already used, now shared rather than
+duplicated, and extended with **ctime**: `utimes(2)` lets userland restore a
+file's mtime to any value (including its old one) after an in-place write, but
+no userland call can set ctime, so a swap that tries to hide behind a restored
+mtime still busts the cache. The hash cache additionally re-checks the
+identity AFTER the read and only caches when it's unchanged from BEFORE — a
+file that changes mid-hash is never pinned to the wrong digest. The signature
+cache only ever stores a genuine PASS (`ok:true, skipped:false`); a rejection
+or a skip (non-macOS) is re-assessed every call so neither is masked by a
+stale result. Both are the DEFAULT `sha256File`/`assessSignature` seams
+`verifyProvenance` uses, so an injected seam (every existing test) is
+unaffected — the cache only activates on the real filesystem path, and
+`_resetProvenanceCacheForTest()` clears both between test files.
+
+**What is still NOT covered.** A TOCTOU window between the gate's checks and
+the actual `exec()` remains, exactly as it does for every other provider this
+document covers — no provider re-verifies inside the kernel's own exec call.
+`forkSession` (the SDK's standalone conversation-fork helper) spawns nothing
+of its own; it operates on an on-disk transcript file and was never in scope
+here. And this closes the gap for `claude-sdk` specifically, but means it now
+inherits the SAME exposure P1/P2 already cover for
+`claude-cli`/`claude-tui`/`claude-channel`: quarantine detection, and (opt-in)
+the SHA-256 pin ledger + signature gate — now re-checked every turn instead of
+once. Nothing provider-specific was added for the version gate below — it is
+generic `runProviderPreflight` machinery any provider can opt into via
+`spec.binary.minVersion` and/or `spec.binary.recommendedVersion`. The
+create-time preflight call still logs the #8031 soft-floor warning as before;
+`_verifyPinnedSpawn`'s per-turn re-verification passes `warnAdvisory: false` so
+that same gap is not re-logged on every single turn — the `versionAdvisory`
+value is still computed and returned either way, just not re-announced.
 
 **Version gate, and where it sits relative to the other gates.** `claude-sdk`'s
 version floor is a HYBRID pair (#8031), replacing the single hard
@@ -328,8 +397,10 @@ because the Agent SDK spawns `claude` with no shell) refuses a Windows
 (`code: PROVIDER_BINARY_UNSUPPORTED`): such a shim can never be spawned that
 way, and it is never exec'd. The probe itself
 (`utils/binary-version.js#probeBinaryVersion`) is cached by stat identity
-(path + dev + ino + size + mtimeMs) so a `claude update` invalidates the
-cache and repeated session-creates against an unchanged binary don't.
+(`utils/stat-identity.js`: path + dev + ino + size + mtimeMs + ctimeMs) so a
+`claude update` invalidates the cache and repeated session-creates against an
+unchanged binary don't — the same shared identity helper the #8030 hash/
+signature caches above now use.
 
 **The desktop bundle no longer ships the SDK platform binary.** The prior
 model bundled `@anthropic-ai/claude-agent-sdk-darwin-arm64` (and friends) so

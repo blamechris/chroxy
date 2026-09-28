@@ -1534,6 +1534,159 @@ describe('SdkSession', () => {
     })
   })
 
+  // -- #8030: per-spawn binary gate --
+
+  describe('per-spawn binary gate (#8030)', () => {
+    it('uses the injected spawnPreflight path, called once per turn, over two turns', async () => {
+      let calls = 0
+      const s = createSession({
+        spawnPreflight: () => { calls += 1; return '/verified/claude' },
+      })
+      s._processReady = true
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: `t-${captured.length}`, total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('first')
+      await s.sendMessage('second')
+      s.destroy()
+
+      assert.equal(captured.length, 2)
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, '/verified/claude')
+      assert.equal(captured[1].options.pathToClaudeCodeExecutable, '/verified/claude')
+      assert.equal(calls, 2, 'the gate must be re-called once per turn, not memoized')
+    })
+
+    it('refuses the turn when spawnPreflight throws — _callQuery is never invoked, the raw code/message survive unenriched, and admission is rejected', async () => {
+      const provenanceMessage = 'claude-sdk: "claude" at /verified/claude binary hash changed since it was pinned (pinned a4291b0c…, now deadbeef…)'
+      const s = createSession({
+        spawnPreflight: () => {
+          const err = new Error(provenanceMessage)
+          err.code = 'PROVIDER_BINARY_PROVENANCE'
+          throw err
+        },
+      })
+      s._processReady = true
+
+      let queryCalls = 0
+      s._callQuery = () => { queryCalls += 1; return (async function* () {})() }
+
+      const errors = []
+      s.on('error', (data) => errors.push(data))
+      const admissions = []
+
+      await s.sendMessage('hello', undefined, { onInputAdmission: (a) => admissions.push(a) })
+      s.destroy()
+
+      assert.equal(queryCalls, 0, '_callQuery must never be invoked when the spawn gate refuses')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'PROVIDER_BINARY_PROVENANCE')
+      // The raw message survives verbatim — NOT rewritten by _enrichErrorMessage,
+      // which would otherwise match the embedded "a4291b0c" hex run as a rate
+      // limit ("429") or auth ("401") pattern and replace it with a wrong,
+      // misleading message.
+      assert.equal(errors[0].message, provenanceMessage)
+      assert.ok(!errors[0].message.toLowerCase().includes('rate limit'))
+      assert.ok(!errors[0].message.toLowerCase().includes('api key'))
+
+      assert.equal(admissions.length, 1)
+      assert.equal(admissions[0].status, 'rejected')
+      assert.equal(admissions[0].delivery, 'not_dispatched')
+      assert.equal(admissions[0].reason, 'PROVIDER_BINARY_PROVENANCE')
+    })
+
+    it('falls back to resolvedBinary per turn when no spawnPreflight is wired (#7986 behaviour preserved)', async () => {
+      const s = createSession()
+      s._processReady = true
+      assert.equal(s._spawnPreflight, null)
+
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'no-gate', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+
+      await s.sendMessage('hello')
+      s.destroy()
+
+      assert.equal(captured[0].options.pathToClaudeCodeExecutable, SdkSession.resolvedBinary)
+    })
+
+    describe('spawn-failure backstop (labelBinarySpawnFailure)', () => {
+      const SDK_LAUNCH_FAILURE_TEXT = 'Claude Code native binary at /x exists but failed to launch.'
+
+      it('relabels a pre-first-message launch failure when the attempted path is unhealthy', async () => {
+        const missingPath = join(tmpdir(), `chroxy-8030-missing-${process.pid}-${Date.now()}`)
+        assert.equal(existsSync(missingPath), false, 'the fixture path must not exist')
+        const s = createSession({ spawnPreflight: () => missingPath })
+        s._processReady = true
+
+        s._callQuery = () => {
+          return (async function* () {
+            throw new Error(SDK_LAUNCH_FAILURE_TEXT)
+          })()
+        }
+        const errors = []
+        s.on('error', (data) => errors.push(data))
+
+        await s.sendMessage('hello')
+        s.destroy()
+
+        assert.equal(errors.length, 1)
+        assert.notEqual(errors[0].message, SDK_LAUNCH_FAILURE_TEXT, 'the generic SDK text must be replaced by the labeled diagnosis')
+        assert.ok(errors[0].message.toLowerCase().includes('not found'), `expected a "not found" diagnosis, got: ${errors[0].message}`)
+        assert.ok(errors[0].message.includes('claude'), 'the label must name the binary')
+      })
+
+      it('keeps the original SDK message when the attempted path is healthy', async () => {
+        const s = createSession({ spawnPreflight: () => process.execPath })
+        s._processReady = true
+
+        s._callQuery = () => {
+          return (async function* () {
+            throw new Error(SDK_LAUNCH_FAILURE_TEXT)
+          })()
+        }
+        const errors = []
+        s.on('error', (data) => errors.push(data))
+
+        await s.sendMessage('hello')
+        s.destroy()
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].message, SDK_LAUNCH_FAILURE_TEXT, 'a healthy attempted path must not be relabeled')
+      })
+
+      it('does not relabel a failure that arrives AFTER a first message', async () => {
+        const missingPath = join(tmpdir(), `chroxy-8030-missing-after-msg-${process.pid}-${Date.now()}`)
+        const s = createSession({ spawnPreflight: () => missingPath })
+        s._processReady = true
+
+        s._callQuery = () => {
+          return (async function* () {
+            yield { type: 'assistant', message: { id: 'm1', content: [], model: 'test', role: 'assistant' } }
+            throw new Error(SDK_LAUNCH_FAILURE_TEXT)
+          })()
+        }
+        const errors = []
+        s.on('error', (data) => errors.push(data))
+
+        await s.sendMessage('hello')
+        s.destroy()
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].message, SDK_LAUNCH_FAILURE_TEXT, 'a failure after streaming started must not be relabeled — the binary plainly launched fine')
+      })
+    })
+  })
+
   // -- #6769: end-of-turn occupancy snapshot via getContextUsage() --
 
   describe('context-usage occupancy snapshot (#6769)', () => {
@@ -1951,6 +2104,18 @@ describe('SdkSession', () => {
   describe('query error enrichment', () => {
     async function queryWithError(s, errorMessage) {
       s._processReady = true
+      // #8030: every error here throws before any message is received, which
+      // is exactly the shape the spawn-failure backstop (labelBinarySpawnFailure)
+      // looks at. Without a pinned, guaranteed-healthy path, this describe
+      // block would depend on whatever `claude` happens to resolve to on the
+      // machine running the suite — healthy here, but NOT_FOUND on a CI
+      // runner with no `claude` installed, which would silently replace the
+      // enrichment under test with a labeled binary-health message instead.
+      // process.execPath (the running Node binary) is absolute, exists, and
+      // is executable on every platform these tests run on, so the backstop
+      // always finds a healthy binary and defers to the enrichment path
+      // these tests actually exercise.
+      s._spawnPreflight = () => process.execPath
       const errors = []
       s.on('error', (data) => errors.push(data))
 

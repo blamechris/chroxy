@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'crypto'
 import {
@@ -7,6 +7,9 @@ import {
   assessMacSignature,
   verifyProvenance,
   MACOS_SPCTL,
+  sha256FileCached,
+  assessMacSignatureCached,
+  _resetProvenanceCacheForTest,
 } from '../src/utils/verify-provenance.js'
 
 /**
@@ -260,5 +263,132 @@ describe('sha256File', () => {
     const h = sha256File('/any/path', { readFileSync: () => bytes })
     assert.equal(h, expected)
     assert.match(h, /^[a-f0-9]{64}$/)
+  })
+})
+
+// #8030 — stat-identity caches for the per-spawn re-verification gate. Both
+// caches are module-level, so every test resets them in beforeEach to avoid
+// leaking identities across tests that reuse the same fake path.
+function statOf({ dev = 1, ino = 1, size = 100, mtimeMs = 1, ctimeMs = 1 } = {}) {
+  return () => ({ dev, ino, size, mtimeMs, ctimeMs })
+}
+
+describe('sha256FileCached (#8030)', () => {
+  beforeEach(() => _resetProvenanceCacheForTest())
+
+  it('caches a hit for the SAME stat identity — readFileSync is not called twice', () => {
+    let reads = 0
+    const statSync = statOf({ ino: 10, mtimeMs: 100, ctimeMs: 100 })
+    const readFileSync = () => { reads += 1; return Buffer.from('abc') }
+    const first = sha256FileCached('/fake/claude', { statSync, readFileSync })
+    const second = sha256FileCached('/fake/claude', { statSync, readFileSync })
+    assert.equal(first, second)
+    assert.equal(reads, 1, 'the second call must be served from cache, not re-read')
+  })
+
+  it('re-reads when ONLY ctimeMs changes — utimes can restore mtime but not ctime', () => {
+    let reads = 0
+    const readFileSync = () => { reads += 1; return Buffer.from(`v${reads}`) }
+    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 200 }), readFileSync })
+    sha256FileCached('/fake/claude', { statSync: statOf({ ino: 20, mtimeMs: 200, ctimeMs: 999 }), readFileSync })
+    assert.equal(reads, 2, 'an unchanged mtime with a changed ctime must still bust the cache')
+  })
+
+  it('does not cache when the identity changes ACROSS the read itself (a swap mid-hash)', () => {
+    let reads = 0
+    let statCalls = 0
+    // Odd calls (the BEFORE read) report one identity; even calls (the AFTER
+    // read) report a different one — simulating the file changing while it
+    // was being hashed. Every invocation of sha256FileCached calls statSync
+    // exactly twice (before + after), so this alternates per-invocation too.
+    const statSync = () => {
+      statCalls += 1
+      return statCalls % 2 === 1
+        ? { dev: 1, ino: 1, size: 100, mtimeMs: 1, ctimeMs: 1 }
+        : { dev: 1, ino: 1, size: 100, mtimeMs: 2, ctimeMs: 2 }
+    }
+    const readFileSync = () => { reads += 1; return Buffer.from('x') }
+    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    sha256FileCached('/fake/claude', { statSync, readFileSync })
+    assert.equal(reads, 2, 'a hash whose identity changed across the read must never be cached')
+  })
+
+  it('propagates (and never caches) a hash read error', () => {
+    let reads = 0
+    const statSync = statOf({ ino: 30, mtimeMs: 300, ctimeMs: 300 })
+    const readFileSync = () => { reads += 1; const e = new Error('EACCES'); throw e }
+    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync }))
+    assert.throws(() => sha256FileCached('/fake/claude', { statSync, readFileSync }))
+    assert.equal(reads, 2, 'a failed hash must never be cached — every call re-reads')
+  })
+})
+
+describe('assessMacSignatureCached (#8030)', () => {
+  beforeEach(() => _resetProvenanceCacheForTest())
+
+  it('caches a PASSING, non-skipped verdict for the SAME identity', () => {
+    let calls = 0
+    const statSync = statOf({ ino: 40, mtimeMs: 400, ctimeMs: 400 })
+    const execFile = () => { calls += 1; return 'accepted' }
+    const first = assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile })
+    const second = assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile })
+    assert.equal(first.ok, true)
+    assert.equal(second.ok, true)
+    assert.equal(calls, 1, 'the second call must be served from cache, not re-assessed')
+  })
+
+  it('re-assesses when the stat identity changes', () => {
+    let calls = 0
+    const execFile = () => { calls += 1; return 'accepted' }
+    assessMacSignatureCached('/fake/claude', { statSync: statOf({ ino: 50, mtimeMs: 500, ctimeMs: 500 }), platform: 'darwin', execFile })
+    assessMacSignatureCached('/fake/claude', { statSync: statOf({ ino: 50, mtimeMs: 500, ctimeMs: 999 }), platform: 'darwin', execFile })
+    assert.equal(calls, 2)
+  })
+
+  it('does NOT cache a REJECTED verdict — every call re-assesses (a later PASS is never masked)', () => {
+    let calls = 0
+    const statSync = statOf({ ino: 60, mtimeMs: 600, ctimeMs: 600 })
+    const execFile = () => { calls += 1; const e = new Error('rejected'); e.stderr = 'rejected: source=Unnotarized'; throw e }
+    const first = assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile })
+    const second = assessMacSignatureCached('/fake/claude', { statSync, platform: 'darwin', execFile })
+    assert.equal(first.ok, false)
+    assert.equal(second.ok, false)
+    assert.equal(calls, 2, 'a rejected verdict must never be cached')
+  })
+
+  it('does NOT cache a skipped verdict (non-macOS) — assessMacSignature no-ops before touching execFile', () => {
+    let calls = 0
+    const statSync = statOf({ ino: 70, mtimeMs: 700, ctimeMs: 700 })
+    const execFile = () => { calls += 1; return 'accepted' }
+    const first = assessMacSignatureCached('/fake/claude', { statSync, platform: 'linux', execFile })
+    const second = assessMacSignatureCached('/fake/claude', { statSync, platform: 'linux', execFile })
+    assert.equal(first.skipped, true)
+    assert.equal(second.skipped, true)
+    assert.equal(calls, 0)
+  })
+})
+
+describe('verifyProvenance defaults to the CACHED hash/signature seams (#8030)', () => {
+  beforeEach(() => _resetProvenanceCacheForTest())
+
+  it('an injected sha256File/assessSignature seam is unaffected by the new defaults', () => {
+    // Existing callers that inject their own seam (every test above this
+    // block) must see byte-identical behaviour — the cache only activates
+    // when nothing is injected.
+    let hashCalls = 0
+    const ledger = makeLedger()
+    verifyProvenance({
+      resolvedPath: '/opt/homebrew/bin/codex',
+      mode: 'warn',
+      ledger,
+      sha256File: () => { hashCalls += 1; return HASH_A },
+    })
+    verifyProvenance({
+      resolvedPath: '/opt/homebrew/bin/codex',
+      mode: 'warn',
+      ledger,
+      sha256File: () => { hashCalls += 1; return HASH_A },
+    })
+    assert.equal(hashCalls, 2, 'an injected seam must run every call — caching is a DEFAULT, not baked into verifyProvenance itself')
   })
 })

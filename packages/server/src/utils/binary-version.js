@@ -39,6 +39,7 @@
 
 import { spawnSync } from 'child_process'
 import { statSync as fsStatSync } from 'fs'
+import { statIdentity } from './stat-identity.js'
 
 // Generous enough for a slow-starting binary under load, short enough that a
 // hung/misbehaving binary can't stall session creation indefinitely. Matches
@@ -124,15 +125,6 @@ export function resolveDeclaredMinVersion(declared) {
     }
   }
   return typeof raw === 'string' && raw.length > 0 ? raw : null
-}
-
-function statIdentity(path, statFn) {
-  try {
-    const st = statFn(path)
-    return `${path}:${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`
-  } catch {
-    return null
-  }
 }
 
 /**

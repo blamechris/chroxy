@@ -432,6 +432,11 @@ export class SessionManager extends EventEmitter {
     // `AbortSignal.timeout(...)`; null → the DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS.
     semanticTitleTimeoutMs = null,
     titleRunOneShot = null,
+    // #8030: test seam. Overrides the provider class `verifyOneShotExecutable()`
+    // re-verifies against (production default: `getProvider('claude-sdk')`) so
+    // tests can point the one-shot binary gate at a fixture class instead of
+    // spawning the real `claude` resolution.
+    oneShotProviderClass = null,
 
     // #5859 (audit P1-7): opt-in boot-time sweep of orphaned chroxy session
     // worktrees (dirs under the worktree base whose session id is no longer
@@ -773,6 +778,9 @@ export class SessionManager extends EventEmitter {
       : DEFAULT_SEMANTIC_TITLE_TIMEOUT_MS
     // null → resolve the default SDK one-shot lazily on first use (see above).
     this._titleRunOneShot = typeof titleRunOneShot === 'function' ? titleRunOneShot : null
+    // #8030: test seam — see the ctor opt above. null → verifyOneShotExecutable()
+    // falls back to getProvider('claude-sdk').
+    this._oneShotProviderClass = oneShotProviderClass || null
 
     // Wire auto_label events from history to session_updated emissions. The
     // synchronous truncation label is broadcast immediately (never blocked), then
@@ -1077,6 +1085,127 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
+  //
+  // #8030 — three helpers that share the "opt-in provenance bag + re-verify a
+  // binary before a spawn" logic that used to live inline at each call site:
+  //
+  //   - `_binaryProvenanceOptions()` builds the `{ mode, signatureGate, ledger }`
+  //     bag `runProviderPreflight` expects (or null when the operator hasn't
+  //     opted in). Used at create-time preflight, inside the native
+  //     `connectionRuntimePreflight` closure, and by the two methods below —
+  //     one place to read `this._binaryProvenanceMode` / `this._binarySignatureGate`
+  //     / `this.binaryProvenanceLedger` instead of three copies drifting.
+  //   - `_verifyPinnedSpawn(ProviderClass, pinnedPath)` re-runs the FULL gate
+  //     against an EXACT path (no re-resolution) and fails closed — thrown
+  //     errors (e.g. `ProviderBinaryProvenanceError`) propagate as-is, and a
+  //     result whose `binaryPath` doesn't match `pinnedPath` is itself an
+  //     error. Wired as `providerOpts.spawnPreflight` (see createSession
+  //     below) so a per-turn provider (the Agent SDK) can re-verify its
+  //     pinned binary before every spawn, not just once at session-create.
+  //   - `verifyOneShotExecutable()` is the same idea for a one-shot call that
+  //     has NO create-time pin to reuse (the summarizer, the semantic-title
+  //     generator) — it re-resolves AND re-verifies fresh every call.
+
+  /**
+   * Build the opt-in binary-provenance config bag for `runProviderPreflight`,
+   * or null when the operator hasn't turned either gate on (mode 'off' AND no
+   * signature gate) — passing null makes `runProviderPreflight` skip the step
+   * entirely, byte-identical to pre-#6858 behaviour.
+   *
+   * @returns {{ mode: string, signatureGate: boolean, ledger: object|null }|null}
+   */
+  _binaryProvenanceOptions() {
+    return (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
+      ? {
+        mode: this._binaryProvenanceMode,
+        signatureGate: this._binarySignatureGate,
+        ledger: this.binaryProvenanceLedger,
+      }
+      : null
+  }
+
+  /**
+   * #8030 — re-verify an EXACT, already-resolved binary path before a spawn.
+   * Used as the `spawnPreflight` seam a per-turn provider (SdkSession) calls
+   * before every `query()`: the SDK execs a NEW process per turn, so a binary
+   * verified once at session-create is not automatically still the same,
+   * still-healthy binary on turn two. `pinnedPath` is the path THIS session
+   * verified at create time — passing it as `options.pinnedPath` to
+   * `runProviderPreflight` skips re-resolution entirely (a PATH change mid-
+   * session can never redirect the spawn to a different binary) while still
+   * re-running existence / quarantine / shim / provenance / version checks
+   * against that exact path.
+   *
+   * Fails CLOSED: `runProviderPreflight` throws its normal typed errors
+   * (`ProviderBinaryProvenanceError`, `ProviderBinaryQuarantinedError`, …) on
+   * any gate failure, which propagate here unchanged. As a belt-and-braces
+   * check, a successful call whose returned `binaryPath` somehow differs from
+   * `pinnedPath` (it should not — verifying a pinned path always echoes it
+   * back) also throws, rather than silently spawning whatever path preflight
+   * returned.
+   *
+   * @param {Function} ProviderClass - the SAME class used to construct the session.
+   * @param {string} pinnedPath - the create-time-verified path to re-verify.
+   * @returns {string} `pinnedPath`, once re-verification passes.
+   * @throws {Error} with `code = 'PROVIDER_BINARY_UNVERIFIED'` on a path
+   *   mismatch, or one of `runProviderPreflight`'s own typed errors otherwise.
+   */
+  _verifyPinnedSpawn(ProviderClass, pinnedPath) {
+    const result = runProviderPreflight(ProviderClass, {
+      provenance: this._binaryProvenanceOptions(),
+      pinnedPath,
+      // #8030: a per-turn re-verification must not re-log the #8031 soft-floor
+      // advisory on every single turn — see runProviderPreflight's docblock.
+      warnAdvisory: false,
+    })
+    if (result.binaryPath !== pinnedPath) {
+      const err = new Error(`Provider binary at "${pinnedPath}" could not be re-verified for this spawn (preflight resolved a different or no path).`)
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
+    return result.binaryPath
+  }
+
+  /**
+   * #8030 — re-resolve AND re-verify the binary a one-shot model call (the
+   * `summarize_session` handler, the semantic-title generator) is about to
+   * spawn. Unlike a chat turn, a one-shot has no create-time session to pin a
+   * path from, so this runs the FULL gate fresh every call: existence,
+   * quarantine, the direct-exec shim refusal, the opt-in provenance gate, and
+   * the version floor — exactly what `createSession` runs for a chat session,
+   * so a `block`-mode hash mismatch refuses a one-shot exactly as it would
+   * refuse a new chat session.
+   *
+   * `this._oneShotProviderClass` is a test seam (constructor opt
+   * `oneShotProviderClass`); production always resolves `getProvider('claude-sdk')`
+   * — the one-shot path always spawns the Agent SDK regardless of which
+   * provider the CALLING session uses (summarize-session.js's `defaultRunOneShot`
+   * is SDK-only).
+   *
+   * `this._skipPreflight` (test-only; see the ctor opt) returns the UNVERIFIED
+   * resolved path with no gate at all — the same meaning `skipPreflight` has
+   * everywhere else in this class.
+   *
+   * @returns {string} a verified, spawnable binary path.
+   * @throws {Error} with `code = 'PROVIDER_BINARY_UNVERIFIED'` when preflight
+   *   resolves no usable path, or one of `runProviderPreflight`'s own typed
+   *   errors (e.g. `PROVIDER_BINARY_PROVENANCE`) on a gate failure.
+   */
+  verifyOneShotExecutable() {
+    const ProviderClass = this._oneShotProviderClass || getProvider('claude-sdk')
+    if (this._skipPreflight) {
+      // Test-only escape hatch — same unverified-path meaning as skipPreflight
+      // everywhere else in this class. Production always leaves this false.
+      return ProviderClass.resolvedBinary
+    }
+    const result = runProviderPreflight(ProviderClass, { provenance: this._binaryProvenanceOptions() })
+    if (!result.binaryPath) {
+      const err = new Error(`Could not verify a spawnable binary for provider "${ProviderClass.displayLabel || ProviderClass.name || 'claude-sdk'}".`)
+      err.code = 'PROVIDER_BINARY_UNVERIFIED'
+      throw err
+    }
+    return result.binaryPath
+  }
   _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
@@ -1160,17 +1289,10 @@ export class SessionManager extends EventEmitter {
     }
     let providerPreflight = null
     if (!this._skipPreflight) {
-      // #6858: opt-in provenance gate. Only build the provenance bag when the
-      // operator opted in (mode warn/block or the signature gate); otherwise pass
-      // null so runProviderPreflight skips the step entirely (unchanged behaviour).
-      const provenance = (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
-        ? {
-          mode: this._binaryProvenanceMode,
-          signatureGate: this._binarySignatureGate,
-          ledger: this.binaryProvenanceLedger,
-        }
-        : null
-      providerPreflight = runProviderPreflight(PreflightProviderClass, { provenance })
+      // #6858: opt-in provenance gate. _binaryProvenanceOptions() returns null
+      // when the operator hasn't opted in (mode 'off' AND no signature gate),
+      // so runProviderPreflight skips the step entirely (unchanged behaviour).
+      providerPreflight = runProviderPreflight(PreflightProviderClass, { provenance: this._binaryProvenanceOptions() })
     }
     // #6378: a provider opted into `config.providers.allowAnyModel` skips static
     // allowlist validation entirely — the model id passes through verbatim and
@@ -1360,7 +1482,13 @@ export class SessionManager extends EventEmitter {
       presetDescriptor,
       effectiveSessionPreamble,
       connectionResolution,
-      connectionVerifiedBinary: providerPreflight?.binaryPath || null,
+      // #8030: renamed from connectionVerifiedBinary — this is the create-time
+      // preflight-verified path for ANY provider (connection-resolved or not),
+      // not only the agent-connection case the old name implied. Still
+      // forwarded to providerOpts.connectionVerifiedBinary unchanged (below)
+      // for the agent-connection consumers that already read that key; ALSO
+      // now drives providerOpts.spawnPreflight for every provider (see below).
+      verifiedBinary: providerPreflight?.binaryPath || null,
     }
   }
 
@@ -1474,7 +1602,7 @@ export class SessionManager extends EventEmitter {
       presetDescriptor,
       effectiveSessionPreamble,
       connectionResolution,
-      connectionVerifiedBinary,
+      verifiedBinary,
     } = plan
 
     const providerOpts = {
@@ -1494,19 +1622,16 @@ export class SessionManager extends EventEmitter {
     if (connectionResolution) {
       providerOpts.connectionAuthRoute = connectionResolution.definition.authRoute
       if (connectionResolution.childEnv) providerOpts.connectionChildEnv = connectionResolution.childEnv
-      if (connectionVerifiedBinary) providerOpts.connectionVerifiedBinary = connectionVerifiedBinary
-      if (connectionResolution.definition.authRoute === 'native' && connectionVerifiedBinary) {
+      // #8030: renamed from connectionVerifiedBinary on the plan object, but
+      // still forwarded under the SAME providerOpts key — every existing
+      // consumer of `opts.connectionVerifiedBinary` is unaffected.
+      if (verifiedBinary) providerOpts.connectionVerifiedBinary = verifiedBinary
+      if (connectionResolution.definition.authRoute === 'native' && verifiedBinary) {
         providerOpts.connectionRuntimePreflight = () => {
           const repeated = runProviderPreflight(ProviderClass, {
-            provenance: (this._binaryProvenanceMode !== 'off' || this._binarySignatureGate)
-              ? {
-                mode: this._binaryProvenanceMode,
-                signatureGate: this._binarySignatureGate,
-                ledger: this.binaryProvenanceLedger,
-              }
-              : null,
+            provenance: this._binaryProvenanceOptions(),
           })
-          if (repeated.binaryPath !== connectionVerifiedBinary) {
+          if (repeated.binaryPath !== verifiedBinary) {
             const err = new Error('The verified provider binary path changed before the explicit native route could start.')
             err.code = 'NATIVE_RUNTIME_UNVERIFIED'
             throw err
@@ -1514,6 +1639,19 @@ export class SessionManager extends EventEmitter {
           return repeated.binaryPath
         }
       }
+    }
+    // #8030: per-spawn re-verification, wired for EVERY provider (not just an
+    // agent-connection session) whenever create-time preflight ran and gave us
+    // a path — `verifiedBinary` is null when preflight was skipped
+    // (this._skipPreflight, test-only) or the provider is containerised
+    // (runProviderPreflight returns binaryPath:null for those; the binary
+    // lives inside the container, unreachable to a host-side re-verify).
+    // Currently only SdkSession's constructor reads `opts.spawnPreflight` (it
+    // execs a NEW process every turn, so "verified once at create" doesn't
+    // cover turn two onward); every other provider's opt destructure simply
+    // ignores this key, same as any opt a given provider doesn't consume.
+    if (verifiedBinary) {
+      providerOpts.spawnPreflight = () => this._verifyPinnedSpawn(ProviderClass, verifiedBinary)
     }
     // #6638: per-session codex sandbox mode (read-only / workspace-write /
     // danger-full-access). Codex-specific opt read directly by CodexAppServerSession;
@@ -2313,8 +2451,34 @@ export class SessionManager extends EventEmitter {
       // Default runner is the SDK one-shot shared with the #5547 summarizer; loaded
       // lazily so the SDK stays out of SessionManager's static import graph. Tests
       // inject `titleRunOneShot`, short-circuiting the import entirely.
-      const runOneShot = this._titleRunOneShot
+      const baseRunner = this._titleRunOneShot
         || (await import('./summarize-session.js')).defaultRunOneShot
+
+      // #8030: the one-shot title spawn goes through the same binary gate a
+      // fresh chat session would (verifyOneShotExecutable — re-resolve AND
+      // re-verify, since a title call has no create-time session to pin a
+      // path from). Wrapping here (rather than changing baseRunner's own
+      // signature) keeps this seam identical for both the real
+      // defaultRunOneShot AND an injected `titleRunOneShot` test double —
+      // both now receive `resolveExecutable` in their args.
+      //
+      // generateSessionTitle wraps its runOneShot call in a bare try/catch and
+      // fails open to the truncation label on ANY throw (by design — a failed
+      // title call must never leave a session unnamed). That means a gate
+      // refusal here is otherwise SILENT: log it before rethrowing, so a
+      // block-mode mismatch on the title path leaves a trace instead of
+      // vanishing into the fallback.
+      const runOneShot = (args) => baseRunner({
+        ...args,
+        resolveExecutable: () => {
+          try {
+            return this.verifyOneShotExecutable()
+          } catch (err) {
+            log.warn(`Semantic title spawn refused by the binary gate for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
+            throw err
+          }
+        },
+      })
 
       // Hard-bound the fire-and-forget call: AbortSignal.timeout fires after
       // _semanticTitleTimeoutMs, which threads to defaultRunOneShot →

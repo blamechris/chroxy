@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every Agent SDK spawn — chat turn, session summarizer, and semantic
+  title — now goes through the same binary-verification gate, not just
+  session create (#8030).** #7986 (below) fixed the SDK spawning a different
+  binary than preflight verified, but preflight itself still ran once, at
+  session create; the SDK execs a brand-new process every chat turn, so a
+  binary swapped, quarantined, or hash-mismatched between session create and
+  a later turn spawned unverified until the next session create. Chat turns
+  now pin the exact create-time-verified path and re-run the full binary gate
+  (existence, quarantine, the direct-exec shim refusal, the opt-in provenance
+  gate, the version floor) against that exact path before every `query()` — a
+  `PATH` change mid-session never redirects the spawn, but a content change
+  at the pinned path is caught on the very next turn. The session summarizer
+  and the semantic-title generator had no create step at all and were never
+  gated in any mode; both now run the same preflight fresh, through a new
+  `SessionManager.verifyOneShotExecutable()`, and `defaultRunOneShot` no
+  longer falls back to an unverified resolve when no gate is supplied — it
+  fails closed instead. `SdkSession` also gained the same spawn-failure
+  backstop the subprocess providers already had
+  (`labelBinarySpawnFailure`): a pre-first-message launch failure against a
+  quarantined or vanished binary now gets a labeled diagnosis instead of the
+  SDK's generic "native binary … failed to launch" text. Re-hashing and
+  re-`spctl`-ing on every turn would add real latency, so both checks are now
+  cached by stat identity (`utils/stat-identity.js`, shared with the existing
+  version-probe cache) including file **ctime** — mtime alone can be restored
+  by `utimes(2)` after an in-place write, but ctime cannot be forged by
+  userland, so a swap that tries to hide behind a restored mtime still busts
+  the cache.
+
 - **The `claude-sdk` provider's minimum-version floor no longer hard-blocks
   every install after an SDK bump — it is now a hand-kept hard floor plus a
   soft, advisory floor (#8031).** #7986 (below) enforced a minimum `claude`

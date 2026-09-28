@@ -89,6 +89,28 @@ describe('summarize_session handler', () => {
     assert.deepEqual(arg.history, HISTORY)
   })
 
+  it('passes a resolveExecutable that delegates to sessionManager.verifyOneShotExecutable (#8030)', async () => {
+    ctx.sessions.sessionManager.verifyOneShotExecutable = createSpy(() => '/verified/claude')
+    await summarizeHandlers.summarize_session(ws, client, {
+      type: 'summarize_session', sessionId: 'sess-1',
+    }, ctx)
+    const arg = ctx.summarizeSession.calls[0][0]
+    assert.equal(typeof arg.resolveExecutable, 'function')
+    assert.equal(arg.resolveExecutable(), '/verified/claude')
+    assert.equal(ctx.sessions.sessionManager.verifyOneShotExecutable.callCount, 1)
+  })
+
+  it('resolveExecutable fails closed when sessionManager has no verifyOneShotExecutable (#8030)', async () => {
+    // createMockSessionManager doesn't implement verifyOneShotExecutable —
+    // the handler must never fall back to an unverified spawn.
+    assert.equal(typeof ctx.sessions.sessionManager.verifyOneShotExecutable, 'undefined')
+    await summarizeHandlers.summarize_session(ws, client, {
+      type: 'summarize_session', sessionId: 'sess-1',
+    }, ctx)
+    const arg = ctx.summarizeSession.calls[0][0]
+    assert.throws(() => arg.resolveExecutable(), (err) => err.code === 'PROVIDER_BINARY_UNVERIFIED')
+  })
+
   it('prefers config.summarize.model over the session model', async () => {
     ctx = makeCtx({ config: { summarize: { model: 'claude-cheap' } } })
     await summarizeHandlers.summarize_session(ws, client, {
@@ -204,6 +226,25 @@ describe('summarize_session handler', () => {
       assert.equal(reply.reason, 'history-failed')
       assert.ok(!/ENOENT/.test(reply.message), 'raw error text must not leak')
       assert.ok(!/\.chroxy/.test(reply.message), 'internal path must not leak')
+    })
+
+    it('maps a PROVIDER_BINARY_* error code (no err.reason) to binary-unverified with the fixed message (#8030)', async () => {
+      ctx = makeCtx({
+        summarizeSession: createSpy(async () => {
+          const err = new Error('claude-sdk: "claude" at /opt/homebrew/bin/claude binary hash changed since it was pinned (pinned a4291b0c…, now deadbeef…)')
+          err.code = 'PROVIDER_BINARY_PROVENANCE'
+          throw err
+        }),
+      })
+      await summarizeHandlers.summarize_session(ws, client, {
+        type: 'summarize_session', sessionId: 'sess-1', requestId: 'r',
+      }, ctx)
+      const reply = lastSent(ctx)
+      assert.equal(reply.code, 'SUMMARIZE_FAILED')
+      assert.equal(reply.reason, 'binary-unverified')
+      assert.equal(reply.message, 'Could not summarize this session — the Claude binary did not pass verification (see the server log)')
+      // Leak guard still holds for this family of errors too.
+      assert.ok(!/a4291b0c/.test(reply.message), 'raw hash fragment must not leak')
     })
 
     it('maps empty-history to a friendly message', async () => {

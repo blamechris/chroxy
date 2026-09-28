@@ -3,6 +3,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
+import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-sdk-version.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
@@ -417,6 +418,13 @@ export class SdkSession extends BaseSession {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-sdk' }))
     // SdkSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
     const { resumeSessionId, transforms, maxToolInput, sandbox, stdinForwardingDisabled } = opts
+    // #8030: per-spawn re-verification gate. SessionManager wires this to
+    // `_verifyPinnedSpawn` (re-runs the binary gate against the EXACT path
+    // create-time preflight verified) whenever preflight ran and the provider
+    // isn't containerised. null when absent — the turn then falls back to a
+    // plain `this.constructor.resolvedBinary` read, same as before #8030 (a
+    // direct `new SdkSession(...)` caller that skips SessionManager, or a test).
+    this._spawnPreflight = typeof opts.spawnPreflight === 'function' ? opts.spawnPreflight : null
     this._maxToolInput = maxToolInput || DEFAULT_MAX_TOOL_INPUT_LENGTH
     this._transformPipeline = new MessageTransformPipeline(transforms || [])
     this._sandbox = sandbox || null
@@ -895,14 +903,43 @@ export class SdkSession extends BaseSession {
     this._resetResultTimeout = resetResultTimeout
     resetResultTimeout()
 
+    // #8030: declared OUTSIDE the try below so the catch block can see them.
+    // spawnRefused distinguishes "the binary gate refused this spawn before
+    // query() was ever called" from every other turn failure — it must never
+    // be routed through the same error-enrichment/container-classification
+    // path a real query failure gets. spawnPath is the path this turn actually
+    // asked the SDK to spawn (whichever of spawnPreflight()/resolvedBinary won
+    // below), used by the post-preflight spawn-failure backstop further down.
+    let spawnRefused = false
+    let spawnPath = null
+    // #8030: flips true on the first message this turn's `for await` loop
+    // receives. Gates the spawn-failure backstop below: a labelBinarySpawnFailure
+    // re-verify only makes sense for a failure BEFORE any SDK output — once a
+    // message has streamed, the binary plainly launched fine and a later
+    // failure is something else entirely.
+    let receivedAnyMessage = false
+
     try {
-      // #7986: point the SDK at the installed `claude` binary on every
-      // install. The desktop bundle does not ship the SDK's own platform
-      // binary, and without it query() throws
-      // ("Native CLI binary ... not found") if this is unset, even when a
-      // subclass supplies spawnClaudeCodeProcess. Set BEFORE
-      // _augmentQueryOptions so a subclass override can see/override it.
-      options.pathToClaudeCodeExecutable = this.constructor.resolvedBinary
+      // #7986 / #8030: point the SDK at the installed `claude` binary on every
+      // turn. The desktop bundle does not ship the SDK's own platform binary,
+      // and without pathToClaudeCodeExecutable query() throws ("Native CLI
+      // binary ... not found") even when a subclass supplies
+      // spawnClaudeCodeProcess. The SDK execs a NEW process per turn (unlike
+      // claude-tui's one PTY or claude-cli's one persistent child), so
+      // "verified at session-create" only covers turn one — `_spawnPreflight`
+      // (set in the constructor from SessionManager's `spawnPreflight` opt)
+      // re-runs the full binary gate against the create-time-pinned path
+      // before every subsequent spawn too. Falls back to a plain
+      // `resolvedBinary` read when no gate was wired (a direct `new
+      // SdkSession(...)` caller that bypassed SessionManager, or a test).
+      // Set BEFORE _augmentQueryOptions so a subclass override can see/override it.
+      try {
+        spawnPath = this._spawnPreflight ? this._spawnPreflight() : this.constructor.resolvedBinary
+      } catch (err) {
+        spawnRefused = true
+        throw err
+      }
+      options.pathToClaudeCodeExecutable = spawnPath
 
       // Allow subclasses to augment query options (e.g. DockerSdkSession
       // injects spawnClaudeCodeProcess here)
@@ -934,6 +971,7 @@ export class SdkSession extends BaseSession {
 
       for await (const msg of this._query) {
         if (this._destroying) break
+        receivedAnyMessage = true // #8030: gates the spawn-failure backstop below
         resetResultTimeout() // Any SDK event = activity, reset inactivity timer
 
         switch (msg.type) {
@@ -1346,6 +1384,26 @@ export class SdkSession extends BaseSession {
           // is no child-process exit status to carry.
           ;(this._log || log).info('Query aborted after user stop')
           this.emit('stopped', {})
+        } else if (spawnRefused) {
+          // #8030: the per-spawn binary gate refused this turn BEFORE query()
+          // was ever called (a block-mode hash mismatch, quarantine, a
+          // vanished pinned binary, …). Two things this branch deliberately
+          // does NOT do:
+          //   - route through _enrichErrorMessage: a provenance message
+          //     embeds a hex hash prefix (e.g. "...a4291b0c...") that can
+          //     match the rate-limit ("429") or auth ("401") patterns in
+          //     _ERROR_PATTERNS and get silently rewritten into a wrong,
+          //     misleading "rate limit"/"auth failed" message instead of the
+          //     real cause.
+          //   - run container classification: the turn never reached the
+          //     SDK, so there is no container to have vanished.
+          ;(this._log || log).error(`Spawn refused by binary gate: ${err.message}`)
+          this.emit('error', { code: err.code || 'PROVIDER_BINARY_UNVERIFIED', message: err.message })
+          reportInputAdmission(sendOptions, {
+            status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+            reason: err.code || 'provider_binary_unverified',
+            message: 'The provider binary failed verification before this turn was dispatched.',
+          })
         } else {
           // #7599: let a containerized subclass classify this turn failure as a
           // vanished container (a distinct, recoverable state) before the
@@ -1363,10 +1421,24 @@ export class SdkSession extends BaseSession {
             ;(this._log || log).warn(`Container vanished during turn: ${containerGone.message}`)
             this.emit('error', containerGone)
           } else {
+            // #8030 backstop: a spawn failure AFTER preflight passed (the
+            // pinned binary was quarantined/moved/removed between the gate
+            // call above and the actual exec, or the gate wasn't wired at
+            // all) surfaces from the SDK as generic text ("native binary ...
+            // failed to launch"). Re-verify the ATTEMPTED path and label the
+            // real cause + fix, the same backstop cli-session.js /
+            // jsonl-subprocess-session.js run for their own spawns — but only
+            // when this is plausibly a launch failure: no SDK message has
+            // arrived yet this turn, a path was actually attempted, and the
+            // provider isn't containerised (its binary lives inside a
+            // container a host-side verify can't see).
+            const labeled = (!receivedAnyMessage && spawnPath && !this.constructor.capabilities?.containerized)
+              ? labelBinarySpawnFailure({ attemptedPath: spawnPath, binary: 'claude' })
+              : null
             // #4828: session-scoped when init has fired; falls back to module
             // `log` for pre-init query failures (e.g. spawn refused).
             ;(this._log || log).error(`Query error: ${err.message}`)
-            this.emit('error', { message: SdkSession._enrichErrorMessage(err.message) })
+            this.emit('error', { message: labeled || SdkSession._enrichErrorMessage(err.message) })
           }
         }
       }
