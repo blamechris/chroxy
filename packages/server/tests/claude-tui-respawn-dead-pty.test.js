@@ -82,34 +82,44 @@ async function liveThenDead(session, control) {
   return term
 }
 
+// [label, break the next spawn, the error that early return emits]
 const EARLY_RETURNS = [
-  ['ptyMod.spawn throws', (session, control) => { control.failSpawn = true }],
-  ['the argv guard refuses the session id', (session) => { session._sessionId = '--not-a-uuid' }],
+  ['ptyMod.spawn throws', (session, control) => { control.failSpawn = true }, /^Failed to spawn claude under PTY/],
+  ['the argv guard refuses the session id', (session) => { session._sessionId = '--not-a-uuid' }, /^Refusing to spawn claude TUI/],
   // The import-failure early return is reproduced by its exact effect rather
   // than by failing the real import: `lint-argv-sinks` only recognises the
   // node-pty spawn sink through the literal `ptyMod = await import('node-pty')`
   // (so a seam there would blind the lint), and a module mock leaks
   // process-wide across concurrently running test files. The fix under test
-  // sits in `_respawnPty`, upstream of whichever early return fires.
+  // sits in `_respawnPty`, upstream of whichever early return fires, so this
+  // case covers `_respawnPty`'s handling of that outcome, not the real
+  // import's catch block inside `_spawnPty`.
   ['the node-pty import fails', (session) => {
     session._spawnPty = async function () {
       this.emit('error', { message: 'node-pty unavailable: Cannot find module node-pty' })
     }
-  }],
+  }, /^node-pty unavailable/],
 ]
 
 describe('ClaudeTuiSession — a respawn that yields no live PTY after a real death (#8043)', () => {
-  for (const [label, breakSpawn] of EARLY_RETURNS) {
+  for (const [label, breakSpawn, expectedError] of EARLY_RETURNS) {
     it(`${label}: no ready on the dead PTY, the backoff continues, and destroy() never signals it`, async () => {
       const { session, control, readies, cleanup } = makeSession()
       try {
         const dead = await liveThenDead(session, control)
         const readiesBefore = readies.length
         const countBefore = session._respawnCount
+        const spawnsBefore = control.spawns
+        const errors = []
+        session.on('error', (e) => errors.push(e))
 
         breakSpawn(session, control)
         await session._respawnPty()
 
+        // Prove the attempt took THIS early return, not some other failure.
+        assert.equal(errors.length, 1, 'exactly one error from the attempt')
+        assert.ok(expectedError.test(errors[0].message), `the ${label} early return fired (got: ${errors[0].message})`)
+        if (label === 'ptyMod.spawn throws') assert.equal(control.spawns, spawnsBefore + 1, 'node-pty spawn was actually attempted')
         assert.equal(readies.length, readiesBefore, 'no ready emitted for a session with no live PTY')
         assert.equal(session._processReady, false)
         assert.equal(session._term, null, 'the dead handle is not kept as if it were live')
@@ -126,14 +136,22 @@ describe('ClaudeTuiSession — a respawn that yields no live PTY after a real de
   }
 
   it('the #8038 sendMessage revival: a spawn that fails after the gate passes rejects the input and starts no turn', async () => {
-    const { session, control, readies, cleanup } = makeSession({ spawnPreflight: () => '/fixture/pinned/claude' })
+    const refusal = new Error('pinned claude hash changed')
+    refusal.code = 'PROVIDER_BINARY_PROVENANCE'
+    let refuseNext = false
+    const { session, control, readies, cleanup } = makeSession({
+      spawnPreflight: () => {
+        if (refuseNext) { refuseNext = false; throw refusal }
+        return '/fixture/pinned/claude'
+      },
+    })
     try {
       await liveThenDead(session, control)
-      // A later respawn was refused by the gate, so the session is parked on
-      // the refusal latch (as #8038 leaves it), with the dead handle still set.
-      const refusal = new Error('pinned claude hash changed')
-      refusal.code = 'PROVIDER_BINARY_PROVENANCE'
-      session._spawnRefusal = refusal
+      // A REAL gate refusal on the next respawn parks the session on the
+      // refusal latch, exactly as #8038 leaves it (not a hand-set latch).
+      refuseNext = true
+      await session._respawnPty()
+      assert.equal(session._spawnRefusal, refusal, 'precondition: the respawn was refused by the gate')
       const readiesBefore = readies.length
 
       // The gate now passes, but the spawn itself fails.
@@ -157,6 +175,7 @@ describe('ClaudeTuiSession — a respawn that yields no live PTY after a real de
   it('a destroy() that lands while a respawn is still in flight never signals the dead PTY', async () => {
     const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-dead-pty-sink-'))
     let releaseAuth
+    let authStarted = false
     const authGate = new Promise((resolve) => { releaseAuth = resolve })
     const { session, control, cleanup } = makeSession({
       connectionAuthRoute: 'native',
@@ -166,6 +185,7 @@ describe('ClaudeTuiSession — a respawn that yields no live PTY after a real de
       // The native route awaits `claude auth status` before spawning: the
       // window this test holds open.
       connectionAuthStatusRunner: async () => {
+        authStarted = true
         await authGate
         return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }) }
       },
@@ -179,7 +199,9 @@ describe('ClaudeTuiSession — a respawn that yields no live PTY after a real de
       session._connectionAuthRoute = 'native'
 
       const inFlight = session._respawnPty()
-      await new Promise((resolve) => setImmediate(resolve))
+      for (let i = 0; i < 50 && !authStarted; i++) await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(authStarted, true, 'precondition: the respawn is paused inside its auth-status await')
+      assert.equal(session._respawning, true, 'precondition: destroy() lands while the respawn is in flight')
       await session.destroy()
       assert.deepEqual(dead.kills, [], 'destroy() mid-respawn sent no signal to the dead PTY')
       assert.equal(session._killTimer, null, 'no SIGKILL escalation armed against its pid')
