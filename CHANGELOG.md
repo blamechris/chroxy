@@ -33,12 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operator-visible: with `binaryProvenance.mode: block`, an in-place update of
   `gemini` or `codex` now refuses the next turn of a live session
   (`PROVIDER_BINARY_PROVENANCE`) instead of only the next session create,
-  matching what #8030 already did for `claude-sdk`. Also adds a narrower
-  spawn-failure backstop to `acp-session.js`: a configured ACP agent `command`
-  that is an absolute path gets the same labeled quarantine/not-executable
-  diagnosis as the other providers; a bare (PATH-resolved) command keeps its
-  raw error, since the binary-health check can't distinguish "not found" from
-  other causes for a non-absolute path.
+  matching what #8030 already did for `claude-sdk`. The pinned gate runs in
+  every provenance mode, including the default `off`: each turn re-checks that
+  the pinned binary exists, is executable and is not quarantined, plus the
+  version floor and required credentials. A pinned `gemini`/`codex` that
+  disappears (an `nvm` switch, an uninstall) now refuses each later turn with a
+  message saying to start a new session, instead of spawning whatever `PATH`
+  resolves. Also adds a narrower spawn-failure backstop to `acp-session.js`: a
+  configured ACP agent `command` that is an absolute path and is quarantined or
+  not executable gets the same labeled diagnosis as the other providers; a
+  missing absolute command keeps Node's raw `ENOENT` (it names the configured
+  path), and a bare (PATH-resolved) command keeps its raw error, since the
+  binary-health check can't tell "not found" from other causes for a
+  non-absolute path. Spawns that are still ungated are tracked in #8036, #8038
+  and #8039.
 
 - **Every Agent SDK spawn — chat turn, session summarizer, and semantic
   title — now goes through the same binary-verification gate, not just

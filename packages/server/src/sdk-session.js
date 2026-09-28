@@ -923,10 +923,9 @@ export class SdkSession extends BaseSession {
       // turn. The desktop bundle does not ship the SDK's own platform binary,
       // and without pathToClaudeCodeExecutable query() throws ("Native CLI
       // binary ... not found") even when a subclass supplies
-      // spawnClaudeCodeProcess. The SDK execs a NEW process per turn (unlike
-      // claude-tui's one PTY or claude-cli's one persistent child), so
-      // "verified at session-create" only covers turn one — `_spawnPreflight`
-      // (set in the constructor from SessionManager's `spawnPreflight` opt)
+      // spawnClaudeCodeProcess. The SDK execs a NEW process per turn, so
+      // "verified at session-create" only covers turn one — `_gatedSpawnBinary`
+      // (BaseSession; the gate is SessionManager's `spawnPreflight` opt)
       // re-runs the full binary gate against the create-time-pinned path
       // before every subsequent spawn too. Falls back to a plain
       // `resolvedBinary` read when no gate was wired (a direct `new

@@ -1069,8 +1069,9 @@ export class SessionManager extends EventEmitter {
   //     directly), so every consumer that spawns more than once per session
   //     shares it — the Agent SDK (#8030, execs a new process per turn) and
   //     JsonlSubprocessSession's Gemini / Codex-exec subclasses (spawn once
-  //     per turn). One-spawn-per-session providers (claude-cli, claude-tui,
-  //     codex app-server's default route) never call it, so it's inert for them.
+  //     per turn). claude-cli, claude-tui and codex app-server's default
+  //     route never call it: their spawns and respawns still re-resolve the
+  //     binary with no per-spawn gate (#8038).
   //   - `verifyOneShotExecutable()` is the same idea for a one-shot call that
   //     has NO create-time pin to reuse (the summarizer, the semantic-title
   //     generator) — it re-resolves AND re-verifies fresh every call.
@@ -1675,11 +1676,10 @@ export class SessionManager extends EventEmitter {
     // `BASE_SESSION_OPT_KEYS` — see base-session.js), so SdkSession AND
     // JsonlSubprocessSession's Gemini / Codex-exec subclasses both consume it
     // per spawn (each execs a NEW process every turn, so "verified once at
-    // create" doesn't cover turn two onward). One-spawn-per-session providers
-    // (claude-cli, claude-tui, codex app-server's default route) inherit the
-    // opt through the same picker but never call `_gatedSpawnBinary`, so it's
-    // simply unused for them — same as any BaseSession opt a given provider
-    // doesn't act on.
+    // create" doesn't cover turn two onward). claude-cli, claude-tui and codex
+    // app-server's default route inherit the opt through the same picker but
+    // never call `_gatedSpawnBinary`; their spawns and respawns still
+    // re-resolve with no per-spawn gate (#8038).
     if (verifiedBinary) {
       providerOpts.spawnPreflight = () => this._verifyPinnedSpawn(ProviderClass, verifiedBinary)
     }

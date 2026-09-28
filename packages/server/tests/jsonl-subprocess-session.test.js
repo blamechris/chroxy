@@ -831,13 +831,18 @@ describe('JsonlSubprocessSession (base)', () => {
       const P = makeTestProviderClass({ binary: '/nonexistent/no/such/binary' })
       const s = new P({ cwd: '/tmp', spawnPreflight: gate })
       s._processReady = true
-      s.on('error', () => {})
+      // #8035 review: collected, not swallowed. A spawn of the missing
+      // resolvedBinary still ends in a fallback `result`, so a result alone
+      // does not prove the gate path was spawned; zero errors does.
+      const errors = []
+      s.on('error', (e) => errors.push(e))
 
       const results = []
       s.on('result', (d) => results.push(d))
 
       await s.sendMessage('turn one')
       await waitFor(() => results.length >= 1, { label: 'result 1' })
+      assert.deepEqual(errors.map((e) => e.message), [], 'turn 1 spawned the gate path without error')
       // _isBusy only clears once the child's `close` event fires, which can
       // land after the JSONL `done` line that produced `result` above — wait
       // for it explicitly, or turn two is rejected as "busy" instead of
@@ -848,6 +853,7 @@ describe('JsonlSubprocessSession (base)', () => {
       await s.sendMessage('turn two')
       await waitFor(() => results.length >= 2, { label: 'result 2' })
       assert.equal(calls, 2, 'gate re-called for turn 2, not cached')
+      assert.deepEqual(errors.map((e) => e.message), [], 'turn 2 spawned the gate path without error')
     })
 
     it('a gate throw with a provenance code refuses before spawn, then a later turn succeeds once the gate is fixed', async () => {
@@ -883,6 +889,7 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(admissions[0].status, 'rejected')
       assert.equal(admissions[0].delivery, 'not_dispatched')
       assert.equal(admissions[0].reason, 'PROVIDER_BINARY_PROVENANCE')
+      assert.equal(admissions[0].retrySafe, true, 'nothing was dispatched, so a retry is safe')
 
       assert.equal(s._isBusy, false, 'refusal leaves the session idle')
       assert.equal(s._skillsPrepended, false, 'refusal never commits the skills-prepend flag')
@@ -926,6 +933,20 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED')
       assert.match(errors[0].message, /fake-provider/, 'uses providerName as the binary label')
       assert.equal(s._isBusy, false)
+    })
+
+    it('a gate returning a non-string refuses with PROVIDER_BINARY_UNVERIFIED', async () => {
+      for (const bad of [null, undefined, 42, {}]) {
+        const P = makeTestProviderClass()
+        const s = new P({ cwd: '/tmp', spawnPreflight: () => bad })
+        s._processReady = true
+        const errors = []
+        s.on('error', (e) => errors.push(e))
+        await s.sendMessage('hi')
+        assert.equal(errors.length, 1, `one refusal for ${String(bad)}`)
+        assert.equal(errors[0].code, 'PROVIDER_BINARY_UNVERIFIED', `refused ${String(bad)}`)
+        assert.equal(s._process, null, `nothing spawned for ${String(bad)}`)
+      }
     })
 
     it('falls back to the static resolvedBinary when no gate is wired (pre-#8035 behavior)', async () => {

@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { createAcpSessionClass, registerAcpProviders } from '../src/acp-session.js'
+import { createAcpSessionClass, registerAcpProviders, labelAcpSpawnFailure } from '../src/acp-session.js'
+import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { validateAcpProviders } from '../src/acp-config.js'
 import { getProvider, listProviders, getRegisteredProviderNames } from '../src/providers.js'
 
@@ -648,6 +649,7 @@ describe('AcpSession — spawn-failure backstop is absolute-command-only (#8035)
     s.start().catch(() => {})
     const payload = await errorP
 
+    assert.ok(payload.message.startsWith('Failed to run ACP agent "Fake ACP Agent": '), `keeps the ACP prefix: ${payload.message}`)
     assert.match(payload.message, /not executable/i, 'labeled not-executable diagnosis')
     assert.match(payload.message, /chmod \+x/, 'includes the remediation command')
     assert.ok(payload.message.includes(notExecutable), 'names the actual attempted path')
@@ -690,5 +692,81 @@ describe('AcpSession — spawn-failure backstop is absolute-command-only (#8035)
 
     await s.destroy().catch(() => {})
     cleanup()
+  })
+})
+
+// #8035 review — the label is kept for the two failures an operator can act on
+// (quarantine, a missing X bit). A MISSING absolute command keeps Node's raw
+// ENOENT, which names the configured path, rather than a generic "not found —
+// install it".
+describe('AcpSession — which spawn failures get a label (#8035 review)', () => {
+  const entry = { command: '/opt/agents/my-agent', label: 'My Agent' }
+  const PREFIX = 'Failed to run ACP agent "My Agent"'
+  const health = (status) => () => ({ ok: status === BINARY_STATUS.OK, status, path: entry.command, quarantine: null })
+
+  it('labels a quarantined or not-executable absolute command, keeping the prefix', () => {
+    for (const status of [BINARY_STATUS.QUARANTINED, BINARY_STATUS.NOT_EXECUTABLE]) {
+      const labeled = labelAcpSpawnFailure(entry, PREFIX, health(status))
+      assert.equal(typeof labeled, 'string', `${status} is labeled`)
+      assert.ok(labeled.startsWith(`${PREFIX}: `), `${status} keeps the prefix: ${labeled}`)
+    }
+  })
+
+  it('keeps the raw error for a missing or healthy absolute command, or a verifier that throws', () => {
+    assert.equal(labelAcpSpawnFailure(entry, PREFIX, health(BINARY_STATUS.NOT_FOUND)), null)
+    assert.equal(labelAcpSpawnFailure(entry, PREFIX, health(BINARY_STATUS.OK)), null)
+    assert.equal(labelAcpSpawnFailure(entry, PREFIX, () => { throw new Error('boom') }), null)
+  })
+
+  it('never verifies a bare command', () => {
+    let called = false
+    const labeled = labelAcpSpawnFailure({ command: 'my-agent', label: 'My Agent' }, PREFIX, () => {
+      called = true
+      return { ok: false, status: BINARY_STATUS.QUARANTINED, path: 'my-agent', quarantine: null }
+    })
+    assert.equal(labeled, null)
+    assert.equal(called, false, 'a bare command is never passed to the verifier')
+  })
+
+  it('a missing absolute command keeps the raw ENOENT that names the configured path', async () => {
+    const missing = join(tmpdir(), `chroxy-acp-8035-missing-${process.pid}-${Date.now()}`)
+    const { s, cleanup } = mkSession({}, { command: missing, args: [] })
+
+    const errorP = waitFor(s, 'error')
+    s.start().catch(() => {})
+    const payload = await errorP
+
+    assert.match(payload.message, /ENOENT/, 'the raw spawn error is kept')
+    assert.ok(payload.message.includes(missing), 'names the configured path')
+    assert.doesNotMatch(payload.message, /not found —|install/i, 'no generic not-found label')
+
+    await s.destroy().catch(() => {})
+    cleanup()
+  })
+
+  it('start() labels a synchronous spawn throw for a not-executable absolute command', {
+    skip: process.platform === 'win32'
+      ? 'POSIX-only premise: Windows has no execute bit, so chmod 0o644 cannot make the file not-executable'
+      : false,
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-acp-8035-sync-'))
+    const notExecutable = join(dir, 'not-executable')
+    writeFileSync(notExecutable, '#!/bin/sh\necho hi\n')
+    chmodSync(notExecutable, 0o644)
+    // A NUL byte in argv makes child_process.spawn() throw synchronously
+    // (ERR_INVALID_ARG_VALUE), so this reaches start()'s own catch rather than
+    // the async child 'error' path the other tests exercise.
+    const { s, cleanup } = mkSession({}, { command: notExecutable, args: ['has\0nul'] })
+    s.on('error', () => {})
+
+    await assert.rejects(s.start(), (err) => {
+      assert.ok(err.message.startsWith('Failed to spawn ACP agent "Fake ACP Agent": '), `keeps the prefix: ${err.message}`)
+      assert.match(err.message, /not executable/i)
+      return true
+    })
+
+    await s.destroy().catch(() => {})
+    cleanup()
+    rmSync(dir, { recursive: true, force: true })
   })
 })
