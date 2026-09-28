@@ -4882,13 +4882,13 @@ export class ClaudeTuiSession extends BaseSession {
       const pid = term.pid
       this._term = null
       // #5351 review — only signal a PTY we believe is still alive. _onPtyGone
-      // does NOT null _term, so after an unexpected exit (crash / respawn
-      // exhaustion) destroy() sees `_term` non-null AND `_ptyExited` true (a
-      // respawn in flight has already nulled it — #8043 — so it skips this
-      // block entirely). The
-      // process has already been reaped by then, so sending ANY signal — even
-      // SIGTERM — risks hitting a recycled pid. Skip the whole kill path; the
-      // PTY is already gone and there's nothing to reap.
+      // does NOT null _term, so after an unexpected exit destroy() can see
+      // `_term` non-null AND `_ptyExited` true. The process has already been
+      // reaped by then, so sending ANY signal — even SIGTERM — risks hitting a
+      // recycled pid. Skip the whole kill path; the PTY is already gone and
+      // there's nothing to reap. (Every respawn attempt drops the dead handle
+      // first — #8043 — so after one, whether in flight, refused, early-
+      // returned or exhausted, `_term` is null or the NEW PTY's handle.)
       if (!this._ptyExited) {
         try { term.kill('SIGTERM') } catch { /* already dead */ }
       }

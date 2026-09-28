@@ -82,10 +82,10 @@ async function liveThenDead(session, control) {
   return term
 }
 
-// [label, break the next spawn, the error that early return emits]
+// [label, break the next spawn, the error that early return emits, node-pty spawns it attempts]
 const EARLY_RETURNS = [
-  ['ptyMod.spawn throws', (session, control) => { control.failSpawn = true }, /^Failed to spawn claude under PTY/],
-  ['the argv guard refuses the session id', (session) => { session._sessionId = '--not-a-uuid' }, /^Refusing to spawn claude TUI/],
+  ['ptyMod.spawn throws', (session, control) => { control.failSpawn = true }, /^Failed to spawn claude under PTY/, 1],
+  ['the argv guard refuses the session id', (session) => { session._sessionId = '--not-a-uuid' }, /^Refusing to spawn claude TUI/, 0],
   // The import-failure early return is reproduced by its exact effect rather
   // than by failing the real import: `lint-argv-sinks` only recognises the
   // node-pty spawn sink through the literal `ptyMod = await import('node-pty')`
@@ -98,11 +98,11 @@ const EARLY_RETURNS = [
     session._spawnPty = async function () {
       this.emit('error', { message: 'node-pty unavailable: Cannot find module node-pty' })
     }
-  }, /^node-pty unavailable/],
+  }, /^node-pty unavailable/, 0],
 ]
 
 describe('ClaudeTuiSession — a respawn that yields no live PTY after a real death (#8043)', () => {
-  for (const [label, breakSpawn, expectedError] of EARLY_RETURNS) {
+  for (const [label, breakSpawn, expectedError, expectedSpawns] of EARLY_RETURNS) {
     it(`${label}: no ready on the dead PTY, the backoff continues, and destroy() never signals it`, async () => {
       const { session, control, readies, cleanup } = makeSession()
       try {
@@ -119,7 +119,7 @@ describe('ClaudeTuiSession — a respawn that yields no live PTY after a real de
         // Prove the attempt took THIS early return, not some other failure.
         assert.equal(errors.length, 1, 'exactly one error from the attempt')
         assert.ok(expectedError.test(errors[0].message), `the ${label} early return fired (got: ${errors[0].message})`)
-        if (label === 'ptyMod.spawn throws') assert.equal(control.spawns, spawnsBefore + 1, 'node-pty spawn was actually attempted')
+        assert.equal(control.spawns, spawnsBefore + expectedSpawns, 'node-pty spawn was attempted exactly as this early return implies')
         assert.equal(readies.length, readiesBefore, 'no ready emitted for a session with no live PTY')
         assert.equal(session._processReady, false)
         assert.equal(session._term, null, 'the dead handle is not kept as if it were live')
