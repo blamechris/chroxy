@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync, symlinkSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -10,6 +10,7 @@ import { CONTAINER_CONFINE_OK } from '../src/built-in-tools/tool-transforms.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { registerDockerProvider, getProvider } from '../src/providers.js'
 import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -101,6 +102,7 @@ let tmpHome
 let originalHome
 let originalApiKey
 let originalMcpTrustPath
+let originalEnvFileBase
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-docker-byok-test-'))
@@ -111,6 +113,20 @@ beforeEach(() => {
   process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
   process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
   process.env.CHROXY_MCP_TRUST_PATH = join(tmpHome, 'mcp-trust.json')
+  // #8047 review N4 — every compose-mode test in this file forwards
+  // ANTHROPIC_API_KEY (set above) into `_startComposeStack()`, which creates
+  // a real owner.pid-stamped dir under `DockerByokSession.ENV_FILE_BASE`.
+  // Left pointed at the real system tmpdir, one run of this file leaves
+  // several `ENV_FILE_BASE/s-chroxy-byok-*` dirs behind on the developer's
+  // machine. Confine it to THIS test's tmpHome instead — already fresh per
+  // test and removed below — so nothing survives the test. Tests that need
+  // a DIFFERENT base (the symlink-refusal probe) further override this
+  // after `beforeEach` runs; `afterEach` always restores the true original.
+  originalEnvFileBase = Object.getOwnPropertyDescriptor(DockerByokSession, 'ENV_FILE_BASE')
+  Object.defineProperty(DockerByokSession, 'ENV_FILE_BASE', {
+    get: () => join(tmpHome, 'byok-env-base'),
+    configurable: true,
+  })
 })
 
 afterEach(() => {
@@ -121,6 +137,7 @@ afterEach(() => {
   else delete process.env.ANTHROPIC_API_KEY
   if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath
   else delete process.env.CHROXY_MCP_TRUST_PATH
+  if (originalEnvFileBase) Object.defineProperty(DockerByokSession, 'ENV_FILE_BASE', originalEnvFileBase)
   rmSync(tmpHome, { recursive: true, force: true })
 })
 
@@ -3728,7 +3745,7 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
       _execFile,
       _dockerBackend: backend,
       _writeEnvFile: (path, content) => writes.push({ path, content }),
-      _unlinkEnvFile: (path) => unlinks.push(path),
+      _removeEnvDir: (path) => unlinks.push(path),
       _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-tmpfile-secret' },
     })
     session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
@@ -3780,7 +3797,7 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
       _execFile,
       _dockerBackend: backend,
       _writeEnvFile: (p, c) => writes.push({ p, c }),
-      _unlinkEnvFile: (p) => unlinks.push(p),
+      _removeEnvDir: (p) => unlinks.push(p),
       _envForApiKey: { /* no ANTHROPIC_API_KEY */ },
     })
     session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
@@ -3814,7 +3831,7 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
       _execFile,
       _dockerBackend: backend,
       _writeEnvFile: () => {},
-      _unlinkEnvFile: () => {},
+      _removeEnvDir: () => {},
       _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-exec-secret' },
     })
     session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
@@ -3850,19 +3867,127 @@ describe('DockerByokSession — Docker Compose support (#5024)', () => {
       _execFile,
       _dockerBackend: backend,
       _writeEnvFile: (p, c) => writes.push({ p, c }),
-      _unlinkEnvFile: (p) => unlinks.push(p),
+      _removeEnvDir: (p) => unlinks.push(p),
       _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-fail-secret' },
     })
     session.on('error', () => {})
     await session.start()
     assert.equal(writes.length, 1, 'tmpfile written before compose up')
-    assert.equal(unlinks.length >= 1, true, 'tmpfile unlinked on start failure')
+    // #8047 review S3 — `unlinks.length >= 1` passed for the PRE-PR,
+    // file-only removal too (mutant R5: remove `_composeEnvFile` instead of
+    // `_composeEnvDir`). Assert the actual argument: it must be the OWNING
+    // DIR, not the bare file, so `owner.pid` is removed along with the key.
+    assert.deepEqual(unlinks, [dirname(writes[0].p)], 'the whole owning dir — not just the file — is removed on start failure')
     assert.equal(session._composeEnvFile, null, 'env-file path cleared on failure')
     // #7373 — the owning dir is cleared too, or the credential-file's
     // liveness stamp (owner.pid) survives a start failure right alongside
     // an orphaned dir with nothing tracking it.
     assert.equal(session._composeEnvDir, null, 'owning dir cleared on failure')
   })
+
+  // #8047 review C1 — the PR's headline security claim ("refuses a
+  // symlinked/foreign-uid base, same protection the tui/cli sites have") had
+  // no test at either new site. Swapping `ensureOwnedBaseDir(ENV_FILE_BASE)`
+  // for a plain `mkdirSync(base, {recursive:true})` left the whole suite
+  // green. Mirrors the pattern in claude-tui-session.test.js's "untrusted
+  // sink base dir" describe: plant the base as a symlink to a victim dir,
+  // and assert nothing was written THROUGH the link.
+  it(
+    'refuses a symlinked ENV_FILE_BASE — nothing is written through the link, session degrades without the env-file (#8047 review C1)',
+    { skip: SKIP_NO_SYMLINK },
+    async () => {
+      const victim = join(tmpHome, 'victim')
+      const squatted = join(tmpHome, 'squatted-env-base')
+      mkdirSync(victim, { recursive: true })
+      symlinkSync(victim, squatted)
+      // Overrides the safe tmpHome-scoped default the file-level beforeEach
+      // just set; the file-level afterEach restores the TRUE original
+      // regardless of this second override.
+      Object.defineProperty(DockerByokSession, 'ENV_FILE_BASE', { get: () => squatted, configurable: true })
+
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const writes = []
+      const backend = composeBackendStub({ primaryId: 'COMPOSE_SYMLINK_ATTACK' })
+      const session = new DockerByokSession({
+        cwd: tmpHome,
+        composeFile: '/proj/docker-compose.yml',
+        _execFile,
+        _dockerBackend: backend,
+        _writeEnvFile: (p, c) => writes.push({ p, c }),
+        _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-symlink-attack' },
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start() // non-fatal degrade, not a rejection — compose still starts
+
+      assert.equal(writes.length, 0, 'no env-file write was attempted through the symlinked base')
+      assert.equal(session._composeEnvFile, null, 'no env-file tracked')
+      assert.equal(session._composeEnvDir, null, 'no owning dir tracked')
+      // The whole point: nothing was written THROUGH the link.
+      assert.deepEqual(readdirSync(victim), [],
+        'a plain mkdirSync would have created the session dir (owner.pid + the key) inside the attacker-controlled target')
+      assert.equal(backend.createCalls[0].envFile, null, 'compose still started, just without the key forwarded')
+
+      await session.destroy()
+    },
+  )
+
+  // #8047 review S1 — if the env-file WRITE itself throws after the owned,
+  // owner.pid-stamped dir was already created (ENOSPC, EIO, a partial
+  // write), the dir used to have nothing tracking it: `_composeEnvDir` is
+  // nulled in the same catch that swallows the error, so neither destroy()
+  // nor the boot sweep would ever remove it (owner.pid still names this
+  // live daemon).
+  it('a partial env-file write failure does not leave the owner.pid dir behind (#8047 review S1)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub({ primaryId: 'COMPOSE_S1_PARTIAL' })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: () => { throw new Error('ENOSPC: no space left on device') },
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-s1-partial' },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._composeEnvFile, null)
+    assert.equal(session._composeEnvDir, null)
+    const base = DockerByokSession.ENV_FILE_BASE
+    const leftover = existsSync(base) ? readdirSync(base).filter((n) => n.startsWith('s-')) : []
+    assert.deepEqual(leftover, [], 'the owner.pid-stamped dir must not survive a failed env-file write')
+
+    await session.destroy()
+  })
+
+  // #8047 review S2 — nothing pinned the credential file's 0600 mode or the
+  // owning dir's 0700 mode; both mutating the writer's mode arg and dropping
+  // `mode: 0o700` from the dir mkdirSync survived the whole suite.
+  it(
+    'the env-file is 0600 and its owning dir is 0700 (POSIX)',
+    { skip: process.platform === 'win32' ? 'POSIX file-mode bits only' : false },
+    async () => {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub({ primaryId: 'COMPOSE_S2_MODE' })
+      const session = new DockerByokSession({
+        cwd: tmpHome,
+        composeFile: '/proj/docker-compose.yml',
+        _execFile,
+        _dockerBackend: backend,
+        // No _writeEnvFile override — use the REAL default writer, so the
+        // mode this test pins is the mode production code actually sets.
+        _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-mode-check' },
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+
+      assert.ok(session._composeEnvFile && session._composeEnvDir, 'env-file + owning dir created')
+      assert.equal(statSync(session._composeEnvFile).mode & 0o777, 0o600, 'env-file must be 0600')
+      assert.equal(statSync(session._composeEnvDir).mode & 0o777, 0o700, 'owning dir must be 0700')
+
+      await session.destroy()
+    },
+  )
 
   // #5081 — persist compose project IDs to disk so a daemon crash
   // between `compose up` and `compose down` leaves an on-disk record the

@@ -20,10 +20,12 @@
  * boot. That residual is recorded in `docs/false-safety-guards.md` rather than
  * papered over in a comment here.
  *
- * Both sweeps are safe and unconditional: only dirs whose owner pid is DEAD are
- * removed, so a live daemon's dirs — including ours — are kept. Lazily imported
- * so a boot that uses neither provider pays nothing, and every failure is
- * warned rather than thrown so a sweep can never affect startup.
+ * All four sweeps (claude-tui, claude-cli, codex app-server, docker-byok —
+ * #8047 added the latter two) are safe and unconditional: only dirs whose
+ * owner pid is DEAD are removed, so a live daemon's dirs — including ours —
+ * are kept. Lazily imported so a boot that uses none of the four providers
+ * pays nothing, and every failure is warned rather than thrown so a sweep can
+ * never affect startup.
  */
 
 /**

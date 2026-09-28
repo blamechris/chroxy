@@ -1,11 +1,12 @@
 import { describe, it, mock, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, utimesSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync, readFileSync, utimesSync, symlinkSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname, basename } from 'path'
 import { EventEmitter } from 'node:events'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { OWNER_PID_FILE } from '../src/utils/stale-session-dirs.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
 import { CodexSession, CODEX_DEFAULT_SANDBOX } from '../src/codex-session.js'
 import {
@@ -1501,6 +1502,51 @@ describe('CodexAppServerSession — attachments (#6609)', () => {
     await s.destroy()
     cleanup()
   })
+
+  // #8047 review C1 — the PR's headline security claim ("refuses a
+  // symlinked/foreign-uid base, same protection the tui/cli sites have")
+  // had no test at either new site. Swapping `ensureOwnedBaseDir(ATTACH_BASE)`
+  // for a plain `mkdirSync(base, {recursive:true})` left the whole suite
+  // green. Mirrors the pattern in claude-tui-session.test.js's "untrusted
+  // sink base dir" describe: plant the base as a symlink to a victim dir,
+  // and assert nothing was written THROUGH the link.
+  it(
+    'refuses a symlinked ATTACH_BASE — no attachment written through the link, turn degrades to text-only (#8047 review C1)',
+    { skip: SKIP_NO_SYMLINK },
+    () => {
+      const baseTmp = mkdtempSync(join(tmpdir(), 'chroxy-cas-basedir-'))
+      const origBase = Object.getOwnPropertyDescriptor(CodexAppServerSession, 'ATTACH_BASE')
+      try {
+        const victim = join(baseTmp, 'victim')
+        const squatted = join(baseTmp, 'squatted-attach-base')
+        mkdirSync(victim, { recursive: true })
+        symlinkSync(victim, squatted)
+        Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', { get: () => squatted, configurable: true })
+
+        const { s, cleanup } = mkSession()
+        try {
+          const input = s._buildTurnInput(
+            'look at this',
+            [{ type: 'image', mediaType: 'image/png', data: PNG_B64, name: 'shot.png' }],
+            'm-symlink',
+          )
+
+          assert.equal(s._attachDir, null, 'no attach dir adopted through the symlinked base')
+          assert.equal(input.filter((i) => i.type === 'localImage').length, 0,
+            'no localImage item — the attachment could not be materialized')
+          assert.deepEqual(input, [{ type: 'text', text: 'look at this' }], 'turn degrades to text-only')
+          // The whole point: nothing was written THROUGH the link.
+          assert.deepEqual(readdirSync(victim), [],
+            'a plain mkdirSync would have created the session dir (owner.pid + the attachment) inside the attacker-controlled target')
+        } finally {
+          cleanup()
+        }
+      } finally {
+        if (origBase) Object.defineProperty(CodexAppServerSession, 'ATTACH_BASE', origBase)
+        rmSync(baseTmp, { recursive: true, force: true })
+      }
+    },
+  )
 
   it('skips an absolute / parent-traversing file_ref path (defence-in-depth, #6614)', () => {
     const { s, cleanup } = mkSession()

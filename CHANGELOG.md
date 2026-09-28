@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`codex-app-server`'s attachment dir and `docker-byok`'s compose env-file —
-  which HOLDS `ANTHROPIC_API_KEY` — now leak no differently than the two
-  session-dir classes #5323/#7337 already fixed (#7373).** Both sites wrote
+  which HOLDS `ANTHROPIC_API_KEY` — now leak on a crash no more than the two
+  session-dir classes #5323/#7337 already fixed do (#7373).** Both sites wrote
   a per-session tmp artifact removed on `destroy()` but never on a crash:
   `codex-app-server-session.js`'s materialized-attachment dir was a bare
   `mkdtempSync(join(tmpdir(), 'chroxy-codex-attach-'))`, and
@@ -22,14 +22,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session's credential file mid-use. Both now follow the shared shape
   `sweepStaleOwnedDirs`/`ensureOwnedBaseDir` already established: a
   dedicated, owned base dir (`ATTACH_BASE` / `ENV_FILE_BASE`), an
-  `s`-prefixed per-session dir stamped with `owner.pid`, and the artifact
-  written inside it. `destroy()` removes the whole dir (was: just the file),
-  and a new boot sweep entry in `sweep-stale-provider-dirs.js`
-  (`CodexAppServerSession.sweepStaleAttachDirs` /
-  `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
+  `s-`-prefixed per-session dir stamped with `owner.pid`, and the artifact
+  written inside it. `destroy()` removes the whole dir — for `docker-byok`
+  this is new (was: just the file); `codex-app-server`'s `destroy()` already
+  removed its whole `mkdtemp` dir and is unchanged in that respect, only the
+  dir's location and ownership stamp moved. A new boot sweep entry in
+  `sweep-stale-provider-dirs.js` (`CodexAppServerSession.sweepStaleAttachDirs`
+  / `DockerByokSession.sweepStaleEnvDirs`) reaps a dead owner's leftovers —
   including the API-key file — while a live owner's are never touched. No
   second reaper implementation was added; both route through the existing
   `sweepStaleOwnedDirs`.
+
+  **Not covered:** credentials leaked by a crash *before* this fix shipped —
+  `$TMPDIR/chroxy-byok-*.env` (holds `ANTHROPIC_API_KEY`) and
+  `$TMPDIR/chroxy-codex-attach-*/` — are outside the new sweep's two bases and
+  are never swept automatically, because the old flat files carry no
+  `owner.pid` a sweep could use to tell a genuinely-dead pre-upgrade session
+  from one still running the old code. List and review them by hand before
+  removing anything:
+  `find "${TMPDIR:-/tmp}" -maxdepth 1 \( -name 'chroxy-byok-*.env' -o -name 'chroxy-codex-attach-*' \) -user "$(id -un)"`.
 
 - **`claude-cli` and `claude-tui` now re-verify their binary before every
   (re)spawn, and `codex` app-server's one spawn is pinned and re-verified
