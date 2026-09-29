@@ -310,12 +310,14 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
   let root
   let rgVersion = ''
 
-  before((t) => {
+  before(() => {
     if (!RG_PATH) {
       if (process.env.CI) {
         assert.fail('ripgrep is not installed on this CI runner, so the #7978 oracle did not run. Install it in the Server Tests job (see #7295).')
       }
-      t.skip('ripgrep is not installed on this machine — the #7978 oracle did NOT run (it is enforced in CI).')
+      // Leave `root` unset: every test below then skips itself with its own
+      // `t.skip()`. The hook cannot skip them (#8100): a before() hook's
+      // context has no .skip(), and calling it threw and cancelled all seven.
       return
     }
     root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-7978-oracle-')))
