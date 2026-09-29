@@ -450,6 +450,104 @@ describe('#6313 — dashboard terminal resync sends', () => {
   })
 })
 
+describe('#7029 — addMcpServer / removeMcpServer resolve immediately when the send fails', () => {
+  it('addMcpServer: calls back NOT_CONNECTED synchronously and leaves no pending op when the send throws', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const { _testMcpServerOpPendingSize } = await import('./message-handler')
+    const socket = closingSocket()
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    const cb = vi.fn()
+    useConnectionStore.getState().addMcpServer('filesystem', { command: 'npx', args: ['x'] }, 'user', cb)
+
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(cb).toHaveBeenCalledWith({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' })
+    expect(_testMcpServerOpPendingSize()).toBe(0)
+  })
+
+  it('removeMcpServer: calls back NOT_CONNECTED synchronously and leaves no pending op when the send throws', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const { _testMcpServerOpPendingSize } = await import('./message-handler')
+    const socket = closingSocket()
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    const cb = vi.fn()
+    useConnectionStore.getState().removeMcpServer('filesystem', 'user', cb)
+
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(cb).toHaveBeenCalledWith({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' })
+    expect(_testMcpServerOpPendingSize()).toBe(0)
+  })
+
+  it('the 15s timeout never fires a second callback after a send-failed addMcpServer (exactly-once)', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const { _testMcpServerOpPendingSize, MCP_SERVER_OP_TIMEOUT_MS } = await import('./message-handler')
+    const socket = closingSocket()
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    const cb = vi.fn()
+    useConnectionStore.getState().addMcpServer('filesystem', {}, 'user', cb)
+    expect(cb).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+    expect(cb).toHaveBeenCalledTimes(1)
+    expect(_testMcpServerOpPendingSize()).toBe(0)
+    vi.useRealTimers()
+  })
+
+  it('addMcpServer: a healthy send still arms the one-shot and does not call back synchronously', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const { _testMcpServerOpPendingSize, clearPendingMcpServerOps } = await import('./message-handler')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    const cb = vi.fn()
+    useConnectionStore.getState().addMcpServer('filesystem', { command: 'npx' }, 'user', cb)
+    expect(sent).toHaveLength(1)
+    expect(cb).not.toHaveBeenCalled()
+    expect(_testMcpServerOpPendingSize()).toBe(1)
+    clearPendingMcpServerOps()
+  })
+
+  it('removeMcpServer: a healthy send still arms the one-shot and does not call back synchronously', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const { _testMcpServerOpPendingSize, clearPendingMcpServerOps } = await import('./message-handler')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    const cb = vi.fn()
+    useConnectionStore.getState().removeMcpServer('filesystem', 'user', cb)
+    expect(sent).toHaveLength(1)
+    expect(cb).not.toHaveBeenCalled()
+    expect(_testMcpServerOpPendingSize()).toBe(1)
+    clearPendingMcpServerOps()
+  })
+})
+
 describe('#6321 — dashboard setPermissionMode does not leave a phantom mode on a closing socket', () => {
   // setPermissionMode self-heals on a server PERMISSION_MODE_NOT_APPLIED rejection,
   // but a failed send has no round-trip → no rejection. The optimistic flip +

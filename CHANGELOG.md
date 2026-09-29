@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Adding or removing an MCP server now resolves the submit spinner
+  immediately when the WebSocket send itself fails, instead of waiting out
+  the full 15-second timeout for something already known to have failed
+  (#7029).** `addMcpServer` / `removeMcpServer` armed a one-shot callback via
+  `armMcpServerOpCallback` and then called `wsSend` without checking its
+  return — so a send that failed the OPEN→CLOSING TOCTOU window (#6283,
+  `wsSend` returns `false` when `socket.send` throws) left the callback armed
+  and the request tracked as in-flight, even though the daemon never saw it.
+  Both call sites now go through a new shared helper, `sendMcpServerOp`
+  (message-handler.ts), which arms and sends in one step and, on a failed
+  send, resolves the callback with `{ ok: false, code: 'NOT_CONNECTED' }`
+  through the same exactly-once resolution path a broadcast or the timeout
+  would use — no dangling pending entry, and the 15s timer can never fire a
+  second callback afterwards.
+
 - **A binary-provenance first-sight decision (and a revoke) is refreshed from
   disk before it trusts a miss in its own memory, so a pin `chroxy resume`
   writes after the daemon started now stops the daemon's very first exec of a
