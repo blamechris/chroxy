@@ -697,6 +697,53 @@ describe('PathHashTrustLedger (#5580)', () => {
     })
   })
 
+  // #8098: a migrate that legitimately WINS the CAS had its
+  // `_migrateExpectations` entry deleted unconditionally inside the merge —
+  // which runs BEFORE the physical `saveJsonState()` write is known to
+  // succeed (see flush()). If that persist then fails, `_changedKeys` keeps
+  // `'migrate'` for the key (best-effort flushes always retain the pending
+  // op — same as every other op), so the NEXT flush re-enters this op's
+  // merge branch — but with the expectation already gone, `expect` reads
+  // back `undefined`, the CAS reads as "disk moved on", and the still-valid
+  // migration is silently reverted to the legacy record it migrated FROM.
+  // Fail-safe (nothing is bypassed — it reverts to a still-valid pin), but
+  // it breaks the documented "a failed flush retries" invariant for this one
+  // op and wastes a re-migration. The fix defers clearing the expectation
+  // until AFTER a successful persist, mirroring how `_changedKeys.clear()`
+  // is itself deferred (#8072 review S1, exercised above).
+  describe('a winning migrate survives a failed persist and completes on retry (#8098)', () => {
+    it('a winning migrate whose first persist fails is completed by the NEXT flush — not reverted to the legacy record', () => {
+      const l = new FlakyLedger({ filePath: ledgerPath })
+      l.approve('/x/p', sha('legacy')) // flushed cleanly
+
+      l._failNextSerialize = true
+      l.approve('/x/p', sha('tree'), { expect: { sha256: sha('legacy') } }) // CAS wins, but this flush's write throws
+      assert.equal(l.isTrusted('/x/p', sha('tree')), true,
+        'the win self-applies to memory regardless of the write failure')
+
+      let onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.equal(onDisk['/x/p'].sha256, sha('legacy'), 'sanity: the failed write never reached disk')
+
+      // Force a retry via an unrelated approve — best-effort flushes retain
+      // pending ops across a failure, so this must complete the migrate too.
+      l.approve('/x/q', sha('q'))
+
+      onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.equal(onDisk['/x/p'].sha256, sha('tree'),
+        'the retry must persist the still-valid migration, not revert it to the legacy record')
+      assert.ok(onDisk['/x/q'], 'the unrelated later write still lands')
+    })
+
+    it('clears the migrate expectation once the persist actually succeeds — no leaked state', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/p', sha('legacy'))
+      l.approve('/x/p', sha('tree'), { expect: { sha256: sha('legacy') } }) // wins, and this flush succeeds outright
+
+      assert.equal(l._migrateExpectations.size, 0,
+        'a migrate expectation must not outlive the successful persist that resolved it')
+    })
+  })
+
   // #8072 review round 2, R2-C1: when the merge SKIPS a 'tofu'/'touch' write
   // because disk already resolved that key, the tracked op must be FORGOTTEN
   // — not merely left in place for a later flush to replay. Without this, a

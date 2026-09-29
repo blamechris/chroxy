@@ -285,6 +285,11 @@ export function cancelEvaluatorRequest(requestId: string): void {
   }
 }
 
+/** @internal test seam. */
+export function _testEvaluatorPendingSize(): number {
+  return _evaluatorPending.size;
+}
+
 /**
  * Reject every in-flight evaluator request with the given reason and clear
  * their timeouts. Called from the connection store when the WebSocket closes

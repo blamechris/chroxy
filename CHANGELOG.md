@@ -63,6 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule (previously unstyled) so the badge doesn't get squeezed by the row's
   flex layout; it is not interactive, so the 44px tap-target rule doesn't
   apply.
+- **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
+  longer reverts itself when its first persist fails (#8098).**
+  `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's
+  `_migrateExpectations` entry unconditionally, inside the merge — which
+  runs BEFORE `flush()`'s `saveJsonState()` write is known to succeed.
+  Flushes are best-effort (`throwOnFlushError: false`), so a failed persist
+  keeps `_changedKeys` set for a retry, same as every other op — but with
+  the expectation already gone, the retry's CAS check read `expect` back as
+  `undefined`, treated the still-valid migration as a lost race, and
+  silently reverted it to the legacy record it migrated from (fail-safe —
+  nothing was bypassed — but it broke the documented "a failed flush
+  retries" invariant for this one op and wasted a re-migration on the next
+  verification). The expectation is now cleared only after `flush()`'s
+  write actually succeeds, mirroring how `_changedKeys.clear()` is itself
+  deferred; a losing CAS still drops its expectation immediately, unchanged.
 - **A worktree-isolated session's tab now shows the repo name instead of the
   opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
   — the last path segment — but a worktree session's cwd is
@@ -73,6 +88,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior) for plain sessions or an older server. No protocol/server change
   was needed — only the dashboard's SessionBar. The full worktree path is
   still available via `title`/`aria-label` on hover.
+- **`setModel`, `setThinkingLevel`, `grantCommunitySkillTrust` and
+  `evaluateDraft` no longer leave a phantom optimistic value, a permanently
+  stuck SkillsPanel row, or a promise waiting out a misleading timeout when
+  the WebSocket send itself fails (#8086, sibling of #7029/#6321).** All four
+  armed a one-shot correlation (a pending revert, a pending trust grant, or a
+  promise + timeout) and then called `wsSend` without checking its boolean
+  return — so a send that failed the OPEN→CLOSING TOCTOU (#6283, `wsSend`
+  returns `false` when `socket.send` throws) left the armed state dangling:
+  `setModel`/`setThinkingLevel` flipped the dropdown to a value the session
+  never switched to with no round-trip coming to revert it;
+  `grantCommunitySkillTrust`'s pending-trust map has no timeout backstop at
+  all, so a failed send left the row "approving" permanently; `evaluateDraft`
+  waited out the full 60s timeout before rejecting with a misleading "timed
+  out" message for something already known to have failed synchronously. All
+  four now check-then-arm — `wsSend` is attempted first, and the pending
+  registration / optimistic mutation / timeout only run on a successful send —
+  mirroring `setPermissionMode` (#6321) and `setNotificationPrefsCategory`
+  (#6310) rather than a new shared helper, since the fix is a two-line
+  reordering already established in this file, not new logic to factor out.
+  A send that throws outright (a serialization bug, not the TOCTOU) is safe
+  by the same reordering: nothing is armed yet when it happens, so nothing can
+  dangle. The same sweep found `summarizeSession` in the same file arming its
+  pending request before an unchecked `wsSend` too (identical shape to
+  `evaluateDraft`) and fixed it the same way.
 - **A BYOK Bash or Grep tool call no longer intermittently returns empty output.**
   `executeBash` returned as soon as the child process exited, but Node can report
   the exit before the stdout/stderr pipes have delivered their data, so a command

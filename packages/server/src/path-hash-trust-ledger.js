@@ -178,6 +178,15 @@ export class PathHashTrustLedger {
     // separate map (rather than folding into `_changedKeys`'s value) so
     // `_changedKeys`'s existing string-valued shape, and every other op's
     // handling of it, is untouched.
+    //
+    // #8098: a WINNING CAS's entry is deleted only once `flush()`'s own
+    // write has actually succeeded, not inside the merge itself (the merge
+    // runs BEFORE the write is attempted) — mirroring how `_changedKeys` is
+    // itself only cleared post-write. Deleting it eagerly meant a failed
+    // persist's retry found no `expect` to compare against and silently
+    // reverted the still-valid migration. A LOSING CAS still deletes its
+    // entry immediately in the merge (see the `'migrate'` branch below) —
+    // that decision doesn't depend on this flush's write succeeding.
     this._migrateExpectations = new Map()
   }
 
@@ -711,8 +720,18 @@ export class PathHashTrustLedger {
           this._migrateExpectations.delete(key)
           continue
         }
+        // #8098: do NOT delete `_migrateExpectations` here. This merge runs
+        // BEFORE `flush()` attempts the physical write (see `flush()`) — if
+        // that write then fails, `_changedKeys` keeps `'migrate'` for this
+        // key so the next flush retries it, but deleting the expectation
+        // now would leave that retry with no `expect` to compare against:
+        // `expect` reads back `undefined`, `matches` above evaluates false,
+        // and the still-valid migration would be silently reverted to the
+        // legacy record it migrated FROM. Deferred to `flush()`'s own
+        // success branch instead — exactly like `_changedKeys.clear()`
+        // itself is deferred — so a retry can still re-derive this same
+        // win against a fresh disk read.
         merged[key] = this._records[key]
-        this._migrateExpectations.delete(key)
         continue
       }
       // 'set': an explicit operator decision — always wins.
@@ -889,6 +908,17 @@ export class PathHashTrustLedger {
       saveJsonState(this._filePath, this._serialize(), { fsync: true, tmpSuffix })
       this._dirty = false
       this._changedKeys.clear()
+      // #8098: a winning 'migrate' keeps its `_migrateExpectations` entry
+      // through the merge (see the 'migrate' branch in `_mergeLoaded()`) so
+      // a failed persist's retry can still re-derive the same CAS result
+      // against a fresh disk read. Only NOW, once the write has actually
+      // landed, is it safe to drop — `_records` (just serialised to disk)
+      // already holds every key's resolved value, including any winning
+      // migrate, so there is nothing left for a retry to protect. A losing
+      // CAS already deleted its own entry immediately inside the merge, so
+      // this is a no-op for it; only a still-pending winning migrate ever
+      // has real work left here.
+      this._migrateExpectations.clear()
       this._onFlushCommitted()
     } catch (err) {
       this._log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
