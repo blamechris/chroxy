@@ -644,20 +644,56 @@ describe('App', () => {
       expect(switchSession).toHaveBeenCalledWith('s2')
     })
 
-    it('Shift+Tab toggles plan mode when focus is OUTSIDE a text input', () => {
+    // #8084 — Shift+Tab used to be the default binding for
+    // `session.togglePlanMode`, which broke reverse focus navigation for
+    // every focusable control outside a text input (WCAG 2.1.1 / 2.4.3) and
+    // silently flipped plan mode. Shift+Tab is no longer bound to anything:
+    // it must reach the browser's native focus traversal untouched.
+    //
+    // jsdom does not implement native focus traversal (there is no "move
+    // focus to the previous focusable element" to assert on), so the honest
+    // test here is the one the issue calls for: dispatch Shift+Tab on a
+    // focused NON-text-input control and assert (a) the plan toggle was not
+    // invoked and (b) the event was not defaultPrevented — i.e. the
+    // dashboard got out of the browser's way. Whether focus actually lands
+    // on the previous control needs a live check in a real browser (see the
+    // PR's "Needs live check" note).
+    it('Shift+Tab does NOT toggle plan mode and is NOT prevented on a focused non-text-input control (#8084)', () => {
       const setPermissionMode = vi.fn()
       stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
       render(<App />)
-      fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
-      expect(setPermissionMode).toHaveBeenCalledWith('plan')
+      const button = screen.getByTestId('header-overflow-trigger')
+      button.focus()
+      const notPrevented = fireEvent.keyDown(button, { key: 'Tab', shiftKey: true })
+      // fireEvent's return value is `true` when preventDefault was NOT called.
+      expect(notPrevented, 'Shift+Tab must not be defaultPrevented outside a text input').toBe(true)
+      expect(setPermissionMode).not.toHaveBeenCalled()
     })
 
-    it('Shift+Tab does NOT toggle plan mode while focus is in the textarea (allows native reverse-tab)', () => {
+    it('Shift+Tab does NOT toggle plan mode while focus is in the textarea either (native reverse-tab still applies)', () => {
       const setPermissionMode = vi.fn()
       stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
       render(<App />)
       const textarea = screen.getByRole('textbox', { name: /message input/i })
-      fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+      const notPrevented = fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
+      expect(notPrevented).toBe(true)
+      expect(setPermissionMode).not.toHaveBeenCalled()
+    })
+
+    it('Shift+Alt+P (the new default binding) toggles plan mode when focus is outside a text input', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'p', altKey: true, shiftKey: true })
+      expect(setPermissionMode).toHaveBeenCalledWith('plan')
+    })
+
+    it('Shift+Alt+P does NOT toggle plan mode while focus is in the textarea (disabledInTextInput)', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = { connectionPhase: 'connected', sessions: oneSession, activeSessionId: 's1', setPermissionMode, permissionMode: 'approve' }
+      render(<App />)
+      const textarea = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.keyDown(textarea, { key: 'p', altKey: true, shiftKey: true })
       expect(setPermissionMode).not.toHaveBeenCalled()
     })
 
@@ -716,6 +752,122 @@ describe('App', () => {
         expect(screen.queryByTestId('confirm-dialog')).toBeNull()
         expect(destroySession).toHaveBeenCalledWith('s2')
       })
+    })
+  })
+
+  // #8084 — the permission-mode dropdown and the Shift+Alt+P toggle shortcut
+  // must both honour the active provider's `planMode` capability. claude-tui
+  // declares `planMode: false` (claude-tui-session.js); offering "Plan" there
+  // (or letting the shortcut enter it) promises a mode the provider cannot
+  // honour. Missing/unset capability is treated as capable — the same
+  // `!== false` convention `dropdownFlags` already uses for
+  // modelSwitch/permissionModeSwitch/thinkingLevel.
+  describe('permission-mode dropdown + toggle honour the planMode capability (#8084)', () => {
+    const permissionModes = [
+      { id: 'approve', label: 'Approve' },
+      { id: 'plan', label: 'Plan' },
+    ]
+    const sessionWithProvider = (provider: string) => [{
+      sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli' as const, provider,
+      hasTerminal: true, model: null, permissionMode: null, isBusy: false,
+      createdAt: Date.now(), conversationId: null,
+    }]
+
+    it('hides the Plan option for a claude-tui session (planMode: false)', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-tui'),
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'approve',
+      }
+      const { container } = render(<App />)
+      const select = container.querySelector('select[data-kind="permission"]')
+      expect(select, 'permission-mode select must render').toBeTruthy()
+      expect(select!.querySelector('option[value="plan"]')).toBeNull()
+      expect(select!.querySelector('option[value="approve"]')).toBeTruthy()
+    })
+
+    it('keeps the Plan option for a provider that supports planMode (positive control)', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-sdk'),
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'approve',
+      }
+      const { container } = render(<App />)
+      const select = container.querySelector('select[data-kind="permission"]')
+      expect(select!.querySelector('option[value="plan"]')).toBeTruthy()
+    })
+
+    it('keeps the Plan option when the provider is unknown / omits the capability (missing = capable)', () => {
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-sdk'),
+        activeSessionId: 's1',
+        availableProviders: [],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'approve',
+      }
+      const { container } = render(<App />)
+      const select = container.querySelector('select[data-kind="permission"]')
+      expect(select!.querySelector('option[value="plan"]')).toBeTruthy()
+    })
+
+    it('Shift+Alt+P is a no-op on a claude-tui session (planMode: false)', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-tui'),
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'approve',
+        setPermissionMode,
+      }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'p', altKey: true, shiftKey: true })
+      expect(setPermissionMode).not.toHaveBeenCalled()
+    })
+
+    it('Shift+Alt+P still toggles normally on a session whose provider supports planMode (positive control)', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-sdk'),
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'approve',
+        setPermissionMode,
+      }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'p', altKey: true, shiftKey: true })
+      expect(setPermissionMode).toHaveBeenCalledWith('plan')
+    })
+
+    // Sensible degrade path: a session can already BE in plan mode on a
+    // planMode:false provider (e.g. the capability flips mid-session, or a
+    // resumed session carries a stale mode). The toggle must still let the
+    // user leave plan mode — only ENTERING it is blocked.
+    it('still allows leaving plan mode on a claude-tui session that is somehow already in plan', () => {
+      const setPermissionMode = vi.fn()
+      stateOverrides = {
+        connectionPhase: 'connected',
+        sessions: sessionWithProvider('claude-tui'),
+        activeSessionId: 's1',
+        availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
+        availablePermissionModes: permissionModes,
+        permissionMode: 'plan',
+        previousPermissionMode: 'approve',
+        setPermissionMode,
+      }
+      render(<App />)
+      fireEvent.keyDown(window, { key: 'p', altKey: true, shiftKey: true })
+      expect(setPermissionMode).toHaveBeenCalledWith('approve')
     })
   })
 

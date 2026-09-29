@@ -517,6 +517,14 @@ export function App() {
       // active provider permanently lacks mid-session model switching (TUI).
       readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
+      // #8084: the active provider's `planMode` capability (claude-tui reports
+      // `false` — claude-tui-session.js). Gates BOTH the "Plan" option in the
+      // permission-mode dropdown (filteredPermissionModes below) and the
+      // Shift+Alt+P toggle shortcut (passed to useShortcutDispatch as
+      // `planModeSupported`), so a provider that says it cannot honour plan
+      // mode never offers it. Missing/unset capability is treated as capable,
+      // same `!== false` convention as showModelPicker/showPermissionMode above.
+      showPlanMode: caps?.planMode !== false,
       // #7784: the capability says the provider HAS a reasoning control; the
       // resolved roster says whether this model has advertised anything for it
       // to offer. Both are required, because the dropdown's own empty-list
@@ -534,6 +542,19 @@ export function App() {
       highlightThinkingKeywords: !!caps?.thinkingKeywords,
     }
   }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels])
+
+  // #8084 — hide the "Plan" entry from the permission-mode dropdown when the
+  // active provider's capability says it cannot honour plan mode
+  // (`dropdownFlags.showPlanMode`). Exception: if the session is SOMEHOW
+  // already in plan mode (a capability flip mid-session, or a resumed
+  // session carrying a stale mode), keep the entry so the <select> doesn't
+  // silently show a value that isn't among its own <option>s — the same
+  // trap `thinkingLevelChoices` guards against above. It disappears again
+  // as soon as the user picks a different mode.
+  const filteredPermissionModes = useMemo(() => {
+    if (dropdownFlags.showPlanMode || permissionMode === 'plan') return availablePermissionModes
+    return availablePermissionModes.filter(m => m.id !== 'plan')
+  }, [availablePermissionModes, dropdownFlags.showPlanMode, permissionMode])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -1305,6 +1326,10 @@ export function App() {
     handleCopyTranscript,
     sendInterrupt,
     setPermissionMode,
+    // #8084 — the Shift+Alt+P toggle is a no-op (can't ENTER plan mode) when
+    // the active provider's capability says it cannot honour plan mode.
+    // Leaving plan mode still always works (see useShortcutDispatch.ts).
+    planModeSupported: dropdownFlags.showPlanMode,
     appendImageAttachments,
     openFilePalette: () => { if (ideEnabled) setFileOpenPaletteOpen(true) },
     openSymbolSearch: () => { if (ideEnabled) setSymbolSearchOpen(true) },
@@ -2201,6 +2226,10 @@ export function App() {
     openSettings,
     setSidebarOpen,
     setPermissionMode,
+    // #8084 / #8087 review (Critical #2) — same flag passed to
+    // useShortcutDispatch above, so the native desktop menu's "Toggle Plan
+    // Mode" item honours the active provider's planMode capability too.
+    planModeSupported: dropdownFlags.showPlanMode,
   })
 
   // #5786 — approving a permission/plan or answering an AskUserQuestion is, like
@@ -2554,7 +2583,7 @@ export function App() {
         defaultModelId={defaultModelId}
         onModelChange={setModel}
         readOnlyModel={dropdownFlags.readOnlyModel}
-        availablePermissionModes={availablePermissionModes}
+        availablePermissionModes={filteredPermissionModes}
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
         showPermissionMode={dropdownFlags.showPermissionMode}

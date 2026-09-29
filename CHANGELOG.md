@@ -135,6 +135,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator answers the first prompt, and the failure surfaces one step later
   as "Login failed."
 
+- **Shift+Tab now always moves focus backward everywhere, and the plan-mode
+  toggle moved to its own binding — Shift+Alt+P — which honors the active
+  provider's `planMode` capability (#8084).** `session.togglePlanMode` was
+  globally bound to `shift+tab` (`packages/dashboard/src/shortcuts/defaults.ts`),
+  so every focusable control outside a text input — buttons, tabs, tool cards,
+  the #8051 focusable conversation scroller — could not reverse-tab; the
+  shortcut also silently flipped plan mode along the way (WCAG 2.1.1 / 2.4.3).
+  The default binding moves to Shift+Alt+P, matching the desktop app's own
+  "Toggle Plan Mode" menu accelerator (`Shift+Alt+P` in `src-tauri/src/lib.rs`),
+  which had already picked that chord because macOS menus can't represent
+  Shift+Tab. It's listed in the `?` cheat sheet and stays rebindable in
+  Settings like any other registry entry; a user who never rebound the
+  shortcut gets the new default automatically, and a user who explicitly
+  rebound it (including to Shift+Tab itself) keeps their own choice —
+  overrides are stored per shortcut id, not per combo, so there is no
+  migration to perform. `CreateSessionModal`'s cwd-suggestions Tab-completion
+  handler also intercepted Shift+Tab (it was missing the `!e.shiftKey` guard
+  the composer's slash-command and `@`-file pickers already carry from
+  #7370) — fixed to match. Separately, `claude-tui` declares `planMode: false`
+  (`claude-tui-session.js`), but the permission-mode dropdown still offered
+  "Plan" and the shortcut still toggled into it regardless: the dropdown now
+  drops the "Plan" option and the create-time permission-mode picker disables
+  it (same treatment as the existing Auto/`autoPermissionMode` gating) for a
+  provider that reports the capability as `false`, and the shortcut becomes a
+  no-op for ENTERING plan mode on such a session — leaving plan mode (if a
+  session is somehow already in it) still always works.
+
 - **`chroxy start`'s dependency checks now run the same verified binaries a
   real session would use, instead of unchecked, no-gate `--version` probes
   (#8041).** `doctor.js`'s `runDoctorChecks()` — which runs BEFORE any session

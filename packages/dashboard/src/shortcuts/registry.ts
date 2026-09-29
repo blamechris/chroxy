@@ -247,11 +247,60 @@ interface KeyEventLike {
   shiftKey: boolean
   altKey: boolean
   /**
+   * Optional physical-key code (`KeyboardEvent.code`, e.g. "KeyP",
+   * "Digit5"). Layout/composition-independent, unlike `key` — see
+   * `resolveEffectiveKey` below. Optional so callers that don't have a
+   * real `KeyboardEvent` (or a `code`) still work; `matchEvent` falls back
+   * to `key` alone in that case.
+   */
+  code?: string
+  /**
    * Optional event target — when provided, `matchEvent` respects each
    * shortcut's `disabledInTextInput` flag. KeyboardEvent already
    * carries `target` so the standard call site needs no extra plumbing.
    */
   target?: EventTarget | null
+}
+
+const ALT_CODE_LETTER = /^Key([A-Z])$/
+const ALT_CODE_DIGIT = /^Digit([0-9])$/
+
+/**
+ * Resolve the "effective" key for matching or capturing a shortcut combo
+ * (#8089 / #8087 review).
+ *
+ * On macOS, holding Option (Alt) together with a letter or digit key makes
+ * the browser report an OS-COMPOSED glyph in `KeyboardEvent.key` — Option+P
+ * is `'π'`, Option+Shift+P is `'∏'`, Option+5 is `'∞'` — never the plain
+ * letter/digit a `defaultBinding` like `alt+p` or `shift+alt+p` is written
+ * against. `KeyboardEvent.code` ("KeyP", "Digit5") names the physical key
+ * regardless of layout or modifier composition, so when Alt is held and
+ * `code` matches a plain letter or digit key, the key is derived from
+ * `code` instead. Every other case — arrows, named keys (Enter/Tab/Escape),
+ * and any chord that doesn't hold Alt — returns `event.key` unchanged, so
+ * non-QWERTY layouts and every pre-existing (non-Alt-letter) shortcut are
+ * unaffected. `alt+arrowup`/`alt+arrowdown` (the two pre-existing Alt
+ * defaults) never hit this path: macOS does not remap arrow keys, and
+ * `ArrowUp`/`ArrowDown` don't match either regex.
+ *
+ * Shared by `matchEvent` below and `KeybindCapture.tsx`'s rebind capture —
+ * a single function so a captured combo and a later dispatched keydown can
+ * never disagree about what "the same combo" means on this platform.
+ */
+export function resolveEffectiveKey(event: { key: string; code?: string; altKey: boolean; ctrlKey: boolean }): string {
+  // `!ctrlKey`: on Windows/Linux, AltGr reports ctrlKey AND altKey together
+  // while TYPING a real character (AltGr+Q is '@' on a German layout). Deriving
+  // the key from `code` there would turn typed text into a `ctrl+alt+<letter>`
+  // shortcut match; macOS Option composition (the case this exists for) never
+  // sets ctrlKey. `ctrlKey` is required, not optional, so a new caller cannot
+  // silently skip the guard.
+  if (event.altKey && !event.ctrlKey && event.code) {
+    const letter = ALT_CODE_LETTER.exec(event.code)
+    if (letter) return letter[1]!.toLowerCase()
+    const digit = ALT_CODE_DIGIT.exec(event.code)
+    if (digit) return digit[1]!
+  }
+  return event.key
 }
 
 function isTextInputTarget(target: EventTarget | null | undefined): boolean {
@@ -440,7 +489,10 @@ export function createShortcutRegistry(defs: readonly ShortcutDef[]): ShortcutRe
   }
 
   function matchEvent(event: KeyEventLike, scope: ShortcutScope): string | null {
-    const eventKey = (event.key || '').toLowerCase()
+    // #8089 / #8087 review — derive from `code` when Alt is held and `code`
+    // names a plain letter/digit key, so an OS-composed `event.key` (macOS
+    // Option+letter) doesn't make an Alt-letter binding unmatchable.
+    const eventKey = (resolveEffectiveKey({ key: event.key || '', code: event.code, altKey: event.altKey, ctrlKey: event.ctrlKey }) || '').toLowerCase()
     const eventMeta = event.metaKey || event.ctrlKey
     const inTextInput = isTextInputTarget(event.target)
     for (const def of definitions) {

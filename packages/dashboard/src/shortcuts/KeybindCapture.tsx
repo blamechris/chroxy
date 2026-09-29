@@ -11,7 +11,7 @@
  *     etc.) don't double-fire during capture.
  */
 import { useEffect, useRef } from 'react'
-import { normalizeBinding } from './registry'
+import { normalizeBinding, resolveEffectiveKey } from './registry'
 
 export interface KeybindCaptureProps {
   onCapture: (binding: string) => void
@@ -38,7 +38,11 @@ export function KeybindCapture({ onCapture, onCancel }: KeybindCaptureProps) {
         onCancel()
         return
       }
-      const keyLower = (e.key || '').toLowerCase()
+      // #8089 / #8087 review — same normalisation `matchEvent` uses, so a
+      // captured combo and a later dispatched keydown can never disagree.
+      // On macOS, Option+P reports `key: 'π'`; deriving from `code` when
+      // Alt is held records `alt+p` instead, portable across machines.
+      const keyLower = (resolveEffectiveKey({ key: e.key || '', code: e.code, altKey: e.altKey, ctrlKey: e.ctrlKey }) || '').toLowerCase()
       if (MODIFIER_KEYS.has(keyLower)) return
       const parts: string[] = []
       if (e.metaKey || e.ctrlKey) parts.push('cmd')

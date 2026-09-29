@@ -138,6 +138,47 @@ describe('CreateSessionModal combobox keyboard (#1477)', () => {
     expect(nameInput.value).toBe('api')
   })
 
+  // #7370-style affordance (Tab completes without sending/navigating) already
+  // existed here pre-#8084 but had no dedicated test — added alongside the
+  // Shift+Tab regression test below so the pair pins both directions.
+  it('Tab completes the highlighted suggestion into CWD', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    fireEvent.keyDown(cwdInput, { key: 'Tab' })
+    expect(cwdInput.value).toBe('/home/user/projects/api/')
+  })
+
+  // #8084 — `handleCwdKeyDown`'s Tab-completion branch did not exclude
+  // Shift+Tab, so reverse-tabbing OUT of the cwd field while the suggestions
+  // dropdown was open completed the highlighted suggestion instead of moving
+  // focus backward — the same class of bug the issue's Shift+Tab fix
+  // addresses globally. Mirrors InputBar.tsx's slash-command/file pickers,
+  // which already exclude `e.shiftKey` from their identical Tab-complete
+  // branches (#7370).
+  it('Shift+Tab does NOT complete the suggestion — it is left for reverse focus navigation (#8084)', () => {
+    renderModal({
+      knownCwds: ['/home/user/projects/api', '/home/user/projects/web'],
+    })
+    const cwdInput = screen.getByLabelText('Working directory') as HTMLInputElement
+    // `fireEvent.focus` (not a real `.focus()` call) matches every other test
+    // in this file — it's what reliably drives `showSuggestions` true here.
+    // Note this means `document.activeElement` is NOT actually the cwd input
+    // in this environment, so Modal.tsx's OWN (separate, legitimate) focus
+    // trap also runs its edge-of-modal wraparound check on every keydown here
+    // and would itself call preventDefault — asserting on
+    // `event.defaultPrevented` would therefore conflate two different
+    // preventDefault callers. The unconfounded signal is the completed
+    // VALUE: only `handleCwdKeyDown`'s own branch calls `selectSuggestion`.
+    fireEvent.focus(cwdInput)
+    fireEvent.keyDown(cwdInput, { key: 'ArrowDown' })
+    fireEvent.keyDown(cwdInput, { key: 'Tab', shiftKey: true })
+    expect(cwdInput.value, 'Shift+Tab must not complete the suggestion into the cwd field').toBe('')
+  })
+
   it('Escape closes suggestion list', () => {
     renderModal({
       knownCwds: ['/home/user/projects/api'],
