@@ -9,6 +9,7 @@ import {
   sha256FileCached,
   _resetProvenanceCacheForTest,
 } from '../src/utils/verify-provenance.js'
+import { buildPackageTreeManifest } from '../src/utils/binary-package-manifest.js'
 import { BinaryProvenanceLedger, _normalizeKey } from '../src/binary-provenance-trust.js'
 
 /**
@@ -62,6 +63,7 @@ function buildCodexFixture(root) {
   mkdirSync(join(pkgRoot, 'bin'), { recursive: true })
   writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({
     name: '@openai/codex',
+    bin: { codex: 'bin/codex.js' },
     optionalDependencies: { '@openai/codex-native': '1.0.0' },
   }))
   const entry = join(pkgRoot, 'bin', 'codex.js')
@@ -89,7 +91,7 @@ function buildCodexFixture(root) {
 function buildGeminiFixture(root) {
   const pkgRoot = join(root, 'libexec', 'lib', 'node_modules', '@google', 'gemini-cli')
   mkdirSync(join(pkgRoot, 'bundle'), { recursive: true })
-  writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: '@google/gemini-cli' }))
+  writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: '@google/gemini-cli', bin: { gemini: 'bundle/gemini.js' } }))
   const entry = join(pkgRoot, 'bundle', 'gemini.js')
   writeFileSync(entry, '#!/usr/bin/env node\nimport "./chunk-a.js"\n')
   writeFileSync(join(pkgRoot, 'bundle', 'chunk-a.js'), 'export const a = 1\n')
@@ -176,6 +178,7 @@ describe('verifyProvenance — package tree (#8040): hoisted optional dependency
     mkdirSync(join(pkgRoot, 'bin'), { recursive: true })
     writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({
       name: 'fixture-codex',
+      bin: { codex: 'bin/codex.js' },
       optionalDependencies: { 'fixture-codex-native': '1.0.0' },
     }))
     const entry = join(pkgRoot, 'bin', 'codex.js')
@@ -205,13 +208,83 @@ describe('verifyProvenance — package tree (#8040): hoisted optional dependency
   })
 })
 
+// ── #8093 review C1: a hoisted optional dep reached through a BIN SYMLINK ──
+// (bun global, yarn-classic global) — the symlink lives OUTSIDE any
+// node_modules, so resolving the hoisted dependency from the symlink's own
+// (unresolved) path searches the wrong directory entirely and misses a
+// sibling that IS installed right next to the real package.
+
+describe('verifyProvenance — package tree (#8040): C1 — hoisted dep reached through a bin symlink (bun/yarn-classic global layout)', () => {
+  /**
+   * Mirrors bun global (`~/.bun/bin/codex` -> `../install/global/node_modules/
+   * @openai/codex/bin/codex.js`) and yarn-classic global: a FLAT
+   * `node_modules` holding the launcher package AND its hoisted platform
+   * package as SIBLINGS, reached through a bin symlink that lives OUTSIDE
+   * that `node_modules` directory entirely.
+   */
+  function buildFlatGlobalFixture(root) {
+    const installNodeModules = join(root, 'install', 'global', 'node_modules')
+    const pkgRoot = join(installNodeModules, 'fixture-codex')
+    mkdirSync(join(pkgRoot, 'bin'), { recursive: true })
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({
+      name: 'fixture-codex',
+      bin: { codex: 'bin/codex.js' },
+      optionalDependencies: { 'fixture-codex-native': '1.0.0' },
+    }))
+    const realEntry = join(pkgRoot, 'bin', 'codex.js')
+    writeFileSync(realEntry, '#!/usr/bin/env node\n')
+
+    // The hoisted sibling — installed directly under the SAME node_modules
+    // directory as the launcher package, NOT nested inside it.
+    const nativeRoot = join(installNodeModules, 'fixture-codex-native')
+    mkdirSync(join(nativeRoot, 'vendor'), { recursive: true })
+    writeFileSync(join(nativeRoot, 'package.json'), JSON.stringify({ name: 'fixture-codex-native' }))
+    const nativeBinary = join(nativeRoot, 'vendor', 'codex')
+    writeFileSync(nativeBinary, 'flat-global native binary v1')
+
+    // The bin symlink lives OUTSIDE `install/global/node_modules` entirely —
+    // `root/bin/codex`, exactly like `~/.bun/bin/codex`.
+    const binDir = join(root, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const symlinkEntry = join(binDir, 'codex')
+    symlinkSync(join('..', 'install', 'global', 'node_modules', 'fixture-codex', 'bin', 'codex.js'), symlinkEntry)
+
+    return { resolvedPath: symlinkEntry, realEntry, nativeBinary }
+  }
+
+  it('block mode: swapping the hoisted native binary is refused (repro for #8093 review C1)', () => {
+    const { resolvedPath, nativeBinary } = buildFlatGlobalFixture(dir)
+    const ledger = makeLedger()
+    const pinned = verifyProvenance({ resolvedPath, mode: 'block', ledger })
+    assert.equal(pinned.status, PROVENANCE_STATUS.PINNED)
+
+    writeFileSync(nativeBinary, 'SWAPPED flat-global native binary')
+
+    const after = verifyProvenance({ resolvedPath, mode: 'block', ledger })
+    assert.equal(after.status, PROVENANCE_STATUS.HASH_MISMATCH,
+      'a hoisted dep reached through a bin symlink outside any node_modules must still be covered — this is the C1 repro: ' +
+      'resolving optionalDependencies from the UNRESOLVED symlink path searches the wrong directory and misses this sibling entirely')
+    assert.equal(after.blocked, true)
+  })
+
+  it('resolving the same layout from the REAL (already-resolved) .js path also catches the swap (control)', () => {
+    const { realEntry, nativeBinary } = buildFlatGlobalFixture(dir)
+    const ledger = makeLedger()
+    verifyProvenance({ resolvedPath: realEntry, mode: 'block', ledger })
+    writeFileSync(nativeBinary, 'SWAPPED')
+    const after = verifyProvenance({ resolvedPath: realEntry, mode: 'block', ledger })
+    assert.equal(after.status, PROVENANCE_STATUS.HASH_MISMATCH)
+    assert.equal(after.blocked, true)
+  })
+})
+
 // ── Symlinks ─────────────────────────────────────────────────────────────
 
 describe('verifyProvenance — package tree (#8040): symlinks', () => {
   it('retargeting a symlink INSIDE the tree is refused', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'entry.js' }))
     const entry = join(pkgRoot, 'entry.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     writeFileSync(join(pkgRoot, 'target-a'), 'a')
@@ -233,7 +306,7 @@ describe('verifyProvenance — package tree (#8040): symlinks', () => {
   it('a symlink pointing OUTSIDE the root is never followed — changing its target does not affect the verdict', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'entry.js' }))
     const entry = join(pkgRoot, 'entry.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     const outside = join(dir, 'outside.txt')
@@ -249,6 +322,44 @@ describe('verifyProvenance — package tree (#8040): symlinks', () => {
     const after = verifyProvenance({ resolvedPath: entry, mode: 'block', ledger })
     assert.equal(after.status, PROVENANCE_STATUS.OK)
     assert.equal(after.blocked, false, 'a symlink target OUTSIDE the root must never be read/followed')
+  })
+})
+
+// ── #8093 review C4: the manifest must bind WHICH file is the entry ────────
+
+describe('verifyProvenance — package tree (#8040): C4 — entry retarget within the same tree', () => {
+  it('retargeting the resolved bin symlink at a DIFFERENT script already inside the same tree is refused', () => {
+    const pkgRoot = join(dir, 'pkg')
+    mkdirSync(join(pkgRoot, 'bin'), { recursive: true })
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({
+      name: 'fixture-pkg',
+      bin: { fixture: 'bin/main.js', alt: 'bin/alt.js' },
+    }))
+    writeFileSync(join(pkgRoot, 'bin', 'main.js'), '#!/usr/bin/env node\nconsole.log("main")\n')
+    writeFileSync(join(pkgRoot, 'bin', 'alt.js'), '#!/usr/bin/env node\nconsole.log("alt")\n')
+
+    // The RESOLVED path is a symlink — user-writable, exactly like the real
+    // /opt/homebrew/bin/codex — initially pointing at bin/main.js.
+    const binDir = join(dir, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const resolvedPath = join(binDir, 'fixture')
+    symlinkSync(join(pkgRoot, 'bin', 'main.js'), resolvedPath)
+
+    const ledger = makeLedger()
+    const pinned = verifyProvenance({ resolvedPath, mode: 'block', ledger })
+    assert.equal(pinned.status, PROVENANCE_STATUS.PINNED)
+
+    // Retarget the SAME symlink (SAME ledger key) at a DIFFERENT script
+    // already inside the identical, UNCHANGED tree — no file's content
+    // changed anywhere.
+    rmSync(resolvedPath, { force: true })
+    symlinkSync(join(pkgRoot, 'bin', 'alt.js'), resolvedPath)
+
+    const after = verifyProvenance({ resolvedPath, mode: 'block', ledger })
+    assert.equal(after.status, PROVENANCE_STATUS.HASH_MISMATCH,
+      'retargeting the entry to a DIFFERENT script inside the same tree must be refused — the digest must bind WHICH file is launched, not just the tree\'s content')
+    assert.equal(after.blocked, true)
+    assert.notEqual(after.hash, pinned.hash, 'the two entries must produce DIFFERENT digests despite an otherwise byte-identical tree')
   })
 })
 
@@ -311,16 +422,39 @@ describe('verifyProvenance — package tree (#8040): legacy single-file record m
     assert.equal(again.status, PROVENANCE_STATUS.OK)
   })
 
-  it('a non-matching legacy hash is a mismatch — exactly as pre-#8040, without walking the manifest', () => {
+  it('a non-matching legacy hash is a mismatch — exactly as pre-#8040, WITHOUT EVER building the manifest (#8093 review S1)', () => {
     const { resolvedPath } = buildCodexFixture(dir)
     const ledger = makeLedger({ [resolvedPath]: { sha256: 'f'.repeat(64), firstSeen: 'x', approvedAt: 'x' } })
 
-    const v = verifyProvenance({ resolvedPath, mode: 'block', ledger })
+    // #8093 review S1: the comment/docs claimed this decision never walks the
+    // manifest, but the code built it FIRST regardless — count actual
+    // `buildManifest` invocations via the real injectable seam, rather than
+    // just asserting the outcome (which was already correct either way).
+    let buildCalls = 0
+    const countingBuildManifest = (...args) => {
+      buildCalls += 1
+      return buildPackageTreeManifest(...args)
+    }
+
+    const v = verifyProvenance({ resolvedPath, mode: 'block', ledger, buildManifest: countingBuildManifest })
     assert.equal(v.status, PROVENANCE_STATUS.HASH_MISMATCH)
     assert.equal(v.blocked, true)
     assert.equal(v.hash, hashFile(resolvedPath), 'the mismatch verdict compares the ENTRY hash, not a manifest digest')
     // Must not have been silently "upgraded" to a tree record on a mismatch.
     assert.equal(ledger.getRecord(resolvedPath).kind, undefined)
+    assert.equal(buildCalls, 0, 'a legacy mismatch must be decided from the entry hash alone — the manifest must never be built to reach this refusal')
+  })
+
+  // #8093 review S1, consequence noted in the review: a legacy mismatch on an
+  // over-cap tree must still report HASH_MISMATCH (from the cheap entry-hash
+  // comparison), never UNREADABLE — the cap only matters once a manifest
+  // build is actually attempted, which this path never reaches.
+  it('a legacy mismatch is HASH_MISMATCH even when the tree itself would exceed the cap', () => {
+    const { resolvedPath } = buildCodexFixture(dir)
+    const ledger = makeLedger({ [resolvedPath]: { sha256: 'f'.repeat(64), firstSeen: 'x', approvedAt: 'x' } })
+    const v = verifyProvenance({ resolvedPath, mode: 'block', ledger, manifestLimits: { maxFiles: 1 } })
+    assert.equal(v.status, PROVENANCE_STATUS.HASH_MISMATCH, 'the cap must never be consulted for a legacy mismatch — no manifest build means no cap check')
+    assert.equal(v.blocked, true)
   })
 
   it('a legacy record with an EXPLICIT kind:"file" migrates the same way as one with no kind at all', () => {
@@ -377,6 +511,50 @@ describe('verifyProvenance — package tree (#8040): real BinaryProvenanceLedger
     const led2 = new BinaryProvenanceLedger({ filePath: ledgerPath })
     assert.equal(led2.getRecord(resolvedPath).kind, 'tree')
   })
+
+  // #8093 review C2: the reviewer's exact repro. Two real ledger instances
+  // over ONE file, both loading the SAME legacy pin. B migrates first,
+  // against the genuine (untouched) tree — a real, correct upgrade, flushed
+  // to disk. The native binary is THEN swapped. A's own in-memory record is
+  // still the ORIGINAL legacy pin (it never saw B's flush) — without a
+  // reload, A would re-derive the migration decision from that stale record,
+  // see its own (now-tampered) tree digest as "the" upgrade, and `approve()`
+  // — an explicit `'set'` write — would win the #8068 merge outright,
+  // silently replacing B's genuine digest with A's tampered one and
+  // reporting `ok` in block mode.
+  it('a stale legacy record must not migrate over — or overwrite — a DIFFERENT process\'s genuine tree pin (repro for #8093 review C2)', () => {
+    const { resolvedPath, nativeBinaryPath } = buildCodexFixture(dir)
+    const entryHash = hashFile(resolvedPath)
+
+    // Seed the legacy pin on disk BEFORE either daemon instance exists, so
+    // both load it into their own memory at construction.
+    const seeder = new BinaryProvenanceLedger({ filePath: ledgerPath })
+    seeder.approve(resolvedPath, entryHash) // legacy-shaped: no kind
+
+    const daemonA = new BinaryProvenanceLedger({ filePath: ledgerPath })
+    const daemonB = new BinaryProvenanceLedger({ filePath: ledgerPath })
+
+    // B migrates first, against the GENUINE, untouched tree.
+    const bVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonB })
+    assert.equal(bVerdict.status, PROVENANCE_STATUS.OK, 'B\'s migration against the genuine tree must succeed with no refusal')
+    const genuineDigest = bVerdict.hash
+
+    // The attack: the native binary is swapped AFTER B's genuine pin landed.
+    writeFileSync(nativeBinaryPath, 'SWAPPED — attacker-controlled native binary')
+
+    // A's in-memory record is STILL the original legacy pin — it has not
+    // reloaded since construction, well before B's flush.
+    const aVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonA })
+    assert.equal(aVerdict.status, PROVENANCE_STATUS.HASH_MISMATCH,
+      'A must refresh from disk before deciding this is still a migration — it must see B\'s genuine tree pin and compare the SWAPPED tree against THAT, not re-migrate from its own stale legacy snapshot')
+    assert.equal(aVerdict.blocked, true, 'the swapped binary must be refused, not silently approved via a stale migration')
+
+    const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+    const diskRecord = onDisk.binaries[_normalizeKey(resolvedPath)]
+    assert.equal(diskRecord.sha256, genuineDigest,
+      'B\'s genuine tree pin must survive completely untouched — A must never have overwritten it with a digest computed against the tampered tree')
+    assert.equal(diskRecord.kind, 'tree')
+  })
 })
 
 // ── Bounds: cap exceeded fails closed ───────────────────────────────────────
@@ -385,7 +563,7 @@ describe('verifyProvenance — package tree (#8040): cap exceeded fails closed',
   it('block mode: exceeding the file-count cap refuses the spawn', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'entry.js' }))
     const entry = join(pkgRoot, 'entry.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     for (let i = 0; i < 10; i++) writeFileSync(join(pkgRoot, `f${i}.txt`), `x${i}`)
@@ -400,7 +578,7 @@ describe('verifyProvenance — package tree (#8040): cap exceeded fails closed',
   it('warn mode: exceeding the cap surfaces but allows', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'entry.js' }))
     const entry = join(pkgRoot, 'entry.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     for (let i = 0; i < 10; i++) writeFileSync(join(pkgRoot, `f${i}.txt`), `x${i}`)
@@ -419,7 +597,7 @@ describe('verifyProvenance — package tree (#8040): per-turn cost', () => {
   it('a second call against an UNCHANGED tree reuses sha256FileCached — no file content is re-read', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'bin.js' }))
     const entry = join(pkgRoot, 'bin.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     for (let i = 0; i < 50; i++) {
@@ -451,7 +629,7 @@ describe('verifyProvenance — package tree (#8040): synthetic ~1000-file timing
   it('measures cold vs warm (no-change) manifest build time on a ~1000-file tree', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'bundle/entry.js' }))
     const entry = join(pkgRoot, 'bundle', 'entry.js')
     mkdirSync(join(pkgRoot, 'bundle'), { recursive: true })
     writeFileSync(entry, '#!/usr/bin/env node\n')
@@ -515,7 +693,7 @@ describe('verifyProvenance — package tree (#8040): synthetic ~1000-file timing
   it('on win32, sha256FileCached never caches — every call re-hashes the WHOLE tree (documented #8030 limitation)', () => {
     const pkgRoot = join(dir, 'pkg')
     mkdirSync(pkgRoot, { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'entry.js' }))
     const entry = join(pkgRoot, 'entry.js')
     writeFileSync(entry, '#!/usr/bin/env node\n')
     for (let i = 0; i < 30; i++) writeFileSync(join(pkgRoot, `f${i}.js`), `module.exports=${i}\n`)

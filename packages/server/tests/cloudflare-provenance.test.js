@@ -214,7 +214,7 @@ describe('cloudflared provenance gate — package-tree coverage via the shared c
     try {
       const pkgRoot = join(dir, 'pkg')
       mkdirSync(join(pkgRoot, 'node_modules', 'dep'), { recursive: true })
-      writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-cloudflared-wrapper' }))
+      writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-cloudflared-wrapper', bin: 'entry.js' }))
       const entry = join(pkgRoot, 'entry.js')
       writeFileSync(entry, '#!/usr/bin/env node\n')
       const nested = join(pkgRoot, 'node_modules', 'dep', 'native')

@@ -391,17 +391,34 @@ export function verifyProvenance({
     // the entry file. A native (non-script) resolution, or a script with no
     // enclosing package root, is unaffected: `kind` stays 'file' and `hash`
     // stays the plain entry-file hash computed above.
-    let hash = entryHash
-    let kind = 'file'
     const classification = classifyBinary(path)
-    if (classification && classification.kind === 'launcher') {
+    const isLauncher = !!(classification && classification.kind === 'launcher')
+
+    // Builds the package-tree manifest and returns either its digest or an
+    // UNREADABLE verdict (never both) — shared by the migration-upgrade path
+    // below and the ordinary path further down, so there is exactly one place
+    // that calls `buildManifest` with these options. Only ever invoked when
+    // `isLauncher` is true, so `classification.entryPath`/`packageRoot` are
+    // always defined here.
+    const computeTreeHash = () => {
       const extraRoots = resolveHoistedOptionalDependencyRoots({
         packageRoot: classification.packageRoot,
         packageJson: classification.packageJson,
-        entryPath: path,
+        // #8093 review C1: the RESOLVED entry path, not the caller's
+        // (possibly unresolved) `path` — a bin symlink outside any
+        // node_modules (bun global, yarn-classic global) makes
+        // `createRequire(path)` search from the symlink's own directory,
+        // which misses a hoisted platform package Node itself would find
+        // from the launcher's REAL location at runtime. `classifyBinary`
+        // always realpaths before returning a `launcher` classification, so
+        // `classification.entryPath` is exactly that real location.
+        entryPath: classification.entryPath,
       })
       const manifest = buildManifest({
         packageRoot: classification.packageRoot,
+        // #8093 review C4: bind WHICH file is the entry into the digest —
+        // see buildPackageTreeManifest's own docblock for why.
+        entryPath: classification.entryPath,
         extraRoots,
         hashFile: hashFn,
         platform,
@@ -414,27 +431,25 @@ export function verifyProvenance({
         // treated as "nothing to check".
         const blocked = mode === 'block'
         return {
-          ok: !blocked,
-          status: PROVENANCE_STATUS.UNREADABLE,
-          blocked,
-          path,
-          hash: null,
-          message: `could not verify the installed package tree (${manifest.error})`,
-          remediation: 'ensure the installed package is readable and within size limits, or disable provenance pinning (binaryProvenance.mode=off)',
+          verdict: {
+            ok: !blocked,
+            status: PROVENANCE_STATUS.UNREADABLE,
+            blocked,
+            path,
+            hash: null,
+            message: `could not verify the installed package tree (${manifest.error})`,
+            remediation: 'ensure the installed package is readable and within size limits, or disable provenance pinning (binaryProvenance.mode=off)',
+          },
         }
       }
-      hash = manifest.digest
-      kind = 'tree'
+      return { hash: manifest.digest }
     }
 
-    if (!ledger) {
-      // Pinning requested but no ledger wired — treat as skipped rather than
-      // guessing. (Production always wires a ledger when mode is on.)
-      return { ok: true, status: PROVENANCE_STATUS.SKIPPED, blocked: false, path, hash }
-    }
-
-    let record = ledger.getRecord(path)
-    if (!record) {
+    // Fetch any existing record + refresh-on-miss (#8073) — shared by the
+    // legacy-migration fast path below and the ordinary flow further down,
+    // so there is exactly one fetch (plus its own reload-on-miss) per call.
+    let record = ledger ? ledger.getRecord(path) : null
+    if (ledger && !record && typeof ledger.reload === 'function') {
       // #8073: a miss in THIS ledger's in-memory snapshot is not the same
       // thing as "nobody has ever pinned this path" — a different process or
       // instance (the daemon vs. a standalone `chroxy resume`) can have
@@ -446,11 +461,104 @@ export function verifyProvenance({
       // #8073); an injected fake without one (most of this file's own
       // tests) is left exactly as it was, deciding from whatever
       // `getRecord` already returned.
-      if (typeof ledger.reload === 'function') {
-        ledger.reload()
-        record = ledger.getRecord(path)
+      ledger.reload()
+      record = ledger.getRecord(path)
+    }
+
+    // #8093 review S1/C2: a launcher path with a LEGACY (non-tree) record is
+    // decided against the ENTRY hash BEFORE the tree is ever walked — the
+    // exact pre-#8040 comparison, so a legacy mismatch never pays for a
+    // manifest build. Refresh from disk once more right before deciding:
+    // this decision either upgrades the record (a WRITE) or leaves it alone,
+    // and a stale in-memory legacy record could otherwise "migrate" over a
+    // genuine tree pin a DIFFERENT process already wrote for this same path
+    // — the explicit `approve()` write below always wins the #8068 merge,
+    // so deciding from a stale snapshot would silently replace someone
+    // else's real digest with our own (possibly computed against an
+    // ALREADY-TAMPERED tree) and report `ok` in block mode. This mirrors the
+    // first-sight branch's own refresh-on-miss above, just triggered by "is
+    // this a migration" instead of "is there any record at all".
+    if (isLauncher && record && record.kind !== 'tree' && typeof ledger.reload === 'function') {
+      ledger.reload()
+      record = ledger.getRecord(path) || record
+    }
+
+    if (isLauncher && record && record.kind !== 'tree') {
+      if (record.sha256 === entryHash) {
+        // Same bytes already trusted under the legacy pin: upgrade the
+        // record to the tree digest. No weaker than before — everything the
+        // legacy pin covered (the launcher file itself) is still covered by
+        // the tree digest, which additionally covers what the legacy pin
+        // never did. Treated as an explicit decision (not TOFU): the trust
+        // being carried forward was already an operator/first-sight grant,
+        // just re-expressed in the new representation. NOW builds the
+        // manifest — never before this comparison decided it was needed.
+        const treeResult = computeTreeHash()
+        if (treeResult.verdict) return treeResult.verdict
+        const hash = treeResult.hash
+        ledger.approve(path, hash, { fields: { kind: 'tree' } })
+        // #8093 review C2 (mirrors #8073 S1): the reload() above and this
+        // approve()'s own internal re-read/flush are two MORE separate
+        // readFileSync calls — a genuine pin from another process can still
+        // land in that narrower gap. Re-read and only report OK when our
+        // hash is still what the ledger holds; otherwise fall through to
+        // the ordinary mismatch handling below using the record that
+        // actually won, instead of claiming a verdict the ledger disagrees
+        // with.
+        const after = ledger.getRecord(path)
+        if (!after || after.sha256 === hash) {
+          return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
+        }
+        record = after
+        const blockedRace = mode === 'block'
+        return {
+          ok: !blockedRace,
+          status: PROVENANCE_STATUS.HASH_MISMATCH,
+          blocked: blockedRace,
+          path,
+          hash,
+          pinnedHash: record.sha256,
+          message: `binary hash changed since it was pinned (pinned ${record.sha256.slice(0, 8)}…, now ${hash.slice(0, 8)}…)`,
+          remediation: blockedRace
+            ? `if this change is expected, re-approve it by removing this path's entry from the binary trust ledger and re-spawning; otherwise investigate the unexpected binary swap`
+            : 'if this change is unexpected, investigate the binary swap',
+        }
+      }
+      // Legacy hash doesn't match the CURRENT launcher file — a mismatch
+      // exactly as today (pre-#8040): the launcher file itself changed.
+      // NEVER builds the manifest to decide this (#8093 review S1).
+      const blocked = mode === 'block'
+      return {
+        ok: !blocked,
+        status: PROVENANCE_STATUS.HASH_MISMATCH,
+        blocked,
+        path,
+        hash: entryHash,
+        pinnedHash: record.sha256,
+        message: `binary hash changed since it was pinned (pinned ${record.sha256.slice(0, 8)}…, now ${entryHash.slice(0, 8)}…)`,
+        remediation: blocked
+          ? `if this change is expected, re-approve it by removing this path's entry from the binary trust ledger and re-spawning; otherwise investigate the unexpected binary swap`
+          : 'if this change is unexpected, investigate the binary swap',
       }
     }
+
+    // Ordinary flow: a native resolution, a launcher whose existing record is
+    // already tree-kind, or first sight (no record at all yet).
+    let hash = entryHash
+    let kind = 'file'
+    if (isLauncher) {
+      const treeResult = computeTreeHash()
+      if (treeResult.verdict) return treeResult.verdict
+      hash = treeResult.hash
+      kind = 'tree'
+    }
+
+    if (!ledger) {
+      // Pinning requested but no ledger wired — treat as skipped rather than
+      // guessing. (Production always wires a ledger when mode is on.)
+      return { ok: true, status: PROVENANCE_STATUS.SKIPPED, blocked: false, path, hash }
+    }
+
     if (!record) {
       // First sight — trust-on-first-use: pin the hash and allow.
       // #8072 review C3: `firstSight: true` tags this as a TOFU pin, not an
@@ -476,48 +584,8 @@ export function verifyProvenance({
         return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
       }
       // Falls through with `record` now set to the winning pin.
-    } else {
-      const recordKind = record.kind === 'tree' ? 'tree' : 'file'
-      if (kind === 'tree' && recordKind !== 'tree') {
-        // #8040 migration: a legacy pin recorded the single-file hash of what
-        // is NOW resolved as a launcher. Compare against the ENTRY hash, not
-        // the (possibly expensive) manifest digest — exactly the pre-#8040
-        // comparison — so a caller never pays for a full tree walk just to
-        // refuse a launcher file that changed.
-        if (record.sha256 === entryHash) {
-          // Same bytes already trusted: upgrade the record to the tree
-          // digest. No weaker than before — everything the legacy pin
-          // covered (the launcher file itself) is still covered by the tree
-          // digest, which additionally covers what the legacy pin never did.
-          // This is treated as an explicit decision (not TOFU): the trust
-          // being carried forward was already an operator/first-sight grant,
-          // just re-expressed in the new representation.
-          ledger.approve(path, hash, { fields: { kind: 'tree' } })
-          return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
-        }
-        // Legacy hash doesn't match the CURRENT launcher file — a mismatch
-        // exactly as today (pre-#8040): the launcher file itself changed.
-        const blocked = mode === 'block'
-        return {
-          ok: !blocked,
-          status: PROVENANCE_STATUS.HASH_MISMATCH,
-          blocked,
-          path,
-          hash: entryHash,
-          pinnedHash: record.sha256,
-          message: `binary hash changed since it was pinned (pinned ${record.sha256.slice(0, 8)}…, now ${entryHash.slice(0, 8)}…)`,
-          remediation: blocked
-            ? `if this change is expected, re-approve it by removing this path's entry from the binary trust ledger and re-spawning; otherwise investigate the unexpected binary swap`
-            : 'if this change is unexpected, investigate the binary swap',
-        }
-      }
-      if (record.sha256 === hash) {
-        return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
-      }
-      // Falls through to the ordinary mismatch handling below — covers a
-      // tree-vs-tree digest mismatch, and the (fail-safe, never expected to
-      // match) case of a path that resolved as a launcher before and now
-      // resolves natively, or vice versa outside the migration branch above.
+    } else if (record.sha256 === hash) {
+      return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
     }
 
     // Mismatch — the binary changed in place since it was pinned. Do NOT re-pin

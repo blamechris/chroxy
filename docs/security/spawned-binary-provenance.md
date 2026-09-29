@@ -358,6 +358,44 @@ discovered by one.
   - **A script with no enclosing package root** (a standalone shell wrapper,
     say) keeps the single-file hash — there is no "installed package" to
     manifest. A native (non-script) resolution is unaffected either way.
+  - **A symlink INSIDE the tree whose target is OUTSIDE it** (#8093 review
+    S2) is pinned by its link TEXT only — retargeting it changes the digest,
+    but the target's own BYTES are never walked or hashed, even though Node
+    (and the OS) follow the symlink at runtime if the launcher ever loads it.
+    Covering the target would mean walking arbitrary locations on disk a
+    package's own tree doesn't own, which this design deliberately does not
+    do. A symlink target that also happens to live inside a package's OWN
+    tree is covered normally, by content, like any other file.
+  - **Windows npm `.cmd` shims, and pnpm / Volta shims (#8093 review C3, not
+    yet closed — #8095).** `resolveBinary` on Windows for an npm-installed
+    provider resolves to `%APPDATA%\npm\codex.cmd` — a shim with no shebang
+    and no script extension, so it classifies `native` and only the shim
+    itself is hashed. The native `codex.exe` and every gemini chunk file stay
+    completely uncovered on Windows npm installs. The same applies to pnpm's
+    `sh`-based shims (there is no symlink and no named `package.json` above
+    `$PNPM_HOME` to climb to) and Volta's native shims. **This means the
+    per-turn timing numbers elsewhere in this document (the ~120ms/~45ms
+    codex/gemini full-rehash estimates) do not apply to any of these
+    installs — the tree is never walked there at all.** Resolving the actual
+    shim target so these installs get real tree coverage is tracked
+    separately as #8095; until it lands, `binaryProvenance.mode: block` on
+    Windows provides the SAME single-file coverage it always did for an
+    npm-installed `codex`/`gemini`, no more.
+  - **A TOFU pin (or a legacy-record migration) taken during an in-progress
+    `npm i -g`** can pin a half-installed tree. The next verification sees a
+    real mismatch (the install finished writing more files afterward) and
+    needs re-approval — a spurious refusal, not a bypass, but worth knowing
+    if a provenance-gated daemon happens to restart mid-install.
+
+  The package-root climb itself is bounded (#8093 review S3): a named
+  `package.json` is only accepted as a root when its `bin` (string or map) or
+  `main` field actually resolves to the entry file being classified. Without
+  this, ANY named `package.json` anywhere above a shebang script — an
+  accidental `npm init -y` left in `$HOME`, say — would become that script's
+  "package root", walking the entire home directory on every cold turn. That
+  still fails CLOSED (the cap, or a permission error, refuses it), so it was
+  never a bypass — just a confusing, avoidable denial of service with a
+  non-obvious cause.
 
   The walk is also capped (file count and total bytes) and fails CLOSED —
   reported as `unreadable`, refused in `block` mode — past either cap or on
@@ -618,21 +656,26 @@ provider that spawns per turn. Since #8035 the same is true of every live
 `gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session — and, since
 #8040, that coverage now extends past the one file at the pinned path. When
 the resolved path is a LAUNCHER (a script — `#!` shebang or a `.js`/`.mjs`/
-`.cjs` extension — with an enclosing `package.json` that has a `name`), the
-gate hashes a MANIFEST of the whole installed package instead: the entry,
-every sibling file (nested `node_modules` included, which is where an
-npm-global `codex`'s native binary actually lives), and any
-`optionalDependencies` package hoisted OUTSIDE the launcher's own package
-root. For an npm-installed `codex` that means the `bin/codex.js` launcher
-plus the native binary its separate platform package `spawn`s; for `gemini`
-it means `bundle/gemini.js` plus every sibling chunk file it `require`s. An
-`npm i -g` that replaces the native binary, a bundle chunk, or the entry
-file itself now refuses the next turn in `block` mode; only a change
-completely outside that tree (a regular, non-optional hoisted `dependencies`
-package — see "Known limitations") still goes unnoticed. A native
-(non-script) resolution, or a script with no enclosing package root, is
-unaffected and keeps the plain single-file hash exactly as before. In `warn`
-mode the mismatch is logged on every turn until it is re-approved, since
+`.cjs` extension, checked on its REALPATH — with an enclosing `package.json`
+that has a `name` AND whose `bin`/`main` field actually resolves to this
+entry, #8093 review S3), the gate hashes a MANIFEST of the whole installed
+package instead: the entry, every sibling file (nested `node_modules`
+included, which is where an npm-global `codex`'s native binary actually
+lives), and any `optionalDependencies` package hoisted OUTSIDE the launcher's
+own package root. For an npm-installed `codex` on macOS/Linux that means the
+`bin/codex.js` launcher plus the native binary its separate platform package
+`spawn`s; for `gemini` it means `bundle/gemini.js` plus every sibling chunk
+file it `require`s. An `npm i -g` that replaces the native binary, a bundle
+chunk, or the entry file itself now refuses the next turn in `block` mode;
+only a change completely outside that tree (a regular, non-optional hoisted
+`dependencies` package — see "Known limitations") still goes unnoticed. **On
+Windows, npm resolves to a `.cmd` shim (no shebang, no script extension) —
+this coverage does NOT yet apply there, nor to pnpm's `sh` shims or Volta's
+shims (#8093 review C3): only the shim itself is hashed, exactly as before
+#8040, until #8095 lands.** A native (non-script) resolution, or a script
+with no enclosing package that claims it via bin/main, is unaffected and
+keeps the plain single-file hash exactly as before. In `warn` mode the
+mismatch is logged on every turn until it is re-approved, since
 `verifyProvenance` deliberately never re-pins a mismatch on its own.
 
 **Existing pins upgrade across the #8040 daemon update, without a spurious

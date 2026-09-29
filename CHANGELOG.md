@@ -174,15 +174,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `binaryProvenance.mode: 'block'` an `npm i -g` that replaced only those
   files left the pinned hash unchanged and went undetected. `verifyProvenance`
   now classifies a resolved path as a launcher when it is a script (a `#!`
-  shebang, or a `.js`/`.mjs`/`.cjs` extension) with an enclosing
-  `package.json` that has a `name`, and — only then — hashes a manifest of
-  the entry, every sibling file (nested `node_modules` included, where an
-  npm-global codex's native binary actually lives), and any
-  `optionalDependencies` package hoisted outside the package root (resolved
-  the way Node itself would, from the launcher) instead of the one file. A
-  symlink is recorded by its link text and never followed. A native
-  (non-script) resolution, or a script with no enclosing package, is
-  unaffected and keeps the exact single-file hash as before. The walk is
+  shebang, or a `.js`/`.mjs`/`.cjs` extension, checked on its realpath) with
+  an enclosing `package.json` that has a `name` AND whose `bin`/`main` field
+  actually resolves to this entry (so a stray unrelated `package.json`
+  somewhere above the script can't become its "root"), and — only then —
+  hashes a manifest of the entry, every sibling file (nested `node_modules`
+  included, where an npm-global codex's native binary actually lives), and
+  any `optionalDependencies` package hoisted outside the package root
+  (resolved by directory, the way Node itself would, from the launcher's
+  real location) instead of the one file. A symlink is recorded by its link
+  text and never followed. The manifest also binds WHICH file is the entry,
+  not just the tree's content, so retargeting the resolved path at a
+  different script already inside the same tree is refused too. A native
+  (non-script) resolution, or a script with no enclosing package that claims
+  it, is unaffected and keeps the exact single-file hash as before. **This
+  does not yet cover Windows npm `.cmd` shims, or pnpm/Volta shims — those
+  stay single-file-hashed, tracked as #8095.** The walk is
   capped on file count and total bytes and fails closed (refused in `block`
   mode) past either cap or on an unreadable tree, mirroring how an unreadable
   single file was already handled. The ledger records which kind of hash a
@@ -190,10 +197,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path that now resolves as a launcher is transparently upgraded to the tree
   digest the first time its current bytes still match the legacy pin — no
   spurious "binary changed" refusal from the daemon update itself — and
-  refused exactly as before when they don't. This is one shared code path
-  (`utils/verify-provenance.js`), so every caller — provider-spawn preflight,
-  `chroxy doctor`'s dependency checks, and the `cloudflared` tunnel gate —
-  gets the same coverage automatically.
+  refused exactly as before when they don't, checked against a freshly
+  reloaded record so a stale in-memory legacy pin can never migrate over (and
+  overwrite) a different process's already-upgraded genuine tree pin. This is
+  one shared code path (`utils/verify-provenance.js`), so every caller —
+  provider-spawn preflight, `chroxy doctor`'s dependency checks, and the
+  `cloudflared` tunnel gate — gets the same coverage automatically.
 
 - **`chroxy resume` now execs the same verified `claude` binary a
   fresh chat session would use, instead of a bare, unverified PATH lookup
@@ -518,7 +527,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closes the gap this entry originally reported here (an update that replaced
   only the native binary or a bundle chunk going undetected) by hashing a
   manifest of the whole installed package instead, once the resolved path is a
-  launcher. The pinned gate runs in
+  launcher (macOS/Linux npm, Homebrew and bun/yarn installs — a Windows npm
+  `.cmd` shim, or a pnpm/Volta shim, is not yet covered; tracked as #8095).
+  The pinned gate runs in
   every provenance mode, including the default `off`: each turn re-checks that
   the pinned binary exists, is executable and is not quarantined, plus the
   version floor and required credentials. A pinned `gemini`/`codex` that

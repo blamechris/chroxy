@@ -48,6 +48,16 @@ mock.module('../src/binary-provenance-trust.js', {
 // `import { BinaryProvenanceLedger } from './binary-provenance-trust.js'`
 // resolves to the spy above.
 const { runDoctorChecks } = await import('../src/doctor.js')
+const { verifyProvenance: realVerifyProvenance } = await import('../src/utils/verify-provenance.js')
+
+// #8093 review S5: with `providers: []` there is no provider row, but
+// `runDoctorChecks` still runs the cloudflared row unconditionally, resolved
+// off the real PATH with no fixture seam here. On a host where the real
+// `cloudflared` happens to be an npm JS launcher, the gate-on test below
+// would walk that REAL installed package tree. Pin `classifyBinary` to a
+// `native`-only stub, same as doctor-binary-provenance.test.js's gate-on
+// calls — this file is about ledger CONSTRUCTION, not classification.
+const CLASSIFY_NATIVE_VERIFY_PROVENANCE = (opts) => realVerifyProvenance({ ...opts, classifyBinary: () => ({ kind: 'native' }) })
 
 describe('runDoctorChecks — ledger construction, gates off (#8074 review N1)', () => {
   it('never constructs BinaryProvenanceLedger when gates are off', async () => {
@@ -58,7 +68,12 @@ describe('runDoctorChecks — ledger construction, gates off (#8074 review N1)',
 
   it('DOES construct BinaryProvenanceLedger when a gate is on and no override is supplied (sanity check on the spy itself)', async () => {
     constructorCalls.length = 0
-    await runDoctorChecks({ providers: [], binaryProvenanceMode: 'block', binarySignatureGate: false })
+    await runDoctorChecks({
+      providers: [],
+      binaryProvenanceMode: 'block',
+      binarySignatureGate: false,
+      verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
+    })
     assert.equal(constructorCalls.length, 1, 'gate on with no override must construct exactly one ledger — proves the spy is actually wired into runDoctorChecks, so the first assertion is not vacuously true')
   })
 })

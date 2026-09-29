@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, readFileSync, readdirSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { createHash } from 'crypto'
 import {
   MANIFEST_FORMAT_VERSION,
   hasShebang,
@@ -83,20 +84,36 @@ describe('hasShebang / isScriptFile', () => {
 })
 
 describe('findEnclosingPackageRoot', () => {
-  it('finds the nearest ancestor package.json with a name', () => {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+  it('finds the nearest ancestor package.json with a name that CLAIMS the entry via bin', () => {
     const entry = write('bin/entry.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: { fixture: 'bin/entry.js' } }))
     const found = findEnclosingPackageRoot(entry)
     assert.ok(found)
     assert.equal(found.root, dir)
     assert.equal(found.packageJson.name, 'fixture-pkg')
   })
 
+  it('finds the nearest ancestor package.json that claims the entry via a STRING bin', () => {
+    const entry = write('bin/entry.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: 'bin/entry.js' }))
+    const found = findEnclosingPackageRoot(entry)
+    assert.ok(found)
+    assert.equal(found.root, dir)
+  })
+
+  it('finds the nearest ancestor package.json that claims the entry via main', () => {
+    const entry = write('index.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', main: 'index.js' }))
+    const found = findEnclosingPackageRoot(entry)
+    assert.ok(found)
+    assert.equal(found.root, dir)
+  })
+
   it('skips a name-less marker package.json and keeps climbing', () => {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    const entry = write('marker/sub/entry.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: { fixture: 'marker/sub/entry.js' } }))
     mkdirSync(join(dir, 'marker'), { recursive: true })
     writeFileSync(join(dir, 'marker', 'package.json'), JSON.stringify({ type: 'module' }))
-    const entry = write('marker/sub/entry.js', '#!/usr/bin/env node\n')
     const found = findEnclosingPackageRoot(entry)
     assert.ok(found, 'must not stop at the name-less marker')
     assert.equal(found.root, dir)
@@ -104,10 +121,10 @@ describe('findEnclosingPackageRoot', () => {
   })
 
   it('skips a malformed package.json and keeps climbing', () => {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
+    const entry = write('broken/sub/entry.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: { fixture: 'broken/sub/entry.js' } }))
     mkdirSync(join(dir, 'broken'), { recursive: true })
     writeFileSync(join(dir, 'broken', 'package.json'), '{ not valid json')
-    const entry = write('broken/sub/entry.js', '#!/usr/bin/env node\n')
     const found = findEnclosingPackageRoot(entry)
     assert.ok(found)
     assert.equal(found.root, dir)
@@ -119,12 +136,40 @@ describe('findEnclosingPackageRoot', () => {
     const found = findEnclosingPackageRoot(entry)
     assert.equal(found, null)
   })
+
+  // #8093 review S3: a NAMED package.json that does not claim the entry as
+  // its own bin/main is not a valid boundary for THIS entry.
+  it('a named package.json with a bin/main pointing elsewhere is NOT a boundary — keeps climbing past it', () => {
+    const entry = write('sub/tool.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-unrelated', bin: { other: 'sub/other-tool.js' } }))
+    const found = findEnclosingPackageRoot(entry)
+    assert.equal(found, null, 'a package that claims a DIFFERENT bin target must not become the root for this entry')
+  })
+
+  it('a named package.json with no bin/main field at all is NOT a boundary', () => {
+    const entry = write('sub/tool.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-no-bin' }))
+    const found = findEnclosingPackageRoot(entry)
+    assert.equal(found, null)
+  })
+
+  // The concrete scenario S3 exists to prevent: a stray `package.json` sitting
+  // above an unrelated shebang script (e.g. a home directory with a leftover
+  // `npm init -y`) must not become that script's "package root" — which would
+  // otherwise walk the entire tree beneath it on every cold turn.
+  it('a stray unrelated package.json several levels up does not capture a deeply nested shebang script', () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'stray-home-package', bin: 'unrelated.js' }))
+    writeFileSync(join(dir, 'unrelated.js'), 'module.exports = 1\n')
+    const entry = write('Library/pnpm/store/v3/shim.js', '#!/usr/bin/env node\n')
+    const found = findEnclosingPackageRoot(entry)
+    assert.equal(found, null, 'the stray package.json declares a DIFFERENT bin target, so it must not claim this unrelated script')
+  })
 })
 
 describe('classifyResolvedBinary', () => {
   it('classifies a script with an enclosing package as a launcher', () => {
-    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg' }))
     const entry = write('bin/entry.js', '#!/usr/bin/env node\n')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture-pkg', bin: { fixture: 'bin/entry.js' } }))
     const c = classifyResolvedBinary(entry)
     assert.equal(c.kind, 'launcher')
     assert.equal(c.packageRoot, dir)
@@ -156,7 +201,7 @@ describe('classifyResolvedBinary', () => {
   it('follows a symlinked entry to find the REAL package root (npm bin-link layout)', () => {
     const pkgRoot = join(dir, 'lib', 'node_modules', 'fixture-codex')
     mkdirSync(join(pkgRoot, 'bin'), { recursive: true })
-    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-codex' }))
+    writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-codex', bin: { codex: 'bin/codex.js' } }))
     const realEntry = join(pkgRoot, 'bin', 'codex.js')
     writeFileSync(realEntry, '#!/usr/bin/env node\n')
 
@@ -351,6 +396,39 @@ describe('buildPackageTreeManifest', () => {
     assert.equal(r.digest, null)
   })
 
+  // #8093 review N2/M2/M7: the cap boundaries themselves were untested — a
+  // `>` vs `>=` mutant survived because no test distinguished exactly-at-the-
+  // limit (must PASS) from one-over (must fail closed).
+  describe('cap boundaries (#8093 review N2)', () => {
+    it('exactly maxFiles dirents succeeds (does not cap)', () => {
+      for (let i = 0; i < 5; i++) write(`file-${i}.txt`, `content ${i}`)
+      const r = buildPackageTreeManifest({ packageRoot: dir, hashFile, maxFiles: 5 })
+      assert.equal(r.capped, false, 'exactly at the cap must NOT be treated as exceeding it')
+      assert.ok(r.digest)
+    })
+
+    it('one MORE than maxFiles dirents fails closed', () => {
+      for (let i = 0; i < 6; i++) write(`file-${i}.txt`, `content ${i}`)
+      const r = buildPackageTreeManifest({ packageRoot: dir, hashFile, maxFiles: 5 })
+      assert.equal(r.capped, true)
+      assert.equal(r.digest, null)
+    })
+
+    it('exactly maxBytes of content succeeds (does not cap)', () => {
+      write('big.bin', Buffer.alloc(100, 1))
+      const r = buildPackageTreeManifest({ packageRoot: dir, hashFile, maxBytes: 100 })
+      assert.equal(r.capped, false, 'exactly at the byte cap must NOT be treated as exceeding it')
+      assert.ok(r.digest)
+    })
+
+    it('one byte MORE than maxBytes fails closed', () => {
+      write('big.bin', Buffer.alloc(101, 1))
+      const r = buildPackageTreeManifest({ packageRoot: dir, hashFile, maxBytes: 100 })
+      assert.equal(r.capped, true)
+      assert.equal(r.digest, null)
+    })
+  })
+
   it('reports unreadable (not capped) when a file cannot be hashed', () => {
     write('a.txt', 'ok')
     const boom = () => { throw new Error('EACCES') }
@@ -379,7 +457,51 @@ describe('buildPackageTreeManifest', () => {
     assert.match(r.error, /unsupported file type/)
   })
 
-  it('includes an extraRoot under a distinct manifest prefix that cannot collide with an in-root path', () => {
+  // #8093 review S4 — M1: the walker must NOT skip dotfiles (`node_modules/
+  // .bin/*`, `.npmignore`-adjacent files, etc.) — Node's `readdirSync` already
+  // includes them, but nothing pinned this property against a future change.
+  it('a dotfile (e.g. node_modules/.bin/tool) contributes to the digest — swapping it changes the digest', () => {
+    write('bin/entry.js', '#!/usr/bin/env node\n')
+    write('node_modules/.bin/tool', 'v1')
+    const before = buildPackageTreeManifest({ packageRoot: dir, hashFile })
+    write('node_modules/.bin/tool', 'v2 — SWAPPED')
+    const after = buildPackageTreeManifest({ packageRoot: dir, hashFile })
+    assert.notEqual(before.digest, after.digest, 'a dotfile must not be silently skipped by the walker')
+  })
+
+  it('a bare dotfile directly under the package root also contributes to the digest', () => {
+    write('.npmignore', 'v1\n')
+    write('bin/entry.js', '#!/usr/bin/env node\n')
+    const before = buildPackageTreeManifest({ packageRoot: dir, hashFile })
+    write('.npmignore', 'v2 — SWAPPED\n')
+    const after = buildPackageTreeManifest({ packageRoot: dir, hashFile })
+    assert.notEqual(before.digest, after.digest)
+  })
+
+  // #8093 review S4 — M3: a subdirectory that becomes unreadable (e.g.
+  // `chmod 111` — traversable for exec but not listable) must fail CLOSED,
+  // not be silently skipped, which would let whatever changed inside it
+  // escape a pin taken while it was unlistable.
+  it('an unreadable SUBDIRECTORY (not just the root) fails closed as unreadable', () => {
+    write('bin/entry.js', '#!/usr/bin/env node\n')
+    write('lib/ok.js', 'fine\n')
+    const libDir = join(dir, 'lib')
+    const fakeSeams = {
+      readdirSync: (p, opts) => {
+        if (p === libDir) {
+          const e = new Error('EACCES: permission denied')
+          e.code = 'EACCES'
+          throw e
+        }
+        return readdirSync(p, opts)
+      },
+    }
+    const r = buildPackageTreeManifest({ packageRoot: dir, hashFile }, fakeSeams)
+    assert.equal(r.unreadable, true, 'an unreadable subdirectory must fail the WHOLE manifest closed, not be silently skipped')
+    assert.equal(r.digest, null)
+  })
+
+  it('includes an extraRoot under a distinct manifest prefix that CANNOT collide with an in-root path (#8093 review N1)', () => {
     write('bin/entry.js', '#!/usr/bin/env node\n')
     const extraDir = mkdtempSync(join(tmpdir(), 'chroxy-extra-'))
     writeFileSync(join(extraDir, 'native'), 'native bytes v1')
@@ -393,11 +515,64 @@ describe('buildPackageTreeManifest', () => {
     }
   })
 
-  it('the digest is a sha256 hex string folding in MANIFEST_FORMAT_VERSION', () => {
+  // #8093 review N1: an in-root directory that LITERALLY reproduces the old
+  // `+optdep/<name>` spelling used to collide byte-for-byte with an actual
+  // extra root of the same name/content. The NUL-keyed prefix cannot be
+  // reproduced by any real dirent name (a real filename can never contain a
+  // NUL byte), so the two trees below must NOT produce the same digest.
+  it('an in-root directory literally named "+optdep" cannot masquerade as an extra (hoisted) root', () => {
     write('bin/entry.js', '#!/usr/bin/env node\n')
+    write('+optdep/fixture-native/native', 'in-root content')
+    const withInRootDir = buildPackageTreeManifest({ packageRoot: dir, hashFile })
+
+    // A SEPARATE fixture: the SAME content, but as a genuine extra root
+    // rather than an in-root directory named "+optdep".
+    const dir2 = mkdtempSync(join(tmpdir(), 'chroxy-pkg-manifest-n1-'))
+    const extraDir = mkdtempSync(join(tmpdir(), 'chroxy-extra-n1-'))
+    try {
+      mkdirSync(join(dir2, 'bin'), { recursive: true })
+      writeFileSync(join(dir2, 'bin', 'entry.js'), '#!/usr/bin/env node\n')
+      writeFileSync(join(extraDir, 'native'), 'in-root content')
+      const withGenuineExtraRoot = buildPackageTreeManifest({
+        packageRoot: dir2,
+        extraRoots: [{ name: 'fixture-native', root: extraDir }],
+        hashFile,
+      })
+      assert.notEqual(withInRootDir.digest, withGenuineExtraRoot.digest,
+        'an in-root "+optdep"-named directory must NOT produce the same digest as a genuine extra root of the same name/content')
+    } finally {
+      rmSync(dir2, { recursive: true, force: true })
+      rmSync(extraDir, { recursive: true, force: true })
+    }
+  })
+
+  // #8093 review N2: the old test only asserted `MANIFEST_FORMAT_VERSION.
+  // length > 0`, which proves nothing about whether the version is actually
+  // folded into the digest. Recompute the EXPECTED digest independently,
+  // using the exact same algorithm the module documents, and compare
+  // byte-for-byte — this only passes if the version (and every line) really
+  // is what the digest is computed over.
+  it('the digest is exactly sha256(header + sorted lines), independently recomputed — proves MANIFEST_FORMAT_VERSION is really in it', () => {
+    write('bin/entry.js', '#!/usr/bin/env node\n')
+    write('lib/a.js', 'module.exports = 1\n')
     const r = buildPackageTreeManifest({ packageRoot: dir, hashFile })
     assert.match(r.digest, /^[a-f0-9]{64}$/)
-    assert.ok(MANIFEST_FORMAT_VERSION.length > 0)
+
+    const entryHash = createHash('sha256').update('#!/usr/bin/env node\n').digest('hex')
+    const aHash = createHash('sha256').update('module.exports = 1\n').digest('hex')
+    const lines = [`bin/entry.js\0file\0${entryHash}`, `lib/a.js\0file\0${aHash}`].sort()
+    const expected = createHash('sha256')
+    expected.update(`${MANIFEST_FORMAT_VERSION}\0entry\0\n`)
+    for (const line of lines) expected.update(`${line}\n`)
+    assert.equal(r.digest, expected.digest('hex'))
+
+    // And changing ONLY the version string must change the digest — proven
+    // by recomputing with a different header and confirming it does NOT
+    // match the real digest.
+    const withDifferentVersion = createHash('sha256')
+    withDifferentVersion.update(`some-other-version\0entry\0\n`)
+    for (const line of lines) withDifferentVersion.update(`${line}\n`)
+    assert.notEqual(r.digest, withDifferentVersion.digest('hex'))
   })
 })
 
