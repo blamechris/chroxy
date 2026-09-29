@@ -293,3 +293,58 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     expect(getHint(container)).toMatch(/Uses whatever the server.s --default-permission-mode/)
   })
 })
+
+// #8084 — the create-time Permission mode picker offered "Plan" as a
+// selectable option even for a provider that declares `planMode: false`
+// (claude-tui). Mirrors the existing autoPermissionMode/Auto disabling
+// pattern above: `permissionModeSupport` now also checks `mode === 'plan'`
+// against `capabilities.planMode`, and the disabled option gets the same
+// "(unavailable)" suffix Auto gets.
+describe('CreateSessionModal disables Plan for a provider with planMode: false (#8084)', () => {
+  it('disables Plan when the selected provider capability says planMode: false', () => {
+    mockStoreState.defaultProvider = 'claude-tui'
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: true } },
+      { name: 'claude-tui', label: 'Claude TUI', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: false } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+      { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null
+    expect(plan?.disabled).toBe(true)
+    expect(plan?.textContent).toMatch(/unavailable/i)
+  })
+
+  it('keeps Plan available for a provider that supports planMode (positive control)', () => {
+    mockStoreState.defaultProvider = 'claude-sdk'
+    mockStoreState.availableProviders = [
+      { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: true } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+      { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null
+    expect(plan?.disabled).toBe(false)
+    expect(plan?.textContent).toBe('Plan')
+  })
+
+  it('keeps Plan available when the capability is missing/unknown (missing = capable)', () => {
+    mockStoreState.defaultProvider = 'future-provider'
+    mockStoreState.availableProviders = [
+      { name: 'future-provider', capabilities: { autoPermissionMode: true } },
+    ]
+    mockStoreState.availablePermissionModes = [
+      { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
+    ]
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null
+    expect(plan?.disabled).toBe(false)
+  })
+})

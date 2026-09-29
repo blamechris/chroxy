@@ -44,7 +44,10 @@ const TEST_DEFS: ShortcutDef[] = [
   { id: 'session.next', defaultBinding: 'cmd+shift+]', description: 'Next tab', category: 'session', scope: 'global' },
   { id: 'session.copyTranscript', defaultBinding: 'cmd+shift+c', description: 'Copy', category: 'session', scope: 'global' },
   { id: 'session.interrupt', defaultBinding: 'cmd+.', description: 'Interrupt', category: 'session', scope: 'global' },
-  { id: 'session.togglePlanMode', defaultBinding: 'shift+tab', description: 'Plan mode', category: 'session', scope: 'global' },
+  // #8084: production default moved off Shift+Tab (which broke reverse-tab
+  // focus navigation) to Shift+Alt+P — matches the real defaults.ts entry so
+  // this fixture doesn't drift into asserting a combo the app no longer uses.
+  { id: 'session.togglePlanMode', defaultBinding: 'shift+alt+p', description: 'Plan mode', category: 'session', scope: 'global', disabledInTextInput: true },
   { id: 'view.toggleChatTerminal', defaultBinding: 'cmd+t', description: 'Toggle view', category: 'view', scope: 'global' },
   { id: 'view.cycleSplit', defaultBinding: 'cmd+\\', description: 'Cycle split', category: 'view', scope: 'global' },
   { id: 'help.toggle', defaultBinding: '?', description: 'Help', category: 'other', scope: 'global' },
@@ -294,7 +297,7 @@ describe('useShortcutDispatch', () => {
       previousPermissionMode: null,
     } as never)
     renderHook(() => useShortcutDispatch(props))
-    fireKey({ key: 'Tab', shiftKey: true })
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
     expect(props.setPermissionMode).toHaveBeenCalledWith('plan')
     getStateSpy.mockRestore()
   })
@@ -306,7 +309,7 @@ describe('useShortcutDispatch', () => {
       previousPermissionMode: 'autoEdit',
     } as never)
     renderHook(() => useShortcutDispatch(props))
-    fireKey({ key: 'Tab', shiftKey: true })
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
     expect(props.setPermissionMode).toHaveBeenCalledWith('autoEdit')
     getStateSpy.mockRestore()
   })
@@ -318,8 +321,46 @@ describe('useShortcutDispatch', () => {
       previousPermissionMode: null,
     } as never)
     renderHook(() => useShortcutDispatch(props))
-    fireKey({ key: 'Tab', shiftKey: true })
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
     expect(props.setPermissionMode).toHaveBeenCalledWith('approve')
+    getStateSpy.mockRestore()
+  })
+
+  // #8084 — `planModeSupported` gates ONLY entering plan mode (the provider's
+  // planMode capability). Leaving plan mode must always work regardless.
+  it('session.togglePlanMode is a no-op when planModeSupported is false and not already in plan', () => {
+    const props = makeProps({ planModeSupported: false })
+    const getStateSpy = vi.spyOn(useConnectionStore, 'getState').mockReturnValue({
+      permissionMode: 'approve',
+      previousPermissionMode: null,
+    } as never)
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
+    expect(props.setPermissionMode).not.toHaveBeenCalled()
+    getStateSpy.mockRestore()
+  })
+
+  it('session.togglePlanMode still allows LEAVING plan mode even when planModeSupported is false', () => {
+    const props = makeProps({ planModeSupported: false })
+    const getStateSpy = vi.spyOn(useConnectionStore, 'getState').mockReturnValue({
+      permissionMode: 'plan',
+      previousPermissionMode: 'acceptEdits',
+    } as never)
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
+    expect(props.setPermissionMode).toHaveBeenCalledWith('acceptEdits')
+    getStateSpy.mockRestore()
+  })
+
+  it('session.togglePlanMode still enters plan mode when planModeSupported is explicitly true', () => {
+    const props = makeProps({ planModeSupported: true })
+    const getStateSpy = vi.spyOn(useConnectionStore, 'getState').mockReturnValue({
+      permissionMode: 'approve',
+      previousPermissionMode: null,
+    } as never)
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: 'p', altKey: true, shiftKey: true })
+    expect(props.setPermissionMode).toHaveBeenCalledWith('plan')
     getStateSpy.mockRestore()
   })
 

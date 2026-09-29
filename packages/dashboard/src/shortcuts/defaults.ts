@@ -21,9 +21,16 @@
  * Edge cases / gates
  * ------------------
  * - Cmd+W (close tab): Tauri-only. Uses `enabled: () => isTauri()`.
- * - Shift+Tab (toggle plan mode): must NOT fire inside text inputs so
- *   the user can still reverse-tab between form fields. Uses
- *   `disabledInTextInput: true`.
+ * - Shift+Alt+P (toggle plan mode): #8084 — this used to be Shift+Tab,
+ *   which broke reverse focus navigation (WCAG 2.1.1 / 2.4.3) for every
+ *   focusable control outside a text input. Shift+Tab is no longer bound
+ *   to anything in this registry; plain reverse-tab is a platform
+ *   convention the dashboard must not intercept. The new chord matches
+ *   the Tauri desktop menu's "Toggle Plan Mode" accelerator
+ *   (`Shift+Alt+P` in `src-tauri/src/lib.rs`), which already used this
+ *   combo because a macOS menu item can't represent Shift+Tab. Retains
+ *   `disabledInTextInput: true` so Option+Shift+P still types its native
+ *   composed character while a text input has focus, same as before.
  * - `?` (open cheat sheet): same text-input gate, plus an overlay
  *   stack check that the App.tsx call site still enforces (the
  *   registry has no notion of modal stacks).
@@ -164,8 +171,13 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // #8084 — moved off Shift+Tab so reverse-tab focus navigation works
+    // everywhere. Shift+Alt+P mirrors the Tauri desktop menu's existing
+    // "Toggle Plan Mode" accelerator (src-tauri/src/lib.rs), which had
+    // already picked this chord because macOS menus can't represent
+    // Shift+Tab.
     id: 'session.togglePlanMode',
-    defaultBinding: 'shift+tab',
+    defaultBinding: 'shift+alt+p',
     description: 'Toggle plan mode',
     category: 'session',
     scope: 'global',

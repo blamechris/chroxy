@@ -1162,9 +1162,14 @@ pub fn run() {
                 // dashboard shortcut registry defaults so the menu-
                 // bar entry serves as the canonical key-binding hint:
                 //   - Toggle Sidebar:    ⌘B  (`sidebar.toggle`)
-                //   - Toggle Plan Mode:  ⇧⌥P (the registry default is
-                //     Shift+Tab, which macOS menus can't represent;
-                //     the menu surface picks a non-colliding chord)
+                //   - Toggle Plan Mode:  ⇧⌥P (`session.togglePlanMode`
+                //     — #8084: the registry default used to be
+                //     Shift+Tab, which broke reverse-tab focus
+                //     navigation everywhere outside a text input and
+                //     macOS menus couldn't represent it anyway; this
+                //     menu already used Shift+Alt+P as the
+                //     non-colliding chord, and the registry default
+                //     was moved to match it)
                 //   - Show QR:           ⇧⌘Q
                 //   - Reload:            ⌘R  (Tauri webview reload)
                 // Cmd+\ ("cycle split") from the proposal collides

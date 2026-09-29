@@ -68,6 +68,14 @@ export interface ShortcutDispatchProps {
   handleCopyTranscript: () => void
   sendInterrupt: () => void
   setPermissionMode: (mode: string) => void
+  /**
+   * #8084 — whether the active session's provider capability allows
+   * ENTERING plan mode (claude-tui reports `planMode: false`). Defaults to
+   * `true` when omitted so existing call sites / tests keep working. Leaving
+   * plan mode via the toggle is never gated on this — see the
+   * `session.togglePlanMode` dispatch arm below.
+   */
+  planModeSupported?: boolean
   appendImageAttachments: (attachments: ImageAttachment[]) => void
   // #6473 — open the Cmd+P quick-open file palette (the caller gates it on the
   // `ide` capability). Optional so existing call sites / tests keep working.
@@ -114,6 +122,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     handleCopyTranscript,
     sendInterrupt,
     setPermissionMode,
+    planModeSupported,
     appendImageAttachments,
     openFilePalette,
     openSymbolSearch,
@@ -308,9 +317,16 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             const state = useConnectionStore.getState()
             const currentMode = state.permissionMode
             if (currentMode === 'plan') {
-              // Switch back to previous mode (default to 'approve')
+              // Switch back to previous mode (default to 'approve'). Always
+              // allowed — a session can be in plan mode already (e.g. the
+              // planMode capability flipped mid-session, or a resumed
+              // session carries a stale mode) and must still be able to
+              // leave it even when `planModeSupported` is false (#8084).
               setPermissionMode(state.previousPermissionMode || 'approve')
-            } else {
+            } else if (planModeSupported !== false) {
+              // #8084 — only ENTERING plan mode is gated on the provider's
+              // planMode capability. `planModeSupported` defaults to
+              // undefined (treated as true) for callers that don't pass it.
               setPermissionMode('plan')
             }
             break
@@ -344,6 +360,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     shortcutRegistry,
     appendImageAttachments,
     setPermissionMode,
+    planModeSupported,
     setSplitMode,
     setPaletteOpen,
     setSidebarOpen,
