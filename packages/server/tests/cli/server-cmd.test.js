@@ -105,18 +105,18 @@ describe('chroxy start -c <path> gates from the merged config (#8074 review C1)'
       },
     }))
 
-    // Doctor's PROVIDER resolution (unlike the binary-provenance gate C1
-    // fixes) still reads its own default config file regardless of `-c`
-    // (#8075, filed separately and explicitly out of scope here). Left
-    // alone, a fresh HOME with no default config.json at all falls through
-    // to DEFAULT_PROVIDER (`claude-tui`, @chroxy/protocol) instead of THIS
-    // test's `claude-cli` — which also runs the SEPARATE claude-tui-driving
-    // version probe against the same shimmed `claude`, entangling this test
-    // with an unrelated code path. Writing a default config.json that
-    // agrees on `provider: 'claude-cli'` (with no `binaryProvenance` of its
-    // own, so a C1 regression that reads THIS file instead would resolve
-    // mode 'off' and expose itself) neutralizes #8075's gap for this test's
-    // purposes without fixing it.
+    // #8075 (fixed alongside this test): doctor's PROVIDER resolution now
+    // honours the MERGED config's provider (`-c other.json`'s `claude-cli`
+    // below), not this default file's. This default config.json is written
+    // anyway, agreeing on `provider: 'claude-cli'`, so a C1 *regression*
+    // that goes back to reading THIS file for the binary-provenance mode
+    // still resolves mode 'off' (no `binaryProvenance` key here) and exposes
+    // itself, rather than accidentally matching `other.json`'s `block` mode
+    // for the wrong reason. It also keeps a fresh HOME from falling through
+    // to DEFAULT_PROVIDER (`claude-tui`, @chroxy/protocol) if provider
+    // resolution ever regressed too — `claude-tui` would run the SEPARATE
+    // claude-tui-driving version probe against this same shimmed `claude`,
+    // entangling this test with an unrelated code path.
     writeFileSync(join(chroxyDir, 'config.json'), JSON.stringify({ provider: 'claude-cli' }))
 
     // The config `-c` points at — deliberately NOT the default

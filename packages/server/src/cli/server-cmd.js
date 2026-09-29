@@ -7,6 +7,7 @@ import { addServerOptions, loadAndMergeConfig, parseExtraOverrides } from './sha
 import { parseTunnelArg } from '../tunnel/index.js'
 import { runDoctorChecks } from '../doctor.js'
 import { resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
+import { resolveDaemonDefaultProvider } from '../providers.js'
 
 export function registerServerCommands(program) {
   const startCmd = program
@@ -47,8 +48,26 @@ export function registerServerCommands(program) {
         // at all). Env vars still win inside the resolvers themselves, so
         // CHROXY_BINARY_PROVENANCE / CHROXY_BINARY_SIGNATURE_GATE precedence
         // is unchanged.
+        //
+        // #8075: same defect family, the remaining half C1 left open — the
+        // PROVIDER selection. Without an explicit `providers` override,
+        // `runDoctorChecks` falls back to `resolveProviders`, which re-reads
+        // the provider out of doctor's own default `configPath('config.json')`
+        // (or DEFAULT_PROVIDER when that file is missing/unset) — never the
+        // provider `--provider`, `-c <path>`, or CHROXY_PROVIDER actually
+        // selected on the MERGED config above. That silently checked the
+        // wrong provider's binary/credentials/provenance (and, via
+        // `resolvedProviders[0]`, the wrong provider in the billing-canary
+        // line and the claude-tui version-pin probe too) while the daemon
+        // below spawned the one the operator actually asked for.
+        // `resolveDaemonDefaultProvider` is the ONE derivation of "this
+        // daemon's resolved default provider" (#7932, providers.js) — reused
+        // here rather than a second `config.provider || DEFAULT_PROVIDER`
+        // inline, so this can never drift from what `startCliServer` /
+        // `startSupervisor` are about to spawn.
         const { checks } = await runDoctorChecks({
           port,
+          providers: [resolveDaemonDefaultProvider(config)],
           binaryProvenanceMode: resolveBinaryProvenanceMode(config),
           binarySignatureGate: isBinarySignatureGateEnabled(config),
         })
