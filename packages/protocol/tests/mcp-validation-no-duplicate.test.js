@@ -24,6 +24,51 @@ import { fileURLToPath } from 'node:url'
  * it proves). The nonzero-file-count assertions below are proven the same
  * way: pointing a scan root at a wrong path and confirming THAT goes RED too
  * (a scan over an empty/missing directory must not pass vacuously).
+ *
+ * TWO TIERS OF CHECK, after a #7030 review round-trip proved the first tier
+ * insufficient on its own:
+ *
+ * 1. SYNTAX_CHECKS — exact source-shape signatures (a regex LITERAL, a
+ *    `new Set([...])` CALL). Cheap and precise, but a reviewer's probe showed
+ *    they are trivially evaded by reimplementing the same behaviour with
+ *    different JS syntax: `new RegExp('^[a-z][a-z0-9_-]{0,63}$')` instead of
+ *    a regex literal, a plain array instead of `new Set([...])`, and
+ *    template-literal strings instead of quoted ones — all 9 subtests stayed
+ *    green with a full duplicate sitting in packages/dashboard/src.
+ *
+ * 2. FRAGMENT_CHECKS — spelling-independent: a plain substring search for
+ *    text that must appear verbatim in the canonical module NO MATTER how
+ *    the surrounding code is shaped (regex literal, `new RegExp('...')`, a
+ *    template literal, string concatenation — the characters still have to
+ *    be spelled out somewhere to reproduce the behaviour). This is what
+ *    catches the reviewer's probe.
+ *
+ *    Fragment choice matters: `169.254` was the reviewer's own suggested
+ *    example, but it is NOT used here — a repo-wide grep found it already
+ *    legitimately present, unrelated to this duplication, in
+ *    `packages/server/src/ssrf-guard.js` (a different SSRF guard),
+ *    `packages/app/src/utils/lan-scanner.ts` + its test (APIPA / LAN
+ *    scanning, unrelated to MCP), `byok-mcp-config.js`'s OWN
+ *    `classifyIpAddress` docstring (a different function, trust-prompt
+ *    address classification, not the metadata blocklist), and a dashboard
+ *    test fixture — six-plus unrelated files. A fragment needing that many
+ *    exclusions is a false-positive-prone check by the same standard this
+ *    file already applies to `constructor`/`prototype` — so it is left out
+ *    rather than smothered in allowlist entries. `a9fe` and `fd00:ec2` are
+ *    used instead: both are verbatim in the canonical module (the mapped-
+ *    IPv6 regex and the AWS IMDS literals) and, per the same repo-wide grep,
+ *    `a9fe` has zero pre-existing hits anywhere in the four scan roots and
+ *    `fd00:ec2` has exactly one — a comment in `byok-mcp-oauth.js` explaining
+ *    why it calls `isBlockedMetadataHost`, not a redefinition — narrowly
+ *    excluded below by exact path, same pattern as the pre-existing
+ *    usage-normalize.js entry. The name-charset fragment `[a-z0-9_-]{0,63}`
+ *    (the regex body without its anchors) has zero pre-existing hits.
+ *
+ *    No fragment check is added for the reserved-key set: `__proto__`,
+ *    `constructor`, and `prototype` are common enough as plain words
+ *    elsewhere in the codebase that a bare substring match would be exactly
+ *    the false-positive-prone check this file avoids for `169.254` — the
+ *    SYNTAX_CHECKS `new Set([...])` signature is the only check for that one.
  */
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
@@ -65,44 +110,63 @@ function listFilesRecursive(dir) {
   return out
 }
 
+// --- Tier 1: SYNTAX_CHECKS — exact source-shape signatures -----------------
 // Signatures of a RE-DECLARATION, not merely a reference to these values —
 // deliberately narrow so a legitimate test enumeration like
 // `for (const name of ['__proto__', 'constructor', 'prototype'])` (which
 // exercises the imported behaviour, not a redefined copy of it) is not a
-// false positive.
+// false positive. Known-evadable by a structurally different reimplement-
+// ation (see FRAGMENT_CHECKS below, which is what actually catches that).
 const NAME_REGEX_LITERAL = /\/\^\[a-z\]\[a-z0-9_-\]\{0,63\}\$\//
 const UNSAFE_KEY_SET_LITERAL = /new\s+Set\(\s*\[\s*['"]__proto__['"]\s*,\s*['"]constructor['"]\s*,\s*['"]prototype['"]\s*\]\s*\)/
-// The AWS IMDS IPv6 endpoint string is distinctive enough on its own to catch
-// a re-implemented isBlockedMetadataHost without also matching unrelated code
-// that merely mentions the 169.254 range in prose/comments.
-const METADATA_BLOCKLIST_HOST_LITERAL = /['"]fd00:ec2::254['"]/
 
-// Pre-existing, UNRELATED reserved-key guards that happen to share the same
-// literal Set — the `__proto__`/`constructor`/`prototype` trio is a generic
-// prototype-pollution guard, not unique to MCP validation, so a coincidental
-// textual match here is not the #7030 duplication this test targets (that
-// duplication was specifically the MCP server-name/config validation logic
-// hand-copied between byok-mcp-config.js and mcp-server-validation.ts).
-// `usage-normalize.js` guards a provider MODEL ID, an entirely different
-// concern with its own single source (`UNSAFE_KEY` there) — consolidating
-// IT with @chroxy/protocol/mcp-validation too may be worth doing, but is out
-// of scope for #7030 and is tracked separately rather than silently widened
-// into this guard.
+const SYNTAX_CHECKS = [
+  { name: 'MCP_SERVER_NAME_RE charset regex (literal)', pattern: NAME_REGEX_LITERAL },
+  { name: 'unsafe/reserved key Set literal', pattern: UNSAFE_KEY_SET_LITERAL },
+]
+
+// --- Tier 2: FRAGMENT_CHECKS — spelling-independent plain substrings -------
+// Each fragment is copied verbatim from packages/protocol/src/mcp-validation.ts
+// and must not appear ANYWHERE outside it, regardless of the surrounding JS
+// syntax (regex literal, `new RegExp('...')`, a template literal, string
+// concatenation) — see the file-level doc comment above for why `169.254`
+// is deliberately NOT one of these.
+const FRAGMENT_CHECKS = [
+  { name: 'metadata-host fragment "a9fe" (IPv4-mapped IPv6 form)', fragment: 'a9fe' },
+  { name: 'metadata-host fragment "fd00:ec2" (AWS IMDS IPv6)', fragment: 'fd00:ec2' },
+  { name: 'name-charset fragment "[a-z0-9_-]{0,63}"', fragment: '[a-z0-9_-]{0,63}' },
+]
+
+// Pre-existing, UNRELATED matches — narrow, keyed by exact file path + a
+// stated reason, exactly like the pattern below asks for. Each entry is
+// verified (repo-wide grep, #7030 review round) to be legitimate and
+// unrelated to the MCP server-name/config validation duplication this test
+// targets, never a redefinition of the constants themselves.
 const KNOWN_UNRELATED_MATCHES = {
+  // `__proto__`/`constructor`/`prototype` is a generic prototype-pollution
+  // guard, not unique to MCP validation. `usage-normalize.js` guards a
+  // provider MODEL ID, an entirely different concern with its own single
+  // source (`UNSAFE_KEY` there) — consolidating IT with
+  // @chroxy/protocol/mcp-validation too may be worth doing, but is out of
+  // scope for #7030 and is tracked separately (task_d1d5b3ef) rather than
+  // silently widened into this guard.
   'unsafe/reserved key Set literal': new Set([join(REPO_ROOT, 'packages/server/src/usage-normalize.js')]),
+  // A comment explaining WHY this file calls `isBlockedMetadataHost`
+  // ("... / fd00:ec2::254) to make the daemon fetch instance credentials on
+  // its behalf.") — prose referencing the concept, not a redefinition.
+  'metadata-host fragment "fd00:ec2" (AWS IMDS IPv6)': new Set([join(REPO_ROOT, 'packages/server/src/byok-mcp-oauth.js')]),
 }
 
 const CHECKS = [
-  { name: 'MCP_SERVER_NAME_RE charset regex', pattern: NAME_REGEX_LITERAL },
-  { name: 'unsafe/reserved key Set literal', pattern: UNSAFE_KEY_SET_LITERAL },
-  { name: 'metadata-host blocklist (fd00:ec2::254)', pattern: METADATA_BLOCKLIST_HOST_LITERAL },
+  ...SYNTAX_CHECKS.map((c) => ({ name: c.name, test: (src) => c.pattern.test(src) })),
+  ...FRAGMENT_CHECKS.map((c) => ({ name: c.name, test: (src) => src.includes(c.fragment) })),
 ]
 
 describe('#7030 no second copy of the MCP validation constants', () => {
-  it('sanity: the canonical module itself still contains all three (proves the patterns are not stale)', () => {
+  it('sanity: the canonical module itself still contains every check (proves the patterns are not stale)', () => {
     const src = readFileSync(CANONICAL_FILE, 'utf8')
     for (const check of CHECKS) {
-      assert.match(src, check.pattern, `${check.name} missing from the canonical module — patterns are stale`)
+      assert.ok(check.test(src), `${check.name} missing from the canonical module — patterns are stale`)
     }
   })
 
@@ -124,7 +188,7 @@ describe('#7030 no second copy of the MCP validation constants', () => {
         const src = readFileSync(file, 'utf8')
         for (const check of CHECKS) {
           if (KNOWN_UNRELATED_MATCHES[check.name]?.has(file)) continue
-          if (check.pattern.test(src)) {
+          if (check.test(src)) {
             offenders.push(`${relative(REPO_ROOT, file)}: ${check.name}`)
           }
         }
