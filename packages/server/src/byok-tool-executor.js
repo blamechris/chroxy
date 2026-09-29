@@ -36,6 +36,7 @@ import {
   GLOB_PATTERN_MAX_BRACE_DEPTH,
   buildGrepArgs,
   buildGrepCommand,
+  formatWriteConfirmation,
 } from './built-in-tools/tool-transforms.js'
 import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
 // #4186: SSRF block-list lives in its own module so the (ip, expected)
@@ -262,7 +263,11 @@ async function runWrite({ input, cwd, cwdRealCache, cwdCacheTtl }) {
   })
   if (!result.ok) return { content: `${result.code}: ${result.message}`, isError: true }
   return {
-    content: `Wrote ${result.bytesWritten} bytes to ${input.file_path}${result.created ? ' (created)' : ''}.`,
+    content: formatWriteConfirmation({
+      bytesWritten: result.bytesWritten,
+      filePath: input.file_path,
+      created: result.created,
+    }),
     isError: false,
   }
 }

@@ -91,6 +91,26 @@ export function applyEdit(content, { oldString, newString, replaceAll = false } 
 }
 
 // ---------------------------------------------------------------------------
+// Write — confirmation text shape
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the short, model-facing confirmation text for a successful Write —
+ * never the file body. This is the SINGLE SOURCE for that wording:
+ * `byok-tool-executor.js`'s `runWrite` uses it to build its `tool_result`
+ * content, and `claude-tui-tool-response.js` reuses it (#8082 review,
+ * Critical #1) so a claude-tui Write card renders the exact same short
+ * confirmation instead of the tool's raw structured result — whose own
+ * `content` field is the ENTIRE written file, not a summary.
+ *
+ * @param {{ bytesWritten: number, filePath: string, created?: boolean }} opts
+ * @returns {string}
+ */
+export function formatWriteConfirmation({ bytesWritten, filePath, created = false }) {
+  return `Wrote ${bytesWritten} bytes to ${filePath}${created ? ' (created)' : ''}.`
+}
+
+// ---------------------------------------------------------------------------
 // Read — line-numbered output shape
 // ---------------------------------------------------------------------------
 

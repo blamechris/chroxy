@@ -55,6 +55,7 @@ import {
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
+import { normalizeClaudeTuiToolResponse } from './claude-tui-tool-response.js'
 // #5559 — PTY-write / paste-throttle layer + interactive-form driver carved out
 // into focused modules. The empirically-pinned helpers, constants and methods
 // are moved byte-identically; the *Mixin classes carry the write/form methods,
@@ -4194,16 +4195,15 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     // PostToolUse — extract a string-ish result for the dashboard.
-    let result = ''
+    // #8082: `tool_response` is Claude Code's raw structured tool result
+    // (stdout/stderr for Bash, a `file` object for Read, …) — forwarding it
+    // stringified showed the JSON envelope in every tool card instead of the
+    // actual output. normalizeClaudeTuiToolResponse unwraps the known shapes
+    // into the same flattened display text SdkSession/CliSession forward for
+    // a real tool_result content block; an unrecognised shape still falls
+    // back to JSON.stringify (unchanged from before this fix).
+    let result = normalizeClaudeTuiToolResponse(toolName, payload.tool_response)
     let truncated = false
-    const resp = payload.tool_response
-    if (typeof resp === 'string') {
-      result = resp
-    } else if (resp && typeof resp === 'object') {
-      // Most Claude tools return { stdout, stderr } or { content: [...] }.
-      // Stringify and let the existing tool-result truncation handle size.
-      try { result = JSON.stringify(resp) } catch { result = String(resp) }
-    }
     const MAX = 10240  // mirror tool-result.js MAX_TOOL_RESULT_SIZE
     if (result.length > MAX) {
       result = result.slice(0, MAX)

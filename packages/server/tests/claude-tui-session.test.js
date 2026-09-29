@@ -5680,20 +5680,59 @@ describe('ClaudeTuiSession', () => {
       assert.equal(events[0].truncated, false)
     })
 
-    it('stringifies object tool_response for the dashboard', () => {
+    // #8082: this used to assert the BUG — a Bash tool_response was
+    // JSON.stringify-ed wholesale, so the dashboard rendered the raw
+    // envelope (`{"stdout":"hello\n","stderr":"","interrupted":false,…}`)
+    // instead of the command's actual output. It now asserts the fixed
+    // behavior: the structured Bash shape is unwrapped to plain stdout text
+    // via normalizeClaudeTuiToolResponse (claude-tui-tool-response.js) —
+    // see claude-tui-tool-response.test.js for the full fixture/edge-case
+    // coverage (stderr, is_error, interrupted, isImage, empty output).
+    it('unwraps a structured Bash tool_response to plain stdout text (#8082)', () => {
       const events = []
       session.on('tool_result', (e) => events.push(e))
 
       session._emitToolHookEvent('PostToolUse', {
         tool_use_id: 'toolu_456',
         tool_name: 'Bash',
-        tool_response: { stdout: 'hello\n', stderr: '', exitCode: 0 },
+        tool_response: { stdout: 'hello\n', stderr: '', interrupted: false, isImage: false, noOutputExpected: false },
       }, 'msg-1')
 
       assert.equal(events.length, 1)
-      const parsed = JSON.parse(events[0].result)
-      assert.equal(parsed.stdout, 'hello\n')
-      assert.equal(parsed.exitCode, 0)
+      assert.equal(events[0].result, 'hello\n')
+      assert.ok(!events[0].result.startsWith('{'), 'must not be a JSON envelope')
+    })
+
+    it('unwraps a structured Read tool_response to plain file content (#8082)', () => {
+      const events = []
+      session.on('tool_result', (e) => events.push(e))
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_457',
+        tool_name: 'Read',
+        tool_response: {
+          type: 'text',
+          file: { filePath: '/tmp/MEMORY.md', content: 'line1\nline2', numLines: 2, startLine: 1, totalLines: 2 },
+        },
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].result, 'line1\nline2')
+      assert.ok(!events[0].result.startsWith('{'), 'must not be a JSON envelope')
+    })
+
+    it('an unrecognised structured tool_response still falls back to JSON.stringify (unchanged from before #8082)', () => {
+      const events = []
+      session.on('tool_result', (e) => events.push(e))
+
+      session._emitToolHookEvent('PostToolUse', {
+        tool_use_id: 'toolu_458',
+        tool_name: 'SomeUnknownTool',
+        tool_response: { weird: 'shape', nested: { a: 1 } },
+      }, 'msg-1')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].result, JSON.stringify({ weird: 'shape', nested: { a: 1 } }))
     })
 
     it('truncates tool_response over 10KB', () => {
