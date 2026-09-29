@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The orphan-reaper's sweep now runs under launchd and Tauri instead of
+  logging `spawnSync lsof ENOENT` every 5 minutes forever (#8083).** `lsof`
+  lives at `/usr/sbin/lsof` on macOS, but the launchd service PATH
+  (`~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, from
+  `com.chroxy.server.plist`) and Tauri's GUI launch both omit `/usr/sbin` —
+  a bare-name `lsof` spawn resolved through PATH and failed with ENOENT, so
+  the cwd lookup was "unavailable" on every tick and the reaper never
+  actually swept. `orphan-reaper.js`'s new `resolveLsofBinary()` tries
+  `/usr/sbin/lsof`, then `/usr/bin/lsof` (covers most Linux distros), before
+  falling back to a PATH lookup via the shared `resolveBinary()` helper —
+  absolute candidates first, never trusting the ambient PATH for a
+  well-known system utility, the same reasoning `verify-provenance.js`'s
+  `MACOS_SPCTL` / `verify-binary.js`'s `MACOS_XATTR` already use. Where
+  `lsof` is genuinely unavailable (Linux without it installed, or any other
+  host), `maybeReapOrphans` now logs that specific case once instead of
+  every sweep — every other "cannot check" reason still warns on every
+  tick, unchanged.
 - **A claude-tui session's tool cards show the tool's actual output again,
   instead of the raw JSON result envelope (#8082).** Bash cards showed
   `{"stdout":"…","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}`

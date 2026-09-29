@@ -12,6 +12,8 @@ import {
   sweepOrphans,
   resolveCwdsViaLsof,
   resolveCwdsViaProcfs,
+  resolveLsofBinary,
+  LSOF_CANDIDATES,
   maybeReapOrphans,
   startPeriodicOrphanReap,
   DEFAULT_MIN_AGE_MS,
@@ -21,6 +23,17 @@ import {
 const BASE = '/home/u/.chroxy/worktrees'
 const UID = 501
 const SELF = 999
+
+/** Records `setInterval` calls without a real timer; `calls[i].fn()` fires tick i+1. */
+const makeIntervalSeam = () => {
+  const calls = []
+  const setIntervalFn = (fn, ms) => {
+    const handle = { _id: calls.length + 1, unref: () => { handle.unrefed = true } }
+    calls.push({ fn, ms, handle })
+    return handle
+  }
+  return { calls, setIntervalFn }
+}
 
 const makeLogger = () => {
   const log = { _info: [], _warn: [] }
@@ -319,16 +332,6 @@ describe('maybeReapOrphans / startPeriodicOrphanReap (#7606)', () => {
     assert.ok(log._warn.some((m) => /sweep skipped/.test(m)))
   })
 
-  const makeIntervalSeam = () => {
-    const calls = []
-    const setIntervalFn = (fn, ms) => {
-      const handle = { _id: calls.length + 1, unref: () => { handle.unrefed = true } }
-      calls.push({ fn, ms, handle })
-      return handle
-    }
-    return { calls, setIntervalFn }
-  }
-
   it('startPeriodicOrphanReap: boot sweep now, unref\'d interval at the default cadence', () => {
     const { calls, setIntervalFn } = makeIntervalSeam()
     let runs = 0
@@ -359,5 +362,172 @@ describe('maybeReapOrphans / startPeriodicOrphanReap (#7606)', () => {
     assert.ok(log._warn.some((m) => /orphan-reaper failed: boom/.test(m)))
     calls[0].fn()
     assert.equal(n, 2)
+  })
+})
+
+// #8083 — lsof lives at /usr/sbin/lsof on macOS, which the launchd service
+// PATH (~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin) and
+// Tauri's GUI launch both omit, so a bare-name spawn got ENOENT and the sweep
+// never ran in production. Every scenario below controls BOTH the absolute
+// existence check and the PATH-lookup fallback via injected seams — none of
+// it touches a real process listing or kill.
+describe('resolveLsofBinary (#8083)', () => {
+  it('exports the candidate list in the required preference order', () => {
+    assert.deepEqual(LSOF_CANDIDATES, ['/usr/sbin/lsof', '/usr/bin/lsof'])
+  })
+
+  it('prefers /usr/sbin/lsof over /usr/bin/lsof when BOTH exist (proves candidate order, not just presence)', () => {
+    const exists = (p) => p === '/usr/sbin/lsof' || p === '/usr/bin/lsof'
+    const result = resolveLsofBinary({
+      exists,
+      resolveBinary: () => { throw new Error('PATH lookup must not run when a candidate exists') },
+    })
+    assert.equal(result, '/usr/sbin/lsof')
+  })
+
+  it('falls back to /usr/bin/lsof when /usr/sbin/lsof is absent', () => {
+    const exists = (p) => p === '/usr/bin/lsof'
+    const result = resolveLsofBinary({
+      exists,
+      resolveBinary: () => { throw new Error('PATH lookup must not run when a candidate exists') },
+    })
+    assert.equal(result, '/usr/bin/lsof')
+  })
+
+  it('falls back to a PATH lookup only when neither absolute candidate exists', () => {
+    let called = false
+    const resolveBinaryFn = (name, candidates) => {
+      called = true
+      assert.equal(name, 'lsof')
+      assert.deepEqual(candidates, [], 'the absolute candidates were already tried — no second list')
+      return '/opt/homebrew/bin/lsof'
+    }
+    const result = resolveLsofBinary({ exists: () => false, resolveBinary: resolveBinaryFn })
+    assert.equal(called, true, 'PATH lookup must run when no candidate exists')
+    assert.equal(result, '/opt/homebrew/bin/lsof')
+  })
+
+  it('returns null when lsof is genuinely unavailable anywhere', () => {
+    // resolveBinary's own convention: the bare name back means "not found".
+    const result = resolveLsofBinary({ exists: () => false, resolveBinary: () => 'lsof' })
+    assert.equal(result, null)
+  })
+})
+
+describe('lsof resolution wired into the sweep (#8083)', () => {
+  it('resolves /usr/sbin/lsof under a launchd-restricted PATH and the (stubbed) sweep reaps normally', () => {
+    // Prove the resolution does not trust the ambient PATH: set it to the
+    // exact launchd service value from the plist, which omits /usr/sbin.
+    const originalPath = process.env.PATH
+    process.env.PATH = '/Users/x/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+    try {
+      const killed = []
+      const lsofCalls = []
+      const deps = {
+        listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test tests/x.test.js']]),
+        kill: (pid, sig) => killed.push([pid, sig]),
+        uid: UID,
+        selfPid: SELF,
+        platform: 'darwin',
+        realpath: (p) => p,
+        // No `cwdOf` override — exercises defaultCwdOf -> resolveLsofBinary -> resolveCwdsViaLsof.
+        exists: (p) => p === '/usr/sbin/lsof',
+        execFileSync: (bin) => { lsofCalls.push(bin); return `p11839\nn${join(BASE, 'abc')}\n` },
+      }
+      const r = sweepOrphans({ worktreeBase: BASE, deps })
+      assert.deepEqual(lsofCalls, ['/usr/sbin/lsof'], 'must spawn the resolved absolute path, never the bare name')
+      assert.deepEqual(killed, [[11839, 'SIGKILL']])
+      assert.equal(r.error, null)
+    } finally {
+      process.env.PATH = originalPath
+    }
+  })
+
+  it('genuinely missing lsof: cannot-check error, nothing killed, never throws', () => {
+    const killed = []
+    const deps = {
+      listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test']]),
+      kill: (pid, sig) => killed.push([pid, sig]),
+      uid: UID,
+      selfPid: SELF,
+      platform: 'darwin',
+      realpath: (p) => p,
+      exists: () => false,
+      resolveBinary: () => 'lsof',
+    }
+    let r
+    assert.doesNotThrow(() => { r = sweepOrphans({ worktreeBase: BASE, deps }) })
+    assert.deepEqual(killed, [])
+    assert.equal(r.errorCode, 'LSOF_NOT_FOUND')
+    assert.match(r.error, /lsof not found/)
+  })
+
+  it('genuinely missing lsof: maybeReapOrphans logs ONCE across multiple sweeps, never throws', () => {
+    const log = makeLogger()
+    const killed = []
+    const deps = {
+      listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test']]),
+      kill: (pid, sig) => killed.push([pid, sig]),
+      uid: UID,
+      selfPid: SELF,
+      platform: 'darwin',
+      realpath: (p) => p,
+      worktreeBase: BASE,
+      exists: () => false,
+      resolveBinary: () => 'lsof',
+    }
+    for (let i = 0; i < 4; i++) {
+      let r
+      assert.doesNotThrow(() => { r = maybeReapOrphans({}, log, deps) })
+      assert.equal(r.errorCode, 'LSOF_NOT_FOUND')
+    }
+    assert.deepEqual(killed, [])
+    const skipped = log._warn.filter((m) => /sweep skipped/.test(m))
+    assert.equal(skipped.length, 1, `expected exactly one warning across 4 sweeps, got ${JSON.stringify(log._warn)}`)
+    assert.match(skipped[0], /lsof not found/)
+  })
+
+  it('genuinely missing lsof via the REAL periodic interval: logs once across several ticks', () => {
+    const { calls, setIntervalFn } = makeIntervalSeam()
+    const log = makeLogger()
+    const killed = []
+    const deps = {
+      listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test']]),
+      kill: (pid, sig) => killed.push([pid, sig]),
+      uid: UID,
+      selfPid: SELF,
+      platform: 'darwin',
+      realpath: (p) => p,
+      worktreeBase: BASE,
+      exists: () => false,
+      resolveBinary: () => 'lsof',
+      setIntervalFn,
+      // deliberately no `run` override — exercises the REAL maybeReapOrphans
+    }
+    startPeriodicOrphanReap({}, log, deps)
+    calls[0].fn()
+    calls[0].fn()
+    calls[0].fn()
+    assert.deepEqual(killed, [])
+    const skipped = log._warn.filter((m) => /sweep skipped/.test(m))
+    assert.equal(skipped.length, 1, `expected exactly one warning across 4 ticks, got ${JSON.stringify(log._warn)}`)
+  })
+
+  it('a DIFFERENT cannot-check reason still warns on every sweep (log-once is scoped to LSOF_NOT_FOUND only)', () => {
+    const log = makeLogger()
+    const deps = {
+      listProcesses: () => table([[11839, 1, UID, '02:00:00', 'node --test']]),
+      cwdOf: () => { throw new Error('some other unavailable mechanism') },
+      kill: () => {},
+      uid: UID,
+      selfPid: SELF,
+      platform: 'darwin',
+      realpath: (p) => p,
+      worktreeBase: BASE,
+    }
+    maybeReapOrphans({}, log, deps)
+    maybeReapOrphans({}, log, deps)
+    const skipped = log._warn.filter((m) => /sweep skipped/.test(m))
+    assert.equal(skipped.length, 2, 'a non-lsof cannot-check reason must not be deduped')
   })
 })
