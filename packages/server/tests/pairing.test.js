@@ -1,6 +1,5 @@
 import { describe, it, before, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { setTimeout as delay } from 'node:timers/promises'
 
 describe('PairingManager (#1836)', () => {
   let PairingManager
@@ -8,6 +7,22 @@ describe('PairingManager (#1836)', () => {
   before(async () => {
     const mod = await import('../src/pairing.js')
     PairingManager = mod.PairingManager
+  })
+
+  // #8106: every TTL test below drives Date.now() (and, where auto-refresh
+  // timers are involved, setTimeout) through node:test's mock.timers instead
+  // of a real `await delay(ms)`. A real wait raced PairingManager's own
+  // Date.now() reads — on a coarse-grained clock (Windows' ~15.6ms tick) a
+  // 1ms TTL could expire either zero or one tick after construction,
+  // nondeterministically flipping which branch of `_generatePairing()`'s
+  // prune-on-refresh ran (see #8106). Mocking the clock puts construction,
+  // refresh() and validation at instants this file chooses, so the outcome
+  // no longer depends on real elapsed wall-clock time. Reset defensively in
+  // afterEach so a failed assertion mid-test can't leak mocked timers into
+  // later tests (mock.timers.reset() is a safe no-op when nothing was
+  // mocked).
+  afterEach(() => {
+    mock.timers.reset()
   })
 
   it('exports PairingManager class', () => {
@@ -71,11 +86,12 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('rejects an expired pairing ID', async () => {
+    it('rejects an expired pairing ID', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 1 })
       const id = pm.currentPairingId
-      // Wait for expiry
-      await delay(10)
+      // Advance past expiry
+      mock.timers.tick(10)
       const result = pm.validatePairing(id)
       assert.equal(result.valid, false)
       assert.equal(result.reason, 'expired')
@@ -102,11 +118,17 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('old pairing ID is rejected after TTL expires', async () => {
+    it('old pairing ID is rejected after TTL expires', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 1 })
       const oldId = pm.currentPairingId
+      // refresh() runs at the SAME mocked instant as construction, so the old
+      // id's expiresAt (createdAt + 1ms) is still in the future here — it
+      // survives _generatePairing()'s prune-on-refresh. This is the exact
+      // branch that raced on a real clock (#8106).
       pm.refresh()
-      await delay(10)
+      // Now advance past the TTL before validating.
+      mock.timers.tick(10)
       const result = pm.validatePairing(oldId)
       assert.equal(result.valid, false)
       assert.equal(result.reason, 'expired')
@@ -143,10 +165,14 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('expired entries are pruned on refresh', async () => {
+    it('expired entries are pruned on refresh', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 1 })
       const oldId = pm.currentPairingId
-      await delay(10)
+      // Advance past the TTL BEFORE refreshing this time — the mirror image
+      // of the test above — so _generatePairing()'s prune loop sees the old
+      // entry as already expired and removes it outright.
+      mock.timers.tick(10)
       pm.refresh()
       // Old entry should have been pruned (must return invalid_pairing_id, not expired)
       const result = pm.validatePairing(oldId)
@@ -191,14 +217,15 @@ describe('PairingManager (#1836)', () => {
   })
 
   describe('extendCurrentId grace period (#2599)', () => {
-    it('extends current pairing ID expiry past original TTL', async () => {
+    it('extends current pairing ID expiry past original TTL', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 50 })
       const id = pm.currentPairingId
       // Extend to 5s — well beyond the original 50ms TTL
       pm.extendCurrentId(5000)
 
-      // Wait past the original TTL — without extension this would expire
-      await delay(100)
+      // Advance past the original TTL — without extension this would expire
+      mock.timers.tick(100)
 
       // The ID should still be valid because we extended it
       const result = pm.validatePairing(id)
@@ -206,24 +233,26 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('extended ID still expires after grace period', async () => {
+    it('extended ID still expires after grace period', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 1 })
       const id = pm.currentPairingId
       pm.extendCurrentId(5) // 5ms grace (clamped won't exceed this since TTL is 1ms)
-      await delay(30)
+      mock.timers.tick(30)
       const result = pm.validatePairing(id)
       assert.equal(result.valid, false, 'should expire after grace period')
       assert.equal(result.reason, 'expired')
       pm.destroy()
     })
 
-    it('delays auto-refresh timer during grace period', async () => {
+    it('delays auto-refresh timer during grace period', () => {
+      mock.timers.enable({ apis: ['Date', 'setTimeout'] })
       const pm = new PairingManager({ ttlMs: 10, autoRefresh: true })
       const id = pm.currentPairingId
       // Extend to 5s — auto-refresh should not fire during this time
       pm.extendCurrentId(5000)
-      // Wait longer than original ttlMs (10ms) but less than grace period
-      await delay(50)
+      // Advance longer than original ttlMs (10ms) but less than grace period
+      mock.timers.tick(50)
       // The current ID should NOT have changed (auto-refresh was delayed)
       assert.equal(pm.currentPairingId, id, 'should not rotate during grace period')
       pm.destroy()
@@ -237,14 +266,15 @@ describe('PairingManager (#1836)', () => {
       assert.equal(pm.currentPairingId, null)
     })
 
-    it('updates the _activePairings entry expiry', async () => {
+    it('updates the _activePairings entry expiry', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ ttlMs: 50 })
       const id = pm.currentPairingId
       pm.extendCurrentId(5000)
 
-      // Wait past the original TTL — the _activePairings entry must have
+      // Advance past the original TTL — the _activePairings entry must have
       // the extended expiry for this validation to succeed
-      await delay(100)
+      mock.timers.tick(100)
 
       const result = pm.validatePairing(id)
       assert.equal(result.valid, true, 'map entry should have extended expiry')
@@ -309,13 +339,14 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('getSessionIdForToken returns null after token TTL expires', async () => {
+    it('getSessionIdForToken returns null after token TTL expires', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ sessionTokenTtlMs: 5 })
       const id = pm.currentPairingId
       const result = pm.validatePairing(id, 'session-xyz')
       assert.equal(result.valid, true)
-      // Wait for expiry
-      await delay(20)
+      // Advance past expiry
+      mock.timers.tick(20)
       assert.equal(pm.getSessionIdForToken(result.sessionToken), null)
       pm.destroy()
     })
@@ -341,7 +372,8 @@ describe('PairingManager (#1836)', () => {
   // be reaped. Now we sweep expired tokens before evicting any valid one, plus
   // run a periodic TTL sweep so tokens don't linger to the cap untouched.
   describe('session token eviction — sweep before evict (#5555)', () => {
-    it('sweeps expired tokens instead of evicting a valid one at the cap', async () => {
+    it('sweeps expired tokens instead of evicting a valid one at the cap', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ sessionTokenTtlMs: 30 })
       // The oldest 5 tokens we insert NOW; they will expire after the TTL.
       const now = Date.now()
@@ -349,7 +381,7 @@ describe('PairingManager (#1836)', () => {
         pm._sessionTokens.set(`old-${i}`, { createdAt: now, sessionId: `old-sess-${i}` })
       }
       // Let those 5 expire.
-      await delay(50)
+      mock.timers.tick(50)
       // Top up to exactly the cap with FRESH (valid) tokens (indices 5..99).
       const fresh = Date.now()
       for (let i = pm._sessionTokens.size; i < 100; i++) {
@@ -384,11 +416,12 @@ describe('PairingManager (#1836)', () => {
       pm.destroy()
     })
 
-    it('_sweepSessionTokens removes only expired tokens', async () => {
+    it('_sweepSessionTokens removes only expired tokens', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ sessionTokenTtlMs: 30 })
       pm._sessionTokens.clear()
       pm._sessionTokens.set('expired', { createdAt: Date.now(), sessionId: null })
-      await delay(50)
+      mock.timers.tick(50)
       pm._sessionTokens.set('alive', { createdAt: Date.now(), sessionId: null })
       const removed = pm._sweepSessionTokens()
       assert.equal(removed, 1)
@@ -406,12 +439,13 @@ describe('PairingManager (#1836)', () => {
       assert.equal(pm._sessionTokenSweepTimer, null, 'sweep timer cleared on destroy')
     })
 
-    it('periodic sweep stops itself once the token map drains', async () => {
+    it('periodic sweep stops itself once the token map drains', () => {
+      mock.timers.enable({ apis: ['Date'] })
       const pm = new PairingManager({ sessionTokenTtlMs: 30 })
       pm._storeSessionToken('solo', { createdAt: Date.now(), sessionId: null })
       assert.notEqual(pm._sessionTokenSweepTimer, null)
       // Manually drain via the sweep after expiry; the helper should null the timer.
-      await delay(50)
+      mock.timers.tick(50)
       pm._sweepSessionTokens()
       assert.equal(pm._sessionTokens.size, 0)
       assert.equal(pm._sessionTokenSweepTimer, null, 'timer stops when map empties')
