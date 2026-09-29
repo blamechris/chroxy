@@ -133,6 +133,161 @@ describe('verifyProvenance — SHA-256 pin ledger (cross-platform)', () => {
   })
 })
 
+// #8073: the daemon's first-sight decision used to consult only THIS
+// ledger's own in-memory snapshot — a `getRecord()` miss meant "first sight"
+// even when a DIFFERENT ledger instance (e.g. a standalone `chroxy resume`)
+// had pinned the exact same path after this one was constructed. A
+// `reload()`-capable ledger is refreshed from disk before that decision is
+// made; a fake without `reload` (every OTHER test in this file) is left
+// exactly as before.
+describe('verifyProvenance — refresh-on-miss before first sight (#8073)', () => {
+  // A minimal ledger with `reload()`, backing its `getRecord`/`approve` with
+  // the SAME shared `Map` a second instance also writes to — simulating two
+  // separate ledger objects over one persisted store without pulling in the
+  // real filesystem-backed PathHashTrustLedger (that scenario is covered
+  // end-to-end in binary-provenance-trust.test.js's "Acceptance 1").
+  function makeSharedStore() {
+    return new Map() // path -> record, stands in for "the file on disk"
+  }
+  function makeReloadableLedger(store, { seenKeys = [] } = {}) {
+    const seen = new Set(seenKeys) // keys THIS ledger has ever loaded into its own view
+    const approvals = []
+    let approveCalls = 0
+    return {
+      getRecord(path) {
+        if (!seen.has(path)) return null
+        const rec = store.get(path)
+        return rec ? { ...rec } : null
+      },
+      approve(path, hash, opts = {}) {
+        // approveCalls counts EVERY invocation, including one that goes on
+        // to yield without writing — separate from `_approvals`, which
+        // counts only a WRITE that actually changed the store. #8073 review
+        // round 1 (R1 re-verification): once approve()'s own internal merge
+        // can self-heal from a stale first sight, correctness alone no
+        // longer distinguishes "reload() found the record first" from
+        // "approve() was called anyway and yielded" — both reach the same
+        // verdict. `approveCalls` is what actually tells them apart, and is
+        // the point of calling `reload()` BEFORE deciding this looks like
+        // first sight: avoid an unnecessary write attempt (and the flush()
+        // it would trigger on a real ledger) for a path that turns out to
+        // already have a genuine record.
+        approveCalls += 1
+        // Mirrors the base ledger's TOFU rule: a first-sight write never
+        // overrides a record the shared store already holds for this path.
+        if (opts.firstSight && store.has(path)) {
+          seen.add(path)
+          return true
+        }
+        approvals.push({ path, hash })
+        store.set(path, { sha256: hash, firstSeen: 'x', approvedAt: 'x' })
+        seen.add(path)
+        return true
+      },
+      reload() {
+        // The behaviour that matters here: after reload, a key present in
+        // the shared store becomes visible to THIS ledger's getRecord too.
+        for (const key of store.keys()) seen.add(key)
+      },
+      _approvals: approvals,
+      get _approveCalls() { return approveCalls },
+    }
+  }
+
+  it('Acceptance 1: a pin written by a second ledger after this one was constructed blocks — not "pinned" — on the very first check', () => {
+    const store = makeSharedStore()
+    const b = makeReloadableLedger(store) // constructed first, sees nothing yet
+    // "a pins P=H1" on a separate ledger instance over the same store.
+    const a = makeReloadableLedger(store)
+    a.approve('/usr/local/bin/claude', HASH_A)
+
+    const v = verifyProvenance({
+      resolvedPath: '/usr/local/bin/claude',
+      mode: 'block',
+      ledger: b,
+      sha256File: () => HASH_B,
+    })
+    assert.equal(v.status, PROVENANCE_STATUS.HASH_MISMATCH, 'not "pinned" — b must refresh from disk before deciding this is first sight')
+    assert.equal(v.blocked, true)
+    assert.equal(v.ok, false)
+    assert.equal(v.pinnedHash, HASH_A)
+    assert.equal(b._approvals.length, 0, 'must not have re-pinned over the genuine record')
+  })
+
+  // #8073 review round 1 (R1 re-verification): S1's post-approve re-read
+  // means the VERDICT is correct even if `reload()` were never called —
+  // approve()'s own internal merge self-heals from a stale first sight
+  // either way, so an outcome-only assertion can no longer tell "reload()
+  // ran first" apart from "approve() was called anyway and yielded." This
+  // asserts the actual point of calling `reload()` BEFORE deciding: a path
+  // that already has a genuine record on disk must never even reach
+  // `approve()` — no unnecessary write attempt (and, on a real ledger, no
+  // unnecessary flush()) for a record this call didn't need to touch.
+  it('a genuine existing record is found via reload() BEFORE approve() is ever called — no unnecessary write attempt', () => {
+    const store = makeSharedStore()
+    const b = makeReloadableLedger(store)
+    const a = makeReloadableLedger(store)
+    a.approve('/usr/local/bin/claude', HASH_A)
+
+    verifyProvenance({
+      resolvedPath: '/usr/local/bin/claude',
+      mode: 'block',
+      ledger: b,
+      sha256File: () => HASH_B,
+    })
+    assert.equal(b._approveCalls, 0,
+      'reload() must find the existing record before the first-sight decision, so approve() is never invoked for it at all')
+  })
+
+  it('warn mode: refresh-on-miss surfaces the mismatch instead of silently pinning the swap', () => {
+    const store = makeSharedStore()
+    const b = makeReloadableLedger(store)
+    const a = makeReloadableLedger(store)
+    a.approve('/usr/local/bin/claude', HASH_A)
+
+    const v = verifyProvenance({
+      resolvedPath: '/usr/local/bin/claude',
+      mode: 'warn',
+      ledger: b,
+      sha256File: () => HASH_B,
+    })
+    assert.equal(v.status, PROVENANCE_STATUS.HASH_MISMATCH)
+    assert.equal(v.blocked, false, 'warn mode never blocks')
+    assert.equal(v.ok, true)
+  })
+
+  it('a genuine first sight (nobody holds a pin) still pins normally through a reloadable ledger', () => {
+    const store = makeSharedStore()
+    const l = makeReloadableLedger(store)
+    const v = verifyProvenance({
+      resolvedPath: '/opt/homebrew/bin/codex',
+      mode: 'block',
+      ledger: l,
+      sha256File: () => HASH_A,
+    })
+    assert.equal(v.status, PROVENANCE_STATUS.PINNED)
+    assert.equal(v.ok, true)
+    assert.equal(l._approvals.length, 1)
+  })
+
+  // Regression guard: every OTHER test in this file uses `makeLedger()`,
+  // which has NO `reload` method at all. Confirms the refresh-on-miss branch
+  // does not assume every injected ledger has one.
+  it('an injected fake ledger with no reload() method is untouched — decides from getRecord alone', () => {
+    const ledger = makeLedger() // no reload — the ordinary fake used everywhere else in this file
+    assert.equal(typeof ledger.reload, 'undefined')
+    const v = verifyProvenance({
+      resolvedPath: '/opt/homebrew/bin/codex',
+      mode: 'block',
+      ledger,
+      sha256File: () => HASH_A,
+    })
+    assert.equal(v.status, PROVENANCE_STATUS.PINNED)
+    assert.equal(v.ok, true)
+    assert.deepEqual(ledger._approvals, [{ path: '/opt/homebrew/bin/codex', hash: HASH_A }])
+  })
+})
+
 describe('verifyProvenance — unreadable binary (fail-safe)', () => {
   it('block mode: an unreadable binary BLOCKS (cannot verify → deny)', () => {
     const v = verifyProvenance({

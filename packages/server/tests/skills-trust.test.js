@@ -112,6 +112,77 @@ describe('skills-trust', () => {
     })
   })
 
+  // #8073: one SkillsTrustStore instance per SESSION (not per process — see
+  // the class docstring) makes this the SAME class of bug the binary-ledger
+  // gate has: a miss in THIS instance's own memory used to decide "first
+  // sight" without ever checking disk, so a genuine record another session
+  // already recorded (or a real acceptHash decision) was invisible until
+  // this instance's own next flush happened to run.
+  describe('inspect — refresh-on-miss before first sight (#8073)', () => {
+    it('a session that never loaded the path sees another session\'s already-recorded hash instead of re-recording it', () => {
+      const a = new SkillsTrustStore({ filePath: trustPath })
+      const b = new SkillsTrustStore({ filePath: trustPath }) // constructed before a's record lands — stale
+
+      assert.equal(a.inspect('/abs/skill.md', 'body').status, 'recorded')
+      a.flush() // inspect() itself never flushes — persist a's record now
+      // b never loaded this record, so its own memory still shows nothing.
+      assert.equal(b.getRecord('/abs/skill.md'), null)
+
+      const r = b.inspect('/abs/skill.md', 'body')
+      assert.equal(r.status, 'verified',
+        'refresh-on-miss must see a\'s record before deciding this is first sight — not "recorded"')
+
+      b.flush()
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/skill.md'].sha256, sha256Hex('body'))
+    })
+
+    it('a genuinely new path (nobody has recorded it) still records normally through refresh-on-miss', () => {
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      const r = store.inspect('/abs/brand-new.md', 'body')
+      assert.equal(r.status, 'recorded')
+      store.flush()
+      const persisted = JSON.parse(readFileSync(trustPath, 'utf8'))
+      assert.equal(persisted.skills['/abs/brand-new.md'].sha256, sha256Hex('body'))
+    })
+
+    it('a corrupt trust file at inspect time fails open — no throw, and the miss still resolves to first sight', () => {
+      writeFileSync(trustPath, '{ this is not valid json, corrupted mid-write')
+      const store = new SkillsTrustStore({ filePath: trustPath })
+      // The constructor's OWN load already failed open to empty; this
+      // exercises inspect()'s reload() call hitting the SAME corrupt file
+      // again on a path this instance has never seen — must not throw, and
+      // a failed refresh must fall through to ordinary first-sight
+      // behaviour rather than leaving the ledger in a broken state.
+      let r
+      assert.doesNotThrow(() => { r = store.inspect('/abs/skill.md', 'body') })
+      assert.equal(r.status, 'recorded')
+    })
+
+    // #8073 review round 1 S4 (mutant M11): `_mergeLoaded`'s docstring
+    // promises `_mergeExtra` runs for BOTH callers — flush() and reload() —
+    // but every existing communityTrust test only ever exercises it through
+    // flush() (grantCommunityTrust always flushes). This drives the sibling
+    // index through reload() specifically: b's own miss (an inspect() on an
+    // unrelated path) triggers a plain reload with nothing of its own to
+    // flush, and that reload alone must be enough to pick up a's grant.
+    it('reload() also merges the communityTrust sibling index, not just flush()', () => {
+      const a = new SkillsTrustStore({ filePath: trustPath })
+      const b = new SkillsTrustStore({ filePath: trustPath }) // constructed before a's grant lands — stale
+
+      a.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      assert.equal(b.isCommunityTrusted('/community/alice/skill.md', 'alice'), false,
+        'b never loaded the grant yet')
+
+      // b's own miss on an UNRELATED path triggers refresh-on-miss's
+      // reload() — b never itself grants or flushes anything here.
+      b.inspect('/abs/unrelated.md', 'unrelated body')
+
+      assert.equal(b.isCommunityTrusted('/community/alice/skill.md', 'alice'), true,
+        'reload() must merge communityTrust via _mergeExtra too, not only flush()')
+    })
+  })
+
   // #3205: getRecord is the read-only accessor used by the
   // dashboard's skills metadata UI. Returns the recorded entry
   // without mutating the ledger; returns null when no record exists.
@@ -1004,7 +1075,16 @@ describe('skills-trust', () => {
   // saw. Only `acceptHash`/`grantCommunityTrust` (explicit operator actions)
   // are last-writer-wins.
   describe('implicit writes never override an explicit decision (#8072 review C3)', () => {
-    it('a stale instance\'s TOFU of a tampered hash does not overwrite another instance\'s real pin (block mode)', () => {
+    // #8073 update: before #8073, a miss in THIS instance's own memory was
+    // decided as first sight without ever checking disk — so A's inspect()
+    // below used to TOFU-pin the tampered hash (status `recorded`) despite
+    // b's genuine v1 pin already being on disk, and only A's SECOND inspect
+    // of the same path (after its own next flush self-healed its memory)
+    // would have caught the mismatch. `inspect()`'s refresh-on-miss
+    // (mirroring verify-provenance.js's fix for the binary ledger) now makes
+    // A's FIRST inspect already see b's pin and report the mismatch
+    // immediately, never touching disk with the tampered hash at all.
+    it('a stale instance\'s inspect() of a tampered hash refreshes from disk and detects the mismatch on its first inspect, not its second (block mode)', () => {
       // 1. A is constructed — before B's pin exists on disk.
       const a = new SkillsTrustStore({ filePath: trustPath, mode: TRUST_MODE_BLOCK })
       // 2. B pins s.md = v1 and flushes it.
@@ -1016,20 +1096,26 @@ describe('skills-trust', () => {
       // 3. s.md is tampered with (simulated: a different body from here on).
       const tampered = 'tampered body'
 
-      // 4. A inspect()s the tampered body. A never loaded b's pin (it was
-      //    constructed before b flushed), so this looks like first sight to
-      //    A too — a TOFU record of the TAMPERED hash.
-      assert.equal(a.inspect('/abs/s.md', tampered).status, 'recorded')
+      // 4. A inspect()s the tampered body. A never loaded b's pin in memory
+      //    (it was constructed before b flushed) — but refresh-on-miss
+      //    checks disk before deciding this is first sight, sees b's
+      //    genuine v1 pin, and reports the mismatch right away.
+      const aResult = a.inspect('/abs/s.md', tampered)
+      assert.equal(aResult.status, 'mismatch',
+        'refresh-on-miss must see b\'s pin before deciding this is first sight — not "recorded"')
+      assert.equal(aResult.blocked, true)
+      assert.equal(aResult.oldHash, sha256Hex(v1))
 
-      // 5. B inspect()s the tampered body — B DOES have the v1 record, so
-      //    this is a genuine mismatch/blocked detection.
+      // A's inspect() never pinned the tampered hash, so this flush has
+      // nothing of A's own to write for this path — b's genuine v1 pin is
+      // untouched.
+      a.flush()
+
+      // 5. B inspect()s the tampered body too — its own genuine
+      //    mismatch/blocked detection, consistent with A's.
       const bMismatch = b.inspect('/abs/s.md', tampered)
       assert.equal(bMismatch.status, 'mismatch')
       assert.equal(bMismatch.blocked, true)
-
-      // A's stale TOFU pin of the tampered hash reaches disk here — it must
-      // not override b's genuine v1 pin.
-      a.flush()
 
       // 6. B flushes for an unrelated first-seen skill.
       b.inspect('/abs/unrelated.md', 'unrelated body')

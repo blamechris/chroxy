@@ -285,7 +285,10 @@ export function _resetProvenanceCacheForTest() {
  * @param {string} opts.resolvedPath          - absolute path the spawn will exec
  * @param {'off'|'warn'|'block'} [opts.mode='off'] - pin-ledger mode
  * @param {boolean} [opts.signatureGate=false] - macOS spctl gate (hard block when on)
- * @param {{ getRecord:Function, approve:Function }|null} [opts.ledger=null] - pin ledger
+ * @param {{ getRecord:Function, approve:Function, reload?:Function }|null} [opts.ledger=null] - pin ledger.
+ *   `reload` is optional (#8073) — a `getRecord()` miss is refreshed from
+ *   disk first when the ledger has one; a fake without it decides from
+ *   whatever `getRecord` already returns, unchanged.
  * @param {string} [opts.platform=process.platform]
  * @param {Function} [opts.sha256File=sha256FileCached]         - injectable hasher
  * @param {Function} [opts.assessSignature=assessMacSignatureCached] - injectable signature assessor
@@ -356,7 +359,24 @@ export function verifyProvenance({
       return { ok: true, status: PROVENANCE_STATUS.SKIPPED, blocked: false, path, hash }
     }
 
-    const record = ledger.getRecord(path)
+    let record = ledger.getRecord(path)
+    if (!record) {
+      // #8073: a miss in THIS ledger's in-memory snapshot is not the same
+      // thing as "nobody has ever pinned this path" — a different process or
+      // instance (the daemon vs. a standalone `chroxy resume`) can have
+      // pinned it after this ledger was constructed or last flushed, and
+      // that pin would otherwise stay invisible until this ledger's own
+      // next flush happened to run, letting a swapped binary's first exec
+      // through in the meantime. Refresh from disk before deciding this is
+      // first sight — a real ledger always has `reload()` (the base class,
+      // #8073); an injected fake without one (most of this file's own
+      // tests) is left exactly as it was, deciding from whatever
+      // `getRecord` already returned.
+      if (typeof ledger.reload === 'function') {
+        ledger.reload()
+        record = ledger.getRecord(path)
+      }
+    }
     if (!record) {
       // First sight — trust-on-first-use: pin the hash and allow.
       // #8072 review C3: `firstSight: true` tags this as a TOFU pin, not an
@@ -365,9 +385,24 @@ export function verifyProvenance({
       // path), so this write must not be allowed to override a pin/decision
       // this instance never saw. See `PathHashTrustLedger.flush()`'s merge.
       ledger.approve(path, hash, { firstSight: true })
-      return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
-    }
-    if (record.sha256 === hash) {
+      // #8073 review S1: the reload() above and this approve()'s own
+      // internal re-read/flush are two separate readFileSync calls in one
+      // synchronous stack — narrow, but a genuine pin from another process
+      // CAN land in between. The ledger's own merge already resolves that
+      // correctly (a stale TOFU write yields to a record it never saw — see
+      // approve()'s `firstSight` contract), but this function had ALREADY
+      // decided PINNED before that resolution could run. Re-read after the
+      // write and only report PINNED when our hash is still what the ledger
+      // actually holds; otherwise someone else's genuine pin won the race,
+      // and this falls through to the ordinary mismatch handling below using
+      // THAT record — so block mode correctly refuses the exec instead of
+      // reporting an `ok: true` verdict the ledger itself disagrees with.
+      record = ledger.getRecord(path)
+      if (!record || record.sha256 === hash) {
+        return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
+      }
+      // Falls through with `record` now set to the winning pin.
+    } else if (record.sha256 === hash) {
       return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
     }
 

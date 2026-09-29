@@ -452,7 +452,21 @@ export class SkillsTrustStore extends PathHashTrustLedger {
     // verbatim `absPath` is kept around for the basename() warn
     // (operator-facing path doesn't change shape).
     const key = _normalizePathKey(absPath)
-    const existing = this._records[key]
+    let existing = this._records[key]
+
+    if (!existing) {
+      // #8073: one SkillsTrustStore instance per SESSION (not per process —
+      // see the class docstring) means a miss here is even more likely to
+      // be stale than the binary ledger's two-process case: any other
+      // session's `inspect()` of this same skill since this instance's own
+      // construction/last flush would have recorded it, invisibly, until
+      // this instance's own next flush happened to run. Refresh from disk
+      // before treating a miss as first sight, so a genuine existing record
+      // decides verified/mismatch here instead of being silently re-pinned
+      // by TOFU.
+      this.reload()
+      existing = this._records[key]
+    }
 
     if (!existing) {
       // #8072 review C3: trust-on-first-use, not an operator decision — a
