@@ -38,15 +38,15 @@ export function nonNegInt(x) {
   return Math.floor(n)
 }
 
+// model ids come from provider output (untrusted). Reject the keys that could
+// pollute a plain object so a hostile/buggy id can't reach `out[id] = …`.
+const isSafeModelId = (id) => typeof id === 'string' && id.length > 0 && !UNSAFE_MCP_KEYS.has(id)
+
 /**
  * Normalize the Agent SDK's per-model usage map (camelCase ModelUsage
  * entries) into the wire contract above. Returns null when the input is
  * absent, not an object, or normalizes to zero entries.
  */
-// model ids come from provider output (untrusted). Reject the keys that could
-// pollute a plain object so a hostile/buggy id can't reach `out[id] = …`.
-const isSafeModelId = (id) => typeof id === 'string' && id.length > 0 && !UNSAFE_MCP_KEYS.has(id)
-
 export function normalizeSdkModelUsage(raw) {
   if (!raw || typeof raw !== 'object') return null
   const out = {}
