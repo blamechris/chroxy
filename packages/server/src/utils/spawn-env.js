@@ -104,11 +104,28 @@ export const STANDARD_ALLOWLIST = [
 // `extras` instead; it only authorises POST /permission, so it is safe to hand
 // to the child.
 //
+// CHROXY_INGEST_SECRET (#8113) joins this list for the same reason, at lower
+// severity: it authorises POST /api/events and POST /api/mailbox* (bearer-
+// token-authority.md §6 — notification injection + a bounded, non-attacker-
+// controlled mailbox wakeup string; no reads, no arbitrary input). The daemon
+// itself never assigns it into process.env (it is generated once and
+// persisted to ~/.chroxy/ingest-secret, read back from disk — grepped: no
+// `process.env.CHROXY_INGEST_SECRET =` assignment anywhere in src/), so any
+// value present in a child's copied env can only be something the OPERATOR's
+// own shell happened to export (e.g. for their own claude-hooks testing) —
+// never a value this daemon minted for itself. No spawned child in this
+// audit is an `@chroxy/claude-hooks` emitter (those run inside an entirely
+// separate, non-chroxy Claude Code session), so none has a legitimate use for
+// it either.
+//
 // Allowlist-mode providers (codex, gemini) already exclude these by omission;
 // this set is the belt-and-braces guarantee for denylist-mode providers (claude)
-// and is re-used by the claude-tui PTY spawn path (claude-tui-session.js).
+// and is re-used by the claude-tui PTY spawn path (claude-tui-session.js), the
+// BYOK in-process Bash/Grep tool shell (byok-tool-executor.js, #8113), the
+// user-shell PTY, and the MCP-server/statusline child-env builders.
 export const CHROXY_SECRET_DENYLIST = [
   'API_TOKEN',
+  'CHROXY_INGEST_SECRET',
 ]
 
 // Chroxy per-SESSION env that must never reach a spawned child by AMBIENT

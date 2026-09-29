@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renam
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded, buildSafeBashEnv } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -149,6 +149,101 @@ describe('executeBuiltinTool', () => {
       })
       assert.equal(r.isError, true)
       assert.match(r.content, /timed out/)
+    })
+  })
+
+  // #8113 (found during #7360/#8111's security review): buildSafeBashEnv()
+  // only stripped the BYOK provider's OWN credential (ANTHROPIC_API_KEY /
+  // CLAUDE_CODE_OAUTH_TOKEN) via a hand-rolled SECRET_ENV_DENYLIST,
+  // independent of and diverged from utils/spawn-env.js's shared
+  // CHROXY_SECRET_DENYLIST / stripInheritedChroxySecrets(). The daemon's own
+  // primary API_TOKEN — full control of the daemon over the WS/HTTP surface —
+  // and an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET (the exact
+  // #7360 class) both reached the model's own Bash/Grep tool calls, retrievable
+  // with a single `env | grep API_TOKEN`.
+  describe('buildSafeBashEnv secret stripping (#8113)', () => {
+    it('strips the primary API_TOKEN, an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET, and CHROXY_INGEST_SECRET — ambient-proof', () => {
+      const saved = {
+        API_TOKEN: process.env.API_TOKEN,
+        CHROXY_PORT: process.env.CHROXY_PORT,
+        CHROXY_HOOK_SECRET: process.env.CHROXY_HOOK_SECRET,
+        CHROXY_INGEST_SECRET: process.env.CHROXY_INGEST_SECRET,
+      }
+      process.env.API_TOKEN = 'primary-bearer-token'
+      process.env.CHROXY_PORT = '19999'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+      process.env.CHROXY_INGEST_SECRET = 'ambient-ingest-secret'
+      try {
+        const env = buildSafeBashEnv()
+        assert.equal(env.API_TOKEN, undefined,
+          'the full-authority primary API_TOKEN must never reach a BYOK-session Bash/Grep tool call')
+        assert.equal(env.CHROXY_PORT, undefined,
+          'an ambiently-inherited CHROXY_PORT must not reach the tool subprocess')
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+          'an ambiently-inherited CHROXY_HOOK_SECRET must not reach the tool subprocess')
+        assert.equal(env.CHROXY_INGEST_SECRET, undefined,
+          'the daemon-level ingest secret must not reach the tool subprocess')
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k]
+          else process.env[k] = v
+        }
+      }
+    })
+
+    it('still strips the BYOK provider\'s own credential (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN) — #4069 invariant preserved', () => {
+      const saved = {
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      }
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-leak'
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-leak'
+      try {
+        const env = buildSafeBashEnv()
+        assert.equal(env.ANTHROPIC_API_KEY, undefined)
+        assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, undefined)
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k]
+          else process.env[k] = v
+        }
+      }
+    })
+
+    it('still forwards benign operator env (PATH, HOME) — not a blanket wipe', () => {
+      const env = buildSafeBashEnv()
+      assert.equal(env.PATH, process.env.PATH)
+      if (process.env.HOME !== undefined) assert.equal(env.HOME, process.env.HOME)
+    })
+
+    // Integration-level proof, through the REAL dispatch path (executeBuiltinTool
+    // -> runBash -> executeBash), that the leak is closed end to end — not just
+    // at the unit level. Spawns a real /bin/sh (the same sandboxed pattern the
+    // 'Bash' describe block above already uses), never a chroxy provider binary.
+    it('the real Bash tool call cannot see the daemon-private secrets (integration, #8113)', async () => {
+      const saved = {
+        API_TOKEN: process.env.API_TOKEN,
+        CHROXY_PORT: process.env.CHROXY_PORT,
+        CHROXY_HOOK_SECRET: process.env.CHROXY_HOOK_SECRET,
+      }
+      process.env.API_TOKEN = 'primary-bearer-token'
+      process.env.CHROXY_PORT = '19999'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+      try {
+        const r = await executeBuiltinTool({
+          toolName: 'Bash',
+          input: { command: 'env | grep -E "^(API_TOKEN|CHROXY_PORT|CHROXY_HOOK_SECRET)=" || echo NONE_FOUND' },
+          ...ctx(),
+        })
+        assert.equal(r.isError, false)
+        assert.match(r.content, /NONE_FOUND/,
+          'a BYOK Bash tool call must not be able to read the daemon-private secrets via env')
+      } finally {
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k]
+          else process.env[k] = v
+        }
+      }
     })
   })
 
