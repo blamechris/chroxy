@@ -3,10 +3,7 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { configDir, configFile, readGateConfig } from './shared.js'
-import { resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
-import { runProviderPreflight, buildBinaryProvenanceOptions } from '../utils/preflight.js'
-import { BinaryProvenanceLedger } from '../binary-provenance-trust.js'
+import { configDir, configFile, resolveVerifiedCliBinary } from './shared.js'
 import { CliSession } from '../cli-session.js'
 
 /**
@@ -77,27 +74,26 @@ import { CliSession } from '../cli-session.js'
  * @returns {string} the verified, spawnable absolute path to `claude`.
  */
 export function resolveVerifiedClaudeBinary({
-  configPath = configFile(),
-  readConfig = () => readGateConfig(configPath),
-  ledger: ledgerOverride,
-  preflight = runProviderPreflight,
+  configPath,
+  readConfig,
+  ledger,
+  preflight,
   ProviderClass = CliSession,
 } = {}) {
-  const config = readConfig()
-  const mode = resolveBinaryProvenanceMode(config)
-  const signatureGate = isBinarySignatureGateEnabled(config)
-  const gateIsOn = mode !== 'off' || signatureGate === true
-  const ledger = ledgerOverride !== undefined
-    ? ledgerOverride
-    : (gateIsOn ? new BinaryProvenanceLedger() : null)
-  const provenance = buildBinaryProvenanceOptions({ mode, signatureGate, ledger })
-  const result = preflight(ProviderClass, { provenance })
-  if (!result.binaryPath) {
-    const err = new Error(`Could not verify a spawnable binary for provider "${ProviderClass.displayLabel || ProviderClass.name || 'claude-cli'}".`)
-    err.code = 'PROVIDER_BINARY_UNVERIFIED'
-    throw err
-  }
-  return result.binaryPath
+  // #8076 review S2: the actual gate sequence (read config → mode →
+  // signatureGate → gateIsOn → lazy ledger → buildBinaryProvenanceOptions →
+  // preflight → PROVIDER_BINARY_UNVERIFIED) now lives once, in
+  // `resolveVerifiedCliBinary` (cli/shared.js), shared with `chroxy tunnel
+  // setup`'s `resolveVerifiedCloudflaredBinary`. This wrapper only supplies
+  // this command's own default (`ProviderClass = CliSession`) and label.
+  return resolveVerifiedCliBinary({
+    configPath,
+    readConfig,
+    ledger,
+    preflight,
+    ProviderClass,
+    providerLabel: ProviderClass.displayLabel || ProviderClass.name || 'claude-cli',
+  })
 }
 
 export function registerSessionCommands(program) {

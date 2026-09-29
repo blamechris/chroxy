@@ -44,16 +44,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preflight`-shaped stand-in for `cloudflared` (there is no session Provider
   for a network tunnel binary), reusing the identical gate `chroxy resume` and
   the tunnel adapter's own `_verifyCloudflaredProvenance` both run rather than
-  a third implementation. The pre-fix `--version` existence probe is gone
-  entirely — `verifyBinary`'s stat-based existence/quarantine check answers
-  "is it available" with no exec at all — so every remaining exec (`login` /
-  `create` / `route dns`) now runs the verified absolute path, never the bare
-  string `'cloudflared'`. A refusal prints the gate's labeled error and exits
-  non-zero with nothing spawned; a missing binary is reported as the ordinary
-  "not found" case, never mislabeled as a provenance failure, and nothing in
-  the current working directory is ever hashed for a binary the health check
-  couldn't confirm exists. With gates off, the observable spawn outcome is
-  unchanged.
+  a third implementation — the actual gate sequence (read config → mode →
+  signatureGate → lazy ledger → preflight) now lives once, in a shared
+  `resolveVerifiedCliBinary()` helper (`cli/shared.js`) both `chroxy resume`
+  and `chroxy tunnel setup` call, not two copies. The pre-fix `--version`
+  existence probe is gone entirely — `verifyBinary`'s stat-based
+  existence/quarantine check answers "is it available" with no exec at all —
+  so every remaining exec (`login` / `create` / `route dns`) now runs the
+  verified absolute path, never the bare string `'cloudflared'`. A refusal
+  prints the gate's labeled error and exits non-zero with nothing spawned; a
+  missing binary is reported as the ordinary "not found" case (`cloudflared
+  not found. Install with: …`, matching the pre-fix wording), never
+  mislabeled as a provenance failure, and — on POSIX — nothing in the current
+  working directory is ever hashed for a binary the health check couldn't
+  confirm exists.
+  `-c, --config <path>` now drives BOTH the gate's read and Step 4's
+  save — the same file, so a daemon later started with `chroxy start -c
+  <path>` actually sees the named-tunnel settings this run saved; before this
+  fix `-c` changed only which file the gate read, while the save always went
+  to the default `config.json`. The dead, still-ungated
+  `CloudflareTunnelAdapter.checkBinary()` (and its `BaseTunnelAdapter` base
+  stub) — unreachable from `chroxy tunnel setup` after the fix above, and with
+  no other caller in the repo — is deleted outright, closing the class of gap
+  entirely rather than leaving an ungated exec on the shelf for the next
+  caller. "Gates off: unchanged" is not quite literal: a minimal `PATH` (no
+  `cloudflared` directory) now finds it via `resolveBinary()`'s
+  `CLOUDFLARED_CANDIDATES` fallback, where the old bare `execFileSync`
+  exec would simply fail — an improvement, not a regression. Removing the
+  `--version` probe also changes what an operator sees for a binary that is
+  present but broken (wrong architecture, a truncated file): before, this
+  surfaced as "not found" before any prompt; now the stat check passes, the
+  operator answers the first prompt, and the failure surfaces one step later
+  as "Login failed."
 
 - **`chroxy start`'s dependency checks now run the same verified binaries a
   real session would use, instead of unchecked, no-gate `--version` probes

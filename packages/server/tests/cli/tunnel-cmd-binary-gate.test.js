@@ -12,6 +12,20 @@
  * a regression in the shared gate machinery itself would also be caught
  * here.
  *
+ * #8076 review C1 — SAFETY: any test whose failure path could exec the real
+ * `cloudflared` is dangerous on a developer machine, because
+ * `CLOUDFLARED_CANDIDATES` (tunnel/cloudflare.js) holds ABSOLUTE fallback
+ * paths — a sanitized PATH does not stop `resolveBinary()` from finding a
+ * real install there. Every test that runs the real `setupCloudflare` does so
+ * in a CHILD PROCESS (`makeSetupHarness`) with an exec tripwire installed
+ * BEFORE `tunnel-cmd.js` is ever imported: every `child_process` spawn
+ * function is patched to allow ONLY the exact shim path this suite controls,
+ * so a regression that bypasses the injected resolver, or reverts an exec
+ * site to a bare/real path, is refused inside the child and logged, never
+ * actually executed. This is independent of whether the harness's own
+ * `deps.resolveBinary` seam is honoured — it protects against exactly the
+ * regression where it isn't (see the D6 mutant note on `makeSetupHarness`).
+ *
  * Never touches the real `~/.chroxy` / `~/.claude` — every fixture (temp
  * config file, gate shim) lives under `os.tmpdir()`, and the "real ledger"
  * tests below rely on `tests/_setup.mjs` redirecting `CHROXY_CONFIG_DIR` to a
@@ -32,6 +46,8 @@ import {
   cloudflaredCreateArgv,
   cloudflaredRouteDnsArgv,
 } from '../../src/cli/tunnel-cmd.js'
+import { BinaryProvenanceLedger } from '../../src/binary-provenance-trust.js'
+import { PathHashTrustLedger } from '../../src/path-hash-trust-ledger.js'
 
 const __filename = fileURLToPath(import.meta.url)
 // tests/cli -> tests -> packages/server -> src
@@ -112,14 +128,20 @@ class FixtureCloudflaredProvider {
 }
 
 /**
- * A REAL, tiny executable script that records every invocation (argv +
- * which absolute path it ran as, via `process.argv[1]`) to a marker file and
- * exits 0 — same convention as `makeGateShim()` in
+ * A REAL, tiny executable script that records every invocation's args to a
+ * marker file and exits 0 — same convention as `makeGateShim()` in
  * session-cmd-binary-gate.test.js / web-task-manager.test.js. Used so "the
  * exec actually ran the VERIFIED path" is proven by a real subprocess side
  * effect, and so `setupCloudflare`'s literal `execFileSync(cloudflaredPath,
  * ...)` call sites — deliberately NOT hidden behind an injectable seam, so
  * `scripts/lint-argv-sinks.mjs` keeps tracing them — are exercised for real.
+ *
+ * #8076 review N3: no longer records `process.argv[1]` ("argv0") — that
+ * assertion could never fail on its own (the shim's absolute path is the
+ * only way to reach it at all, so a recorded invocation always came from
+ * it), and dropping it also drops the need for a `lint-ignore-entry-point-
+ * guard` marker. The exec tripwire in `makeSetupHarness` is what actually
+ * proves no OTHER path was ever exec'd.
  */
 function makeCloudflaredShim() {
   const dir = tmpDir('shim')
@@ -128,12 +150,7 @@ function makeCloudflaredShim() {
   const body = [
     '#!/usr/bin/env node',
     `import { appendFileSync } from 'node:fs'`,
-    // This string is the BODY of a separate, dynamically-written shim script
-    // (written to disk and exec'd as its own process below) — `argv[1]`
-    // records which absolute path the OS invoked THAT shim as, for this
-    // test's own assertions. Not this file determining its own entry point.
-    // lint-ignore-entry-point-guard: records the invoked shim's own path, not this file's entry point
-    `appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ argv0: process.argv[1], args: process.argv.slice(2) }) + '\\n')`,
+    `appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args: process.argv.slice(2) }) + '\\n')`,
     `process.exit(0)`,
   ].join('\n')
   writeFileSync(shimPath, body)
@@ -152,32 +169,70 @@ function makeCloudflaredShim() {
  * calls the real `runTunnelSetup` with an injected `resolveBinary` (fixed to
  * whatever path argv gives it) and a canned prompt-answer queue.
  *
+ * #8076 review C1 — the exec tripwire below is installed BEFORE
+ * `tunnel-cmd.js` is imported (`syncBuiltinESMExports()` propagates the
+ * patched `node:child_process` CJS exports onto the ESM namespace every
+ * `import('child_process')` — static or dynamic, anywhere in this process —
+ * observes from then on). It allows a spawn ONLY when its target file is
+ * EXACTLY `cloudflaredPath` (this harness invocation's own shim); anything
+ * else — `which`, a real `/opt/homebrew/bin/cloudflared` a mutant resolved
+ * through the absolute `CLOUDFLARED_CANDIDATES` fallback, a bare
+ * `'cloudflared'` — is refused with a synthetic ENOENT and logged to
+ * `tripLogPath`. This is what lets mutant D6 (`runTunnelSetup` ignores the
+ * injected resolver and always calls the real `resolveVerifiedCloudflaredBinary`)
+ * run safely: without it, D6 would resolve the REAL installed `cloudflared`
+ * via `CLOUDFLARED_CANDIDATES` and exec `tunnel login` for real, opening a
+ * genuine Cloudflare OAuth page.
+ *
  * `setupCloudflare`'s pre-existing login-failure branch calls `process.exit(1)`
- * directly (unchanged by #8066 — out of scope here) — if a bare, unresolved
- * `'cloudflared'` ever reaches that `execFileSync` call (which is exactly
- * what a "gate call removed" / "one exec site reverted to bare 'cloudflared'"
- * mutant produces, since nothing on this test's PATH is named `cloudflared`),
- * the login exec throws ENOENT and that branch exits the process outright.
- * Running this in-process would kill the whole `node --test` run instead of
- * failing one test red (see docs/false-safety-guards.md's "a guard that
- * HANGS instead of failing" entry) — spawning a real child process means a
+ * directly (unchanged by #8066 — out of scope here) — if a blocked exec (or a
+ * bare, unresolved `'cloudflared'`) ever reaches that `execFileSync` call,
+ * the login exec throws and that branch exits the process outright. Running
+ * this in-process would kill the whole `node --test` run instead of failing
+ * one test red (see docs/false-safety-guards.md's "a guard that HANGS
+ * instead of failing" entry) — spawning a real child process means a
  * mutant-triggered `process.exit()` only ends that child; the parent test
- * reads the shim's marker file (or the child's exit code / stderr) as the
- * ground truth regardless of how the child ended.
+ * reads the shim's marker file, the trip log, and the child's exit code /
+ * stderr as the ground truth regardless of how the child ended.
  */
 function makeSetupHarness() {
   const dir = tmpDir('harness')
   const harnessPath = join(dir, 'run-setup.mjs')
+  const tripLogPath = join(dir, 'trip.jsonl')
   const body = [
-    `import { runTunnelSetup } from ${JSON.stringify(TUNNEL_CMD_URL)}`,
-    'const [, , cloudflaredPath, answersJson, configPath] = process.argv',
+    `import { createRequire, syncBuiltinESMExports } from 'node:module'`,
+    `import { appendFileSync } from 'node:fs'`,
+    'const [, , cloudflaredPath, answersJson, configPath, tripLogPath] = process.argv',
+    "const cp = createRequire(import.meta.url)('node:child_process')",
+    "for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync', 'exec', 'execSync', 'fork']) {",
+    '  const real = cp[name]',
+    '  cp[name] = function tripwire(file, ...rest) {',
+    '    if (file === cloudflaredPath) return real.call(this, file, ...rest)',
+    "    appendFileSync(tripLogPath, JSON.stringify({ fn: name, file: String(file) }) + '\\n')",
+    "    const err = new Error('tripwire: blocked a non-shim exec of ' + file)",
+    "    err.code = 'ENOENT'",
+    '    throw err',
+    '  }',
+    '}',
+    'syncBuiltinESMExports()',
+    `const { runTunnelSetup } = await import(${JSON.stringify(TUNNEL_CMD_URL)})`,
     'const answers = JSON.parse(answersJson)',
     'let i = 0',
     "const promptFn = async () => answers[i++] ?? ''",
     'await runTunnelSetup({ config: configPath }, { resolveBinary: () => cloudflaredPath, promptFn })',
   ].join('\n')
   writeFileSync(harnessPath, body)
-  return harnessPath
+  return { dir, harnessPath, tripLogPath }
+}
+
+/**
+ * Read the tripwire's log (see `makeSetupHarness`). Absent file (nothing was
+ * ever blocked) reads the same as an empty array.
+ */
+function readTripLog(tripLogPath) {
+  return existsSync(tripLogPath)
+    ? readFileSync(tripLogPath, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    : []
 }
 
 // #8039-review precedent: a `.mjs` shebang shim is not directly executable
@@ -237,6 +292,15 @@ describe('resolveVerifiedCloudflaredBinary (#8066)', () => {
   it('gates off + no ledger override never opens (or warns about) the real ledger file', (t) => {
     FixtureCloudflaredProvider.resolvedOverride = null // process.execPath
     const warnMock = t.mock.method(console, 'warn')
+    // #8076 review S5: "never warns" alone cannot fail — a missing ledger
+    // file never warns whether or not it was opened, so a mutant that
+    // unconditionally constructs `new BinaryProvenanceLedger()` survived
+    // against `console.warn` alone (D7). Spy on the actual load call
+    // instead — `BinaryProvenanceLedger`'s constructor calls
+    // `this._loadRecords()` directly (binary-provenance-trust.js), so a
+    // callCount of 0 proves no ledger was ever constructed, not just that
+    // nothing logged.
+    const loadMock = t.mock.method(PathHashTrustLedger.prototype, '_loadRecords')
     // No `ledger` key at all — the gate being off must short-circuit BEFORE
     // the lazy default (`new BinaryProvenanceLedger()`, the daemon's real
     // default-path trust file — sandboxed to a tmp CHROXY_CONFIG_DIR by
@@ -246,6 +310,7 @@ describe('resolveVerifiedCloudflaredBinary (#8066)', () => {
       readConfig: () => ({}),
     })
     assert.equal(resolved, process.execPath)
+    assert.equal(loadMock.mock.callCount(), 0, 'gates off must never construct (or load) the real ledger file — this is the test that goes red under D7 (a mutant that unconditionally constructs one)')
     assert.equal(warnMock.mock.callCount(), 0, 'gates off must never open (or warn about) the ledger file')
   })
 
@@ -313,6 +378,27 @@ describe('resolveVerifiedCloudflaredBinary (#8066)', () => {
       configPath: offConfigPath,
     })
     assert.equal(resolved, process.execPath)
+  })
+
+  it('a corrupt -c config file refuses via GATE_CONFIG_UNREADABLE, never silently falls open to gates-off (#8076 review S6)', () => {
+    // #8076 review S6 (D5b): the tunnel resolver must not catch
+    // `readConfig()`'s throw and default to `{}`. Uses the REAL
+    // `readGateConfig` (no `readConfig` override), so a wrapper that
+    // swallowed the error would resolve successfully instead of throwing.
+    FixtureCloudflaredProvider.resolvedOverride = null // process.execPath
+    const dir = tmpDir('corrupt-config')
+    const configPath = join(dir, 'corrupt.json')
+    writeFileSync(configPath, '{"binaryProvenance":{"mode":"block"},}') // trailing comma
+    assert.throws(
+      () => resolveVerifiedCloudflaredBinary({
+        ProviderClass: FixtureCloudflaredProvider,
+        configPath,
+      }),
+      (err) => {
+        assert.equal(err.code, 'GATE_CONFIG_UNREADABLE')
+        return true
+      },
+    )
   })
 
   it('production wiring: the REAL config reader + REAL default-path ledger refuse a block-mode hash mismatch (sandboxed under CHROXY_CONFIG_DIR)', () => {
@@ -384,43 +470,155 @@ describe('runTunnelSetup — the exec is gated (#8066)', () => {
     }
   })
 
-  it('a resolved path is forwarded to setup() exactly, with the promptFn seam', async () => {
+  it('a missing-binary refusal prints the ordinary "not found" message, not "Refusing to set up the tunnel" (#8076 review N1)', async (t) => {
+    const savedExitCode = process.exitCode
+    process.exitCode = 0
+    const errorMock = t.mock.method(console, 'error')
+    let setupCalled = false
+    try {
+      await runTunnelSetup({ config: '/nonexistent/config.json' }, {
+        resolveBinary: () => {
+          throw Object.assign(new Error('cloudflared: required binary "cloudflared" not found (checked PATH). brew install cloudflared.'), {
+            code: 'PROVIDER_BINARY_NOT_FOUND',
+            installHint: 'brew install cloudflared',
+          })
+        },
+        setup: () => { setupCalled = true },
+      })
+      assert.equal(process.exitCode, 1)
+      assert.equal(setupCalled, false)
+      const errorMessages = errorMock.mock.calls.map((c) => String(c.arguments[0]))
+      assert.ok(
+        errorMessages.some((msg) => /cloudflared not found\. Install with: brew install cloudflared/.test(msg)),
+        `expected the ordinary "cloudflared not found. Install with: ..." message, got: ${JSON.stringify(errorMessages)}`,
+      )
+      assert.ok(
+        !errorMessages.some((msg) => /Refusing to set up the tunnel/.test(msg)),
+        `a missing-binary message must not read like a security refusal, got: ${JSON.stringify(errorMessages)}`,
+      )
+    } finally {
+      process.exitCode = savedExitCode
+    }
+  })
+
+  it('a resolved path is forwarded to setup() exactly, with the configPath and promptFn seams (#8076 review S3)', async () => {
     let captured = null
-    await runTunnelSetup({ config: '/nonexistent/config.json' }, {
+    await runTunnelSetup({ config: '/some/config/path.json' }, {
       resolveBinary: () => '/verified/absolute/path/to/cloudflared',
-      setup: (path, deps) => { captured = { path, deps } },
+      setup: (path, configWritePath, deps) => { captured = { path, configWritePath, deps } },
       promptFn: async () => '',
     })
     assert.equal(captured.path, '/verified/absolute/path/to/cloudflared')
+    assert.equal(captured.configWritePath, '/some/config/path.json', 'the SAME -c path must reach setup() for Step 4 to write to')
     assert.equal(typeof captured.deps.promptFn, 'function')
+  })
+
+  it('a corrupt -c config refuses via GATE_CONFIG_UNREADABLE through the PRODUCTION default resolver — no setup() call (#8076 review S6)', async () => {
+    const dir = tmpDir('corrupt-config-e2e')
+    const configPath = join(dir, 'corrupt.json')
+    writeFileSync(configPath, '{"binaryProvenance":{"mode":"block"},}') // trailing comma
+    const savedExitCode = process.exitCode
+    process.exitCode = 0
+    let setupCalled = false
+    try {
+      // No `resolveBinary` override — exercises the REAL default
+      // `resolveVerifiedCloudflaredBinary` end to end. `setup` is a spy, so
+      // nothing execs even if resolution unexpectedly fell through to a
+      // real candidate path.
+      await runTunnelSetup({ config: configPath }, {
+        setup: () => { setupCalled = true },
+        promptFn: async () => '',
+      })
+      assert.equal(process.exitCode, 1, 'a corrupt gate config must refuse with a non-zero exit code')
+      assert.equal(setupCalled, false, 'setup() must never run when the gate config cannot be read')
+    } finally {
+      process.exitCode = savedExitCode
+    }
+  })
+
+  it('the default resolver + the -c hop both drive the gate, through the PRODUCTION path end to end (#8076 review S1)', async () => {
+    // #8076 review S1: every other `runTunnelSetup` test injects
+    // `resolveBinary`, so a mutant that replaces the DEFAULT resolver with a
+    // bare stub (D3), or that drops `-c` on its way to the resolver (D2b),
+    // survived every test in this file. This test supplies NEITHER
+    // `resolveBinary` NOR a `ProviderClass` override — only `setup` (a spy,
+    // so nothing execs even if resolution unexpectedly succeeds) and a
+    // `-c` config path pointing at a REAL, block-mode file with a
+    // REAL, sandboxed ledger seeded with the WRONG hash for a REAL stub
+    // executable that `which cloudflared` can find on a deliberately
+    // minimal PATH (no `/opt/homebrew/bin` or other real-cloudflared
+    // location).
+    const dir = tmpDir('prod-wiring-runsetup')
+    const binDir = tmpDir('prod-wiring-runsetup-bin')
+    const stubPath = join(binDir, 'cloudflared')
+    writeFileSync(stubPath, '#!/bin/sh\nexit 0\n')
+    chmodSync(stubPath, 0o755)
+
+    const configPath = join(dir, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ binaryProvenance: { mode: 'block' } }))
+
+    // Seed the REAL sandboxed default-path ledger with a WRONG hash for
+    // this exact stub path — `approve()` persists synchronously.
+    new BinaryProvenanceLedger().approve(stubPath, SPAWN_GATE_WRONG_HASH)
+
+    const savedPath = process.env.PATH
+    process.env.PATH = `${binDir}:/usr/bin:/bin`
+    const savedExitCode = process.exitCode
+    process.exitCode = 0
+    let setupCalled = false
+    try {
+      await runTunnelSetup({ config: configPath }, {
+        setup: () => { setupCalled = true },
+        promptFn: async () => '',
+      })
+      assert.equal(process.exitCode, 1, 'a block-mode hash mismatch on the production path must refuse')
+      assert.equal(setupCalled, false, 'setup() must never run — this is the test that goes red under D3 (default resolver replaced with a bare stub) and D2b (-c dropped on the hop to the resolver)')
+    } finally {
+      process.env.PATH = savedPath
+      process.exitCode = savedExitCode
+    }
   })
 })
 
 describe('setupCloudflare execs the verified path for real (#8066)', () => {
-  it('every cloudflared exec (login, create, route dns) runs the verified absolute path, never the bare string "cloudflared"', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
+  it('every cloudflared exec (login, create, route dns) runs the verified absolute path, never the bare string "cloudflared", and Step 4 writes to the -c path (#8076 review S3)', { skip: WINDOWS_SHIM_EXEC_SKIP }, () => {
     const shim = makeCloudflaredShim()
-    const harnessPath = makeSetupHarness()
+    const harness = makeSetupHarness()
+    const configPath = join(tmpDir('exec-config'), 'config.json')
     try {
-      // Run out-of-process (see makeSetupHarness's docblock) — the child's
-      // own exit code/status is not asserted on directly; the shim's marker
-      // file, written by a REAL subprocess exec, is the ground truth.
-      spawnSync(process.execPath, [
-        harnessPath,
+      const result = spawnSync(process.execPath, [
+        harness.harnessPath,
         shim.shimPath,
         JSON.stringify(['', '', 'chroxy.example.com']),
-        '/nonexistent/config.json',
-      ], { encoding: 'utf-8' })
+        configPath,
+        harness.tripLogPath,
+      ], { encoding: 'utf-8', timeout: 30_000 })
+
+      const diag = `status=${result.status} signal=${result.signal} stderr=${result.stderr}`
+      assert.equal(result.signal, null, `the harness child was killed by a signal (possibly the 30s timeout) — ${diag}`)
+
+      // #8076 review C1: the tripwire log must be EMPTY — proves nothing
+      // other than the shim path was ever exec'd, regardless of how the
+      // child otherwise behaved.
+      const tripEntries = readTripLog(harness.tripLogPath)
+      assert.deepEqual(tripEntries, [], `the tripwire recorded a non-shim exec attempt — ${diag}`)
 
       const invocations = shim.readInvocations()
-      assert.equal(invocations.length, 3, `expected 3 cloudflared invocations (login, create, route dns), got: ${JSON.stringify(invocations)}`)
-      for (const inv of invocations) {
-        assert.equal(inv.argv0, shim.shimPath, 'every invocation must run the verified absolute path, not a bare "cloudflared" resolved off PATH')
-      }
+      assert.equal(invocations.length, 3, `expected 3 cloudflared invocations (login, create, route dns), got ${invocations.length}: ${JSON.stringify(invocations)} — ${diag}`)
       assert.deepEqual(invocations[0].args, ['tunnel', 'login'])
       assert.deepEqual(invocations[1].args, cloudflaredCreateArgv('chroxy'))
       assert.deepEqual(invocations[2].args, cloudflaredRouteDnsArgv('chroxy', 'chroxy.example.com'))
+
+      // #8076 review S3: Step 4 must write to the -c path, not the default
+      // config.json — the file the gate read from.
+      assert.ok(existsSync(configPath), `Step 4 must write the tunnel settings to the -c path — ${diag}`)
+      const written = JSON.parse(readFileSync(configPath, 'utf-8'))
+      assert.equal(written.tunnel, 'named')
+      assert.equal(written.tunnelName, 'chroxy')
+      assert.equal(written.tunnelHostname, 'chroxy.example.com')
     } finally {
       rmSync(shim.dir, { recursive: true, force: true })
+      rmSync(harness.dir, { recursive: true, force: true })
     }
   })
 })

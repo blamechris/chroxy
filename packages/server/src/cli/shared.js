@@ -6,8 +6,10 @@
  */
 import { existsSync, readFileSync } from 'fs'
 import readline from 'readline'
-import { validateConfig, mergeConfig, isFatalConfigWarning, DEFAULT_MAX_PAYLOAD_BYTES } from '../config.js'
+import { validateConfig, mergeConfig, isFatalConfigWarning, DEFAULT_MAX_PAYLOAD_BYTES, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
 import { configDir, configPath } from '../config-dir.js'
+import { runProviderPreflight, buildBinaryProvenanceOptions } from '../utils/preflight.js'
+import { BinaryProvenanceLedger } from '../binary-provenance-trust.js'
 
 // Re-exported so CLI command modules keep importing their paths from one place.
 export { configDir }
@@ -57,6 +59,63 @@ function gateConfigUnreadable(configPath, cause) {
   const err = new Error(`cannot read ${configPath} to determine binaryProvenance mode (${cause.message})`)
   err.code = 'GATE_CONFIG_UNREADABLE'
   return err
+}
+
+/**
+ * Resolve AND verify a CLI-invoked binary through the opt-in provenance gate,
+ * for a standalone CLI subcommand with no daemon `SessionManager` instance to
+ * read `_binaryProvenanceMode` / `_binarySignatureGate` / `binaryProvenanceLedger`
+ * off of (#8061/#8065's `chroxy resume`, #8066's `chroxy tunnel setup`, and any
+ * future CLI writer of this shape).
+ *
+ * #8076 review S2: `resolveVerifiedClaudeBinary` (session-cmd.js) and
+ * `resolveVerifiedCloudflaredBinary` (tunnel-cmd.js) were a line-for-line copy
+ * of this exact sequence — read config → mode → signatureGate → gateIsOn →
+ * lazy ledger → `buildBinaryProvenanceOptions` → preflight → throw
+ * `PROVIDER_BINARY_UNVERIFIED` — with only the `ProviderClass` default and the
+ * error's provider label differing. Extracted here so a change to the
+ * sequence (e.g. #8073's ledger-writer rework) lands once, not twice.
+ *
+ * @param {object} [deps] - test seams; production callers supply their own
+ *   `ProviderClass` default and usually nothing else.
+ * @param {string} [deps.configPath] - defaults to `configFile()`.
+ * @param {Function} [deps.readConfig] - defaults to `readGateConfig(configPath)`.
+ * @param {object} [deps.ledger] - defaults to a lazily-opened, default-path
+ *   ledger; pass one explicitly to override, including `null`.
+ * @param {Function} [deps.preflight] - defaults to `runProviderPreflight`.
+ * @param {object} deps.ProviderClass - REQUIRED; the preflight-shaped class
+ *   (or stand-in) to verify.
+ * @param {string} [deps.providerLabel] - used in the `PROVIDER_BINARY_UNVERIFIED`
+ *   error message; falls back to `ProviderClass.displayLabel` /
+ *   `ProviderClass.name` / `'the requested provider'`.
+ * @returns {string} the verified, spawnable absolute path.
+ * @throws {Error} whatever `preflight` throws, or `PROVIDER_BINARY_UNVERIFIED`
+ *   when it resolves no path at all.
+ */
+export function resolveVerifiedCliBinary({
+  configPath = configFile(),
+  readConfig = () => readGateConfig(configPath),
+  ledger: ledgerOverride,
+  preflight = runProviderPreflight,
+  ProviderClass,
+  providerLabel,
+} = {}) {
+  const config = readConfig()
+  const mode = resolveBinaryProvenanceMode(config)
+  const signatureGate = isBinarySignatureGateEnabled(config)
+  const gateIsOn = mode !== 'off' || signatureGate === true
+  const ledger = ledgerOverride !== undefined
+    ? ledgerOverride
+    : (gateIsOn ? new BinaryProvenanceLedger() : null)
+  const provenance = buildBinaryProvenanceOptions({ mode, signatureGate, ledger })
+  const result = preflight(ProviderClass, { provenance })
+  if (!result.binaryPath) {
+    const label = providerLabel || ProviderClass.displayLabel || ProviderClass.name || 'the requested provider'
+    const err = new Error(`Could not verify a spawnable binary for provider "${label}".`)
+    err.code = 'PROVIDER_BINARY_UNVERIFIED'
+    throw err
+  }
+  return result.binaryPath
 }
 
 /**

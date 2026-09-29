@@ -2,12 +2,10 @@
  * chroxy tunnel — Tunnel management commands
  */
 import { existsSync, mkdirSync, readFileSync } from 'fs'
+import { dirname } from 'path'
 import { CLOUDFLARED_CANDIDATES } from '../tunnel/cloudflare.js'
 import { writeFileRestricted, cloudflaredInstallHint } from '../platform.js'
-import { configDir, configFile, prompt, readGateConfig } from './shared.js'
-import { resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from '../config.js'
-import { runProviderPreflight, buildBinaryProvenanceOptions } from '../utils/preflight.js'
-import { BinaryProvenanceLedger } from '../binary-provenance-trust.js'
+import { configFile, prompt, resolveVerifiedCliBinary } from './shared.js'
 
 /**
  * #7296 — writer-side check on the interactively-prompted tunnel name.
@@ -139,27 +137,24 @@ const CLOUDFLARED_PREFLIGHT_PROVIDER = {
  * @returns {string} the verified, spawnable absolute path to `cloudflared`.
  */
 export function resolveVerifiedCloudflaredBinary({
-  configPath = configFile(),
-  readConfig = () => readGateConfig(configPath),
-  ledger: ledgerOverride,
-  preflight = runProviderPreflight,
+  configPath,
+  readConfig,
+  ledger,
+  preflight,
   ProviderClass = CLOUDFLARED_PREFLIGHT_PROVIDER,
 } = {}) {
-  const config = readConfig()
-  const mode = resolveBinaryProvenanceMode(config)
-  const signatureGate = isBinarySignatureGateEnabled(config)
-  const gateIsOn = mode !== 'off' || signatureGate === true
-  const ledger = ledgerOverride !== undefined
-    ? ledgerOverride
-    : (gateIsOn ? new BinaryProvenanceLedger() : null)
-  const provenance = buildBinaryProvenanceOptions({ mode, signatureGate, ledger })
-  const result = preflight(ProviderClass, { provenance })
-  if (!result.binaryPath) {
-    const err = new Error('Could not verify a spawnable binary for "cloudflared".')
-    err.code = 'PROVIDER_BINARY_UNVERIFIED'
-    throw err
-  }
-  return result.binaryPath
+  // #8076 review S2: the actual gate sequence now lives once, in
+  // `resolveVerifiedCliBinary` (cli/shared.js), shared with `chroxy resume`'s
+  // `resolveVerifiedClaudeBinary` — this wrapper only supplies the
+  // `cloudflared` stand-in and label.
+  return resolveVerifiedCliBinary({
+    configPath,
+    readConfig,
+    ledger,
+    preflight,
+    ProviderClass,
+    providerLabel: 'cloudflared',
+  })
 }
 
 export function registerTunnelCommand(program) {
@@ -170,11 +165,17 @@ export function registerTunnelCommand(program) {
   tunnelCmd
     .command('setup')
     .description('Interactive Cloudflare Named Tunnel setup')
-    // #8066 — mirrors `chroxy resume`'s `-c, --config` (#8065 review S4): only
-    // affects which file the binary-provenance gate reads `binaryProvenance`
-    // from; CHROXY_BINARY_PROVENANCE / CHROXY_BINARY_SIGNATURE_GATE still come
-    // from the invoking shell's own env, not a running daemon's.
-    .option('-c, --config <path>', 'Path to config file (only affects the binary-provenance gate; env overrides come from the invoking shell)', configFile())
+    // #8066/#8076 review S3 — mirrors `chroxy resume`'s `-c, --config`
+    // (#8065 review S4), but for `tunnel setup` this option controls TWO
+    // things at the SAME path, not just one: the file the binary-provenance
+    // gate reads `binaryProvenance` from, AND the file Step 4 writes
+    // `tunnel`/`tunnelName`/`tunnelHostname` to. They must be the same file —
+    // a daemon started with `chroxy start -c <path>` reads its named-tunnel
+    // settings from THAT file, so writing them anywhere else would leave
+    // `chroxy start -c <path>` unaware the setup ever ran. CHROXY_BINARY_PROVENANCE
+    // / CHROXY_BINARY_SIGNATURE_GATE still come from the invoking shell's own
+    // env, not a running daemon's.
+    .option('-c, --config <path>', 'Path to config file — both the binary-provenance gate and the saved tunnel settings read/write this file; env overrides for the gate come from the invoking shell', configFile())
     .action(async (options) => {
       await runTunnelSetup(options)
     })
@@ -192,7 +193,7 @@ export function registerTunnelCommand(program) {
  *   `resolveVerifiedCloudflaredBinary`, called as
  *   `resolveBinary({ configPath: options.config })` in production.
  * @param {Function} [deps.setup] - defaults to `setupCloudflare`; called as
- *   `setup(cloudflaredPath, { promptFn: deps.promptFn })`.
+ *   `setup(cloudflaredPath, options.config, { promptFn: deps.promptFn })`.
  * @param {Function} [deps.promptFn] - forwarded to `setup` — a test-only
  *   stand-in for the real interactive `prompt()`.
  */
@@ -213,24 +214,43 @@ export async function runTunnelSetup(options, deps = {}) {
   try {
     cloudflaredPath = resolveBinary({ configPath: options.config })
   } catch (err) {
-    console.error(`\n❌ Refusing to set up the tunnel: ${err.message}`)
+    // #8076 review N1: a plain "binary not installed" refusal should not
+    // read like a security refusal for a binary that simply isn't present —
+    // that phrasing is reserved for an actual gate verdict (provenance,
+    // quarantine, an unreadable gate config). `ProviderBinaryNotFoundError`
+    // is thrown BEFORE provenance ever runs (preflight.js's health-check-
+    // first ordering), so this branch never fires for a real gate refusal.
+    if (err.code === 'PROVIDER_BINARY_NOT_FOUND') {
+      console.error(`\n❌ cloudflared not found.${err.installHint ? ` Install with: ${err.installHint}` : ''}`)
+    } else {
+      console.error(`\n❌ Refusing to set up the tunnel: ${err.message}`)
+    }
     process.exitCode = 1
     return
   }
 
-  await setup(cloudflaredPath, { promptFn })
+  // #8076 review S3: `-c <path>` must drive BOTH the gate's read (above) and
+  // Step 4's write (inside `setup`) — the SAME file, so a daemon started
+  // with `chroxy start -c <path>` actually sees the settings this run saves.
+  await setup(cloudflaredPath, options.config, { promptFn })
 }
 
 /**
  * @param {string} cloudflaredPath - the verified absolute path resolved by
  *   `resolveVerifiedCloudflaredBinary` — execed for every call below,
  *   never the bare string `'cloudflared'` (#8066).
+ * @param {string} configWritePath - #8076 review S3: the file Step 4 reads,
+ *   merges into, and writes `tunnel`/`tunnelName`/`tunnelHostname` to — the
+ *   SAME file `-c <path>` pointed the gate at (`runTunnelSetup` passes
+ *   `options.config` here), never always the default `configFile()`, so a
+ *   daemon later started with `chroxy start -c <path>` actually sees what
+ *   this run saved.
  * @param {object} [deps]
  * @param {Function} [deps.promptFn] - defaults to the real `prompt()`
  *   (`cli/shared.js`); test-only seam so a Maestro-free unit test doesn't
  *   need real stdin.
  */
-async function setupCloudflare(cloudflaredPath, { promptFn = prompt } = {}) {
+async function setupCloudflare(cloudflaredPath, configWritePath, { promptFn = prompt } = {}) {
   const { execFileSync } = await import('child_process')
 
   console.log('\n🔧 Named Tunnel Setup\n')
@@ -285,22 +305,23 @@ async function setupCloudflare(cloudflaredPath, { promptFn = prompt } = {}) {
 
   console.log('\nStep 4: Saving configuration\n')
 
-  if (!existsSync(configDir())) {
-    mkdirSync(configDir(), { recursive: true })
+  const writeDir = dirname(configWritePath)
+  if (!existsSync(writeDir)) {
+    mkdirSync(writeDir, { recursive: true })
   }
 
   let config = {}
-  if (existsSync(configFile())) {
-    config = JSON.parse(readFileSync(configFile(), 'utf-8'))
+  if (existsSync(configWritePath)) {
+    config = JSON.parse(readFileSync(configWritePath, 'utf-8'))
   }
 
   config.tunnel = 'named'
   config.tunnelName = tunnelName
   config.tunnelHostname = hostname
 
-  writeFileRestricted(configFile(), JSON.stringify(config, null, 2))
+  writeFileRestricted(configWritePath, JSON.stringify(config, null, 2))
 
-  console.log('✅ Configuration saved to:', configFile())
+  console.log('✅ Configuration saved to:', configWritePath)
   console.log('')
   console.log('Your stable URLs:')
   console.log(`   HTTP:      https://${hostname}`)
