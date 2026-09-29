@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { useTauriMenuEvents } from './useTauriMenuEvents'
+import { resolveTogglePlanModeTarget } from '../lib/plan-mode-toggle'
 
 export interface UseTauriMenuWiringArgs {
   /** File > New Session — same callback the chrome "New Session" button uses. */
@@ -11,6 +12,15 @@ export interface UseTauriMenuWiringArgs {
   openSettings: () => void
   setSidebarOpen: React.Dispatch<React.SetStateAction<boolean>>
   setPermissionMode: (mode: string) => void
+  /**
+   * #8084 / #8087 review (Critical #2) — whether the active session's
+   * provider capability allows ENTERING plan mode (claude-tui reports
+   * `planMode: false`). Mirrors `useShortcutDispatch.ts`'s prop of the same
+   * name; both flow from `App.tsx`'s `dropdownFlags.showPlanMode`. Defaults
+   * to `true` when omitted so existing call sites keep working. Leaving
+   * plan mode is never gated on this — see `resolveTogglePlanModeTarget`.
+   */
+  planModeSupported?: boolean
 }
 
 /**
@@ -25,6 +35,13 @@ export interface UseTauriMenuWiringArgs {
  * Window > Bring All to Front is handled entirely Rust-side
  * (`handle_bring_all_to_front`) — the dashboard has no state to mutate, so it
  * doesn't appear in the hook surface.
+ *
+ * `menuTogglePlanMode` used to carry its own copy of the enter/leave logic
+ * `useShortcutDispatch.ts`'s `session.togglePlanMode` case has — the two
+ * copies drifted (#8087 review, Critical #2): the shortcut got gated on the
+ * active provider's `planMode` capability in #8084, and this menu handler
+ * did not, so the native menu bar could still force a `claude-tui` session
+ * into plan mode. Both now call the shared `resolveTogglePlanModeTarget`.
  */
 export function useTauriMenuWiring({
   onNewSession,
@@ -32,6 +49,7 @@ export function useTauriMenuWiring({
   openSettings,
   setSidebarOpen,
   setPermissionMode,
+  planModeSupported,
 }: UseTauriMenuWiringArgs): void {
   const menuConnectToServer = useCallback(() => {
     // The dashboard's existing "connect to a different server" surface
@@ -48,12 +66,13 @@ export function useTauriMenuWiring({
   }, [setSidebarOpen])
   const menuTogglePlanMode = useCallback(() => {
     const state = useConnectionStore.getState()
-    if (state.permissionMode === 'plan') {
-      setPermissionMode(state.previousPermissionMode || 'approve')
-    } else {
-      setPermissionMode('plan')
-    }
-  }, [setPermissionMode])
+    const target = resolveTogglePlanModeTarget(
+      state.permissionMode,
+      state.previousPermissionMode,
+      planModeSupported,
+    )
+    if (target !== null) setPermissionMode(target)
+  }, [setPermissionMode, planModeSupported])
   const menuReload = useCallback(() => {
     window.location.reload()
   }, [])

@@ -19,6 +19,7 @@ import {
   parseBinding,
   formatBindingForDisplay,
   formatBindingForAria,
+  resolveEffectiveKey,
   STORAGE_KEY,
   type ShortcutDef,
 } from './registry'
@@ -394,6 +395,74 @@ describe('createShortcutRegistry', () => {
       expect(registry.matchEvent({
         key: 'w', metaKey: true, ctrlKey: false, shiftKey: false, altKey: false,
       }, 'global')).toBeNull()
+    })
+  })
+
+  // #8089 / #8087 review — on macOS, holding Option with a letter or digit
+  // makes the browser report an OS-COMPOSED glyph in `event.key` (Option+P
+  // -> 'π', Option+Shift+P -> '∏', Option+5 -> '∞'), never the plain
+  // letter/digit an `alt+`-prefixed `defaultBinding` is written against.
+  // `event.code` ("KeyP", "Digit5") names the physical key regardless of
+  // composition — `resolveEffectiveKey` / `matchEvent` must derive the key
+  // from `code` whenever Alt is held and `code` names a plain letter/digit.
+  describe('matchEvent + macOS Option-key composition (#8089 / #8087 review)', () => {
+    const altDefs: ShortcutDef[] = [
+      { id: 'session.togglePlanMode', defaultBinding: 'shift+alt+p', description: 'Toggle plan mode', category: 'session', scope: 'global' },
+      { id: 'test.altDigit', defaultBinding: 'alt+5', description: 'Alt+digit test fixture', category: 'other', scope: 'global' },
+      { id: 'sidebar.reorder.up', defaultBinding: 'alt+arrowup', description: 'Move sidebar row up', category: 'sidebar', scope: 'global' },
+    ]
+
+    it('resolveEffectiveKey derives the key from `code` when Alt is held and code is a letter', () => {
+      // Real macOS Option+Shift+P keydown shape: key is the composed glyph.
+      expect(resolveEffectiveKey({ key: '∏', code: 'KeyP', altKey: true })).toBe('p')
+    })
+
+    it('resolveEffectiveKey derives the key from `code` when Alt is held and code is a digit', () => {
+      expect(resolveEffectiveKey({ key: '∞', code: 'Digit5', altKey: true })).toBe('5')
+    })
+
+    it('resolveEffectiveKey leaves `key` alone when Alt is not held', () => {
+      expect(resolveEffectiveKey({ key: 'p', code: 'KeyP', altKey: false })).toBe('p')
+    })
+
+    it('resolveEffectiveKey leaves `key` alone for a named/arrow key even with Alt held', () => {
+      expect(resolveEffectiveKey({ key: 'ArrowUp', code: 'ArrowUp', altKey: true })).toBe('ArrowUp')
+    })
+
+    it('resolveEffectiveKey falls back to `key` when `code` is absent', () => {
+      expect(resolveEffectiveKey({ key: 'p', altKey: true })).toBe('p')
+    })
+
+    it('matchEvent resolves session.togglePlanMode from a REAL macOS Option+Shift+P keydown shape', () => {
+      const registry = createShortcutRegistry(altDefs)
+      const match = registry.matchEvent({
+        key: '∏', code: 'KeyP', altKey: true, shiftKey: true, metaKey: false, ctrlKey: false,
+      }, 'global')
+      expect(match).toBe('session.togglePlanMode')
+    })
+
+    it('matchEvent resolves an Alt+digit binding from a REAL macOS Option+5 keydown shape', () => {
+      const registry = createShortcutRegistry(altDefs)
+      const match = registry.matchEvent({
+        key: '∞', code: 'Digit5', altKey: true, shiftKey: false, metaKey: false, ctrlKey: false,
+      }, 'global')
+      expect(match).toBe('test.altDigit')
+    })
+
+    it('matchEvent still resolves alt+arrowup (pre-existing Alt default, unaffected)', () => {
+      const registry = createShortcutRegistry(altDefs)
+      const match = registry.matchEvent({
+        key: 'ArrowUp', code: 'ArrowUp', altKey: true, shiftKey: false, metaKey: false, ctrlKey: false,
+      }, 'global')
+      expect(match).toBe('sidebar.reorder.up')
+    })
+
+    it('matchEvent still works when no `code` is supplied at all (non-KeyboardEvent callers)', () => {
+      const registry = createShortcutRegistry(altDefs)
+      const match = registry.matchEvent({
+        key: 'p', altKey: true, shiftKey: true, metaKey: false, ctrlKey: false,
+      }, 'global')
+      expect(match).toBe('session.togglePlanMode')
     })
   })
 })

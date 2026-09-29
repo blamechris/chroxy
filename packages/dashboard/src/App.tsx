@@ -2226,6 +2226,10 @@ export function App() {
     openSettings,
     setSidebarOpen,
     setPermissionMode,
+    // #8084 / #8087 review (Critical #2) — same flag passed to
+    // useShortcutDispatch above, so the native desktop menu's "Toggle Plan
+    // Mode" item honours the active provider's planMode capability too.
+    planModeSupported: dropdownFlags.showPlanMode,
   })
 
   // #5786 — approving a permission/plan or answering an AskUserQuestion is, like

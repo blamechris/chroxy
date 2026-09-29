@@ -33,6 +33,7 @@ import { readClipboardImage } from '../utils/clipboard-image'
 import { processBase64Image } from '../utils/image-utils'
 import { useConnectionStore } from '../store/connection'
 import { persistSplitMode } from '../store/persistence'
+import { resolveTogglePlanModeTarget } from '../lib/plan-mode-toggle'
 
 type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots'
 
@@ -314,21 +315,18 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             break
           }
           case 'session.togglePlanMode': {
+            // #8084 / #8087 review (Critical #2) — the enter/leave decision
+            // is shared with the Tauri desktop menu's own toggle
+            // (`useTauriMenuWiring.ts`) via `resolveTogglePlanModeTarget`,
+            // so the two entry points can't drift back into "one gated,
+            // one not."
             const state = useConnectionStore.getState()
-            const currentMode = state.permissionMode
-            if (currentMode === 'plan') {
-              // Switch back to previous mode (default to 'approve'). Always
-              // allowed — a session can be in plan mode already (e.g. the
-              // planMode capability flipped mid-session, or a resumed
-              // session carries a stale mode) and must still be able to
-              // leave it even when `planModeSupported` is false (#8084).
-              setPermissionMode(state.previousPermissionMode || 'approve')
-            } else if (planModeSupported !== false) {
-              // #8084 — only ENTERING plan mode is gated on the provider's
-              // planMode capability. `planModeSupported` defaults to
-              // undefined (treated as true) for callers that don't pass it.
-              setPermissionMode('plan')
-            }
+            const target = resolveTogglePlanModeTarget(
+              state.permissionMode,
+              state.previousPermissionMode,
+              planModeSupported,
+            )
+            if (target !== null) setPermissionMode(target)
             break
           }
           default:
