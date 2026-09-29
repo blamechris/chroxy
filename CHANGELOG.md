@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claude-tui session's tool cards show the tool's actual output again,
+  instead of the raw JSON result envelope (#8082).** Bash cards showed
+  `{"stdout":"…","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}`
+  and Read cards showed `{"type":"text","file":{"filePath":"…","content":"…",…}}`
+  — `_emitToolHookEvent`'s PostToolUse handler (claude-tui-session.js) was
+  forwarding the hook's structured `tool_response` wholesale through
+  `JSON.stringify`. A new `normalizeClaudeTuiToolResponse`
+  (claude-tui-tool-response.js) unwraps the known shapes into the same
+  flattened display text SdkSession/CliSession already forward for a real
+  tool_result content block — Bash renders `stdout` (plus `stderr` on its own
+  line when non-empty), Read renders `file.content`, and an MCP-shaped
+  `{content, isError}` response is flattened the same way
+  `tool-result.js`'s `emitToolResults` does. An unrecognised structured shape
+  still falls back to `JSON.stringify`, unchanged from before this fix.
+
 - **Adding or removing an MCP server now resolves the submit spinner
   immediately when the WebSocket send itself fails, instead of waiting out
   the full 15-second timeout for something already known to have failed
