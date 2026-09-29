@@ -621,7 +621,7 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     // is still its `baseSnapshot()` default (`false`) whenever this spread runs.
     // A future edit that marks-then-falls-through here would rely on the
     // non-enumerable definition alone to keep the (now-true) marker off the
-    // wire, same as the WS handler's reply — see session-pr-status-test.js's
+    // wire, same as the WS handler's reply — see session-pr-status.test.js's
     // "never indeterminate on a found PR" coverage.
     return { ...snapshot, repo: { owner: parent.owner, name: parent.repo }, ...forkNormalised }
   }
