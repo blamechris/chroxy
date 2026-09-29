@@ -78,6 +78,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification). The expectation is now cleared only after `flush()`'s
   write actually succeeds, mirroring how `_changedKeys.clear()` is itself
   deferred; a losing CAS still drops its expectation immediately, unchanged.
+- **`chroxy start`'s dependency checks now probe the named tunnel the MERGED
+  config actually resolved, not whichever tunnel doctor's own default
+  `config.json` names (#8116).** `runDoctorChecks`'s named-tunnel routability
+  probe (`checkTunnelRoutability`, #5328 step 5.6) read `tunnel` /
+  `tunnelHostname` from its own default config file, independent of the
+  merged config `chroxy start` (`server-cmd.js`) already resolved (`-c
+  <path>`, `--tunnel`, `--tunnel-hostname`, `CHROXY_TUNNEL*` env) — the same
+  defect shape #8074 (binary-provenance mode) and #8115 (provider selection)
+  closed for their own pieces of this same wiring gap. `chroxy start -c
+  other.json` (or `--tunnel named:…`) probed the default config's tunnel, or
+  none at all, while the daemon it started used the other one; the probe is
+  advisory, so this was a wrong or missing hint rather than a wrong gate.
+  `runDoctorChecks` now accepts `tunnelMode` / `tunnelHostname` overrides
+  (same seam shape as #8074's `binaryProvenanceMode`) that replace the
+  default-file read when supplied; `server-cmd.js` passes both from the
+  merged config's already-parsed tunnel. `chroxy doctor` (which never
+  supplies the override) is unaffected.
 - **A worktree-isolated session's tab now shows the repo name instead of the
   opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
   — the last path segment — but a worktree session's cwd is
