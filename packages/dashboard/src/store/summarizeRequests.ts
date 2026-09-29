@@ -80,3 +80,8 @@ export function rejectAllSummarizeRequests(message: string): void {
   }
   pending.clear()
 }
+
+/** @internal test seam. */
+export function _testSummarizePendingSize(): number {
+  return pending.size
+}
