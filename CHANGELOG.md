@@ -1016,6 +1016,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The MCP server-name regex, reserved-key set, and cloud-metadata host
+  blocklist are now single-sourced in `@chroxy/protocol/mcp-validation`
+  (#7030).** `packages/dashboard/src/lib/mcp-server-validation.ts` used to
+  hand-duplicate `MCP_SERVER_NAME_RE`, the `__proto__`/`constructor`/
+  `prototype` reserved-key guard, and `isBlockedMetadataHost` from
+  `packages/server/src/byok-mcp-config.js` — verified byte-identical at
+  review time, but exactly the shape of drift #6986 and #7001 hit. Both
+  packages now import the same Zod-free `@chroxy/protocol/mcp-validation`
+  subpath, and a guard test fails if a second copy of these constants
+  reappears anywhere in packages/server, packages/dashboard, packages/app, or
+  packages/store-core. No behavior change — the server remains the sole
+  validation authority on write.
+
 - **`CHROXY_CONFIG_DIR` now relocates ALL daemon state (#7052).** It previously
   moved only about half of it: `models.json`, `connection.json`, `pages/`,
   `snapshots/`, `checkpoints/`, `ingest-secret` and the session-token store

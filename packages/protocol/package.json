@@ -24,6 +24,10 @@
     "./handler-coverage": {
       "import": "./dist/handler-coverage-extract.js",
       "types": "./dist/handler-coverage-extract.d.ts"
+    },
+    "./mcp-validation": {
+      "import": "./dist/mcp-validation.js",
+      "types": "./dist/mcp-validation.d.ts"
     }
   },
   "scripts": {
