@@ -454,6 +454,9 @@ describe('lsof resolution wired into the sweep (#8083)', () => {
       realpath: (p) => p,
       exists: () => false,
       resolveBinary: () => 'lsof',
+      // Defense in depth (#8108 review): if the resolver ever stops returning
+      // null here, the sweep must fail HERE, never exec the host's real lsof.
+      execFileSync: () => { throw new Error('test must never exec lsof when it is unavailable') },
     }
     let r
     assert.doesNotThrow(() => { r = sweepOrphans({ worktreeBase: BASE, deps }) })
@@ -475,6 +478,9 @@ describe('lsof resolution wired into the sweep (#8083)', () => {
       worktreeBase: BASE,
       exists: () => false,
       resolveBinary: () => 'lsof',
+      // Defense in depth (#8108 review): if the resolver ever stops returning
+      // null here, the sweep must fail HERE, never exec the host's real lsof.
+      execFileSync: () => { throw new Error('test must never exec lsof when it is unavailable') },
     }
     for (let i = 0; i < 4; i++) {
       let r
@@ -501,6 +507,9 @@ describe('lsof resolution wired into the sweep (#8083)', () => {
       worktreeBase: BASE,
       exists: () => false,
       resolveBinary: () => 'lsof',
+      // Defense in depth (#8108 review): if the resolver ever stops returning
+      // null here, the sweep must fail HERE, never exec the host's real lsof.
+      execFileSync: () => { throw new Error('test must never exec lsof when it is unavailable') },
       setIntervalFn,
       // deliberately no `run` override — exercises the REAL maybeReapOrphans
     }
