@@ -2795,3 +2795,60 @@ The test is `[ -e ] || [ -L ]`, which stops on the link and hands it to the
 resolver, where it is an escape or a failure but never a pass. The mutation that
 drops `-L` reds exactly one test (the dangling LEAF), and nothing else in the
 suite notices, which is why that test exists.
+
+### 36. The catalogue whose comparison was a container check — `#8112`
+
+`scripts/lint-argv-sinks.mjs` (`#7868`, entries 13/14's own lint) audits every
+argv element that reaches `spawn`/`execFile` and isn't provably a constant:
+guard it (shape 1), terminate it with `--` (shape 2), fuse it behind a fixed
+`--flag=` prefix (shape 3), or name it in `AUDITED_SINKS`, the catalogue this
+lint checks itself against. The catalogue entry for `DockerSession
+._startContainer`'s image argument was `match: 'this._image'`, with a reason
+explaining `this._image` is never client-supplied. The comparison that decided
+whether an entry attested a finding was `catalogueKey.includes(c.match)` — a
+containment test standing in for the equality test the reason actually argued
+for.
+
+Found reviewing `#8109`: replacing `this._image` with `this._image ||
+this._userSuppliedImageOverride` passes the lint unchanged on `main`, because
+the new expression *contains* the old one. The reason attached to the entry
+was never re-evaluated against the wider expression — it couldn't have been,
+since nothing about `.includes()` asks "is this still the same thing I
+reasoned about?" A template literal wrapping the attested text
+(`` `${attacker}${this._image}` ``) and string concatenation
+(`attacker + this._image`) are the same hole from two other directions. In
+`_startContainer` the `||` branch is dead today (the constructor guarantees
+`this._image` truthy), which is exactly why no behavioural test could have
+caught it — only the static lint could, and the static lint's own comparison
+was the thing that let it through.
+
+The fix (`catalogueEntryMatchesFinding`, `lint-argv-sinks.mjs`) replaces
+`.includes()` with whole-expression equality: an entry's `match` must equal
+the flagged element's own normalised text, not merely appear inside it. A
+`match` may still legitimately span several call sites — `docker-sdk-
+session.js`'s `this._containerId` entry covers 5 — but only because every
+site carries that identical literal expression, verbatim, which is a
+different claim from "contains it as a substring." Retrofitting this against
+the live catalogue surfaced three entries that had been silently covering a
+SECOND, differently-shaped expression by the same accident, harmlessly in each
+case (`service.js`'s `taskName` entry was also absorbing `state.taskName ||
+WINDOWS_TASK_NAME`, itself safe because it round-trips a file chroxy writes
+and reads back — but attested by accident, not by the entry's own reasoning)
+— each now has its own entry, so the catalogue's next reader sees what is
+actually being attested at each site instead of inferring it from a
+substring's reach.
+
+**Related:** a wrapper that hides a sink's own argv construction behind an
+opaque, same-file function trades element-level attestation for one opaque
+call-site attestation — and #8109's first pass did exactly this to
+`_startContainer` before review caught it, the same PR. See "Opaque wrappers
+silently give up coverage" in `lint-argv-sinks.mjs`'s own header comment for
+the mechanism and why it was reverted rather than kept.
+
+**Guard against it:** when a catalogue/allowlist entry's `reason` argues about
+a SPECIFIC expression, ask whether the comparison that consumes it can only
+ever match that expression, or anything built around it. `.includes()`,
+`.startsWith()` and a bare regex without anchors all answer "anything built
+around it" — the same shape as entry 13's charset allowlist, one layer up:
+there a character was let through with no check on position, here a substring
+was let through with no check on what surrounds it.

@@ -431,6 +431,82 @@ export function outer(value) {
 }
 `
 
+// #8112 — a catalogue entry attests an argv element's WHOLE expression, not
+// any expression that merely contains it. The entry below always attests the
+// bare `this._image` property access; each fixture below builds a WIDER
+// expression around that exact same attested text and must NOT be silenced
+// by it.
+const IMAGE_ATTESTED_CATALOGUE = `export const AUDITED_SINKS = [
+  { file: 'offender.js', match: 'this._image', reason: 'test: attests the bare property access only' },
+]\n`
+
+// The exact attested expression, unmodified — the positive control every RED
+// case below is contrasted against.
+const IMAGE_EXACT = `
+import { execFile } from 'node:child_process'
+class Runner {
+  constructor() { this._image = 'node:22-slim' }
+  run() {
+    execFile('/usr/bin/docker', ['run', this._image], () => {})
+  }
+}
+`
+
+// The literal #8112 issue example: a dead-today `||` fallback that would
+// have gone live the moment the constructor stopped guaranteeing `_image`.
+const IMAGE_OR_FALLBACK = `
+import { execFile } from 'node:child_process'
+class Runner {
+  constructor() { this._image = 'node:22-slim' }
+  run() {
+    execFile('/usr/bin/docker', ['run', this._image || this._userSuppliedImageOverride], () => {})
+  }
+}
+`
+
+// A template literal interpolating an attacker-controlled value AROUND the
+// attested one — `${attacker}${this._image}` is not `this._image`.
+const IMAGE_TEMPLATE_INTERPOLATION = `
+import { execFile } from 'node:child_process'
+class Runner {
+  constructor() { this._image = 'node:22-slim' }
+  run(attacker) {
+    execFile('/usr/bin/docker', ['run', \`\${attacker}\${this._image}\`], () => {})
+  }
+}
+`
+
+// String concatenation with an attacker-controlled leading operand.
+const IMAGE_CONCAT = `
+import { execFile } from 'node:child_process'
+class Runner {
+  constructor() { this._image = 'node:22-slim' }
+  run(attacker) {
+    execFile('/usr/bin/docker', ['run', attacker + this._image], () => {})
+  }
+}
+`
+
+// The attested expression, reformatted across lines the way a normal
+// reflow/Prettier pass would — must still match a `match` written compactly
+// on one line. Mirrors the real `state.taskName || WINDOWS_TASK_NAME` shape
+// in service.js (a documented, intentionally-safe `||` fallback whose value
+// round-trips a file chroxy itself writes).
+const TASKNAME_OR_FALLBACK_CATALOGUE = `export const AUDITED_SINKS = [
+  { file: 'offender.js', match: 'state.taskName || WINDOWS_TASK_NAME', reason: 'test: compact match text' },
+]\n`
+
+const TASKNAME_OR_FALLBACK_REFORMATTED = `
+import { execFileSync } from 'node:child_process'
+const WINDOWS_TASK_NAME = 'Chroxy'
+export function run(state) {
+  execFileSync('schtasks', ['/Delete', '/TN',
+    state.taskName
+      || WINDOWS_TASK_NAME,
+  '/F'], { stdio: 'ignore' })
+}
+`
+
 describe('lint-argv-sinks', () => {
   describe('required fixtures (issue #7868 acceptance)', () => {
     test('RED: an unguarded new spawn with a variable argv fails', () => {
@@ -700,6 +776,43 @@ describe('lint-argv-sinks', () => {
     })
   })
 
+  // #8112 — catalogue matching is whole-expression EQUALITY, not a bare
+  // substring test. Before this fix, `match: 'this._image'` silently
+  // attested any WIDER expression that merely contained the text
+  // `this._image`, because the check was `catalogueKey.includes(c.match)`.
+  describe('catalogue matching is whole-expression equality, not substring (#8112)', () => {
+    test('POSITIVE CONTROL: the exact attested expression is silenced', () => {
+      const r = runLint({ 'offender.js': IMAGE_EXACT }, { catalogue: IMAGE_ATTESTED_CATALOGUE })
+      assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('RED: a `||` fallback built around the attested expression is NOT silenced by it (the #8112 issue example)', () => {
+      const r = runLint({ 'offender.js': IMAGE_OR_FALLBACK }, { catalogue: IMAGE_ATTESTED_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /1 argv sink\(s\)/)
+      assert.match(r.stderr, /this\._image \|\| this\._userSuppliedImageOverride/)
+    })
+
+    test('RED: a template literal interpolating an attacker value around the attested expression is NOT silenced', () => {
+      const r = runLint({ 'offender.js': IMAGE_TEMPLATE_INTERPOLATION }, { catalogue: IMAGE_ATTESTED_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /1 argv sink\(s\)/)
+      assert.match(r.stderr, /\$\{attacker\}\$\{this\._image\}/)
+    })
+
+    test('RED: string concatenation with an attacker-controlled operand is NOT silenced', () => {
+      const r = runLint({ 'offender.js': IMAGE_CONCAT }, { catalogue: IMAGE_ATTESTED_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /1 argv sink\(s\)/)
+      assert.match(r.stderr, /attacker \+ this\._image/)
+    })
+
+    test('GREEN: the same expression reformatted across lines still matches a compactly-written entry (whitespace-insensitive)', () => {
+      const r = runLint({ 'offender.js': TASKNAME_OR_FALLBACK_REFORMATTED }, { catalogue: TASKNAME_OR_FALLBACK_CATALOGUE })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
   describe('inline `// argv-safety-ignore:` marker', () => {
     test('a marker with a reason on the line above silences that one finding', () => {
       const r = runLint({ 'marked.js': IGNORE_MARKER_ABOVE }, { catalogue: EMPTY_CATALOGUE })
@@ -720,11 +833,22 @@ describe('lint-argv-sinks', () => {
     })
 
     test('an opaque array IS silenced by a matching catalogue entry', () => {
+      // #8112: the match must name the WHOLE call expression, not a prefix
+      // of it — a prefix is exactly the substring hazard this issue fixes,
+      // just at the opaque-call granularity instead of the element one.
       const catalogue = `export const AUDITED_SINKS = [
-        { file: 'offender.js', match: "execFile('/usr/bin/git', args", reason: 'test: pretend audited' },
+        { file: 'offender.js', match: "execFile('/usr/bin/git', args, () => {})", reason: 'test: pretend audited' },
       ]\n`
       const r = runLint({ 'offender.js': OPAQUE_SPREAD_ARGV }, { catalogue })
       assert.equal(r.status, 0, r.stderr)
+    })
+
+    test('RED (#8112): a catalogue entry naming only a PREFIX of the opaque call no longer silences it', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: "execFile('/usr/bin/git', args", reason: 'test: deliberately truncated' },
+      ]\n`
+      const r = runLint({ 'offender.js': OPAQUE_SPREAD_ARGV }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
     })
   })
 

@@ -23,6 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`lint-argv-sinks`'s catalogue now matches an argv expression exactly, not
+  by substring (#8112).** `AUDITED_SINKS` entries like `match: 'this._image'`
+  were compared against a finding with `.includes()`, so any WIDER expression
+  containing an attested one silently passed as though it were the attested
+  value — `this._image || this._userSuppliedImageOverride`, a template
+  literal interpolating an attacker value around `this._image`, or
+  `attacker + this._image` all passed the lint unchanged on `main`, found
+  reviewing #8109. Catalogue matching is now whole-expression equality
+  (`catalogueEntryMatchesFinding`, `lint-argv-sinks.mjs`): an entry attests a
+  finding only when its normalised text equals the entry's `match`, not
+  merely contains it. Several existing entries that had been relying on the
+  old substring looseness — a truncated opaque-call prefix, a template's text
+  without its own backticks, a bare identifier accidentally also covering a
+  wider expression built from it — were tightened to name the exact
+  expression they attest; none represented a real unguarded widening. Also
+  documents the opaque-sink-wrapper coverage trade-off (`lint-argv-sinks.mjs`'s
+  header, `docs/false-safety-guards.md` entry 36) so a future same-file
+  wrapper around a sink doesn't silently give up element-level coverage the
+  way #8109's first pass did.
 - **A worktree-isolated session's tab now shows the repo name instead of the
   opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
   — the last path segment — but a worktree session's cwd is

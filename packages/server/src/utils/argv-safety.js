@@ -157,28 +157,52 @@ function escapeForRegExp(flag) {
  *
  * Each entry is `{ file, match, reason }`:
  *   - `file` — the sink's path, relative to `packages/server/src`.
- *   - `match` — a distinguishing substring of the finding's catalogueKey. For
- *     an unresolvable argv, that key is the whole call's normalised source
- *     text. For a single flagged ELEMENT (#7936), it is that element's own
- *     normalised text — UNCHANGED and always first — followed by the
- *     enclosing function (or `<module>`), the sink's callee, a per-
- *     (function, callee) call-site ORDINAL (review follow-through: two
+ *   - `match` — the flagged expression's own text, matched by EXACT equality
+ *     (modulo whitespace — #8112), never by substring. For an unresolvable
+ *     argv, that is the whole call's normalised source text. For a single
+ *     flagged ELEMENT (#7936), it is that element's own normalised text —
+ *     UNCHANGED and always first — optionally followed by a site suffix:
+ *     ` [[` + the enclosing function (or `<module>`) + the sink's callee + a
+ *     per-(function, callee) call-site ORDINAL (review follow-through: two
  *     separate calls to the same callee within the same function still
- *     shared a key without this — see the `elementCatalogueKey` doc comment
- *     in `lint-argv-sinks.mjs`), and the element's position within its
- *     resolved argv array, e.g. `` `value [[runA#execFile#0#1]]` ``. A match
- *     written as just the bare element text (the pre-#7936 convention — most
- *     of the entries below) still matches, since that text is still a
- *     literal, unmoved prefix of the key, and may legitimately span several
- *     call sites that share one safety argument (the `domain`-style entries
- *     below). A match that also includes the bracketed suffix pins to
- *     exactly the one call site it was written against — use that shape
- *     when two sinks in this file could otherwise share an identically-named
- *     flagged element (`lint-argv-sinks.mjs`'s `elementCatalogueKey`). Not a
+ *     shared a key without this — see the `elementSite` doc comment in
+ *     `lint-argv-sinks.mjs`) + the element's position within its resolved
+ *     argv array, e.g. `` `value [[runA#execFile#0#1]]` `` (closed with `]]`)
+ *     or the shorter `` `value [[runA#execFile` `` (an unterminated prefix of
+ *     the site — narrows without needing the ordinal/index).
+ *
+ *     A match written as just the bare element text (no ` [[` suffix — most
+ *     of the entries below) matches at ANY call site in the file whose
+ *     flagged expression is that EXACT text — never merely a site whose
+ *     expression contains it (`docs/false-safety-guards.md`'s "substring
+ *     match standing in for a token match", `#7290`/`#7291`: before #8112 an
+ *     entry for the bare identifier `this._image` also matched
+ *     `this._image || this._userSuppliedImageOverride` at the same site,
+ *     since the old check was `.includes()`). A bare match legitimately
+ *     spanning several call sites is still supported and still safe under
+ *     exact matching, because every site it covers must carry that identical
+ *     literal expression, verbatim — `docker-sdk-session.js`'s `this
+ *     ._containerId` entry covers 5 call sites this way, and keychain.js's
+ *     `service` entry covers 6, all bare references to the same-named,
+ *     independently-safe value. Adding the ` [[` suffix pins a match to
+ *     exactly the one call site it was written against — use that shape when
+ *     two sinks in this file could otherwise share an identically-named
+ *     flagged element (`lint-argv-sinks.mjs`'s `elementSite`, and
+ *     `catalogueEntryMatchesFinding` for the full matching contract). Not a
  *     line number on purpose: a line number drifts on every unrelated edit
  *     above it, which would force a churn-only update on every such edit. A
  *     source-text match only goes stale when the FLAGGED CODE ITSELF
  *     changes — which is exactly when re-auditing is wanted.
+ *
+ *     A template literal or `+`-concatenation is matched as its OWN whole
+ *     text, backticks/quotes included (e.g. `` `${domain}/${SERVICE_LABEL}` ``,
+ *     not `domain`) — it is a different expression from the bare identifier
+ *     it embeds, even when the identifier alone is independently safe, and
+ *     #8112 is precisely about not treating "contains a safe identifier" as
+ *     "is safe". Where the same underlying value legitimately appears both
+ *     bare and wrapped in a fixed-literal template at different call sites
+ *     (`service.js`'s `domain`/`` `${domain}/${SERVICE_LABEL}` `` pair), each
+ *     shape gets its own entry.
  *   - `reason` — one line: why this value cannot be attacker-controlled, or
  *     why the CLI it reaches cannot option-parse it.
  *
@@ -194,7 +218,7 @@ export const AUDITED_SINKS = [
   // ── acp-session.js ──
   {
     file: 'acp-session.js',
-    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    match: "spawn(spawnSpec.command, spawnSpec.args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: this._buildChildEnv(), ...spawnSpec.options, })",
     reason: 'entryRef.args is providers.acp[].args from the operator config.json, loaded once at boot by registerAcpProviders(); no WS/client message reaches it.',
   },
 
@@ -222,14 +246,20 @@ export const AUDITED_SINKS = [
   // ── byok-mcp-client.js ──
   {
     file: 'byok-mcp-client.js',
-    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    match: "spawn(spawnSpec.command, spawnSpec.args, { env: this._buildChildEnv(), stdio: ['pipe', 'pipe', 'pipe'], ...spawnSpec.options, })",
     reason: 'this._config.{command,args} is an MCP server entry the primary/owner user names to run an arbitrary local program — that is the feature (STRICT-PRIMARY gate + a requestMcpTrust approval prompt before spawn), not option-flag injection into an unrelated binary; not reachable by a non-primary client.',
   },
 
   // ── claude-tui-session.js ──
   {
     file: 'claude-tui-session.js',
-    match: "execFile(binary, args",
+    // The full call text is 200+ chars, so this is the exact 200-char PREFIX
+    // the lint's own truncation (`.slice(0, 200)`, lint-argv-sinks.mjs) would
+    // produce for this call site — not a hand-picked shorter distinguishing
+    // substring (#8112: those are no longer honoured). If this call site's
+    // source text changes upstream of this cut point, this entry goes stale
+    // and must be re-derived against the new truncation.
+    match: "execFile(binary, args, { cwd, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true, }, (err, stdout) => { if (err && typeof err.code !== 'number') { reject(err) return } reso",
     reason: "runClaudeAuthStatus's one call site passes a literal ['auth','status','--json','--settings', this._settingsPath] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
   },
   // #7935 — `_spawnPty`'s node-pty `ptyMod.spawn(attemptedBinary, args, {...})`
@@ -260,7 +290,7 @@ export const AUDITED_SINKS = [
   // ── cli-session.js ──
   {
     file: 'cli-session.js',
-    match: 'spawn(spawnSpec.command, spawnSpec.args',
+    match: "spawn(spawnSpec.command, spawnSpec.args, { cwd: this.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: this._buildChildEnv(), ...spawnSpec.options, })",
     reason: '_spawnPersistentProcess(args) has one caller (start()), which passes args = buildClaudeCliArgs({...}) — audited below, at buildClaudeCliArgs itself.',
   },
   {
@@ -322,7 +352,7 @@ export const AUDITED_SINKS = [
   // ── codex-session.js ──
   {
     file: 'codex-session.js',
-    match: 'buildCodexArgs(text, this.model, this.resumeSessionId',
+    match: 'return buildCodexArgs(text, this.model, this.resumeSessionId, this._resolvedCodexSandbox)',
     reason: 'delegates to buildCodexArgs, a separate exported function audited at its own definition (text terminated behind --, model TOML-serialized via -c, sandbox enum-checked, threadId asserted safe — #7868).',
   },
   {
@@ -353,7 +383,11 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'docker-sdk-session.js',
-    match: '${this.cwd || process.cwd()}:/workspace',
+    // #8112: matched by whole-expression equality now, so the template's
+    // OWN delimiting backticks are part of the text — a bare `${...}`
+    // string (no backticks) no longer matches, since that is not what the
+    // flagged element's normalised source text actually is.
+    match: '`${this.cwd || process.cwd()}:/workspace`',
     reason: 'this.cwd is gated by validateCwdAllowed(), which must statSync+realpathSync it to an existing real directory before this is ever reached; fixed value-slot after -v, not free text.',
   },
   {
@@ -383,7 +417,9 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'docker-session.js',
-    match: '${this.cwd || process.cwd()}:/workspace',
+    // #8112: see the same-text entry in docker-sdk-session.js above — the
+    // template's own backticks are part of the matched text.
+    match: '`${this.cwd || process.cwd()}:/workspace`',
     reason: 'same reasoning as docker-sdk-session.js: this.cwd is gated by validateCwdAllowed() to an existing real directory before reaching here.',
   },
   {
@@ -393,7 +429,7 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'docker-session.js',
-    match: "spawn('docker', dockerArgs",
+    match: "spawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })",
     reason: "dockerArgs is this._containerId (see above, safe) plus the literal 'claude' plus ...buildClaudeCliArgs() — the same delegated, separately-audited builder as cli-session.js.",
   },
   {
@@ -405,12 +441,12 @@ export const AUDITED_SINKS = [
   // ── doctor.js ──
   {
     file: 'doctor.js',
-    match: 'execFileSync(s.command, s.args',
+    match: "execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...s.options })",
     reason: "checkClaudeTuiCliVersion's default exec seam always receives the literal ['--version'] from its one call site; prepareSpawn only rewraps for a Windows .cmd shim. CLI-only (chroxy doctor).",
   },
   {
     file: 'doctor.js',
-    match: 'execFileSync(spawnSpec.command, spawnSpec.args',
+    match: "execFileSync(spawnSpec.command, spawnSpec.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...spawnSpec.options, })",
     reason: "checkBinary's args are either the literal ['--version'] or a provider's static preflight.args declared in source (providers/*.js), never runtime/client data. CLI-only (chroxy doctor).",
   },
 
@@ -436,6 +472,16 @@ export const AUDITED_SINKS = [
     match: 'token',
     reason: "the secret value being stored, always generated server-side or set via local CLI init; also sits as -w's required argument (macOS security add-generic-password), consumed unconditionally regardless of content.",
   },
+  // #8112: previously silenced only by ACCIDENT, as a substring of the
+  // 'service' entry above — service is independently safe (see that entry's
+  // reason), and this template wraps it in a fixed literal prefix/suffix, but
+  // it is a DIFFERENT expression from the bare identifier and needs its own
+  // exact-text entry now that matching is whole-expression equality.
+  {
+    file: 'keychain.js',
+    match: '`Chroxy API Token (${service})`',
+    reason: '_linuxSetToken\'s --label value; service is the same value the "service" entry above already establishes is never client-supplied text, wrapped in a fixed "Chroxy API Token (...)" literal.',
+  },
   {
     file: 'keychain.js',
     match: 'script',
@@ -450,7 +496,9 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'platform.js',
-    match: '*${sid}:F',
+    // #8112: matched by whole-expression equality — the template's own
+    // backticks are part of the matched text now.
+    match: '`*${sid}:F`',
     reason: "sid is the Windows account SID from currentUserSid(), regex-matched to /S-1-[0-9-]+/ against `whoami /user` output; the argv element also carries a literal '*' prefix.",
   },
   {
@@ -462,7 +510,11 @@ export const AUDITED_SINKS = [
   // ── service.js ──
   {
     file: 'service.js',
-    match: 'gui/${process.getuid()}',
+    // #8112: whole-expression equality now, so the template's own backticks
+    // are part of the match — this covers ONLY installService's own
+    // `` `gui/${process.getuid()}` `` (no `/${SERVICE_LABEL}` suffix); the
+    // longer template below is a different expression with its own entry.
+    match: '`gui/${process.getuid()}`',
     reason: 'process.getuid() is the Node builtin returning the current OS user numeric uid — always a non-negative integer; the template also carries a fixed literal "gui/" prefix.',
   },
   {
@@ -470,7 +522,7 @@ export const AUDITED_SINKS = [
     match: 'servicePath',
     reason: "join(homedir(), 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`) with SERVICE_LABEL a hardcoded constant — always an internally-computed absolute path, never client input.",
   },
-  // Review #7929 — the five entries below cover `installWindowsService`,
+  // Review #7929 — the entries below cover `installWindowsService`,
   // `getWindowsTaskStatus`, `uninstallService`, `startService`,
   // `bootstrapLaunchd` and `stopService`, all of which build their `exec`
   // call through `const exec = options._exec || execFileSync` (a
@@ -485,17 +537,52 @@ export const AUDITED_SINKS = [
   {
     file: 'service.js',
     match: 'taskName',
-    reason: "taskName = options._taskName || WINDOWS_TASK_NAME ('Chroxy', a hardcoded module constant); options._taskName is a test-only seam never set by the one real caller (cli/service-cmd.js, always called with zero args). state.taskName (the uninstallService darwin/win32 branch) is read back from service.json, which is written only by installWindowsService using this same taskName — so it round-trips the same constant. CLI-only, no WS path.",
+    reason: "taskName = options._taskName || WINDOWS_TASK_NAME ('Chroxy', a hardcoded module constant); options._taskName is a test-only seam never set by the one real caller (cli/service-cmd.js, always called with zero args). CLI-only, no WS path.",
+  },
+  // #8112: `state.taskName || WINDOWS_TASK_NAME` (uninstallService's win32
+  // branch) is a DIFFERENT expression from the bare `taskName` above — it
+  // used to be silenced only because `taskName` is a substring of it. Kept
+  // as its own entry, not folded into a widened `taskName` match, precisely
+  // because the reasoning is different: this is `docs/false-safety-guards.md`'s
+  // "the same literal expression, verbatim" family rule applied correctly —
+  // one entry per distinct expression, not one entry stretched to cover both.
+  {
+    file: 'service.js',
+    match: 'state.taskName || WINDOWS_TASK_NAME',
+    reason: 'state.taskName (the uninstallService win32 branch) is read back from service.json, which is written only by installWindowsService using this same taskName constant — so it round-trips a value chroxy itself wrote, never client text; the fallback to the hardcoded WINDOWS_TASK_NAME constant is dead only when service.json is missing/corrupt.',
   },
   {
     file: 'service.js',
-    match: 'wrapperPath',
+    // #8112: was a bare 'wrapperPath', silenced only by substring accident —
+    // the real flagged element is this whole template (quotes included).
+    match: '`"${wrapperPath}"`',
     reason: "wrapperPath = config._wrapperPath || join(stateDir, WINDOWS_WRAPPER_NAME) — an internally-computed absolute path (join() always returns one) or a test-only override; used as schtasks' /TR value, quoted. CLI-only (chroxy service install).",
   },
   {
     file: 'service.js',
     match: 'domain',
-    reason: "domain = `gui/${process.getuid()}` — process.getuid() is the Node builtin returning the current OS user's numeric uid (always a non-negative integer), with a fixed literal 'gui/' prefix; can never start with '-'. Passed bare into `${domain}/${SERVICE_LABEL}` and as a positional to `launchctl bootstrap`. CLI-only (chroxy service start/stop).",
+    reason: "domain = `gui/${process.getuid()}` — process.getuid() is the Node builtin returning the current OS user's numeric uid (always a non-negative integer), with a fixed literal 'gui/' prefix; can never start with '-'. Passed bare as a positional to `launchctl bootstrap`. CLI-only (chroxy service start/stop).",
+  },
+  // #8112: `` `${domain}/${SERVICE_LABEL}` `` (bootstrapLaunchd's `launchctl
+  // bootout` argument) is a different expression from the bare `domain`
+  // above — same underlying value (see that entry), wrapped in a fixed
+  // `/${SERVICE_LABEL}` literal suffix; was silenced only by substring
+  // accident before #8112.
+  {
+    file: 'service.js',
+    match: '`${domain}/${SERVICE_LABEL}`',
+    reason: 'domain is the same `gui/${process.getuid()}` value the "domain" entry above establishes is never client-supplied text; SERVICE_LABEL is a hardcoded module constant.',
+  },
+  // #8112: `` `gui/${process.getuid()}/${SERVICE_LABEL}` `` — a THIRD,
+  // longer template built from the same process.getuid()/SERVICE_LABEL
+  // pieces as the two entries above, appearing verbatim at two call sites
+  // (uninstallService's darwin branch, stopService) that share one entry
+  // under the catalogue's ordinary bare-text "family" convention (identical
+  // text at both sites, not merely overlapping substrings).
+  {
+    file: 'service.js',
+    match: '`gui/${process.getuid()}/${SERVICE_LABEL}`',
+    reason: 'process.getuid() is the Node builtin returning the current OS user numeric uid (always non-negative); SERVICE_LABEL is a hardcoded module constant; the template also carries a fixed literal "gui/"..."/ " structure. Same reasoning as the shorter "gui/${process.getuid()}" entry above, one literal segment longer.',
   },
   {
     file: 'service.js',
@@ -506,7 +593,7 @@ export const AUDITED_SINKS = [
   // ── session-context.js ──
   {
     file: 'session-context.js',
-    match: "execFile(GIT, args",
+    match: "execFile(GIT, args, { cwd, timeout: TIMEOUT_MS }, (err, stdout) => { if (err) return reject(err) resolve(stdout.trim()) })",
     reason: "gitCommand(cwd, args)'s only 3 call sites in this file pass fully literal arrays (['rev-parse','--abbrev-ref','HEAD'], ['status','--porcelain'], ['rev-list','--count','@{upstream}..HEAD']) — args is unresolved only at this local helper's own scope.",
   },
 
@@ -535,7 +622,9 @@ export const AUDITED_SINKS = [
   // ── supervisor.js ──
   {
     file: 'supervisor.js',
-    match: '${tag}^{commit}',
+    // #8112: whole-expression equality — the template's own backticks are
+    // part of the matched text now.
+    match: '`${tag}^{commit}`',
     reason: "tag is drawn from `git tag --list 'known-good-*'` output, glob-filtered by git itself to always start with the literal 'known-good-' — not attacker text, and structurally cannot start with '-'.",
   },
   {
@@ -568,7 +657,7 @@ export const AUDITED_SINKS = [
   // ── web-task-manager.js ──
   {
     file: 'web-task-manager.js',
-    match: 'execFile(cmd, args, { timeout: 15_000',
+    match: "execFile(cmd, args, { timeout: 15_000, ...opts }, (err, stdout) => { if (err) return reject(err) resolve(stdout) })",
     reason: "this generic exec wrapper's one caller passes ['--teleport', task.taskId], where task.taskId is a server-generated randomUUID() looked up from the task map — the client's raw taskId is used only as a Map key, never as the argv value itself. A separate, already-hardened call site handles the client prompt text via buildRemoteTaskArgs()'s -- terminator (#7291).",
   },
 
@@ -580,7 +669,11 @@ export const AUDITED_SINKS = [
   // WS-client-supplied text.
   {
     file: 'worktree-gc.js',
-    match: "execFileSync(GIT, ['-C', cwd, ...args]",
+    // #8112: full call text (was a prefix) — one entry legitimately covers
+    // all 3 call sites (planRepoGc, sweepOrphanChroxyWorktrees, applyPlan)
+    // because each builds the IDENTICAL default-injection expression,
+    // verbatim, not merely an overlapping one.
+    match: "execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' })",
     reason: 'cwd is always an absolute repo/worktree path from server config or resolveRepoSet discovery; the only variable positionals pushed through args are absolute paths reported by `git worktree list --porcelain` itself, or a --reason-bound lockReason value — never remote/WS-supplied text.',
   },
 ]
