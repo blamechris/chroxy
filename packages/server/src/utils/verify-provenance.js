@@ -385,9 +385,24 @@ export function verifyProvenance({
       // path), so this write must not be allowed to override a pin/decision
       // this instance never saw. See `PathHashTrustLedger.flush()`'s merge.
       ledger.approve(path, hash, { firstSight: true })
-      return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
-    }
-    if (record.sha256 === hash) {
+      // #8073 review S1: the reload() above and this approve()'s own
+      // internal re-read/flush are two separate readFileSync calls in one
+      // synchronous stack — narrow, but a genuine pin from another process
+      // CAN land in between. The ledger's own merge already resolves that
+      // correctly (a stale TOFU write yields to a record it never saw — see
+      // approve()'s `firstSight` contract), but this function had ALREADY
+      // decided PINNED before that resolution could run. Re-read after the
+      // write and only report PINNED when our hash is still what the ledger
+      // actually holds; otherwise someone else's genuine pin won the race,
+      // and this falls through to the ordinary mismatch handling below using
+      // THAT record — so block mode correctly refuses the exec instead of
+      // reporting an `ok: true` verdict the ledger itself disagrees with.
+      record = ledger.getRecord(path)
+      if (!record || record.sha256 === hash) {
+        return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
+      }
+      // Falls through with `record` now set to the winning pin.
+    } else if (record.sha256 === hash) {
       return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
     }
 

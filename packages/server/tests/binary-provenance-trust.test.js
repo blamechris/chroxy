@@ -192,8 +192,19 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     // own call site (mutant MC3c) left this file, and verify-provenance's
     // own suite (whose fake ledger ignores opts entirely), green. This test
     // drives the SAME scenario through the real production entry point,
-    // `verifyProvenance()` itself, with an injected `sha256File` — so a
-    // dropped `firstSight` flag is caught here.
+    // `verifyProvenance()` itself, with an injected `sha256File`.
+    //
+    // #8073 review round 1 C1: refresh-on-miss changes what this test
+    // actually exercises — the daemon's `reload()` now finds the CLI's pin
+    // BEFORE the TOFU branch ever runs, so `verifyProvenance` never reaches
+    // `approve(path, hash, { firstSight: true })` in this scenario at all.
+    // That means dropping `{ firstSight: true }` from the call site (mutant
+    // M19) survives this ENTIRE file — this test can no longer tell "the
+    // flag is still passed" apart from "the call it guards never happens
+    // here." The flag is very much still load-bearing (a TOFU write that
+    // DOES still run — the race test below, or a retried flush after a
+    // failure — can still clobber a genuine pin without it); the dedicated
+    // race test below is what actually guards it now.
     //
     // #8073 update: before #8073, the daemon's OWN first verifyProvenance
     // call for this path also took the first-sight branch (pinning the
@@ -248,6 +259,49 @@ describe('BinaryProvenanceLedger (#6858)', () => {
       })
       assert.equal(daemonNextVerdict.status, 'hash_mismatch')
       assert.equal(daemonNextVerdict.blocked, true)
+    })
+
+    // #8073 review round 1, C1 + S1: a genuine pin can land in the narrow
+    // window between refresh-on-miss's `reload()` (which finds nothing —
+    // the daemon reaches the TOFU branch) and the TOFU `approve()`'s own
+    // internal re-read/flush. That window is two `readFileSync` calls apart
+    // in one synchronous stack, but real, and it is the one scenario where
+    // `verifyProvenance` STILL calls `approve(path, hash, { firstSight:
+    // true })` after refresh-on-miss already ran — so it is also the guard
+    // for mutant M19 (dropping the `firstSight` flag from that call site),
+    // which the test above can no longer catch (see its comment).
+    //
+    // Without `{ firstSight: true }`, the daemon's write here is an
+    // operator-equivalent `set` and clobbers the CLI's genuine pin on disk
+    // outright. With it, the ledger's own merge makes the daemon's stale
+    // TOFU write yield to the pin it never saw — but `verifyProvenance` had
+    // ALREADY returned `pinned` before that merge ran, which is what S1
+    // fixes: a post-approve re-read that reports `pinned` only when this
+    // call's own hash is still what the ledger holds.
+    it('a genuine pin landing between refresh-on-miss and the TOFU approve is neither overwritten nor bypassed (#8073 review round 1 C1/S1)', () => {
+      const path = '/usr/local/bin/claude'
+      const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first, sees nothing
+      const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
+
+      const approve = daemon.approve.bind(daemon)
+      // Lands the CLI's genuine pin from INSIDE daemon.approve() — i.e.
+      // strictly after refresh-on-miss's own `reload()` already ran (and
+      // found nothing), simulating the CLI's flush winning the race that
+      // narrowly.
+      daemon.approve = (p, h, opts) => { cli.approve(path, HASH_A); return approve(p, h, opts) }
+
+      const v = verifyProvenance({
+        resolvedPath: path,
+        mode: 'block',
+        ledger: daemon,
+        sha256File: () => HASH_B,
+      })
+
+      assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).binaries[path].sha256, HASH_A,
+        'a dropped { firstSight: true } lets the daemon overwrite the genuine pin here')
+      assert.equal(v.status, 'hash_mismatch',
+        'S1: the post-approve re-read must catch the race and refuse a `pinned` verdict the ledger itself disagrees with')
+      assert.equal(v.blocked, true)
     })
 
     // Acceptance 1 (#8073), through the REAL BinaryProvenanceLedger (the

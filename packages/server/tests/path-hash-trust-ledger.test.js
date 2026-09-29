@@ -735,6 +735,15 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.equal(changed, true, 'a successful reload reports true')
       assert.equal(readFileSync(ledgerPath, 'utf8'), before, 'reload must never write to disk')
       assert.equal(b.isTrusted('/x/p', sha('genuine')), true, 'b sees the pin after reload, with no flush of its own')
+      // #8073 review round 1 S3 (mutant M6): reload must not mark the
+      // ledger dirty just because it picked up someone else's pin — nothing
+      // about b's OWN state changed. A reload that marks dirty would make
+      // every refreshing instance write on its next flush for no reason —
+      // for a per-session store like SkillsTrustStore, a miss that resolves
+      // to "verified" would then rewrite the trust file on every load,
+      // exactly what #3231's throttle exists to prevent, and it is one more
+      // participant in the #8080 rename race for nothing.
+      assert.equal(b._dirty, false, 'reload must never mark the ledger dirty')
     })
 
     it('reload keeps this instance\'s own pending SET op over whatever is on disk', () => {
@@ -823,6 +832,27 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.equal(changed, false, 'a failed reload reports false')
       assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
         'the pin must survive an EACCES reload, not be reset to empty')
+    })
+
+    // #8073 review round 1 S3 (mutant M7): the tofu-forget guard
+    // (`if (!readFailed) this._changedKeys.delete(key)`) must stay
+    // conditioned on `readFailed` — forgetting unconditionally would be
+    // WORSE for reload() than for flush(), because reload() never writes.
+    // A pending tofu whose own flush already failed once, then hits a
+    // corrupt/EACCES reload, must stay tracked so a LATER good reload (or
+    // flush) can still resolve it correctly — forgetting it here would drop
+    // the pin from `_changedKeys` without it ever having been persisted
+    // anywhere, and the path would be first-sighted again from scratch.
+    it('a corrupt reload does not forget a pending TOFU op — only a SUCCESSFUL re-read that resolves it may forget it', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      const key = l._normalizeKey('/x/p')
+      l._setRecord(key, { sha256: sha('stale-swap'), firstSeen: 'x', approvedAt: 'x' }, 'tofu') // pending, not flushed
+
+      writeFileSync(ledgerPath, '{ this is not valid json, corrupted mid-write')
+
+      l.reload()
+      assert.equal(l._changedKeys.get(key), 'tofu',
+        'a readFailed reload must not forget a pending tofu op — nothing reliable was learned about disk this round')
     })
   })
 })

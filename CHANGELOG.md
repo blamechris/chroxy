@@ -47,12 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes another instance's on-disk pin instead of silently no-op'ing;
   `SkillsTrustStore.inspect()` — one instance per SESSION, so its exposure to
   this class of bug was already broader than the binary ledger's two
-  processes — gets the same refresh before its own TOFU path. A reload that
-  hits a corrupt file or a read error (EACCES/EIO/…) leaves every in-memory
-  pin exactly as it was; it never resets to empty. The remaining
-  read-to-rename race in `flush()` itself (two flushes landing inside the
-  same narrow window) is unrelated to this fix and stays documented, not
-  solved, pending a lockfile helper this codebase doesn't have yet.
+  processes — gets the same refresh before its own TOFU path. The TOFU write
+  itself is re-checked too: after `approve(path, hash, { firstSight: true })`,
+  `verifyProvenance()` re-reads the record and reports `pinned` only when it
+  still holds our hash, closing the narrow window where a genuine pin from
+  another process lands between the `reload()` and this `approve()`'s own
+  internal re-read. A reload that hits a corrupt file or a read error
+  (EACCES/EIO/…) leaves every in-memory pin exactly as it was — it never
+  resets to empty — but does not itself block: the first-sight decision then
+  proceeds exactly as it did before this fix and allows the spawn in every
+  mode, `block` included, since a read failure says nothing about what disk
+  actually holds. The remaining read-to-rename race in `flush()` itself (two
+  flushes landing inside the same narrow window) is the same bug class, out
+  of scope here, and stays documented rather than solved pending a lockfile
+  helper this codebase doesn't have yet (#8080). A ledger HIT is still
+  decided from memory alone with no refresh at all — unchanged by this fix —
+  so an already-running daemon does not pick up a re-seeded pin or an
+  operator's "remove this entry" remediation until its own next miss or
+  flush (#8081).
 
 - **`chroxy tunnel setup` now execs the same verified `cloudflared` binary the
   daemon's tunnel adapter would use, instead of a bare, unverified PATH lookup

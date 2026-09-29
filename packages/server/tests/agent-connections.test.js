@@ -355,7 +355,17 @@ describe('SessionManager explicit connection create/restore', () => {
     assert.equal(typeof VerifiedConnectionFixtureSession.lastRuntimePreflight, 'function')
     assert.equal(VerifiedConnectionFixtureSession.lastRuntimePreflight(), process.execPath)
     assert.equal(VerifiedConnectionFixtureSession.lastRuntimePreflight(), process.execPath)
-    assert.equal(reads, 3, 'create plus adjacent auth/PTY checks reuse the configured ledger')
+    // #8073 review round 1 S1: `verifyProvenance`'s first-sight branch now
+    // re-reads the record once via `getRecord` immediately after `approve()`
+    // — closing the TOCTOU window where a genuine pin from another process
+    // could land between a refresh-on-miss reload and this approve()'s own
+    // write, which would otherwise let this call report `pinned` while the
+    // ledger ends up holding someone else's pin. This fake ledger has no
+    // `reload`, so only the FIRST of these three checks is genuinely first
+    // sight (record null) — it now costs 2 reads (the initial miss, then
+    // S1's post-approve re-check) instead of 1; the other two checks find
+    // the record already there and cost 1 read each, unchanged. 2 + 1 + 1 = 4.
+    assert.equal(reads, 4, 'create (2 reads: the miss, then S1\'s post-approve re-check) plus two adjacent auth/PTY checks (1 read each) reuse the configured ledger')
     mgr.destroyAll()
   })
 })

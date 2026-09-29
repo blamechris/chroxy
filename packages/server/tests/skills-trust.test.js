@@ -158,6 +158,29 @@ describe('skills-trust', () => {
       assert.doesNotThrow(() => { r = store.inspect('/abs/skill.md', 'body') })
       assert.equal(r.status, 'recorded')
     })
+
+    // #8073 review round 1 S4 (mutant M11): `_mergeLoaded`'s docstring
+    // promises `_mergeExtra` runs for BOTH callers — flush() and reload() —
+    // but every existing communityTrust test only ever exercises it through
+    // flush() (grantCommunityTrust always flushes). This drives the sibling
+    // index through reload() specifically: b's own miss (an inspect() on an
+    // unrelated path) triggers a plain reload with nothing of its own to
+    // flush, and that reload alone must be enough to pick up a's grant.
+    it('reload() also merges the communityTrust sibling index, not just flush()', () => {
+      const a = new SkillsTrustStore({ filePath: trustPath })
+      const b = new SkillsTrustStore({ filePath: trustPath }) // constructed before a's grant lands — stale
+
+      a.grantCommunityTrust('alice', { realPath: '/community/alice/skill.md' })
+      assert.equal(b.isCommunityTrusted('/community/alice/skill.md', 'alice'), false,
+        'b never loaded the grant yet')
+
+      // b's own miss on an UNRELATED path triggers refresh-on-miss's
+      // reload() — b never itself grants or flushes anything here.
+      b.inspect('/abs/unrelated.md', 'unrelated body')
+
+      assert.equal(b.isCommunityTrusted('/community/alice/skill.md', 'alice'), true,
+        'reload() must merge communityTrust via _mergeExtra too, not only flush()')
+    })
   })
 
   // #3205: getRecord is the read-only accessor used by the

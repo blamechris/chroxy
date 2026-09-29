@@ -715,15 +715,17 @@ export class PathHashTrustLedger {
    * Known remaining window: the re-read and the eventual rename are not one
    * atomic step, so two processes can both re-read the same pre-flush file,
    * each merge their own change on top, and then race the rename — the
-   * second rename wins outright and the first process's merge (including
-   * whatever it freshly re-read from the other) is lost. That's strictly
-   * narrower than the bug this fixes — it needs two flushes inside the same
-   * read-to-rename window rather than merely two flushes ever — and this
-   * codebase has no file-lock helper to close it with (checked `src/utils`),
-   * so it's documented here rather than solved. Tracked as #8073's point 1;
-   * deliberately kept out of #8073's own scope (see `reload()`, which closes
-   * the DIFFERENT gap #8073 actually fixes — a stale in-memory snapshot
-   * deciding a trust question before this flush's own next merge runs).
+   * second rename wins outright, and the LOSING process's own changed keys
+   * (not the winner's — both racers read the same pre-flush bytes, so
+   * neither one's merge actually saw the other's write) are what's lost.
+   * That's strictly narrower than the bug this fixes — it needs two flushes
+   * inside the same read-to-rename window rather than merely two flushes
+   * ever — and this codebase has no file-lock helper to close it with
+   * (checked `src/utils`), so it's documented here rather than solved.
+   * Tracked as #8080; deliberately kept out of #8073's own scope (see
+   * `reload()`, which closes the DIFFERENT gap #8073 actually fixed — a
+   * stale in-memory snapshot deciding a trust question before this flush's
+   * own next merge runs).
    *
    * The merge itself (base selection + the per-key conflict rule above) is
    * `_mergeLoaded()` — shared with `reload()` (#8073), which needs the exact

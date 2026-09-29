@@ -152,6 +152,7 @@ describe('verifyProvenance — refresh-on-miss before first sight (#8073)', () =
   function makeReloadableLedger(store, { seenKeys = [] } = {}) {
     const seen = new Set(seenKeys) // keys THIS ledger has ever loaded into its own view
     const approvals = []
+    let approveCalls = 0
     return {
       getRecord(path) {
         if (!seen.has(path)) return null
@@ -159,6 +160,19 @@ describe('verifyProvenance — refresh-on-miss before first sight (#8073)', () =
         return rec ? { ...rec } : null
       },
       approve(path, hash, opts = {}) {
+        // approveCalls counts EVERY invocation, including one that goes on
+        // to yield without writing — separate from `_approvals`, which
+        // counts only a WRITE that actually changed the store. #8073 review
+        // round 1 (R1 re-verification): once approve()'s own internal merge
+        // can self-heal from a stale first sight, correctness alone no
+        // longer distinguishes "reload() found the record first" from
+        // "approve() was called anyway and yielded" — both reach the same
+        // verdict. `approveCalls` is what actually tells them apart, and is
+        // the point of calling `reload()` BEFORE deciding this looks like
+        // first sight: avoid an unnecessary write attempt (and the flush()
+        // it would trigger on a real ledger) for a path that turns out to
+        // already have a genuine record.
+        approveCalls += 1
         // Mirrors the base ledger's TOFU rule: a first-sight write never
         // overrides a record the shared store already holds for this path.
         if (opts.firstSight && store.has(path)) {
@@ -176,6 +190,7 @@ describe('verifyProvenance — refresh-on-miss before first sight (#8073)', () =
         for (const key of store.keys()) seen.add(key)
       },
       _approvals: approvals,
+      get _approveCalls() { return approveCalls },
     }
   }
 
@@ -197,6 +212,31 @@ describe('verifyProvenance — refresh-on-miss before first sight (#8073)', () =
     assert.equal(v.ok, false)
     assert.equal(v.pinnedHash, HASH_A)
     assert.equal(b._approvals.length, 0, 'must not have re-pinned over the genuine record')
+  })
+
+  // #8073 review round 1 (R1 re-verification): S1's post-approve re-read
+  // means the VERDICT is correct even if `reload()` were never called —
+  // approve()'s own internal merge self-heals from a stale first sight
+  // either way, so an outcome-only assertion can no longer tell "reload()
+  // ran first" apart from "approve() was called anyway and yielded." This
+  // asserts the actual point of calling `reload()` BEFORE deciding: a path
+  // that already has a genuine record on disk must never even reach
+  // `approve()` — no unnecessary write attempt (and, on a real ledger, no
+  // unnecessary flush()) for a record this call didn't need to touch.
+  it('a genuine existing record is found via reload() BEFORE approve() is ever called — no unnecessary write attempt', () => {
+    const store = makeSharedStore()
+    const b = makeReloadableLedger(store)
+    const a = makeReloadableLedger(store)
+    a.approve('/usr/local/bin/claude', HASH_A)
+
+    verifyProvenance({
+      resolvedPath: '/usr/local/bin/claude',
+      mode: 'block',
+      ledger: b,
+      sha256File: () => HASH_B,
+    })
+    assert.equal(b._approveCalls, 0,
+      'reload() must find the existing record before the first-sight decision, so approve() is never invoked for it at all')
   })
 
   it('warn mode: refresh-on-miss surfaces the mismatch instead of silently pinning the swap', () => {
