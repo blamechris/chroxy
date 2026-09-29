@@ -543,6 +543,66 @@ describe('SessionBar', () => {
     })
   })
 
+  // #7328 — a worktree-isolated session's cwd is the opaque
+  // `~/.chroxy/worktrees/<hex>` checkout, so the tab-cwd badge used to render
+  // a meaningless hash. The server threads the original repo dir through as
+  // `repoCwd`; the badge should prefer its basename when present.
+  describe('#7328 worktree-aware cwd badge', () => {
+    it('renders the repo name (not the opaque worktree hex) when repoCwd is set', () => {
+      const sessions: SessionTabData[] = [
+        {
+          sessionId: 's1',
+          name: 'Worktree',
+          isBusy: false,
+          isActive: true,
+          cwd: '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+          repoCwd: '/Users/blamechris/Projects/chroxy',
+        },
+      ]
+      const { container } = render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      const cwd = container.querySelector('.tab-cwd')
+      expect(cwd?.textContent).toBe('chroxy')
+      expect(cwd?.textContent).not.toContain('34914672f8578ecdf71accf8f8aec47e')
+      // Full path stays available on hover / for screen readers.
+      expect(cwd?.getAttribute('title')).toBe(sessions[0]!.cwd)
+    })
+
+    it('renders the cwd basename for a plain (non-worktree) session, unchanged', () => {
+      const sessions: SessionTabData[] = [
+        { sessionId: 's1', name: 'Plain', isBusy: false, isActive: true, cwd: '/home/user/projects/api' },
+      ]
+      const { container } = render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      expect(container.querySelector('.tab-cwd')?.textContent).toBe('api')
+    })
+
+    it('falls back to the cwd basename when repoCwd is null', () => {
+      const sessions: SessionTabData[] = [
+        {
+          sessionId: 's1', name: 'Worktree', isBusy: false, isActive: true,
+          cwd: '/Users/blamechris/.chroxy/worktrees/abc123', repoCwd: null,
+        },
+      ]
+      const { container } = render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      expect(container.querySelector('.tab-cwd')?.textContent).toBe('abc123')
+    })
+
+    it('falls back to the cwd basename when repoCwd is omitted (pre-#7328 server)', () => {
+      const sessions: SessionTabData[] = [
+        { sessionId: 's1', name: 'Worktree', isBusy: false, isActive: true, cwd: '/Users/blamechris/.chroxy/worktrees/abc123' },
+      ]
+      const { container } = render(
+        <SessionBar sessions={sessions} onSwitch={vi.fn()} onClose={vi.fn()} onRename={vi.fn()} onNewSession={vi.fn()} />
+      )
+      expect(container.querySelector('.tab-cwd')?.textContent).toBe('abc123')
+    })
+  })
+
   // #4831 — drag-to-reorder. Users want to drag tabs in the top SessionBar
   // strip to reorder them; the new order persists across reload. These
   // tests cover the pure reorder helper, the drag-emit path, the keyboard

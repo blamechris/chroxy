@@ -111,6 +111,14 @@ export interface SessionInfo {
   // it from `provider`.
   billingClass?: BillingClass;
   worktree?: boolean;
+  // #7328: the ORIGINAL repo directory for a worktree-isolated session
+  // (`ServerSessionListEntrySchema.repoCwd`, sourced from session-manager.js's
+  // `entry.worktreeRepoDir`) — null for a non-worktree session, `undefined`
+  // on a server that predates this field. `cwd` for a worktree session is the
+  // opaque `~/.chroxy/worktrees/<hex>` checkout, so renderers that want a
+  // human-readable repo name (rather than the hex basename) should prefer
+  // `basename(repoCwd)` over `basename(cwd)` when this is a non-empty string.
+  repoCwd?: string | null;
   // #3185: per-session promptEvaluator toggle. Optional in the type so
   // older servers that don't include the field don't break the parser.
   // Renderers should treat `undefined` as `false` (toggle off).

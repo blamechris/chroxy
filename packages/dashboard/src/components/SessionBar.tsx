@@ -23,6 +23,7 @@ import { useState, useCallback, useRef, useEffect, useId } from 'react'
 import type { SessionVisualStatus } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 import { isImeComposing } from '../utils/ime'
+import { repoDisplayName } from '../utils/repoLabel'
 
 export type SessionStatus = SessionVisualStatus
 
@@ -38,6 +39,11 @@ export interface SessionTabData {
   isBusy: boolean
   isActive: boolean
   cwd?: string
+  // #7328: the original repo directory for a worktree-isolated session
+  // (mirrors `SessionInfo.repoCwd` in @chroxy/store-core — see there for the
+  // full wire provenance). `null`/`undefined` for a plain session or an old
+  // server; the tab-cwd badge falls back to `abbreviateCwd(cwd)` in that case.
+  repoCwd?: string | null
   model?: string
   provider?: string
   status?: SessionStatus
@@ -104,11 +110,6 @@ export interface SessionBarProps {
 
 function shortenModel(model: string): string {
   return model.replace(/^claude-/, '').replace(/-\d.*$/, '')
-}
-
-function abbreviateCwd(cwd: string): string {
-  const parts = cwd.split('/')
-  return parts[parts.length - 1] || cwd
 }
 
 function shortenProvider(provider: string): string {
@@ -605,7 +606,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 title={session.cwd}
                 aria-label={`Working directory: ${session.cwd}`}
               >
-                {abbreviateCwd(session.cwd)}
+                {repoDisplayName(session.cwd, session.repoCwd)}
               </span>
             )}
 

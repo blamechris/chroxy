@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A worktree-isolated session's tab now shows the repo name instead of the
+  opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
+  — the last path segment — but a worktree session's cwd is
+  `~/.chroxy/worktrees/<32-char hex>`, so the badge read as a meaningless
+  hash. The server already threads the session's original repo directory
+  through as `repoCwd` on every `session_list` entry; the badge now prefers
+  its basename when present and falls back to the cwd basename (today's
+  behavior) for plain sessions or an older server. No protocol/server change
+  was needed — only the dashboard's SessionBar. The full worktree path is
+  still available via `title`/`aria-label` on hover.
 - **A BYOK Bash or Grep tool call no longer intermittently returns empty output.**
   `executeBash` returned as soon as the child process exited, but Node can report
   the exit before the stdout/stderr pipes have delivered their data, so a command
