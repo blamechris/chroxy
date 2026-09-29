@@ -275,6 +275,23 @@ describe('DiscordCiSink — sanitisation (#7428)', () => {
     assert.ok(payload.embeds[0].title.length <= 256)
   })
 
+  it('escapes markdown metacharacters in the embed TITLE, not only the description', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
+    const { sink } = makeSink()
+    await sink.send(ciComplete({ title: 'CI *passed* on _main_ #1234' }))
+    const title = JSON.parse(calls[0].body).embeds[0].title
+    assert.ok(title.includes('\\*passed\\*'), 'title must escape *')
+    assert.ok(title.includes('\\_main\\_'), 'title must escape _')
+  })
+
+  it('sets allowed_mentions { parse: [] } so Discord parses no mentions server-side', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
+    const { sink } = makeSink()
+    await sink.send(ciComplete({ body: '@everyone <@123456789012345678>' }))
+    const payload = JSON.parse(calls[0].body)
+    assert.deepEqual(payload.allowed_mentions, { parse: [] })
+  })
+
   it('a mention injected via the title itself is also neutralised', async () => {
     const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
     const { sink } = makeSink()

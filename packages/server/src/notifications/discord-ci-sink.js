@@ -231,6 +231,10 @@ export class DiscordCiSink extends NotificationSink {
     return {
       username: this._botName,
       embeds: [embed],
+      // Server-side backstop for neutralizeMentions(): Discord itself parses no
+      // mentions from this message, so nothing in a GitHub-authored PR title
+      // can ping anyone even if a mention form slips past the text transform.
+      allowed_mentions: { parse: [] },
     }
   }
 }
