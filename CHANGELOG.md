@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string (`SPAWN_APIS` contains that pair, plus `spawn`/`spawnSync`). Fixed
   by requiring a field-boundary (`#`, or end-of-string) immediately after an
   unterminated site prefix.
+- **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
+  longer reverts itself when its first persist fails (#8098).**
+  `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's
+  `_migrateExpectations` entry unconditionally, inside the merge — which
+  runs BEFORE `flush()`'s `saveJsonState()` write is known to succeed.
+  Flushes are best-effort (`throwOnFlushError: false`), so a failed persist
+  keeps `_changedKeys` set for a retry, same as every other op — but with
+  the expectation already gone, the retry's CAS check read `expect` back as
+  `undefined`, treated the still-valid migration as a lost race, and
+  silently reverted it to the legacy record it migrated from (fail-safe —
+  nothing was bypassed — but it broke the documented "a failed flush
+  retries" invariant for this one op and wasted a re-migration on the next
+  verification). The expectation is now cleared only after `flush()`'s
+  write actually succeeds, mirroring how `_changedKeys.clear()` is itself
+  deferred; a losing CAS still drops its expectation immediately, unchanged.
 - **A worktree-isolated session's tab now shows the repo name instead of the
   opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
   — the last path segment — but a worktree session's cwd is
