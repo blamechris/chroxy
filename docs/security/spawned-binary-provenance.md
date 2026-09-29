@@ -328,9 +328,9 @@ or `TunnelBinaryProvenanceError` (`code: TUNNEL_BINARY_PROVENANCE`) from the tun
 
 ### Known limitations (accepted, not defects)
 
-Two properties of this design are inherent to how it's built, not gaps left to
-close. They're named here so they're legible to a reviewer rather than discovered
-by one.
+These properties of this design are inherent to how it's built, not gaps left
+to close. They're named here so they're legible to a reviewer rather than
+discovered by one.
 
 - **check→exec is not atomic (TOCTOU).** `verifyProvenance()` hashes the bytes at
   a resolved *path* (`sha256File`); the spawn that follows execs that same path a
@@ -353,11 +353,40 @@ by one.
   win a race against a live spawn. It is not, and cannot be with these OS
   primitives, an atomic guarantee — accepted and documented rather than treated as
   an open defect.
+- **A flush's re-read-then-rename is not itself atomic (deliberately deferred,
+  #8073).** `PathHashTrustLedger.flush()` re-reads the file, merges in only the
+  keys this instance changed, then writes via temp-file-plus-`rename` (#8068).
+  Those two steps are not one atomic operation: two processes can both re-read
+  the same pre-flush file, each merge their own change on top, and then race
+  the `rename` — the second rename wins outright, silently dropping the first
+  process's merge (including whatever it freshly picked up from the other).
+  This is strictly narrower than the bug #8073 fixes elsewhere in this
+  document — it needs two flushes landing inside the same read-to-rename
+  window, not merely two flushes ever — and there is no file-lock helper
+  anywhere in this codebase (`src/utils`) to close it with. Documented in
+  `flush()`'s own docstring rather than solved; closing it would need an
+  `O_EXCL` lockfile with stale-lock recovery, tracked as #8073's still-open
+  point 1.
 - **The trust ledger is TOFU, and the ledger file itself is the trust root.** A
   path's *first* sight pins its hash automatically (`ledger.approve(path, hash)`
   inside `verifyProvenance`) with no operator gate on that initial pin —
-  trust-on-first-use, not trust-on-verification. An operator who wants a stronger
-  baseline than "whatever was there the first time this ran" can pre-seed
+  trust-on-first-use, not trust-on-verification. "First sight" is decided from
+  the CURRENT disk state, not a snapshot frozen at construction: `chroxy resume`
+  and the daemon are two independent `BinaryProvenanceLedger` instances (and
+  `SkillsTrustStore` mints a fresh instance per session) over the same file,
+  each loading it once — before #8073, a `getRecord()` miss in one instance's
+  own memory was treated as first sight even when a DIFFERENT instance had
+  already pinned that exact path, letting that instance's first exec of a
+  swapped binary through before its own next flush happened to self-heal it.
+  `verifyProvenance()`'s first-sight check and `revoke()`'s "nothing to
+  remove" check now call the ledger's `reload()` on a miss — a read-merge
+  (never a write) using the same conflict rule `flush()` uses — before
+  deciding there is genuinely nothing pinned; `SkillsTrustStore.inspect()`
+  does the same on its own `_records` miss. A read failure during that
+  refresh (corrupt bytes, EACCES/EIO) leaves every in-memory pin exactly as
+  it was — the same fail-open-to-memory guarantee `flush()` already gave a
+  failed re-read (#8072), not fail-open-to-empty. An operator who wants a
+  stronger baseline than "whatever was there the first time this ran" can pre-seed
   `~/.chroxy/binary-trust.json` out of band *before* first spawn — either
   hand-editing the `binaries` map with hashes computed on a known-good host/build,
   or calling `BinaryProvenanceLedger.approve(path, hash)` programmatically — so the

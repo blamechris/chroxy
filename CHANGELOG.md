@@ -23,6 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A binary-provenance first-sight decision (and a revoke) is refreshed from
+  disk before it trusts a miss in its own memory, so a pin `chroxy resume`
+  writes after the daemon started now stops the daemon's very first exec of a
+  swapped binary, not just its second (#8073).** #8068/#8072 fixed WHAT a
+  flush writes — a pin one process persisted was no longer erased by another
+  process's next flush — but not WHEN each process's own view of the world
+  refreshes: every `PathHashTrustLedger` instance still decided every trust
+  question from the snapshot it loaded at construction (or wrote at its own
+  last flush) until that instance's own next flush happened to run.
+  `verifyProvenance()`'s first-sight check treated `ledger.getRecord(path) ===
+  null` as "trust on first use" without ever looking at disk again, so a
+  daemon that started before `chroxy resume` pinned a path first-sighted the
+  swapped binary too — and, in block mode, ALLOWED that one exec before
+  self-healing on its next flush. `PathHashTrustLedger` gains a `reload()`
+  that re-reads the file and merges it with this instance's own pending
+  changes — sharing the exact conflict rule `flush()` already used, factored
+  out into `_mergeLoaded()` rather than duplicated — but never writes.
+  `verifyProvenance()` now calls it on a `getRecord()` miss before deciding a
+  path is first sight (an injected fake ledger with no `reload` is
+  unaffected); `revoke()` calls it before deciding there is nothing to
+  remove, so revoking a key this instance never itself loaded now correctly
+  removes another instance's on-disk pin instead of silently no-op'ing;
+  `SkillsTrustStore.inspect()` — one instance per SESSION, so its exposure to
+  this class of bug was already broader than the binary ledger's two
+  processes — gets the same refresh before its own TOFU path. A reload that
+  hits a corrupt file or a read error (EACCES/EIO/…) leaves every in-memory
+  pin exactly as it was; it never resets to empty. The remaining
+  read-to-rename race in `flush()` itself (two flushes landing inside the
+  same narrow window) is unrelated to this fix and stays documented, not
+  solved, pending a lockfile helper this codebase doesn't have yet.
+
 - **`chroxy tunnel setup` now execs the same verified `cloudflared` binary the
   daemon's tunnel adapter would use, instead of a bare, unverified PATH lookup
   (#8066).** `cli/tunnel-cmd.js` ran an unconditional, ungated

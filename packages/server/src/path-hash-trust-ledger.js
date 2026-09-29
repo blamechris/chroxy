@@ -56,6 +56,17 @@
  * index (skills' `communityTrust`) overrides `_mergeExtra`/
  * `_onFlushCommitted` to merge that index the same way.
  *
+ * Refresh-on-miss (#8073): #8068 fixed WHAT a flush writes; it did not
+ * change WHEN each instance's own view of the world gets refreshed — that
+ * still only happened on this instance's own next flush. A trust decision
+ * made from `getRecord()`/`_records[key]` returning nothing was therefore
+ * still deciding "first sight" (or "nothing to revoke") from a snapshot that
+ * could be stale by an arbitrary amount, not from disk as of NOW. `reload()`
+ * re-reads and merges (via the same `_mergeLoaded()` flush() uses) without
+ * writing, so a caller that is about to treat a miss as meaningful —
+ * `verify-provenance.js`'s first-sight TOFU pin, `revoke()`'s "nothing to
+ * remove" check — can check disk first. See `reload()`.
+ *
  * Merge safety, three properties (#8072 review):
  *   - every map the merge builds is created with `Object.assign(Object.
  *     create(null), …)`, never `{ ...spread }` — a plain object silently
@@ -269,18 +280,23 @@ export class PathHashTrustLedger {
    * subclass that supports a legacy flat-root format overrides `_extractLegacy`
    * to detect + return it (skills v1).
    *
-   * @param {{ atFlush?: boolean }} [opts]  `atFlush: true` only changes the
-   *   WARN wording on a failure (#8072 review N1) — at flush time this
+   * @param {{ atFlush?: boolean, atReload?: boolean }} [opts]  `atFlush: true`
+   *   or `atReload: true` only change the WARN wording on a failure (#8072
+   *   review N1; `atReload` added #8073) — at flush OR reload time this
    *   instance's own in-memory records are what actually gets kept (or, on
-   *   `ioError`, the flush is skipped outright — see `readFailed`/`ioError`
-   *   above), so "starting fresh" would describe the wrong outcome. At
-   *   construction (the default) there is nothing in memory yet, so
-   *   "starting fresh" is accurate.
+   *   `ioError` at flush time, the flush is skipped outright — see
+   *   `readFailed`/`ioError` above), so "starting fresh" would describe the
+   *   wrong outcome. At construction (the default) there is nothing in
+   *   memory yet, so "starting fresh" is accurate. `atFlush` gets its own
+   *   ioError wording ("skipping this flush, will retry") because a flush
+   *   really is about to skip a write; `reload()` never writes, so an
+   *   `atReload` ioError uses the same "keeping this instance's own records"
+   *   wording as every other reload failure.
    * @returns {{ records: object, parsed: object|null, migratedLegacy: boolean, readFailed: boolean, ioError: boolean, ioErrorDetail: string|null }}
    * @protected
    */
-  _loadRecords({ atFlush = false } = {}) {
-    const outcome = atFlush ? 'keeping this instance\'s own records' : 'starting fresh'
+  _loadRecords({ atFlush = false, atReload = false } = {}) {
+    const outcome = (atFlush || atReload) ? 'keeping this instance\'s own records' : 'starting fresh'
     const empty = (readFailed, ioError = false, ioErrorDetail = null) => ({
       records: Object.create(null), parsed: null, migratedLegacy: false, readFailed, ioError, ioErrorDetail,
     })
@@ -296,6 +312,8 @@ export class PathHashTrustLedger {
         // `ioErrorDetail` carries the code/message forward so flush()'s own
         // warn/throw names the SAME underlying failure a caller would have
         // seen from the write attempt this replaces (EISDIR, EACCES, ...).
+        // reload() (#8073) has no write to skip, so it gets the ordinary
+        // `outcome` wording, not "skipping this flush".
         const detail = (err && err.code) || (err && err.message) || 'read failed'
         const ioOutcome = atFlush ? 'skipping this flush, will retry' : outcome
         this._log.warn(`Could not read trust file (${detail}); ${ioOutcome}`)
@@ -457,13 +475,26 @@ export class PathHashTrustLedger {
    * Revoke `absPath` — drops the record so the path goes inert again. Persists
    * synchronously.
    *
+   * #8073: a miss in THIS instance's memory used to end the call right there
+   * — `false`, nothing revoked — even when a DIFFERENT process/instance had
+   * pinned this exact path after this instance's own last load. That left a
+   * genuine on-disk pin un-revokable from any instance that did not
+   * personally load it. Refresh from disk before trusting a miss: `reload()`
+   * merges disk into memory (without writing), so a pin another instance
+   * wrote becomes visible here, and the delete that follows is tracked in
+   * `_changedKeys` and actually flushed — removing it from disk too, not
+   * merely masking it in this instance's own view.
+   *
    * @param {string} absPath
    * @returns {boolean} true when a record was removed
    */
   revoke(absPath) {
     if (typeof absPath !== 'string' || !absPath) return false
     const key = this._normalizeKey(absPath)
-    if (!this._records[key]) return false
+    if (!this._records[key]) {
+      this.reload()
+      if (!this._records[key]) return false
+    }
     this._deleteRecord(key)
     this.flush()
     return true
@@ -481,6 +512,125 @@ export class PathHashTrustLedger {
     const map = {}
     for (const [k, v] of Object.entries(this._records)) map[k] = v
     return { [this._wrapperKey]: map }
+  }
+
+  /**
+   * Merge a freshly re-read disk snapshot (a `_loadRecords()` result) with
+   * this instance's own pending `_changedKeys`, using the conflict rule
+   * documented on `flush()` below, and replace `this._records` with the
+   * result. Shared (#8073) by `flush()` (which then persists the merged
+   * result) and `reload()` (which never writes) — the two callers differ
+   * only in what happens AFTER this returns, not in how the merge itself
+   * works, so there is exactly one implementation of the conflict rule to
+   * keep correct.
+   *
+   * `readFailed` (from the same `_loadRecords()` call) controls the merge
+   * base: `false` uses the freshly re-read `records`; `true` (known-bad
+   * bytes OR an I/O error — both set `readFailed`) falls back to THIS
+   * instance's own current `_records`, which makes the merge a safe no-op —
+   * every already-applied change stays applied, nothing pending is
+   * resolved-and-forgotten (see the R2-C1 branches below), and no in-memory
+   * pin is ever dropped. `_mergeExtra` (the subclass sibling-index hook)
+   * only runs on a successful re-read, for the same reason `flush()` always
+   * skipped it on a failed one — merging a subclass index against `parsed:
+   * null` would have nothing real to merge against.
+   *
+   * @param {{ records: object, parsed: object|null, readFailed: boolean }} loaded
+   *   A `_loadRecords()` result.
+   * @private
+   */
+  _mergeLoaded({ records: diskRecords, parsed: diskParsed, readFailed }) {
+    // C2: a failed re-read of known-bad bytes (or an I/O error) must not be
+    // treated as "the ledger is empty" — that would drop every pin this
+    // instance holds but didn't change this round. Fall back to this
+    // instance's own current records (already reflects every change it has
+    // made, applied immediately by `_setRecord`/`_deleteRecord`).
+    const base = readFailed ? this._records : diskRecords
+    // C1: null-prototype, not `{ ...base }` — a plain object lets a key
+    // named `constructor`/`toString`/`__proto__` resolve through the
+    // prototype chain instead of a real own-property miss.
+    const merged = Object.assign(Object.create(null), base)
+    for (const [key, op] of this._changedKeys) {
+      if (op === 'delete') {
+        delete merged[key]
+        continue
+      }
+      if (op === 'tofu') {
+        // C3: a first-sight pin is not a decision — never override a
+        // record another process/instance already holds for this path.
+        if (base[key]) {
+          // R2-C1: disk already resolved this key — forget the tracked op
+          // rather than risk replaying it against a LATER disk state where
+          // the key is gone (revoked/removed), which would resurrect it. On
+          // a `readFailed` base we didn't learn anything reliable about
+          // disk this time, so keep retrying instead of forgetting.
+          if (!readFailed) this._changedKeys.delete(key)
+          continue
+        }
+        merged[key] = this._records[key]
+        continue
+      }
+      if (op === 'touch') {
+        // C3: an informational bump is not a decision — only apply it when
+        // the base still agrees with the hash this instance verified
+        // against. If it doesn't (a real approve/acceptHash superseded this
+        // instance, or the record is gone), keep the base's value.
+        const baseRec = base[key]
+        const ourRec = this._records[key]
+        if (!baseRec || !ourRec || baseRec.sha256 !== ourRec.sha256) {
+          // R2-C1: same reasoning as the 'tofu' branch above.
+          if (!readFailed) this._changedKeys.delete(key)
+          continue
+        }
+        // #8072 review round 2 N2: apply ONLY the bumped approval
+        // timestamp on top of the BASE record, not this instance's whole
+        // (possibly stale) record. The hashes already match here, but
+        // `firstSeen` or a different approval timestamp on `baseRec` could
+        // reflect a revoke-then-re-approve this instance never saw — taking
+        // `this._records[key]` wholesale would silently revert those to
+        // this instance's own stale values.
+        merged[key] = { ...baseRec, [this._approvalField]: ourRec[this._approvalField] }
+        continue
+      }
+      // 'set': an explicit operator decision — always wins.
+      merged[key] = this._records[key]
+    }
+    this._records = merged
+    if (!readFailed) this._mergeExtra(diskParsed)
+  }
+
+  /**
+   * Re-read the ledger file from disk and merge it with this instance's own
+   * pending changes, using the exact same conflict rule `flush()` uses (via
+   * the shared `_mergeLoaded()`) — but never writes (#8073).
+   *
+   * A trust decision that treats "nothing in MY memory" as "nothing exists
+   * anywhere" is exactly the bug this closes: `verifyProvenance()`'s
+   * first-sight check and `revoke()`'s "is there anything to remove" check
+   * both used to consult only `this._records`, which is a snapshot frozen at
+   * this instance's construction (or its own last flush) — not at NOW. A
+   * pin/decision a DIFFERENT process or instance persisted after that point
+   * was invisible until this instance's own next flush happened to run,
+   * which is exactly the daemon-exec-before-flush window the issue reports.
+   * `reload()` gives a caller that is about to treat a miss as meaningful a
+   * way to check disk FIRST.
+   *
+   * On any re-read failure — `readFailed` (malformed JSON / wrong shape) or
+   * `ioError` (EACCES/EIO/EMFILE/…, which also sets `readFailed` — see
+   * `_loadRecords`) — `_mergeLoaded` uses this instance's OWN `_records` as
+   * the merge base, so nothing in memory changes and nothing pending is
+   * resolved-and-forgotten: nothing this instance already holds is ever
+   * dropped by a failed reload. `_loadRecords` itself already logs the
+   * warn; `reload()` adds none of its own.
+   *
+   * @returns {boolean} true when the reload actually re-synced from a
+   *   successfully re-read disk file; false when the read failed and
+   *   memory was left exactly as it was.
+   */
+  reload() {
+    const loaded = this._loadRecords({ atReload: true })
+    this._mergeLoaded(loaded)
+    return !loaded.readFailed
   }
 
   /**
@@ -570,7 +720,14 @@ export class PathHashTrustLedger {
    * narrower than the bug this fixes — it needs two flushes inside the same
    * read-to-rename window rather than merely two flushes ever — and this
    * codebase has no file-lock helper to close it with (checked `src/utils`),
-   * so it's documented here rather than solved (tracked as #8073).
+   * so it's documented here rather than solved. Tracked as #8073's point 1;
+   * deliberately kept out of #8073's own scope (see `reload()`, which closes
+   * the DIFFERENT gap #8073 actually fixes — a stale in-memory snapshot
+   * deciding a trust question before this flush's own next merge runs).
+   *
+   * The merge itself (base selection + the per-key conflict rule above) is
+   * `_mergeLoaded()` — shared with `reload()` (#8073), which needs the exact
+   * same rule for its own "merge disk into memory, but never write" job.
    *
    * On failure: either re-throw (subclass set `throwOnFlushError`) or swallow
    * with a warn. `_dirty` and `_changedKeys` both stay set on failure so a
@@ -581,7 +738,7 @@ export class PathHashTrustLedger {
   flush() {
     if (!this._dirty) return
     const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    const { records: diskRecords, parsed: diskParsed, readFailed, ioError, ioErrorDetail } = this._loadRecords({ atFlush: true })
+    const loaded = this._loadRecords({ atFlush: true })
 
     // S4 (#8072 review, round 2): an I/O error on the re-read says nothing
     // about whether disk's CURRENT bytes are good — unlike the known-bad-
@@ -594,74 +751,15 @@ export class PathHashTrustLedger {
     // ...) in its MESSAGE, so a caller matching on the message text sees
     // the same code. The thrown Error carries no `.code` property, unlike a
     // re-thrown write failure; no current caller reads `.code`.
-    if (ioError) {
-      this._log.warn(`Could not persist trust file (${ioErrorDetail}); skipping this flush, will retry`)
+    if (loaded.ioError) {
+      this._log.warn(`Could not persist trust file (${loaded.ioErrorDetail}); skipping this flush, will retry`)
       if (this._throwOnFlushError) {
-        throw new Error(`Could not persist trust file: pre-write re-read failed (${ioErrorDetail})`)
+        throw new Error(`Could not persist trust file: pre-write re-read failed (${loaded.ioErrorDetail})`)
       }
       return
     }
 
-    // C2: a failed re-read of known-bad bytes must not be treated as "the
-    // ledger is empty" — that would drop every pin this instance holds but
-    // didn't change this flush. Fall back to this instance's own current
-    // records (already reflects every change it has made, applied
-    // immediately by `_setRecord`/`_deleteRecord`), matching the pre-#8072
-    // "write my snapshot" behaviour for exactly this failure. (An I/O error
-    // already returned above, so `readFailed` here only means malformed
-    // JSON / wrong shape — overwriting THOSE bytes is a repair, not a risk.)
-    const base = readFailed ? this._records : diskRecords
-    // C1: null-prototype, not `{ ...base }` — a plain object lets a key
-    // named `constructor`/`toString`/`__proto__` resolve through the
-    // prototype chain instead of a real own-property miss.
-    const merged = Object.assign(Object.create(null), base)
-    for (const [key, op] of this._changedKeys) {
-      if (op === 'delete') {
-        delete merged[key]
-        continue
-      }
-      if (op === 'tofu') {
-        // C3: a first-sight pin is not a decision — never override a
-        // record another process/instance already holds for this path.
-        if (base[key]) {
-          // R2-C1: disk already resolved this key — forget the tracked op
-          // rather than risk replaying it against a LATER disk state where
-          // the key is gone (revoked/removed), which would resurrect it. On
-          // a `readFailed` base we didn't learn anything reliable about
-          // disk this time, so keep retrying instead of forgetting.
-          if (!readFailed) this._changedKeys.delete(key)
-          continue
-        }
-        merged[key] = this._records[key]
-        continue
-      }
-      if (op === 'touch') {
-        // C3: an informational bump is not a decision — only apply it when
-        // the base still agrees with the hash this instance verified
-        // against. If it doesn't (a real approve/acceptHash superseded this
-        // instance, or the record is gone), keep the base's value.
-        const baseRec = base[key]
-        const ourRec = this._records[key]
-        if (!baseRec || !ourRec || baseRec.sha256 !== ourRec.sha256) {
-          // R2-C1: same reasoning as the 'tofu' branch above.
-          if (!readFailed) this._changedKeys.delete(key)
-          continue
-        }
-        // #8072 review round 2 N2: apply ONLY the bumped approval
-        // timestamp on top of the BASE record, not this instance's whole
-        // (possibly stale) record. The hashes already match here, but
-        // `firstSeen` or a different approval timestamp on `baseRec` could
-        // reflect a revoke-then-re-approve this instance never saw — taking
-        // `this._records[key]` wholesale would silently revert those to
-        // this instance's own stale values.
-        merged[key] = { ...baseRec, [this._approvalField]: ourRec[this._approvalField] }
-        continue
-      }
-      // 'set': an explicit operator decision — always wins.
-      merged[key] = this._records[key]
-    }
-    this._records = merged
-    if (!readFailed) this._mergeExtra(diskParsed)
+    this._mergeLoaded(loaded)
     try {
       saveJsonState(this._filePath, this._serialize(), { fsync: true, tmpSuffix })
       this._dirty = false

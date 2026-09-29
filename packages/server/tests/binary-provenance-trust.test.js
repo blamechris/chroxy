@@ -114,6 +114,28 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     assert.equal(led.getRecord('/opt/homebrew/bin/codex'), null)
   })
 
+  // Acceptance 2 (#8073), through the real BinaryProvenanceLedger.
+  it('revoke() on an instance that never loaded the path removes another instance\'s on-disk pin', () => {
+    const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first, never loads the pin below
+    const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
+
+    cli.approve('/usr/local/bin/claude', HASH_A)
+    assert.equal(daemon.getRecord('/usr/local/bin/claude'), null, 'daemon never loaded the pin cli wrote')
+
+    assert.equal(daemon.revoke('/usr/local/bin/claude'), true,
+      'revoke must refresh from disk before deciding there is nothing to remove')
+    assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).binaries['/usr/local/bin/claude'], undefined,
+      'the pin must actually be gone from disk')
+
+    // Neither instance's later flush resurrects it.
+    daemon.approve('/opt/homebrew/bin/codex', HASH_B)
+    cli.approve('/usr/local/bin/git', HASH_A)
+    const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).binaries
+    assert.equal(onDisk['/usr/local/bin/claude'], undefined, 'stays revoked after both flush again')
+    assert.ok(onDisk['/opt/homebrew/bin/codex'])
+    assert.ok(onDisk['/usr/local/bin/git'])
+  })
+
   // #8068: since #8065, `chroxy resume` opens its own BinaryProvenanceLedger
   // on the same default `binary-trust.json` the daemon's SessionManager
   // already holds — two independent writer PROCESSES, each loading the file
@@ -172,7 +194,15 @@ describe('BinaryProvenanceLedger (#6858)', () => {
     // drives the SAME scenario through the real production entry point,
     // `verifyProvenance()` itself, with an injected `sha256File` — so a
     // dropped `firstSight` flag is caught here.
-    it('verifyProvenance\'s own first-sight pin does not overwrite another process\'s genuine pin', () => {
+    //
+    // #8073 update: before #8073, the daemon's OWN first verifyProvenance
+    // call for this path also took the first-sight branch (pinning the
+    // swapped hash and ALLOWING that one exec), and only its SECOND call
+    // caught the mismatch — the daemon's stale in-memory snapshot decided
+    // "first sight" before its own next flush ever ran. That is the exact
+    // bug #8073 reports: refresh-on-miss now makes the daemon's FIRST call
+    // already see the CLI's genuine pin.
+    it('verifyProvenance\'s own refresh-on-miss sees another process\'s genuine pin on its very FIRST call, not its second', () => {
       const path = '/usr/local/bin/claude'
       const daemon = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first, sees nothing
       const cli = new BinaryProvenanceLedger({ filePath: ledgerPath })    // chroxy resume, later
@@ -189,24 +219,27 @@ describe('BinaryProvenanceLedger (#6858)', () => {
       assert.equal(cliVerdict.status, 'pinned')
 
       // The daemon's stale ledger (constructed before the CLI's pin landed,
-      // never reloaded) also has no record for this path, so its own
-      // verifyProvenance call ALSO takes the first-sight branch — pinning
-      // whatever `sha256File` reports for the daemon's (possibly swapped)
-      // view of the binary.
+      // never reloaded) has no record for this path in memory — but #8073's
+      // refresh-on-miss means its OWN first verifyProvenance call now
+      // refreshes from disk before deciding this is first sight, sees the
+      // CLI's genuine pin, and correctly reports a mismatch and BLOCKS —
+      // the swapped binary's first exec is refused, not allowed once.
       const daemonVerdict = verifyProvenance({
         resolvedPath: path,
         mode: 'block',
         ledger: daemon,
         sha256File: () => HASH_B,
       })
-      assert.equal(daemonVerdict.status, 'pinned')
+      assert.equal(daemonVerdict.status, 'hash_mismatch',
+        'the daemon\'s FIRST call must already see the CLI\'s pin via refresh-on-miss, not treat this as first sight')
+      assert.equal(daemonVerdict.blocked, true, 'block mode must refuse the swapped binary\'s first exec too')
+      assert.equal(daemonVerdict.pinnedHash, HASH_A)
 
       const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
       assert.equal(onDisk.binaries[path].sha256, HASH_A,
-        'the CLI\'s genuine pin (via verifyProvenance) must survive the daemon\'s stale first-sight write (via verifyProvenance)')
+        'the CLI\'s genuine pin must be completely untouched by the daemon\'s call')
 
-      // The daemon's NEXT verifyProvenance call must correctly detect the
-      // hash mismatch and block, now that its memory has self-healed.
+      // A repeat call is consistent — still blocked, nothing re-pinned.
       const daemonNextVerdict = verifyProvenance({
         resolvedPath: path,
         mode: 'block',
@@ -215,6 +248,29 @@ describe('BinaryProvenanceLedger (#6858)', () => {
       })
       assert.equal(daemonNextVerdict.status, 'hash_mismatch')
       assert.equal(daemonNextVerdict.blocked, true)
+    })
+
+    // Acceptance 1 (#8073), through the REAL BinaryProvenanceLedger (the
+    // fake-ledger version lives in verify-provenance.test.js): two ledgers on
+    // one file, B constructed before A pins, warn mode still surfaces the
+    // mismatch (allowing warn's own "surface but don't block" contract) and
+    // block mode refuses — neither ever reports `pinned`.
+    it('Acceptance 1: a pin written after this ledger was constructed blocks the swapped binary on the very first check', () => {
+      const path = '/opt/homebrew/bin/codex'
+      const b = new BinaryProvenanceLedger({ filePath: ledgerPath }) // constructed first — the daemon
+      const a = new BinaryProvenanceLedger({ filePath: ledgerPath }) // chroxy resume, later
+
+      a.approve(path, HASH_A) // an explicit operator-equivalent pin, flushed
+
+      const verdict = verifyProvenance({
+        resolvedPath: path,
+        mode: 'block',
+        ledger: b,
+        sha256File: () => HASH_B,
+      })
+      assert.equal(verdict.status, 'hash_mismatch', 'not "pinned" — b must refresh before deciding this is first sight')
+      assert.equal(verdict.blocked, true)
+      assert.equal(verdict.ok, false)
     })
   })
 })

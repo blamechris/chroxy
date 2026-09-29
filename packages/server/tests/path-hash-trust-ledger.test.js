@@ -137,6 +137,36 @@ describe('PathHashTrustLedger (#5580)', () => {
       const l = new TestLedger({ filePath: ledgerPath })
       assert.equal(l.revoke('/x/never'), false)
     })
+
+    // #8073: revoke() used to consult only this instance's own in-memory
+    // `_records` — a miss ended the call right there (`false`, nothing
+    // removed) even when a DIFFERENT instance had pinned this exact path
+    // since this instance's own last load. That left a genuine on-disk pin
+    // un-revokable from any instance that did not personally load it.
+    it('revoke() on an instance that never loaded the path removes a pin a different instance wrote', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath }) // constructed before a's pin lands — never loads it
+
+      a.approve('/x/p', sha('genuine'))
+      assert.equal(b.getRecord('/x/p'), null, 'b never loaded the record a wrote')
+
+      assert.equal(b.revoke('/x/p'), true, 'revoke must refresh from disk before deciding there is nothing to remove')
+      assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/p'], undefined,
+        'the pin must actually be gone from disk, not merely hidden from b\'s own view')
+
+      // a still holds the (now-revoked) record in memory but never itself
+      // touches it again — a's next flush must not resurrect it.
+      a.approve('/x/other', sha('other'))
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.equal(onDisk['/x/p'], undefined, 'the revoke stays revoked after both instances flush again')
+      assert.ok(onDisk['/x/other'], 'the unrelated pin still lands')
+    })
+
+    it('revoke() still returns false when the path truly has no record anywhere, even after refreshing', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/other', sha('other')) // ensure the file exists with unrelated content
+      assert.equal(l.revoke('/x/never'), false)
+    })
   })
 
   describe('hash-mismatch re-gate', () => {
@@ -680,6 +710,119 @@ describe('PathHashTrustLedger (#5580)', () => {
       assert.equal(rec.approvedAt, bumped, 'the touch\'s own bumped timestamp lands')
       assert.equal(rec.firstSeen, 're-approved-elsewhere',
         'every other field must come from the disk record, not this instance\'s stale copy')
+    })
+  })
+
+  // #8073: #8068/#8072 fixed WHAT a flush writes; they did not change WHEN
+  // an instance's own view of the world refreshes — that still only happened
+  // at this instance's OWN next flush. A trust decision made from a
+  // getRecord()/`_records[key]` miss (verify-provenance.js's first-sight
+  // TOFU pin, revoke()'s "nothing to remove" check) was therefore still
+  // deciding from a snapshot that could be stale by an arbitrary amount.
+  // `reload()` re-reads and merges (reusing flush()'s own merge rule)
+  // without writing, so a caller about to treat a miss as meaningful can
+  // check disk first.
+  describe('reload() refreshes from disk without writing (#8073)', () => {
+    it('a pin written by a different instance becomes visible after reload, and reload never writes to disk', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      const b = new TestLedger({ filePath: ledgerPath }) // constructed before a's pin lands — stale
+
+      a.approve('/x/p', sha('genuine'))
+      assert.equal(b.getRecord('/x/p'), null, 'b never loaded the record a wrote')
+
+      const before = readFileSync(ledgerPath, 'utf8')
+      const changed = b.reload()
+      assert.equal(changed, true, 'a successful reload reports true')
+      assert.equal(readFileSync(ledgerPath, 'utf8'), before, 'reload must never write to disk')
+      assert.equal(b.isTrusted('/x/p', sha('genuine')), true, 'b sees the pin after reload, with no flush of its own')
+    })
+
+    it('reload keeps this instance\'s own pending SET op over whatever is on disk', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      a.approve('/x/other', sha('other')) // seed the file so it exists
+
+      const b = new TestLedger({ filePath: ledgerPath })
+      const key = b._normalizeKey('/x/mine')
+      b._setRecord(key, { sha256: sha('mine'), firstSeen: 'x', approvedAt: 'x' }, 'set') // pending, not yet flushed
+
+      b.reload()
+      assert.equal(b.isTrusted('/x/mine', sha('mine')), true, 'the pending set survives a reload')
+      assert.equal(b._changedKeys.get(key), 'set', 'the op is still tracked for the next flush')
+
+      b.flush()
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8')).records
+      assert.ok(onDisk['/x/mine'], 'the pending set still lands on the next flush')
+    })
+
+    it('reload keeps this instance\'s own pending DELETE over a record still on disk', () => {
+      const a = new TestLedger({ filePath: ledgerPath })
+      a.approve('/x/p', sha('v1')) // flushed, on disk
+
+      const b = new TestLedger({ filePath: ledgerPath }) // loads a's pin too
+      assert.equal(b.isTrusted('/x/p', sha('v1')), true)
+      b._deleteRecord(b._normalizeKey('/x/p')) // pending delete — disk still has the record
+
+      b.reload()
+      assert.equal(b.getRecord('/x/p'), null,
+        'the pending delete survives a reload even though disk still has the record')
+
+      b.flush()
+      assert.equal(JSON.parse(readFileSync(ledgerPath, 'utf8')).records['/x/p'], undefined,
+        'the delete lands on the next flush')
+    })
+
+    it('reload does not let a pending TOFU write override a disk pin', () => {
+      const cli = new TestLedger({ filePath: ledgerPath })
+      const daemon = new TestLedger({ filePath: ledgerPath }) // stale: constructed before cli's pin lands
+
+      cli.approve('/x/p', sha('genuine')) // a real decision, flushed
+
+      const key = daemon._normalizeKey('/x/p')
+      // Pending, not yet flushed — mirrors verify-provenance.js's TOFU write
+      // (`approve(path, hash, { firstSight: true })`) happening BEFORE the
+      // reload this test exercises directly, at the base level.
+      daemon._setRecord(key, { sha256: sha('stale-swap'), firstSeen: 'x', approvedAt: 'x' }, 'tofu')
+
+      daemon.reload()
+      assert.equal(daemon.isTrusted('/x/p', sha('genuine')), true,
+        'the disk pin wins over the pending tofu — a stale first-sight write must never override a real pin')
+      assert.equal(daemon._changedKeys.has(key), false,
+        'the resolved tofu op is forgotten, not retried against a later disk state')
+    })
+  })
+
+  // #8073: a failed re-read (corrupt bytes, or the read call itself throwing)
+  // must never be treated as "there is nothing to keep" — a reload exists so
+  // a caller can check disk BEFORE deciding a miss is real; if the check
+  // itself fails, the only safe outcome is "nothing learned", never "assume
+  // empty and drop what I already hold".
+  describe('reload() fails safe on a re-read failure (#8073)', () => {
+    it('a corrupt on-disk file leaves every in-memory pin untouched', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
+      writeFileSync(ledgerPath, '{ this is not valid json, corrupted mid-write')
+
+      const changed = l.reload()
+      assert.equal(changed, false, 'a failed reload reports false')
+      assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
+        'the pin approved before the corruption must survive a reload that hits a corrupt re-read')
+    })
+
+    it('an unreadable (EACCES) file leaves every in-memory pin untouched', { skip: process.platform === 'win32' }, () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/earlier', sha('earlier'))
+
+      chmodSync(ledgerPath, 0o000)
+      let changed
+      try {
+        changed = l.reload()
+      } finally {
+        chmodSync(ledgerPath, 0o600)
+      }
+      assert.equal(changed, false, 'a failed reload reports false')
+      assert.equal(l.getRecord('/x/earlier').sha256, sha('earlier'),
+        'the pin must survive an EACCES reload, not be reset to empty')
     })
   })
 })
