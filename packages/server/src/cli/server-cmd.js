@@ -65,11 +65,23 @@ export function registerServerCommands(program) {
         // here rather than a second `config.provider || DEFAULT_PROVIDER`
         // inline, so this can never drift from what `startCliServer` /
         // `startSupervisor` are about to spawn.
+        // #8116: same rationale as the two overrides above (review C1 /
+        // #8075) — the named-tunnel routability probe (doctor.js step 5.6,
+        // #5328 WP-5.6) must target the MERGED config's tunnel coordinates
+        // (-c <path> / --tunnel / --tunnel-hostname / CHROXY_TUNNEL* env),
+        // not doctor's own default config.json read, which names whatever
+        // tunnel a PRIOR `chroxy init`/`chroxy tunnel setup` configured —
+        // not necessarily the one the daemon below is about to actually use.
+        // Reuses the SAME `parsedTunnel` already computed above (no second,
+        // differently-normalized parse of config.tunnel) and `config`'s own
+        // merged `tunnelHostname` field.
         const { checks } = await runDoctorChecks({
           port,
           providers: [resolveDaemonDefaultProvider(config)],
           binaryProvenanceMode: resolveBinaryProvenanceMode(config),
           binarySignatureGate: isBinarySignatureGateEnabled(config),
+          tunnelMode: parsedTunnel?.mode ?? null,
+          tunnelHostname: config.tunnelHostname || null,
         })
         const failures = checks.filter((c) => {
           if (c.status !== 'fail') return false

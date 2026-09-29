@@ -1210,4 +1210,76 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
       rmSync(cfgPath, { force: true })
     }
   })
+
+  it('#8116: an explicit tunnelMode/tunnelHostname override REPLACES the default file\'s tunnel, even when the file names a different one', async () => {
+    const { writeFileSync, rmSync } = await import('node:fs')
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    // The DEFAULT file names a DIFFERENT named tunnel — if runDoctorChecks
+    // (pre-#8116) ignored the override and fell through to its own file
+    // read, the probe would fire against THIS hostname instead.
+    writeFileSync(cfgPath, JSON.stringify({ tunnel: 'named', tunnelHostname: 'file.example.test' }))
+    try {
+      let probedUrl = null
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-sdk'],
+        tunnelMode: 'named',
+        tunnelHostname: 'override.example.test',
+        tunnelProbe: async (url) => { probedUrl = url; return { ok: true, status: 200 } },
+      })
+      assert.equal(
+        probedUrl,
+        'https://override.example.test/',
+        `expected the override's hostname to win over the default file's — got ${JSON.stringify(probedUrl)}`,
+      )
+      const routability = checks.find(c => c.name === 'Tunnel routability')
+      assert.ok(routability)
+      assert.equal(routability.status, 'pass')
+    } finally {
+      rmSync(cfgPath, { force: true })
+    }
+  })
+
+  it('#8116: an explicit tunnelMode override of \'quick\' skips the probe even when the default file names a named tunnel', async () => {
+    const { writeFileSync, rmSync } = await import('node:fs')
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify({ tunnel: 'named', tunnelHostname: 'file.example.test' }))
+    try {
+      let probed = false
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-sdk'],
+        tunnelMode: 'quick',
+        tunnelHostname: null,
+        tunnelProbe: async () => { probed = true; return { ok: true } },
+      })
+      assert.equal(probed, false, 'a quick-mode override must skip the probe regardless of the default file')
+      assert.equal(checks.find(c => c.name === 'Tunnel routability'), undefined)
+    } finally {
+      rmSync(cfgPath, { force: true })
+    }
+  })
+
+  it('#8116: omitting the override falls back to the default file, unchanged (chroxy doctor)', async () => {
+    // No override supplied at all (both keys absent, i.e. undefined) — the
+    // two tests above this one already prove the no-named-tunnel and
+    // configured-named-tunnel default-file-read paths still work with
+    // `tunnelMode`/`tunnelHostname` simply never passed; this test pins that
+    // "never passed" is treated identically to "explicitly undefined" so a
+    // future refactor of the destructuring default can't quietly change it.
+    const { writeFileSync, rmSync } = await import('node:fs')
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify({ tunnel: 'named', tunnelHostname: 'file.example.test' }))
+    try {
+      let probedUrl = null
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-sdk'],
+        tunnelMode: undefined,
+        tunnelHostname: undefined,
+        tunnelProbe: async (url) => { probedUrl = url; return { ok: true, status: 200 } },
+      })
+      assert.equal(probedUrl, 'https://file.example.test/')
+      assert.ok(checks.find(c => c.name === 'Tunnel routability'))
+    } finally {
+      rmSync(cfgPath, { force: true })
+    }
+  })
 })
