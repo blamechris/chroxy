@@ -134,6 +134,11 @@ export class PathHashTrustLedger {
    *   approvalField?: string,    // name of the third timestamp field (default 'approvedAt')
    *   wrapperKey?: string,       // on-disk top-level key holding the records map (default 'records')
    *   throwOnFlushError?: boolean, // re-throw persistence failures (default false — best-effort)
+   *   extraFields?: string[],    // additional string-valued record fields a subclass persists
+   *                              // (#8040 — BinaryProvenanceLedger's `kind`: 'file'|'tree').
+   *                              // Round-trips through _validateRecord/getRecord/approve; the
+   *                              // merge itself needs no special casing — it already carries
+   *                              // whole record objects, so an extra field on one rides along.
    * }} opts
    */
   constructor(opts = {}) {
@@ -146,6 +151,7 @@ export class PathHashTrustLedger {
     this._approvalField = opts.approvalField || 'approvedAt'
     this._wrapperKey = opts.wrapperKey || 'records'
     this._throwOnFlushError = opts.throwOnFlushError === true
+    this._extraFields = Array.isArray(opts.extraFields) ? opts.extraFields : []
     // Subclasses run their own _load() (which may parse extra sibling indexes
     // and set extra dirty state) — the base does not auto-load so a subclass
     // can wire its constructor in whatever order it needs.
@@ -387,11 +393,19 @@ export class PathHashTrustLedger {
       const approval = typeof value[this._approvalField] === 'string'
         ? value[this._approvalField]
         : value.firstSeen
-      return {
+      const rec = {
         sha256: value.sha256,
         firstSeen: value.firstSeen,
         [this._approvalField]: approval,
       }
+      // #8040: carry through any declared extra fields present on disk (e.g.
+      // BinaryProvenanceLedger's `kind`) — a record written before a subclass
+      // declared the field simply lacks it, which callers treat as a legacy
+      // default (see verify-provenance.js's migration branch).
+      for (const field of this._extraFields) {
+        if (typeof value[field] === 'string') rec[field] = value[field]
+      }
+      return rec
     }
     return null
   }
@@ -433,11 +447,15 @@ export class PathHashTrustLedger {
   getRecord(absPath) {
     const rec = this._records[this._normalizeKey(absPath)]
     if (!rec) return null
-    return {
+    const out = {
       sha256: rec.sha256,
       firstSeen: rec.firstSeen,
       [this._approvalField]: rec[this._approvalField],
     }
+    for (const field of this._extraFields) {
+      if (rec[field] !== undefined) out[field] = rec[field]
+    }
+    return out
   }
 
   /**
@@ -447,26 +465,38 @@ export class PathHashTrustLedger {
    *
    * @param {string} absPath
    * @param {string} hash
-   * @param {{ firstSight?: boolean }} [opts]  `firstSight: true` (#8072
-   *   review C3) marks this as a trust-on-first-use pin rather than an
+   * @param {{ firstSight?: boolean, fields?: object }} [opts]  `firstSight: true`
+   *   (#8072 review C3) marks this as a trust-on-first-use pin rather than an
    *   explicit operator decision — `verify-provenance.js`'s TOFU binary pin
    *   passes this so a stale instance's first-sight write of a possibly
    *   tampered hash can never override a pin/decision another process made
    *   that this instance never saw (see `flush()`'s merge). Omit for an
-   *   operator-driven approval (default) — always wins the merge.
+   *   operator-driven approval (default) — always wins the merge. `fields`
+   *   (#8040) supplies a value for each subclass-declared `extraFields` key
+   *   (e.g. `{ kind: 'tree' }`) — a key not present in `fields` carries
+   *   forward the existing record's value for that field, if any, so an
+   *   approval that doesn't mention an extra field never silently drops it.
    * @returns {boolean} true when the grant was recorded
    */
-  approve(absPath, hash, { firstSight = false } = {}) {
+  approve(absPath, hash, { firstSight = false, fields = {} } = {}) {
     if (typeof absPath !== 'string' || !absPath) return false
     if (typeof hash !== 'string' || !HEX64.test(hash)) return false
     const key = this._normalizeKey(absPath)
     const now = new Date().toISOString()
     const existing = this._records[key]
-    this._setRecord(key, {
+    const record = {
       sha256: hash,
       firstSeen: existing && typeof existing.firstSeen === 'string' ? existing.firstSeen : now,
       [this._approvalField]: now,
-    }, firstSight ? 'tofu' : 'set')
+    }
+    for (const field of this._extraFields) {
+      if (fields[field] !== undefined) {
+        record[field] = fields[field]
+      } else if (existing && existing[field] !== undefined) {
+        record[field] = existing[field]
+      }
+    }
+    this._setRecord(key, record, firstSight ? 'tofu' : 'set')
     this.flush()
     return true
   }

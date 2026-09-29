@@ -9,7 +9,20 @@ import {
   defaultBinaryTrustFile,
   binaryTrustFileExists,
 } from '../src/binary-provenance-trust.js'
-import { verifyProvenance } from '../src/utils/verify-provenance.js'
+import { verifyProvenance as realVerifyProvenance } from '../src/utils/verify-provenance.js'
+
+// #8040: `verifyProvenance` now defaults `classifyBinary` to the REAL
+// launcher/native classifier, so a resolvedPath like '/opt/homebrew/bin/codex'
+// below (a real path on a developer machine with codex installed) would
+// otherwise have its real launcher script opened to check for a shebang. This
+// file predates package-tree hashing and is only exercising the pin-ledger
+// mechanics with an already-injected `sha256File`, so every call here pins
+// `classifyBinary` to a stub reporting `native` — the pre-#8040 single-file
+// behaviour — exactly like verify-provenance.test.js does.
+const CLASSIFY_NATIVE = () => ({ kind: 'native' })
+function verifyProvenance(opts) {
+  return realVerifyProvenance({ classifyBinary: CLASSIFY_NATIVE, ...opts })
+}
 
 /**
  * Unit tests for the provider-binary provenance pin ledger (#6858) — a thin

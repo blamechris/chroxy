@@ -69,6 +69,11 @@ import { createHash } from 'crypto'
 import { readFileSync as fsReadFileSync, statSync as fsStatSync } from 'fs'
 import { execFileSync } from 'child_process'
 import { statIdentity } from './stat-identity.js'
+import {
+  classifyResolvedBinary as defaultClassifyResolvedBinary,
+  resolveHoistedOptionalDependencyRoots,
+  buildPackageTreeManifest as defaultBuildPackageTreeManifest,
+} from './binary-package-manifest.js'
 
 /**
  * Classification of a provenance verification.
@@ -292,6 +297,16 @@ export function _resetProvenanceCacheForTest() {
  * @param {string} [opts.platform=process.platform]
  * @param {Function} [opts.sha256File=sha256FileCached]         - injectable hasher
  * @param {Function} [opts.assessSignature=assessMacSignatureCached] - injectable signature assessor
+ * @param {Function} [opts.classifyBinary=classifyResolvedBinary] - injectable launcher/native
+ *   classifier (#8040). Defaults to the real classifier so every production
+ *   caller gets package-tree coverage with no per-caller wiring — see
+ *   `binary-package-manifest.js`. A test that wants the pre-#8040 single-file
+ *   behaviour injects `() => ({ kind: 'native' })` (never touches real fs).
+ * @param {Function} [opts.buildManifest=buildPackageTreeManifest] - injectable
+ *   manifest builder (#8040), only called when `classifyBinary` reports a launcher.
+ * @param {{ maxFiles?: number, maxBytes?: number }} [opts.manifestLimits] - cap
+ *   overrides forwarded to `buildManifest` (tests only — production uses the
+ *   module's generous defaults).
  * @returns {ProvenanceVerdict}
  */
 export function verifyProvenance({
@@ -307,6 +322,18 @@ export function verifyProvenance({
   // this only changes what runs when nothing is injected (production).
   sha256File: hashFn = sha256FileCached,
   assessSignature = assessMacSignatureCached,
+  // #8040: real launcher/native classifier + manifest builder by DEFAULT, so
+  // every one of this function's callers (preflight.js, doctor.js's two
+  // call sites, the tunnel adapter's cloudflared gate) gets package-tree
+  // coverage automatically through this ONE code path — none of them need
+  // to change. Tests that want the pre-#8040 single-file behaviour (every
+  // test in verify-provenance.test.js written before this) inject
+  // `classifyBinary: () => ({ kind: 'native' })`, exactly like they already
+  // inject their own `sha256File`/`assessSignature` seam to avoid touching
+  // the real filesystem.
+  classifyBinary = defaultClassifyResolvedBinary,
+  buildManifest = defaultBuildPackageTreeManifest,
+  manifestLimits = {},
 } = {}) {
   const path = typeof resolvedPath === 'string' ? resolvedPath : ''
   const pinning = mode === 'warn' || mode === 'block'
@@ -335,9 +362,13 @@ export function verifyProvenance({
 
   // 2. SHA-256 pin ledger.
   if (pinning) {
-    let hash
+    // #8040: hash the entry file itself first — cheap even for a launcher
+    // (codex's `bin/codex.js` is ~8.7 KB, gemini's `bundle/gemini.js` ~5 KB),
+    // and needed either way: it IS the hash for a native resolution, and it
+    // is the comparison point for migrating a legacy single-file pin below.
+    let entryHash
     try {
-      hash = hashFn(path, { platform })
+      entryHash = hashFn(path, { platform })
     } catch (err) {
       // Cannot read the binary to hash it → unverifiable. Fail-safe: block in
       // `block` mode, surface-but-allow in `warn` mode.
@@ -351,6 +382,49 @@ export function verifyProvenance({
         message: `could not read binary to verify its hash (${(err && err.code) || (err && err.message) || 'read failed'})`,
         remediation: 'ensure the binary is readable, or disable provenance pinning (binaryProvenance.mode=off)',
       }
+    }
+
+    // #8040: resolve known launchers (an npm-installed codex's bin/codex.js,
+    // gemini's bundle/gemini.js) to a manifest of their WHOLE installed
+    // package — the entry, every sibling file (nested node_modules included),
+    // and any hoisted optionalDependencies package — instead of hashing only
+    // the entry file. A native (non-script) resolution, or a script with no
+    // enclosing package root, is unaffected: `kind` stays 'file' and `hash`
+    // stays the plain entry-file hash computed above.
+    let hash = entryHash
+    let kind = 'file'
+    const classification = classifyBinary(path)
+    if (classification && classification.kind === 'launcher') {
+      const extraRoots = resolveHoistedOptionalDependencyRoots({
+        packageRoot: classification.packageRoot,
+        packageJson: classification.packageJson,
+        entryPath: path,
+      })
+      const manifest = buildManifest({
+        packageRoot: classification.packageRoot,
+        extraRoots,
+        hashFile: hashFn,
+        platform,
+        maxFiles: manifestLimits.maxFiles,
+        maxBytes: manifestLimits.maxBytes,
+      })
+      if (manifest.capped || manifest.unreadable) {
+        // Same fail-closed-in-block-mode treatment as an unreadable single
+        // file — a cap breach or an unwalkable tree must never be silently
+        // treated as "nothing to check".
+        const blocked = mode === 'block'
+        return {
+          ok: !blocked,
+          status: PROVENANCE_STATUS.UNREADABLE,
+          blocked,
+          path,
+          hash: null,
+          message: `could not verify the installed package tree (${manifest.error})`,
+          remediation: 'ensure the installed package is readable and within size limits, or disable provenance pinning (binaryProvenance.mode=off)',
+        }
+      }
+      hash = manifest.digest
+      kind = 'tree'
     }
 
     if (!ledger) {
@@ -384,7 +458,7 @@ export function verifyProvenance({
       // hasn't seen a genuine pin `chroxy resume` just wrote for this same
       // path), so this write must not be allowed to override a pin/decision
       // this instance never saw. See `PathHashTrustLedger.flush()`'s merge.
-      ledger.approve(path, hash, { firstSight: true })
+      ledger.approve(path, hash, { firstSight: true, fields: { kind } })
       // #8073 review S1: the reload() above and this approve()'s own
       // internal re-read/flush are two separate readFileSync calls in one
       // synchronous stack — narrow, but a genuine pin from another process
@@ -402,8 +476,48 @@ export function verifyProvenance({
         return { ok: true, status: PROVENANCE_STATUS.PINNED, blocked: false, path, hash }
       }
       // Falls through with `record` now set to the winning pin.
-    } else if (record.sha256 === hash) {
-      return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
+    } else {
+      const recordKind = record.kind === 'tree' ? 'tree' : 'file'
+      if (kind === 'tree' && recordKind !== 'tree') {
+        // #8040 migration: a legacy pin recorded the single-file hash of what
+        // is NOW resolved as a launcher. Compare against the ENTRY hash, not
+        // the (possibly expensive) manifest digest — exactly the pre-#8040
+        // comparison — so a caller never pays for a full tree walk just to
+        // refuse a launcher file that changed.
+        if (record.sha256 === entryHash) {
+          // Same bytes already trusted: upgrade the record to the tree
+          // digest. No weaker than before — everything the legacy pin
+          // covered (the launcher file itself) is still covered by the tree
+          // digest, which additionally covers what the legacy pin never did.
+          // This is treated as an explicit decision (not TOFU): the trust
+          // being carried forward was already an operator/first-sight grant,
+          // just re-expressed in the new representation.
+          ledger.approve(path, hash, { fields: { kind: 'tree' } })
+          return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
+        }
+        // Legacy hash doesn't match the CURRENT launcher file — a mismatch
+        // exactly as today (pre-#8040): the launcher file itself changed.
+        const blocked = mode === 'block'
+        return {
+          ok: !blocked,
+          status: PROVENANCE_STATUS.HASH_MISMATCH,
+          blocked,
+          path,
+          hash: entryHash,
+          pinnedHash: record.sha256,
+          message: `binary hash changed since it was pinned (pinned ${record.sha256.slice(0, 8)}…, now ${entryHash.slice(0, 8)}…)`,
+          remediation: blocked
+            ? `if this change is expected, re-approve it by removing this path's entry from the binary trust ledger and re-spawning; otherwise investigate the unexpected binary swap`
+            : 'if this change is unexpected, investigate the binary swap',
+        }
+      }
+      if (record.sha256 === hash) {
+        return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
+      }
+      // Falls through to the ordinary mismatch handling below — covers a
+      // tree-vs-tree digest mismatch, and the (fail-safe, never expected to
+      // match) case of a path that resolved as a launcher before and now
+      // resolves natively, or vice versa outside the migration branch above.
     }
 
     // Mismatch — the binary changed in place since it was pinned. Do NOT re-pin

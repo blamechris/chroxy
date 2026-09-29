@@ -336,6 +336,49 @@ everything else on this list, and a reviewer should find it in the same
 place. They're named here so they're legible to a reviewer rather than
 discovered by one.
 
+- **Package-tree hashing (#8040) covers a launcher's own tree, not everything
+  it could ever reach.** When a resolved path is a LAUNCHER — a script with an
+  enclosing `package.json` that has a `name` — the gate hashes a manifest of
+  the entry file, every sibling file under the package root (nested
+  `node_modules` included), and any `optionalDependencies` package hoisted
+  outside that root (resolved the way Node itself would, from the launcher).
+  Three things this does NOT cover, by design:
+  - **A regular (non-optional) hoisted `dependencies` package.** Only
+    `optionalDependencies` are resolved and walked when hoisted outside the
+    root — this is exactly the shape codex's platform packages use, but an
+    arbitrary hoisted `dependencies` package a launcher `require`s is not
+    walked unless it happens to be nested inside the package root already
+    (the common case for a single, self-contained CLI package, but not
+    guaranteed for every launcher shape).
+  - **Anything a launcher reaches by a means other than its own package
+    tree** — a dynamically-constructed `require`/`import` path outside
+    `node_modules`, a config file it reads and then executes, a plugin
+    directory outside the package root. The manifest walks a directory
+    tree; it has no way to know what a script *does* at runtime.
+  - **A script with no enclosing package root** (a standalone shell wrapper,
+    say) keeps the single-file hash — there is no "installed package" to
+    manifest. A native (non-script) resolution is unaffected either way.
+
+  The walk is also capped (file count and total bytes) and fails CLOSED —
+  reported as `unreadable`, refused in `block` mode — past either cap or on
+  an unwalkable tree (an unreadable file, or a filesystem entry that is
+  neither a regular file, a directory, nor a symlink). This trades a
+  vanishingly rare false refusal (a package that genuinely exceeds the caps,
+  generous as they are) for never silently hashing a truncated, incomplete
+  manifest. Hashing more files necessarily takes longer than hashing one —
+  measured on a synthetic ~1000-file/~225 KB fixture, a cold walk took
+  ~20-30ms and a warm (no-change) walk ~4-6ms on this machine, and raw
+  SHA-256 throughput here (~2 GB/s) puts a full, uncached re-hash of a
+  codex-native-sized tree (~277 MB) at roughly 120ms and a gemini-sized tree
+  (~98 MB) at roughly 45ms — both figures are estimates from this machine's
+  measured throughput, not a real cross-platform disk-I/O benchmark. This
+  widens the TOCTOU window described below in proportion to the walk's own
+  duration (a file verified early in a multi-hundred-file walk sits
+  unverified-again for the rest of that walk, versus a single-file hash's
+  near-instant check), but is the same *class* of accepted risk, not a new
+  kind of gap — the walk still completes in well under the ~200ms/turn
+  budget the per-turn gate is held to (§5 above) for every package shape
+  measured so far.
 - **check→exec is not atomic (TOCTOU).** `verifyProvenance()` hashes the bytes at
   a resolved *path* (`sha256File`); the spawn that follows execs that same path a
   moment later. Those are two separate filesystem operations with an
@@ -572,15 +615,43 @@ now refuses the NEXT TURN of every live `claude-sdk` session with
 `PROVIDER_BINARY_PROVENANCE`, not only the next session create, until the new
 hash is re-approved. That is the promise `block` mode makes, now kept for a
 provider that spawns per turn. Since #8035 the same is true of every live
-`gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session, with one
-qualification: the gate hashes only the file at the pinned path. For an
-npm-installed `codex` that file is the `bin/codex.js` launcher, which execs a
-native binary from a separate platform package; for `gemini` it is
-`bundle/gemini.js`, which loads dozens of chunk files. A change to that file
-refuses the next turn, but an `npm i -g` that replaces only the native binary
-or a chunk leaves the pinned hash unchanged and is not detected (#8040). In `warn`
+`gemini` and `codex exec` (`CHROXY_CODEX_APPSERVER=0`) session — and, since
+#8040, that coverage now extends past the one file at the pinned path. When
+the resolved path is a LAUNCHER (a script — `#!` shebang or a `.js`/`.mjs`/
+`.cjs` extension — with an enclosing `package.json` that has a `name`), the
+gate hashes a MANIFEST of the whole installed package instead: the entry,
+every sibling file (nested `node_modules` included, which is where an
+npm-global `codex`'s native binary actually lives), and any
+`optionalDependencies` package hoisted OUTSIDE the launcher's own package
+root. For an npm-installed `codex` that means the `bin/codex.js` launcher
+plus the native binary its separate platform package `spawn`s; for `gemini`
+it means `bundle/gemini.js` plus every sibling chunk file it `require`s. An
+`npm i -g` that replaces the native binary, a bundle chunk, or the entry
+file itself now refuses the next turn in `block` mode; only a change
+completely outside that tree (a regular, non-optional hoisted `dependencies`
+package — see "Known limitations") still goes unnoticed. A native
+(non-script) resolution, or a script with no enclosing package root, is
+unaffected and keeps the plain single-file hash exactly as before. In `warn`
 mode the mismatch is logged on every turn until it is re-approved, since
 `verifyProvenance` deliberately never re-pins a mismatch on its own.
+
+**Existing pins upgrade across the #8040 daemon update, without a spurious
+refusal.** Before #8040 a launcher path was pinned with the plain single-FILE
+hash. After the daemon upgrades, that same path's verdict is a TREE digest —
+a different number entirely — so the ledger records which KIND of hash a
+record holds (`kind: 'file'` or `'tree'`; a record with no `kind` field at
+all is a pre-#8040 legacy pin, read the same way as `'file'`). On a legacy
+record for a path that now resolves as a launcher, `verifyProvenance` first
+compares the CURRENT launcher file's own hash against the legacy pinned
+hash — the exact pre-#8040 comparison, so a caller never pays for a full
+tree walk just to decide this. A match means the same bytes were already
+trusted, and the record is transparently upgraded to the tree digest with no
+refusal — no weaker than before, since everything the tree digest additionally
+covers was never checked at all under the legacy pin. A mismatch is refused
+exactly as it always was, without ever computing the manifest. `chroxy
+doctor`/`chroxy start`/`chroxy resume` and the daemon all read and write this
+field through the one shared `verifyProvenance` code path, so an upgrade
+written by any one of them is understood by the others.
 
 **What is still NOT covered.** A TOCTOU window between the gate's checks and
 the actual `exec()` remains, exactly as it does for every other provider this
@@ -591,10 +662,11 @@ here. And this closes the gap for `claude-sdk` specifically, but means it now
 inherits the SAME exposure P1/P2 already cover for
 `claude-cli`/`claude-tui`/`claude-channel`: quarantine detection, and (opt-in)
 the SHA-256 pin ledger + signature gate — now re-checked every turn instead of
-once. The pin covers only the bytes at the resolved path; a launcher that execs
-or loads other files (npm-installed `codex`, and `gemini` however installed)
-leaves those files unhashed
-(#8040). Nothing provider-specific was added for the version gate below — it is
+once. Since #8040 the pin covers the whole installed package for a
+launcher-resolved path (see above), not only the bytes at the resolved path
+itself — a regular, non-optional hoisted dependency, and anything a launcher
+reaches OUTSIDE its own package tree by some other means, are documented
+residual gaps (see "Known limitations"). Nothing provider-specific was added for the version gate below — it is
 generic `runProviderPreflight` machinery any provider can opt into via
 `spec.binary.minVersion` and/or `spec.binary.recommendedVersion`. The
 create-time preflight call still logs the #8031 soft-floor warning as before;
@@ -689,8 +761,9 @@ closed by #8039, the `chroxy resume` gate closed by #8061, the `chroxy
 start` dependency checks closed by #8041, and the `chroxy tunnel setup` gate
 closed by #8066 all follow the identical pattern. A row marked "none" gets at
 most the create-time check; there is no longer a known spawn that runs with
-no gate of its own. Where a gate does run, it
-hashes only the file at the pinned path (#8040).
+no gate of its own. Where a gate does run, it hashes the file at the pinned
+path — or, since #8040, a manifest of the whole installed package when that
+path resolves to a launcher (see §4's "What operators will notice" above).
 
 **Per-spawn refusal semantics (#8038).** A gate refusal on a (re)spawn is not
 treated as the process dying. `claude-cli` and `claude-tui` normally respond to
@@ -765,8 +838,9 @@ permission-mode change, a post-Stop revival or a crash respawn to a different
 binary than create-time preflight verified. A binary replaced IN PLACE at the
 pinned path is a different case: the pinned path still exists, so in `off` and
 `warn` mode the respawn runs the new file; only `block` mode (a hash mismatch)
-or the signature gate refuses it, and even then only the file at the pinned
-path is hashed (#8040).
+or the signature gate refuses it — and, since #8040, that hash covers the
+whole installed package tree when the pinned path resolves to a launcher, not
+only the one file at that path (see §4).
 
 ## 6. Operator remediation quick reference
 

@@ -5,7 +5,7 @@ import {
   PROVENANCE_STATUS,
   sha256File,
   assessMacSignature,
-  verifyProvenance,
+  verifyProvenance as realVerifyProvenance,
   MACOS_SPCTL,
   sha256FileCached,
   assessMacSignatureCached,
@@ -19,7 +19,25 @@ import {
  * The pin ledger + signature gate are exercised over injected seams (a fake
  * ledger, a fake hash fn, a fake signature assessor), so these run identically
  * on macOS, Linux, and Windows CI with NO real binary, ledger file, or `spctl`.
+ *
+ * #8040: `verifyProvenance` now defaults `classifyBinary` to the REAL
+ * launcher/native classifier (so every production caller gets package-tree
+ * coverage for free — see verify-provenance.js's docblock). Every test below
+ * predates that and uses fake paths like `/opt/homebrew/bin/codex` purely as
+ * opaque ledger keys — several of those happen to be REAL paths on a
+ * developer's own machine (a real npm-global codex/gemini install), and the
+ * real classifier would open()/read() them to check for a shebang. This
+ * local `verifyProvenance` wrapper pins `classifyBinary` to a stub that
+ * always reports `native` (the pre-#8040 single-file behaviour), so this
+ * file never touches the real filesystem — exactly the same reasoning that
+ * already makes every test here inject its own `sha256File`/`assessSignature`
+ * seam. Package-tree behaviour itself is covered end-to-end, with real
+ * fixture trees in a temp dir, by verify-provenance-package-tree.test.js.
  */
+const CLASSIFY_NATIVE = () => ({ kind: 'native' })
+function verifyProvenance(opts) {
+  return realVerifyProvenance({ classifyBinary: CLASSIFY_NATIVE, ...opts })
+}
 
 // A minimal in-memory ledger implementing exactly the surface verifyProvenance
 // consults: getRecord() + approve(). Records the same shape PathHashTrustLedger
