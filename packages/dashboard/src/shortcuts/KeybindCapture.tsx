@@ -42,7 +42,7 @@ export function KeybindCapture({ onCapture, onCancel }: KeybindCaptureProps) {
       // captured combo and a later dispatched keydown can never disagree.
       // On macOS, Option+P reports `key: 'π'`; deriving from `code` when
       // Alt is held records `alt+p` instead, portable across machines.
-      const keyLower = (resolveEffectiveKey({ key: e.key || '', code: e.code, altKey: e.altKey }) || '').toLowerCase()
+      const keyLower = (resolveEffectiveKey({ key: e.key || '', code: e.code, altKey: e.altKey, ctrlKey: e.ctrlKey }) || '').toLowerCase()
       if (MODIFIER_KEYS.has(keyLower)) return
       const parts: string[] = []
       if (e.metaKey || e.ctrlKey) parts.push('cmd')

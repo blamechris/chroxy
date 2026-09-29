@@ -414,23 +414,23 @@ describe('createShortcutRegistry', () => {
 
     it('resolveEffectiveKey derives the key from `code` when Alt is held and code is a letter', () => {
       // Real macOS Option+Shift+P keydown shape: key is the composed glyph.
-      expect(resolveEffectiveKey({ key: '∏', code: 'KeyP', altKey: true })).toBe('p')
+      expect(resolveEffectiveKey({ key: '∏', code: 'KeyP', altKey: true , ctrlKey: false })).toBe('p')
     })
 
     it('resolveEffectiveKey derives the key from `code` when Alt is held and code is a digit', () => {
-      expect(resolveEffectiveKey({ key: '∞', code: 'Digit5', altKey: true })).toBe('5')
+      expect(resolveEffectiveKey({ key: '∞', code: 'Digit5', altKey: true , ctrlKey: false })).toBe('5')
     })
 
     it('resolveEffectiveKey leaves `key` alone when Alt is not held', () => {
-      expect(resolveEffectiveKey({ key: 'p', code: 'KeyP', altKey: false })).toBe('p')
+      expect(resolveEffectiveKey({ key: 'p', code: 'KeyP', altKey: false , ctrlKey: false })).toBe('p')
     })
 
     it('resolveEffectiveKey leaves `key` alone for a named/arrow key even with Alt held', () => {
-      expect(resolveEffectiveKey({ key: 'ArrowUp', code: 'ArrowUp', altKey: true })).toBe('ArrowUp')
+      expect(resolveEffectiveKey({ key: 'ArrowUp', code: 'ArrowUp', altKey: true , ctrlKey: false })).toBe('ArrowUp')
     })
 
     it('resolveEffectiveKey falls back to `key` when `code` is absent', () => {
-      expect(resolveEffectiveKey({ key: 'p', altKey: true })).toBe('p')
+      expect(resolveEffectiveKey({ key: 'p', altKey: true , ctrlKey: false })).toBe('p')
     })
 
     it('matchEvent resolves session.togglePlanMode from a REAL macOS Option+Shift+P keydown shape', () => {
@@ -455,6 +455,18 @@ describe('createShortcutRegistry', () => {
         key: 'ArrowUp', code: 'ArrowUp', altKey: true, shiftKey: false, metaKey: false, ctrlKey: false,
       }, 'global')
       expect(match).toBe('sidebar.reorder.up')
+    })
+
+    it('AltGr (ctrlKey + altKey) typing a character is NOT turned into a code-derived ctrl+alt shortcut', () => {
+      // Windows/Linux German layout: AltGr+Q types '@' and reports ctrlKey AND altKey.
+      expect(resolveEffectiveKey({ key: '@', code: 'KeyQ', altKey: true, ctrlKey: true })).toBe('@')
+      const registry = createShortcutRegistry([
+        { id: 'test.ctrlAltQ', defaultBinding: 'cmd+alt+q', description: 'ctrl+alt+q fixture', category: 'other', scope: 'global' },
+      ])
+      const match = registry.matchEvent({
+        key: '@', code: 'KeyQ', altKey: true, ctrlKey: true, shiftKey: false, metaKey: false,
+      }, 'global')
+      expect(match).toBeNull()
     })
 
     it('matchEvent still works when no `code` is supplied at all (non-KeyboardEvent callers)', () => {

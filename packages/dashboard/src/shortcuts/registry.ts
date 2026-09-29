@@ -287,8 +287,14 @@ const ALT_CODE_DIGIT = /^Digit([0-9])$/
  * a single function so a captured combo and a later dispatched keydown can
  * never disagree about what "the same combo" means on this platform.
  */
-export function resolveEffectiveKey(event: { key: string; code?: string; altKey: boolean }): string {
-  if (event.altKey && event.code) {
+export function resolveEffectiveKey(event: { key: string; code?: string; altKey: boolean; ctrlKey: boolean }): string {
+  // `!ctrlKey`: on Windows/Linux, AltGr reports ctrlKey AND altKey together
+  // while TYPING a real character (AltGr+Q is '@' on a German layout). Deriving
+  // the key from `code` there would turn typed text into a `ctrl+alt+<letter>`
+  // shortcut match; macOS Option composition (the case this exists for) never
+  // sets ctrlKey. `ctrlKey` is required, not optional, so a new caller cannot
+  // silently skip the guard.
+  if (event.altKey && !event.ctrlKey && event.code) {
     const letter = ALT_CODE_LETTER.exec(event.code)
     if (letter) return letter[1]!.toLowerCase()
     const digit = ALT_CODE_DIGIT.exec(event.code)
@@ -486,7 +492,7 @@ export function createShortcutRegistry(defs: readonly ShortcutDef[]): ShortcutRe
     // #8089 / #8087 review — derive from `code` when Alt is held and `code`
     // names a plain letter/digit key, so an OS-composed `event.key` (macOS
     // Option+letter) doesn't make an Alt-letter binding unmatchable.
-    const eventKey = (resolveEffectiveKey({ key: event.key || '', code: event.code, altKey: event.altKey }) || '').toLowerCase()
+    const eventKey = (resolveEffectiveKey({ key: event.key || '', code: event.code, altKey: event.altKey, ctrlKey: event.ctrlKey }) || '').toLowerCase()
     const eventMeta = event.metaKey || event.ctrlKey
     const inTextInput = isTextInputTarget(event.target)
     for (const def of definitions) {
