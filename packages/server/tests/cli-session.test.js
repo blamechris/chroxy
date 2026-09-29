@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { CliSession } from '../src/cli-session.js'
 import { isWindows } from '../src/platform.js'
 import { SessionStatePersistence } from '../src/session-state-persistence.js'
+import { withEnv } from './test-helpers.js'
 
 /**
  * Tests for CliSession lifecycle: process management, respawn,
@@ -1136,16 +1137,29 @@ describe('CliSession._buildChildEnv', () => {
   })
 
   it('includes CHROXY_PORT when port is set', () => {
-    const session = createSession({ port: 8765 })
-    session._hookManager?.destroy()
-    const env = session._buildChildEnv()
-    assert.equal(env.CHROXY_PORT, '8765')
+    // #7360 positive control: an ambient CHROXY_PORT with a DIFFERENT value
+    // is present too, so a pass here proves the session's own port wins —
+    // not merely that some CHROXY_PORT happened to be present.
+    withEnv({ CHROXY_PORT: '1' }, () => {
+      const session = createSession({ port: 8765 })
+      session._hookManager?.destroy()
+      const env = session._buildChildEnv()
+      assert.equal(env.CHROXY_PORT, '8765',
+        "the session's own port must win over a conflicting ambient value")
+    })
   })
 
+  // #7360: ambient-proof regardless of the shell running the suite — this
+  // used to assert on whatever CHROXY_PORT happened to be unset in the
+  // ambient environment, which is false whenever the developer (or CI) runs
+  // the suite from inside a chroxy session that already exports CHROXY_PORT.
   it('omits CHROXY_PORT when port is not set', () => {
-    const session = createSession()
-    const env = session._buildChildEnv()
-    assert.equal(env.CHROXY_PORT, undefined)
+    withEnv({ CHROXY_PORT: '19999' }, () => {
+      const session = createSession()
+      const env = session._buildChildEnv()
+      assert.equal(env.CHROXY_PORT, undefined,
+        'an ambiently-inherited CHROXY_PORT must not reach a child whose session set no port')
+    })
   })
 
   it('sets CHROXY_PERMISSION_MODE from session', () => {
@@ -1162,18 +1176,33 @@ describe('CliSession._buildChildEnv', () => {
   })
 
   it('includes CHROXY_HOOK_SECRET when port is set', () => {
-    const session = createSession({ port: 8765 })
-    session._hookManager?.destroy()
-    const env = session._buildChildEnv()
-    assert.ok(typeof env.CHROXY_HOOK_SECRET === 'string', 'CHROXY_HOOK_SECRET should be a string')
-    assert.ok(env.CHROXY_HOOK_SECRET.length >= 64, 'CHROXY_HOOK_SECRET should be at least 64 hex chars (32 bytes)')
+    // #7360 positive control: an ambient CHROXY_HOOK_SECRET with a DIFFERENT
+    // value is present too, so a pass here proves the session's own
+    // freshly-generated secret wins — not merely that some
+    // CHROXY_HOOK_SECRET happened to be present.
+    withEnv({ CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret' }, () => {
+      const session = createSession({ port: 8765 })
+      session._hookManager?.destroy()
+      const env = session._buildChildEnv()
+      assert.ok(typeof env.CHROXY_HOOK_SECRET === 'string', 'CHROXY_HOOK_SECRET should be a string')
+      assert.ok(env.CHROXY_HOOK_SECRET.length >= 64, 'CHROXY_HOOK_SECRET should be at least 64 hex chars (32 bytes)')
+      assert.notEqual(env.CHROXY_HOOK_SECRET, 'ambient-foreign-session-secret',
+        "the session's own hook secret must win over a conflicting ambient value")
+    })
   })
 
+  // #7360: ambient-proof regardless of the shell running the suite — this
+  // used to assert on whatever CHROXY_HOOK_SECRET happened to be unset in
+  // the ambient environment, which is false whenever the developer (or CI)
+  // runs the suite from inside a chroxy session that already exports
+  // CHROXY_HOOK_SECRET.
   it('omits CHROXY_HOOK_SECRET when port is not set', () => {
-    const session = createSession()
-    const env = session._buildChildEnv()
-    assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_HOOK_SECRET'),
-      'CHROXY_HOOK_SECRET should not appear when no port is configured')
+    withEnv({ CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret' }, () => {
+      const session = createSession()
+      const env = session._buildChildEnv()
+      assert.ok(!Object.prototype.hasOwnProperty.call(env, 'CHROXY_HOOK_SECRET'),
+        'an ambiently-inherited CHROXY_HOOK_SECRET should not appear when no port is configured')
+    })
   })
 
   it('CHROXY_HOOK_SECRET matches the session _hookSecret', () => {

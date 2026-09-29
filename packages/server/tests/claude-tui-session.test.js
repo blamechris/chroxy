@@ -7773,21 +7773,23 @@ describe('ClaudeTuiSession', () => {
     it('skipPermissions=true: spawn env omits CHROXY_PORT/HOOK_SECRET/PERMISSION_MODE_FILE (#4207 agent-review)', async () => {
       // The env gate at claude-tui-session.js:498-508 is a distinct site
       // from settings.json — both have to be off or the hook script can
-      // still phone home. Mirror the production env-build in the stub.
+      // still phone home.
+      //
+      // #7360: this used to hand-roll a SECOND copy of the production
+      // env-build logic in the stub (`{ ...process.env }` + the same
+      // `if (permissionsEnabled)` shape) instead of calling the real
+      // `_buildPtyEnv` — the exact "hand-written mirror that never reads
+      // the real logic" shape this repo's own project memory flags for
+      // docker-session.test.js. That copy predated (and did not track) the
+      // #7360 stripInheritedChroxySecrets fix, so it went RED the moment the
+      // suite ran with an ambient CHROXY_PORT/CHROXY_HOOK_SECRET already
+      // exported — the very failure mode #7360 is about, hiding in a test's
+      // own reimplementation instead of the source it was meant to verify.
+      // Calling the real method makes this test track the source instead of
+      // silently drifting from it.
       let capturedEnv = null
       ClaudeTuiSession.prototype._spawnPty = async function (permissionsEnabled) {
-        const env = { ...process.env }
-        delete env.ANTHROPIC_API_KEY
-        env.TERM = 'xterm-256color'
-        if (permissionsEnabled) {
-          env.CHROXY_PORT = String(this._port)
-          env.CHROXY_HOOK_SECRET = this._hookSecret
-          env.CHROXY_PERMISSION_MODE = this.permissionMode || 'approve'
-          if (this._permissionModeFile) {
-            env.CHROXY_PERMISSION_MODE_FILE = this._permissionModeFile
-          }
-        }
-        capturedEnv = env
+        capturedEnv = this._buildPtyEnv(permissionsEnabled)
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
       }
       session = new ClaudeTuiSession({
@@ -9017,6 +9019,55 @@ describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
       assert.equal(env.CHROXY_HOOK_SECRET, envSession._hookSecret,
         'the per-session hook secret is the only chroxy secret the child legitimately needs')
       assert.equal(env.TERM, 'xterm-256color')
+    })
+
+    // #7360: ambient-proof regardless of the shell running the suite — an
+    // inherited CHROXY_PORT/CHROXY_HOOK_SECRET (e.g. this daemon was itself
+    // launched from inside another chroxy session) must not reach the TUI
+    // child when THIS session has permissions disabled and sets neither.
+    it('drops an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET when permissions are disabled (#7360)', () => {
+      const prevPort = process.env.CHROXY_PORT
+      const prevSecret = process.env.CHROXY_HOOK_SECRET
+      process.env.CHROXY_PORT = '19999'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(false)
+        assert.equal(env.CHROXY_PORT, undefined,
+          'an ambiently-inherited CHROXY_PORT must not reach the child when permissions are disabled')
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+          'an ambiently-inherited CHROXY_HOOK_SECRET must not reach the child when permissions are disabled')
+      } finally {
+        if (prevPort === undefined) delete process.env.CHROXY_PORT
+        else process.env.CHROXY_PORT = prevPort
+        if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
+        else process.env.CHROXY_HOOK_SECRET = prevSecret
+      }
+    })
+
+    // Positive control: THIS session's own port/secret must win over a
+    // conflicting ambient value when permissions ARE enabled — proves the
+    // strip runs before the session's own assignment, not after (the E3
+    // mutant shape), and that the fix doesn't just always blank the keys.
+    it('positive control: session-set CHROXY_PORT/CHROXY_HOOK_SECRET win over a conflicting ambient value (#7360)', () => {
+      const prevPort = process.env.CHROXY_PORT
+      const prevSecret = process.env.CHROXY_HOOK_SECRET
+      process.env.CHROXY_PORT = '1'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-wrong-secret'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(true)
+        assert.equal(env.CHROXY_PORT, '12345',
+          "the session's own port must win over a conflicting ambient value")
+        assert.equal(env.CHROXY_HOOK_SECRET, envSession._hookSecret,
+          "the session's own hook secret must win over a conflicting ambient value")
+        assert.notEqual(env.CHROXY_HOOK_SECRET, 'ambient-wrong-secret')
+      } finally {
+        if (prevPort === undefined) delete process.env.CHROXY_PORT
+        else process.env.CHROXY_PORT = prevPort
+        if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
+        else process.env.CHROXY_HOOK_SECRET = prevSecret
+      }
     })
 
     it('forwards non-secret operator env (denylist semantics preserved)', () => {

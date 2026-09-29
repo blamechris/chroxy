@@ -34,10 +34,21 @@
 
 import { spawn } from 'node:child_process'
 import { forceKill, killProcessTree } from '../platform.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from '../utils/spawn-env.js'
 
 export const DEFAULT_BASH_TIMEOUT_MS = 30_000
 export const DEFAULT_BASH_MAX_OUTPUT_BYTES = 1_000_000 // 1 MB
 export const HARD_KILL_GRACE_MS = 2_000
+
+// A caller that omits `env` must not hand bash the daemon's own secrets
+// (API_TOKEN, the hook secret): fall back to a stripped copy of process.env,
+// never process.env itself (#8111 review, #8113).
+function defaultChildEnv() {
+  const out = { ...process.env }
+  for (const key of CHROXY_SECRET_DENYLIST) delete out[key]
+  stripInheritedChroxySecrets(out)
+  return out
+}
 
 export async function executeBash({
   command,
@@ -70,7 +81,7 @@ export async function executeBash({
 
   const child = spawn('bash', ['-c', command], {
     cwd,
-    env: env || process.env,
+    env: env || defaultChildEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 

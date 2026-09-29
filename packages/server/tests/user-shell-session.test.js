@@ -284,6 +284,32 @@ describe('UserShellSession — lifecycle (#5983)', () => {
         else process.env.API_TOKEN = prev
       }
     })
+
+    // #7360: a user shell has no permission hook (see the class doc) and
+    // never sets its own CHROXY_PORT/CHROXY_HOOK_SECRET, so any value
+    // present is necessarily AMBIENTLY inherited — e.g. this daemon was
+    // itself launched from inside another chroxy session — and must not
+    // reach the operator's plain interactive shell. Ambient-proof regardless
+    // of the shell running the suite.
+    it('strips an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET from the shell PTY env', () => {
+      const prevPort = process.env.CHROXY_PORT
+      const prevSecret = process.env.CHROXY_HOOK_SECRET
+      process.env.CHROXY_PORT = '19999'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+      try {
+        const s = new UserShellSession({ cwd: '/tmp' })
+        const env = s._buildShellEnv()
+        assert.equal(env.CHROXY_PORT, undefined,
+          'an ambiently-inherited CHROXY_PORT must not reach the plain interactive shell')
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+          'an ambiently-inherited CHROXY_HOOK_SECRET must not reach the plain interactive shell')
+      } finally {
+        if (prevPort === undefined) delete process.env.CHROXY_PORT
+        else process.env.CHROXY_PORT = prevPort
+        if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
+        else process.env.CHROXY_HOOK_SECRET = prevSecret
+      }
+    })
   })
 
   describe('forceTerminalRepaint (#6313)', () => {

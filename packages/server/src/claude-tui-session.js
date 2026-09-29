@@ -39,7 +39,7 @@ import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
-import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -2435,6 +2435,12 @@ export class ClaudeTuiSession extends BaseSession {
    *     token must never reach a tool/MCP/subagent the TUI runs (#6311). The
    *     scoped per-session CHROXY_HOOK_SECRET below is the only chroxy secret
    *     the child legitimately needs.
+   *   - CHROXY_INHERITED_SESSION_ENV (CHROXY_PORT / CHROXY_HOOK_SECRET): an
+   *     AMBIENTLY-inherited value from process.env — e.g. this daemon was
+   *     itself launched from inside another chroxy session — is a FOREIGN
+   *     session's hook secret and must not reach this TUI's child either
+   *     (#7360). Stripped unconditionally, then reassigned below with THIS
+   *     session's own value only when `permissionsEnabled`.
    *
    * Extracted from _spawnPty so the secret-stripping invariant is unit-testable
    * without spawning a real PTY.
@@ -2453,6 +2459,10 @@ export class ClaudeTuiSession extends BaseSession {
     for (const key of CHROXY_SECRET_DENYLIST) {
       delete env[key]
     }
+    // #7360: drop any ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET
+    // BEFORE the `permissionsEnabled` block below reassigns THIS session's
+    // own values — must run before that assignment, never after.
+    stripInheritedChroxySecrets(env)
     env.TERM = 'xterm-256color'
 
     // permission-hook.sh reads these to phone home to /permission on the

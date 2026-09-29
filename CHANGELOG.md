@@ -23,6 +23,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A spawned provider no longer inherits the daemon's own `CHROXY_PORT` /
+  `CHROXY_HOOK_SECRET` from the ambient environment when its session sets
+  neither, and a BYOK session's own Bash/Grep tool call can no longer read
+  the daemon's full-authority primary `API_TOKEN` (#7360, #8113 — critical,
+  security).** `_buildChildEnv()`-style builders that copy the full parent
+  env (`cli-session.js` via `buildSpawnEnv`'s denylist mode,
+  `claude-tui-session.js`'s `_buildPtyEnv`, `user-shell-session.js`'s
+  `_buildShellEnv`, `byok-mcp-client.js`'s `_buildChildEnv`,
+  `statusline.js`'s `defaultBuildEnv`) forwarded whatever the DAEMON PROCESS
+  ITSELF happened to inherit — e.g. the daemon was launched from inside
+  another chroxy session, or a developer's shell still exported a prior
+  session's values — into a child that has no use for a foreign session's
+  hook secret: without hooks (or with a different session's hooks), the
+  child gains nothing from the key and the daemon gains a needless leak
+  surface. A new shared helper, `stripInheritedChroxySecrets()` in
+  `utils/spawn-env.js`, drops any ambiently-inherited value before a
+  builder reasserts THIS session's own port/secret, so the session's real
+  value (when set) still wins.
+
+  #8113, found during #7360's own security review, was a sixth, un-audited
+  copier of the same shape with much higher severity:
+  `byok-tool-executor.js`'s `buildSafeBashEnv()` — the env for the built-in
+  Bash/Grep tool BYOK-style sessions run themselves — carried an independent,
+  hand-rolled denylist (the BYOK provider's own credential only, `ANTHROPIC_
+  API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN`, #4069) that never covered chroxy's own
+  daemon-private secrets. A BYOK session's own model could retrieve the
+  daemon's full-authority primary bearer token with one `env | grep
+  API_TOKEN` Bash call and use it to gain full control of the daemon over
+  the WebSocket/HTTP surface. Fixed the same way, via the shared
+  `CHROXY_SECRET_DENYLIST` (now also carrying `CHROXY_INGEST_SECRET`, the
+  daemon-level `/api/events`/`/api/mailbox` bearer, for the same reason) and
+  `stripInheritedChroxySecrets()`.
+
+  A roster test (`spawn-env-inherited-secrets-roster.test.js`) enumerates
+  every file under `src/` matching a known full-env-copy spelling (a spread,
+  `Object.assign` with any target, `Object.entries`/`Object.keys`,
+  `structuredClone`, or a direct env-reference — widened from just the
+  spread/`Object.assign({}, …)` shapes after #8113 escaped the original
+  discovery sweep) and requires each to either call the helper or carry a
+  documented exemption; it also verifies, both statically (the strip's
+  argument must be the identifier that is actually returned, not a
+  throwaway object) and behaviorally (direct execution of the three
+  plain-function builders with ambient secrets set), so a future builder —
+  or a call to the helper on the wrong object — can't silently pass.
 - **The orphan-reaper's sweep now runs under launchd and Tauri instead of
   logging `spawnSync lsof ENOENT` every 5 minutes forever (#8083).** `lsof`
   lives at `/usr/sbin/lsof` on macOS, but the launchd service PATH

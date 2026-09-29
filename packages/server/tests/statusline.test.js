@@ -23,6 +23,7 @@ import {
   statusLineDisplayText,
   StatusLineManager,
   STATUSLINE_MAX_OUTPUT_BYTES,
+  defaultBuildEnv,
 } from '../src/statusline.js'
 
 // ---------------------------------------------------------------------------
@@ -488,4 +489,52 @@ test('stopAll clears every tracked timer and blocks further scheduling', async (
   // A start after stopAll is a no-op (stopped latch).
   mgr.startSession('s3', () => ({ cwd: '/proj3' }))
   assert.equal(timers.pending().length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// defaultBuildEnv secret stripping (#6311 / #7360)
+// ---------------------------------------------------------------------------
+
+test('defaultBuildEnv strips API_TOKEN and ANTHROPIC_API_KEY', () => {
+  const prevToken = process.env.API_TOKEN
+  const prevKey = process.env.ANTHROPIC_API_KEY
+  process.env.API_TOKEN = 'primary-bearer-token'
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-leak'
+  try {
+    const env = defaultBuildEnv()
+    assert.equal(env.API_TOKEN, undefined,
+      'the full-authority API_TOKEN must never reach the statusline script')
+    assert.equal(env.ANTHROPIC_API_KEY, undefined)
+    assert.equal(env.COLUMNS, '80')
+    assert.equal(env.LINES, '1')
+  } finally {
+    if (prevToken === undefined) delete process.env.API_TOKEN
+    else process.env.API_TOKEN = prevToken
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY
+    else process.env.ANTHROPIC_API_KEY = prevKey
+  }
+})
+
+// #7360: the statusline script is an arbitrary operator-configured command
+// with no permission-hook role, so any CHROXY_PORT/CHROXY_HOOK_SECRET
+// present is necessarily AMBIENTLY inherited — e.g. this daemon was itself
+// launched from inside another chroxy session — and must be stripped.
+// Ambient-proof regardless of the shell running the suite.
+test('defaultBuildEnv strips an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET', () => {
+  const prevPort = process.env.CHROXY_PORT
+  const prevSecret = process.env.CHROXY_HOOK_SECRET
+  process.env.CHROXY_PORT = '19999'
+  process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+  try {
+    const env = defaultBuildEnv()
+    assert.equal(env.CHROXY_PORT, undefined,
+      'an ambiently-inherited CHROXY_PORT must not reach the statusline script')
+    assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+      'an ambiently-inherited CHROXY_HOOK_SECRET must not reach the statusline script')
+  } finally {
+    if (prevPort === undefined) delete process.env.CHROXY_PORT
+    else process.env.CHROXY_PORT = prevPort
+    if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
+    else process.env.CHROXY_HOOK_SECRET = prevSecret
+  }
 })
