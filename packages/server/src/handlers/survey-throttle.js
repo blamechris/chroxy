@@ -55,6 +55,41 @@
  * admitted one can overlap, and an unconditional delete destroys B's newer
  * stamp and cache when A fails late (#7445 review, reproduced).
  *
+ * ## Ownership is tracked by a TOKEN, not by object identity (#8091)
+ *
+ * Every record carries a `token` — a fresh, unique marker minted at `open()`
+ * time — because object identity alone cannot carry the "is this still mine"
+ * question once a write-through exists. #7450's original write-through
+ * MUTATED the current record in place, so `rollback()`'s plain identity check
+ * (`records.get(key) !== record`) could not tell "nothing has happened since I
+ * was admitted" apart from "my record was silently enriched by an unrelated,
+ * OLDER survey's write-through" — both left the same object sitting in the
+ * map. Reproduced directly: admit A, admit B (supersedes A), A completes and
+ * write-throughs into B's record, B's own survey later throws and rolls back —
+ * the identity check passed, so `rollback()` blindly restored `prior` (the
+ * record as it was BEFORE A's write-through), discarding A's completed
+ * reading AND reopening the window on A's much older stamp.
+ *
+ * The fix: `commit()` never mutates a record in place — every commit,
+ * write-through included, REPLACES the current record with a new object that
+ * carries the SAME `.token` (and window-start `.at`) forward. `rollback()`
+ * keys on that token: `records.get(key)?.token === token` means "I am still
+ * the admission this slot belongs to, however it has been enriched since,"
+ * while a mismatch means a NEWER admission has genuinely taken over and this
+ * rollback is stale — a no-op, exactly like the pre-#8091 identity check
+ * intended, but now correct in the presence of a write-through.
+ *
+ * A rollback that IS current restores `{ at: prior.at, snapshot:
+ * newest(current, prior) }` (comparing `snapshotAt`, never regressing to an
+ * older reading than what is already there) — deleting the record outright
+ * only when there is neither a `prior` to fall back to nor any snapshot worth
+ * keeping. This means a rollback fully undoes ITS OWN admission window (the
+ * next request's throttle reverts to whatever was true before this admission
+ * — consistent with "a survey that spent nothing must not cost the next
+ * retry"), while a completed reading is NEVER discarded — it is simply
+ * carried forward as the next admission's own replay-cache. See
+ * `survey-throttle.test.js`'s "#8091 (C1)" tests for the worked interleaving.
+ *
  * ## Why the map is keyed on an OWNER object
  *
  * The stamps live in a `WeakMap` keyed on a long-lived object the caller
@@ -64,11 +99,19 @@
  *
  * ## Bounded by the LIVE session count, not the daemon's lifetime (#7450)
  *
- * A destroyed session's record is pruned by `forgetSurveyKey(owner, key)`,
- * called from `WsServer`'s `session_destroyed` handler — the same event
- * `SessionCiWatcher._state` already prunes on, with the same requirement: a
- * long-running daemon must not accumulate the id of every session it has ever
- * surveyed. `forgetSurveyKey` reaches EVERY throttle instance created via
+ * A destroyed session's record is pruned by `forgetSurveyKey(owner, key)` —
+ * the SAME problem class `SessionCiWatcher._state` already guards against
+ * (a long-running daemon must not accumulate the id of every session it has
+ * ever surveyed), but by a DIFFERENT mechanism: that watcher prunes via a
+ * periodic `tick()` sweep that diffs its state map against a fresh
+ * live-session list, not an event listener (`session-ci-watcher.js`'s own
+ * `tick()`). Event-based pruning has a gap a live-session sweep does not —
+ * see #8092 — so `forgetSurveyKey` is called from `SessionManager`'s
+ * `_cleanupSessionMaps()` (the sole `_sessions.delete` site, `destroyAll()`
+ * excepted, which calls it too) rather than from a `session_destroyed`
+ * listener, precisely so every teardown path is covered through the removal
+ * itself rather than through whichever events happen to be wired up.
+ * `forgetSurveyKey` reaches EVERY throttle instance created via
  * `createSurveyThrottle()` through this one module-level registry, not just
  * whichever handler happened to wire it up first — the threads handler (#7430)
  * opens its own independent instance of this gate, and a per-instance prune
@@ -112,7 +155,17 @@ const throttleInstances = new Set()
  * }}
  */
 export function createSurveyThrottle() {
-  /** WeakMap<owner, Map<key, { at: number, snapshot: *, snapshotAt: number|null }>> */
+  /**
+   * WeakMap<owner, Map<key, {
+   *   at: number, token: object, snapshot: *, snapshotAt: number|null
+   * }>>
+   *
+   * `token` is a fresh, unique marker minted per `open()` call — see the
+   * module doc's "ownership is tracked by a TOKEN, not by object identity"
+   * section (#8091). A record's `token` is carried forward by `commit()`'s
+   * write-through and by `rollback()`'s restore; it changes ONLY when a NEW
+   * `open()` call supersedes the current admission.
+   */
   const byOwner = new WeakMap()
 
   /** The per-key record map for this owner. */
@@ -120,6 +173,15 @@ export function createSurveyThrottle() {
     let m = byOwner.get(owner)
     if (!m) { m = new Map(); byOwner.set(owner, m) }
     return m
+  }
+
+  /** Whichever of two (snapshot, snapshotAt) pairs is newer; a tie keeps `a`. */
+  function newerOf(aSnapshot, aSnapshotAt, bSnapshot, bSnapshotAt) {
+    if (aSnapshotAt === null) return { snapshot: bSnapshot, snapshotAt: bSnapshotAt }
+    if (bSnapshotAt === null) return { snapshot: aSnapshot, snapshotAt: aSnapshotAt }
+    return aSnapshotAt >= bSnapshotAt
+      ? { snapshot: aSnapshot, snapshotAt: aSnapshotAt }
+      : { snapshot: bSnapshot, snapshotAt: bSnapshotAt }
   }
 
   const throttle = {
@@ -136,9 +198,11 @@ export function createSurveyThrottle() {
       // survey that produced `.snapshot` was itself admitted — not this
       // record's own `.at` — so a later write-through (see `commit()`) can
       // tell a genuinely newer cached reading apart from one merely carried
-      // forward under a more recent window.
-      const record = { at: nowMs, snapshot: prior?.snapshot ?? null, snapshotAt: prior?.snapshotAt ?? null }
-      records.set(key, record)
+      // forward under a more recent window. `token` is this admission's own
+      // fresh identity — see the module doc (#8091).
+      const myAt = nowMs
+      const token = {}
+      records.set(key, { at: myAt, token, snapshot: prior?.snapshot ?? null, snapshotAt: prior?.snapshotAt ?? null })
       return {
         admitted: true,
         commit(snapshot, opts) {
@@ -153,39 +217,53 @@ export function createSurveyThrottle() {
           // forward. Overwriting it with a failure would blank a display other
           // clients are using; clearing it would do the same more quietly.
           if (!replayable) return
-          if (records.get(key) === record) {
-            // The common case: nothing superseded this admission between
-            // `open()` and `commit()`.
-            record.snapshot = snapshot
-            record.snapshotAt = record.at
-            return
-          }
-          // #7450 scope addition: this record was superseded by a LATER
-          // `open()` for the same key before this survey finished — a survey
-          // slower than the throttle window itself lets a third request land
-          // outside the window while the first is still in flight. Writing
-          // only to OUR closure-captured `record` would strand this completed
-          // reading where nothing will ever read it again (see the module
-          // doc's refusal-shape section) — a request in that gap would then
-          // degrade with RATE_LIMITED_REASON despite a reading having
-          // completed. Write THROUGH to whichever record is current now,
-          // unless it already holds a reading admitted more recently than
-          // this one: a superseding survey's OWN later commit must still win
-          // over an older survey's late arrival.
-          const current = records.get(key)
+          const cur = records.get(key)
           // The key can be gone outright (forgetSurveyKey() pruned it, e.g. a
-          // session_destroyed landing while both surveys were in flight) —
-          // nothing to write through to, and recreating the entry would
-          // resurrect a record for a session that no longer exists.
-          if (!current) return
-          if (current.snapshotAt !== null && current.snapshotAt >= record.at) return
-          current.snapshot = snapshot
-          current.snapshotAt = record.at
+          // session_destroyed landing while this survey was in flight) —
+          // nothing to write to, and recreating the entry would resurrect a
+          // record for a session that no longer exists.
+          if (!cur) return
+          // One rule, whether this is the common (untouched-since-admission)
+          // case or a write-through onto a record someone else has since
+          // superseded: never let a reading older than what is already
+          // recorded win (#7450 / #8091's outcome 3). `cur.snapshotAt` — a
+          // FRESHLY admitted record carries it forward from `prior`, so this
+          // also correctly refuses an admission whose predecessor already
+          // held a newer reading than this one, in the ordinary sequential
+          // case. `>=`, not `>` — an EXACT tie keeps the CURRENT reading
+          // (pinned by the "S3" test in survey-throttle.test.js).
+          if (cur.snapshotAt !== null && cur.snapshotAt >= myAt) return
+          // REPLACE, never mutate in place (#8091) — carrying `cur.token` and
+          // `cur.at` forward unchanged is what lets a later `rollback()` (see
+          // below) still recognise this slot as belonging to whichever
+          // admission currently owns it, however the SNAPSHOT has been
+          // enriched since.
+          records.set(key, { at: cur.at, token: cur.token, snapshot, snapshotAt: myAt })
         },
         rollback() {
-          if (records.get(key) !== record) return
-          if (prior) records.set(key, prior)
-          else records.delete(key)
+          const cur = records.get(key)
+          // Stale: a NEWER admission has since taken over this slot (whether
+          // or not it has committed anything of its own yet) — a no-op,
+          // exactly like the pre-#8091 identity check intended (#7450 scope
+          // addition's "a stale rollback... stays a no-op").
+          if (!cur || cur.token !== token) return
+          // Undo MY OWN admission in full: the window reverts to whatever was
+          // true before I was ever admitted — a survey that spent nothing
+          // must not cost the next retry (#8091's outcome 2) — but the
+          // SNAPSHOT never regresses: keep whichever of what I'm currently
+          // holding (possibly enriched by someone ELSE's write-through while
+          // I was still current) and what `prior` already had is newer.
+          const survivor = newerOf(cur.snapshot, cur.snapshotAt, prior?.snapshot ?? null, prior?.snapshotAt ?? null)
+          if (!prior && survivor.snapshotAt === null) {
+            records.delete(key)
+            return
+          }
+          records.set(key, {
+            at: prior ? prior.at : -Infinity,
+            token: prior ? prior.token : {},
+            snapshot: survivor.snapshot,
+            snapshotAt: survivor.snapshotAt,
+          })
         },
       }
     },
@@ -206,7 +284,10 @@ export function createSurveyThrottle() {
  * Prune the record for `(owner, key)` from EVERY throttle instance created via
  * `createSurveyThrottle()` — both of today's handlers (session-pr-status,
  * session-pr-threads) and any future one, through this one call. Called from
- * `WsServer`'s `session_destroyed` handler in `ws-server.js` (#7450).
+ * `SessionManager`'s `_cleanupSessionMaps()` (#7450) and `destroyAll()`
+ * (#8092) in `session-manager.js` — the removal itself, not a lifecycle
+ * event, so every teardown path is covered rather than only the ones that
+ * happen to emit `session_destroyed`.
  *
  * Safe to call for a key that was never opened, or that has already been
  * forgotten — both are silent no-ops.

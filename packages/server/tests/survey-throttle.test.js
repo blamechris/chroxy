@@ -331,3 +331,139 @@ describe('#7450 scope addition — a completed reading writes THROUGH a supersed
     assert.equal(h.open('sess-1').admitted, true, 'a forgotten key must not be silently recreated by a late write-through')
   })
 })
+
+describe('#8091 (C1) — a write-through can no longer be silently lost by a later rollback', () => {
+  // Filed from review of #8088: write-through used to MUTATE the current
+  // record in place, so rollback()'s identity check (`records.get(key) !==
+  // record`) could not tell "nothing happened since I was admitted" apart
+  // from "my record was mutated in place by an unrelated survey's
+  // write-through" — both looked identical under raw object identity.
+  //
+  // FIX: every record now carries a `token` — a fresh marker minted at
+  // `open()` time — and a write-through REPLACES the record (never mutates
+  // it in place) while carrying the CURRENT record's token and `.at` forward
+  // unchanged. `rollback()` keys on that token, not on object identity, so it
+  // can still tell a stale call (someone newer has since taken over) apart
+  // from "the object I'm looking at is still mine, just enriched."
+  //
+  // DESIGN DECISION (stated explicitly, since the coordinator left the
+  // specific outcome to this PR): a rollback undoes the ROLLED-BACK survey's
+  // OWN admission in full, including its window — consistent with "a failed
+  // survey spent no budget, so the next retry must not be refused for it."
+  // Concretely: `rollback()` restores `{ at: prior.at, snapshot:
+  // newest(current, prior) }` — the WINDOW reverts to whatever was true
+  // before the rolled-back gate was ever admitted, while the SNAPSHOT is
+  // never allowed to regress to something older than what is already there
+  // (comparing `snapshotAt`, exactly like `commit()`'s own write-through
+  // guard). A reading is therefore NEVER lost to any later rollback — it is
+  // simply carried forward as the next admission's replay-cache — even
+  // though, in the specific repro below, that means the very next request
+  // is freely ADMITTED (a fresh survey) rather than throttled: B's rollback
+  // undoing ITS OWN stamp legitimately reopens the window all the way back
+  // to A's original (long-elapsed) admission time.
+
+  it("the reviewer's exact interleaving: A writes through onto B's slot, then B rolls back — A's reading survives", () => {
+    const throttle = createSurveyThrottle()
+    const owner = {}
+    const A = throttle.open(owner, 'sess-1', 1_000, 5_000) // admitted
+    const B = throttle.open(owner, 'sess-1', 7_000, 5_000) // supersedes A
+
+    A.commit({ id: 'A-result' }, { replayable: true }) // write-through into B's (current) record
+    B.rollback() // B's survey later throws
+
+    // B's rollback fully undoes B's own admission — the window reverts to
+    // A's ORIGINAL (t=1000) admission, which by t=7500 has long elapsed
+    // (6500ms >= the 5000ms window) — so this request is ADMITTED, not
+    // throttled. That is the outcome this design chooses; see the block
+    // comment above.
+    const after = throttle.open(owner, 'sess-1', 7_500, 5_000)
+    assert.equal(after.admitted, true, "B's rollback must fully undo B's own stamp, reopening to A's original window")
+
+    // But A's completed reading is NEVER discarded — it is carried forward
+    // as the brand-new admission's own replay-cache, so a second request
+    // landing in the same instant (before `after` itself completes) is
+    // throttled and replays it rather than seeing a blank slate.
+    const pileOn = throttle.open(owner, 'sess-1', 7_500, 5_000)
+    assert.equal(pileOn.admitted, false, "the brand-new admission opened its own window")
+    assert.deepEqual(pileOn.cached, { id: 'A-result' }, "A's completed reading must never be discarded by B's rollback")
+  })
+
+  it('mirror order: B rolls back BEFORE A ever completes, then A writes through onto its own (restored) slot', () => {
+    const throttle = createSurveyThrottle()
+    const owner = {}
+    const A = throttle.open(owner, 'sess-1', 1_000, 5_000)
+    const B = throttle.open(owner, 'sess-1', 7_000, 5_000) // supersedes A
+
+    B.rollback() // nothing committed yet — a full undo, as if B never existed
+    A.commit({ id: 'A-result' }, { replayable: true }) // lands on what is now A's own restored slot again
+
+    // A's own window (opened at t=1000) is still in force.
+    const soon = throttle.open(owner, 'sess-1', 1_500, 5_000)
+    assert.equal(soon.admitted, false, "A's own window must still be in force")
+    assert.deepEqual(soon.cached, { id: 'A-result' })
+  })
+
+  it('a stale rollback stays a no-op even when its slot was write-through-enriched while it was current', () => {
+    // A different actor's write-through landing on B's slot while B was still
+    // current must not make B's EVENTUAL (very late) rollback able to disturb
+    // a THIRD, even-newer admission that has since taken over.
+    const throttle = createSurveyThrottle()
+    const owner = {}
+    const A = throttle.open(owner, 'sess-1', 1_000, 5_000)
+    const B = throttle.open(owner, 'sess-1', 7_000, 5_000) // supersedes A
+    A.commit({ id: 'A-result' }, { replayable: true }) // write-through lands on B's slot while B is current
+    const C = throttle.open(owner, 'sess-1', 13_000, 5_000) // supersedes B in turn
+    C.commit({ id: 'C-result' }, { replayable: true })
+
+    B.rollback() // B itself never committed or rolled back until now
+
+    const after = throttle.open(owner, 'sess-1', 13_500, 5_000)
+    assert.equal(after.admitted, false, "C's window must survive B's stale rollback")
+    assert.deepEqual(after.cached, { id: 'C-result' })
+  })
+
+  it('an OLDER admission rolling back after a write-through never overwrites the CURRENT reading', () => {
+    // A itself decides its write attempt is worthless right after handing it
+    // off is not a real call pattern (a caller commits XOR rolls back), but a
+    // DIFFERENT, even-older admission rolling back late must not disturb a
+    // write-through that already landed on a newer slot.
+    const throttle = createSurveyThrottle()
+    const owner = {}
+    const zero = throttle.open(owner, 'sess-1', 100, 5_000) // the oldest of all
+    const A = throttle.open(owner, 'sess-1', 6_000, 5_000) // supersedes `zero`
+    throttle.open(owner, 'sess-1', 12_000, 5_000) // B: supersedes A
+    A.commit({ id: 'A-result' }, { replayable: true }) // write-through onto B's slot
+
+    zero.rollback() // long stale — B (and A's write-through) have since taken over
+
+    const after = throttle.open(owner, 'sess-1', 12_500, 5_000)
+    assert.equal(after.admitted, false)
+    assert.deepEqual(after.cached, { id: 'A-result' }, "zero's stale rollback must not disturb A's write-through onto B's slot")
+  })
+})
+
+describe('S3 — the write-through recency guard\'s tie-break is pinned', () => {
+  it('an EXACT snapshotAt tie keeps the CURRENT reading (>=, not >)', () => {
+    // The review's own mutant (`>=` -> `>`) survived the full targeted suite
+    // (191/191) because every existing test compares clearly-ordered
+    // timestamps. Constructing an exact tie legitimately (via the public API)
+    // needs two DIFFERENT admissions that share one admission timestamp —
+    // `forget()` (a session_destroyed prune) resets the key so a second
+    // admission can reuse the same tick a first one used.
+    const throttle = createSurveyThrottle()
+    const owner = {}
+
+    const A = throttle.open(owner, 'sess-1', 5_000, 5_000)
+    throttle.forget(owner, 'sess-1')
+    const B = throttle.open(owner, 'sess-1', 5_000, 5_000) // same tick as A, on a fresh key
+
+    B.commit({ id: 'B (current)' }, { replayable: true }) // snapshotAt becomes exactly 5000
+
+    // A's own admission time is ALSO exactly 5000 — an exact tie against B's
+    // already-recorded snapshotAt.
+    A.commit({ id: 'A (late, tied)' }, { replayable: true })
+
+    const after = throttle.open(owner, 'sess-1', 5_500, 5_000)
+    assert.deepEqual(after.cached, { id: 'B (current)' }, 'on an exact tie, the CURRENT reading must win — the boundary this test pins')
+  })
+})

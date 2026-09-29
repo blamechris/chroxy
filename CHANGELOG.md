@@ -66,28 +66,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator's "remove this entry" remediation until its own next miss or
   flush (#8081).
 
-- **The per-session pull-request survey throttle is pruned on
-  `session_destroyed`, and a completed reading can no longer be stranded in a
-  superseded record (#7450).** #7445's per-session throttle stamped a
+- **The per-session pull-request survey throttle is pruned on every
+  session-teardown path, a completed reading can no longer be stranded in a
+  superseded record NOR silently discarded by a later rollback, and a
+  write-through recency tie now has a pinned, tested outcome (#7450, #8091,
+  #8092).** #7445's per-session throttle stamped a
   `WeakMap<sessionManager, Map<sessionId, …>>` that was never cleaned up, so
   its entry count was bounded by every session id ever surveyed over the
-  daemon's lifetime rather than by the live session count — the same class of
-  leak `SessionCiWatcher._state` already guards against on the same event.
+  daemon's lifetime rather than by the live session count — the same PROBLEM
+  `SessionCiWatcher._state` already guards against, though that watcher does
+  it by a periodic live-session sweep in `tick()`, not an event listener.
   `survey-throttle.js` (shared by both the PR-status and the PR-thread-count
   handlers since #7430) now keeps a registry of every throttle instance it
-  creates, and one exported `forgetSurveyKey(owner, sessionId)`, called from
-  `WsServer`'s `session_destroyed` handler, prunes the record from all of them
-  — a per-instance prune wired to only one handler would have reproduced the
-  exact "guard wired to only some of its callers" shape this codebase already
-  catalogues. Folded in alongside it: a completed survey previously wrote only
-  to its own closure-captured record, so when a survey ran slower than the
-  throttle window itself and a later request was admitted before the first
-  finished, the first survey's completed reading landed in a record nothing
-  reads again — a request arriving in that gap degraded with a rate-limited
-  reason despite a reading having actually completed. `commit()` now writes a
-  superseded reading THROUGH to the current record, but only when that record
-  holds nothing admitted more recently, so a genuinely newer survey's own
-  commit still wins over an older one's late arrival.
+  creates, and one exported `forgetSurveyKey(owner, sessionId)` prunes the
+  record from all of them — a per-instance prune wired to only one handler
+  would have reproduced the exact "guard wired to only some of its callers"
+  shape this codebase already catalogues. That call is made from
+  `SessionManager._cleanupSessionMaps()` (and from `destroyAll()`, the one
+  path that bypasses it) rather than from a `session_destroyed` listener: the
+  first attempt at this fix listened for that event alone and missed
+  `_handleAsyncStartFailure()`'s restore-rebind branch, which removes a
+  session without ever emitting it (#8092) — the identical gap this codebase
+  already documented, and already fixed the same way, for the #7552
+  environment-untag. Folded in alongside it, a completed survey that arrives
+  after being superseded by a later admission now writes its reading THROUGH
+  to the current record instead of being stranded — but the first version of
+  that write-through mutated the current record in place, which a later
+  `rollback()`'s identity-only check could not tell apart from "nothing
+  happened since I was admitted," so a superseded survey's rollback could
+  silently discard an already-written-through reading and reopen the window
+  on a stale timestamp (#8091). Every record now carries an ownership token:
+  a write-through replaces the record (never mutates it) while carrying the
+  current token forward, and `rollback()` keys on that token rather than on
+  object identity — a rollback that is still current restores `{ at:
+  prior.at, snapshot: newest(current, prior) }`, so it fully undoes its OWN
+  admission window while never regressing to an older reading than what is
+  already there. The write-through recency guard's exact-tie boundary (does
+  an equally-fresh reading overwrite the current one?) is now covered by a
+  dedicated test pinning "no" — the current reading wins a tie.
 
 - **`session_pr_status`'s server-only `indeterminate` marker can no longer
   reach the wire from a future sender, because it is no longer an ordinary
