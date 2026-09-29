@@ -81,6 +81,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator's "remove this entry" remediation until its own next miss or
   flush (#8081).
 
+- **A settled CI run now reaches Discord — `ci_complete` was silently dropped
+  by the per-project status sink, indistinguishable from a successful
+  delivery (#7428).** #7424/#7426 added the `ci_complete` push category (a CI
+  run finishing on the pull request a session opened) and wired the Expo sink
+  to deliver it; `discord-webhook-sink.js`'s `STATE_FOR_CATEGORY` has no entry
+  for it, so `send()` returned `true` for a category it never touched — a
+  Discord-only setup got no CI-completion notice at all, with nothing in the
+  return value to say so. `ci_complete` is not a session-lifecycle state
+  (folding it into the per-project embed would repaint whatever the session's
+  actual status is with a stale CI verdict from a run that may have settled
+  long after the session moved on), so it gets a new, separate,
+  **stateless** sink, `discord-ci-sink.js`, modelled on the billing-alert
+  sink's precedent for "an event that is not a session state" — except this
+  one posts a brand-new message for every completion rather than tracking one
+  to edit: two runs settling for the same PR are two distinct completions and
+  get two distinct Discord messages. Each embed carries the PR number and
+  link, a ✅ passed / ❌ failed / ❓ unrecognised conclusion, and the check-count
+  summary and PR title chroxy already builds for the push notification — a PR
+  title is GitHub-authored text, so it is escaped the same way every other
+  Discord sink escapes free text (#5475) and has any `@everyone` / `@here` /
+  role-or-user mention neutralized (`neutralizeMentions`, new in
+  `discord-webhook-client.js`) before it reaches the wire. The sink shares the
+  status sink's webhook and is on by default whenever one resolves; set
+  `notifications.discord.ciAlerts: false` to keep CI notices off Discord
+  specifically.
+
 - **The per-session pull-request survey throttle is pruned on every
   session-teardown path, a completed reading can no longer be stranded in a
   superseded record NOR silently discarded by a later rollback, and a

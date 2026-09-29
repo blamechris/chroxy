@@ -38,6 +38,7 @@ import {
 } from './notifications/expo-push-sink.js'
 import { DiscordWebhookSink } from './notifications/discord-webhook-sink.js'
 import { DiscordBillingSink } from './notifications/discord-billing-sink.js'
+import { DiscordCiSink } from './notifications/discord-ci-sink.js'
 
 const log = createLogger('push')
 
@@ -120,6 +121,8 @@ export class PushManager {
    *   #5828: also feeds DiscordBillingSink — `billingStatePath` (its own state
    *   file, kept separate from the status store) and `billingAlerts` (kill-switch,
    *   default on when a webhook resolves).
+   *   #7428: also feeds DiscordCiSink — `ciAlerts` (kill-switch, default on
+   *   when a webhook resolves). No state path: the CI sink keeps no state.
    * @param {() => number} [opts.now] - #6146 injectable clock (epoch ms),
    *   defaults to `Date.now`. send()'s rate-limit AND the #4544 quiet-hours gate
    *   evaluate against "now"; tests pin it to a deterministic instant so the
@@ -166,6 +169,17 @@ export class PushManager {
       resolveWebhookUrl: discord.resolveWebhookUrl,
     })
     this._sinks.register(this._discordBillingSink)
+    // #7428: the Discord CI-completion sink. Separate from the status sink (a
+    // CI run settling is not a session-lifecycle state) and, unlike the
+    // billing sink, stateless — every ci_complete is a brand-new message, no
+    // message id to track. Shares the same webhook + gating; off when no
+    // webhook resolves or ciAlerts is false.
+    this._discordCiSink = new DiscordCiSink({
+      botName: discord.botName,
+      ciAlerts: discord.ciAlerts,
+      resolveWebhookUrl: discord.resolveWebhookUrl,
+    })
+    this._sinks.register(this._discordCiSink)
   }
 
   /**

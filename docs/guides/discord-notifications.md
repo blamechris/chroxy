@@ -100,7 +100,8 @@ The non-secret knobs live in `~/.chroxy/config.json` under
       "updateThrottleMs": 15000,
       "heartbeatIntervalMs": 300000,
       "pruneAfterMs": 86400000,
-      "billingAlerts": true
+      "billingAlerts": true,
+      "ciAlerts": true
     }
   }
 }
@@ -143,6 +144,9 @@ The non-secret knobs live in `~/.chroxy/config.json` under
 - **`billingAlerts`** — kill-switch for the billing-alert message (see below).
   Default `true` when a webhook is configured; set `false` to keep billing
   alerts off Discord while the per-project status embed stays on.
+- **`ciAlerts`** — kill-switch for CI-completion notices (see below). Default
+  `true` when a webhook is configured; set `false` to keep them off Discord
+  while the per-project status embed / billing alerts stay on.
 
 See [packages/server/CONFIG.md](../../packages/server/CONFIG.md#discord-notifications-notificationsdiscord)
 for the full key reference.
@@ -167,6 +171,30 @@ the `billing_warning` category or set quiet hours and they fall silent like any
 other category. The datacenter-egress part of the canary is itself opt-in
 (`billing.egressCheck`); see the billing canary docs.
 
+## CI-completion notices
+
+When the session CI watcher (#7424) sees a pull request's checks settle, it
+posts a **fresh Discord message** — one per completed run, never an edit of a
+previous one. This is `discord-ci-sink.js`, a third sink alongside the status
+embed and the billing alert: a CI run finishing is not a session-lifecycle
+state (folding it into the status embed would repaint whatever the session is
+actually doing right now with a stale CI verdict), and unlike the billing
+alert there is nothing to edit in place — two runs settling for the same PR
+are two distinct completions and get two distinct messages.
+
+Each message's embed carries whatever the completion event actually has: the
+PR number, a ✅ passed / ❌ failed / ❓ unrecognised conclusion, the check-count
+summary and PR title chroxy already builds for the push notification, and a
+link (the embed title links to the PR). PR titles are GitHub-authored text, so
+they're escaped the same way every other free-text field is (#5475) and have
+any `@everyone` / `@here` / user or role mention neutralized before they reach
+the wire.
+
+CI notices flow through the same pipeline gating as everything else — mute the
+`ci_complete` category or set quiet hours and they fall silent like any other
+category. Set `ciAlerts: false` to keep them off Discord specifically while
+the status embed / billing alerts stay on.
+
 ## Where state lives
 
 Status-message bookkeeping (message id, current state, timestamps per
@@ -180,6 +208,9 @@ The billing-alert message tracks its own id separately in
 `~/.chroxy/discord-billing-state.json` (one message, not per-project), so it
 never collides with the status store. Deleting it is safe — the next billing
 warning posts fresh.
+
+CI-completion notices keep **no state file at all** — every `ci_complete`
+posts a brand-new message with nothing tracked or edited afterwards.
 
 ## External sessions via `POST /api/events`
 

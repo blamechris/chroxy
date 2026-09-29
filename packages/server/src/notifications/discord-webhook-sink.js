@@ -69,6 +69,7 @@ import {
   formatDuration,
   apiBase,
   fetchWithDiscordRetry,
+  MAX_EMBED_TITLE_CHARS,
 } from './discord-webhook-client.js'
 
 const log = createLogger('discord')
@@ -126,6 +127,16 @@ const DEFAULT_OFFLINE_AFTER_MS = 30 * 60_000 // 30m
 //                events keep it fresh via routine PATCH.
 //   offline    — session ended (bash SessionEnd: routine PATCH in place;
 //                no-op when nothing is tracked or already offline)
+//
+// `ci_complete` (#7424) is deliberately NOT listed here: a CI-completion event
+// is not a session-lifecycle state, and mapping it onto one would repaint
+// whatever this project's status embed actually shows (idle/online/...) with
+// a stale CI verdict from a run that may have settled long after the session
+// moved on — see #7428. `send()` below returns `true` for any unmapped
+// category without touching the store or the wire, which is the same "not
+// ours" no-op every other unmapped category gets; `discord-ci-sink.js`
+// (registered alongside this sink) is the one that actually delivers it, as
+// its own separate message.
 const STATE_FOR_CATEGORY = {
   activity_update: 'idle',
   result: 'idle',
@@ -150,18 +161,9 @@ const STATE_TITLES = {
   offline: (project) => `\u{1F534} ${project} — Session Offline`,
 }
 
-/**
- * Discord's hard embed-title limit (#7105).
- *
- * Past it the ENTIRE webhook POST/PATCH comes back 400, so the project's status
- * embed silently stops updating — the failure is logged and invisible to the
- * user. Every other field `_buildPayload` emits already goes through
- * `escapeAndCap` for exactly this reason; the title did not, and it is the one
- * that costs the whole embed rather than one field.
- *
- * https://discord.com/developers/docs/resources/message#embed-object-embed-limits
- */
-export const MAX_EMBED_TITLE_CHARS = 256
+// Re-exported for back-compat: moved to discord-webhook-client.js in #7428 so
+// discord-ci-sink.js can share it without importing this (much larger) file.
+export { MAX_EMBED_TITLE_CHARS }
 
 export class DiscordWebhookSink extends NotificationSink {
   /**

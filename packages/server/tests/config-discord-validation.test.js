@@ -33,12 +33,19 @@ describe('validateConfig — notifications.discord unknown keys (#5453)', () => 
 
   it('does NOT warn-as-unknown for recognised knobs (incl. #5676 watchdog tunables)', () => {
     const ws = discordWarnings({
-      botName: 'Bot', billingAlerts: true, defaultColor: 0, permissionColor: 1, errorColor: 2,
+      botName: 'Bot', billingAlerts: true, ciAlerts: true, defaultColor: 0, permissionColor: 1, errorColor: 2,
       colors: {}, updateThrottleMs: 0, heartbeatIntervalMs: 0, pruneAfterMs: 0,
       staleAfterMs: 600000, offlineAfterMs: 1800000,
       statePath: '/tmp/state.json', billingStatePath: '/tmp/billing.json',
     })
     assert.ok(!ws.some(w => w.includes('unknown key')), `recognised knobs should not warn as unknown, got: ${JSON.stringify(ws)}`)
+  })
+
+  it('validates ciAlerts as a boolean (#7428)', () => {
+    const ws = discordWarnings({ ciAlerts: 'nope' })
+    assert.ok(ws.some(w => w.includes("'notifications.discord.ciAlerts'") && w.includes('boolean')))
+    assert.ok(!ws.some(w => w.includes('unknown key')), 'known-but-invalid knob gets a value warning, not unknown-key')
+    assert.ok(!discordWarnings({ ciAlerts: true }).some(w => w.includes("'notifications.discord.ciAlerts'")))
   })
 
   it('does NOT warn on the runtime-honored state-store paths (statePath/billingStatePath)', () => {

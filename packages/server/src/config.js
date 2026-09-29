@@ -728,7 +728,7 @@ const MAX_DISCORD_COLOR = 16777215
 // silently no-op'ing / failing the sink closed. Keep in sync with the per-key
 // validation below. The webhook URL is a SECRET (its own warning) — not a knob.
 export const DISCORD_SUPPORTED_KEYS = new Set([
-  'botName', 'billingAlerts', 'defaultColor', 'permissionColor', 'errorColor',
+  'botName', 'billingAlerts', 'ciAlerts', 'defaultColor', 'permissionColor', 'errorColor',
   'colors', 'updateThrottleMs', 'heartbeatIntervalMs', 'pruneAfterMs',
   // #5676 status-watchdog tunables — the sink reads these from the config spread
   // (discord-webhook-sink.js: staleAfterMs/offlineAfterMs, default 10m/30m), so
@@ -1036,6 +1036,13 @@ function validateDiscordNotificationsBlock(discord, warnings) {
   // status embed stays on.
   if (Object.prototype.hasOwnProperty.call(discord, 'billingAlerts') && typeof discord.billingAlerts !== 'boolean') {
     warnings.push(`Invalid value for 'notifications.discord.billingAlerts': expected a boolean, got ${JSON.stringify(discord.billingAlerts)}`)
+  }
+
+  // #7428: kill-switch for the Discord CI-completion sink. Default ON when a
+  // webhook resolves; set false to keep ci_complete notices off Discord while
+  // the status embed / billing alerts stay on.
+  if (Object.prototype.hasOwnProperty.call(discord, 'ciAlerts') && typeof discord.ciAlerts !== 'boolean') {
+    warnings.push(`Invalid value for 'notifications.discord.ciAlerts': expected a boolean, got ${JSON.stringify(discord.ciAlerts)}`)
   }
 
   const isValidColor = (v) => Number.isInteger(v) && v >= 0 && v <= MAX_DISCORD_COLOR

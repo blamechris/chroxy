@@ -11,6 +11,8 @@ import {
   retryAfterMs,
   fetchWithDiscordRetry,
   MAX_COLOR,
+  MAX_EMBED_TITLE_CHARS,
+  neutralizeMentions,
 } from '../src/notifications/discord-webhook-client.js'
 
 const WEBHOOK = 'https://discord.com/api/webhooks/123456789012345678/aBcDeFgHiJkLmNoPqRsTuVwXyZ-0123456789_abcdefghijklmnopqrstuvwx'
@@ -86,4 +88,33 @@ test('fetchWithDiscordRetry retries 5xx then throws-through only on the last net
     /network down/,
   )
   assert.equal(fetchImpl.mock.callCount(), 2)
+})
+
+// #7428: mention neutralization, shared by every Discord sink that embeds
+// GitHub-authored free text (PR titles, in discord-ci-sink.js's case).
+test('MAX_EMBED_TITLE_CHARS is Discord\'s embed-title limit', () => {
+  assert.equal(MAX_EMBED_TITLE_CHARS, 256)
+})
+
+test('neutralizeMentions breaks @everyone / @here so they render as inert text', () => {
+  assert.equal(neutralizeMentions('cc @everyone'), 'cc @​everyone')
+  assert.equal(neutralizeMentions('cc @here'), 'cc @​here')
+  assert.ok(!neutralizeMentions('cc @everyone').includes('@everyone'))
+})
+
+test('neutralizeMentions breaks user/nickname/role snowflake mentions', () => {
+  assert.equal(neutralizeMentions('hi <@123>'), 'hi <@​123>')
+  assert.equal(neutralizeMentions('hi <@!123>'), 'hi <@​!123>')
+  assert.equal(neutralizeMentions('hi <@&456>'), 'hi <@​&456>')
+})
+
+test('neutralizeMentions is case-insensitive and leaves ordinary text alone', () => {
+  assert.ok(!neutralizeMentions('cc @Everyone').includes('@Everyone'))
+  assert.equal(neutralizeMentions('no mentions here'), 'no mentions here')
+})
+
+test('neutralizeMentions is a safe no-op on non-strings', () => {
+  assert.equal(neutralizeMentions(null), '')
+  assert.equal(neutralizeMentions(undefined), '')
+  assert.equal(neutralizeMentions(42), '')
 })

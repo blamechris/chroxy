@@ -259,7 +259,7 @@ rather than being silently dropped.
 | `userShell` | `enabled`, `requireApproval` |
 | `environments.k8s` | `namespace`, `inCluster`, `kubeconfigPath`, `sidecarImage`, `imagePullPolicy`, `connectMode`, `namespaceQuota`, `namespaceLimitRange`, `workspace` |
 | `environments.rancher` | `rancherUrl`, `clusterId`, `token`, `tokenEnv`, `tokenFile`, `caData`, `skipTLSVerify`, `defaultProjectId` |
-| `notifications.discord` | `botName`, `billingAlerts`, `colors`, `defaultColor`, `permissionColor`, `errorColor`, `updateThrottleMs`, `heartbeatIntervalMs`, `pruneAfterMs`, `staleAfterMs`, `offlineAfterMs`, `statePath`, `billingStatePath` |
+| `notifications.discord` | `botName`, `billingAlerts`, `ciAlerts`, `colors`, `defaultColor`, `permissionColor`, `errorColor`, `updateThrottleMs`, `heartbeatIntervalMs`, `pruneAfterMs`, `staleAfterMs`, `offlineAfterMs`, `statePath`, `billingStatePath` |
 | `providers` *(object form)* | `anthropicCompatible`, `openaiCompatible`, `acp`, `allowAnyModel` |
 
 `summarize`, `features`, and `orchestration` have no unknown-key check today, so
@@ -978,7 +978,8 @@ The non-secret knobs live under `notifications.discord` in `config.json`:
       "updateThrottleMs": 15000,
       "heartbeatIntervalMs": 300000,
       "pruneAfterMs": 86400000,
-      "billingAlerts": true
+      "billingAlerts": true,
+      "ciAlerts": true
     }
   }
 }
@@ -995,6 +996,7 @@ The non-secret knobs live under `notifications.discord` in `config.json`:
 | `heartbeatIntervalMs` | number | Elapsed-time footer refresh interval for live embeds — offline embeds are final and never re-PATCHed (default `300000`; `0` disables; minimum `10000`) |
 | `pruneAfterMs` | number | Retention for state-store entries: entries untouched longer than this are dropped on load (default `86400000` / 24h; `0` disables; minimum `60000` / 60s — smaller values fall back to the default, since a retention shorter than the gap between events prunes the tracked message id in between and turns the embed into message-per-event spam; the last Discord message is kept). Heartbeat refreshes don't reset the clock — only real pipeline events do |
 | `billingAlerts` | boolean | Kill-switch for the daemon-global billing-alert message (the 2026-06-15 billing canary). Default `true` when a webhook is configured; `false` keeps billing alerts off Discord while the per-project status embed stays on |
+| `ciAlerts` | boolean | Kill-switch for CI-completion notices (#7428 — one fresh message per settled `ci_complete` event, no state tracked). Default `true` when a webhook is configured; `false` keeps them off Discord while the per-project status embed / billing alerts stay on |
 | `staleAfterMs` | number | How long a live embed may go without a pipeline event before the sink marks the project **stale** (#5676 status watchdog; default `600000` / 10 min). Any finite value >= 0 is honoured; anything else falls back to the default |
 | `offlineAfterMs` | number | How long a live embed may go without a pipeline event before the sink marks the project **offline** and stops re-PATCHing it (#5676; default `1800000` / 30 min). Same validation as `staleAfterMs` |
 | `statePath` | string | Override for the status-embed state store (default `~/.chroxy/discord-webhook-state.json`). The caller defaults it and the config value wins — set it to relocate the store off `$HOME` |
