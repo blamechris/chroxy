@@ -30,12 +30,58 @@
 // at the kill sites already reaps the tree there; the sweep is a no-op.
 
 import { execFileSync } from 'child_process'
-import { readlinkSync, realpathSync } from 'fs'
-import { resolve, sep } from 'path'
+import { existsSync, readlinkSync, realpathSync } from 'fs'
+import { isAbsolute, resolve, sep } from 'path'
 import { configPath } from './config-dir.js'
+import { resolveBinary } from './utils/resolve-binary.js'
 
 export const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60 * 1000
 export const DEFAULT_MIN_AGE_MS = 10 * 60 * 1000
+
+// `lsof` lives at `/usr/sbin/lsof` on macOS. The launchd service PATH
+// (`~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`) and Tauri's
+// GUI launch both omit `/usr/sbin` (#8083, same class as the desktop's own
+// PATH-enrichment note in `server.rs` and `feedback_tauri_gui_path`), so a
+// bare-name spawn resolves through PATH and gets ENOENT under the daemon's
+// normal launch path — the sweep never runs. Absolute candidates are tried
+// BEFORE any PATH lookup: unlike `resolveBinary()` (PATH first, used for
+// user-installed CLIs whose real location genuinely varies), a well-known
+// system utility's fixed install path should win over whatever a narrower or
+// wider PATH happens to resolve — same reasoning as `MACOS_SPCTL` /
+// `MACOS_XATTR` in verify-provenance.js / verify-binary.js, though those never
+// fall back to PATH at all (security-hardening) while lsof must, to cover
+// Linux distros that keep it elsewhere (commonly `/usr/bin/lsof`) and any
+// host where neither absolute candidate applies.
+export const LSOF_CANDIDATES = ['/usr/sbin/lsof', '/usr/bin/lsof']
+
+/**
+ * Resolve the absolute path to `lsof`: each of LSOF_CANDIDATES via an
+ * existence check, in order, then a PATH lookup as the last resort (reusing
+ * the shared `resolveBinary()` helper — an empty candidates list, since the
+ * absolute locations were already tried above — rather than a second
+ * PATH-lookup implementation). Returns `null` when lsof is genuinely
+ * unavailable anywhere (`resolveBinary` falling through to its own bare-name
+ * "not found" sentinel, same convention `verify-binary.js`/`doctor.js` already
+ * rely on: a non-absolute result is "not found").
+ *
+ * Re-resolved on every call rather than cached — same choice
+ * `claude-binary.js`/`gemini-session.js` make for their provider binaries, so
+ * a binary installed (or a symlink fixed) between sweeps is picked up on the
+ * very next tick rather than requiring a daemon restart. The existence checks
+ * involved are a couple of `stat`s; at a 5-minute cadence the cost is noise.
+ *
+ * `deps.exists` / `deps.resolveBinary` are test seams; production defaults to
+ * the real `existsSync` / the shared `resolveBinary`.
+ */
+export function resolveLsofBinary(deps = {}) {
+  const exists = deps.exists || existsSync
+  for (const candidate of LSOF_CANDIDATES) {
+    if (exists(candidate)) return candidate
+  }
+  const resolveBin = deps.resolveBinary || resolveBinary
+  const resolved = resolveBin('lsof', [])
+  return isAbsolute(resolved) ? resolved : null
+}
 
 /**
  * Parse a `ps` `etime` column — `[[dd-]hh:]mm:ss` — into milliseconds.
@@ -107,13 +153,18 @@ function defaultListProcesses() {
  * listing and this call is routine, so a nonzero exit with stdout present is
  * a PARTIAL result to parse, not a failure. Only a spawn failure (ENOENT), a
  * timeout, or a signal death means the mechanism is unavailable (#7608 review).
+ *
+ * `lsofPath` defaults to the bare name `'lsof'` — unchanged from before #8083
+ * — so every existing caller/test that doesn't pass it keeps its exact prior
+ * behaviour. The real sweep path (`defaultCwdOf`) always passes the resolved
+ * absolute path from `resolveLsofBinary()`.
  */
-export function resolveCwdsViaLsof(pids, exec = execFileSync) {
+export function resolveCwdsViaLsof(pids, exec = execFileSync, lsofPath = 'lsof') {
   const args = ['-a', '-d', 'cwd', '-p', pids.join(','), '-Fpn']
   const opts = { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }
   let text
   try {
-    text = exec('lsof', args, opts)
+    text = exec(lsofPath, args, opts)
   } catch (err) {
     if (err && typeof err.status === 'number' && err.stdout != null) text = String(err.stdout)
     else throw err
@@ -142,11 +193,27 @@ export function resolveCwdsViaProcfs(pids, readlink = readlinkSync) {
 /**
  * Resolve the cwd of each pid. Returns a Map; a pid whose cwd cannot be read
  * is absent. Throws only when the MECHANISM is unavailable, which the caller
- * treats as "cannot check".
+ * treats as "cannot check" — including a genuinely-missing `lsof`, thrown here
+ * as `LSOF_NOT_FOUND` so `maybeReapOrphans` can log that specific case once
+ * instead of every sweep (#8083).
+ *
+ * `deps.platform` (falling back to the real `process.platform`, same as
+ * `sweepOrphans`'s own win32 gate) rather than always reading the real
+ * platform directly — needed so this branch is exercisable under test the
+ * same way the rest of the module already is.
  */
-function defaultCwdOf(pids) {
+function defaultCwdOf(pids, deps = {}) {
   if (pids.length === 0) return new Map()
-  return process.platform === 'linux' ? resolveCwdsViaProcfs(pids) : resolveCwdsViaLsof(pids)
+  const platform = deps.platform || process.platform
+  if (platform === 'linux') return resolveCwdsViaProcfs(pids, deps.readlink)
+  const lsofPath = resolveLsofBinary(deps)
+  if (!lsofPath) {
+    throw Object.assign(
+      new Error('lsof not found (checked /usr/sbin/lsof, /usr/bin/lsof, PATH)'),
+      { code: 'LSOF_NOT_FOUND' },
+    )
+  }
+  return resolveCwdsViaLsof(pids, deps.execFileSync, lsofPath)
 }
 
 function isUnder(path, base) {
@@ -162,11 +229,13 @@ function isUnder(path, base) {
  * @param {string} args.worktreeBase - chroxy's session-worktree root
  * @param {number} [args.minAgeMs]
  * @param {object} [args.deps] - test seams: listProcesses (called twice: list, then
- *   re-verify before signalling), cwdOf, kill, uid, selfPid, platform, realpath
- * @returns {{ scanned: number, candidates: number, unresolved: number, reaped: object[], skipped: object[], error: string|null }}
+ *   re-verify before signalling), cwdOf, kill, uid, selfPid, platform, realpath,
+ *   plus (when `cwdOf` is not overridden) `exists`/`resolveBinary`/`execFileSync`/
+ *   `readlink` consumed by the default lsof/procfs resolution (#8083)
+ * @returns {{ scanned: number, candidates: number, unresolved: number, reaped: object[], skipped: object[], error: string|null, errorCode: string|null }}
  */
 export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps = {} } = {}) {
-  const report = { scanned: 0, candidates: 0, unresolved: 0, reaped: [], skipped: [], error: null }
+  const report = { scanned: 0, candidates: 0, unresolved: 0, reaped: [], skipped: [], error: null, errorCode: null }
   const platform = deps.platform || process.platform
   if (platform === 'win32') return report
   if (!worktreeBase) { report.error = 'no worktree base'; return report }
@@ -204,10 +273,14 @@ export function sweepOrphans({ worktreeBase, minAgeMs = DEFAULT_MIN_AGE_MS, deps
   if (candidates.length === 0) return report
 
   let cwds
-  try { cwds = cwdOf(candidates.map((r) => r.pid)) } catch (err) {
+  // `deps` is passed through so the default resolver (lsof/procfs path
+  // resolution, #8083) has its own seams available; a `deps.cwdOf` override
+  // takes a single `pids` arg and simply ignores the second.
+  try { cwds = cwdOf(candidates.map((r) => r.pid), deps) } catch (err) {
     // "Cannot check" must not become "nothing to check": surface it and reap
     // nothing this tick.
     report.error = `cwd lookup unavailable: ${(err && err.message) || err}`
+    report.errorCode = (err && err.code) || null
     return report
   }
 
@@ -260,7 +333,13 @@ function isEnabled(config) {
  *
  * @param {object} config - merged server config
  * @param {{ info: Function, warn: Function }} log
- * @param {object} [deps] - sweepOrphans seams plus `worktreeBase`
+ * @param {object} [deps] - sweepOrphans seams plus `worktreeBase`. Also the
+ *   log-dedup carrier for the LSOF_NOT_FOUND case (#8083) below: `deps` is the
+ *   SAME object across every tick of `startPeriodicOrphanReap`'s interval (its
+ *   closure captures it once), so a flag set here on first sight persists for
+ *   the rest of the daemon's life without any new module/closure-level state.
+ *   A one-off caller that doesn't pass its own `deps` gets a fresh `{}` each
+ *   call, so it always logs — exactly like today, for every OTHER error kind.
  */
 export function maybeReapOrphans(config, log, deps = {}) {
   if (!isEnabled(config)) return null
@@ -270,7 +349,18 @@ export function maybeReapOrphans(config, log, deps = {}) {
   const worktreeBase = deps.worktreeBase || configPath('worktrees')
   const report = sweepOrphans({ worktreeBase, minAgeMs, deps })
   if (report.error) {
-    log.warn(`orphan-reaper: sweep skipped — ${report.error}`)
+    // Genuinely-missing lsof is a durable host fact, not a transient hiccup —
+    // warning every 5 minutes forever is pure log spam once it's been said
+    // once. Every OTHER "cannot check" reason still warns on every sweep,
+    // unchanged (a real, possibly-transient problem must stay loud).
+    if (report.errorCode === 'LSOF_NOT_FOUND') {
+      if (!deps.lsofUnavailableWarned) {
+        log.warn(`orphan-reaper: sweep skipped — ${report.error} (further occurrences suppressed until restart)`)
+        deps.lsofUnavailableWarned = true
+      }
+    } else {
+      log.warn(`orphan-reaper: sweep skipped — ${report.error}`)
+    }
     return report
   }
   for (const r of report.reaped) {
