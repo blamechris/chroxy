@@ -425,7 +425,7 @@ export class DockerSession extends CliSession {
 
     log.info(`Starting container (image: ${this._image}, memory: ${this._memoryLimit}, cpus: ${this._cpuLimit})`)
 
-    execFile('docker', args, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
+    this._execFileDocker(args, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
       if (err) {
         const classified = classifyDockerError(err, stderr)
         log.warn(`Docker start failed [${classified.code}]: ${classified.message}`)
@@ -438,6 +438,25 @@ export class DockerSession extends CliSession {
       log.info(`Container started: ${this._containerId.slice(0, 12)}`)
       callback(null)
     })
+  }
+
+  /**
+   * execFile seam for _startContainer (#7416), mirroring `_spawnDocker` (#7374)
+   * below: a one-line override point so a test can capture the REAL `docker
+   * run` argv (env forwards + bind mounts) without shelling out.
+   *
+   * Before this, `_startContainer`'s argv had no behavioural pin at all — only
+   * `_spawnPersistentProcess`'s `docker exec` argv did (#7374). The two
+   * builders share the same shape (env vars conditionally pushed, mounts
+   * assembled inline), so the same class of bypass — a forward/mount added
+   * that a source-level check never looks at — applies here too.
+   *
+   * Kept as a one-line override point rather than a constructor opt so it adds
+   * no BaseSession opt to forward (see BASE_SESSION_OPT_KEYS and
+   * scripts/lint-session-opt-forwarding.sh).
+   */
+  _execFileDocker(args, opts, callback) {
+    return execFile('docker', args, opts, callback)
   }
 
   /**

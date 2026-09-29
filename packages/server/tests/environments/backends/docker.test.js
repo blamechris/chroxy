@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import { DockerBackend } from '../../../src/environments/backends/docker.js'
+import { getChroxyHostEnv } from '../../../src/chroxy-host-metadata.js'
 
 /**
  * Creates a mock execFile that records calls and returns configured results.
@@ -936,6 +937,136 @@ describe('DockerBackend.streamCliInEnvironment() security hardening', () => {
     const { args } = getLastSpawn()
     const userIdx = args.indexOf('-u')
     assert.equal(args[userIdx + 1], 'chroxy', 'default containerUser must be chroxy (never root)')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DockerBackend.streamCliInEnvironment — exact --env key-set pin (#7416)
+//
+// #7416 — streamCliInEnvironment has the identical shape that made the
+// _spawnPersistentProcess guard bypassable before #7374: an allowlist loop
+// (FORWARDED_ENV_KEYS) followed by explicit, UNCONDITIONAL `--env` pushes
+// (getChroxyHostEnv(), HOME, PATH) outside it. The 'forwards only allowlisted
+// env vars' test above is allowlist-shaped — it checks presence/absence of a
+// few named keys, so an extra push added anywhere (inside or outside the
+// loop) is invisible to it unless that exact key happens to be asserted
+// against. These tests instead pin the COMPLETE SET of `--env` KEYS the real
+// argv carries, so ANY stray addition or omission goes red, not just the
+// ones this file already knows to look for — and assert specifically that
+// CHROXY_PERMISSION_MODE_FILE (the daemon-private sidecar path #7374/#7337
+// protect) is not among them even when present in the caller's env.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('DockerBackend.streamCliInEnvironment() — exact argv env-key pin (#7416)', () => {
+  function makeBackendWithSpawnSpy() {
+    let lastSpawn = null
+    const fakeChild = new EventEmitter()
+    fakeChild.stdout = new PassThrough()
+    fakeChild.stderr = new PassThrough()
+    fakeChild.stdin = new PassThrough()
+    fakeChild.killed = false
+    fakeChild.kill = () => { fakeChild.killed = true }
+
+    function fakeSpawn(cmd, args, opts) {
+      lastSpawn = { cmd, args, opts }
+      return fakeChild
+    }
+
+    const backend = new DockerBackend({ _spawn: fakeSpawn })
+    return { backend, getLastSpawn: () => lastSpawn }
+  }
+
+  /** The `--env KEY=value` KEYS (not values) present in a captured argv. */
+  function envKeysOf(args) {
+    const keys = []
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--env') keys.push(String(args[i + 1]).split('=')[0])
+    }
+    return keys
+  }
+
+  const HOST_ONLY_SIDECAR = '/tmp/chroxy-host-only/s-abc/permission-mode'
+
+  it('POSITIVE CONTROL: an allowlisted key IS forwarded, so the exact-set pin below is not vacuous', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [],
+      env: { ANTHROPIC_API_KEY: 'sk-test', NODE_ENV: 'production' },
+    })
+
+    const keys = envKeysOf(getLastSpawn().args)
+    assert.ok(keys.includes('ANTHROPIC_API_KEY'), 'an allowlisted key must really reach argv')
+    assert.ok(keys.includes('NODE_ENV'), 'an allowlisted key must really reach argv')
+  })
+
+  it('pins the COMPLETE set of --env keys the argv forwards — not just the allowlist', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [],
+      containerUser: 'chroxy',
+      env: {
+        ANTHROPIC_API_KEY: 'sk-test',
+        NODE_ENV: 'production',
+        SECRET_TOKEN: 'should-not-leak',
+        AWS_SECRET_ACCESS_KEY: 'should-not-leak',
+        CHROXY_PERMISSION_MODE_FILE: HOST_ONLY_SIDECAR,
+      },
+    })
+
+    const keys = envKeysOf(getLastSpawn().args)
+    // Derived from the SAME memoized function streamCliInEnvironment itself
+    // calls, not re-typed — so this never drifts from a real host's key set
+    // (present/absent CHROXY_HOST_GIT_SHA/BRANCH depend on whether this is a
+    // git checkout) while still catching a key added or dropped anywhere in
+    // the builder.
+    const expectedKeys = [
+      'ANTHROPIC_API_KEY',
+      'NODE_ENV',
+      ...Object.keys(getChroxyHostEnv()),
+      'HOME',
+      'PATH',
+    ]
+    assert.deepEqual(
+      [...keys].sort(),
+      [...expectedKeys].sort(),
+      `docker exec argv must carry EXACTLY this --env key set (no more, no less); got ${JSON.stringify(keys)}`,
+    )
+  })
+
+  it('does NOT forward CHROXY_PERMISSION_MODE_FILE into the container even when present in opts.env', () => {
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [],
+      env: { CHROXY_PERMISSION_MODE_FILE: HOST_ONLY_SIDECAR },
+    })
+
+    const keys = envKeysOf(getLastSpawn().args)
+    assert.ok(
+      !keys.includes('CHROXY_PERMISSION_MODE_FILE'),
+      'the sidecar path is a HOST path with no bind mount into this container; forwarding the key would name a path that does not exist in there',
+    )
+  })
+
+  it('does not leak the host sidecar path by any other argv route', () => {
+    // Keyed on the VALUE, not the key name — a forward that renamed the
+    // variable (or embedded the path in another one) would slip past a
+    // name-only check while leaking the identical host path.
+    const { backend, getLastSpawn } = makeBackendWithSpawnSpy()
+
+    backend.streamCliInEnvironment('ctr-x', {
+      cmd: 'node',
+      args: [],
+      env: { CHROXY_PERMISSION_MODE_FILE: HOST_ONLY_SIDECAR },
+    })
+
+    const leaked = getLastSpawn().args.filter((a) => String(a).includes(HOST_ONLY_SIDECAR))
+    assert.deepEqual(leaked, [], `the host sidecar path must not appear anywhere in argv; got ${JSON.stringify(leaked)}`)
   })
 })
 
