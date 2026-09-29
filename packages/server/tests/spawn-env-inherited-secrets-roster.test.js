@@ -115,7 +115,14 @@ const FULL_ENV_COPY_RE = /\.\.\.\s*process\.env\b/
 // exclusion that line would need a permanent EXEMPT entry despite never
 // actually copying anything FOR a child; the negative-fixture test below
 // pins that this exclusion is deliberate, not an oversight.
-const OBJECT_ASSIGN_COPY_RE = /Object\.assign\(\s*(?!process\.env\b)[^,]+,\s*process\.env\b/
+// `process.env` may be ANY source argument after the target — second, third or
+// later (`Object.assign({}, base, process.env)`), and the call may span lines.
+// A property read inside an argument (`{ cwd: process.env.HOME }`) is not a
+// whole-env copy, hence the trailing `(?!\s*[.[])`.
+// The scan stays inside this call's own argument list (one level of nested
+// parens allowed): this codebase writes no semicolons, so an unbounded scan
+// would run on into later statements.
+const OBJECT_ASSIGN_COPY_RE = /Object\.assign\(\s*(?!process\.env\b)(?:[^()]|\([^()]*\))*?\bprocess\.env\b(?!\s*[.[])/
 
 // `for (const [k, v] of Object.entries(process.env))` — the #8113 shape
 // itself (`byok-tool-executor.js`'s pre-fix `buildSafeBashEnv`).
@@ -331,6 +338,10 @@ describe('discovery pattern coverage — one fixture per known copy-spelling (#8
     'spread ({ ...process.env })': 'const env = { ...process.env }',
     'Object.assign with a literal {} target': 'const env = Object.assign({}, process.env)',
     'Object.assign with an identifier target (the pre-#8113 blind spot)': 'Object.assign(out, process.env)',
+    'Object.assign with process.env as a LATER source (3-arg form)': 'const env = Object.assign({}, base, process.env)',
+    'Object.assign with process.env second and extras third': 'const env = Object.assign({}, process.env, extras)',
+    'Object.assign spanning lines': 'const env = Object.assign(\n  {},\n  defaults,\n  process.env,\n)',
+    'Object.assign with a nested call before process.env': 'const env = Object.assign({}, getChroxyHostEnv(), process.env)',
     'Object.entries(process.env) (the #8113 shape itself)':
       'for (const [k, v] of Object.entries(process.env)) { out[k] = v }',
     'Object.keys(process.env)': 'for (const k of Object.keys(process.env)) { out[k] = process.env[k] }',
@@ -347,6 +358,15 @@ describe('discovery pattern coverage — one fixture per known copy-spelling (#8
 
   it('does NOT flag a scoped single-key read (process.env.FOO) — not the leak shape this file guards', () => {
     assert.ok(!matchesFullEnvCopy('const x = process.env.FOO'))
+  })
+
+  it('does NOT flag Object.assign reading a single key inside an argument ({ cwd: process.env.HOME })', () => {
+    assert.ok(!matchesFullEnvCopy('Object.assign(opts, { cwd: process.env.HOME, x: process.env["Y"] })'))
+  })
+
+  it('does NOT run past the call: an unrelated Object.assign followed later by process.env (no semicolons)', () => {
+    assert.ok(!matchesFullEnvCopy('Object.assign(opts, defaults)\nlog(process.env === undefined)'))
+    assert.ok(!matchesFullEnvCopy('Object.assign(opts, defaults)\nconst home = process.env.HOME'))
   })
 
   it("does NOT flag Object.assign(process.env, computedVars) — mutating the daemon's OWN env is the opposite direction from copying it FOR a spawned child (the real server-cli.js:894 shape)", () => {
