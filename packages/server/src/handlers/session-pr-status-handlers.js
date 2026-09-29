@@ -210,11 +210,13 @@ export async function handleSessionPrStatusRequest(ws, client, msg, ctx) {
   const manager = ctx.sessions?.sessionManager
   const nowMs = typeof ctx._nowMs === 'function' ? ctx._nowMs() : Date.now()
   const sendSnapshot = (snap) => {
-    // #7435: `indeterminate` is server-side state for the CI watcher, not a
-    // wire field — stripped from fresh replies AND cached replays alike (the
-    // cache keeps the RAW snapshot; observe() also receives it raw).
-    const { indeterminate: _serverOnly, ...wireSnapshot } = snap
-    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...wireSnapshot })
+    // #7435 / #7442: `indeterminate` is server-side state for the CI watcher,
+    // not a wire field. It no longer needs an explicit strip here — it is
+    // defined non-enumerable in `baseSnapshot()` (session-pr-status.js), so
+    // this plain spread structurally cannot carry it, for a fresh reply or a
+    // cached replay alike (the cache keeps the RAW snapshot; observe() below
+    // also receives it raw, unaffected by this spread).
+    ctx.transport.send(ws, { type: 'session_pr_status', requestId, ...snap })
   }
   const gate = surveyThrottle.open(manager, targetSessionId, nowMs, SURVEY_MIN_INTERVAL_MS)
   if (!gate.admitted) {

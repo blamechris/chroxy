@@ -33,6 +33,7 @@ import { readClipboardImage } from '../utils/clipboard-image'
 import { processBase64Image } from '../utils/image-utils'
 import { useConnectionStore } from '../store/connection'
 import { persistSplitMode } from '../store/persistence'
+import { resolveTogglePlanModeTarget } from '../lib/plan-mode-toggle'
 
 type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots'
 
@@ -68,6 +69,14 @@ export interface ShortcutDispatchProps {
   handleCopyTranscript: () => void
   sendInterrupt: () => void
   setPermissionMode: (mode: string) => void
+  /**
+   * #8084 — whether the active session's provider capability allows
+   * ENTERING plan mode (claude-tui reports `planMode: false`). Defaults to
+   * `true` when omitted so existing call sites / tests keep working. Leaving
+   * plan mode via the toggle is never gated on this — see the
+   * `session.togglePlanMode` dispatch arm below.
+   */
+  planModeSupported?: boolean
   appendImageAttachments: (attachments: ImageAttachment[]) => void
   // #6473 — open the Cmd+P quick-open file palette (the caller gates it on the
   // `ide` capability). Optional so existing call sites / tests keep working.
@@ -114,6 +123,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     handleCopyTranscript,
     sendInterrupt,
     setPermissionMode,
+    planModeSupported,
     appendImageAttachments,
     openFilePalette,
     openSymbolSearch,
@@ -305,14 +315,18 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             break
           }
           case 'session.togglePlanMode': {
+            // #8084 / #8087 review (Critical #2) — the enter/leave decision
+            // is shared with the Tauri desktop menu's own toggle
+            // (`useTauriMenuWiring.ts`) via `resolveTogglePlanModeTarget`,
+            // so the two entry points can't drift back into "one gated,
+            // one not."
             const state = useConnectionStore.getState()
-            const currentMode = state.permissionMode
-            if (currentMode === 'plan') {
-              // Switch back to previous mode (default to 'approve')
-              setPermissionMode(state.previousPermissionMode || 'approve')
-            } else {
-              setPermissionMode('plan')
-            }
+            const target = resolveTogglePlanModeTarget(
+              state.permissionMode,
+              state.previousPermissionMode,
+              planModeSupported,
+            )
+            if (target !== null) setPermissionMode(target)
             break
           }
           default:
@@ -344,6 +358,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     shortcutRegistry,
     appendImageAttachments,
     setPermissionMode,
+    planModeSupported,
     setSplitMode,
     setPaletteOpen,
     setSidebarOpen,

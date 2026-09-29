@@ -39,6 +39,42 @@ describe('DEFAULT_SHORTCUTS', () => {
     })
   })
 
+  // #8084 — Shift+Tab (and plain Tab) must never be a global shortcut's
+  // default binding. Reverse/forward focus navigation is a platform
+  // convention every focusable control outside a text input relies on;
+  // a global default on either combo would silently swallow it via the
+  // dispatcher's unconditional preventDefault() (useShortcutDispatch.ts).
+  // This is a REGISTRY-LEVEL guard so a future shortcut can't reintroduce
+  // the exact defect this issue fixed (the previous `session.togglePlanMode`
+  // default was `shift+tab`).
+  describe('no default binding is Shift+Tab or plain Tab (#8084)', () => {
+    it('no DEFAULT_SHORTCUTS entry defaults to shift+tab', () => {
+      const offenders = DEFAULT_SHORTCUTS.filter(s => s.defaultBinding.toLowerCase() === 'shift+tab')
+      expect(offenders.map(s => s.id)).toEqual([])
+    })
+
+    it('no DEFAULT_SHORTCUTS entry defaults to plain tab', () => {
+      const offenders = DEFAULT_SHORTCUTS.filter(s => s.defaultBinding.toLowerCase() === 'tab')
+      expect(offenders.map(s => s.id)).toEqual([])
+    })
+
+    it('session.togglePlanMode now defaults to Shift+Alt+P', () => {
+      const entry = DEFAULT_SHORTCUTS.find(s => s.id === 'session.togglePlanMode')
+      expect(entry, 'missing session.togglePlanMode entry').toBeDefined()
+      expect(entry?.defaultBinding.toLowerCase()).toBe('shift+alt+p')
+    })
+
+    it('session.togglePlanMode default does not collide with any other global default', () => {
+      const target = DEFAULT_SHORTCUTS.find(s => s.id === 'session.togglePlanMode')!
+      const collisions = DEFAULT_SHORTCUTS.filter(
+        s => s.id !== target.id
+          && s.scope === target.scope
+          && s.defaultBinding.toLowerCase() === target.defaultBinding.toLowerCase(),
+      )
+      expect(collisions.map(s => s.id)).toEqual([])
+    })
+  })
+
   describe('device.pairQr entry (pair-a-device QR shortcut)', () => {
     const entry = DEFAULT_SHORTCUTS.find(s => s.id === 'device.pairQr')
 

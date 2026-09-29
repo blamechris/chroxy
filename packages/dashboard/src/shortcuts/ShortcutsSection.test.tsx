@@ -230,4 +230,33 @@ describe('<ShortcutsSection>', () => {
       expect(editBtn.disabled).toBe(false)
     })
   })
+
+  // #8089 / #8087 review — on a real Mac, holding Option (Alt) together
+  // with a letter reports an OS-composed glyph in `KeyboardEvent.key`
+  // (Option+Shift+P -> '∏'), never the plain letter. KeybindCapture must
+  // derive the recorded binding from `event.code` in that case (via the
+  // same `resolveEffectiveKey` helper `matchEvent` uses), or a user
+  // capturing "the same combo" the app dispatches on would record
+  // something that can never actually fire.
+  describe('captures a real macOS Option-key keydown correctly (#8089 / #8087 review)', () => {
+    it('capturing a macOS-shaped Option+Shift+P event records shift+alt+p', () => {
+      const registry = installFreshRegistry()
+      // `session.togglePlanMode`'s OWN default is already shift+alt+p —
+      // asserting the post-capture binding equals that value would pass
+      // vacuously via `setBinding`'s "same as current effective value"
+      // no-op guard even if capture were completely broken. Rebind it
+      // away first (to a combo nothing else uses) so this assertion can
+      // only pass if the macOS-shaped keydown genuinely round-trips back
+      // to shift+alt+p through the fix.
+      registry.setBinding('session.togglePlanMode', 'cmd+j')
+      render(<ShortcutsSection />)
+      fireEvent.click(screen.getByTestId('shortcut-edit-session.togglePlanMode'))
+      expect(screen.getByTestId('keybind-capture')).toBeInTheDocument()
+      act(() => {
+        fireEvent.keyDown(window, { key: '∏', code: 'KeyP', altKey: true, shiftKey: true })
+      })
+      expect(registry.getBinding('session.togglePlanMode')).toBe('shift+alt+p')
+      expect(screen.getByTestId('shortcut-binding-session.togglePlanMode')).toHaveTextContent('Shift+Option+P')
+    })
+  })
 })

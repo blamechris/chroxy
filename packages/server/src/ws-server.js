@@ -1269,6 +1269,14 @@ export class WsServer {
         // accumulate dead entries.
         this._evaluatorIterations.delete(sessionId)
         this._inputDedupRecords.delete(sessionId)
+        // #7450's survey-throttle prune used to live here, keyed on this
+        // EVENT — but #8092 found a teardown path (the restore-rebind branch
+        // of `_handleAsyncStartFailure()`) that removes a session without
+        // ever emitting `session_destroyed`, so an event-based prune missed
+        // it. The prune now lives in `SessionManager._cleanupSessionMaps()`
+        // (and `destroyAll()`, which bypasses that method) instead — the
+        // removal itself, reached by every teardown path rather than only
+        // the ones that happen to fire this particular event.
       }
       // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
       // The WS inline response path in settings-handlers.js audits user

@@ -55,14 +55,68 @@
  * admitted one can overlap, and an unconditional delete destroys B's newer
  * stamp and cache when A fails late (#7445 review, reproduced).
  *
+ * ## Ownership is tracked by a TOKEN, not by object identity (#8091)
+ *
+ * Every record carries a `token` — a fresh, unique marker minted at `open()`
+ * time — because object identity alone cannot carry the "is this still mine"
+ * question once a write-through exists. #7450's original write-through
+ * MUTATED the current record in place, so `rollback()`'s plain identity check
+ * (`records.get(key) !== record`) could not tell "nothing has happened since I
+ * was admitted" apart from "my record was silently enriched by an unrelated,
+ * OLDER survey's write-through" — both left the same object sitting in the
+ * map. Reproduced directly: admit A, admit B (supersedes A), A completes and
+ * write-throughs into B's record, B's own survey later throws and rolls back —
+ * the identity check passed, so `rollback()` blindly restored `prior` (the
+ * record as it was BEFORE A's write-through), discarding A's completed
+ * reading AND reopening the window on A's much older stamp.
+ *
+ * The fix: `commit()` never mutates a record in place — every commit,
+ * write-through included, REPLACES the current record with a new object that
+ * carries the SAME `.token` (and window-start `.at`) forward. `rollback()`
+ * keys on that token: `records.get(key)?.token === token` means "I am still
+ * the admission this slot belongs to, however it has been enriched since,"
+ * while a mismatch means a NEWER admission has genuinely taken over and this
+ * rollback is stale — a no-op, exactly like the pre-#8091 identity check
+ * intended, but now correct in the presence of a write-through.
+ *
+ * A rollback that IS current restores `{ at: prior.at, snapshot:
+ * newest(current, prior) }` (comparing `snapshotAt`, never regressing to an
+ * older reading than what is already there) — deleting the record outright
+ * only when there is neither a `prior` to fall back to nor any snapshot worth
+ * keeping. This means a rollback fully undoes ITS OWN admission window (the
+ * next request's throttle reverts to whatever was true before this admission
+ * — consistent with "a survey that spent nothing must not cost the next
+ * retry"), while a completed reading is NEVER discarded — it is simply
+ * carried forward as the next admission's own replay-cache. See
+ * `survey-throttle.test.js`'s "#8091 (C1)" tests for the worked interleaving.
+ *
  * ## Why the map is keyed on an OWNER object
  *
  * The stamps live in a `WeakMap` keyed on a long-lived object the caller
  * supplies — in production the daemon-lifetime `SessionManager` singleton, so
  * records survive the per-message shallow ctx copies; in tests every mock ctx
- * builds a fresh manager, so isolation comes free with no reset hook. A
- * destroyed session's record lingers until the owner itself is collected — one
- * small record per ever-surveyed key (pruning on session_destroyed is #7450).
+ * builds a fresh manager, so isolation comes free with no reset hook.
+ *
+ * ## Bounded by the LIVE session count, not the daemon's lifetime (#7450)
+ *
+ * A destroyed session's record is pruned by `forgetSurveyKey(owner, key)` —
+ * the SAME problem class `SessionCiWatcher._state` already guards against
+ * (a long-running daemon must not accumulate the id of every session it has
+ * ever surveyed), but by a DIFFERENT mechanism: that watcher prunes via a
+ * periodic `tick()` sweep that diffs its state map against a fresh
+ * live-session list, not an event listener (`session-ci-watcher.js`'s own
+ * `tick()`). Event-based pruning has a gap a live-session sweep does not —
+ * see #8092 — so `forgetSurveyKey` is called from `SessionManager`'s
+ * `_cleanupSessionMaps()` (the sole `_sessions.delete` site, `destroyAll()`
+ * excepted, which calls it too) rather than from a `session_destroyed`
+ * listener, precisely so every teardown path is covered through the removal
+ * itself rather than through whichever events happen to be wired up.
+ * `forgetSurveyKey` reaches EVERY throttle instance created via
+ * `createSurveyThrottle()` through this one module-level registry, not just
+ * whichever handler happened to wire it up first — the threads handler (#7430)
+ * opens its own independent instance of this gate, and a per-instance prune
+ * added to only one of them would be exactly the `docs/false-safety-guards.md`
+ * "a guard wired to only some of its callers" shape.
  */
 
 /**
@@ -82,13 +136,36 @@
  */
 
 /**
+ * Registry of every throttle created via `createSurveyThrottle()`, so
+ * `forgetSurveyKey()` below can reach all of them through ONE call — see the
+ * module doc's "bounded by the live session count" section. A plain `Set`, not
+ * a `WeakSet`: each handler module creates exactly one instance at import time
+ * and keeps it for the daemon's lifetime, and enumerating that (small, fixed)
+ * set is the entire point.
+ */
+const throttleInstances = new Set()
+
+/**
  * Create an independent throttle. Each handler owns one module-level instance,
  * so two handlers never share a window.
  *
- * @returns {{ open: (owner: object, key: string, nowMs: number, minIntervalMs: number) => ThrottleGate }}
+ * @returns {{
+ *   open: (owner: object, key: string, nowMs: number, minIntervalMs: number) => ThrottleGate,
+ *   forget: (owner: object, key: string) => void,
+ * }}
  */
 export function createSurveyThrottle() {
-  /** WeakMap<owner, Map<key, { at: number, snapshot: * }>> */
+  /**
+   * WeakMap<owner, Map<key, {
+   *   at: number, token: object, snapshot: *, snapshotAt: number|null
+   * }>>
+   *
+   * `token` is a fresh, unique marker minted per `open()` call — see the
+   * module doc's "ownership is tracked by a TOKEN, not by object identity"
+   * section (#8091). A record's `token` is carried forward by `commit()`'s
+   * write-through and by `rollback()`'s restore; it changes ONLY when a NEW
+   * `open()` call supersedes the current admission.
+   */
   const byOwner = new WeakMap()
 
   /** The per-key record map for this owner. */
@@ -98,7 +175,16 @@ export function createSurveyThrottle() {
     return m
   }
 
-  return {
+  /** Whichever of two (snapshot, snapshotAt) pairs is newer; a tie keeps `a`. */
+  function newerOf(aSnapshot, aSnapshotAt, bSnapshot, bSnapshotAt) {
+    if (aSnapshotAt === null) return { snapshot: bSnapshot, snapshotAt: bSnapshotAt }
+    if (bSnapshotAt === null) return { snapshot: aSnapshot, snapshotAt: aSnapshotAt }
+    return aSnapshotAt >= bSnapshotAt
+      ? { snapshot: aSnapshot, snapshotAt: aSnapshotAt }
+      : { snapshot: bSnapshot, snapshotAt: bSnapshotAt }
+  }
+
+  const throttle = {
     open(owner, key, nowMs, minIntervalMs) {
       const records = recordsFor(owner)
       const prior = records.get(key)
@@ -108,9 +194,15 @@ export function createSurveyThrottle() {
       // Carry the previous cache forward so a request that lands while THIS
       // survey is in flight still replays the last completed reading, and
       // stamp BEFORE the work starts — the window dates from when a survey
-      // was admitted, not from when it finished.
-      const record = { at: nowMs, snapshot: prior?.snapshot ?? null }
-      records.set(key, record)
+      // was admitted, not from when it finished. `snapshotAt` tracks WHEN the
+      // survey that produced `.snapshot` was itself admitted — not this
+      // record's own `.at` — so a later write-through (see `commit()`) can
+      // tell a genuinely newer cached reading apart from one merely carried
+      // forward under a more recent window. `token` is this admission's own
+      // fresh identity — see the module doc (#8091).
+      const myAt = nowMs
+      const token = {}
+      records.set(key, { at: myAt, token, snapshot: prior?.snapshot ?? null, snapshotAt: prior?.snapshotAt ?? null })
       return {
         admitted: true,
         commit(snapshot, opts) {
@@ -125,14 +217,104 @@ export function createSurveyThrottle() {
           // forward. Overwriting it with a failure would blank a display other
           // clients are using; clearing it would do the same more quietly.
           if (!replayable) return
-          record.snapshot = snapshot
+          const cur = records.get(key)
+          // The key can be gone outright (forgetSurveyKey() pruned it, e.g. a
+          // session_destroyed landing while this survey was in flight) —
+          // nothing to write to, and recreating the entry would resurrect a
+          // record for a session that no longer exists.
+          if (!cur) return
+          // One rule, whether this is the common (untouched-since-admission)
+          // case or a write-through onto a record someone else has since
+          // superseded: never let a reading older than what is already
+          // recorded win (#7450 / #8091's outcome 3). `cur.snapshotAt` — a
+          // FRESHLY admitted record carries it forward from `prior`, so this
+          // also correctly refuses an admission whose predecessor already
+          // held a newer reading than this one, in the ordinary sequential
+          // case. `>=`, not `>` — an EXACT tie keeps the CURRENT reading
+          // (pinned by the "S3" test in survey-throttle.test.js).
+          if (cur.snapshotAt !== null && cur.snapshotAt >= myAt) return
+          // REPLACE, never mutate in place (#8091) — carrying `cur.token` and
+          // `cur.at` forward unchanged is what lets a later `rollback()` (see
+          // below) still recognise this slot as belonging to whichever
+          // admission currently owns it, however the SNAPSHOT has been
+          // enriched since.
+          records.set(key, { at: cur.at, token: cur.token, snapshot, snapshotAt: myAt })
         },
         rollback() {
-          if (records.get(key) !== record) return
-          if (prior) records.set(key, prior)
-          else records.delete(key)
+          const cur = records.get(key)
+          // Stale: a NEWER admission has since taken over this slot (whether
+          // or not it has committed anything of its own yet) — a no-op,
+          // exactly like the pre-#8091 identity check intended (#7450 scope
+          // addition's "a stale rollback... stays a no-op").
+          if (!cur || cur.token !== token) return
+          // Undo MY OWN admission in full: the window reverts to whatever was
+          // true before I was ever admitted — a survey that spent nothing
+          // must not cost the next retry (#8091's outcome 2) — but the
+          // SNAPSHOT never regresses: keep whichever of what I'm currently
+          // holding (possibly enriched by someone ELSE's write-through while
+          // I was still current) and what `prior` already had is newer.
+          const survivor = newerOf(cur.snapshot, cur.snapshotAt, prior?.snapshot ?? null, prior?.snapshotAt ?? null)
+          if (!prior && survivor.snapshotAt === null) {
+            records.delete(key)
+            return
+          }
+          records.set(key, {
+            at: prior ? prior.at : -Infinity,
+            token: prior ? prior.token : {},
+            snapshot: survivor.snapshot,
+            snapshotAt: survivor.snapshotAt,
+          })
         },
       }
     },
+    /** Drop the record for (owner, key), if any. Called by `forgetSurveyKey()`. */
+    forget(owner, key) {
+      byOwner.get(owner)?.delete(key)
+    },
+    /** TEST-ONLY: how many records this owner currently holds, in THIS instance. */
+    _testRecordCount(owner) {
+      return byOwner.get(owner)?.size ?? 0
+    },
   }
+  throttleInstances.add(throttle)
+  return throttle
+}
+
+/**
+ * Prune the record for `(owner, key)` from EVERY throttle instance created via
+ * `createSurveyThrottle()` — both of today's handlers (session-pr-status,
+ * session-pr-threads) and any future one, through this one call. Called from
+ * `SessionManager`'s `_cleanupSessionMaps()` (#7450) and `destroyAll()`
+ * (#8092) in `session-manager.js` — the removal itself, not a lifecycle
+ * event, so every teardown path is covered rather than only the ones that
+ * happen to emit `session_destroyed`.
+ *
+ * Safe to call for a key that was never opened, or that has already been
+ * forgotten — both are silent no-ops.
+ *
+ * @param {object} owner - the session-manager instance the throttle was keyed on.
+ * @param {string} key - the session id.
+ */
+export function forgetSurveyKey(owner, key) {
+  for (const throttle of throttleInstances) {
+    throttle.forget(owner, key)
+  }
+}
+
+/**
+ * TEST-ONLY: total record count for one owner, summed across every throttle
+ * instance. Used by the #7450 acceptance test to prove the bound holds no
+ * matter which (or how many) handlers have opened a survey — a per-instance
+ * count would only prove the property for whichever instance the test
+ * happened to import.
+ *
+ * @param {object} owner
+ * @returns {number}
+ */
+export function _testTotalRecordCount(owner) {
+  let total = 0
+  for (const throttle of throttleInstances) {
+    total += throttle._testRecordCount(owner)
+  }
+  return total
 }

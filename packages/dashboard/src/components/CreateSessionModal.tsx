@@ -90,6 +90,10 @@ type PermissionModeEnforcement = NonNullable<PermissionMode['enforcement']>
 type PermissionModeCapabilities = {
   permissionFloor?: boolean
   autoPermissionMode?: boolean
+  // #8084: claude-tui declares this `false` (claude-tui-session.js). Missing
+  // is treated as capable, matching `permissionModeSupport`'s existing
+  // `capabilities?.autoPermissionMode === false` convention below.
+  planMode?: boolean
 }
 
 const PERMISSION_MODE_LABELS: Record<string, string> = {
@@ -119,6 +123,12 @@ function permissionModeSupport(
   capabilities: PermissionModeCapabilities | undefined,
 ): { supported: boolean; enforcement: PermissionModeEnforcement } {
   if (mode === 'auto' && capabilities?.autoPermissionMode === false) {
+    return { supported: false, enforcement: 'unsupported' }
+  }
+  // #8084 — claude-tui reports `planMode: false`; offering Plan as a
+  // selectable create-time option promises a mode the provider cannot
+  // honour. Same disabled-option treatment as the Auto case above.
+  if (mode === 'plan' && capabilities?.planMode === false) {
     return { supported: false, enforcement: 'unsupported' }
   }
   return {
@@ -583,8 +593,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // `keyCode === 229` is the Safari fallback for browsers that don't set
     // `isComposing` reliably.
     if (isImeComposing(e)) return
-    // Tab completion — only when dropdown is visible to avoid trapping keyboard focus
-    if (e.key === 'Tab' && showSuggestions && suggestions.length > 0) {
+    // Tab completion — only when dropdown is visible to avoid trapping keyboard
+    // focus. #8084: Shift+Tab is excluded so it keeps moving focus backward
+    // (never completes) — mirrors InputBar.tsx's slash-command/file pickers,
+    // which apply the identical `!e.shiftKey` guard to their own Tab-complete
+    // branches (#7370).
+    if (e.key === 'Tab' && !e.shiftKey && showSuggestions && suggestions.length > 0) {
       e.preventDefault()
       const idx = selectedSuggestion >= 0 ? selectedSuggestion : 0
       const suggestion = suggestions[idx]!

@@ -15,6 +15,7 @@ import {
   redactAbsolutePaths,
   PR_JSON_FIELDS,
   FORK_QUERY_LIMIT,
+  isIndeterminate,
 } from '../src/session-pr-status.js'
 import { ServerSessionPrStatusSchema } from '@chroxy/protocol'
 
@@ -493,6 +494,56 @@ describe('#7344 — session PR/CI status survey', () => {
       assert.equal(snap.pr.number, 42)
       const targets = calls.filter(c => c.args.includes('-R')).map(c => c.args[c.args.indexOf('-R') + 1])
       assert.ok(targets.includes('blamechris/chroxy'), `expected the parent to be queried, got ${JSON.stringify(targets)}`)
+    })
+
+    it('#7442 — never indeterminate on a found PR (fork path)', async () => {
+      const mine = prRow({ number: 14245, headRepositoryOwner: { login: 'MsfPablo' } })
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([mine]) })),
+      })
+      assert.equal(isIndeterminate(snap), false, 'a found fork PR is never indeterminate — see the comment above the fork return')
+    })
+  })
+
+  describe('#7442 — `indeterminate` is structurally unable to reach the wire', () => {
+    it('a REAL indeterminate snapshot: JSON.stringify and object spread both drop the key, isIndeterminate() still sees it', async () => {
+      // Built by the real producer (surveySessionPrStatus → markIndeterminate),
+      // not a hand-rolled fixture — this is the positive control that proves the
+      // definition in baseSnapshot()/markIndeterminate() carries the property,
+      // not merely a convention some caller happens to follow.
+      const table = happyTable('[]', 'feat/x', 'me/chroxy')
+      table['/usr/local/bin/gh repo view me/chroxy --json parent'] = new Error('boom')
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      assert.equal(isIndeterminate(snap), true, 'sanity: the fixture must actually be indeterminate')
+
+      const spread = { ...snap }
+      assert.ok(!('indeterminate' in spread), 'a plain object spread must not carry the marker')
+
+      const wire = JSON.parse(JSON.stringify({ type: 'session_pr_status', requestId: 'r1', ...snap }))
+      assert.ok(!('indeterminate' in wire), 'JSON.stringify must not serialise the marker')
+
+      // The accessor still works on the ORIGINAL object — only a copy drops it.
+      assert.equal(isIndeterminate(snap), true, 'isIndeterminate() must still read true on the original snapshot')
+    })
+
+    it('a hypothetical second sender that spreads the snapshot cannot leak the marker either', async () => {
+      // #7442's acceptance criterion, phrased as the issue's own hypothetical: a
+      // FUTURE sender (a broadcast on settle, a REST mirror) that never heard of
+      // the strip and just spreads the snapshot onto its own wire message.
+      const table = happyTable('[]', 'feat/x', 'me/chroxy')
+      table['/usr/local/bin/gh repo view me/chroxy --json parent'] = new Error('boom')
+      const snap = await surveySessionPrStatus({ sessionId: 's1', cwd: '/repo', _execFile: fakeExec(table) })
+      const naiveSecondSender = { type: 'some_other_wire_message', ...snap }
+      assert.ok(!('indeterminate' in naiveSecondSender), 'a naive second sender must not be able to leak the marker')
+    })
+
+    it('never indeterminate on a found PR — same-repo path', async () => {
+      const snap = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(happyTable(JSON.stringify([prRow()]))),
+      })
+      assert.equal(isIndeterminate(snap), false, 'a found PR is never indeterminate — see the comment above the same-repo return')
     })
   })
 

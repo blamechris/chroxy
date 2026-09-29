@@ -93,7 +93,7 @@
  * nothing else here wants. Left as-is deliberately; revisit if it grates.
  */
 
-import { surveySessionPrStatus } from './session-pr-status.js'
+import { surveySessionPrStatus, isIndeterminate } from './session-pr-status.js'
 import { wakeSession, sanitizeWakeText } from './session-wake.js'
 import { settlePush } from './push.js'
 import { createLogger } from './logger.js'
@@ -475,10 +475,12 @@ export class SessionCiWatcher {
     // "Could not determine" changes nothing. Disarming here would mean a single
     // `gh` hiccup silently cancels a watch the user is waiting on. The
     // `indeterminate` marker is the fork bail-outs saying the same thing while
-    // keeping the DISPLAY contract's quiet negative on the wire (#7435). Only
-    // `session-pr-status.js` sets it, always as a literal boolean — the strict
-    // `=== true` is deliberate, so nothing truthy-but-foreign widens the rule.
-    if (snapshot?.reason || snapshot?.indeterminate === true) return 'undeterminable'
+    // keeping the DISPLAY contract's quiet negative on the wire (#7435). Read
+    // through `isIndeterminate()` (#7442) rather than `snapshot.indeterminate`
+    // directly — same value either way (property access does not care whether
+    // the field is enumerable), but one accessor keeps every reader pointed at
+    // `session-pr-status.js`'s single definition of what the marker means.
+    if (snapshot?.reason || isIndeterminate(snapshot)) return 'undeterminable'
 
     // No open PR (the quiet negative — merged, closed, or never opened). Nothing
     // left to report on, so drop any arm.

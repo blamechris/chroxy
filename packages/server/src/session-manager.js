@@ -47,6 +47,7 @@ import {
   restorePerSessionSettings,
 } from './per-session-settings.js'
 import { AgentConnectionRegistry, createLegacyAgentConnection } from './agent-connections.js'
+import { forgetSurveyKey } from './handlers/survey-throttle.js'
 
 const log = createLogger('session-manager')
 /**
@@ -875,7 +876,8 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Remove a session from all session-scoped maps and sets (#1204).
+   * Remove a session from all session-scoped maps and sets (#1204), including
+   * the survey-throttle record (#7450 / #8092).
    * Called by destroySession(), sync catch, and async .catch() paths.
    * @param {string} sessionId
    */
@@ -900,6 +902,18 @@ export class SessionManager extends EventEmitter {
     this._timeoutManager.removeSession(sessionId)
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
+    // #8092: prune this session's survey-throttle record(s) for the SAME
+    // reason the environment untag above lives here rather than on
+    // `session_destroyed` — the restore-rebind branch of
+    // `_handleAsyncStartFailure()` (and the sync/async start()-failure catch
+    // paths above it) runs this method without ever emitting that event, so
+    // an event-based prune (this PR's first attempt, #7450) silently missed
+    // them. Hooking the removal itself, here, reaches every path out of
+    // `_sessions` (this method IS that sole path, `destroyAll()` excepted —
+    // see its own call below) rather than only the paths that happen to fire
+    // a particular event — the general lesson this repo already learned once
+    // for the environment tag.
+    forgetSurveyKey(this, sessionId)
   }
 
   /**
@@ -2725,6 +2739,10 @@ export class SessionManager extends EventEmitter {
       // session ids that are already dead, and "correct only because something
       // else cleans up later" is the shape that rots.
       if (entry.environmentId) this._environmentManager?.removeSession(entry.environmentId, sessionId)
+      // #8092: same reasoning as the environment untag immediately above —
+      // destroyAll() bypasses `_cleanupSessionMaps()` entirely, so it is the
+      // one path that has to prune the survey-throttle record for itself too.
+      forgetSurveyKey(this, sessionId)
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()
