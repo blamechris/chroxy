@@ -14,6 +14,7 @@ import {
 } from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
 import { AGENT_DESCRIPTION_MAX } from '../src/claude-stream-parser.js'
+import { MAX_INPUT_CHARS } from '../src/redaction.js'
 
 describe('BaseSession', () => {
   let session
@@ -1957,6 +1958,77 @@ describe('BaseSession', () => {
         s._trackToolStart('toolu_2', 'OtherTool')
         s._recordToolInput('toolu_2', {})
         assert.deepEqual(s._getTrackedToolInput('toolu_2'), {})
+      })
+
+      it('returns the sanitized value directly (so callers do not need a redundant _getTrackedToolInput round-trip)', () => {
+        s._trackToolStart('toolu_1', 'Bash')
+        const returned = s._recordToolInput('toolu_1', { token: 'sk-ant-api03-' + 'a'.repeat(48) })
+        assert.deepEqual(returned, { token: '[REDACTED]' })
+        assert.deepEqual(s._getTrackedToolInput('toolu_1'), returned)
+      })
+
+      // #8135 (review on #7346) — Critical: sanitizeToolInput/redactValue
+      // (redaction.js, #6029) exists exactly to stop a secret in a tool
+      // input reaching a client verbatim, and this is the ONE choke
+      // point both cli-session.js and sdk-session.js's finalized-input
+      // capture flows through.
+      describe('redaction (#8135)', () => {
+        it('redacts a secret embedded in a benign-keyed value (the #6029 shape)', () => {
+          s._trackToolStart('toolu_1', 'Bash')
+          s._recordToolInput('toolu_1', { command: 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com' })
+          const tracked = s._getTrackedToolInput('toolu_1')
+          assert.ok(!JSON.stringify(tracked).includes('sk-ant-api03-'), 'the raw key must never appear')
+          assert.ok(JSON.stringify(tracked).includes('[REDACTED]'), 'a redaction marker must be present instead')
+        })
+
+        it('redacts a value under a sensitive KEY NAME wholesale', () => {
+          s._trackToolStart('toolu_1', 'SomeMcpTool')
+          s._recordToolInput('toolu_1', { password: 'hunter2-not-actually-secret-shaped' })
+          assert.deepEqual(s._getTrackedToolInput('toolu_1'), { password: '[REDACTED]' })
+        })
+
+        it('redacts a secret nested inside an object/array at any depth', () => {
+          s._trackToolStart('toolu_1', 'SomeTool')
+          s._recordToolInput('toolu_1', { env: { TOKEN: 'sk-ant-api03-' + 'b'.repeat(48) }, args: ['--token', 'sk-ant-api03-' + 'c'.repeat(48)] })
+          const tracked = s._getTrackedToolInput('toolu_1')
+          const serialized = JSON.stringify(tracked)
+          assert.ok(!serialized.includes('sk-ant-api03-'))
+          // env.TOKEN is a SENSITIVE KEY NAME (redacted wholesale); args[1]
+          // is redacted by the value-shape pass since 'args' itself isn't
+          // a sensitive key name.
+          assert.equal(tracked.env.TOKEN, '[REDACTED]')
+        })
+
+        it('leaves a benign input completely unchanged (no false-positive redaction)', () => {
+          s._trackToolStart('toolu_1', 'Bash')
+          const benign = { command: 'ls -la /tmp' }
+          s._recordToolInput('toolu_1', benign)
+          assert.deepEqual(s._getTrackedToolInput('toolu_1'), benign)
+        })
+      })
+
+      // #8136 (review on #7346) — Critical: SessionMessageHistory's own
+      // 50KB truncateEntry cap only ever fired for STRING input, and
+      // tool_start.input is now an object — this proves the size bound
+      // is enforced much earlier, at capture, regardless of that gap.
+      describe('size cap (#8136)', () => {
+        it('caps an oversized object to a truncated summary shape instead of storing it whole', () => {
+          s._trackToolStart('toolu_big', 'Write')
+          const bigInput = { file_path: '/tmp/big.txt', content: 'x'.repeat(120 * 1024) }
+          s._recordToolInput('toolu_big', bigInput)
+          const tracked = s._getTrackedToolInput('toolu_big')
+          assert.equal(tracked._truncated, true)
+          assert.ok(typeof tracked.summary === 'string')
+          assert.ok(JSON.stringify(tracked).length <= MAX_INPUT_CHARS + 200, 'capped, not the raw 120KB+ object')
+          assert.ok(!JSON.stringify(tracked).includes('x'.repeat(120 * 1024)), 'the raw oversized content must not survive verbatim')
+        })
+
+        it('leaves a small object completely uncapped', () => {
+          s._trackToolStart('toolu_1', 'Write')
+          const smallInput = { file_path: '/tmp/small.txt', content: 'hello world' }
+          s._recordToolInput('toolu_1', smallInput)
+          assert.deepEqual(s._getTrackedToolInput('toolu_1'), smallInput)
+        })
       })
     })
 

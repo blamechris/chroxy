@@ -473,6 +473,57 @@ describe('SessionMessageHistory', () => {
       assert.ok(result.input.endsWith('[truncated]'))
       assert.equal(entry.input.length, 100 * 1024)
     })
+
+    // #8136 (review on #7346) — Critical: before this fix, the checks
+    // above were gated on `typeof === 'string'`, so an OBJECT-shaped
+    // `tool_start.input` (the shape #7346's backfill produces —
+    // `_captureFinalizedToolInput` / `_handleToolUseBlock` now attach a
+    // parsed object, e.g. `{ file_path, content }` for `Write`) never
+    // hit either branch and persisted to `session-state.json` uncapped.
+    describe('object-shaped input (#8136)', () => {
+      it('caps a 120KB Write-shaped object input, measured by serialized size', () => {
+        const entry = {
+          type: 'tool_start',
+          toolUseId: 'tu-1',
+          tool: 'Write',
+          input: { file_path: '/tmp/big.txt', content: 'x'.repeat(120 * 1024) },
+        }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input._truncated, true)
+        assert.ok(typeof result.input.summary === 'string')
+        assert.ok(result.input.summary.endsWith('... [truncated]'))
+        assert.ok(JSON.stringify(result).length < 60 * 1024, 'must be capped near the 50KB budget, not the raw ~123KB')
+        // Original entry is unchanged (shallow clone contract, same as
+        // the string branches above).
+        assert.equal(entry.input.content.length, 120 * 1024)
+      })
+
+      it('does not touch a small object-shaped input', () => {
+        const entry = {
+          type: 'tool_start',
+          toolUseId: 'tu-1',
+          tool: 'Write',
+          input: { file_path: '/tmp/small.txt', content: 'hello' },
+        }
+        const result = history.truncateEntry(entry)
+        assert.deepEqual(result.input, { file_path: '/tmp/small.txt', content: 'hello' })
+      })
+
+      it('leaves a null input (genuinely no input) untouched', () => {
+        const entry = { type: 'tool_start', toolUseId: 'tu-1', tool: 'Bash', input: null }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input, null)
+      })
+
+      it('falls back to a safe marker for an unserializable (cyclic) input rather than throwing', () => {
+        const cyclic = { file_path: '/tmp/x' }
+        cyclic.self = cyclic
+        const entry = { type: 'tool_start', toolUseId: 'tu-1', tool: 'SomeTool', input: cyclic }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input._truncated, true)
+        assert.equal(result.input.summary, '[unserializable]')
+      })
+    })
   })
 
   describe('setHistory', () => {

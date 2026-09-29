@@ -321,8 +321,14 @@ describe('CliSession stream-event handling', () => {
   // fallback (which renders `toolInputPartial` when the structured
   // `toolInput` is still empty) had no CLI data source and the panel read
   // "(no input)" for the entire in-flight window.
-  describe('tool_input_delta emission (#7346)', () => {
-    it('emits tool_input_delta for each input_json_delta chunk, mirroring byok-session.js\'s shape', () => {
+  //
+  // #8135 (review): unlike byok-session.js, CliSession must NOT forward raw
+  // per-chunk `input_json_delta` partials — a secret can straddle chunk
+  // boundaries and mid-stream partial JSON can't be sanitized. Instead it
+  // delivers the SANITIZED, size-capped FULL input as exactly ONE
+  // `tool_input_delta`, once the block finalizes (`content_block_stop`).
+  describe('tool_input_delta emission (#7346, redesigned per #8135)', () => {
+    it('emits NO tool_input_delta while chunks are still streaming — only after content_block_stop', () => {
       const session = createSession()
       const deltas = []
       session.on('tool_input_delta', (d) => deltas.push(d))
@@ -330,10 +336,11 @@ describe('CliSession stream-event handling', () => {
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
       session._handleEvent(inputJsonDelta('{"com'))
       session._handleEvent(inputJsonDelta('mand":"ls"}'))
+      assert.equal(deltas.length, 0, 'no raw per-chunk deltas during streaming (#8135 R4 guard)')
 
-      assert.equal(deltas.length, 2)
-      assert.deepEqual(deltas[0], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: '{"com' })
-      assert.deepEqual(deltas[1], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: 'mand":"ls"}' })
+      session._handleEvent(contentBlockStop())
+      assert.equal(deltas.length, 1, 'exactly one delta, once the block finalizes')
+      assert.deepEqual(deltas[0], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: '{"command":"ls"}' })
     })
 
     it('uses the synthesized fallback toolUseId when content_block.id is missing (#4778 parity)', () => {
@@ -346,12 +353,13 @@ describe('CliSession stream-event handling', () => {
         event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' } },
       })
       session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+      session._handleEvent(contentBlockStop())
 
       assert.equal(deltas.length, 1)
       assert.equal(deltas[0].toolUseId, 'msg-1-tool')
     })
 
-    it('stops emitting once the buffer overflows (matches the accumulation guard)', () => {
+    it('does not emit when the buffer overflowed (matches the accumulation guard)', () => {
       const session = createSession()
       session.on('error', () => {}) // absorb overflow error event
       const deltas = []
@@ -360,9 +368,31 @@ describe('CliSession stream-event handling', () => {
       session._handleEvent(toolUseStart('Bash', 'toolu_1'))
       const bigChunk = 'x'.repeat(session._maxToolInput + 1)
       session._handleEvent(inputJsonDelta(bigChunk))
-      // The overflow-triggering chunk itself is not emitted (it never
-      // reaches the accumulation branch), and neither is anything after.
-      session._handleEvent(inputJsonDelta('more'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit when the finalized JSON never parsed (malformed chunk)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{not valid json'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit a literal "null" chunk for a tool with genuinely no input', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('null'))
+      session._handleEvent(contentBlockStop())
 
       assert.equal(deltas.length, 0)
     })
@@ -380,8 +410,28 @@ describe('CliSession stream-event handling', () => {
         type: 'stream_event',
         event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } },
       })
+      session._handleEvent(contentBlockStop())
 
       assert.equal(deltas.length, 0)
+    })
+
+    // #8135 — Critical: the delivered delta must carry the SANITIZED
+    // value, never the raw one.
+    describe('redaction (#8135)', () => {
+      it('redacts a secret embedded in the finalized tool_input_delta', () => {
+        const session = createSession()
+        const deltas = []
+        session.on('tool_input_delta', (d) => deltas.push(d))
+
+        const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+        session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+        session._handleEvent(inputJsonDelta(JSON.stringify({ command: secretCommand })))
+        session._handleEvent(contentBlockStop())
+
+        assert.equal(deltas.length, 1)
+        assert.ok(!deltas[0].partialJson.includes('sk-ant-api03-'), 'the raw key must never appear on the wire')
+        assert.ok(deltas[0].partialJson.includes('[REDACTED]'), 'a redaction marker must be present instead')
+      })
     })
   })
 
@@ -484,6 +534,44 @@ describe('CliSession stream-event handling', () => {
       session._handleEvent(toolResultEvent('toolu_ask', 'Continue'))
       assert.equal(results.length, 1)
       assert.deepEqual(results[0].input, { questions: [{ question: 'Continue?' }] })
+    })
+
+    // #8135 (review) — Critical: a secret in a Bash command must come out
+    // of tool_result redacted, not verbatim. Reproduces the exact
+    // scenario #8135 was filed from.
+    it('redacts a secret in the Bash command attached to tool_result', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ command: secretCommand })))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'done'))
+
+      assert.equal(results.length, 1)
+      const serialized = JSON.stringify(results[0].input)
+      assert.ok(!serialized.includes('sk-ant-api03-'), 'the raw key must never leave the server')
+      assert.ok(serialized.includes('[REDACTED]'), 'a redaction marker must be present instead')
+    })
+
+    // #8136 (review) — a large Write input must be capped, not persisted
+    // to tool_result (and, transitively, history) whole.
+    it('caps a 120KB Write input attached to tool_result', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      const bigContent = 'x'.repeat(120 * 1024)
+      session._handleEvent(toolUseStart('Write', 'toolu_1'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ file_path: '/tmp/big.txt', content: bigContent })))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'wrote file'))
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].input._truncated, true)
+      assert.ok(!JSON.stringify(results[0].input).includes(bigContent), 'the raw 120KB content must not survive verbatim')
     })
   })
 

@@ -234,15 +234,19 @@ export class CliSession extends BaseSession {
    * exhaust there.
    */
   static get customEvents() {
-    // #7346: `tool_input_delta` streams the accumulating partial JSON of
-    // an in-flight tool's input (see the `input_json_delta` handling in
-    // `_handleEvent`'s `content_block_delta` case) — matches
-    // byok-session.js's shape/handler exactly so store-core's
-    // `handleToolInputDelta` needs no provider branch. Without listing
-    // it here, `session-manager.js`'s `_wireSessionEvents` never bridges
-    // the local EventEmitter emit onto the `session_event` channel and
-    // it never reaches the client (same wiring requirement documented on
-    // byok-session.js's `customEvents`).
+    // #7346: `tool_input_delta` delivers the SANITIZED full tool input
+    // as a single chunk once its content_block finalizes (see
+    // `_captureFinalizedToolInput`, called from `content_block_stop`) —
+    // matches byok-session.js's wire shape/client handler exactly so
+    // store-core's `handleToolInputDelta` needs no provider branch, even
+    // though (per #8135) cli-session.js does NOT stream raw per-chunk
+    // `input_json_delta` partials the way byok-session.js does — a
+    // secret can straddle chunk boundaries and can't be sanitized
+    // mid-stream, so this only ever emits once, already-safe. Without
+    // listing it here, `session-manager.js`'s `_wireSessionEvents` never
+    // bridges the local EventEmitter emit onto the `session_event`
+    // channel and it never reaches the client (same wiring requirement
+    // documented on byok-session.js's `customEvents`).
     return ['respawn_exhausted', 'tool_input_delta']
   }
 
@@ -1368,24 +1372,18 @@ export class CliSession extends BaseSession {
                 } else {
                   ctx.toolInputChunks += delta.partial_json
                   ctx.toolInputBytes += chunkBytes
-                  // #7346: stream the partial JSON to the dashboard the
-                  // same way byok-session.js already does, so an
-                  // in-flight tool-call bubble shows the command as it
-                  // assembles instead of "(no input)" for the entire
-                  // in-flight window — the #4341 client fallback already
-                  // renders `toolInputPartial`; it just never had a CLI
-                  // data source to fall back to. Guarded on
-                  // ctx.currentToolUseId (always set by the matching
-                  // content_block_start before any delta can arrive) so
-                  // a malformed/reordered event can't emit with an
-                  // undefined toolUseId.
-                  if (ctx.currentToolUseId) {
-                    this.emit('tool_input_delta', {
-                      messageId,
-                      toolUseId: ctx.currentToolUseId,
-                      partialJson: delta.partial_json,
-                    })
-                  }
+                  // #8135 (review on #7346): do NOT forward this raw
+                  // chunk as a live `tool_input_delta` — a secret can
+                  // straddle chunk boundaries (e.g. "export TOKEN=sk-"
+                  // in one delta, "ant-api03-…" in the next), so a
+                  // per-chunk value can't be redacted safely, and
+                  // mid-stream partial JSON can't be parsed to run the
+                  // structured sanitizer over it either. The sanitized
+                  // FULL input is instead delivered as a single
+                  // `tool_input_delta` once the block finalizes — see
+                  // `_captureFinalizedToolInput` at `content_block_stop`,
+                  // a few ms later (execution, not this streaming
+                  // window, is the long part of a Bash call).
                 }
               }
             }
@@ -1554,23 +1552,36 @@ export class CliSession extends BaseSession {
 
   /**
    * #7346: backfill the finalized tool input onto `_inFlightToolStarts`
-   * (base-session.js `_recordToolInput`) so `tool-result.js`'s
-   * `emitToolResults` can attach it to the matching `tool_result` via
-   * `_getTrackedToolInput`. Runs for every tool (unlike
-   * `_applyToolInputSemantics`, which only parses to drive four
-   * special-cased tools' session state) — the #7346 root cause was that
-   * nothing captured the finalized input for a generic Bash/Read/etc.
-   * call, so it stayed `null` forever: not just in flight, but in the
-   * persisted `tool_start` history entry a session-switch replay
-   * rebuilds from.
+   * (base-session.js `_recordToolInput`, which sanitizes + size-caps it
+   * — see #8135/#8136) so `tool-result.js`'s `emitToolResults` can
+   * attach it to the matching `tool_result` via `_getTrackedToolInput`.
+   * Runs for every tool (unlike `_applyToolInputSemantics`, which only
+   * parses to drive four special-cased tools' session state) — the
+   * #7346 root cause was that nothing captured the finalized input for
+   * a generic Bash/Read/etc. call, so it stayed `null` forever: not
+   * just in flight, but in the persisted `tool_start` history entry a
+   * session-switch replay rebuilds from.
+   *
+   * #8135 (review): also delivers the SANITIZED full input as a
+   * single-shot `tool_input_delta` right here, so the in-flight panel
+   * lights up within milliseconds of the block finalizing — long
+   * before the tool actually finishes executing (the #4341 client
+   * fallback already renders whatever lands in `toolInputPartial`; one
+   * complete-JSON chunk parses via `tryParseCompleteJson` exactly like
+   * many partial ones would have). This REPLACES the raw per-chunk
+   * `tool_input_delta` streaming `content_block_delta` used to do
+   * (removed — see the comment there): a secret can straddle chunk
+   * boundaries and mid-stream partial JSON can't be sanitized, so the
+   * safe delivery point is "sanitize the complete parsed value, then
+   * send it once."
    *
    * Best-effort and silent on failure: a JSON parse error (malformed
    * chunk) or an empty buffer (the overflow path already reset
    * `ctx.toolInputChunks` to `''` and told the user via the `error`
-   * event emitted at accumulation time) simply skips the backfill — the
-   * tool_start entry's `input` stays `null` and the client shows the
-   * "(input not received yet)" placeholder (#7346 direction 3) rather
-   * than a stale or fabricated value.
+   * event emitted at accumulation time) simply skips both the backfill
+   * and the delta — the tool_start entry's `input` stays `null` and the
+   * client shows the "(input not received yet)" placeholder (#7346
+   * direction 3) rather than a stale or fabricated value.
    *
    * @param {{ currentToolUseId: string|null, toolInputChunks: string }} ctx
    * @private
@@ -1578,12 +1589,25 @@ export class CliSession extends BaseSession {
   _captureFinalizedToolInput(ctx) {
     const toolUseId = ctx.currentToolUseId
     if (!toolUseId || !ctx.toolInputChunks) return
+    let parsed
     try {
-      const parsed = JSON.parse(ctx.toolInputChunks)
-      this._recordToolInput(toolUseId, parsed)
+      parsed = JSON.parse(ctx.toolInputChunks)
     } catch {
-      // Malformed/truncated JSON — nothing to backfill.
+      // Malformed/truncated JSON — nothing to backfill or deliver.
+      return
     }
+    const sanitized = this._recordToolInput(toolUseId, parsed)
+    // `null`/`undefined` means "known to have no input" (or the parse
+    // above legitimately produced one of those) — the placeholder logic
+    // covers that case on its own; don't ship a literal "null" chunk.
+    if (sanitized === null || sanitized === undefined) return
+    const messageId = this._currentMessageId
+    if (!messageId) return
+    this.emit('tool_input_delta', {
+      messageId,
+      toolUseId,
+      partialJson: JSON.stringify(sanitized),
+    })
   }
 
   /**

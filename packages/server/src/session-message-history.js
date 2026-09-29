@@ -453,6 +453,18 @@ export class SessionMessageHistory extends EventEmitter {
   /**
    * Shallow-clone and truncate a history entry for serialization.
    * Content/input fields >50KB are truncated to avoid bloated state files.
+   *
+   * #8136 (review on #7346): `input` on a `tool_start` entry used to be
+   * `null` for every provider, so the string-only check below was dead
+   * code for it. Since #7346's backfill, `input` is a PARSED OBJECT (the
+   * tool's structured arguments, e.g. `{ file_path, content }` for
+   * `Write`) — measured here by its SERIALIZED size, matching the string
+   * branch's semantics rather than leaving objects uncapped entirely.
+   * (In practice `base-session.js`'s `_recordToolInput` already runs
+   * every captured input through `sanitizeToolInput`'s ~10KB broadcast
+   * cap before it ever reaches history, so this branch is defense in
+   * depth — a second, independent bound at the persistence boundary — not
+   * the only thing standing between a huge input and the state file.)
    * @param {object} entry
    * @returns {object}
    */
@@ -467,6 +479,23 @@ export class SessionMessageHistory extends EventEmitter {
     }
     if (typeof clone.input === 'string' && clone.input.length > MAX) {
       clone.input = clone.input.slice(0, MAX) + '[truncated]'
+    } else if (clone.input && typeof clone.input === 'object') {
+      // #8136: object-shaped input (tool_start, since #7346's backfill) —
+      // the string branch above never fires for it. Serialize to measure
+      // its real on-disk size; a cyclic/unserializable value (shouldn't
+      // happen for a JSON-sourced tool input, but defensive) falls back
+      // to a safe marker rather than throwing out of a persist path.
+      let serialized
+      try {
+        serialized = JSON.stringify(clone.input)
+      } catch {
+        serialized = null
+      }
+      if (typeof serialized !== 'string') {
+        clone.input = { _truncated: true, summary: '[unserializable]' }
+      } else if (serialized.length > MAX) {
+        clone.input = { _truncated: true, summary: serialized.slice(0, MAX) + '... [truncated]' }
+      }
     }
     return clone
   }

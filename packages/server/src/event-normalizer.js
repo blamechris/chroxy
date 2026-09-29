@@ -437,6 +437,17 @@ Object.assign(EVENT_MAP, {
     // codex mcpToolCall / orphan-sweep result would render plain live but
     // error-styled after a history replay (which sends the entry raw).
     if (typeof data.isError === 'boolean') msg.isError = data.isError
+    // #7346/#8135 (review): forward the finalized tool input — cli-session.js
+    // / sdk-session.js attach it via tool-result.js's emitToolResults (already
+    // sanitized + size-capped at capture, base-session.js's _recordToolInput).
+    // This normalizer is the LIVE-broadcast choke point; without this the new
+    // field never left the server on the live path (only the persisted-history
+    // replay, which forwards `tool_start` entries raw, delivered it) — the
+    // store-core handleToolResult fold and the ServerToolResultSchema field
+    // were otherwise dead on the live wire. Undefined (BYOK, and any tool that
+    // never resolved a tracked input) is omitted, same as every optional field
+    // here.
+    if (data.input !== undefined) msg.input = data.input
     return { messages: [{ msg }] }
   },
 
