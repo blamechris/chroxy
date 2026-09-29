@@ -6,8 +6,7 @@
  */
 import { useState, useCallback, useRef, useMemo } from 'react'
 import type { CumulativeUsage, McpServer, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
-import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
-import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { formatCostBadge, formatCostBreakdown, getProviderInfo } from '@chroxy/store-core'
 import { useShallow } from 'zustand/react/shallow'
 import { useConnectionStore } from '../store/connection'
 import { ConversationSearch } from './ConversationSearch'
@@ -982,9 +981,23 @@ export function Sidebar({
                                 W
                               </span>
                             )}
-                            {session.provider && session.provider !== DEFAULT_PROVIDER && (
-                              <span className="sidebar-provider-badge" title={session.provider}>
-                                {session.provider.replace(/^claude-/, '').toUpperCase()}
+                            {session.provider && (
+                              // #7334 — shown for EVERY provider, the default
+                              // included: a claude-tui row used to sit
+                              // unbadged next to a claude-cli row's `CLI`
+                              // badge, indistinguishable from a session whose
+                              // provider was simply unknown. The tab
+                              // (SessionBar) never suppressed this way; this
+                              // now matches it, and routes the label through
+                              // the same shared `getProviderInfo` helper so
+                              // the two surfaces can't drift apart again.
+                              <span
+                                className="sidebar-provider-badge"
+                                data-provider={getProviderInfo(session.provider).type}
+                                title={getProviderInfo(session.provider).tooltip}
+                                aria-label={getProviderInfo(session.provider).tooltip}
+                              >
+                                {getProviderInfo(session.provider).short}
                               </span>
                             )}
                             {session.stdinForwardingDisabled && (
