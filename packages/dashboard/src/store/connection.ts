@@ -134,7 +134,7 @@ import {
   registerThinkingLevelChangeRequest,
   clearPendingThinkingLevelReverts,
   clearPendingPermissionModeReverts,
-  armMcpServerOpCallback,
+  sendMcpServerOp,
   clearPendingMcpServerOps,
   beginTranscriptFetch,
   endTranscriptFetch,
@@ -4304,11 +4304,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // — MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT otherwise — and requires the
   // daemon's first-use spawn-trust prompt before the server is actually
   // spawned, whatever the response). There is no dedicated result type on
-  // this request: `callback` fires exactly once via armMcpServerOpCallback's
-  // three-way race (a matching `error`, an `mcp_servers` broadcast that now
-  // contains `name`, or a bounded timeout — see message-handler.ts), so a
-  // submit button's spinner always clears. `config` is never logged anywhere
-  // in this path — it may carry secrets in `env`/`headers`.
+  // this request: `callback` fires exactly once via sendMcpServerOp's
+  // four-way race (a matching `error`, an `mcp_servers` broadcast that now
+  // contains `name`, a bounded timeout, or an immediate NOT_CONNECTED when
+  // the send itself fails the OPEN→CLOSING TOCTOU — #7029, see
+  // message-handler.ts), so a submit button's spinner always clears.
+  // `config` is never logged anywhere in this path — it may carry secrets in
+  // `env`/`headers`.
   addMcpServer: (
     name: string,
     config: McpServerConfigInput,
@@ -4321,21 +4323,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return;
     }
     const requestId = `add-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    armMcpServerOpCallback(requestId, { op: 'add', name, sessionId: activeSessionId }, callback);
-    wsSend(socket, {
-      type: 'add_mcp_server',
-      sessionId: activeSessionId,
-      name,
-      config,
-      scope,
+    sendMcpServerOp(
+      socket,
       requestId,
-    });
+      { op: 'add', name, sessionId: activeSessionId },
+      { type: 'add_mcp_server', sessionId: activeSessionId, name, config, scope, requestId },
+      callback,
+    );
   },
 
   // #6999 — permanently remove a configured MCP server from the active
   // session's config (BYOK lane; same strict-primary gate as addMcpServer).
-  // Same three-way `callback` resolution, but success is an `mcp_servers`
-  // broadcast whose list no longer contains `name`.
+  // Same four-way `callback` resolution (see addMcpServer above), but success
+  // is an `mcp_servers` broadcast whose list no longer contains `name`.
   removeMcpServer: (
     name: string,
     scope: McpConfigScope,
@@ -4347,14 +4347,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return;
     }
     const requestId = `remove-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    armMcpServerOpCallback(requestId, { op: 'remove', name, sessionId: activeSessionId }, callback);
-    wsSend(socket, {
-      type: 'remove_mcp_server',
-      sessionId: activeSessionId,
-      name,
-      scope,
+    sendMcpServerOp(
+      socket,
       requestId,
-    });
+      { op: 'remove', name, sessionId: activeSessionId },
+      { type: 'remove_mcp_server', sessionId: activeSessionId, name, scope, requestId },
+      callback,
+    );
   },
 
   // #6772 — pull the permission audit history for the active session. Sets the

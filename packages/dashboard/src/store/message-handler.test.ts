@@ -50,6 +50,7 @@ import {
   endTranscriptFetch,
   resetTranscriptFetchTracking,
   armMcpServerOpCallback,
+  sendMcpServerOp,
   clearPendingMcpServerOps,
   _testMcpServerOpPendingSize,
   MCP_SERVER_OP_TIMEOUT_MS,
@@ -83,6 +84,23 @@ function createMockStore(initial: Partial<ConnectionState>) {
 function createMockSocket(): WebSocket {
   return {
     send: vi.fn(),
+    close: vi.fn(),
+    readyState: WebSocket.OPEN,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  } as unknown as WebSocket
+}
+
+/**
+ * #7029 — OPEN socket whose send() throws, modelling the OPEN→CLOSING TOCTOU
+ * window wsSend guards against (#6283). Mirrors connection-send-fail-closed.test.ts's
+ * closingSocket().
+ */
+function closingSocket(): WebSocket {
+  return {
+    send: vi.fn(() => {
+      throw new Error('InvalidStateError: socket is closing')
+    }),
     close: vi.fn(),
     readyState: WebSocket.OPEN,
     addEventListener: vi.fn(),
@@ -1518,6 +1536,111 @@ describe('dashboard message-handler dispatch', () => {
       armMcpServerOpCallback('reentrant-tail', { op: 'add', name: 'tail', sessionId: 's1' }, tail)
       expect(retrying).toHaveBeenCalledTimes(1)
       expect(_testMcpServerOpPendingSize()).toBeLessThanOrEqual(MCP_SERVER_OP_PENDING_CAP)
+    })
+
+    // #7029 — addMcpServer / removeMcpServer armed the callback via
+    // armMcpServerOpCallback and then called wsSend WITHOUT checking its
+    // return, so a send that fails the OPEN→CLOSING TOCTOU (#6283) left the
+    // one-shot armed for the full MCP_SERVER_OP_TIMEOUT_MS even though the
+    // daemon was never going to see the request. sendMcpServerOp arms + sends
+    // in one step and resolves NOT_CONNECTED immediately through the same
+    // exactly-once path a broadcast/timeout would use, so nothing is left
+    // dangling.
+    describe('sendMcpServerOp — send-failed path resolves immediately (#7029)', () => {
+      let warnSpy: ReturnType<typeof vi.spyOn>
+
+      beforeEach(() => {
+        warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      })
+
+      afterEach(() => {
+        warnSpy.mockRestore()
+      })
+
+      it('add: resolves ok:false NOT_CONNECTED synchronously when the send throws, no dangling entry', () => {
+        const socket = closingSocket()
+        const cb = vi.fn()
+        sendMcpServerOp(
+          socket,
+          'add-send-fail-1',
+          { op: 'add', name: 'filesystem', sessionId: 's1' },
+          { type: 'add_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'add-send-fail-1' },
+          cb,
+        )
+        expect(socket.send).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledWith({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' })
+        expect(_testMcpServerOpPendingSize()).toBe(0)
+      })
+
+      it('remove: resolves ok:false NOT_CONNECTED synchronously when the send throws, no dangling entry', () => {
+        const socket = closingSocket()
+        const cb = vi.fn()
+        sendMcpServerOp(
+          socket,
+          'remove-send-fail-1',
+          { op: 'remove', name: 'filesystem', sessionId: 's1' },
+          { type: 'remove_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'remove-send-fail-1' },
+          cb,
+        )
+        expect(socket.send).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledWith({ ok: false, code: 'NOT_CONNECTED', message: 'Not connected to the daemon.' })
+        expect(_testMcpServerOpPendingSize()).toBe(0)
+      })
+
+      it('the 15s timeout can never fire a second callback after a send-failed resolution (exactly-once)', () => {
+        vi.useFakeTimers()
+        const socket = closingSocket()
+        const cb = vi.fn()
+        sendMcpServerOp(
+          socket,
+          'add-send-fail-2',
+          { op: 'add', name: 'filesystem', sessionId: 's1' },
+          { type: 'add_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'add-send-fail-2' },
+          cb,
+        )
+        expect(cb).toHaveBeenCalledTimes(1)
+        vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+        expect(cb).toHaveBeenCalledTimes(1)
+        expect(_testMcpServerOpPendingSize()).toBe(0)
+      })
+
+      it('a send that THROWS (serialization bug) resolves the armed op once with SEND_FAILED, then re-throws', () => {
+        vi.useFakeTimers()
+        const socket = createMockSocket()
+        const cb = vi.fn()
+        // A BigInt makes JSON.stringify throw inside wsSend, before socket.send —
+        // the path #6283 deliberately keeps loud instead of returning false.
+        expect(() => sendMcpServerOp(
+          socket,
+          'add-send-throw-1',
+          { op: 'add', name: 'filesystem', sessionId: 's1' },
+          { type: 'add_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'add-send-throw-1', bad: BigInt(1) },
+          cb,
+        )).toThrow(TypeError)
+        expect(socket.send).not.toHaveBeenCalled()
+        expect(cb).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledWith({ ok: false, code: 'SEND_FAILED', message: 'The request could not be sent to the daemon.' })
+        expect(_testMcpServerOpPendingSize()).toBe(0)
+        vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+        expect(cb).toHaveBeenCalledTimes(1)
+      })
+
+      it('a healthy send still arms normally and does not call back synchronously (happy-path regression guard)', () => {
+        const socket = createMockSocket()
+        const cb = vi.fn()
+        sendMcpServerOp(
+          socket,
+          'add-send-ok-1',
+          { op: 'add', name: 'filesystem', sessionId: 's1' },
+          { type: 'add_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'add-send-ok-1' },
+          cb,
+        )
+        expect(socket.send).toHaveBeenCalledTimes(1)
+        expect(cb).not.toHaveBeenCalled()
+        expect(_testMcpServerOpPendingSize()).toBe(1)
+      })
     })
   })
 
