@@ -230,7 +230,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
   const emitResult = (fakes) =>
     fakes.sessionManager.emit('session_event', { sessionId: 's1', event: 'result', data: {} })
 
-  it('keeps the plain body when the session has no getBackgroundTaskSnapshot (absent = no info)', () => {
+  it('keeps the plain body when the session has no peekBackgroundTaskSnapshot (absent = no info)', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, { name: 'n' })
     emitResult(fakes)
@@ -239,7 +239,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
 
   it('keeps the plain body when the snapshot is null (degraded transcript scan)', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
-    wireSession(fakes, { name: 'n', getBackgroundTaskSnapshot: () => null })
+    wireSession(fakes, { name: 'n', peekBackgroundTaskSnapshot: () => null })
     emitResult(fakes)
     assert.equal(fakes.sends[0].body, 'Ready for next message')
   })
@@ -248,7 +248,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, {
       name: 'n',
-      getBackgroundTaskSnapshot: () => ({ backgroundTasks: [], scheduledWakeup: null }),
+      peekBackgroundTaskSnapshot: () => ({ backgroundTasks: [], scheduledWakeup: null }),
     })
     emitResult(fakes)
     assert.equal(fakes.sends[0].body, 'Ready for next message')
@@ -258,7 +258,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, {
       name: 'n',
-      getBackgroundTaskSnapshot: () => ({
+      peekBackgroundTaskSnapshot: () => ({
         backgroundTasks: [
           { toolUseId: 'a', kind: 'bash', description: 'older watcher', startedAt: 1_000 },
           { toolUseId: 'b', kind: 'agent', description: 'deploy monitor', startedAt: 2_000 },
@@ -282,7 +282,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, {
       name: 'n',
-      getBackgroundTaskSnapshot: () => ({
+      peekBackgroundTaskSnapshot: () => ({
         backgroundTasks: [],
         scheduledWakeup: { at, reason: 'poll the release build' },
       }),
@@ -295,7 +295,7 @@ describe('PushNotificationHandler — #5438 ready-body enrichment', () => {
     const fakes = makeFakes({ wsServer: fakeWsServer({ authenticatedClientCount: 0 }) })
     wireSession(fakes, {
       name: 'n',
-      getBackgroundTaskSnapshot: () => { throw new Error('transcript gone') },
+      peekBackgroundTaskSnapshot: () => { throw new Error('transcript gone') },
     })
     assert.doesNotThrow(() => emitResult(fakes))
     assert.equal(fakes.sends.length, 1)

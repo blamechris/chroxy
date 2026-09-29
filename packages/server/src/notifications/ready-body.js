@@ -114,8 +114,8 @@ function formatRelativeWakeup(at, now) {
  *
  * @param {{ backgroundTasks?: Array<{toolUseId:string, description?:string, startedAt?:number}>,
  *           scheduledWakeup?: { at:number, reason?:string } | null } | null | undefined} snapshot
- *   Output of `getBackgroundTaskSnapshot()` (#5436), or null when the session
- *   type doesn't expose one / the transcript scan degraded.
+ *   Output of `peekBackgroundTaskSnapshot()` (#5436 / #8052), or null when
+ *   the session type doesn't expose one / the transcript scan degraded.
  * @param {number} [now] Reference epoch ms for the relative wakeup offset —
  *   defaults to `Date.now()`. Parameterized so tests can pin the offset against
  *   a fixed `at` without freezing the global clock.
@@ -162,14 +162,25 @@ export function composeReadyNotificationBody(snapshot, now = Date.now()) {
 /**
  * Read a session's background-task snapshot for notification enrichment.
  * Returns null (= "no information", body unchanged) when the session type
- * doesn't implement `getBackgroundTaskSnapshot()` or the read throws —
+ * doesn't implement `peekBackgroundTaskSnapshot()` or the read throws —
  * the same degrade-to-plain-ready posture as event-normalizer's
  * backgroundTaskFields().
+ *
+ * #8052: this call is deliberately side-effect-free — it goes through
+ * `peekBackgroundTaskSnapshot()`, never `getBackgroundTaskSnapshot()`. This
+ * composes an idle-push body whenever the session has no active viewers, so
+ * nothing here ever broadcasts a `claude_ready` / `background_tasks_changed`
+ * message to a client. Reading through the side-effecting method would
+ * silently advance the idle-poll's dedup baseline (and could stop the poll
+ * outright on a drained snapshot) with nobody ever told what changed —
+ * stranding a client's already-shown background-task indicator forever
+ * (`ws-history.js` replays a bare `claude_ready`, where an absent field means
+ * "keep state").
  */
 export function readBackgroundTaskSnapshot(session) {
   try {
-    return typeof session?.getBackgroundTaskSnapshot === 'function'
-      ? session.getBackgroundTaskSnapshot()
+    return typeof session?.peekBackgroundTaskSnapshot === 'function'
+      ? session.peekBackgroundTaskSnapshot()
       : null
   } catch {
     return null
