@@ -19,7 +19,7 @@ import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 import { isWindows, defaultShell, killProcessTree } from './platform.js'
-import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 
 const log = createLogger('user-shell-session')
 
@@ -154,6 +154,14 @@ export class UserShellSession extends BaseSession {
    * primary bearer token from the environment. Extracted so the strip is
    * unit-testable without a real PTY spawn.
    *
+   * Also strips CHROXY_PORT/CHROXY_HOOK_SECRET (#7360): this session never
+   * sets its own (a user shell has no permission hook — see the class doc —
+   * so there is no "this session's own value" to preserve here, unlike
+   * cli-session.js/claude-tui-session.js), so any value present is
+   * necessarily AMBIENTLY inherited — e.g. this daemon was itself launched
+   * from inside another chroxy session — and is a foreign session's hook
+   * secret with no legitimate use in a plain interactive shell.
+   *
    * @returns {Record<string, string>}
    */
   _buildShellEnv() {
@@ -161,6 +169,7 @@ export class UserShellSession extends BaseSession {
     for (const key of CHROXY_SECRET_DENYLIST) {
       delete env[key]
     }
+    stripInheritedChroxySecrets(env)
     return env
   }
 

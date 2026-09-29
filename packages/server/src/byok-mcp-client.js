@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 import { isBlockedMetadataHost } from './byok-mcp-config.js'
-import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import * as realOAuthFlow from './byok-mcp-oauth.js'
 import * as realOAuthStore from './byok-mcp-oauth-store.js'
@@ -208,6 +208,12 @@ export class MCPClient extends EventEmitter {
    * never reach an MCP server subprocess, which could read it and seize the
    * daemon. Extracted so the strip is unit-testable without a real spawn.
    *
+   * Also strips CHROXY_PORT/CHROXY_HOOK_SECRET (#7360): an MCP server has no
+   * legitimate use for the daemon's permission-hook secret — it is not a
+   * hook-consuming child — so any value present here is necessarily
+   * AMBIENTLY inherited (e.g. this daemon was itself launched from inside
+   * another chroxy session) rather than something this client set itself.
+   *
    * @returns {Record<string, string>}
    */
   _buildChildEnv() {
@@ -215,6 +221,7 @@ export class MCPClient extends EventEmitter {
     for (const key of CHROXY_SECRET_DENYLIST) {
       delete env[key]
     }
+    stripInheritedChroxySecrets(env)
     return env
   }
 

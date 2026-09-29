@@ -34,7 +34,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
-import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 
 const log = createLogger('statusline')
 
@@ -152,10 +152,17 @@ export function buildStatusLineInput(ctx = {}) {
  * set. Deliberately does NOT go through `buildSpawnEnv` / the credential store:
  * a status script needs no provider OAuth token, and injecting one would hit
  * the keychain on every periodic spawn (every ~10s) for no benefit.
+ *
+ * Also strips CHROXY_PORT/CHROXY_HOOK_SECRET (#7360): the statusline script is
+ * an arbitrary operator-configured command with no permission-hook role, so
+ * any value present is necessarily AMBIENTLY inherited (e.g. this daemon was
+ * itself launched from inside another chroxy session) rather than something
+ * this builder set itself — exported so the strip is directly unit-testable.
  */
-function defaultBuildEnv() {
+export function defaultBuildEnv() {
   const env = { ...process.env }
   for (const key of [...CHROXY_SECRET_DENYLIST, 'ANTHROPIC_API_KEY']) delete env[key]
+  stripInheritedChroxySecrets(env)
   env.COLUMNS = '80'
   env.LINES = '1'
   return env

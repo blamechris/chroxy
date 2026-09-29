@@ -23,6 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A spawned provider no longer inherits the daemon's own `CHROXY_PORT` /
+  `CHROXY_HOOK_SECRET` from the ambient environment when its session sets
+  neither (#7360).** `_buildChildEnv()`-style builders that copy the full
+  parent env (`cli-session.js` via `buildSpawnEnv`'s denylist mode,
+  `claude-tui-session.js`'s `_buildPtyEnv`, `user-shell-session.js`'s
+  `_buildShellEnv`, `byok-mcp-client.js`'s `_buildChildEnv`,
+  `statusline.js`'s `defaultBuildEnv`) forwarded whatever the DAEMON PROCESS
+  ITSELF happened to inherit — e.g. the daemon was launched from inside
+  another chroxy session, or a developer's shell still exported a prior
+  session's values — into a child that has no use for a foreign session's
+  hook secret: without hooks (or with a different session's hooks), the
+  child gains nothing from the key and the daemon gains a needless leak
+  surface. A new shared helper, `stripInheritedChroxySecrets()` in
+  `utils/spawn-env.js`, drops any ambiently-inherited value before a
+  builder reasserts THIS session's own port/secret, so the session's real
+  value (when set) still wins. A roster test
+  (`spawn-env-inherited-secrets-roster.test.js`) requires every full-parent-env
+  copier under `src/` to either call the helper or carry a documented
+  exemption, so a future builder can't silently skip it.
 - **The orphan-reaper's sweep now runs under launchd and Tauri instead of
   logging `spawnSync lsof ENOENT` every 5 minutes forever (#8083).** `lsof`
   lives at `/usr/sbin/lsof` on macOS, but the launchd service PATH

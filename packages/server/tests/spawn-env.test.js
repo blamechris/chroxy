@@ -205,6 +205,39 @@ describe('buildSpawnEnv', () => {
           'the scoped per-session hook secret is the only chroxy secret the child should get')
       })
     })
+
+    // #7360: the two tests below are ambient-proof by construction — each
+    // one sets the ambient var it is asserting against, inside the test, via
+    // `withEnv` (which saves + restores), so the assertion holds regardless
+    // of whatever the shell running the suite happens to already export.
+    // Before the fix these are RED whenever the developer's own shell (or
+    // CI) already has CHROXY_PORT/CHROXY_HOOK_SECRET set — which is exactly
+    // #7360's reported failure mode (running tests inside a chroxy session).
+    it('drops an ambiently-inherited CHROXY_PORT when this call sets none (#7360)', () => {
+      withEnv({ CHROXY_PORT: '19999' }, () => {
+        const env = buildSpawnEnv('claude')
+        assert.equal(env.CHROXY_PORT, undefined,
+          'an ambiently-inherited CHROXY_PORT must not reach a child whose session set none')
+      })
+    })
+
+    it('drops an ambiently-inherited CHROXY_HOOK_SECRET when this call sets none (#7360)', () => {
+      withEnv({ CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret' }, () => {
+        const env = buildSpawnEnv('claude')
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+          'an ambiently-inherited CHROXY_HOOK_SECRET must not reach a child whose session set none')
+      })
+    })
+
+    it('positive control: extras CHROXY_PORT/CHROXY_HOOK_SECRET win over a CONFLICTING ambient value (#7360)', () => {
+      withEnv({ CHROXY_PORT: '1', CHROXY_HOOK_SECRET: 'ambient-wrong-secret' }, () => {
+        const env = buildSpawnEnv('claude', { CHROXY_PORT: '8765', CHROXY_HOOK_SECRET: 'session-real-secret' })
+        assert.equal(env.CHROXY_PORT, '8765',
+          "the session's own port must win over an ambient value, not merely be non-empty")
+        assert.equal(env.CHROXY_HOOK_SECRET, 'session-real-secret',
+          "the session's own hook secret must win over an ambient value, not merely be non-empty")
+      })
+    })
   })
 
   describe('extras parameter', () => {

@@ -111,6 +111,52 @@ export const CHROXY_SECRET_DENYLIST = [
   'API_TOKEN',
 ]
 
+// Chroxy per-SESSION env that must never reach a spawned child by AMBIENT
+// INHERITANCE — only when THIS session's own builder explicitly (re-)sets it
+// for its own child (#7360). Distinct from CHROXY_SECRET_DENYLIST above
+// (never reaches ANY child, full stop): CHROXY_HOOK_SECRET and CHROXY_PORT
+// are legitimately handed to a hook-consuming child (cli-session.js's
+// `extras`, claude-tui-session.js's `_buildPtyEnv` when permissions are
+// enabled) — but only THIS session's own freshly-generated/assigned values.
+//
+// A full-parent-env copy (`{ ...process.env }`) otherwise forwards whatever
+// the DAEMON PROCESS ITSELF happened to inherit — e.g. this daemon was
+// launched from inside another chroxy session (nested chroxy), or a
+// developer's shell still exports a prior session's values — into a child
+// that has no use for a FOREIGN session's hook secret: without hooks (or
+// with a different session's hooks), the child gains nothing from the key
+// and the daemon gains a needless leak surface (#7360's reproduction: a test
+// suite run inside a chroxy session inherited the outer session's
+// CHROXY_PORT/CHROXY_HOOK_SECRET into every child env it built).
+export const CHROXY_INHERITED_SESSION_ENV = [
+  'CHROXY_PORT',
+  'CHROXY_HOOK_SECRET',
+]
+
+/**
+ * Strip ambiently-inherited chroxy per-session env from a full parent-env
+ * copy, IN PLACE, before a builder re-applies its own session's explicit
+ * values. Callers MUST call this BEFORE assigning/merging their own
+ * `CHROXY_PORT`/`CHROXY_HOOK_SECRET` (never after) — otherwise the strip
+ * would delete the session's own just-assigned value along with any ambient
+ * one, which is exactly the E3 mutant `spawn-env-inherited-secrets-roster.
+ * test.js` and the per-builder tests pin as a regression.
+ *
+ * Every builder that copies the full parent env into a spawned child must
+ * route through this so a NEW one can't quietly skip it — the roster test
+ * enumerates every `{ ...process.env }`-shaped copier under `src/` and
+ * requires each to either call this helper or carry a documented exemption.
+ *
+ * @param {Record<string, string|undefined>} env - mutated in place
+ * @returns {Record<string, string|undefined>} the same object, for chaining
+ */
+export function stripInheritedChroxySecrets(env) {
+  for (const key of CHROXY_INHERITED_SESSION_ENV) {
+    delete env[key]
+  }
+  return env
+}
+
 const PROVIDERS = {
   codex: {
     mode: 'allowlist',
@@ -204,6 +250,12 @@ export function buildSpawnEnv(provider, extras = {}) {
   for (const key of effectiveDenylist) {
     delete parentEnv[key]
   }
+  // #7360: drop any AMBIENTLY-inherited CHROXY_PORT/CHROXY_HOOK_SECRET before
+  // `extras` (below) has a chance to reassert THIS session's own values —
+  // stripInheritedChroxySecrets must run before the `extras` merge, never
+  // after, or a session that DOES set its own port/secret would have them
+  // wiped right back out (see the helper's own doc comment).
+  stripInheritedChroxySecrets(parentEnv)
   // #3855: inject ONLY this provider's own credential-store keys that the
   // shell did not export (e.g. CLAUDE_CODE_OAUTH_TOKEN for claude). Scoped via
   // the per-provider `storeInjectKeys` allowlist so other providers' stored

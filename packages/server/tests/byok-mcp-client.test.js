@@ -705,5 +705,33 @@ describe('MCPClient', () => {
         else process.env.API_TOKEN = prev
       }
     })
+
+    // #7360: an MCP server subprocess has no legitimate use for the daemon's
+    // permission-hook secret (it is not a hook-consuming child), so any
+    // CHROXY_PORT/CHROXY_HOOK_SECRET present is necessarily AMBIENTLY
+    // inherited — e.g. this daemon was itself launched from inside another
+    // chroxy session — and must be stripped. Ambient-proof regardless of the
+    // shell running the suite.
+    it('strips an ambiently-inherited CHROXY_PORT/CHROXY_HOOK_SECRET from the MCP server child env', () => {
+      const prevPort = process.env.CHROXY_PORT
+      const prevSecret = process.env.CHROXY_HOOK_SECRET
+      process.env.CHROXY_PORT = '19999'
+      process.env.CHROXY_HOOK_SECRET = 'ambient-foreign-session-secret'
+      try {
+        const client = new MCPClient(stubConfig({ env: { MY_MCP_OPT: 'keep-me' } }), { log: silentLog() })
+        const env = client._buildChildEnv()
+        assert.equal(env.CHROXY_PORT, undefined,
+          'an ambiently-inherited CHROXY_PORT must not reach an MCP server subprocess')
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined,
+          'an ambiently-inherited CHROXY_HOOK_SECRET must not reach an MCP server subprocess')
+        assert.equal(env.MY_MCP_OPT, 'keep-me',
+          'user-configured _config.env entries are still forwarded')
+      } finally {
+        if (prevPort === undefined) delete process.env.CHROXY_PORT
+        else process.env.CHROXY_PORT = prevPort
+        if (prevSecret === undefined) delete process.env.CHROXY_HOOK_SECRET
+        else process.env.CHROXY_HOOK_SECRET = prevSecret
+      }
+    })
   })
 })
