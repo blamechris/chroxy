@@ -124,7 +124,7 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     )
   })
 
-  it('a bare `claude` spawnSync() and a real-prefix `codex`/`gemini` execFile() all throw', () => {
+  it('a bare `claude` spawnSync() and a real-prefix `codex`/`gemini` execFileSync() all throw', () => {
     assert.throws(() => spawnSync('claude', ['--version']), { code: REAL_BINARY_ERROR_CODE })
     assert.throws(() => execFileSync('/usr/local/bin/codex', ['--version']), { code: REAL_BINARY_ERROR_CODE })
     assert.throws(() => execFileSync('/opt/homebrew/bin/gemini', ['--version']), { code: REAL_BINARY_ERROR_CODE })
@@ -147,6 +147,16 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
       () => execFileSync('cloudflared --version', { shell: true }),
       { code: REAL_BINARY_ERROR_CODE },
     )
+  })
+
+  it('exec()/execSync() shell-command strings of a guarded binary throw — the exec branch of resolveCommandArg actually FIRES, not merely wraps', () => {
+    // The wrap-marker test above proves exec/execSync were PATCHED; this proves
+    // the patch reaches its decision (firstShellToken on a command string).
+    // The absolute path is a real install prefix with no binary behind it, so a
+    // regressed guard cannot reach a real program even under the normal PATH.
+    assert.throws(() => execSync('claude --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => exec('cloudflared --version', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => execSync('/usr/local/bin/gemini --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
   })
 
   it('a safe command with options.shell: true is unaffected (proves the shell:true branch is not a blanket refusal)', () => {
