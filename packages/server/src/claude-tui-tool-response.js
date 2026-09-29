@@ -158,26 +158,18 @@ function flattenArrayContent(content) {
  * originalFile, userModified }` — where `content` is the ENTIRE written
  * file, not a flattened model-facing summary?
  *
- * Checked via a POSITIVE discriminator (any of `filePath`/`structuredPatch`/
- * `type: 'create'|'update'`) rather than tool name: the shape, not the hook
- * payload's `tool_name` string, is what makes a string `content` field
- * dangerous to forward verbatim, and a positive check composes with rule 1a
- * (which never fires for this shape — Write's `content` is always a
- * string) without needing to know every alias a wrapped/renamed Write-like
- * tool might use.
- *
- * `filePath` alone would also match Read's structured result, but Read's
- * `filePath` is nested under `file.filePath`, never top-level — so a
- * top-level `filePath` is specific to Write here.
+ * Checked by shape rather than tool name: `type: 'create'|'update'` AND a
+ * string `content`. Both are required. `filePath` or `structuredPatch` alone
+ * is NOT enough, because Edit's result carries both (`{ filePath, oldString,
+ * newString, originalFile, structuredPatch, … }`) and has no `content`;
+ * matching it here would render "Wrote 0 bytes to <path>", a false
+ * statement, where Edit's unchanged fallback is at least accurate.
  *
  * @param {Record<string, unknown>} resp
  * @returns {boolean}
  */
 function isFileWriteResponseShape(resp) {
-  if (typeof resp.filePath === 'string') return true
-  if (Array.isArray(resp.structuredPatch)) return true
-  if (resp.type === 'create' || resp.type === 'update') return true
-  return false
+  return (resp.type === 'create' || resp.type === 'update') && typeof resp.content === 'string'
 }
 
 /**

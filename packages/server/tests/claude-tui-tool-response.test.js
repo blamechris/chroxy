@@ -293,6 +293,23 @@ describe('normalizeClaudeTuiToolResponse — Grep content-mode (rule 1b, not Wri
 // before the content-field rule, or the content-field rule before the
 // Write-shape check) went undetected. These fixtures pin the intended
 // priority so that regression is caught.
+describe('normalizeClaudeTuiToolResponse — Edit is not mistaken for Write', () => {
+  it('an Edit result (filePath + structuredPatch, no type/content) keeps its unchanged fallback and never claims a write', () => {
+    const fixture = {
+      filePath: '/tmp/edited.js',
+      oldString: 'const a = 1',
+      newString: 'const a = 2',
+      originalFile: 'const a = 1\n',
+      structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-const a = 1', '+const a = 2'] }],
+      userModified: false,
+      replaceAll: false,
+    }
+    const result = normalizeClaudeTuiToolResponse('Edit', fixture)
+    assert.ok(!/Wrote \d+ bytes/.test(result), 'an Edit must not be rendered as a write confirmation')
+    assert.equal(result, JSON.stringify(fixture))
+  })
+})
+
 describe('normalizeClaudeTuiToolResponse — rule-order regression (kills the surviving mutant)', () => {
   it('a Write-shaped object ALSO named "Bash" still renders the Write confirmation, not stdout/stderr (Write-shape check must run before the Bash branch)', () => {
     // Pathological but exactly what a naive reorder would get wrong: this
