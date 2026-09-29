@@ -2085,6 +2085,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const requestId = `summarize-${nextMessageId()}`;
     return new Promise((resolve, reject) => {
+      // #8086 (same class as evaluateDraft, found in the sweep for this issue):
+      // attempt the send BEFORE arming the watchdog / pending-map entry. A send
+      // that fails the OPEN→CLOSING TOCTOU (wsSend -> false, #6283) has no server
+      // round-trip coming, so waiting out the full 5-minute watchdog and then
+      // rejecting with a "timed out" message is wrong for something already known
+      // to have failed synchronously. A send that THROWS (a serialization bug)
+      // is not caught here: nothing has been armed yet, so the throw propagates
+      // and the Promise constructor rejects with it.
+      if (!wsSend(socket, { type: 'summarize_session', sessionId, requestId })) {
+        reject(new Error('Not connected — cannot summarize this session.'));
+        return;
+      }
       // Watchdog: a one-shot model turn is slow (much longer than the evaluator
       // round-trip), so allow 5min — but never leave the entry pending forever
       // if the server stalls or drops the reply while the socket stays open.
@@ -2094,7 +2106,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         reject(new Error('Summary request timed out after 5 minutes.'));
       }, 5 * 60_000);
       registerSummarizeRequest(requestId, { resolve, reject, timeoutId });
-      wsSend(socket, { type: 'summarize_session', sessionId, requestId });
     });
   },
 
@@ -4097,16 +4108,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         return;
       }
 
+      const payload: Record<string, unknown> = { type: 'evaluate_draft', draft, requestId };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      // #8086: attempt the send BEFORE arming the timeout / pending-map entry,
+      // mirroring setPermissionMode (#6321) / sendMcpServerOp (#8085). A send that
+      // fails the OPEN→CLOSING TOCTOU (wsSend -> false, #6283) has no server
+      // round-trip coming, so waiting out the full 60s timeout and then rejecting
+      // with the misleading "timed out" message is wrong for something already
+      // known to have failed synchronously — reject immediately instead. A send
+      // that THROWS (a serialization bug — #6283 keeps those loud) is not caught
+      // here: nothing has been armed yet at this point, so the throw simply
+      // propagates and the Promise constructor rejects with it — there is nothing
+      // to roll back.
+      if (!wsSend(socket, payload)) {
+        reject(new Error('Not connected to server'));
+        return;
+      }
+
       const timeoutId = window.setTimeout(() => {
         cancelEvaluatorRequest(requestId);
         reject(new Error('Evaluator request timed out after 60s'));
       }, 60_000);
 
       registerEvaluatorRequest(requestId, { resolve, reject, timeoutId });
-
-      const payload: Record<string, unknown> = { type: 'evaluate_draft', draft, requestId };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
     });
   },
 
@@ -4578,14 +4602,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // requestId rides set_model's passthrough schema; the server echoes it on
       // a MODEL_NOT_APPLIED error so the handler can revert the right request.
       const requestId = `set-model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      registerModelChangeRequest(requestId, { sessionId: activeSessionId, previousModel });
       const payload: Record<string, unknown> = { type: 'set_model', model, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
+      // #8086: gate the pending registration AND the optimistic update below on
+      // wsSend's return, mirroring setPermissionMode (#6321) / setNotificationPrefsCategory
+      // (#6310) — if wsSend returns false (the OPEN→CLOSING TOCTOU, #6283) there is no
+      // server round-trip coming, so a MODEL_NOT_APPLIED rejection can never arrive to
+      // revert the dropdown. Bailing here keeps a failed send from leaving a phantom
+      // activeModel the session never switched to, or an orphaned pending revert entry
+      // with no timeout backstop (registerModelChangeRequest's map only clears on a
+      // matching error, disconnect, or 16-entry FIFO eviction).
+      if (!wsSend(socket, payload)) return;
+      registerModelChangeRequest(requestId, { sessionId: activeSessionId, previousModel });
     }
     // Mirror the optimistic-update pattern from setPermissionMode (#3693)
     // so the controlled <select> doesn't briefly snap back to the prior
-    // value while waiting for the server's `model_changed` broadcast.
+    // value while waiting for the server's `model_changed` broadcast. With
+    // NO open socket we keep this offline behavior: still flip locally (no
+    // round-trip is pending, so nothing to register).
     if (activeSessionId && get().sessionStates[activeSessionId]) {
       updateActiveSession(() => ({ activeModel: model }));
     } else {
@@ -4696,10 +4730,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       : 'default';
     const requestId = `set-thinking-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (socket && socket.readyState === WebSocket.OPEN) {
-      registerThinkingLevelChangeRequest(requestId, { sessionId: activeSessionId, previousLevel });
       const payload: Record<string, unknown> = { type: 'set_thinking_level', level, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
+      // #8086: gate the pending registration AND the optimistic update below on
+      // wsSend's return (sibling of setModel above / setPermissionMode #6321) — a
+      // send that fails the OPEN→CLOSING TOCTOU (#6283) has no server round-trip
+      // coming, so a THINKING_LEVEL_NOT_APPLIED rejection never arrives to revert.
+      // Bail before arming anything so the dropdown doesn't show a phantom level.
+      if (!wsSend(socket, payload)) return;
+      registerThinkingLevelChangeRequest(requestId, { sessionId: activeSessionId, previousLevel });
     }
     // Optimistically update the active session's thinking level so the controlled
     // `<select>` doesn't snap back to the prior value before the server's
@@ -4812,13 +4851,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const requestId = `trust-grant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      // #3587: remember the request locally so the message-handler can
-      // pair the resulting INVALID_AUTHOR error (if any) with the
-      // original `skillName` and offer a "Try as <actualAuthor>" toast
-      // action. The wire error doesn't echo `skillName`, so client-side
-      // tracking is the only correlation path. Cleared on success ack
-      // (`skill_trust_grant_ok`) or on error processing.
-      registerTrustGrantRequest(requestId, { skillName, author });
       const payload: Record<string, unknown> = {
         type: 'skill_trust_grant',
         skillName,
@@ -4827,7 +4859,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         requestId,
       };
       if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
+      // #8086: gate BOTH the pending-request registration and the in-flight row
+      // tracking on wsSend's return, mirroring setPermissionMode (#6321) — this map
+      // has no timeout backstop at all (unlike evaluateDraft's 60s or the MCP op's
+      // 15s), so a failed send used to leave the SkillsPanel row "approving"
+      // permanently rather than for a bounded window. Bail before arming anything
+      // so a request that never reached the daemon never renders as in-flight.
+      if (!wsSend(socket, payload)) return;
+      // #3587: remember the request locally so the message-handler can
+      // pair the resulting INVALID_AUTHOR error (if any) with the
+      // original `skillName` and offer a "Try as <actualAuthor>" toast
+      // action. The wire error doesn't echo `skillName`, so client-side
+      // tracking is the only correlation path. Cleared on success ack
+      // (`skill_trust_grant_ok`) or on error processing.
+      registerTrustGrantRequest(requestId, { skillName, author });
       // Track the in-flight grant so the panel can disable the row.
       // Only track when the message has a session to bind to — otherwise
       // there's no SkillsPanel surface to show feedback on anyway.

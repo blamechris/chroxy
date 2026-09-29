@@ -13,7 +13,7 @@
  * UI asserting something the server never received.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import type { SessionState } from './types'
+import type { SessionState, EvaluatorResultPayload } from './types'
 
 vi.mock('./crypto', () => ({
   createKeyPair: vi.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
@@ -585,5 +585,244 @@ describe('#6321 — dashboard setPermissionMode does not leave a phantom mode on
     store.getState().setPermissionMode('plan')
     expect(sent).toEqual([expect.objectContaining({ type: 'set_permission_mode', mode: 'plan' })])
     expect(store.getState().sessionStates['sess-1']!.permissionMode).toBe('plan')
+  })
+})
+
+// #8086 — sibling of #7029/#6321: setModel / setThinkingLevel /
+// grantCommunitySkillTrust / evaluateDraft all armed a one-shot correlation
+// (a pending revert, a pending trust grant, a promise + timeout) and then
+// called wsSend WITHOUT checking its boolean return. A send that fails the
+// OPEN→CLOSING TOCTOU (#6283) then left the armed state dangling — a
+// phantom optimistic value, a stuck SkillsPanel row with no timeout at all,
+// or a promise waiting out a misleading timeout for something already known
+// to have failed. Each is fixed by gating the arm on wsSend's return,
+// mirroring setPermissionMode (#6321) above / setNotificationPrefsCategory
+// (#6310) / sendMcpServerOp (#8085).
+describe('#8086 — setModel does not leave a phantom activeModel or dangling revert on a closing socket', () => {
+  async function seed(socket: WebSocket) {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: {
+        'sess-1': { ...createEmptySessionState(), activeModel: 'claude-sonnet-4' } as unknown as SessionState,
+      },
+      activeModel: 'claude-sonnet-4',
+      socket,
+    } as never)
+    return useConnectionStore
+  }
+
+  it('no optimistic activeModel flip and no dangling pending revert when the send throws', async () => {
+    const socket = closingSocket()
+    const store = await seed(socket)
+    const { _testModelRevertPendingSize } = await import('./message-handler')
+    store.getState().setModel('claude-opus-4')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(store.getState().sessionStates['sess-1']!.activeModel).toBe('claude-sonnet-4')
+    expect(_testModelRevertPendingSize()).toBe(0)
+  })
+
+  it('applies the optimistic flip and arms the revert on a healthy send', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    const { _testModelRevertPendingSize } = await import('./message-handler')
+    store.getState().setModel('claude-opus-4')
+    expect(sent).toEqual([expect.objectContaining({ type: 'set_model', model: 'claude-opus-4' })])
+    expect(store.getState().sessionStates['sess-1']!.activeModel).toBe('claude-opus-4')
+    expect(_testModelRevertPendingSize()).toBe(1)
+  })
+
+  it('a send that THROWS (serialization bug, not the TOCTOU) never arms the revert either', async () => {
+    // JSON.stringify happens OUTSIDE wsSend's try (#6283 keeps a real
+    // serialization bug loud rather than swallowing it as a transient send
+    // failure). Because setModel now checks-then-arms (wsSend before
+    // registerModelChangeRequest), the throw happens before anything is
+    // armed — nothing to roll back, and socket.send is never reached.
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    const { _testModelRevertPendingSize } = await import('./message-handler')
+    const setModelUnsafe = store.getState().setModel as unknown as (model: unknown) => void
+    expect(() => setModelUnsafe(BigInt(1))).toThrow(TypeError)
+    expect(sent).toHaveLength(0)
+    expect(_testModelRevertPendingSize()).toBe(0)
+    expect(store.getState().sessionStates['sess-1']!.activeModel).toBe('claude-sonnet-4')
+  })
+
+  it('still flips locally with no live socket (offline behavior unchanged)', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: {
+        'sess-1': { ...createEmptySessionState(), activeModel: 'claude-sonnet-4' } as unknown as SessionState,
+      },
+      activeModel: 'claude-sonnet-4',
+      socket: null,
+    } as never)
+    useConnectionStore.getState().setModel('claude-opus-4')
+    expect(useConnectionStore.getState().sessionStates['sess-1']!.activeModel).toBe('claude-opus-4')
+  })
+})
+
+describe('#8086 — setThinkingLevel does not leave a phantom level or dangling revert on a closing socket', () => {
+  async function seed(socket: WebSocket) {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: {
+        'sess-1': { ...createEmptySessionState(), thinkingLevel: 'default' } as unknown as SessionState,
+      },
+      socket,
+    } as never)
+    return useConnectionStore
+  }
+
+  it('no optimistic thinkingLevel flip and no dangling pending revert when the send throws', async () => {
+    const socket = closingSocket()
+    const store = await seed(socket)
+    const { _testThinkingLevelRevertPendingSize } = await import('./message-handler')
+    store.getState().setThinkingLevel('high')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(store.getState().sessionStates['sess-1']!.thinkingLevel).toBe('default')
+    expect(_testThinkingLevelRevertPendingSize()).toBe(0)
+  })
+
+  it('applies the optimistic flip and arms the revert on a healthy send', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    const { _testThinkingLevelRevertPendingSize } = await import('./message-handler')
+    store.getState().setThinkingLevel('high')
+    expect(sent).toEqual([expect.objectContaining({ type: 'set_thinking_level', level: 'high' })])
+    expect(store.getState().sessionStates['sess-1']!.thinkingLevel).toBe('high')
+    expect(_testThinkingLevelRevertPendingSize()).toBe(1)
+  })
+})
+
+describe('#8086 — grantCommunitySkillTrust never renders a row in-flight for a send that never went out', () => {
+  async function seed(socket: WebSocket) {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+    return useConnectionStore
+  }
+
+  it('no pending-trust-grant registration and no pendingTrustGrants row when the send throws', async () => {
+    const socket = closingSocket()
+    const store = await seed(socket)
+    const { _testTrustGrantPendingSize } = await import('./message-handler')
+    store.getState().grantCommunitySkillTrust('my-skill', 'someone')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(_testTrustGrantPendingSize()).toBe(0)
+    expect(store.getState().sessionStates['sess-1']!.pendingTrustGrants ?? []).toHaveLength(0)
+  })
+
+  it('registers the pending grant and renders the row on a healthy send', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    const { _testTrustGrantPendingSize } = await import('./message-handler')
+    store.getState().grantCommunitySkillTrust('my-skill', 'someone')
+    expect(sent).toEqual([expect.objectContaining({ type: 'skill_trust_grant', skillName: 'my-skill', author: 'someone' })])
+    expect(_testTrustGrantPendingSize()).toBe(1)
+    expect(store.getState().sessionStates['sess-1']!.pendingTrustGrants).toHaveLength(1)
+  })
+})
+
+describe('#8086 — evaluateDraft rejects immediately instead of waiting out the 60s timeout', () => {
+  it('rejects synchronously with no pending entry and no timer armed when the send throws', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore } = await import('./connection')
+    const { _testEvaluatorPendingSize } = await import('./message-handler')
+    const socket = closingSocket()
+    useConnectionStore.setState({ activeSessionId: 'sess-1', socket } as never)
+
+    const rejection = useConnectionStore.getState().evaluateDraft('some draft text')
+    await expect(rejection).rejects.toThrow('Not connected to server')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(_testEvaluatorPendingSize()).toBe(0)
+
+    // Exactly-once: nothing was armed, so advancing past the 60s window must
+    // not throw an unhandled rejection or otherwise touch a second listener.
+    const rejectSpy = vi.fn()
+    rejection.catch(rejectSpy)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(rejectSpy).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('a send that THROWS (serialization bug, not the TOCTOU) rejects via the Promise constructor, no dangling entry', async () => {
+    // JSON.stringify happens OUTSIDE wsSend's try (#6283 keeps a real
+    // serialization bug loud). evaluateDraft now sends BEFORE arming the
+    // timeout/pending-map entry, so nothing has been armed when this throws —
+    // the Promise constructor catches the synchronous throw and rejects with
+    // it automatically; socket.send is never reached.
+    const { useConnectionStore } = await import('./connection')
+    const { _testEvaluatorPendingSize } = await import('./message-handler')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({ activeSessionId: 'sess-1', socket } as never)
+
+    const evaluateDraftUnsafe = useConnectionStore.getState().evaluateDraft as unknown as (draft: unknown) => Promise<EvaluatorResultPayload>
+    await expect(evaluateDraftUnsafe(BigInt(1))).rejects.toThrow(TypeError)
+    expect(sent).toHaveLength(0)
+    expect(_testEvaluatorPendingSize()).toBe(0)
+  })
+
+  it('a healthy send still arms the pending request and does not resolve/reject synchronously', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const { _testEvaluatorPendingSize } = await import('./message-handler')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({ activeSessionId: 'sess-1', socket } as never)
+
+    let settled = false
+    const promise = useConnectionStore.getState().evaluateDraft('some draft text')
+    promise.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(sent).toHaveLength(1)
+    expect(settled).toBe(false)
+    expect(_testEvaluatorPendingSize()).toBe(1)
+  })
+})
+
+describe('#8086 — summarizeSession (extra site found in the #8086 sweep) rejects immediately instead of waiting out the 5min timeout', () => {
+  it('rejects synchronously with no pending entry when the send throws', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore } = await import('./connection')
+    const { _testSummarizePendingSize } = await import('./summarizeRequests')
+    const socket = closingSocket()
+    useConnectionStore.setState({ activeSessionId: 'sess-1', socket } as never)
+
+    const rejection = useConnectionStore.getState().summarizeSession('sess-1')
+    await expect(rejection).rejects.toThrow()
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(_testSummarizePendingSize()).toBe(0)
+
+    const rejectSpy = vi.fn()
+    rejection.catch(rejectSpy)
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    expect(rejectSpy).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
+  it('a healthy send still arms the pending request and does not resolve/reject synchronously', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const { _testSummarizePendingSize } = await import('./summarizeRequests')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({ activeSessionId: 'sess-1', socket } as never)
+
+    let settled = false
+    const promise = useConnectionStore.getState().summarizeSession('sess-1')
+    promise.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(sent).toHaveLength(1)
+    expect(settled).toBe(false)
+    expect(_testSummarizePendingSize()).toBe(1)
   })
 })
