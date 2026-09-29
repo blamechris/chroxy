@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string (`SPAWN_APIS` contains that pair, plus `spawn`/`spawnSync`). Fixed
   by requiring a field-boundary (`#`, or end-of-string) immediately after an
   unterminated site prefix.
+- **The sidebar now shows the provider badge for every session, the default
+  provider included (#7334).** `session.provider && session.provider !==
+  DEFAULT_PROVIDER` suppressed the badge whenever a session ran the default
+  provider, so a `claude-tui` row sat unbadged next to a `claude-cli` row's
+  `CLI` badge — indistinguishable from a session whose provider was simply
+  unknown. The session tab (`SessionBar`) never suppressed this way; the
+  sidebar now matches it and renders the badge unconditionally whenever
+  `session.provider` is present, with the label routed through the same
+  shared `getProviderInfo` helper `SessionBar` uses so the two surfaces
+  cannot disagree again. Added a dedicated `.sidebar-provider-badge` CSS
+  rule (previously unstyled) so the badge doesn't get squeezed by the row's
+  flex layout; it is not interactive, so the 44px tap-target rule doesn't
+  apply.
 - **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
   longer reverts itself when its first persist fails (#8098).**
   `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's

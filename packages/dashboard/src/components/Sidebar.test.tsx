@@ -7,6 +7,8 @@ import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Sidebar, overlayLiveUsage, type SidebarProps, type RepoNode } from './Sidebar'
 import type { ConnectedClient } from '../store/types'
 import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
+import { getProviderInfo } from '@chroxy/store-core'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 
 // #7793 — mutable so tests can arm live `sessionStates[id].cumulativeUsage`
 // values (the session_usage-patched slice) independently of the `sessions`
@@ -631,6 +633,67 @@ describe('Sidebar', () => {
       renderSidebar({ repos, activeSessionId: 's1' })
       expect(screen.queryByTestId('sidebar-stdin-disabled-s1')).not.toBeInTheDocument()
       expect(screen.queryByTestId('sidebar-stdin-disabled-s2')).not.toBeInTheDocument()
+    })
+  })
+
+  // #7334 — the sidebar used to suppress the provider badge for the DEFAULT
+  // provider (`session.provider !== DEFAULT_PROVIDER`), so a claude-tui
+  // session sat with nothing beside it while a claude-cli session next to it
+  // showed `CLI` — ambiguous in a mixed-provider setup. The tab (SessionBar)
+  // never suppressed this way. Fixed by (a) dropping the DEFAULT_PROVIDER
+  // gate so every session with a known provider shows a badge, and (b)
+  // routing the label through the same `getProviderInfo` helper SessionBar
+  // uses (via `shortenProvider`), so the two surfaces cannot drift apart.
+  describe('provider badge (#7334)', () => {
+    function repoWithProvider(provider: string | undefined): RepoNode[] {
+      return [
+        {
+          path: '/repo',
+          name: 'repo',
+          source: 'auto',
+          exists: true,
+          activeSessions: [{ sessionId: 's1', name: 'Session', isBusy: false, provider }],
+          resumableSessions: [],
+        },
+      ]
+    }
+
+    it('shows the badge for a session on the DEFAULT provider (RED on the old suppression)', () => {
+      renderSidebar({ repos: repoWithProvider(DEFAULT_PROVIDER), activeSessionId: 's1' })
+      const badge = screen.getByTestId('session-item-s1').querySelector('.sidebar-provider-badge')
+      expect(badge).toBeInTheDocument()
+      expect(badge).toHaveTextContent(getProviderInfo(DEFAULT_PROVIDER).short)
+    })
+
+    it('still shows the badge for a non-default provider', () => {
+      renderSidebar({ repos: repoWithProvider('claude-cli'), activeSessionId: 's1' })
+      const badge = screen.getByTestId('session-item-s1').querySelector('.sidebar-provider-badge')
+      expect(badge).toBeInTheDocument()
+      expect(badge).toHaveTextContent('CLI')
+    })
+
+    it.each(['claude-cli', 'claude-sdk', 'claude-tui', 'docker-byok', 'codex', 'gemini'])(
+      'label for %s matches getProviderInfo(...).short — the same derivation SessionBar uses',
+      provider => {
+        renderSidebar({ repos: repoWithProvider(provider), activeSessionId: 's1' })
+        const badge = screen.getByTestId('session-item-s1').querySelector('.sidebar-provider-badge')
+        expect(badge).toHaveTextContent(getProviderInfo(provider).short)
+      },
+    )
+
+    it('renders no badge when the session has no provider', () => {
+      renderSidebar({ repos: repoWithProvider(undefined), activeSessionId: 's1' })
+      const badge = screen.getByTestId('session-item-s1').querySelector('.sidebar-provider-badge')
+      expect(badge).not.toBeInTheDocument()
+    })
+
+    it('falls back sensibly for an unknown provider — no empty badge, no "undefined" text', () => {
+      renderSidebar({ repos: repoWithProvider('some-unheard-of-provider'), activeSessionId: 's1' })
+      const badge = screen.getByTestId('session-item-s1').querySelector('.sidebar-provider-badge')
+      expect(badge).toBeInTheDocument()
+      expect(badge?.textContent).toBeTruthy()
+      expect(badge?.textContent).not.toMatch(/undefined/i)
+      expect(badge).toHaveTextContent(getProviderInfo('some-unheard-of-provider').short)
     })
   })
 })

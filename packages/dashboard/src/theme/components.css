@@ -1108,6 +1108,40 @@ a.dev-preview-chip__link:focus-visible {
   border: 1px solid var(--accent-green-border, rgba(34, 197, 94, 0.2));
 }
 
+/* #7334 — provider badge on the sidebar session row. Previously rendered
+   only for non-default providers (and, even then, with no rule here — an
+   unstyled inline span that could shrink/clip inside the row's flex layout
+   instead of truncating cleanly). Now shown for every session, so it needs
+   to actually fit: `flex-shrink: 0` keeps it from being squeezed (the
+   session name's own `flex: 1` + ellipsis absorbs the row's width pressure
+   instead), and `white-space: nowrap` keeps multi-word labels like "Docker
+   BYOK" on one line. Not a tap target (no onClick/role) — the 44px minimum
+   doesn't apply. Color-coded by `data-provider` to match `.tab-provider` on
+   the session tab, so the same provider reads the same way on both
+   surfaces. */
+.sidebar-provider-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  padding: 0 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+  cursor: help;
+}
+.sidebar-provider-badge[data-provider='sdk'] {
+  color: var(--accent-orange);
+  background: color-mix(in srgb, var(--accent-orange) 15%, transparent);
+}
+.sidebar-provider-badge[data-provider='cli'] {
+  color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+}
+.sidebar-provider-badge[data-provider='other'] {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
 /* #3567: stdin-forwarding-disabled badge on the sidebar session row. */
 .sidebar-stdin-disabled-badge {
   flex-shrink: 0;
