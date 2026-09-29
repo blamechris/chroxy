@@ -12,6 +12,7 @@ import { registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
 import { ServerSessionPrStatusSchema } from '@chroxy/protocol'
 import { SessionCiWatcher } from '../src/session-ci-watcher.js'
+import { markIndeterminate } from '../src/session-pr-status.js'
 
 /**
  * Tests for the `session_pr_status_request` handler (#7344).
@@ -90,7 +91,14 @@ describe('#7427 — the reply arms the CI watcher', () => {
     // state, not a wire field: the reply keeps the pre-#7435 shape byte-for-
     // byte, and the watcher receives the snapshot verbatim.
     const observed = []
-    const forkBailout = { ...SAMPLE, pr: null, checks: null, merge: null, reason: null, indeterminate: true }
+    // #7442: built via markIndeterminate() rather than a raw `indeterminate:
+    // true` literal — a plain object-literal property is always enumerable
+    // regardless of what the key is, so a hand-rolled fixture would prove
+    // nothing about the STRUCTURAL guarantee this test exists to pin. Going
+    // through the real accessor is what makes "wire reply carries no key"
+    // demonstrate the definition in session-pr-status.js rather than an
+    // incidental strip.
+    const forkBailout = markIndeterminate({ ...SAMPLE, pr: null, checks: null, merge: null, reason: null })
     const ctx = makeCtx({
       surveySessionPrStatus: createSpy(async () => forkBailout),
       sessionCiWatcher: { observe: (sessionId, snap) => { observed.push(snap); return 'undeterminable' } },
@@ -546,7 +554,8 @@ describe('#7436 — per-session survey throttle', () => {
     // on the wire it is byte-identical to an authoritative "no open PR" (#7435).
     // Replaying it therefore shows the client exactly what a fresh survey would
     // have shown; suppressing it would degrade a usable display for nothing.
-    const forkBailout = { ...SAMPLE, pr: null, checks: null, merge: null, reason: null, indeterminate: true }
+    // #7442: markIndeterminate(), not a raw literal — see the sibling test above.
+    const forkBailout = markIndeterminate({ ...SAMPLE, pr: null, checks: null, merge: null, reason: null })
     const { ctx } = throttleCtx({ surveySessionPrStatus: createSpy(async () => forkBailout) })
 
     await handler(ws, { id: 'c1' }, { ...req, requestId: 'r1' }, ctx)
