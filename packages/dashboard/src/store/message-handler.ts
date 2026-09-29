@@ -645,6 +645,63 @@ export function _testMcpServerOpPendingSize(): number {
   return _pendingMcpServerOps.size;
 }
 
+/**
+ * Arm + send an `add_mcp_server` / `remove_mcp_server` request in one step
+ * (#7029). Both hand-written call sites in connection.ts used to call
+ * `armMcpServerOpCallback` and then `wsSend` without checking the latter's
+ * return — so a send that failed the OPEN→CLOSING TOCTOU (#6283, `wsSend`
+ * returns `false` when `socket.send` throws) left the one-shot armed for the
+ * full `MCP_SERVER_OP_TIMEOUT_MS`, even though the daemon was never going to
+ * see the request and the caller already knows it failed.
+ *
+ * Arms first — exactly what `armMcpServerOpCallback` did before, including
+ * its FIFO eviction of the oldest entry when the map is at cap — then
+ * attempts the send. When `wsSend` returns `false`, the JUST-armed entry is
+ * resolved immediately through `_resolvePendingMcpServerOp`: the same
+ * exactly-once path a broadcast or the timeout would use, so the timer is
+ * cleared and the map entry deleted in the same step. No dangling pending
+ * op, and the 15s timer can never fire a second callback afterwards.
+ *
+ * If `wsSend` THROWS instead (a serialization/encryption bug — #6283 keeps
+ * those loud), the armed entry is resolved with `SEND_FAILED` through the
+ * same path and the error is re-thrown, so a throw never leaves an op armed.
+ *
+ * A future sender should use this helper rather than hand-rolling
+ * `armMcpServerOpCallback` + `wsSend` again.
+ */
+export function sendMcpServerOp(
+  socket: WebSocket,
+  requestId: string,
+  entry: { op: 'add' | 'remove'; name: string; sessionId: string | null },
+  payload: Record<string, unknown>,
+  callback: (result: McpServerOpResult) => void,
+): void {
+  armMcpServerOpCallback(requestId, entry, callback);
+  let sent: boolean;
+  try {
+    sent = wsSend(socket, payload);
+  } catch (err) {
+    // wsSend deliberately lets a JSON/crypto serialization bug THROW rather
+    // than return false (#6283) — that is a real defect, not a transient send
+    // failure. The op is already armed, so resolve it first (the caller's
+    // spinner clears and no timer outlives a request that never went out),
+    // then re-throw so the bug stays loud.
+    _resolvePendingMcpServerOp(requestId, {
+      ok: false,
+      code: 'SEND_FAILED',
+      message: 'The request could not be sent to the daemon.',
+    });
+    throw err;
+  }
+  if (!sent) {
+    _resolvePendingMcpServerOp(requestId, {
+      ok: false,
+      code: 'NOT_CONNECTED',
+      message: 'Not connected to the daemon.',
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // E2E encryption state — reset on every new connection
 // ---------------------------------------------------------------------------
