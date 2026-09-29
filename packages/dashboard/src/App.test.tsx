@@ -3990,3 +3990,59 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
   })
 })
+
+describe('#7328 — worktree-aware session tab cwd badge', () => {
+  it('threads session_list.repoCwd through to the SessionBar tab-cwd badge', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Worktree session',
+          cwd: '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+          repoCwd: '/Users/blamechris/Projects/chroxy',
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: true,
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    const { container } = render(<App />)
+    const badge = container.querySelector('.tab-cwd')
+    expect(badge, 'tab-cwd badge must render').toBeTruthy()
+    expect(badge!.textContent).toBe('chroxy')
+    expect(badge!.textContent).not.toContain('34914672f8578ecdf71accf8f8aec47e')
+  })
+
+  it('leaves a plain (non-worktree) session tab-cwd badge showing the cwd basename', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Plain session',
+          cwd: '/home/user/projects/api',
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: false,
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    const { container } = render(<App />)
+    expect(container.querySelector('.tab-cwd')?.textContent).toBe('api')
+  })
+})

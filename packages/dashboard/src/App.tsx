@@ -1586,6 +1586,10 @@ export function App() {
         isBusy: s.isBusy,
         isActive: s.sessionId === activeSessionId,
         cwd: s.cwd,
+        // #7328: the original repo dir for a worktree-isolated session, so
+        // the tab-cwd badge can show the repo name instead of the opaque
+        // `~/.chroxy/worktrees/<hex>` basename.
+        repoCwd: s.repoCwd,
         model: s.model ?? undefined,
         provider: s.provider,
         status: getSessionVisualStatus(s),
