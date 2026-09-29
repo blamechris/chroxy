@@ -858,6 +858,42 @@ describe('EventNormalizer', () => {
       const msg = result.messages[0].msg
       assert.equal(msg.images, undefined)
     })
+
+    // #7346/#8135 (review) — this normalizer is the LIVE-broadcast choke
+    // point; before this fix `data.input` (attached by tool-result.js's
+    // emitToolResults, already sanitized by base-session.js's
+    // _recordToolInput) was silently dropped here, so store-core's
+    // handleToolResult toolInput fold and the ServerToolResultSchema
+    // field were dead on the live wire — only the persisted-history
+    // replay path (which forwards tool_start raw) actually delivered it.
+    it('forwards input when present (the #7346 finalized-input attach)', () => {
+      const data = { toolUseId: 'tu1', result: 'ok', truncated: false, input: { command: 'ls -la' } }
+      const msg = normalizer.normalize('tool_result', data, makeCtx()).messages[0].msg
+      assert.deepEqual(msg.input, { command: 'ls -la' })
+    })
+
+    it('omits input when not present (BYOK today, and any tool whose input was never tracked)', () => {
+      const data = { toolUseId: 'tu1', result: 'ok', truncated: false }
+      const msg = normalizer.normalize('tool_result', data, makeCtx()).messages[0].msg
+      assert.equal('input' in msg, false)
+    })
+
+    it('forwards a legally falsy input (null) — presence, not truthiness, gates the forward', () => {
+      const data = { toolUseId: 'tu1', result: 'ok', truncated: false, input: null }
+      const msg = normalizer.normalize('tool_result', data, makeCtx()).messages[0].msg
+      assert.equal('input' in msg, true)
+      assert.equal(msg.input, null)
+    })
+
+    it('forwards the already-redacted shape verbatim (does not re-sanitize or otherwise mutate it)', () => {
+      // The normalizer trusts its input is already safe (sanitized at
+      // capture, base-session.js's _recordToolInput) — it is a pure
+      // field-forwarding choke point, not a second sanitization layer.
+      const redacted = { command: 'export TOKEN=[REDACTED]' }
+      const data = { toolUseId: 'tu1', result: 'ok', truncated: false, input: redacted }
+      const msg = normalizer.normalize('tool_result', data, makeCtx()).messages[0].msg
+      assert.deepEqual(msg.input, redacted)
+    })
   })
 
   // ---- EVENT_MAP: agent_spawned / agent_completed ----

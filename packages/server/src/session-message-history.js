@@ -370,6 +370,33 @@ export class SessionMessageHistory extends EventEmitter {
         break
 
       case 'tool_result':
+        // #7346: backfill the matching tool_start entry's `input` when the
+        // caller (tool-result.js's emitToolResults, via
+        // base-session.js's `_getTrackedToolInput`) attached the
+        // finalized input it captured at content_block_stop (CliSession)
+        // / from the full assistant block (SdkSession). tool_start is
+        // write-once (`_pushHistory` only ever appends), so without this
+        // the persisted entry stays `input: null` forever — the exact
+        // root cause of the "(no input)" placeholder surviving a session
+        // switch: a forceFull replay faithfully rebuilds from history,
+        // and history never had the input to rebuild WITH. Search
+        // backward (most turns have only a handful of recent entries,
+        // and the match is almost always near the end) rather than
+        // indexing by toolUseId, since tool_start entries are rare
+        // enough that a second Map isn't worth the bookkeeping.
+        //
+        // BYOK never sets `data.input` (its `_getTrackedToolInput` is
+        // never even reached — see tool-result.js), so this loop is a
+        // no-op for it and its tool_start entries are unchanged.
+        if (data.input !== undefined) {
+          for (let i = history.length - 1; i >= 0; i--) {
+            const entry = history[i]
+            if (entry && entry.type === 'tool_start' && entry.toolUseId === data.toolUseId) {
+              entry.input = data.input
+              break
+            }
+          }
+        }
         this._pushHistory(history, {
           type: 'tool_result',
           toolUseId: data.toolUseId,
@@ -426,6 +453,18 @@ export class SessionMessageHistory extends EventEmitter {
   /**
    * Shallow-clone and truncate a history entry for serialization.
    * Content/input fields >50KB are truncated to avoid bloated state files.
+   *
+   * #8136 (review on #7346): `input` on a `tool_start` entry used to be
+   * `null` for every provider, so the string-only check below was dead
+   * code for it. Since #7346's backfill, `input` is a PARSED OBJECT (the
+   * tool's structured arguments, e.g. `{ file_path, content }` for
+   * `Write`) — measured here by its SERIALIZED size, matching the string
+   * branch's semantics rather than leaving objects uncapped entirely.
+   * (In practice `base-session.js`'s `_recordToolInput` already runs
+   * every captured input through `sanitizeToolInput`'s ~10KB broadcast
+   * cap before it ever reaches history, so this branch is defense in
+   * depth — a second, independent bound at the persistence boundary — not
+   * the only thing standing between a huge input and the state file.)
    * @param {object} entry
    * @returns {object}
    */
@@ -440,6 +479,23 @@ export class SessionMessageHistory extends EventEmitter {
     }
     if (typeof clone.input === 'string' && clone.input.length > MAX) {
       clone.input = clone.input.slice(0, MAX) + '[truncated]'
+    } else if (clone.input && typeof clone.input === 'object') {
+      // #8136: object-shaped input (tool_start, since #7346's backfill) —
+      // the string branch above never fires for it. Serialize to measure
+      // its real on-disk size; a cyclic/unserializable value (shouldn't
+      // happen for a JSON-sourced tool input, but defensive) falls back
+      // to a safe marker rather than throwing out of a persist path.
+      let serialized
+      try {
+        serialized = JSON.stringify(clone.input)
+      } catch {
+        serialized = null
+      }
+      if (typeof serialized !== 'string') {
+        clone.input = { _truncated: true, summary: '[unserializable]' }
+      } else if (serialized.length > MAX) {
+        clone.input = { _truncated: true, summary: serialized.slice(0, MAX) + '... [truncated]' }
+      }
     }
     return clone
   }

@@ -351,6 +351,103 @@ describe('SessionMessageHistory', () => {
     })
   })
 
+  // #7346 — the persisted/rehydration half of the fix. tool_start is
+  // write-once (`_pushHistory` only ever appends), so a `tool_start` that
+  // fired with `input: null` (both cli-session.js and sdk-session.js emit
+  // null there — the wire protocol never carries the real value that
+  // early) stayed null forever, and a session-switch replay faithfully
+  // rebuilt from that null. This backfills the matching `tool_start` entry
+  // when `tool_result` arrives carrying the finalized input (attached by
+  // tool-result.js's emitToolResults via base-session.js's
+  // _getTrackedToolInput).
+  describe('tool_result backfills the matching tool_start entry input (#7346)', () => {
+    it('sets input on the matching tool_start entry when tool_result carries one', () => {
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm1', toolUseId: 'tu-1', tool: 'Bash', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-1', result: 'ok', truncated: false, input: { command: 'ls -la' },
+      })
+
+      const [toolStart, toolResult] = history.getHistory('s1')
+      assert.equal(toolStart.type, 'tool_start')
+      assert.deepEqual(toolStart.input, { command: 'ls -la' })
+      // The tool_result entry itself is unchanged — only tool_start is
+      // the backfill target (the wire event's own shape already carries
+      // it separately for the live merge; history doesn't need it twice).
+      assert.equal(toolResult.type, 'tool_result')
+    })
+
+    it('is a no-op when tool_result carries no input field (BYOK today: unchanged behavior)', () => {
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm1', toolUseId: 'tu-1', tool: 'Bash', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-1', result: 'ok', truncated: false,
+      })
+
+      const toolStart = history.getHistory('s1')[0]
+      assert.equal(toolStart.input, null, 'tool_start keeps its original null input')
+    })
+
+    it('does not touch an unrelated tool_start with a different toolUseId', () => {
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm1', toolUseId: 'tu-other', tool: 'Read', input: null,
+      })
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm2', toolUseId: 'tu-1', tool: 'Bash', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-1', result: 'ok', truncated: false, input: { command: 'ls' },
+      })
+
+      const [first, second] = history.getHistory('s1')
+      assert.equal(first.toolUseId, 'tu-other')
+      assert.equal(first.input, null, 'unrelated entry left alone')
+      assert.deepEqual(second.input, { command: 'ls' })
+    })
+
+    it('backfills the MOST RECENT matching tool_start when the same toolUseId appears twice (defensive)', () => {
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm1', toolUseId: 'tu-dup', tool: 'Bash', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-dup', result: 'first', truncated: false,
+      })
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm2', toolUseId: 'tu-dup', tool: 'Bash', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-dup', result: 'second', truncated: false, input: { command: 'ls' },
+      })
+
+      const entries = history.getHistory('s1')
+      const toolStarts = entries.filter(e => e.type === 'tool_start')
+      assert.equal(toolStarts.length, 2)
+      assert.equal(toolStarts[0].input, null, 'the earlier tool_start is untouched')
+      assert.deepEqual(toolStarts[1].input, { command: 'ls' }, 'the later (matching) one is backfilled')
+    })
+
+    it('does not crash when no tool_start entry exists at all (ring buffer already evicted it)', () => {
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-gone', result: 'ok', truncated: false, input: { command: 'ls' },
+      })
+      const entry = history.getHistory('s1')[0]
+      assert.equal(entry.type, 'tool_result')
+    })
+
+    it('backfills a legally falsy input (null) — presence in the tool_result payload is what gates the write, not truthiness', () => {
+      history.recordHistory('s1', 'tool_start', {
+        messageId: 'm1', toolUseId: 'tu-1', tool: 'SomeTool', input: null,
+      })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-1', result: 'ok', truncated: false, input: {},
+      })
+      const toolStart = history.getHistory('s1')[0]
+      assert.deepEqual(toolStart.input, {})
+    })
+  })
+
   describe('truncateEntry', () => {
     it('does not truncate entries under 50KB', () => {
       const entry = { type: 'message', content: 'short', input: 'also short' }
@@ -375,6 +472,57 @@ describe('SessionMessageHistory', () => {
       const result = history.truncateEntry(entry)
       assert.ok(result.input.endsWith('[truncated]'))
       assert.equal(entry.input.length, 100 * 1024)
+    })
+
+    // #8136 (review on #7346) — Critical: before this fix, the checks
+    // above were gated on `typeof === 'string'`, so an OBJECT-shaped
+    // `tool_start.input` (the shape #7346's backfill produces —
+    // `_captureFinalizedToolInput` / `_handleToolUseBlock` now attach a
+    // parsed object, e.g. `{ file_path, content }` for `Write`) never
+    // hit either branch and persisted to `session-state.json` uncapped.
+    describe('object-shaped input (#8136)', () => {
+      it('caps a 120KB Write-shaped object input, measured by serialized size', () => {
+        const entry = {
+          type: 'tool_start',
+          toolUseId: 'tu-1',
+          tool: 'Write',
+          input: { file_path: '/tmp/big.txt', content: 'x'.repeat(120 * 1024) },
+        }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input._truncated, true)
+        assert.ok(typeof result.input.summary === 'string')
+        assert.ok(result.input.summary.endsWith('... [truncated]'))
+        assert.ok(JSON.stringify(result).length < 60 * 1024, 'must be capped near the 50KB budget, not the raw ~123KB')
+        // Original entry is unchanged (shallow clone contract, same as
+        // the string branches above).
+        assert.equal(entry.input.content.length, 120 * 1024)
+      })
+
+      it('does not touch a small object-shaped input', () => {
+        const entry = {
+          type: 'tool_start',
+          toolUseId: 'tu-1',
+          tool: 'Write',
+          input: { file_path: '/tmp/small.txt', content: 'hello' },
+        }
+        const result = history.truncateEntry(entry)
+        assert.deepEqual(result.input, { file_path: '/tmp/small.txt', content: 'hello' })
+      })
+
+      it('leaves a null input (genuinely no input) untouched', () => {
+        const entry = { type: 'tool_start', toolUseId: 'tu-1', tool: 'Bash', input: null }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input, null)
+      })
+
+      it('falls back to a safe marker for an unserializable (cyclic) input rather than throwing', () => {
+        const cyclic = { file_path: '/tmp/x' }
+        cyclic.self = cyclic
+        const entry = { type: 'tool_start', toolUseId: 'tu-1', tool: 'SomeTool', input: cyclic }
+        const result = history.truncateEntry(entry)
+        assert.equal(result.input._truncated, true)
+        assert.equal(result.input.summary, '[unserializable]')
+      })
     })
   })
 

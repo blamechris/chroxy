@@ -265,6 +265,87 @@ describe('emitToolResults', () => {
     assert.equal(results[0].images[MAX_TOOL_IMAGES_PER_RESULT - 1].data, `img${MAX_TOOL_IMAGES_PER_RESULT - 1}=`)
   })
 
+  // #7346 — the finalized-input backfill. `emitToolResults` is shared by
+  // CliSession and SdkSession; both stash the finalized input via
+  // base-session.js's `_recordToolInput` before the tool_result fires, and
+  // this reads it back via `_getTrackedToolInput`.
+  describe('finalized tool input attachment (#7346)', () => {
+    function emitterWithTrackedInput(inputByToolUseId) {
+      const emitter = new EventEmitter()
+      emitter._getTrackedToolInput = (toolUseId) => inputByToolUseId[toolUseId]
+      return emitter
+    }
+
+    it('attaches the tracked input onto the tool_result event', () => {
+      const emitter = emitterWithTrackedInput({ tu_1: { command: 'ls -la' } })
+      const results = []
+      emitter.on('tool_result', r => results.push(r))
+
+      emitToolResults([
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'file list' },
+      ], emitter)
+
+      assert.equal(results.length, 1)
+      assert.deepEqual(results[0].input, { command: 'ls -la' })
+    })
+
+    it('omits input when _getTrackedToolInput returns undefined (nothing recorded)', () => {
+      const emitter = emitterWithTrackedInput({})
+      const results = []
+      emitter.on('tool_result', r => results.push(r))
+
+      emitToolResults([
+        { type: 'tool_result', tool_use_id: 'tu_missing', content: 'ok' },
+      ], emitter)
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    it('omits input when the emitter exposes no _getTrackedToolInput at all (BYOK / plain EventEmitter — no regression)', () => {
+      // This is the exact shape the pre-existing tests in this file use —
+      // pin that adding the new attach step does not require every
+      // caller to implement the getter.
+      const emitter = new EventEmitter()
+      const results = []
+      emitter.on('tool_result', r => results.push(r))
+
+      emitToolResults([
+        { type: 'tool_result', tool_use_id: 'tu_byok', content: 'ok' },
+      ], emitter)
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    it('forwards a recorded null input (a tool genuinely called with no arguments), not just truthy values', () => {
+      const emitter = emitterWithTrackedInput({ tu_1: null })
+      const results = []
+      emitter.on('tool_result', r => results.push(r))
+
+      emitToolResults([
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' },
+      ], emitter)
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], true)
+      assert.equal(results[0].input, null)
+    })
+
+    it('still calls _trackToolResult after attaching input (existing sweep-guard contract unchanged)', () => {
+      const emitter = emitterWithTrackedInput({ tu_1: { a: 1 } })
+      const tracked = []
+      emitter._trackToolResult = (id) => tracked.push(id)
+      emitter.on('tool_result', () => {})
+
+      emitToolResults([
+        { type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' },
+      ], emitter)
+
+      assert.deepEqual(tracked, ['tu_1'])
+    })
+  })
+
   it('handles mediaType field name (camelCase variant)', () => {
     const emitter = new EventEmitter()
     const results = []

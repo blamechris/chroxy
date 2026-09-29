@@ -316,6 +316,265 @@ describe('CliSession stream-event handling', () => {
     })
   })
 
+  // #7346 — live in-flight parity with byok-session.js. Pre-fix, CliSession
+  // never emitted `tool_input_delta` at all, so the dashboard's #4341
+  // fallback (which renders `toolInputPartial` when the structured
+  // `toolInput` is still empty) had no CLI data source and the panel read
+  // "(no input)" for the entire in-flight window.
+  //
+  // #8135 (review): unlike byok-session.js, CliSession must NOT forward raw
+  // per-chunk `input_json_delta` partials — a secret can straddle chunk
+  // boundaries and mid-stream partial JSON can't be sanitized. Instead it
+  // delivers the SANITIZED, size-capped FULL input as exactly ONE
+  // `tool_input_delta`, once the block finalizes (`content_block_stop`).
+  describe('tool_input_delta emission (#7346, redesigned per #8135)', () => {
+    it('emits NO tool_input_delta while chunks are still streaming — only after content_block_stop', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{"com'))
+      session._handleEvent(inputJsonDelta('mand":"ls"}'))
+      assert.equal(deltas.length, 0, 'no raw per-chunk deltas during streaming (#8135 R4 guard)')
+
+      session._handleEvent(contentBlockStop())
+      assert.equal(deltas.length, 1, 'exactly one delta, once the block finalizes')
+      assert.deepEqual(deltas[0], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: '{"command":"ls"}' })
+    })
+
+    it('uses the synthesized fallback toolUseId when content_block.id is missing (#4778 parity)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' } },
+      })
+      session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 1)
+      assert.equal(deltas[0].toolUseId, 'msg-1-tool')
+    })
+
+    it('does not emit when the buffer overflowed (matches the accumulation guard)', () => {
+      const session = createSession()
+      session.on('error', () => {}) // absorb overflow error event
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
+      session._handleEvent(inputJsonDelta(bigChunk))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit when the finalized JSON never parsed (malformed chunk)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{not valid json'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit a literal "null" chunk for a tool with genuinely no input', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('null'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit for non-tool_use content blocks (text deltas take the stream_delta path, not this one)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_start', content_block: { type: 'text' } },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } },
+      })
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(deltas.length, 0)
+    })
+
+    // #8135 — Critical: the delivered delta must carry the SANITIZED
+    // value, never the raw one.
+    describe('redaction (#8135)', () => {
+      it('redacts a secret embedded in the finalized tool_input_delta', () => {
+        const session = createSession()
+        const deltas = []
+        session.on('tool_input_delta', (d) => deltas.push(d))
+
+        const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+        session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+        session._handleEvent(inputJsonDelta(JSON.stringify({ command: secretCommand })))
+        session._handleEvent(contentBlockStop())
+
+        assert.equal(deltas.length, 1)
+        assert.ok(!deltas[0].partialJson.includes('sk-ant-api03-'), 'the raw key must never appear on the wire')
+        assert.ok(deltas[0].partialJson.includes('[REDACTED]'), 'a redaction marker must be present instead')
+      })
+    })
+  })
+
+  // #7346 — the persisted/rehydration half. Pre-fix, `_applyToolInputSemantics`
+  // parsed `ctx.toolInputChunks` ONLY to drive four special-cased tools'
+  // session state (AskUserQuestion/Task/Agent/EnterPlanMode/ExitPlanMode); a
+  // plain Bash/Read/etc. call's parsed input went nowhere. This is the
+  // generic capture that backfills `_inFlightToolStarts` so tool-result.js
+  // can attach it to the eventual `tool_result`.
+  describe('finalized tool input capture onto tool_result (#7346)', () => {
+    function toolResultEvent(toolUseId, content = 'ok') {
+      return {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content }] },
+      }
+    }
+
+    it('attaches the parsed input to the matching tool_result for a generic tool', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{"command":"ls -la"}'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'file list'))
+
+      assert.equal(results.length, 1)
+      assert.deepEqual(results[0].input, { command: 'ls -la' })
+    })
+
+    it('keeps each tool\'s input distinct across multiple tools in one turn', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_a'))
+      session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolUseStart('Read', 'toolu_b'))
+      session._handleEvent(inputJsonDelta('{"file_path":"/etc/hosts"}'))
+      session._handleEvent(contentBlockStop())
+
+      // Results can arrive in either order — assert by toolUseId, not index.
+      session._handleEvent(toolResultEvent('toolu_b', 'hosts contents'))
+      session._handleEvent(toolResultEvent('toolu_a', 'file list'))
+
+      const byId = Object.fromEntries(results.map((r) => [r.toolUseId, r.input]))
+      assert.deepEqual(byId.toolu_a, { command: 'ls' })
+      assert.deepEqual(byId.toolu_b, { file_path: '/etc/hosts' })
+    })
+
+    it('omits input on tool_result when the JSON never parsed (malformed chunk) — no stale/fabricated value', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{not valid json'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1'))
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    it('omits input on tool_result when the buffer overflowed (already reported via a dedicated error event)', () => {
+      const session = createSession()
+      session.on('error', () => {})
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
+      session._handleEvent(inputJsonDelta(bigChunk))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1'))
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    // Positive control: the four special-cased tools' existing session-state
+    // side effects (here, AskUserQuestion's user_question emission) must be
+    // completely unaffected by the new generic capture running alongside it.
+    it('does not disturb AskUserQuestion detection — both the semantics event AND the input backfill fire', () => {
+      const session = createSession()
+      const questions = []
+      const results = []
+      session.on('user_question', (q) => questions.push(q))
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_ask'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ questions: [{ question: 'Continue?' }] })))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(questions.length, 1)
+      assert.equal(questions[0].toolUseId, 'toolu_ask')
+
+      session._handleEvent(toolResultEvent('toolu_ask', 'Continue'))
+      assert.equal(results.length, 1)
+      assert.deepEqual(results[0].input, { questions: [{ question: 'Continue?' }] })
+    })
+
+    // #8135 (review) — Critical: a secret in a Bash command must come out
+    // of tool_result redacted, not verbatim. Reproduces the exact
+    // scenario #8135 was filed from.
+    it('redacts a secret in the Bash command attached to tool_result', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ command: secretCommand })))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'done'))
+
+      assert.equal(results.length, 1)
+      const serialized = JSON.stringify(results[0].input)
+      assert.ok(!serialized.includes('sk-ant-api03-'), 'the raw key must never leave the server')
+      assert.ok(serialized.includes('[REDACTED]'), 'a redaction marker must be present instead')
+    })
+
+    // #8136 (review) — a large Write input must be capped, not persisted
+    // to tool_result (and, transitively, history) whole.
+    it('caps a 120KB Write input attached to tool_result', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      const bigContent = 'x'.repeat(120 * 1024)
+      session._handleEvent(toolUseStart('Write', 'toolu_1'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ file_path: '/tmp/big.txt', content: bigContent })))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'wrote file'))
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].input._truncated, true)
+      assert.ok(!JSON.stringify(results[0].input).includes(bigContent), 'the raw 120KB content must not survive verbatim')
+    })
+  })
+
   describe('text streaming', () => {
     it('emits stream_start and stream_delta for text blocks', () => {
       const session = createSession()

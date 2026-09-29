@@ -122,6 +122,7 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     result: z.ZodAny;
     truncated: z.ZodOptional<z.ZodBoolean>;
     isError: z.ZodOptional<z.ZodBoolean>;
+    input: z.ZodOptional<z.ZodAny>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolInputDeltaSchema: z.ZodObject<{

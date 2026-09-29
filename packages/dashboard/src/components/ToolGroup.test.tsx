@@ -356,8 +356,33 @@ describe('ToolGroup', () => {
       expect(detail).not.toHaveTextContent('Which release strategy?')
       expect(detail).not.toHaveTextContent('Patch')
       expect(detail).not.toHaveTextContent('Minor')
-      // The entry collapses to a quiet placeholder: tool name only, "(no input)".
+      // The entry collapses to a quiet placeholder: tool name only. This
+      // fixture has no toolResult, so per #7346 the pending copy applies —
+      // suppression is about never exposing the CONTENT, not about which
+      // placeholder wording is used while pending vs. completed.
       expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('AskUserQuestion')
+      expect(detail).toHaveTextContent('(input not received yet)')
+    })
+
+    // #7346 (mutant C3 guard): even once the server backfills the finalized
+    // input onto a completed tool_result (see store-core's handleToolResult),
+    // AskUserQuestion's raw structured toolInput must stay suppressed here —
+    // the suppression check runs on `message.tool`, independent of whether
+    // toolInput arrived via the original tool_start or a later backfill.
+    it('suppresses the raw AskUserQuestion input even once toolInput is backfilled after completion (#7346)', () => {
+      const messages = [
+        tool('1', 'AskUserQuestion', {
+          toolInput: { questions: [{ question: 'Which release strategy?', options: [{ label: 'Patch' }] }] },
+          toolResult: 'Patch',
+        }),
+      ]
+      render(<ToolGroup messages={messages} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const detail = screen.getByTestId('tool-group-entry-detail-1')
+      expect(detail).not.toHaveTextContent('Which release strategy?')
+      // Completed (`toolResult` present) + suppressed + no visible input ->
+      // the "(no input)" copy, distinct from the pending "(input not
+      // received yet)" case exercised above.
       expect(detail).toHaveTextContent('(no input)')
     })
 
@@ -456,25 +481,52 @@ describe('ToolGroup', () => {
         expect(detail).not.toHaveAttribute('data-streaming', 'true')
       })
 
-      it('still shows "(no input)" when both toolInput and toolInputPartial are absent', () => {
+      it('still shows "(no input)" when both toolInput and toolInputPartial are absent on a COMPLETED tool', () => {
         // Regression guard for the existing placeholder behavior — a
-        // truly inputless tool still shows the placeholder.
-        const messages = [tool('1', 'Bash')]
+        // truly inputless tool that has finished still shows the final
+        // placeholder (#7346's MUST-NOT-REGRESS positive control).
+        const messages = [tool('1', 'Bash', { toolResult: '' })]
         render(<ToolGroup messages={messages} isActive={true} />)
         fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
         const detail = screen.getByTestId('tool-group-entry-detail-1')
         expect(detail).toHaveTextContent('(no input)')
       })
 
-      it('still shows "(no input)" when toolInputPartial is an empty string', () => {
+      it('still shows "(no input)" when toolInputPartial is an empty string on a COMPLETED tool', () => {
         // Empty-string partials must not flip the panel into the
         // streaming path — only content counts.
-        const messages = [tool('1', 'Bash', { toolInputPartial: '' })]
+        const messages = [tool('1', 'Bash', { toolInputPartial: '', toolResult: '' })]
         render(<ToolGroup messages={messages} isActive={true} />)
         fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
         const detail = screen.getByTestId('tool-group-entry-detail-1')
         expect(detail).toHaveTextContent('(no input)')
         expect(detail).not.toHaveAttribute('data-streaming', 'true')
+      })
+
+      // #7346 — the copy fix (direction 3). Pre-fix this showed "(no input)"
+      // for the ENTIRE in-flight window, which is a false statement: the
+      // tool obviously has input, Chroxy just hasn't received it yet.
+      // Mirrors the "(no result yet)" pending copy RESULT already used.
+      it('shows "(input not received yet)" — not "(no input)" — when the tool has not finished and no input data has arrived', () => {
+        const messages = [tool('1', 'Bash')]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail).toHaveTextContent('(input not received yet)')
+        expect(detail).not.toHaveTextContent('(no input)')
+      })
+
+      it('mutant C4 guard: pending placeholder must not silently regress to the old "(no input)" copy', () => {
+        // Direct pin on the exact placeholder string used for the pending
+        // case, isolated from the "not '(no input)'" check above so a
+        // mutant that reverts ToolGroup's inputPlaceholder ternary to the
+        // literal '(no input)' fails HERE, legibly, rather than only via
+        // a negative assertion.
+        const messages = [tool('1', 'Read')]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+        const detail = screen.getByTestId('tool-group-entry-detail-1')
+        expect(detail.textContent).toContain('(input not received yet)')
       })
     })
 

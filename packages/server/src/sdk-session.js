@@ -194,10 +194,23 @@ export class SdkSession extends BaseSession {
    * are session-lifetime so a fresh emit on the next drop re-publishes
    * the running total.
    *
+   * #7346: `tool_input_delta` delivers the SANITIZED full tool input as
+   * a single chunk from `_handleToolUseBlock`, once the full
+   * assistant-message `block.input` is known — mirroring
+   * byok-session.js's wire shape/client handler exactly. Per #8135
+   * (review), this does NOT stream raw per-chunk `input_json_delta`
+   * partials the way BYOK does — the Agent SDK's `stream_event` does
+   * carry those (same `includePartialMessages: true` config CliSession
+   * reads), but a secret can straddle chunk boundaries and mid-stream
+   * partial JSON can't be run through the sanitizer, so this only ever
+   * emits once, already-safe. Listing it here is what makes
+   * `session-manager.js`'s `_wireSessionEvents` bridge the emit onto the
+   * `session_event` channel at all.
+   *
    * @returns {string[]}
    */
   static get customEvents() {
-    return ['stdin_dropped_totals']
+    return ['stdin_dropped_totals', 'tool_input_delta']
   }
 
   /**
@@ -1195,6 +1208,13 @@ export class SdkSession extends BaseSession {
                   didStreamThinking = true
                   this.emit('stream_delta', { messageId: thinkingId, delta: delta.thinking, thinking: true })
                 }
+                // #8135 (review on #7346): the Agent SDK's `input_json_delta`
+                // chunks (present, since `includePartialMessages: true` is
+                // set) are deliberately NOT forwarded here — a secret can
+                // straddle chunk boundaries and mid-stream partial JSON
+                // can't be sanitized. The sanitized FULL input is delivered
+                // once instead, from `_handleToolUseBlock` below, once the
+                // complete assistant-message `block.input` is known.
                 break
               }
 
@@ -1768,6 +1788,34 @@ export class SdkSession extends BaseSession {
       return
     }
 
+    // #7346: backfill the finalized input onto the in-flight tool_start
+    // tracking entry (`_trackToolStart` / base-session.js
+    // `_recordToolInput`, which sanitizes + size-caps it — see
+    // #8135/#8136) so `tool-result.js`'s `emitToolResults` can attach it
+    // to the matching `tool_result` (`_getTrackedToolInput`). Runs for
+    // EVERY tool_use block, not just the Task/plan-mode ones handled
+    // below: the full "assistant" message this function is called from
+    // always carries the complete `block.input`, so (unlike CliSession,
+    // which must accumulate `input_json_delta` chunks) no buffering is
+    // needed. Mirrors the `${messageId}-tool` fallback `buildToolStartData`
+    // uses (and the Task branch below reuses) so the id always matches
+    // whatever `_trackToolStart` was called with at `content_block_start`.
+    const toolUseId = block.id || `${messageId}-tool`
+    const sanitizedInput = this._recordToolInput(toolUseId, block.input ?? null)
+    // #8135 (review): deliver the SANITIZED input as a single-shot
+    // `tool_input_delta` here — this is the earliest point SdkSession
+    // knows the full value, milliseconds after the block finalized and
+    // well before the tool finishes executing. `null`/`undefined` means
+    // "known to have no input" (the placeholder logic covers that on
+    // its own); don't ship a literal "null" chunk for it.
+    if (sanitizedInput !== null && sanitizedInput !== undefined) {
+      this.emit('tool_input_delta', {
+        messageId,
+        toolUseId,
+        partialJson: JSON.stringify(sanitizedInput),
+      })
+    }
+
     // #4307: stash the command text against the tool_use_id so the
     // matching tool_result (carrying the shellId Claude prints) can
     // recover it. Strict-boolean run_in_background check; non-Bash
@@ -1800,7 +1848,8 @@ export class SdkSession extends BaseSession {
       // agent_spawned toolUseId + _activeAgents key match the wire-emitted
       // tool_start id. Without this, _activeAgents.set(undefined, ...)
       // collides on undefined for any fallback-path Task spawn.
-      const toolUseId = block.id || `${messageId}-tool`
+      // (#7346: reuses the same `toolUseId` computed above — one fallback
+      // derivation, not two.)
       // #7340: this records the MODEL'S REQUEST (`run_in_background`) into
       // `background`. It does NOT exempt the agent from the turn-end sweep —
       // `backgroundConfirmed` does, and only `task_started` can set that.

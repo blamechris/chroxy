@@ -704,6 +704,105 @@ describe('SdkSession', () => {
         session = createSession()
       })
     })
+
+    // #7346 — the persisted/rehydration half for SDK. Unlike CliSession
+    // (which must accumulate `input_json_delta` chunks at
+    // `content_block_stop`), SdkSession already has the full parsed
+    // `block.input` right here, from the assistant full-message event —
+    // so the backfill is a direct `_recordToolInput` call, no buffering.
+    describe('finalized tool input capture (#7346)', () => {
+      it('backfills _inFlightToolStarts so _getTrackedToolInput can read it back', () => {
+        session._trackToolStart('tool-1', 'Bash')
+        assert.equal(session._getTrackedToolInput('tool-1'), undefined, 'nothing recorded yet')
+
+        session._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-1', input: { command: 'ls -la' } })
+
+        assert.deepEqual(session._getTrackedToolInput('tool-1'), { command: 'ls -la' })
+      })
+
+      it('uses the synthesized ${messageId}-tool fallback id when block.id is missing, matching tool_start', () => {
+        session._trackToolStart('msg-1-tool', 'Bash')
+        session._handleToolUseBlock('msg-1', { name: 'Bash', input: { command: 'ls' } })
+        assert.deepEqual(session._getTrackedToolInput('msg-1-tool'), { command: 'ls' })
+      })
+
+      it('records null (not skipped) for a tool genuinely called with no input', () => {
+        session._trackToolStart('tool-1', 'SomeTool')
+        session._handleToolUseBlock('msg-1', { name: 'SomeTool', id: 'tool-1', input: undefined })
+        assert.equal(session._getTrackedToolInput('tool-1'), null)
+      })
+
+      it('does not backfill when the oversized-input guard already returned early', () => {
+        session._trackToolStart('tool-big', 'Write')
+        session.on('error', () => {})
+        const bigInput = { data: 'x'.repeat(session._maxToolInput) }
+        session._handleToolUseBlock('msg-1', { name: 'Write', id: 'tool-big', input: bigInput })
+        assert.equal(session._getTrackedToolInput('tool-big'), undefined)
+      })
+
+      it('does not disturb Task agent tracking — both still fire from the same call', () => {
+        session._trackToolStart('tool-1', 'Task')
+        const spawned = []
+        session.on('agent_spawned', (e) => spawned.push(e))
+        session._handleToolUseBlock('msg-1', { name: 'Task', id: 'tool-1', input: { description: 'Explore' } })
+        assert.equal(spawned.length, 1)
+        assert.deepEqual(session._getTrackedToolInput('tool-1'), { description: 'Explore' })
+      })
+
+      // #8135 (review) — Critical: the value stored (and thus later
+      // forwarded to tool_result) must be sanitized, never raw.
+      it('redacts a secret embedded in block.input before recording it', () => {
+        session._trackToolStart('tool-1', 'Bash')
+        const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+        session._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-1', input: { command: secretCommand } })
+        const tracked = session._getTrackedToolInput('tool-1')
+        assert.ok(!JSON.stringify(tracked).includes('sk-ant-api03-'))
+        assert.ok(JSON.stringify(tracked).includes('[REDACTED]'))
+      })
+
+      // #8136 (review) — Critical: a large object input must be capped
+      // before it is ever tracked/forwarded.
+      it('caps a 120KB Write input before recording it', () => {
+        session._trackToolStart('tool-big', 'Write')
+        const bigInput = { file_path: '/tmp/big.txt', content: 'x'.repeat(120 * 1024) }
+        session._handleToolUseBlock('msg-1', { name: 'Write', id: 'tool-big', input: bigInput })
+        const tracked = session._getTrackedToolInput('tool-big')
+        assert.equal(tracked._truncated, true)
+        assert.ok(!JSON.stringify(tracked).includes('x'.repeat(120 * 1024)))
+      })
+
+      // #8135 (review) — the single-shot `tool_input_delta` this method
+      // emits must also carry the sanitized value.
+      it('emits the single-shot tool_input_delta with the SANITIZED value, not the raw one', () => {
+        session._trackToolStart('tool-1', 'Bash')
+        const deltas = []
+        session.on('tool_input_delta', (d) => deltas.push(d))
+        const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48)
+        session._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-1', input: { command: secretCommand } })
+
+        assert.equal(deltas.length, 1)
+        assert.ok(!deltas[0].partialJson.includes('sk-ant-api03-'))
+        assert.ok(deltas[0].partialJson.includes('[REDACTED]'))
+      })
+
+      it('does not emit a tool_input_delta for a genuinely input-less tool (no literal "null" chunk)', () => {
+        session._trackToolStart('tool-1', 'SomeTool')
+        const deltas = []
+        session.on('tool_input_delta', (d) => deltas.push(d))
+        session._handleToolUseBlock('msg-1', { name: 'SomeTool', id: 'tool-1', input: undefined })
+        assert.equal(deltas.length, 0)
+      })
+
+      it('does not emit a tool_input_delta when the oversized-input guard already returned early', () => {
+        session._trackToolStart('tool-big', 'Write')
+        session.on('error', () => {})
+        const deltas = []
+        session.on('tool_input_delta', (d) => deltas.push(d))
+        const bigInput = { data: 'x'.repeat(session._maxToolInput) }
+        session._handleToolUseBlock('msg-1', { name: 'Write', id: 'tool-big', input: bigInput })
+        assert.equal(deltas.length, 0)
+      })
+    })
   })
 
   // -- _clearMessageState --
@@ -2310,6 +2409,214 @@ describe('SdkSession', () => {
       // Should complete without timeout error
       assert.equal(errors.length, 0)
       assert.equal(s._resultTimeout, null) // cleared in finally
+      s.destroy()
+    })
+  })
+
+  // #7346 — full-turn, end-to-end coverage for both halves of the fix on the
+  // SDK path: live in-flight `tool_input_delta` (a single, SANITIZED,
+  // full-input chunk delivered from `_handleToolUseBlock` — NOT raw
+  // per-chunk `input_json_delta` streaming, per #8135), and the
+  // finalized-input backfill landing on `tool_result`.
+  describe('tool_input_delta and finalized input, end-to-end (#7346, redesigned per #8135)', () => {
+    function capture(s, names) {
+      const out = []
+      for (const name of names) s.on(name, (d) => out.push({ name, ...d }))
+      return out
+    }
+
+    it('never forwards raw input_json_delta chunks, even though the SDK stream carries them (#8135 R4 guard)', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"com' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'mand":"ls"}' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 0, 'no delta while streaming — the assistant full-message event has not arrived yet')
+      s.destroy()
+    })
+
+    it('emits exactly one sanitized tool_input_delta once the full assistant message with block.input arrives', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_start', 'tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls -la' } }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const starts = events.filter((e) => e.name === 'tool_start')
+      const deltas = events.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(starts.length, 1)
+      assert.equal(deltas.length, 1)
+      assert.equal(deltas[0].toolUseId, 'tool-1')
+      assert.deepEqual(JSON.parse(deltas[0].partialJson), { command: 'ls -la' })
+      s.destroy()
+    })
+
+    it('does not emit tool_input_delta for a genuinely input-less tool (no literal "null" chunk)', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'SomeTool' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'SomeTool' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 0)
+      s.destroy()
+    })
+
+    // #8135 — Critical: the delivered delta AND the eventual tool_result
+    // must both carry the sanitized value, never the raw secret.
+    it('redacts a secret end-to-end: neither the delta nor tool_result carries it raw', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta', 'tool_result'])
+
+      const secretCommand = 'export TOKEN=sk-ant-api03-' + 'a'.repeat(48) + '; curl https://api.example.com'
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: secretCommand } }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'done' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const delta = events.find((e) => e.name === 'tool_input_delta')
+      const result = events.find((e) => e.name === 'tool_result')
+      assert.ok(delta && !delta.partialJson.includes('sk-ant-api03-'))
+      assert.ok(delta.partialJson.includes('[REDACTED]'))
+      const resultSerialized = JSON.stringify(result.input)
+      assert.ok(!resultSerialized.includes('sk-ant-api03-'))
+      assert.ok(resultSerialized.includes('[REDACTED]'))
+      s.destroy()
+    })
+
+    // #8136 — a large Write input must be capped end-to-end too.
+    it('caps a 120KB Write input end-to-end: neither the delta nor tool_result carries it whole', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta', 'tool_result'])
+
+      const bigContent = 'x'.repeat(120 * 1024)
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Write' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Write', input: { file_path: '/tmp/big.txt', content: bigContent } }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'wrote file' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const delta = events.find((e) => e.name === 'tool_input_delta')
+      const result = events.find((e) => e.name === 'tool_result')
+      assert.ok(delta && !delta.partialJson.includes(bigContent))
+      assert.ok(!JSON.stringify(result.input).includes(bigContent))
+      assert.equal(result.input._truncated, true)
+      s.destroy()
+    })
+
+    it('backfills the finalized input onto tool_result for a generic tool', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_result'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        // The full assistant message carries the complete, already-parsed input.
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls -la' } }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'file list' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 1)
+      assert.deepEqual(events[0].input, { command: 'ls -la' })
+      s.destroy()
+    })
+
+    it('keeps each tool\'s finalized input distinct when two tools run in one turn', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_result'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-a', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tool-b', name: 'Read' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 1 } }
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'tool-a', name: 'Bash', input: { command: 'ls' } },
+              { type: 'tool_use', id: 'tool-b', name: 'Read', input: { file_path: '/etc/hosts' } },
+            ],
+          },
+        }
+        yield {
+          type: 'user',
+          message: {
+            content: [
+              { type: 'tool_result', tool_use_id: 'tool-b', content: 'hosts contents' },
+              { type: 'tool_result', tool_use_id: 'tool-a', content: 'file list' },
+            ],
+          },
+        }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const byId = Object.fromEntries(events.map((e) => [e.toolUseId, e.input]))
+      assert.deepEqual(byId['tool-a'], { command: 'ls' })
+      assert.deepEqual(byId['tool-b'], { file_path: '/etc/hosts' })
+      s.destroy()
+    })
+
+    it('omits input on tool_result when the oversized-input guard skipped the backfill', async () => {
+      const s = createSession()
+      s._processReady = true
+      s.on('error', () => {})
+      const events = capture(s, ['tool_result'])
+
+      const bigInput = { data: 'x'.repeat(s._maxToolInput) }
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-big', name: 'Write' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-big', name: 'Write', input: bigInput }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-big', content: 'ok' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 1)
+      assert.equal('input' in events[0], false)
       s.destroy()
     })
   })

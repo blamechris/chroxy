@@ -21,6 +21,7 @@ import { ActivityRegistry } from './activity-registry.js'
 import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
 import { assertProviderPermissionModeSupported, getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
+import { sanitizeToolInput } from './redaction.js'
 
 const log = createLogger('base-session')
 
@@ -521,6 +522,22 @@ export class BaseSession extends EventEmitter {
     // forever AND persist the orphan to session-state.json. Companion
     // path: SessionMessageHistory.sweepUnresolvedToolStarts (#4617/#4619)
     // catches stragglers at restore-time as a backstop.
+    //
+    // #7346: entries may also carry a finalized `input` field, set via
+    // `_recordToolInput` once the provider knows the tool's full input
+    // (CliSession: parsed `content_block_stop` buffer; SdkSession: the
+    // full assistant-message `block.input`, no buffering needed). Both
+    // `content_block_start`'s `tool_start` and the Anthropic wire
+    // protocol's `content_block_start` for a tool_use carry `input: null`
+    // — the finalized value only exists once the block closes — so this
+    // is the one place both providers can stash it for `tool-result.js`'s
+    // `emitToolResults` to read back (`_getTrackedToolInput`) and attach
+    // to the matching `tool_result`, which lets the client (and
+    // persisted history, via session-message-history.js) backfill the
+    // `tool_start` entry that was `input: null` when first emitted.
+    // BYOK never calls `_trackToolStart`, so this map stays empty there
+    // and `_getTrackedToolInput` always returns `undefined` — BYOK's
+    // `tool_result` is unaffected.
     this._inFlightToolStarts = new Map()
     // #5160: per-session activity registry (Control Room). A thin unifying
     // layer that maps the signals BaseSession already emits (tool_start /
@@ -1770,6 +1787,67 @@ export class BaseSession extends EventEmitter {
   _trackToolResult(toolUseId) {
     if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
     this._inFlightToolStarts.delete(toolUseId)
+  }
+
+  /**
+   * #7346: attach the finalized tool input onto the in-flight tracking
+   * entry created by `_trackToolStart`, so `_getTrackedToolInput` can
+   * hand it back to `tool-result.js`'s `emitToolResults` when the
+   * matching `tool_result` fires. No-op when the toolUseId isn't
+   * tracked (already resolved/swept, or `_trackToolStart` was never
+   * called for this provider — e.g. BYOK).
+   *
+   * #8135/#8136 (review on #7346): this is the ONE choke point both
+   * providers' finalized-input capture flows through
+   * (`cli-session.js`'s `_captureFinalizedToolInput`,
+   * `sdk-session.js`'s `_handleToolUseBlock`), so it runs every input
+   * through `sanitizeToolInput` (`redaction.js`, the same #6029 floor
+   * `permission-manager.js`/`ws-permissions.js` already apply on the
+   * permission-request path) BEFORE storing it — never the raw value.
+   * That one call does double duty: it redacts secret-shaped values
+   * (key-name AND value-shape passes, recursively) and caps the
+   * serialized size to `MAX_INPUT_CHARS` (10KB, the existing broadcast
+   * cap — falling back to a `{ _truncated, summary }` shape when the
+   * whole object is oversized), so a 100KB+ `Write`/`Edit` input can
+   * never reach `_getTrackedToolInput`, `tool_result`, or the persisted
+   * `tool_start` history entry ungated. Every reader of this map
+   * therefore gets an already-safe value for free — there is no second
+   * place that needs to sanitize or cap.
+   *
+   * Returns the sanitized value (not just `undefined`) so a caller that
+   * wants to deliver it somewhere else too (e.g. a single-shot
+   * `tool_input_delta` for the in-flight view) doesn't need a redundant
+   * `_getTrackedToolInput` round-trip.
+   *
+   * @param {string} toolUseId
+   * @param {unknown} input - the finalized (fully parsed) tool input
+   * @returns {unknown} the sanitized value that was stored (or `input`
+   *   unchanged if `toolUseId` wasn't tracked — still sanitized, just
+   *   not stored anywhere)
+   */
+  _recordToolInput(toolUseId, input) {
+    const sanitized = sanitizeToolInput(input)
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return sanitized
+    const entry = this._inFlightToolStarts.get(toolUseId)
+    if (entry) entry.input = sanitized
+    return sanitized
+  }
+
+  /**
+   * #7346: read back the finalized tool input recorded via
+   * `_recordToolInput`, if any. Returns `undefined` when nothing was
+   * recorded — either the toolUseId isn't tracked at all (BYOK never
+   * calls `_trackToolStart`, so this is always `undefined` there and
+   * `tool_result` stays exactly as it was) or `_recordToolInput` was
+   * never called for it (parse failure / overflow discard on the CLI
+   * path). Already sanitized/capped — see `_recordToolInput`.
+   *
+   * @param {string} toolUseId
+   * @returns {unknown}
+   */
+  _getTrackedToolInput(toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return undefined
+    return this._inFlightToolStarts.get(toolUseId)?.input
   }
 
   /**
