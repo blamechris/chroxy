@@ -87,6 +87,7 @@ import { join, resolve } from 'node:path'
 
 import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
 import { installSpawnHomeSandbox } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
+import { installRealBinaryTripwire } from '../../../scripts/lib/test-real-binary-tripwire.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
 import { installAssertMatchPayloadGuard } from '../../../scripts/lib/assert-match-payload-guard.mjs'
 
@@ -261,6 +262,23 @@ export const {
   isolatedHome: ownedSpawnHomeTmpDir,
   allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
 })
+
+// --- Tripwire: no test may resolve/exec a REAL provider binary (#8096) -------
+// Sibling guard to the spawn-home sandbox above — same `child_process` launcher
+// surface, composed on top of it (each layer wraps whatever `cp[name]`
+// currently is and calls through, so install order between the two doesn't
+// matter). Where the sandbox above silently REDIRECTS a spawned child's HOME,
+// this one REFUSES the call outright when its resolved command is a real,
+// host-installed `cloudflared`/`claude`/`codex`/`gemini` — the #8096 defect
+// class (a test that was supposed to be hermetic reaches the developer's
+// actual installed binary instead of a fixture). See
+// scripts/lib/test-real-binary-tripwire.mjs for the exact rule, the narrow
+// exemptions (`node`/`git`/`sh`/… are never guarded), and the two call sites
+// that legitimately set `CHROXY_TEST_ALLOW_REAL_BINARY=1` themselves.
+export const {
+  installed: REAL_BINARY_TRIPWIRE_INSTALLED,
+  skipped: REAL_BINARY_TRIPWIRE_SKIPPED,
+} = installRealBinaryTripwire()
 
 // --- Default the credential-store to "no keychain" ----------------------------
 // #5154: the credential store encrypts credentials.json with an OS-keychain

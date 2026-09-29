@@ -106,6 +106,15 @@ if (!SHOULD_RUN) {
     'binary not found in BINARY_CANDIDATES.',
   )
 } else {
+  // #8096: this file's own gating above (FORCE, or an auto-detected local
+  // install) already decided a REAL `codex` spawn is intentional here — that
+  // predates and is out of scope for #8096. Declare it to the suite-wide
+  // `test-real-binary-tripwire.mjs` guard (installed via `tests/_setup.mjs`),
+  // which would otherwise refuse every `spawn(CODEX_BIN, ...)` call below: its
+  // resolved absolute path sits under a real install prefix (e.g.
+  // `/opt/homebrew/bin/codex` on a Homebrew host) with basename `codex`,
+  // exactly what that guard exists to catch when it is NOT already known-safe.
+  process.env.CHROXY_TEST_ALLOW_REAL_BINARY = '1'
 
   // ─── constants ──────────────────────────────────────────────────────────
 

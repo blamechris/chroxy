@@ -37,7 +37,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { checkBinary, checkClaudeTuiCliVersion, runDoctorChecks } from '../src/doctor.js'
-import { registerProvider } from '../src/providers.js'
+import { registerProvider, getProvider } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { defaultBinaryTrustFile } from '../src/binary-provenance-trust.js'
 import { configPath } from '../src/config-dir.js'
@@ -53,6 +53,34 @@ import { verifyProvenance as realVerifyProvenance } from '../src/utils/verify-pr
 // for the same reason — these tests are about the GATE's wiring, not about
 // package-tree classification (covered end-to-end elsewhere).
 const CLASSIFY_NATIVE_VERIFY_PROVENANCE = (opts) => realVerifyProvenance({ ...opts, classifyBinary: () => ({ kind: 'native' }) })
+
+// #8096: `runDoctorChecks` always runs the cloudflared row too, independent of
+// `providers` — resolved via `resolveBinary('cloudflared', cloudflaredCandidates)`,
+// which tries `which cloudflared` off THIS PROCESS'S real PATH first and, when
+// that fails, falls through to the fixed, real install paths in
+// `CLOUDFLARED_CANDIDATES` (`/opt/homebrew/bin/cloudflared`, etc). On a host
+// with cloudflared installed at ANY of those (this repo's own dev machines
+// included), every `runDoctorChecks` call below that neither empties PATH nor
+// overrides `cloudflaredCandidates` resolves, health-checks and — once healthy —
+// EXECS `<real cloudflared> --version` for real, gate on or off (the gate only
+// decides whether it's also HASHED first). Route every call through this
+// helper instead of calling `runDoctorChecks` directly: it always passes
+// `cloudflaredCandidates: []` (so the candidates fallback can never rediscover
+// a real install) AND scopes `process.env.PATH` to empty for the call's
+// duration (so `which cloudflared` can't find one either) — restoring PATH
+// in a `finally` regardless of outcome. Either alone is insufficient: an
+// emptied PATH with the real candidates list still finds a real install via
+// the fallback, and an empty candidates list with a real PATH still finds one
+// via `which`.
+async function runDoctorChecksNoRealCloudflared(opts) {
+  const savedPath = process.env.PATH
+  process.env.PATH = ''
+  try {
+    return await runDoctorChecks({ cloudflaredCandidates: [], ...opts })
+  } finally {
+    process.env.PATH = savedPath
+  }
+}
 
 // ── shared tmp root ─────────────────────────────────────────────────────────
 
@@ -444,7 +472,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     registerFixtureProvider(providerName, [shim.shimPath])
     const ledger = fakeProvenanceLedger({ [shim.shimPath]: { sha256: SPAWN_GATE_WRONG_HASH } })
     try {
-      const { checks, passed } = await runDoctorChecks({
+      const { checks, passed } = await runDoctorChecksNoRealCloudflared({
         providers: [providerName],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: ledger,
@@ -474,7 +502,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
       // runner) makes `passed` false regardless of anything this test is
       // actually about, which is exactly the assertion that made this test
       // depend on the host.
-      const { checks } = await runDoctorChecks({
+      const { checks } = await runDoctorChecksNoRealCloudflared({
         providers: [providerName],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: ledger,
@@ -501,7 +529,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     try {
       // #8074 review C3(d): same reasoning as above — assert on the row, not
       // on host-dependent `passed`.
-      const { checks } = await runDoctorChecks({
+      const { checks } = await runDoctorChecksNoRealCloudflared({
         providers: [providerName],
         binaryProvenanceMode: 'off',
         binarySignatureGate: false,
@@ -535,7 +563,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     const priorConfig = hadConfig ? readFileSync(cfgPath, 'utf-8') : null
     writeFileSync(cfgPath, JSON.stringify({ binaryProvenance: { mode: 'block' } }))
     try {
-      const { checks } = await runDoctorChecks({
+      const { checks } = await runDoctorChecksNoRealCloudflared({
         providers: [providerName],
         binaryProvenanceLedger: ledger,
         verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
@@ -568,7 +596,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
     // construction-spy test in `doctor-binary-provenance-ledger-construction.test.js`
     // (#8074 review N1) — this test only adds a filesystem-level check that
     // the REAL ledger class never writes.
-    await runDoctorChecks({ providers: [providerName] })
+    await runDoctorChecksNoRealCloudflared({ providers: [providerName] })
     assert.equal(
       existsSync(defaultBinaryTrustFile()),
       false,
@@ -587,18 +615,39 @@ describe('runDoctorChecks — claude-tui version-probe provenance wiring (#8074 
   // `provenance` dropped), making the two indistinguishable.
   //
   // `providers: ['claude-tui']` deliberately uses the REAL, already-registered
-  // 'claude-tui' provider class rather than a fixture — `runDoctorChecks`
-  // only runs the driving-probe when the resolved provider is literally
-  // named 'claude-tui', and overwriting that global registry entry (even
-  // temporarily) would risk corrupting it for every OTHER test that runs
-  // afterward in this process. The REAL provider's own binary-preflight row
-  // (a SEPARATE row, keyed by 'claude') is unaffected by these assertions,
-  // which only check for the presence/absence of the 'claude-tui driving' row.
+  // 'claude-tui' provider NAME rather than a fixture provider name —
+  // `runDoctorChecks` only runs the driving-probe when the resolved provider
+  // is literally named 'claude-tui'. That does NOT require keeping the REAL
+  // `ClaudeTuiSession` CLASS registered under that name for these two tests,
+  // though: `checkProvider('claude-tui', ...)` (a SEPARATE row, keyed by
+  // 'claude' — unrelated to the 'claude-tui driving' row these tests assert
+  // on) resolves `claude` via the real, fixed `CLAUDE_BINARY_CANDIDATES` list,
+  // and on a host with `claude` installed at one of those (this repo's own
+  // dev machines: `~/.local/bin/claude`), that row resolves — and, in the
+  // gate-off test below, actually EXECS — the REAL claude binary (#8096).
+  // Swap the registry entry for a harmless fixture provider (bogus binary
+  // name, no candidates) for the DURATION of this describe only, restored
+  // in `after()` — a plain map get/set on the SAME registry `getProvider`/
+  // `registerProvider` already use elsewhere in this file, undone before any
+  // other test in this file's process can observe it (this runner's `it()`s
+  // run sequentially within a file — see the #8074 review N4 comment above).
+  const REAL_CLAUDE_TUI_PROVIDER = getProvider('claude-tui')
+  class FixtureClaudeTuiSession extends SdkSession {
+    static get preflight() {
+      return {
+        label: 'Claude TUI (fixture, #8096)',
+        binary: { name: 'chroxy-8096-fixture-claude-tui-bin', args: ['--version'], candidates: [] },
+      }
+    }
+  }
+  before(() => { registerProvider('claude-tui', FixtureClaudeTuiSession) })
+  after(() => { registerProvider('claude-tui', REAL_CLAUDE_TUI_PROVIDER) })
+
   it('a stub that blocks every path means the claude-tui driving row never appears — proves the gate is wired, not just present', async () => {
     const shim = makeGateShim()
     try {
       const alwaysBlocked = () => ({ ok: false, blocked: true, status: 'hash_mismatch', message: 'stubbed refusal', remediation: null })
-      const { checks } = await runDoctorChecks({
+      const { checks } = await runDoctorChecksNoRealCloudflared({
         providers: ['claude-tui'],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: fakeProvenanceLedger(),
@@ -620,7 +669,7 @@ describe('runDoctorChecks — claude-tui version-probe provenance wiring (#8074 
   it('sanity check: with the gate off, the SAME shim DOES produce a claude-tui driving row — proves the test above is not vacuous', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
     const shim = makeGateShim()
     try {
-      const { checks } = await runDoctorChecks({
+      const { checks } = await runDoctorChecksNoRealCloudflared({
         providers: ['claude-tui'],
         binaryProvenanceMode: 'off',
         binarySignatureGate: false,

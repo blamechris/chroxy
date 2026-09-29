@@ -3,12 +3,35 @@ import assert from 'node:assert/strict'
 import { execSync } from 'child_process'
 import { CloudflareTunnelAdapter as TunnelManager } from '../src/tunnel/cloudflare.js'
 
-// Skip entire suite if cloudflared not installed
+// #8096: this suite spawns a REAL `cloudflared` and opens a REAL
+// trycloudflare.com tunnel over the network — it must never run in a
+// default/CI test invocation. The OLD gate here probed availability with a
+// PATH deliberately AUGMENTED with common install locations (`/opt/homebrew/
+// bin`, `/usr/local/bin`), independent of whatever PATH the test process
+// actually inherited. On a host where cloudflared is installed at one of
+// those two fixed paths but NOT on the process's real, unmodified PATH —
+// exactly the stripped PATH this repo's test-safety convention requires (see
+// CLAUDE.md and the harness rule this issue was filed under) — the probe
+// reported "available" and let the suite run, and the REAL spawn inside
+// `TunnelManager` (a bare `cloudflared` name, resolved off the process's REAL,
+// un-augmented PATH — `_spawnCloudflared`, `src/tunnel/cloudflare.js`) then
+// failed with `spawn cloudflared ENOENT` instead of skipping cleanly.
+//
+// Same convention as `keychain.test.js`'s `CHROXY_TEST_REAL_KEYCHAIN=1`: gate
+// behind an explicit opt-in env var so this never runs by accident, and only
+// probe real availability — using the process's OWN, unmodified PATH, no
+// augmentation — once that opt-in is set. `CHROXY_TEST_ALLOW_REAL_BINARY` is
+// also set here (not just the cloudflared-specific opt-in below) so the
+// `test-real-binary-tripwire.mjs` guard installed suite-wide doesn't refuse
+// the very spawns this opt-in exists to allow.
 let hasCloudflared = false
-try {
-  execSync('which cloudflared', { stdio: 'ignore', env: { ...process.env, PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` } })
-  hasCloudflared = true
-} catch {}
+if (process.env.CHROXY_TEST_REAL_CLOUDFLARED === '1') {
+  process.env.CHROXY_TEST_ALLOW_REAL_BINARY = '1'
+  try {
+    execSync('which cloudflared', { stdio: 'ignore' })
+    hasCloudflared = true
+  } catch {}
+}
 const suite = hasCloudflared ? describe : describe.skip
 
 suite('TunnelManager Integration (requires cloudflared)', () => {
