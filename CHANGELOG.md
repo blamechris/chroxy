@@ -63,6 +63,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule (previously unstyled) so the badge doesn't get squeezed by the row's
   flex layout; it is not interactive, so the 44px tap-target rule doesn't
   apply.
+- **`claude-cli`/`claude-sdk` tool calls no longer show `(no input)` while
+  running, after completion, or after a session switch (#7346).** Neither
+  provider's `tool_start` ever carried the real input — the wire protocol's
+  `content_block_start` for a `tool_use` block never does — and nothing
+  captured it once the block finished: `cli-session.js` buffered the
+  streaming `input_json_delta` chunks only to drive four special-cased
+  tools' session state (AskUserQuestion/Task/Agent/EnterPlanMode/
+  ExitPlanMode) and discarded them for everything else, while
+  `sdk-session.js` never emitted `tool_input_delta` at all, so the
+  dashboard's existing partial-input fallback (#4341) had no CLI/SDK data
+  source. The completed-call symptom was the same root cause surfacing on a
+  session switch: server history's `tool_start` entry was write-once with
+  `input: null`, so a `forceFull` replay faithfully rebuilt the same
+  input-less entry. Both providers now stream `tool_input_delta` for an
+  in-flight tool's input (matching `byok-session.js`'s existing shape, so
+  the client needs no provider branch), and both backfill the finalized
+  input onto `_inFlightToolStarts` (`base-session.js` `_recordToolInput` /
+  `_getTrackedToolInput`) so `tool-result.js`'s `emitToolResults` attaches
+  it to the matching `tool_result` — which `session-message-history.js`
+  now uses to correct the persisted `tool_start` entry, and which the
+  client folds into `toolInput` (`handleToolResult`). The expanded panel's
+  copy also now distinguishes "still running, input not received yet"
+  from "genuinely no input" (matching the existing `(no result yet)` vs.
+  `(no result)` pattern), instead of the same false `(no input)` for both.
+  BYOK, which already had its own working `tool_input_delta` path, is
+  unaffected — it never populates `_inFlightToolStarts`, so the new
+  backfill is a no-op there.
 - **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
   longer reverts itself when its first persist fails (#8098).**
   `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's

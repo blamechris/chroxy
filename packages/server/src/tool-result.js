@@ -74,6 +74,22 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
       event.images = images
     }
 
+    // #7346: backfill the finalized tool input recorded via
+    // `_recordToolInput` (base-session.js) — at `content_block_stop` for
+    // CliSession, or from the full assistant-message `block.input` for
+    // SdkSession — onto this tool_result. session-message-history.js's
+    // `tool_result` case uses it to correct the matching `tool_start`
+    // history entry (which was `input: null` when first emitted, since
+    // neither provider's `content_block_start` carries the real input),
+    // and the client backfills `toolInput` from it too. `undefined` when
+    // nothing was recorded (BYOK never calls `_trackToolStart`, so
+    // `_getTrackedToolInput` isn't even present there) — this stays a
+    // no-op and BYOK's `tool_result` shape is unchanged.
+    if (typeof emitter._getTrackedToolInput === 'function') {
+      const input = emitter._getTrackedToolInput(block.tool_use_id)
+      if (input !== undefined) event.input = input
+    }
+
     emitter.emit('tool_result', event)
     // #4628: drop the in-flight tracker entry so _emitResult's sweep
     // (BaseSession) doesn't double-emit a synthetic for an already-

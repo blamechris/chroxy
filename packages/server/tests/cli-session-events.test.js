@@ -316,6 +316,177 @@ describe('CliSession stream-event handling', () => {
     })
   })
 
+  // #7346 — live in-flight parity with byok-session.js. Pre-fix, CliSession
+  // never emitted `tool_input_delta` at all, so the dashboard's #4341
+  // fallback (which renders `toolInputPartial` when the structured
+  // `toolInput` is still empty) had no CLI data source and the panel read
+  // "(no input)" for the entire in-flight window.
+  describe('tool_input_delta emission (#7346)', () => {
+    it('emits tool_input_delta for each input_json_delta chunk, mirroring byok-session.js\'s shape', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{"com'))
+      session._handleEvent(inputJsonDelta('mand":"ls"}'))
+
+      assert.equal(deltas.length, 2)
+      assert.deepEqual(deltas[0], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: '{"com' })
+      assert.deepEqual(deltas[1], { messageId: 'msg-1', toolUseId: 'toolu_1', partialJson: 'mand":"ls"}' })
+    })
+
+    it('uses the synthesized fallback toolUseId when content_block.id is missing (#4778 parity)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Bash' } },
+      })
+      session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+
+      assert.equal(deltas.length, 1)
+      assert.equal(deltas[0].toolUseId, 'msg-1-tool')
+    })
+
+    it('stops emitting once the buffer overflows (matches the accumulation guard)', () => {
+      const session = createSession()
+      session.on('error', () => {}) // absorb overflow error event
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
+      session._handleEvent(inputJsonDelta(bigChunk))
+      // The overflow-triggering chunk itself is not emitted (it never
+      // reaches the accumulation branch), and neither is anything after.
+      session._handleEvent(inputJsonDelta('more'))
+
+      assert.equal(deltas.length, 0)
+    })
+
+    it('does not emit for non-tool_use content blocks (text deltas take the stream_delta path, not this one)', () => {
+      const session = createSession()
+      const deltas = []
+      session.on('tool_input_delta', (d) => deltas.push(d))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_start', content_block: { type: 'text' } },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } },
+      })
+
+      assert.equal(deltas.length, 0)
+    })
+  })
+
+  // #7346 — the persisted/rehydration half. Pre-fix, `_applyToolInputSemantics`
+  // parsed `ctx.toolInputChunks` ONLY to drive four special-cased tools'
+  // session state (AskUserQuestion/Task/Agent/EnterPlanMode/ExitPlanMode); a
+  // plain Bash/Read/etc. call's parsed input went nowhere. This is the
+  // generic capture that backfills `_inFlightToolStarts` so tool-result.js
+  // can attach it to the eventual `tool_result`.
+  describe('finalized tool input capture onto tool_result (#7346)', () => {
+    function toolResultEvent(toolUseId, content = 'ok') {
+      return {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content }] },
+      }
+    }
+
+    it('attaches the parsed input to the matching tool_result for a generic tool', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{"command":"ls -la"}'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1', 'file list'))
+
+      assert.equal(results.length, 1)
+      assert.deepEqual(results[0].input, { command: 'ls -la' })
+    })
+
+    it('keeps each tool\'s input distinct across multiple tools in one turn', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_a'))
+      session._handleEvent(inputJsonDelta('{"command":"ls"}'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolUseStart('Read', 'toolu_b'))
+      session._handleEvent(inputJsonDelta('{"file_path":"/etc/hosts"}'))
+      session._handleEvent(contentBlockStop())
+
+      // Results can arrive in either order — assert by toolUseId, not index.
+      session._handleEvent(toolResultEvent('toolu_b', 'hosts contents'))
+      session._handleEvent(toolResultEvent('toolu_a', 'file list'))
+
+      const byId = Object.fromEntries(results.map((r) => [r.toolUseId, r.input]))
+      assert.deepEqual(byId.toolu_a, { command: 'ls' })
+      assert.deepEqual(byId.toolu_b, { file_path: '/etc/hosts' })
+    })
+
+    it('omits input on tool_result when the JSON never parsed (malformed chunk) — no stale/fabricated value', () => {
+      const session = createSession()
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      session._handleEvent(inputJsonDelta('{not valid json'))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1'))
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    it('omits input on tool_result when the buffer overflowed (already reported via a dedicated error event)', () => {
+      const session = createSession()
+      session.on('error', () => {})
+      const results = []
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('Bash', 'toolu_1'))
+      const bigChunk = 'x'.repeat(session._maxToolInput + 1)
+      session._handleEvent(inputJsonDelta(bigChunk))
+      session._handleEvent(contentBlockStop())
+      session._handleEvent(toolResultEvent('toolu_1'))
+
+      assert.equal(results.length, 1)
+      assert.equal('input' in results[0], false)
+    })
+
+    // Positive control: the four special-cased tools' existing session-state
+    // side effects (here, AskUserQuestion's user_question emission) must be
+    // completely unaffected by the new generic capture running alongside it.
+    it('does not disturb AskUserQuestion detection — both the semantics event AND the input backfill fire', () => {
+      const session = createSession()
+      const questions = []
+      const results = []
+      session.on('user_question', (q) => questions.push(q))
+      session.on('tool_result', (r) => results.push(r))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_ask'))
+      session._handleEvent(inputJsonDelta(JSON.stringify({ questions: [{ question: 'Continue?' }] })))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(questions.length, 1)
+      assert.equal(questions[0].toolUseId, 'toolu_ask')
+
+      session._handleEvent(toolResultEvent('toolu_ask', 'Continue'))
+      assert.equal(results.length, 1)
+      assert.deepEqual(results[0].input, { questions: [{ question: 'Continue?' }] })
+    })
+  })
+
   describe('text streaming', () => {
     it('emits stream_start and stream_delta for text blocks', () => {
       const session = createSession()

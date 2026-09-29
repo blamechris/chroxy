@@ -704,6 +704,51 @@ describe('SdkSession', () => {
         session = createSession()
       })
     })
+
+    // #7346 — the persisted/rehydration half for SDK. Unlike CliSession
+    // (which must accumulate `input_json_delta` chunks at
+    // `content_block_stop`), SdkSession already has the full parsed
+    // `block.input` right here, from the assistant full-message event —
+    // so the backfill is a direct `_recordToolInput` call, no buffering.
+    describe('finalized tool input capture (#7346)', () => {
+      it('backfills _inFlightToolStarts so _getTrackedToolInput can read it back', () => {
+        session._trackToolStart('tool-1', 'Bash')
+        assert.equal(session._getTrackedToolInput('tool-1'), undefined, 'nothing recorded yet')
+
+        session._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-1', input: { command: 'ls -la' } })
+
+        assert.deepEqual(session._getTrackedToolInput('tool-1'), { command: 'ls -la' })
+      })
+
+      it('uses the synthesized ${messageId}-tool fallback id when block.id is missing, matching tool_start', () => {
+        session._trackToolStart('msg-1-tool', 'Bash')
+        session._handleToolUseBlock('msg-1', { name: 'Bash', input: { command: 'ls' } })
+        assert.deepEqual(session._getTrackedToolInput('msg-1-tool'), { command: 'ls' })
+      })
+
+      it('records null (not skipped) for a tool genuinely called with no input', () => {
+        session._trackToolStart('tool-1', 'SomeTool')
+        session._handleToolUseBlock('msg-1', { name: 'SomeTool', id: 'tool-1', input: undefined })
+        assert.equal(session._getTrackedToolInput('tool-1'), null)
+      })
+
+      it('does not backfill when the oversized-input guard already returned early', () => {
+        session._trackToolStart('tool-big', 'Write')
+        session.on('error', () => {})
+        const bigInput = { data: 'x'.repeat(session._maxToolInput) }
+        session._handleToolUseBlock('msg-1', { name: 'Write', id: 'tool-big', input: bigInput })
+        assert.equal(session._getTrackedToolInput('tool-big'), undefined)
+      })
+
+      it('does not disturb Task agent tracking — both still fire from the same call', () => {
+        session._trackToolStart('tool-1', 'Task')
+        const spawned = []
+        session.on('agent_spawned', (e) => spawned.push(e))
+        session._handleToolUseBlock('msg-1', { name: 'Task', id: 'tool-1', input: { description: 'Explore' } })
+        assert.equal(spawned.length, 1)
+        assert.deepEqual(session._getTrackedToolInput('tool-1'), { description: 'Explore' })
+      })
+    })
   })
 
   // -- _clearMessageState --
@@ -2310,6 +2355,164 @@ describe('SdkSession', () => {
       // Should complete without timeout error
       assert.equal(errors.length, 0)
       assert.equal(s._resultTimeout, null) // cleared in finally
+      s.destroy()
+    })
+  })
+
+  // #7346 — full-turn, end-to-end coverage for both halves of the fix on the
+  // SDK path: live in-flight `tool_input_delta` streaming (mirrors
+  // byok-session.js — the Agent SDK's `stream_event` carries the same
+  // `input_json_delta` chunks since `includePartialMessages: true` is set),
+  // and the finalized-input backfill landing on `tool_result`.
+  describe('tool_input_delta and finalized input, end-to-end (#7346)', () => {
+    function capture(s, names) {
+      const out = []
+      for (const name of names) s.on(name, (d) => out.push({ name, ...d }))
+      return out
+    }
+
+    it('streams tool_input_delta for each input_json_delta chunk on a tool_use block', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_start', 'tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"com' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'mand":"ls"}' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const starts = events.filter((e) => e.name === 'tool_start')
+      const deltas = events.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(starts.length, 1)
+      assert.equal(deltas.length, 2)
+      for (const d of deltas) assert.equal(d.toolUseId, 'tool-1')
+      assert.equal(deltas[0].partialJson, '{"com')
+      assert.equal(deltas[1].partialJson, 'mand":"ls"}')
+      s.destroy()
+    })
+
+    it('drops the delta quietly when no content_block_start was seen for that index (reordered/malformed event)', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        // No content_block_start at all for index 0.
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'orphan' } } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 0)
+      s.destroy()
+    })
+
+    it('frees the index slot on content_block_stop so a later reused index does not pick up a stale toolUseId', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_input_delta'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        // Index 0 reused for a DIFFERENT tool later in the same turn.
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-2', name: 'Read' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/etc/hosts"}' } } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'tool-2', 'must resolve to the CURRENT occupant of index 0, not the stale one')
+      s.destroy()
+    })
+
+    it('backfills the finalized input onto tool_result for a generic tool', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_result'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        // The full assistant message carries the complete, already-parsed input.
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls -la' } }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'file list' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 1)
+      assert.deepEqual(events[0].input, { command: 'ls -la' })
+      s.destroy()
+    })
+
+    it('keeps each tool\'s finalized input distinct when two tools run in one turn', async () => {
+      const s = createSession()
+      s._processReady = true
+      const events = capture(s, ['tool_result'])
+
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-a', name: 'Bash' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tool-b', name: 'Read' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 1 } }
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'tool-a', name: 'Bash', input: { command: 'ls' } },
+              { type: 'tool_use', id: 'tool-b', name: 'Read', input: { file_path: '/etc/hosts' } },
+            ],
+          },
+        }
+        yield {
+          type: 'user',
+          message: {
+            content: [
+              { type: 'tool_result', tool_use_id: 'tool-b', content: 'hosts contents' },
+              { type: 'tool_result', tool_use_id: 'tool-a', content: 'file list' },
+            ],
+          },
+        }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      const byId = Object.fromEntries(events.map((e) => [e.toolUseId, e.input]))
+      assert.deepEqual(byId['tool-a'], { command: 'ls' })
+      assert.deepEqual(byId['tool-b'], { file_path: '/etc/hosts' })
+      s.destroy()
+    })
+
+    it('omits input on tool_result when the oversized-input guard skipped the backfill', async () => {
+      const s = createSession()
+      s._processReady = true
+      s.on('error', () => {})
+      const events = capture(s, ['tool_result'])
+
+      const bigInput = { data: 'x'.repeat(s._maxToolInput) }
+      s._callQuery = () => (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-big', name: 'Write' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-big', name: 'Write', input: bigInput }] } }
+        yield { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-big', content: 'ok' }] } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0, duration_ms: 10, usage: {} }
+      })()
+
+      await s.sendMessage('hi')
+
+      assert.equal(events.length, 1)
+      assert.equal('input' in events[0], false)
       s.destroy()
     })
   })

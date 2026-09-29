@@ -154,6 +154,16 @@ function ToolGroupEntry({
   // Distinguish "tool finished with empty output" from "tool still running".
   // hasResult covers both toolResult presence and image results.
   const resultPlaceholder = hasResult ? '(no result)' : '(no result yet)'
+  // #7346: mirror the RESULT placeholder's pending/final distinction for
+  // INPUT. Pre-fix this panel said "(no input)" for the entire in-flight
+  // window and for a genuinely-missing-data case alike — a false
+  // statement while the tool is still running (it obviously HAS input;
+  // Chroxy just doesn't have it yet) that was also the visible symptom of
+  // the underlying cli/sdk capture bug (#7346's server-side fix backfills
+  // `toolInput` once the tool_result lands, so this now only shows the
+  // pending copy for the brief window before that happens — or
+  // indefinitely for a tool that has genuinely finished with no input).
+  const inputPlaceholder = hasResult ? '(no input)' : '(input not received yet)'
   // #6755 — images-only tool results (computer-use screenshots, browser
   // tools returning base64 PNGs) previously rendered "Result: (no result)"
   // in this panel because `resultDetail` was empty and there was nowhere
@@ -229,7 +239,7 @@ function ToolGroupEntry({
           <div className="tool-group-entry-detail-section">
             <div className="tool-group-entry-detail-label">Input</div>
             <pre className="tool-group-entry-detail-content">
-              {inputDetail || '(no input)'}
+              {inputDetail || inputPlaceholder}
             </pre>
           </div>
           {showResultText && (

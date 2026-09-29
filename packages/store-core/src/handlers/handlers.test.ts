@@ -8118,6 +8118,75 @@ describe('handleToolResult', () => {
     expect(out!.sessionId).toBe('sess-active')
   })
 
+  // #7346 — the server backfills the finalized tool input onto tool_result
+  // once it knows it (cli-session.js / sdk-session.js — see
+  // base-session.js's _getTrackedToolInput), since neither provider's
+  // tool_start carries it. This is the client-side half of that fix: fold
+  // it into `patch.toolInput` so a completed call's expanded panel shows
+  // the real input instead of the "(no input)" placeholder — both for the
+  // live bubble and, since the server backfills the persisted tool_start
+  // history entry the same way, for a session-switch/reconnect replay.
+  describe('toolInput backfill (#7346)', () => {
+    it('sets patch.toolInput from a structured object msg.input', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'ok', input: { command: 'ls -la' } },
+        'sess-active',
+      )
+      expect(out!.patch.toolInput).toEqual({ command: 'ls -la' })
+    })
+
+    it('omits patch.toolInput when msg.input is absent (BYOK today: unchanged behavior)', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'ok' },
+        'sess-active',
+      )
+      expect(out!.patch.toolInput).toBeUndefined()
+      expect('toolInput' in out!.patch).toBe(false)
+    })
+
+    it('omits patch.toolInput when msg.input is null', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'ok', input: null },
+        'sess-active',
+      )
+      expect('toolInput' in out!.patch).toBe(false)
+    })
+
+    it('omits patch.toolInput when msg.input is a non-object primitive (defensive — real tool inputs are always objects)', () => {
+      expect('toolInput' in handleToolResult({ toolUseId: 'tu-1', result: 'ok', input: 'raw string' }, 's')!.patch).toBe(false)
+      expect('toolInput' in handleToolResult({ toolUseId: 'tu-1', result: 'ok', input: 42 }, 's')!.patch).toBe(false)
+    })
+
+    it('omits patch.toolInput when msg.input is an array (ChatMessage.toolInput is typed Record<string, unknown>)', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'ok', input: ['a', 'b'] },
+        'sess-active',
+      )
+      expect('toolInput' in out!.patch).toBe(false)
+    })
+
+    it('preserves a legally empty object input ({}), distinct from "no input recorded"', () => {
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'ok', input: {} },
+        'sess-active',
+      )
+      expect(out!.patch.toolInput).toEqual({})
+    })
+
+    it('applyTo() merges the backfilled toolInput onto the matching tool_use message', () => {
+      const messages: ChatMessage[] = [
+        { id: 'msg-2', type: 'tool_use', content: 'Bash', toolUseId: 'tu-1', timestamp: 2 },
+      ]
+      const out = handleToolResult(
+        { toolUseId: 'tu-1', result: 'file list', input: { command: 'ls -la' } },
+        'sess-active',
+      )!
+      const updated = out.applyTo(messages)
+      expect(updated[0]!.toolInput).toEqual({ command: 'ls -la' })
+      expect(updated[0]!.toolResult).toBe('file list')
+    })
+  })
+
   describe('applyTo()', () => {
     const baseMessages: ChatMessage[] = [
       { id: 'msg-1', type: 'response', content: 'hello', timestamp: 1 },

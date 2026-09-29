@@ -521,6 +521,22 @@ export class BaseSession extends EventEmitter {
     // forever AND persist the orphan to session-state.json. Companion
     // path: SessionMessageHistory.sweepUnresolvedToolStarts (#4617/#4619)
     // catches stragglers at restore-time as a backstop.
+    //
+    // #7346: entries may also carry a finalized `input` field, set via
+    // `_recordToolInput` once the provider knows the tool's full input
+    // (CliSession: parsed `content_block_stop` buffer; SdkSession: the
+    // full assistant-message `block.input`, no buffering needed). Both
+    // `content_block_start`'s `tool_start` and the Anthropic wire
+    // protocol's `content_block_start` for a tool_use carry `input: null`
+    // — the finalized value only exists once the block closes — so this
+    // is the one place both providers can stash it for `tool-result.js`'s
+    // `emitToolResults` to read back (`_getTrackedToolInput`) and attach
+    // to the matching `tool_result`, which lets the client (and
+    // persisted history, via session-message-history.js) backfill the
+    // `tool_start` entry that was `input: null` when first emitted.
+    // BYOK never calls `_trackToolStart`, so this map stays empty there
+    // and `_getTrackedToolInput` always returns `undefined` — BYOK's
+    // `tool_result` is unaffected.
     this._inFlightToolStarts = new Map()
     // #5160: per-session activity registry (Control Room). A thin unifying
     // layer that maps the signals BaseSession already emits (tool_start /
@@ -1770,6 +1786,40 @@ export class BaseSession extends EventEmitter {
   _trackToolResult(toolUseId) {
     if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
     this._inFlightToolStarts.delete(toolUseId)
+  }
+
+  /**
+   * #7346: attach the finalized tool input onto the in-flight tracking
+   * entry created by `_trackToolStart`, so `_getTrackedToolInput` can
+   * hand it back to `tool-result.js`'s `emitToolResults` when the
+   * matching `tool_result` fires. No-op when the toolUseId isn't
+   * tracked (already resolved/swept, or `_trackToolStart` was never
+   * called for this provider — e.g. BYOK).
+   *
+   * @param {string} toolUseId
+   * @param {unknown} input - the finalized (fully parsed) tool input
+   */
+  _recordToolInput(toolUseId, input) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+    const entry = this._inFlightToolStarts.get(toolUseId)
+    if (entry) entry.input = input
+  }
+
+  /**
+   * #7346: read back the finalized tool input recorded via
+   * `_recordToolInput`, if any. Returns `undefined` when nothing was
+   * recorded — either the toolUseId isn't tracked at all (BYOK never
+   * calls `_trackToolStart`, so this is always `undefined` there and
+   * `tool_result` stays exactly as it was) or `_recordToolInput` was
+   * never called for it (parse failure / overflow discard on the CLI
+   * path).
+   *
+   * @param {string} toolUseId
+   * @returns {unknown}
+   */
+  _getTrackedToolInput(toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return undefined
+    return this._inFlightToolStarts.get(toolUseId)?.input
   }
 
   /**

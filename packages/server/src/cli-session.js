@@ -194,6 +194,7 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
  *   stream_end       { messageId }
  *   message          { type, content, tool, timestamp }
  *   tool_start       { messageId, tool, input }
+ *   tool_input_delta { messageId, toolUseId, partialJson }
  *   result           { cost, duration, usage, sessionId }
  *   error            { message }
  *   user_question    { toolUseId, questions }
@@ -201,7 +202,7 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
  *   agent_completed  { toolUseId }
  *   plan_started     {}
  *   plan_ready       { allowedPrompts }
- *   tool_result      { toolUseId, result, truncated }
+ *   tool_result      { toolUseId, result, truncated, input? }
  */
 
 export class CliSession extends BaseSession {
@@ -233,7 +234,16 @@ export class CliSession extends BaseSession {
    * exhaust there.
    */
   static get customEvents() {
-    return ['respawn_exhausted']
+    // #7346: `tool_input_delta` streams the accumulating partial JSON of
+    // an in-flight tool's input (see the `input_json_delta` handling in
+    // `_handleEvent`'s `content_block_delta` case) — matches
+    // byok-session.js's shape/handler exactly so store-core's
+    // `handleToolInputDelta` needs no provider branch. Without listing
+    // it here, `session-manager.js`'s `_wireSessionEvents` never bridges
+    // the local EventEmitter emit onto the `session_event` channel and
+    // it never reaches the client (same wiring requirement documented on
+    // byok-session.js's `customEvents`).
+    return ['respawn_exhausted', 'tool_input_delta']
   }
 
   /**
@@ -1358,6 +1368,24 @@ export class CliSession extends BaseSession {
                 } else {
                   ctx.toolInputChunks += delta.partial_json
                   ctx.toolInputBytes += chunkBytes
+                  // #7346: stream the partial JSON to the dashboard the
+                  // same way byok-session.js already does, so an
+                  // in-flight tool-call bubble shows the command as it
+                  // assembles instead of "(no input)" for the entire
+                  // in-flight window — the #4341 client fallback already
+                  // renders `toolInputPartial`; it just never had a CLI
+                  // data source to fall back to. Guarded on
+                  // ctx.currentToolUseId (always set by the matching
+                  // content_block_start before any delta can arrive) so
+                  // a malformed/reordered event can't emit with an
+                  // undefined toolUseId.
+                  if (ctx.currentToolUseId) {
+                    this.emit('tool_input_delta', {
+                      messageId,
+                      toolUseId: ctx.currentToolUseId,
+                      partialJson: delta.partial_json,
+                    })
+                  }
                 }
               }
             }
@@ -1366,6 +1394,16 @@ export class CliSession extends BaseSession {
 
           case 'content_block_stop': {
             if (ctx && ctx.currentToolName) {
+              // #7346: backfill EVERY tool's finalized input (not just the
+              // four special-cased by _applyToolInputSemantics below) so a
+              // generic Bash/Read/etc. call's input rides out on its
+              // tool_result instead of staying null forever — the actual
+              // root cause of the "(no input)" bug, in flight AND after
+              // completion/session-switch replay. Must run before
+              // _applyToolInputSemantics only by convention (the two are
+              // independent; ordering doesn't matter since neither mutates
+              // ctx.toolInputChunks).
+              this._captureFinalizedToolInput(ctx)
               this._applyToolInputSemantics(ctx)
             }
             if (ctx) {
@@ -1511,6 +1549,40 @@ export class CliSession extends BaseSession {
         this._clearMessageState({ turnEndedCleanly: true })
         break
       }
+    }
+  }
+
+  /**
+   * #7346: backfill the finalized tool input onto `_inFlightToolStarts`
+   * (base-session.js `_recordToolInput`) so `tool-result.js`'s
+   * `emitToolResults` can attach it to the matching `tool_result` via
+   * `_getTrackedToolInput`. Runs for every tool (unlike
+   * `_applyToolInputSemantics`, which only parses to drive four
+   * special-cased tools' session state) — the #7346 root cause was that
+   * nothing captured the finalized input for a generic Bash/Read/etc.
+   * call, so it stayed `null` forever: not just in flight, but in the
+   * persisted `tool_start` history entry a session-switch replay
+   * rebuilds from.
+   *
+   * Best-effort and silent on failure: a JSON parse error (malformed
+   * chunk) or an empty buffer (the overflow path already reset
+   * `ctx.toolInputChunks` to `''` and told the user via the `error`
+   * event emitted at accumulation time) simply skips the backfill — the
+   * tool_start entry's `input` stays `null` and the client shows the
+   * "(input not received yet)" placeholder (#7346 direction 3) rather
+   * than a stale or fabricated value.
+   *
+   * @param {{ currentToolUseId: string|null, toolInputChunks: string }} ctx
+   * @private
+   */
+  _captureFinalizedToolInput(ctx) {
+    const toolUseId = ctx.currentToolUseId
+    if (!toolUseId || !ctx.toolInputChunks) return
+    try {
+      const parsed = JSON.parse(ctx.toolInputChunks)
+      this._recordToolInput(toolUseId, parsed)
+    } catch {
+      // Malformed/truncated JSON — nothing to backfill.
     }
   }
 

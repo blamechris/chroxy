@@ -1906,6 +1906,60 @@ describe('BaseSession', () => {
       assert.equal(s._inFlightToolStarts.size, 0)
     })
 
+    // #7346 — the finalized-input backfill both providers rely on to get a
+    // completed tool's input onto its tool_result (see tool-result.js's
+    // emitToolResults / cli-session.js's _captureFinalizedToolInput /
+    // sdk-session.js's _handleToolUseBlock).
+    describe('_recordToolInput / _getTrackedToolInput (#7346)', () => {
+      it('attaches input to an existing in-flight entry and reads it back', () => {
+        s._trackToolStart('toolu_1', 'Bash')
+        assert.equal(s._getTrackedToolInput('toolu_1'), undefined, 'nothing recorded yet')
+        s._recordToolInput('toolu_1', { command: 'ls -la' })
+        assert.deepEqual(s._getTrackedToolInput('toolu_1'), { command: 'ls -la' })
+      })
+
+      it('is a no-op when the toolUseId was never tracked (e.g. BYOK, which never calls _trackToolStart)', () => {
+        // No _trackToolStart call at all — mirrors byok-session.js, which
+        // has its own tool_input_delta path and never populates
+        // _inFlightToolStarts.
+        s._recordToolInput('toolu_untracked', { command: 'rm -rf /' })
+        assert.equal(s._getTrackedToolInput('toolu_untracked'), undefined)
+      })
+
+      it('is a no-op once the entry has already resolved (tool_result already fired)', () => {
+        s._trackToolStart('toolu_1', 'Bash')
+        s._trackToolResult('toolu_1')
+        s._recordToolInput('toolu_1', { command: 'ls' })
+        assert.equal(s._getTrackedToolInput('toolu_1'), undefined)
+      })
+
+      it('ignores empty / non-string toolUseId on both methods (defensive)', () => {
+        s._recordToolInput('', { a: 1 })
+        s._recordToolInput(null, { a: 1 })
+        assert.equal(s._getTrackedToolInput(''), undefined)
+        assert.equal(s._getTrackedToolInput(null), undefined)
+        assert.equal(s._getTrackedToolInput(undefined), undefined)
+      })
+
+      it('preserves a legally falsy recorded input (null / empty object), distinguishable from "nothing recorded"', () => {
+        // Mirrors the #4774 falsy-JSON lesson elsewhere in this codebase —
+        // presence in the map (not truthiness of the value) is what
+        // `_getTrackedToolInput` must key on. `tool-result.js` gates its
+        // own attach on `input !== undefined`, so a recorded `null` (a
+        // tool genuinely called with no arguments, per SdkSession's
+        // `block.input ?? null`) is still forwarded — only "never
+        // recorded" reads back as `undefined`.
+        s._trackToolStart('toolu_1', 'SomeTool')
+        s._recordToolInput('toolu_1', null)
+        assert.equal(s._getTrackedToolInput('toolu_1'), null)
+        assert.notEqual(s._getTrackedToolInput('toolu_1'), undefined)
+
+        s._trackToolStart('toolu_2', 'OtherTool')
+        s._recordToolInput('toolu_2', {})
+        assert.deepEqual(s._getTrackedToolInput('toolu_2'), {})
+      })
+    })
+
     it('_sweepUnresolvedToolStarts emits one synthetic tool_result per orphan and clears the map', () => {
       s._trackToolStart('toolu_A', 'Bash')
       s._trackToolStart('toolu_B', 'Read')

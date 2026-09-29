@@ -599,6 +599,26 @@ export function handleToolResult(
     toolResultIsError: isError,
   }
   if (images?.length) patch.toolResultImages = images
+  // #7346: backfill `toolInput` from the finalized input the server
+  // attaches once known (CliSession / SdkSession — see
+  // base-session.js's `_getTrackedToolInput`), so a completed call whose
+  // `tool_start` arrived with `input: null` still ends up with the real
+  // structured input once its result lands — both for the live bubble
+  // (this patch merges onto the existing ChatMessage) and, since the
+  // server backfills the persisted `tool_start` history entry the same
+  // way, for a later session-switch/reconnect replay. Guarded to a
+  // plain (non-array) object — the only shape `toolInput` is typed as
+  // and the only shape a real tool input is ever serialized as; BYOK
+  // never sends this field, so `msg.input` stays `undefined` there and
+  // this is a no-op (unchanged from before).
+  if (
+    msg.input !== undefined
+    && msg.input !== null
+    && typeof msg.input === 'object'
+    && !Array.isArray(msg.input)
+  ) {
+    patch.toolInput = msg.input as Record<string, unknown>
+  }
 
   return {
     sessionId,

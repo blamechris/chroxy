@@ -370,6 +370,33 @@ export class SessionMessageHistory extends EventEmitter {
         break
 
       case 'tool_result':
+        // #7346: backfill the matching tool_start entry's `input` when the
+        // caller (tool-result.js's emitToolResults, via
+        // base-session.js's `_getTrackedToolInput`) attached the
+        // finalized input it captured at content_block_stop (CliSession)
+        // / from the full assistant block (SdkSession). tool_start is
+        // write-once (`_pushHistory` only ever appends), so without this
+        // the persisted entry stays `input: null` forever — the exact
+        // root cause of the "(no input)" placeholder surviving a session
+        // switch: a forceFull replay faithfully rebuilds from history,
+        // and history never had the input to rebuild WITH. Search
+        // backward (most turns have only a handful of recent entries,
+        // and the match is almost always near the end) rather than
+        // indexing by toolUseId, since tool_start entries are rare
+        // enough that a second Map isn't worth the bookkeeping.
+        //
+        // BYOK never sets `data.input` (its `_getTrackedToolInput` is
+        // never even reached — see tool-result.js), so this loop is a
+        // no-op for it and its tool_start entries are unchanged.
+        if (data.input !== undefined) {
+          for (let i = history.length - 1; i >= 0; i--) {
+            const entry = history[i]
+            if (entry && entry.type === 'tool_start' && entry.toolUseId === data.toolUseId) {
+              entry.input = data.input
+              break
+            }
+          }
+        }
         this._pushHistory(history, {
           type: 'tool_result',
           toolUseId: data.toolUseId,

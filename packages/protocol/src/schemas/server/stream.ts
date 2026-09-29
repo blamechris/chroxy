@@ -230,6 +230,16 @@ export const ServerToolResultSchema = z.object({
   // missing value as false. Older servers and non-mcp tools omit it; codex
   // mcpToolCall emits it explicitly (`false` on success).
   isError: z.boolean().optional(),
+  // #7346: the finalized tool input, backfilled by CliSession (parsed from
+  // the buffered `content_block_stop` input_json_delta chunks) / SdkSession
+  // (the full assistant-message `block.input`, already parsed) — see
+  // base-session.js's `_getTrackedToolInput` / tool-result.js's
+  // `emitToolResults`. `tool_start`'s own `input` is `null` for both
+  // providers (neither's `content_block_start` carries the real value), so
+  // this is how the client and persisted history (session-message-
+  // history.js backfills the matching `tool_start` entry) ever see it.
+  // Optional and absent on BYOK, which never populates it.
+  input: z.any().optional(),
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420
