@@ -373,8 +373,23 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'docker-session.js',
-    match: "execFile('docker', args, opts, callback)",
-    reason: "the _execFileDocker seam (#7416, mirroring #7374's _spawnDocker) added so a test can capture the real docker run argv without shelling out. args is opaque here (a parameter), but it is built in _startContainer's only caller from this._memoryLimit (opts.memoryLimit || '2g'), this._cpuLimit (opts.cpuLimit || '2'), this._image (opts.image || 'node:22-slim' — none ever populated by the live create_session wiring, always the hardcoded literal default) and `${this.cwd || process.cwd()}:/workspace` (this.cwd gated by validateCwdAllowed() to an existing real directory) — the same reasoning the four per-element entries this replaces used, before they were made opaque by this seam.",
+    match: 'this._memoryLimit',
+    reason: "opts.memoryLimit || '2g' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-session.js',
+    match: 'this._cpuLimit',
+    reason: "opts.cpuLimit || '2' — never populated by the live create_session wiring, always the hardcoded literal default.",
+  },
+  {
+    file: 'docker-session.js',
+    match: '${this.cwd || process.cwd()}:/workspace',
+    reason: 'same reasoning as docker-sdk-session.js: this.cwd is gated by validateCwdAllowed() to an existing real directory before reaching here.',
+  },
+  {
+    file: 'docker-session.js',
+    match: 'this._image',
+    reason: "opts.image || 'node:22-slim' — never populated by the live create_session wiring, always the hardcoded literal default.",
   },
   {
     file: 'docker-session.js',
