@@ -613,6 +613,29 @@ describe('DiscordWebhookSink — status-message state machine', () => {
     assert.equal(calls.length, 0)
   })
 
+  // #7428: the negative half of "STATE_FOR_CATEGORY has no entry → returns
+  // true without sending" — the exact behavior that made #7428's original bug
+  // (ci_complete silently dropped, indistinguishable from delivered) possible.
+  // This pins that the status sink keeps leaving ci_complete alone even after
+  // #7428 adds a sink that DOES handle it: no fetch, no state file, no
+  // touched project entry — delivery for this category is `discord-ci-sink.js`'s
+  // job, never this sink's. If `ci_complete` were ever folded into
+  // STATE_FOR_CATEGORY (routing it through the per-project embed instead), this
+  // test goes red.
+  it('leaves ci_complete alone — CI-completion delivery is DiscordCiSink’s job (#7428)', async () => {
+    const calls = scriptFetch()
+    const { sink, statePath } = makeSink()
+    const ok = await sink.send({
+      category: 'ci_complete',
+      title: 'CI passed on #123',
+      body: '5 of 5 checks passed',
+      data: { prNumber: 123, prUrl: 'https://github.com/o/r/pull/123', verdict: 'success' },
+    })
+    assert.equal(ok, true)
+    assert.equal(calls.length, 0, 'no PATCH/POST of the session embed')
+    assert.equal(existsSync(statePath), false, 'no session-status state written')
+  })
+
   it('builds the embed with per-project color, state title, and fields', async () => {
     const calls = scriptFetch()
     const { sink } = makeSink({ colors: { alpha: 1752220 }, botName: 'TestBot' })
@@ -1096,7 +1119,7 @@ describe('PushManager integration (#5413 Phase 2)', () => {
     const pm = new PushManager({
       discord: { resolveWebhookUrl: () => ({ url: null, source: 'none' }) },
     })
-    assert.deepEqual(pm._sinks.sinks.map((s) => s.name), ['expo-push', 'discord-webhook', 'discord-billing'])
+    assert.deepEqual(pm._sinks.sinks.map((s) => s.name), ['expo-push', 'discord-webhook', 'discord-billing', 'discord-ci'])
     assert.equal(pm.hasConfiguredSinks(), false)
     pm.destroy()
   })
@@ -1128,6 +1151,30 @@ describe('PushManager integration (#5413 Phase 2)', () => {
     assert.equal(ok, true)
     assert.equal(calls.length, 1)
     assert.equal(calls[0].method, 'POST')
+    pm.destroy()
+  })
+
+  // #7428: end-to-end through the real pipeline (rate limit → gating → fan-out)
+  // — a ci_complete send() must reach discord-ci-sink.js and ONLY that sink,
+  // exactly once, and must not write to the status sink's state file.
+  it('send() routes ci_complete through DiscordCiSink alone — one POST, no status-embed state written', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    const dir = mkdtempSync(join(tmpdir(), 'discord-pm-'))
+    const statePath = join(dir, 'state.json')
+    const pm = new PushManager({
+      discord: {
+        statePath,
+        resolveWebhookUrl: () => ({ url: WEBHOOK, source: 'env' }),
+        heartbeatIntervalMs: 0,
+      },
+    })
+    const ok = await pm.send('ci_complete', 'CI passed on #42', '5 of 5 checks passed', {
+      prNumber: 42, prUrl: 'https://github.com/o/r/pull/42', verdict: 'success',
+    })
+    assert.equal(ok, true)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].method, 'POST')
+    assert.equal(existsSync(statePath), false, 'status-embed sink must never write for ci_complete')
     pm.destroy()
   })
 

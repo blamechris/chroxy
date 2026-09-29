@@ -108,6 +108,51 @@ export function escapeAndCap(text, max = 1000) {
   return trailing % 2 === 1 ? cut.slice(0, -1) : cut
 }
 
+/**
+ * Discord's hard embed-title limit (#7105, moved here from
+ * discord-webhook-sink.js in #7428 so a second embed-building sink —
+ * discord-ci-sink.js — can share it without importing the status sink).
+ *
+ * Past it the ENTIRE webhook POST/PATCH comes back 400, so whatever the embed
+ * was reporting silently stops updating. Every free-text field goes through
+ * escapeAndCap for the same reason; a title needs the same ceiling even
+ * though Discord does not render markdown in titles (escapeAndCap's escaping
+ * step is then a no-op for a plain chroxy-authored title, but the length cap
+ * still applies).
+ *
+ * https://discord.com/developers/docs/resources/message#embed-object-embed-limits
+ */
+export const MAX_EMBED_TITLE_CHARS = 256
+
+// Discord's mention grammar: `@everyone` / `@here` (exact, case-sensitive in
+// the client, matched case-insensitively here to be conservative) and the
+// snowflake forms `<@123>` (user), `<@!123>` (nickname-mention user), `<@&123>`
+// (role).
+const MENTION_PATTERN = /<@[!&]?\d+>|@(?:everyone|here)\b/gi
+
+/**
+ * Neutralize Discord mention syntax in free text so a PR title (or any other
+ * GitHub-authored string a sink embeds) can't ping `@everyone`/`@here`/a
+ * role/a user (#7428). Discord's mention parser needs the EXACT substring
+ * (`@everyone`, `<@123>`, ...) with nothing in between; inserting an
+ * invisible zero-width space (U+200B) right after the leading `@` breaks that
+ * match while leaving the text visually unchanged to a human reader — the
+ * same technique used by webhook bots generally, and cheaper than stripping
+ * or rewriting the mention (which would make a legitimately-named PR like
+ * "Add @here handling" unreadable).
+ *
+ * Order matters relative to escapeAndCap: call this FIRST, then escapeAndCap
+ * — escaping doesn't touch `@`/`<`/`>`/digits so the two passes don't
+ * interact, but running mention neutralization after a truncation could clip
+ * a mention mid-match and skip it.
+ */
+export function neutralizeMentions(text) {
+  if (typeof text !== 'string') return ''
+  return text.replace(MENTION_PATTERN, (match) => (
+    match.startsWith('<@') ? `<@​${match.slice(2)}` : `@​${match.slice(1)}`
+  ))
+}
+
 /** Build the Discord webhook API base from a validated webhook URL. */
 export function apiBase(webhookUrl) {
   const parts = extractWebhookIdToken(webhookUrl)

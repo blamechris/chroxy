@@ -8,11 +8,14 @@
  * them asking —
  *
  *   - the **user**, through the existing notification pipeline (a `ci_complete`
- *     push), so a finished run reaches the phone. NOTE: the Expo sink delivers
- *     it; the Discord sink does NOT — its `STATE_FOR_CATEGORY` maps categories
- *     onto a session-status embed and `ci_complete` is not a session state, so
- *     it drops silently. Wiring Discord up needs its own shape (see #7428) and
- *     claiming it here without checking was the first thing review caught;
+ *     push), so a finished run reaches the phone. The Expo sink delivers it as
+ *     a push notification; on Discord it is `discord-ci-sink.js` that
+ *     delivers it (#7428) — as its own one-shot message, NOT the per-project
+ *     status sink (`discord-webhook-sink.js`), whose `STATE_FOR_CATEGORY` maps
+ *     categories onto a session-status embed and still has no entry for
+ *     `ci_complete` on purpose: it is not a session state, and folding it in
+ *     would repaint whatever the session's actual status is with a stale CI
+ *     verdict;
  *   - the **agent**, by typing one line into the session's own prompt when it
  *     is idle, so the model learns CI settled instead of spending a turn (and a
  *     whole cached-context re-read) polling `gh pr checks`.
