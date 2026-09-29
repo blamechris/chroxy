@@ -88,6 +88,56 @@
  *   (e) a matching entry in the `AUDITED_SINKS` catalogue exported by
  *       `utils/argv-safety.js` (`--catalogue` overrides the file read).
  *
+ * ## Catalogue matching is whole-expression equality (#8112)
+ *
+ * A catalogue entry attests an argv element (or, for an unresolvable argv,
+ * the whole spawn-like call) only when its normalised source text EQUALS the
+ * entry's `match` — never merely CONTAINS it. Before #8112 this was a bare
+ * substring check, so a wider expression built around an attested one —
+ * `this._image || this._userSuppliedImageOverride`, a template literal
+ * interpolating an attacker value alongside `this._image`, `attacker +
+ * this._image` — passed as though it WERE `this._image`, the exact
+ * `docs/false-safety-guards.md` "substring match standing in for a token
+ * match" class (`#7290`, `#7291`). See `catalogueEntryMatchesFinding` for the
+ * full matching contract, including the (safe, lint-derived-metadata-only)
+ * site-prefix scoping an entry can still opt into.
+ *
+ * ## Opaque wrappers silently give up coverage (#8112)
+ *
+ * This lint can only reason about what it can SEE as source text. A
+ * same-file helper that takes an already-built argv array as an opaque
+ * parameter and forwards it to `spawn`/`execFile` — `_execFileDocker(args)`,
+ * say — collapses however many element-level attestations the array's
+ * construction site needed into ONE opaque call-site attestation at the
+ * wrapper's own `spawn(...)` line (shape (e) above, since the array can no
+ * longer be resolved element-by-element). Anything pushed onto that array
+ * AFTER the wrapper is introduced — a new flag, a new interpolated value —
+ * is then invisible to this lint: it sees only the wrapper's call, already
+ * catalogued, and never looks inside the array-construction site again.
+ *
+ * This is not hypothetical: PR #8109's first pass added exactly this wrapper
+ * to `DockerSession._startContainer` and collapsed 4 element-level
+ * `argv-safety.js` entries into 1. Review caught it because a companion
+ * mutant — `args.push('--hostname', this._hostnameOverride)` added after the
+ * collapse — went undetected by both the lint and the same-file behavioural
+ * test the wrapper was added to support; the same mutant against pre-PR code
+ * (no wrapper) failed loudly. The PR reverted the wrapper rather than keep
+ * it, and `_startContainer`'s argv is pinned by a `mock.module('child_process')`
+ * behavioural test instead (`docker-session-start-container-argv.test.js`).
+ *
+ * A same-file wrapper around a sink is not wrong in general — `_spawnDocker`
+ * in `docker-session.js` is exactly this shape and is deliberately audited
+ * that way, one catalogue entry for the whole `spawn('docker', dockerArgs, ...)`
+ * call — but it is a coverage trade-off, not a free refactor: it is safe only
+ * when introducing it does not ALSO stop the array's construction site from
+ * being independently, element-by-element audited (directly, if the wrapper
+ * simply relays a `_buildArgs`-shaped function's return value — see
+ * `resolvesToAuditedBuildArgs` above — or by a behavioural test with real
+ * argv assertions otherwise, the way `_startContainer` ended up). Introducing
+ * one is the moment to ask "what audits the array THIS wrapper now hides?",
+ * not to assume the wrapper's own catalogue entry answers that question for
+ * every future push into the array it wraps.
+ *
  * ## Both directions (#7199, #7216, #7544, #7639)
  *
  * `AUDITED_SINKS` is checked both ways: every catalogued `{file, match}` must
@@ -859,15 +909,25 @@ function isIgnoreMarkerAbove(node, sourceFile, rawLines) {
  * `AUDITED_SINKS` itself): a function name / callee / call ordinal / argv
  * position only changes when the FLAGGED SITE's own shape changes, not on
  * every unrelated edit elsewhere in the file.
+ *
+ * #8112: this function used to return ONE combined string (`text + " [[" +
+ * site + "]]"`), matched against a catalogue entry with `.includes()` — a
+ * BARE SUBSTRING check. That let any WIDER expression containing an attested
+ * one pass as though it WERE the attested value (`this._image` attested
+ * `this._image || this._userSuppliedImageOverride` by pure textual
+ * containment — see `catalogueEntryMatchesFinding` below). The text and site
+ * are now kept as SEPARATE finding fields (`matchText`, `site`) precisely so
+ * the text half can be compared for EXACT equality while the site half keeps
+ * the prefix-scoping this function's doc comment above describes — the two
+ * need different comparison rules, which a single concatenated string could
+ * not express safely.
  */
-function elementCatalogueKey(elem, index, scopeFn, calleeLabel, source, callOrdinal = 0) {
-  const text = normText(elem, source).slice(0, 200)
-  const site = `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}#${callOrdinal}#${index}`
-  return `${text} [[${site}]]`
+function elementSite(index, scopeFn, calleeLabel, callOrdinal = 0) {
+  return `${functionName(scopeFn) ?? '<module>'}#${calleeLabel}#${callOrdinal}#${index}`
 }
 
 /**
- * @typedef {{ file: string, line: number, text: string, catalogueKey: string }} Finding
+ * @typedef {{ file: string, line: number, text: string, matchText: string, site: string|null }} Finding
  */
 
 function analyzeFile(filePath, keyRoot) {
@@ -890,8 +950,8 @@ function analyzeFile(filePath, keyRoot) {
   // Review (#7936 follow-through): per-(function, callee) call-site ordinal,
   // counted in source-traversal order and reset for every file. Distinguishes
   // two separate calls to the same callee within the same function — see the
-  // elementCatalogueKey doc comment above for why function+callee+argv-index
-  // alone still collides in that case.
+  // elementSite doc comment above for why function+callee+argv-index alone
+  // still collides in that case.
   const callSiteOrdinals = new Map()
 
   const evaluateBranches = (branches, siteNode, calleeLabel, scopeFn) => {
@@ -906,7 +966,11 @@ function analyzeFile(filePath, keyRoot) {
         file: rel,
         line,
         text: `${calleeLabel}(...) — argv could not be statically resolved (not an array literal, a local push-built array, or a two-branch ternary of either)`,
-        catalogueKey: normText(siteNode, source).slice(0, 200),
+        // Opaque (whole-call) findings carry no call-site suffix — the call
+        // EXPRESSION ITSELF is the thing a catalogue entry must name exactly
+        // (#8112) — so `site` is null, never a string.
+        matchText: normText(siteNode, source).slice(0, 200),
+        site: null,
       })
       return
     }
@@ -920,7 +984,8 @@ function analyzeFile(filePath, keyRoot) {
           file: rel,
           line: lineOf(elem, sourceFile),
           text: `${calleeLabel}(...) argv element \`${normText(elem, source)}\` is not provably constant and is not gated`,
-          catalogueKey: elementCatalogueKey(elem, idx, scopeFn, calleeLabel, source, callOrdinal),
+          matchText: normText(elem, source).slice(0, 200),
+          site: elementSite(idx, scopeFn, calleeLabel, callOrdinal),
         })
       })
     }
@@ -959,6 +1024,131 @@ function analyzeFile(filePath, keyRoot) {
   })
 
   return { findings, sinksScanned }
+}
+
+// ─── Catalogue matching (#8112) ─────────────────────────────────────────────
+
+// The delimiter a catalogue entry's `match` uses to glue an optional site
+// suffix onto its text (see `elementSite` above and
+// `catalogueEntryMatchesFinding` below). Kept as named constants because
+// both sides — how an author writes a site-scoped `match`, and how this file
+// parses one — must agree on it byte-for-byte.
+const SITE_OPEN = ' [['
+const SITE_CLOSE = ']]'
+// The delimiter BETWEEN FIELDS inside a site string itself (`elementSite`:
+// `${functionName}#${calleeLabel}#${callOrdinal}#${index}`) — distinct from
+// SITE_OPEN/SITE_CLOSE, which delimit the site suffix from the text half.
+// #8126: this is what an unterminated site PREFIX must be followed by (or
+// end-of-string) to be accepted — see catalogueEntryMatchesFinding.
+const SITE_FIELD_DELIM = '#'
+
+/**
+ * Collapse insignificant whitespace exactly like `normText` does, so a
+ * catalogue entry's `match` can be wrapped/re-indented in the source file
+ * without going stale — this is EXPRESSION equality, not byte-for-byte
+ * source equality.
+ *
+ * Deliberately does NOT strip anything else — reviewed and pinned by test
+ * (`lint-argv-sinks.test.js`'s "normalizeMatchText's exact boundary" describe,
+ * #8126 review): a wrapping `(...)` and a trailing `,` are both left alone.
+ * `(this._image)` is a DIFFERENT text from `this._image`, even though the
+ * two are semantically identical JS (parens are pure grouping) — an author
+ * must write `match` with the exact parenthesization/comma the flagged
+ * source has, the same as any other character. This is a deliberate,
+ * narrower promise than "AST equality": stripping either would let two
+ * textually-different real findings collapse onto the same normalised
+ * string, which is the #8112/#8126 hazard one level down — a normalisation
+ * step is exactly as dangerous as the comparison it feeds if it can equate
+ * two things that were not attested to be the same.
+ */
+function normalizeMatchText(text) {
+  return text.trim().replace(/\s+/g, ' ')
+}
+
+/**
+ * Does catalogue entry `c` attest finding `f`? (#8112)
+ *
+ * Before this, a finding's combined `text + site` key was checked against
+ * `c.match` with a bare `.includes()` — so any WIDER expression that merely
+ * CONTAINED an attested one passed as though it WERE the attested value:
+ * `match: 'this._image'` silently attested `this._image || this
+ * ._userSuppliedImageOverride`, a template literal interpolating an
+ * attacker value around `this._image`, and `attacker + this._image`, none
+ * of which the entry's author ever saw or reasoned about. This is
+ * `docs/false-safety-guards.md`'s "a substring match standing in for a
+ * token match" class (`#7290`, `#7291`) — the fix is the same shape as
+ * every other entry in that catalogue: replace the substring test with an
+ * EQUALITY test on the whole thing that must be attested.
+ *
+ * `c.match` is one of two shapes:
+ *
+ *   1. Bare text, no site suffix — must equal `f.matchText` EXACTLY (modulo
+ *      the whitespace normalisation above). This still legitimately spans
+ *      EVERY call site in the file whose flagged expression is that exact
+ *      text — six keychain.js sites share `match: 'service'` — which is the
+ *      catalogue's own documented "family" case
+ *      (`AUDITED_SINKS`'s doc comment in utils/argv-safety.js). That
+ *      remains safe under exact matching because it requires the SAME
+ *      literal expression, verbatim, not merely a shared substring: `service`
+ *      matches `service`, never `service || attacker`.
+ *   2. Text followed by a site suffix — ` [[<site>]]` (fully closed) or the
+ *      unterminated ` [[<site-prefix>` shorthand (see `elementSite` and the
+ *      `AUDITED_SINKS.match` doc comment for the site's shape). Same
+ *      whole-text equality on the text half, AND `f` must be an
+ *      element-level finding (`f.site !== null` — an opaque/whole-call
+ *      finding has no site to scope against) whose site starts with the
+ *      entry's site fragment.
+ *
+ *      Prefix-matching the SITE half (but never the text half) is
+ *      deliberate and not a re-opening of the same hole: the site is
+ *      entirely lint-derived call-site metadata — enclosing function name,
+ *      sink callee, a same-callee call ordinal, the element's argv index —
+ *      that the flagged EXPRESSION's own content never influences. A
+ *      catalogue author cannot smuggle a wider *value* through a site
+ *      prefix; at most they narrow (or fail to narrow) which of several
+ *      textually-IDENTICAL call sites one entry covers, which is exactly
+ *      what the #7936 call-site-ordinal fix this scoping is built on top of
+ *      was for. **This property only holds because the prefix match below
+ *      requires a FIELD BOUNDARY** (`#8126`): the site's own fields are
+ *      `#`-joined (`elementSite`), so an unterminated prefix is accepted
+ *      only when it equals the whole site, or the very next character in
+ *      the real site is `SITE_FIELD_DELIM` (`#`). A bare `f.site.startsWith
+ *      (sitePrefix)` with no boundary check — this function's own shape
+ *      before `#8126` — does NOT have this property: `SPAWN_APIS` contains
+ *      two literal-prefix pairs (`execFile`/`execFileSync`,
+ *      `spawn`/`spawnSync`), so an entry pinned to `fn#execFile` (the
+ *      documented callee-only shorthand, no ordinal/index) also matched a
+ *      completely different `fn#execFileSync#0#N` site sharing the same
+ *      flagged TEXT but a different callee and a different real value —
+ *      found reviewing this PR, reproduced directly against the real lint,
+ *      filed and fixed as `#8126`. The same missing-boundary root cause
+ *      applied to a partial ordinal/index too: `fn#callee#1` (unterminated)
+ *      is a string-prefix of `fn#callee#10#0`, so it would have falsely
+ *      matched the 11th call to that (function, callee) pair as well.
+ *
+ * One caveat worth stating rather than silently accepting: if a flagged
+ * expression's own source text happens to contain the literal substring
+ * `" [["`, the FIRST such occurrence is what this function treats as the
+ * site delimiter, which could misparse a hand-written `match` for that
+ * expression. No real catalogue entry needs this today (verified against
+ * the live tree), and no argv expression in this codebase's style
+ * legitimately contains a double-bracket sequence — noted so a future
+ * false-negative here isn't mysterious.
+ */
+function catalogueEntryMatchesFinding(c, f) {
+  const openIdx = c.match.indexOf(SITE_OPEN)
+  const matchText = normalizeMatchText(openIdx === -1 ? c.match : c.match.slice(0, openIdx))
+  if (matchText !== normalizeMatchText(f.matchText)) return false
+  if (openIdx === -1) return true
+  if (f.site === null) return false
+  let sitePrefix = c.match.slice(openIdx + SITE_OPEN.length)
+  if (sitePrefix.endsWith(SITE_CLOSE)) sitePrefix = sitePrefix.slice(0, -SITE_CLOSE.length)
+  if (f.site === sitePrefix) return true
+  // #8126: an unterminated prefix may only end at a FIELD BOUNDARY — the
+  // character immediately after it in the real site must be the fields'
+  // own delimiter, never a bare string continuation (`execFile` extending
+  // into `execFileSync`, `1` extending into `10`).
+  return f.site.startsWith(sitePrefix) && f.site[sitePrefix.length] === SITE_FIELD_DELIM
 }
 
 // ─── Catalogue ──────────────────────────────────────────────────────────────
@@ -1020,7 +1210,7 @@ if (args.minFiles !== null && scanned < args.minFiles) {
 const usedCatalogueIdx = new Set()
 const uncatalogued = []
 for (const f of allFindings) {
-  const idx = catalogue.findIndex((c) => c.file === f.file && f.catalogueKey.includes(c.match))
+  const idx = catalogue.findIndex((c) => c.file === f.file && catalogueEntryMatchesFinding(c, f))
   if (idx === -1) {
     uncatalogued.push(f)
   } else {
