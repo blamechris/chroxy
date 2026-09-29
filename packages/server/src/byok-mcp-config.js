@@ -29,6 +29,17 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
 import { fsyncForDurability, confirmRenameDurable } from './platform.js'
+import {
+  MCP_SERVER_NAME_RE,
+  UNSAFE_MCP_KEYS,
+  containsMcpToolNamespaceSeparator,
+  isBlockedMetadataHost,
+  // #7030 — single-sourced from @chroxy/protocol/mcp-validation (the
+  // Zod-free subpath: this file has no other dependency on @chroxy/protocol
+  // and must not pull the Zod barrel into the ~/.claude.json parse path).
+  // Previously hand-duplicated in packages/dashboard/src/lib/mcp-server-
+  // validation.ts; #6986 and #7001 are what one-copy-drifts looks like.
+} from '@chroxy/protocol/mcp-validation'
 
 /**
  * Defensive upper bound on the size of `~/.claude.json`. Today the file is
@@ -79,8 +90,12 @@ function coerceStringArray(value, { warnings, serverName }) {
  * explanation. `constructor` / `prototype` are plain own-property writes (no
  * setter) but are refused alongside it: a map key that shadows an object internal
  * is never a legitimate environment variable or HTTP header (#7001 review).
+ *
+ * #7030 — single-sourced as `UNSAFE_MCP_KEYS` from
+ * @chroxy/protocol/mcp-validation (imported above). Kept as a local alias so
+ * this stays a pure rename at every call site below.
  */
-const UNSAFE_MAP_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const UNSAFE_MAP_KEYS = UNSAFE_MCP_KEYS
 
 /**
  * Coerce an env object to string→string only. Pushes one warning per dropped
@@ -151,34 +166,12 @@ function coerceHeaders(value, { warnings, serverName }) {
   return headers
 }
 
-/**
- * True when a hostname (or a bare IP from dns.lookup) targets the cloud
- * metadata service / IPv4 link-local range — never a legitimate MCP server
- * (#6821, sharpest edge of #6834). Covers:
- *   - 169.254.0.0/16 (link-local; the metadata endpoint 169.254.169.254
- *     lives here). The WHATWG URL parser canonicalizes hex/decimal/octal
- *     host tricks (0xa9fea9fe, 2852039166) to dotted-quad first, so a
- *     literal-host check on the PARSED hostname catches those too.
- *   - IPv4-mapped IPv6 forms of the same range: the URL parser serializes
- *     them as hex groups (`::ffff:a9fe:xxxx`; a9fe == 169.254), dns.lookup
- *     may return the dotted form (`::ffff:169.254.x.x`).
- *   - fd00:ec2::254, the AWS IMDS IPv6 endpoint (URL-canonical compressed
- *     form plus the expanded spelling).
- * Deliberately does NOT block loopback / RFC1918 generally — localhost MCP
- * servers are legitimate; the broader egress policy is #6834's scope.
- */
-export function isBlockedMetadataHost(hostname) {
-  if (typeof hostname !== 'string' || hostname.length === 0) return false
-  let h = hostname.toLowerCase()
-  if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1)
-  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/)
-  if (v4) return Number(v4[1]) === 169 && Number(v4[2]) === 254
-  if (/^::ffff:a9fe:[0-9a-f]{1,4}$/.test(h)) return true
-  const mapped = h.match(/^::ffff:(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/)
-  if (mapped) return Number(mapped[1]) === 169 && Number(mapped[2]) === 254
-  if (h === 'fd00:ec2::254' || h === 'fd00:ec2:0:0:0:0:0:254') return true
-  return false
-}
+// #7030 — `isBlockedMetadataHost` is single-sourced from
+// @chroxy/protocol/mcp-validation (imported above) and re-exported here so
+// existing callers (`byok-mcp-client.js`, `byok-mcp-oauth.js`) are unaffected.
+// See the shared module's doc comment for the full metadata-host rationale
+// (169.254.0.0/16, IPv4-mapped IPv6 forms, the AWS IMDS IPv6 endpoint).
+export { isBlockedMetadataHost }
 
 /**
  * Return a credential-stripped form of an MCP server url, safe to log or
@@ -905,8 +898,11 @@ export function discoverMcpServerSpecs(cwd, { configPath = defaultClaudeConfigPa
  * no `.` or `/` (so a name can never read as a path or traverse), no uppercase
  * (so two names can't collide case-insensitively), and no whitespace/control
  * characters (so a name can't be visually spoofed in the picker).
+ *
+ * #7030 — single-sourced from @chroxy/protocol/mcp-validation (imported
+ * above); re-exported here since nothing else in this file changes shape.
  */
-export const MCP_SERVER_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/
+export { MCP_SERVER_NAME_RE }
 
 /**
  * Names that must never be used as an object key we assign into, regardless of
@@ -914,8 +910,12 @@ export const MCP_SERVER_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/
  * already refused by MCP_SERVER_NAME_RE (leading `_`), but `constructor` and
  * `prototype` are pure lowercase letters and WOULD pass it, so they are refused
  * explicitly here. Also applied on the removal path, which uses a laxer charset.
+ *
+ * #7030 — single-sourced as `UNSAFE_MCP_KEYS` (same Set as the env/headers
+ * check above); kept as a local alias so the name-specific call sites below
+ * read unchanged.
  */
-const UNSAFE_MCP_SERVER_NAMES = new Set(['__proto__', 'constructor', 'prototype'])
+const UNSAFE_MCP_SERVER_NAMES = UNSAFE_MCP_KEYS
 
 /**
  * Upper bound on a removable name. Removal accepts a much laxer charset than
@@ -952,7 +952,7 @@ export function validateNewMcpServerName(name) {
         '(letters, digits, dash, underscore; must start with a letter, max 64 chars)',
     }
   }
-  if (name.includes('__')) {
+  if (containsMcpToolNamespaceSeparator(name)) {
     return {
       ok: false,
       error:
