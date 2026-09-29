@@ -555,6 +555,134 @@ describe('verifyProvenance — package tree (#8040): real BinaryProvenanceLedger
       'B\'s genuine tree pin must survive completely untouched — A must never have overwritten it with a digest computed against the tampered tree')
     assert.equal(diskRecord.kind, 'tree')
   })
+
+  // #8093 round 2: with the migrate write now a compare-and-swap, the OUTER
+  // reload-before-decide is no longer load-bearing for CORRECTNESS on its
+  // own — the CAS itself rejects a stale write regardless of whether this
+  // reload ran (proven by the test above and the narrower-window tests
+  // below, neither of which depends on this reload distinguishing anything).
+  // It remains load-bearing for A never even ATTEMPTING a doomed migrate
+  // write once disk already shows the tree kind: without it, A still walks
+  // the tree, still computes a digest, and still calls `approve()` with an
+  // `expect` snapshot that the CAS is guaranteed to reject — correct, but a
+  // wasted write attempt (and the walk to produce it) on every such turn.
+  it('once a DIFFERENT process has already migrated, a stale-since-construction A never attempts a migrate write at all (efficiency, not a bypass)', () => {
+    const { resolvedPath } = buildCodexFixture(dir)
+    const entryHash = hashFile(resolvedPath)
+
+    const seeder = new BinaryProvenanceLedger({ filePath: ledgerPath })
+    seeder.approve(resolvedPath, entryHash)
+
+    // A is constructed BEFORE B's migration lands — its own in-memory view
+    // starts (and, without a reload, would stay) legacy-shaped, exactly like
+    // the wide-gap repro above. Only a reload can bring it up to date.
+    const daemonA = new BinaryProvenanceLedger({ filePath: ledgerPath })
+    let migrateAttempts = 0
+    const realApproveA = daemonA.approve.bind(daemonA)
+    daemonA.approve = (p, h, opts) => {
+      if (opts && opts.expect) migrateAttempts += 1
+      return realApproveA(p, h, opts)
+    }
+
+    const daemonB = new BinaryProvenanceLedger({ filePath: ledgerPath })
+    const bVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonB })
+    assert.equal(bVerdict.status, PROVENANCE_STATUS.OK)
+
+    const aVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonA })
+    assert.equal(aVerdict.status, PROVENANCE_STATUS.OK)
+    assert.equal(migrateAttempts, 0, 'a path a DIFFERENT process already migrated must never make THIS instance re-enter the migrate branch at all — without the outer reload, a stale-since-construction instance has no way to learn that except by attempting (and having rejected) a doomed CAS write')
+  })
+
+  // #8093 round 2: the test above closes the WIDE window (A's snapshot is
+  // stale from CONSTRUCTION) via the outer reload-before-decide — by the
+  // time A's outer reload runs, B has ALREADY flushed, so A's outer reload
+  // itself observes B's tree record and A never even enters the migrate
+  // branch. The round-2 finding is about a NARROWER window: B's write lands
+  // strictly AFTER A's own reload (A still sees the legacy record and
+  // proceeds to migrate) but BEFORE A's own `approve()` call actually runs —
+  // the exact gap `computeTreeHash()` (a pure, ledger-free computation)
+  // sits in. The only way to land a write there through the real
+  // `verifyProvenance()` call is to hook the ledger method it calls at that
+  // exact point — `approve()` — since nothing else touches the ledger
+  // between A's reload and A's write in the real control flow.
+  describe('the NARROWER window: a genuine write landing between A\'s reload and A\'s own write (#8093 round 2, C2)', () => {
+    function makeInterleavedLedgers(genuineDigest) {
+      const daemonA = new BinaryProvenanceLedger({ filePath: ledgerPath })
+      const realApproveA = daemonA.approve.bind(daemonA)
+      daemonA.approve = (p, h, opts) => {
+        if (opts && opts.expect) {
+          // B is a separate instance/process over the SAME file, writing
+          // its own genuine migration strictly AFTER A's own reload (A is
+          // already past that point, mid-call, by the time this runs) but
+          // BEFORE A's write below — the exact gap the review identified.
+          const daemonB = new BinaryProvenanceLedger({ filePath: ledgerPath })
+          daemonB.approve(p, genuineDigest, { fields: { kind: 'tree' }, expect: opts.expect })
+        }
+        return realApproveA(p, h, opts)
+      }
+      return daemonA
+    }
+
+    it('a TAMPERED tree is refused: A\'s own digest reflects the tamper, B\'s genuine pin survives untouched', () => {
+      const { resolvedPath, nativeBinaryPath } = buildCodexFixture(dir)
+      const entryHash = hashFile(resolvedPath)
+
+      // Capture the GENUINE digest before any tampering, via a throwaway
+      // scratch ledger — never touches `ledgerPath`. This is what a
+      // concurrent B, migrating slightly earlier against the untouched
+      // tree, would have computed and flushed for real.
+      const scratchLedgerDir = mkdtempSync(join(tmpdir(), 'chroxy-binary-trust-scratch-'))
+      const scratchLedger = new BinaryProvenanceLedger({ filePath: join(scratchLedgerDir, 'binary-trust.json') })
+      const genuineDigest = verifyProvenance({ resolvedPath, mode: 'block', ledger: scratchLedger }).hash
+      rmSync(scratchLedgerDir, { recursive: true, force: true })
+
+      // NOW tamper — after the genuine digest was captured, before A ever
+      // looks at the tree.
+      writeFileSync(nativeBinaryPath, 'SWAPPED — attacker-controlled native binary')
+
+      const seeder = new BinaryProvenanceLedger({ filePath: ledgerPath })
+      seeder.approve(resolvedPath, entryHash) // legacy pin — the entry file itself never changed
+
+      const daemonA = makeInterleavedLedgers(genuineDigest)
+      const aVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonA })
+
+      assert.equal(aVerdict.status, PROVENANCE_STATUS.HASH_MISMATCH,
+        'A\'s own digest reflects the TAMPERED tree, and must never be reported as matching a hash the ledger does not actually hold')
+      assert.equal(aVerdict.blocked, true, 'block mode must refuse the tampered tree')
+      assert.equal(aVerdict.pinnedHash, genuineDigest, 'the reported pinnedHash must be B\'s genuine digest — the value the ledger actually holds')
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      const diskRecord = onDisk.binaries[_normalizeKey(resolvedPath)]
+      assert.equal(diskRecord.sha256, genuineDigest, 'B\'s genuine tree pin must survive untouched — this is the CAS actually working, not another reload moving the gap')
+      assert.equal(diskRecord.kind, 'tree')
+    })
+
+    it('a MATCHING tree (no tamper) is OK: A\'s own digest agrees with B\'s genuine pin', () => {
+      const { resolvedPath } = buildCodexFixture(dir)
+      const entryHash = hashFile(resolvedPath)
+
+      const scratchLedgerDir = mkdtempSync(join(tmpdir(), 'chroxy-binary-trust-scratch-'))
+      const scratchLedger = new BinaryProvenanceLedger({ filePath: join(scratchLedgerDir, 'binary-trust.json') })
+      const genuineDigest = verifyProvenance({ resolvedPath, mode: 'block', ledger: scratchLedger }).hash
+      rmSync(scratchLedgerDir, { recursive: true, force: true })
+
+      // No tampering this time — the tree A itself walks is byte-identical
+      // to what B (and the scratch capture) saw.
+      const seeder = new BinaryProvenanceLedger({ filePath: ledgerPath })
+      seeder.approve(resolvedPath, entryHash)
+
+      const daemonA = makeInterleavedLedgers(genuineDigest)
+      const aVerdict = verifyProvenance({ resolvedPath, mode: 'block', ledger: daemonA })
+
+      assert.equal(aVerdict.status, PROVENANCE_STATUS.OK,
+        'A\'s own independently-computed digest genuinely matches what the ledger holds, even though A\'s own CAS lost the race — this must not be refused')
+      assert.equal(aVerdict.blocked, false)
+      assert.equal(aVerdict.hash, genuineDigest)
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.binaries[_normalizeKey(resolvedPath)].sha256, genuineDigest)
+    })
+  })
 })
 
 // ── Bounds: cap exceeded fails closed ───────────────────────────────────────

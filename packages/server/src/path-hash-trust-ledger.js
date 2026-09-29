@@ -122,8 +122,12 @@ import { HEX64 } from './utils/validation-patterns.js'
  * only real caller and nothing re-inspects a revoked preset in the same
  * window), and the two subclasses with a `'tofu'` op (skills, binary) have
  * no revoke caller either.
+ *
+ * `'migrate'` (#8093 round 2, C2) sits at the same tier as `'tofu'`: a
+ * compare-and-swap write that is conditioned on disk, not an operator
+ * decision — see `approve()`'s `expect` option and the merge branch below.
  */
-const CHANGE_OP_PRIORITY = { touch: 1, tofu: 2, set: 3, delete: 3 }
+const CHANGE_OP_PRIORITY = { touch: 1, tofu: 2, migrate: 2, set: 3, delete: 3 }
 
 export class PathHashTrustLedger {
   /**
@@ -159,13 +163,22 @@ export class PathHashTrustLedger {
     this._dirty = false
     // Tracks which keys THIS instance has changed since its last successful
     // flush (or since construction) — key -> 'set' | 'delete' | 'tofu' |
-    // 'touch' (#8072 review C3 added the latter two). A `Map` so a key
-    // changed more than once before the next flush keeps only its latest
-    // (highest-priority — see `_recordChange`) op. Read by flush()'s merge
-    // (#8068); populated by `_setRecord`/`_deleteRecord`, which
-    // `approve`/`revoke` and any subclass that mutates `_records` directly
-    // must go through.
+    // 'touch' | 'migrate' (#8072 review C3 added 'tofu'/'touch'; #8093 round
+    // 2 added 'migrate'). A `Map` so a key changed more than once before the
+    // next flush keeps only its latest (highest-priority — see
+    // `_recordChange`) op. Read by flush()'s merge (#8068); populated by
+    // `_setRecord`/`_deleteRecord`, which `approve`/`revoke` and any
+    // subclass that mutates `_records` directly must go through.
     this._changedKeys = new Map()
+    // #8093 round 2 (C2): key -> the record `approve()` expected to still
+    // find on disk when it decided a `'migrate'` write was safe (`{ sha256,
+    // kind }`, or an object with `kind: undefined` for a legacy record that
+    // never had one). Populated only alongside a `'migrate'` entry in
+    // `_changedKeys`; consulted only by that op's merge branch. Kept as a
+    // separate map (rather than folding into `_changedKeys`'s value) so
+    // `_changedKeys`'s existing string-valued shape, and every other op's
+    // handling of it, is untouched.
+    this._migrateExpectations = new Map()
   }
 
   /**
@@ -177,18 +190,26 @@ export class PathHashTrustLedger {
    *
    * @param {string} key  Already-normalised key.
    * @param {TrustRecord} record
-   * @param {'set'|'tofu'|'touch'} [op='set']  Why this key changed (#8072
-   *   review C3) — `'set'` for an explicit operator decision (default;
-   *   always wins the merge), `'tofu'` for a trust-on-first-use first-sight
-   *   pin (merge skips it if disk already has ANY record for this key —
-   *   never overwrite a pin/decision this instance never saw), `'touch'`
-   *   for an informational `lastVerified` bump (merge skips it if disk's
-   *   hash no longer matches the one this instance verified against).
+   * @param {'set'|'tofu'|'touch'|'migrate'} [op='set']  Why this key changed
+   *   (#8072 review C3; `'migrate'` added #8093 round 2) — `'set'` for an
+   *   explicit operator decision (default; always wins the merge), `'tofu'`
+   *   for a trust-on-first-use first-sight pin (merge skips it if disk
+   *   already has ANY record for this key — never overwrite a pin/decision
+   *   this instance never saw), `'touch'` for an informational
+   *   `lastVerified` bump (merge skips it if disk's hash no longer matches
+   *   the one this instance verified against), `'migrate'` for a
+   *   compare-and-swap write conditioned on an explicit `expect` snapshot
+   *   (see `approve()`) rather than on `record` itself.
    * @protected
    */
   _setRecord(key, record, op = 'set') {
     this._records[key] = record
     this._recordChange(key, op)
+    // A key changing to any op OTHER than 'migrate' has no business with a
+    // stale expectation from an earlier 'migrate' call on the same key
+    // before a flush ran — drop it so the merge never consults leftover
+    // state for the wrong op.
+    if (op !== 'migrate') this._migrateExpectations.delete(key)
     this._dirty = true
   }
 
@@ -204,6 +225,7 @@ export class PathHashTrustLedger {
   _deleteRecord(key) {
     delete this._records[key]
     this._recordChange(key, 'delete')
+    this._migrateExpectations.delete(key)
     this._dirty = true
   }
 
@@ -465,20 +487,33 @@ export class PathHashTrustLedger {
    *
    * @param {string} absPath
    * @param {string} hash
-   * @param {{ firstSight?: boolean, fields?: object }} [opts]  `firstSight: true`
-   *   (#8072 review C3) marks this as a trust-on-first-use pin rather than an
-   *   explicit operator decision — `verify-provenance.js`'s TOFU binary pin
-   *   passes this so a stale instance's first-sight write of a possibly
-   *   tampered hash can never override a pin/decision another process made
-   *   that this instance never saw (see `flush()`'s merge). Omit for an
-   *   operator-driven approval (default) — always wins the merge. `fields`
-   *   (#8040) supplies a value for each subclass-declared `extraFields` key
-   *   (e.g. `{ kind: 'tree' }`) — a key not present in `fields` carries
-   *   forward the existing record's value for that field, if any, so an
-   *   approval that doesn't mention an extra field never silently drops it.
-   * @returns {boolean} true when the grant was recorded
+   * @param {{ firstSight?: boolean, fields?: object, expect?: { sha256: string, [field: string]: unknown } }} [opts]
+   *   `firstSight: true` (#8072 review C3) marks this as a trust-on-first-use
+   *   pin rather than an explicit operator decision — `verify-provenance.js`'s
+   *   TOFU binary pin passes this so a stale instance's first-sight write of
+   *   a possibly tampered hash can never override a pin/decision another
+   *   process made that this instance never saw (see `flush()`'s merge).
+   *   `expect` (#8093 round 2, C2) makes this write a COMPARE-AND-SWAP
+   *   instead: tagged `'migrate'`, applied by the merge only when disk still
+   *   holds a record matching `expect` exactly (compared field-by-field over
+   *   every key `expect` names, `sha256` included) — otherwise disk's value
+   *   is kept and this write is dropped entirely. For a legacy record with
+   *   no `kind` at all, pass `expect: { sha256, kind: undefined }` (or simply
+   *   omit `kind`) so the comparison requires the SAME absence, not a
+   *   coincidental match against some other kind-less field. `firstSight`
+   *   and `expect` are mutually exclusive; `expect` wins if both are given.
+   *   Omit both for an operator-driven approval (default) — always wins the
+   *   merge. `fields` (#8040) supplies a value for each subclass-declared
+   *   `extraFields` key (e.g. `{ kind: 'tree' }`) — a key not present in
+   *   `fields` carries forward the existing record's value for that field,
+   *   if any, so an approval that doesn't mention an extra field never
+   *   silently drops it.
+   * @returns {boolean} true when the write was accepted for merging — for a
+   *   `'migrate'` write this means the CAS was attempted, not that it WON;
+   *   call `getRecord()` after to see what the merge actually kept, exactly
+   *   as every other conditional (`'tofu'`/`'touch'`) op already requires.
    */
-  approve(absPath, hash, { firstSight = false, fields = {} } = {}) {
+  approve(absPath, hash, { firstSight = false, fields = {}, expect } = {}) {
     if (typeof absPath !== 'string' || !absPath) return false
     if (typeof hash !== 'string' || !HEX64.test(hash)) return false
     const key = this._normalizeKey(absPath)
@@ -496,7 +531,10 @@ export class PathHashTrustLedger {
         record[field] = existing[field]
       }
     }
-    this._setRecord(key, record, firstSight ? 'tofu' : 'set')
+    const isMigrate = expect !== undefined
+    const op = isMigrate ? 'migrate' : (firstSight ? 'tofu' : 'set')
+    if (isMigrate) this._migrateExpectations.set(key, expect)
+    this._setRecord(key, record, op)
     this.flush()
     return true
   }
@@ -620,6 +658,61 @@ export class PathHashTrustLedger {
         // `this._records[key]` wholesale would silently revert those to
         // this instance's own stale values.
         merged[key] = { ...baseRec, [this._approvalField]: ourRec[this._approvalField] }
+        continue
+      }
+      if (op === 'migrate') {
+        // #8093 round 2 (C2): a compare-and-swap, not an unconditional
+        // write. The ORIGINAL migration fix reloaded once before DECIDING to
+        // migrate, then wrote with plain `'set'` priority — which always won
+        // this merge regardless of what a fresh re-read found, making the
+        // caller's own post-approve `getRecord()` re-read unable to ever
+        // observe a concurrent genuine write (it was always reading back
+        // its OWN just-applied value, since `_setRecord` already applied it
+        // to `_records` synchronously, before this merge ever runs). This
+        // branch is what actually closes that: apply our record ONLY when
+        // disk (`base`, i.e. THIS re-read — see the `readFailed` branch
+        // below for why that fallback is handled separately) still matches
+        // the `expect` snapshot the caller took before deciding this was
+        // safe.
+        if (readFailed) {
+          // We didn't learn anything reliable about disk this round. `base`
+          // has already fallen back to `this._records`, which by now holds
+          // OUR NEW record (applied synchronously by `_setRecord` before
+          // this ever runs) — comparing THAT against `expect` (the OLD,
+          // pre-migration snapshot) would almost never match and would
+          // wrongly read as "disk moved on" for a merely-transient read
+          // failure, indistinguishable from a real conflict. Keep retrying
+          // instead, exactly like every other conditional op's readFailed
+          // handling — `merged[key]` already defaults to `base[key]`
+          // (== our own record here), so nothing is lost by not deciding.
+          continue
+        }
+        const expect = this._migrateExpectations.get(key)
+        const baseRec = base[key]
+        // Match every field `expect` names (sha256 always among them) — not
+        // just sha256 — so a kind change alone (extremely unlikely without
+        // a hash change, but not impossible with a hand-edited ledger) also
+        // counts as "disk moved on". A `baseRec` field absent from `expect`
+        // is not compared: `expect` describes what this instance is
+        // conditioning on, not the record's entire shape.
+        const matches = !!baseRec && expect != null
+          && Object.entries(expect).every(([field, value]) => baseRec[field] === value)
+        if (!matches) {
+          // Disk no longer matches what we migrated FROM — a different
+          // process's write (very likely a genuine, already-migrated tree
+          // pin) resolved this key first. Drop our write outright; `merged`
+          // already defaults to `base[key]`, i.e. disk's real current
+          // value, so nothing further is needed to "keep" it. Forget the
+          // tracked op and its expectation — a LATER flush must not
+          // re-evaluate this against whatever disk shows THEN, which could
+          // wrongly resurrect a decision made against a since-superseded
+          // snapshot (the same R2-C1 reasoning as 'tofu'/'touch' above).
+          this._changedKeys.delete(key)
+          this._migrateExpectations.delete(key)
+          continue
+        }
+        merged[key] = this._records[key]
+        this._migrateExpectations.delete(key)
         continue
       }
       // 'set': an explicit operator decision — always wins.

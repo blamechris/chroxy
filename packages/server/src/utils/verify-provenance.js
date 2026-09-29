@@ -496,20 +496,41 @@ export function verifyProvenance({
         const treeResult = computeTreeHash()
         if (treeResult.verdict) return treeResult.verdict
         const hash = treeResult.hash
-        ledger.approve(path, hash, { fields: { kind: 'tree' } })
-        // #8093 review C2 (mirrors #8073 S1): the reload() above and this
-        // approve()'s own internal re-read/flush are two MORE separate
-        // readFileSync calls — a genuine pin from another process can still
-        // land in that narrower gap. Re-read and only report OK when our
-        // hash is still what the ledger holds; otherwise fall through to
-        // the ordinary mismatch handling below using the record that
-        // actually won, instead of claiming a verdict the ledger disagrees
-        // with.
+        // #8093 round 2 (C2): the write itself must be CONDITIONAL, not
+        // merely preceded by another reload (a second reload only moves the
+        // gap, it doesn't close it). `expect` makes this a compare-and-swap:
+        // the ledger's merge (`path-hash-trust-ledger.js`'s `'migrate'` op)
+        // applies our write ONLY when disk still holds exactly the legacy
+        // record we migrated FROM (same `sha256` and `kind`) — otherwise it
+        // keeps disk's actual value and drops ours. An unconditional
+        // `approve()` (tagged `'set'`) always wins the merge regardless of
+        // what a fresh re-read finds, which is why a PRIOR version of this
+        // fix (a bare post-approve `getRecord()` re-read, with no `expect`)
+        // could never actually observe a concurrent genuine write — that
+        // re-read was always reading back its own just-applied value,
+        // since `_setRecord` applies to `_records` synchronously before any
+        // merge runs. With the CAS, a LOST race leaves `_records` (and so
+        // this re-read) holding whatever the merge actually kept — the
+        // other process's real record, not ours. This closes the SEQUENTIAL
+        // case (our read strictly precedes the other process's completed
+        // flush); two flushes landing inside the identical read-to-rename
+        // window is a narrower race this does not add a new guarantee for —
+        // see docs/security/spawned-binary-provenance.md's "Known
+        // limitations" and #8080.
+        ledger.approve(path, hash, {
+          fields: { kind: 'tree' },
+          expect: { sha256: record.sha256, kind: record.kind },
+        })
         const after = ledger.getRecord(path)
-        if (!after || after.sha256 === hash) {
+        if (after && after.sha256 === hash) {
           return { ok: true, status: PROVENANCE_STATUS.OK, blocked: false, path, hash }
         }
-        record = after
+        // The CAS lost: a different process's write — very likely a
+        // genuine, already-migrated tree pin — is what the ledger actually
+        // holds now. Fall through to a mismatch using THAT record; never
+        // report OK for a hash the ledger doesn't hold. `after` can also be
+        // null (the record vanished — e.g. a concurrent revoke), which is
+        // handled the same fail-safe way, just with no `pinnedHash` to name.
         const blockedRace = mode === 'block'
         return {
           ok: !blockedRace,
@@ -517,8 +538,10 @@ export function verifyProvenance({
           blocked: blockedRace,
           path,
           hash,
-          pinnedHash: record.sha256,
-          message: `binary hash changed since it was pinned (pinned ${record.sha256.slice(0, 8)}…, now ${hash.slice(0, 8)}…)`,
+          pinnedHash: after ? after.sha256 : null,
+          message: after
+            ? `binary hash changed since it was pinned (pinned ${after.sha256.slice(0, 8)}…, now ${hash.slice(0, 8)}…)`
+            : 'the binary trust ledger entry was removed while migrating to the tree representation',
           remediation: blockedRace
             ? `if this change is expected, re-approve it by removing this path's entry from the binary trust ledger and re-spawning; otherwise investigate the unexpected binary swap`
             : 'if this change is unexpected, investigate the binary swap',

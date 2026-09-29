@@ -452,7 +452,11 @@ discovered by one.
   file-lock helper anywhere in this codebase (`src/utils`) to close it with.
   Documented in `flush()`'s own docstring rather than solved; closing it
   would need an `O_EXCL` lockfile with stale-lock recovery, tracked as
-  #8080.
+  #8080. The `'migrate'` op (#8093 round 2 — see §5's "upgrade write itself
+  is a compare-and-swap") is conditioned on this SAME read, so it inherits
+  this exact window too: it closes the sequential case (one write's read
+  strictly precedes the other's completed flush) but not two flushes racing
+  inside the identical window, which is still #8080.
 - **The trust ledger is TOFU, and the ledger file itself is the trust root.** A
   path's *first* sight pins its hash automatically (`ledger.approve(path, hash)`
   inside `verifyProvenance`) with no operator gate on that initial pin —
@@ -691,8 +695,27 @@ tree walk just to decide this. A match means the same bytes were already
 trusted, and the record is transparently upgraded to the tree digest with no
 refusal — no weaker than before, since everything the tree digest additionally
 covers was never checked at all under the legacy pin. A mismatch is refused
-exactly as it always was, without ever computing the manifest. `chroxy
-doctor`/`chroxy start`/`chroxy resume` and the daemon all read and write this
+exactly as it always was, without ever computing the manifest.
+
+**The upgrade write itself is a compare-and-swap, not a plain write (#8093
+round 2).** An earlier version of this fix reloaded the ledger once before
+deciding a migration was safe, then wrote unconditionally — which closed the
+WIDE window (a stale-since-construction instance deciding from a snapshot
+that is arbitrarily old) but left a narrower one open: between that reload
+and the write, a different process could complete its own genuine migration,
+and the unconditional write would silently replace it. `PathHashTrustLedger`
+gained a `'migrate'` op (`approve(path, hash, { expect })`) for exactly this:
+the write is applied only when a fresh re-read AT FLUSH TIME still matches
+`expect` — the legacy record this instance based its decision on. When it
+doesn't (a different process's genuine migration landed first), the write is
+dropped and `_records` is left holding THAT record instead, so a caller's own
+post-write re-read observes it rather than its own just-applied value. This
+closes the sequential case — one write's read strictly precedes the other's
+completed flush. Two flushes landing inside the exact SAME read-to-rename
+window is a narrower race this does not add a new guarantee for; it remains
+the general, still-open case tracked as #8080.
+
+`chroxy doctor`/`chroxy start`/`chroxy resume` and the daemon all read and write this
 field through the one shared `verifyProvenance` code path, so an upgrade
 written by any one of them is understood by the others.
 

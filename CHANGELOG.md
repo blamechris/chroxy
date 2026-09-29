@@ -278,9 +278,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path that now resolves as a launcher is transparently upgraded to the tree
   digest the first time its current bytes still match the legacy pin — no
   spurious "binary changed" refusal from the daemon update itself — and
-  refused exactly as before when they don't, checked against a freshly
-  reloaded record so a stale in-memory legacy pin can never migrate over (and
-  overwrite) a different process's already-upgraded genuine tree pin. This is
+  refused exactly as before when they don't. The migration write itself is a
+  compare-and-swap (a new `'migrate'` ledger op, `path-hash-trust-ledger.js`):
+  applied only when a fresh re-read at flush time still shows the exact
+  legacy record this instance migrated from, so a write whose own read
+  strictly precedes a different process's already-completed, already-flushed
+  migration cannot overwrite that genuine record — the stale write is
+  dropped, and the caller's own post-write read observes the other process's
+  record instead of its own. Two flushes landing inside the SAME
+  read-to-rename window is a narrower race this does not add a new guarantee
+  for — it remains the general, still-open case tracked as #8080. This is
   one shared code path (`utils/verify-provenance.js`), so every caller —
   provider-spawn preflight, `chroxy doctor`'s dependency checks, and the
   `cloudflared` tunnel gate — gets the same coverage automatically.
