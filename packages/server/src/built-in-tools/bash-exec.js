@@ -40,6 +40,29 @@ export const DEFAULT_BASH_TIMEOUT_MS = 30_000
 export const DEFAULT_BASH_MAX_OUTPUT_BYTES = 1_000_000 // 1 MB
 export const HARD_KILL_GRACE_MS = 2_000
 
+// How long to wait, after the child exits, for its stdout/stderr pipes to
+// finish delivering data (#8120). Bounded so a backgrounded grandchild that
+// keeps the pipe open (`cmd &`) cannot stall the tool.
+export const STDIO_DRAIN_GRACE_MS = 250
+
+function streamEnded(stream) {
+  if (!stream || stream.readableEnded || stream.destroyed) return Promise.resolve()
+  return new Promise((resolve) => {
+    stream.once('end', resolve)
+    stream.once('close', resolve)
+    stream.once('error', resolve)
+  })
+}
+
+async function drainStdio(child, graceMs) {
+  let timer
+  await Promise.race([
+    Promise.all([streamEnded(child.stdout), streamEnded(child.stderr)]),
+    new Promise((resolve) => { timer = setTimeout(resolve, graceMs) }),
+  ])
+  clearTimeout(timer)
+}
+
 // A caller that omits `env` must not hand bash the daemon's own secrets
 // (API_TOKEN, the hook secret): fall back to a stripped copy of process.env,
 // never process.env itself (#8111 review, #8113).
@@ -161,6 +184,9 @@ export async function executeBash({
     child.on('exit', (code, signalName) => resolve({ code, sig: signalName }))
     child.on('error', () => resolve({ code: null, sig: null }))
   })
+  // 'exit' can fire before the stdio pipes are drained, so a fast command's
+  // output may still be in flight here (#8120). Wait for both streams to end.
+  await drainStdio(child, STDIO_DRAIN_GRACE_MS)
 
   clearTimeout(timeoutHandle)
   if (hardKillTimer !== null) clearTimeout(hardKillTimer)

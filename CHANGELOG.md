@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A BYOK Bash or Grep tool call no longer intermittently returns empty output.**
+  `executeBash` returned as soon as the child process exited, but Node can report
+  the exit before the stdout/stderr pipes have delivered their data, so a command
+  that finished in a few milliseconds could lose its output. It now waits for
+  both streams to end, bounded by a short grace so a backgrounded process that
+  keeps the pipe open cannot stall the tool. (#8120)
 - **The Discord status embed and billing-alert sinks now neutralize
   `@everyone`/`@here`/role/user mentions in every free-text field, and every
   Discord payload sets `allowed_mentions: { parse: [] }` as a server-side
