@@ -507,6 +507,79 @@ export function run(state) {
 }
 `
 
+// #8126 — the site half of a ` [[<site-prefix>` match must end at a FIELD
+// BOUNDARY (the site's own `#` delimiter), not merely be a string prefix.
+// `SPAWN_APIS` contains two literal-prefix pairs — `execFile`/`execFileSync`
+// and `spawn`/`spawnSync` — so an entry pinned to the callee-only shorthand
+// `fn#execFile` must not also attest an unrelated `fn#execFileSync` site
+// sharing the same flagged TEXT (a shadowed variable reusing a name) but a
+// different callee and a different real value. This is the exact
+// reproduction from the #8126 issue report.
+const CALLEE_PREFIX_COLLISION_EXECFILE = `
+import { execFile, execFileSync } from 'node:child_process'
+export function run(value, attacker) {
+  execFile('/usr/bin/git', ['diff', value], () => {})
+  {
+    let value = attacker
+    execFileSync('/usr/bin/git', ['log', value], () => {})
+  }
+}
+`
+
+// Same shape, the OTHER literal-prefix pair on the same roster (`spawn`/
+// `spawnSync`) — proves the fix is boundary-based, not a name-specific patch.
+const CALLEE_PREFIX_COLLISION_SPAWN = `
+import { spawn, spawnSync } from 'node:child_process'
+export function run(value, attacker) {
+  spawn('/usr/bin/git', ['diff', value], () => {})
+  {
+    let value = attacker
+    spawnSync('/usr/bin/git', ['log', value])
+  }
+}
+`
+
+// Eleven calls to the SAME callee in the SAME function, all flagging the
+// same bare parameter `value` — ordinals 0 through 10 in source order. An
+// entry pinned to the unterminated ordinal-only shorthand `run#execFile#1`
+// (ordinal exactly 1, any argv index) must attest ordinal 1 and MUST NOT
+// attest ordinal 10, even though '1' is a literal string-prefix of '10'.
+const ORDINAL_PREFIX_COLLISION = `
+import { execFile } from 'node:child_process'
+export function run(value) {
+${Array.from({ length: 11 }, (_, i) => `  execFile('/usr/bin/git', ['cmd${i}', value], () => {})`).join('\n')}
+}
+`
+
+// #8126 review — two mutants of `normalizeMatchText` survived the original
+// 59-test suite: stripping a wrapping `(...)`, and stripping a trailing `,`.
+// Neither is what the shipped function does, but nothing PINNED that, so a
+// future "helpful" edit could add either without any test noticing.
+//
+// `(this._image)` is a DIFFERENT text from the bare `this._image` the
+// catalogue attests — redundant parens are semantically a no-op in JS, but
+// textually a different expression, and #8112's whole point is that textual
+// equality is exactly what this comparison promises.
+const IMAGE_WRAPPED_IN_PARENS = `
+import { execFile } from 'node:child_process'
+class Runner {
+  constructor() { this._image = 'node:22-slim' }
+  run() {
+    execFile('/usr/bin/docker', ['run', (this._image)], () => {})
+  }
+}
+`
+
+// An opaque call whose real text has NO trailing comma before the closing
+// brace. Paired in its test with a catalogue `match` that has one ADDED —
+// deliberately wrong, to prove a comma difference is never normalised away.
+const OPAQUE_NO_TRAILING_COMMA = `
+import { execFile } from 'node:child_process'
+export function run(argsArr) {
+  execFile('/usr/bin/git', argsArr, { encoding: 'utf8' })
+}
+`
+
 describe('lint-argv-sinks', () => {
   describe('required fixtures (issue #7868 acceptance)', () => {
     test('RED: an unguarded new spawn with a variable argv fails', () => {
@@ -809,6 +882,90 @@ describe('lint-argv-sinks', () => {
 
     test('GREEN: the same expression reformatted across lines still matches a compactly-written entry (whitespace-insensitive)', () => {
       const r = runLint({ 'offender.js': TASKNAME_OR_FALLBACK_REFORMATTED }, { catalogue: TASKNAME_OR_FALLBACK_CATALOGUE })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
+  // #8126 — the SITE half of a ` [[<site-prefix>` match must end at a field
+  // boundary, not merely be a string prefix. Found reviewing #8125/#8112:
+  // `f.site.startsWith(sitePrefix)` with no boundary check let an entry
+  // pinned to `fn#execFile` also attest an unrelated `fn#execFileSync` site,
+  // since `SPAWN_APIS` contains literal-prefix callee pairs.
+  describe('site-suffix prefix must end at a field boundary, not just be a string prefix (#8126)', () => {
+    test('RED: an entry pinned to `fn#execFile` does NOT also attest a same-function `fn#execFileSync` site sharing the same flagged text', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[run#execFile', reason: 'test: pin to the execFile call only' },
+      ]\n`
+      const r = runLint({ 'offender.js': CALLEE_PREFIX_COLLISION_EXECFILE }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      // The execFile call (line 4) IS legitimately silenced by the shorthand...
+      assert.doesNotMatch(r.stderr, /offender\.js:4\b/)
+      // ...but the unrelated, shadowed-variable execFileSync call (line 7)
+      // must NOT be — under the #8126 bug, 'run#execFileSync#0#1'.startsWith
+      // ('run#execFile') is true, since 'execFileSync' extends 'execFile'.
+      assert.match(r.stderr, /offender\.js:7\s+execFileSync\(\.\.\.\) argv element `value`/)
+    })
+
+    test('RED: the same collision on the OTHER literal-prefix callee pair (spawn/spawnSync)', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[run#spawn', reason: 'test: pin to the spawn call only' },
+      ]\n`
+      const r = runLint({ 'offender.js': CALLEE_PREFIX_COLLISION_SPAWN }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      assert.doesNotMatch(r.stderr, /offender\.js:4\b/)
+      assert.match(r.stderr, /offender\.js:7\s+spawnSync\(\.\.\.\) argv element `value`/)
+    })
+
+    test('RED: an ordinal-only prefix (`#1`) does NOT also attest a different ordinal sharing a leading digit (`#10`)', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[run#execFile#1', reason: 'test: pin to ordinal 1 only' },
+      ]\n`
+      const r = runLint({ 'offender.js': ORDINAL_PREFIX_COLLISION }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      // Ordinal 1 (the 2nd call, line 5) is legitimately silenced...
+      assert.doesNotMatch(r.stderr, /offender\.js:5\b/)
+      // ...but ordinal 10 (the 11th call, line 14) shares the leading digit
+      // '1' and must NOT be — '10' is a string-prefix collision with '1',
+      // not a field-boundary match.
+      assert.match(r.stderr, /offender\.js:14\s+execFile\(\.\.\.\) argv element `value`/)
+    })
+
+    test('GREEN: the legitimate callee-only shorthand still attests every call to the exact pinned callee', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: 'value [[run#execFile', reason: 'test: pin to the execFile call only' },
+        { file: 'offender.js', match: 'value [[run#execFileSync', reason: 'test: pin to the execFileSync call too' },
+      ]\n`
+      const r = runLint({ 'offender.js': CALLEE_PREFIX_COLLISION_EXECFILE }, { catalogue })
+      assert.equal(r.status, 0, r.stderr)
+    })
+  })
+
+  // #8126 review — pins normalizeMatchText's exact boundary: no paren
+  // stripping, no trailing-comma stripping. Both are decisions (documented
+  // on normalizeMatchText itself), not oversights, and each has its own test
+  // so a future edit that adds either goes red instead of silently landing.
+  describe("normalizeMatchText's exact boundary: no paren-stripping, no trailing-comma-stripping (#8126 review)", () => {
+    test('RED: a redundant-parens wrapper around the attested expression is NOT silenced by it', () => {
+      const r = runLint({ 'offender.js': IMAGE_WRAPPED_IN_PARENS }, { catalogue: IMAGE_ATTESTED_CATALOGUE })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /1 argv sink\(s\)/)
+      assert.match(r.stderr, /argv element `\(this\._image\)`/)
+    })
+
+    test('RED: an entry whose match adds a trailing comma the real call text does not have is NOT silenced', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: "execFile('/usr/bin/git', argsArr, { encoding: 'utf8', })", reason: 'test: deliberately wrong trailing comma' },
+      ]\n`
+      const r = runLint({ 'offender.js': OPAQUE_NO_TRAILING_COMMA }, { catalogue })
+      assert.equal(r.status, 1, r.stderr)
+      assert.match(r.stderr, /could not be statically resolved/)
+    })
+
+    test('POSITIVE CONTROL: the exact text, comma-for-comma, DOES silence the same opaque call', () => {
+      const catalogue = `export const AUDITED_SINKS = [
+        { file: 'offender.js', match: "execFile('/usr/bin/git', argsArr, { encoding: 'utf8' })", reason: 'test: exact text' },
+      ]\n`
+      const r = runLint({ 'offender.js': OPAQUE_NO_TRAILING_COMMA }, { catalogue })
       assert.equal(r.status, 0, r.stderr)
     })
   })

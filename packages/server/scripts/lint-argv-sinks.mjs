@@ -1035,12 +1035,31 @@ function analyzeFile(filePath, keyRoot) {
 // parses one — must agree on it byte-for-byte.
 const SITE_OPEN = ' [['
 const SITE_CLOSE = ']]'
+// The delimiter BETWEEN FIELDS inside a site string itself (`elementSite`:
+// `${functionName}#${calleeLabel}#${callOrdinal}#${index}`) — distinct from
+// SITE_OPEN/SITE_CLOSE, which delimit the site suffix from the text half.
+// #8126: this is what an unterminated site PREFIX must be followed by (or
+// end-of-string) to be accepted — see catalogueEntryMatchesFinding.
+const SITE_FIELD_DELIM = '#'
 
 /**
  * Collapse insignificant whitespace exactly like `normText` does, so a
  * catalogue entry's `match` can be wrapped/re-indented in the source file
  * without going stale — this is EXPRESSION equality, not byte-for-byte
  * source equality.
+ *
+ * Deliberately does NOT strip anything else — reviewed and pinned by test
+ * (`lint-argv-sinks.test.js`'s "normalizeMatchText's exact boundary" describe,
+ * #8126 review): a wrapping `(...)` and a trailing `,` are both left alone.
+ * `(this._image)` is a DIFFERENT text from `this._image`, even though the
+ * two are semantically identical JS (parens are pure grouping) — an author
+ * must write `match` with the exact parenthesization/comma the flagged
+ * source has, the same as any other character. This is a deliberate,
+ * narrower promise than "AST equality": stripping either would let two
+ * textually-different real findings collapse onto the same normalised
+ * string, which is the #8112/#8126 hazard one level down — a normalisation
+ * step is exactly as dangerous as the comparison it feeds if it can equate
+ * two things that were not attested to be the same.
  */
 function normalizeMatchText(text) {
   return text.trim().replace(/\s+/g, ' ')
@@ -1089,7 +1108,23 @@ function normalizeMatchText(text) {
  *      prefix; at most they narrow (or fail to narrow) which of several
  *      textually-IDENTICAL call sites one entry covers, which is exactly
  *      what the #7936 call-site-ordinal fix this scoping is built on top of
- *      was for.
+ *      was for. **This property only holds because the prefix match below
+ *      requires a FIELD BOUNDARY** (`#8126`): the site's own fields are
+ *      `#`-joined (`elementSite`), so an unterminated prefix is accepted
+ *      only when it equals the whole site, or the very next character in
+ *      the real site is `SITE_FIELD_DELIM` (`#`). A bare `f.site.startsWith
+ *      (sitePrefix)` with no boundary check — this function's own shape
+ *      before `#8126` — does NOT have this property: `SPAWN_APIS` contains
+ *      two literal-prefix pairs (`execFile`/`execFileSync`,
+ *      `spawn`/`spawnSync`), so an entry pinned to `fn#execFile` (the
+ *      documented callee-only shorthand, no ordinal/index) also matched a
+ *      completely different `fn#execFileSync#0#N` site sharing the same
+ *      flagged TEXT but a different callee and a different real value —
+ *      found reviewing this PR, reproduced directly against the real lint,
+ *      filed and fixed as `#8126`. The same missing-boundary root cause
+ *      applied to a partial ordinal/index too: `fn#callee#1` (unterminated)
+ *      is a string-prefix of `fn#callee#10#0`, so it would have falsely
+ *      matched the 11th call to that (function, callee) pair as well.
  *
  * One caveat worth stating rather than silently accepting: if a flagged
  * expression's own source text happens to contain the literal substring
@@ -1108,7 +1143,12 @@ function catalogueEntryMatchesFinding(c, f) {
   if (f.site === null) return false
   let sitePrefix = c.match.slice(openIdx + SITE_OPEN.length)
   if (sitePrefix.endsWith(SITE_CLOSE)) sitePrefix = sitePrefix.slice(0, -SITE_CLOSE.length)
-  return f.site === sitePrefix || f.site.startsWith(sitePrefix)
+  if (f.site === sitePrefix) return true
+  // #8126: an unterminated prefix may only end at a FIELD BOUNDARY — the
+  // character immediately after it in the real site must be the fields'
+  // own delimiter, never a bare string continuation (`execFile` extending
+  // into `execFileSync`, `1` extending into `10`).
+  return f.site.startsWith(sitePrefix) && f.site[sitePrefix.length] === SITE_FIELD_DELIM
 }
 
 // ─── Catalogue ──────────────────────────────────────────────────────────────

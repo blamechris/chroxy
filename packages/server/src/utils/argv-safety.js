@@ -169,7 +169,15 @@ function escapeForRegExp(flag) {
  *     `lint-argv-sinks.mjs`) + the element's position within its resolved
  *     argv array, e.g. `` `value [[runA#execFile#0#1]]` `` (closed with `]]`)
  *     or the shorter `` `value [[runA#execFile` `` (an unterminated prefix of
- *     the site — narrows without needing the ordinal/index).
+ *     the site — narrows without needing the ordinal/index). An unterminated
+ *     prefix must still end at a FIELD BOUNDARY of the site (the next
+ *     character in the real site must be the fields' own `#` delimiter, or
+ *     the prefix must be the whole site) — `#8126`: a bare string-prefix
+ *     check let `runA#execFile` also match `runA#execFileSync#0#1`, since
+ *     `SPAWN_APIS` contains callee names that are themselves string prefixes
+ *     of each other (`execFile`/`execFileSync`, `spawn`/`spawnSync`). See
+ *     `catalogueEntryMatchesFinding` in `lint-argv-sinks.mjs` for the exact
+ *     boundary rule.
  *
  *     A match written as just the bare element text (no ` [[` suffix — most
  *     of the entries below) matches at ANY call site in the file whose
@@ -430,7 +438,21 @@ export const AUDITED_SINKS = [
   {
     file: 'docker-session.js',
     match: "spawn('docker', dockerArgs, { stdio: ['pipe', 'pipe', 'pipe'] })",
-    reason: "dockerArgs is this._containerId (see above, safe) plus the literal 'claude' plus ...buildClaudeCliArgs() — the same delegated, separately-audited builder as cli-session.js.",
+    // Review (#8125): this reason previously described only the LAST three
+    // elements pushed onto dockerArgs before this opaque call — this.
+    // _containerId, the literal 'claude', and ...claudeArgs — and said
+    // nothing about the `--env <key>=<val>` pairs pushed earlier in
+    // _spawnPersistentProcess (one per FORWARDED_ENV_KEYS hit, plus
+    // CHROXY_HOST and getChroxyHostEnv()'s keys). This IS the opaque-wrapper
+    // coverage gap this PR's own docs section describes: the array's
+    // construction site is a DIFFERENT function from this spawn call, so the
+    // lint cannot see inside it and the whole array is one opaque
+    // attestation. Each `key` is drawn from the fixed FORWARDED_ENV_KEYS
+    // allowlist (or is the literal 'CHROXY_HOST' / a getChroxyHostEnv() key),
+    // so the pushed token's own leading text can never start with '-'
+    // regardless of `val` — safe, but worth stating explicitly rather than
+    // leaving the reason silent about most of the array's real content.
+    reason: "dockerArgs is: a fixed ['exec','-i','--workdir','/workspace'] prefix; zero or more '--env', `${key}=${val}` pairs where key is drawn only from the fixed FORWARDED_ENV_KEYS allowlist (plus the literal 'CHROXY_HOST' and getChroxyHostEnv()'s own keys), never client text, so the token can't start with '-' regardless of val; then this._containerId (see above, safe), the literal 'claude', and ...claudeArgs — the same delegated, separately-audited buildClaudeCliArgs() output cli-session.js uses.",
   },
   {
     file: 'docker-session.js',

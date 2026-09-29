@@ -2852,3 +2852,23 @@ ever match that expression, or anything built around it. `.includes()`,
 around it" — the same shape as entry 13's charset allowlist, one layer up:
 there a character was let through with no check on position, here a substring
 was let through with no check on what surrounds it.
+
+**Residual closed by `#8126`, found reviewing this very fix.** The TEXT half
+above was replaced with equality, but the SITE half — the ` [[<site>]]`
+suffix an entry can use to pin a bare-text match to one specific call
+site — was still compared with a plain `f.site.startsWith(sitePrefix)`, the
+exact shape the paragraph above names as the same failure. The site string is
+`${functionName}#${calleeLabel}#${callOrdinal}#${index}`, and `SPAWN_APIS`
+(the lint's own callee roster) contains two literal-prefix pairs:
+`spawn`/`spawnSync` and `execFile`/`execFileSync`. An entry pinned to
+`fn#execFile` (the documented callee-only shorthand) therefore also matched
+an unrelated `fn#execFileSync#0#N` finding sharing the same flagged TEXT but a
+different callee and a different real value — reproduced directly against the
+real lint, not hypothetical. The fix requires a FIELD BOUNDARY immediately
+after an unterminated prefix (the next character must be the site's own `#`
+delimiter, or the prefix must be the whole site): `execFile` no longer
+matches `execFileSync`, and an ordinal `1` no longer matches `10`, because
+neither is followed by `#`. Not live-exploitable against the catalogue this
+PR shipped (the only site-scoped entries, `claude-tui-session.js`'s
+`_spawnPty` trio, have no second callee in scope to collide with) — a defect
+in the matching primitive itself, caught before anything relied on it.

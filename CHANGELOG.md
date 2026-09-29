@@ -41,7 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   documents the opaque-sink-wrapper coverage trade-off (`lint-argv-sinks.mjs`'s
   header, `docs/false-safety-guards.md` entry 36) so a future same-file
   wrapper around a sink doesn't silently give up element-level coverage the
-  way #8109's first pass did.
+  way #8109's first pass did. Review on this fix found a second instance of
+  the same class in the new matching code itself (#8126): the ` [[<site>]]`
+  site suffix an entry can use to pin a match to one call site was compared
+  with a plain `f.site.startsWith(...)`, so an entry pinned to `fn#execFile`
+  (the documented callee-only shorthand) also attested an unrelated
+  `fn#execFileSync` site, since `execFileSync` extends `execFile` as a
+  string (`SPAWN_APIS` contains that pair, plus `spawn`/`spawnSync`). Fixed
+  by requiring a field-boundary (`#`, or end-of-string) immediately after an
+  unterminated site prefix.
 - **A worktree-isolated session's tab now shows the repo name instead of the
   opaque worktree hex (#7328).** The cwd badge rendered `abbreviateCwd(session.cwd)`
   — the last path segment — but a worktree session's cwd is
