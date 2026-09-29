@@ -23,6 +23,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claude-tui background-task snapshot read that never gets broadcast no
+  longer silently advances the idle poll's dedup baseline or stops the poll
+  (#8052).** `ClaudeTuiSession.getBackgroundTaskSnapshot()` did two side
+  effects on EVERY call, whoever the caller was: it set
+  `_lastBackgroundTaskKey` (the idle re-scan poll's change-detection
+  baseline) and ran `_refreshBackgroundTaskPoll(snapshot)`, which stops the
+  poll outright when the snapshot is empty. Only the callers that actually
+  broadcast what they read (event-normalizer's `ready` handler and the poll
+  tick itself) may safely trigger those side effects — but
+  `PushNotificationHandler`'s idle-push body composition
+  (`readBackgroundTaskSnapshot()` in `notifications/ready-body.js`) called
+  the very same method purely to read the snapshot, whenever a session had
+  no active viewers. If a `run_in_background` task drained during a turn
+  that ended with nobody watching, that read alone advanced the baseline and
+  stopped the poll — and because it never broadcasts, no `claude_ready` /
+  `background_tasks_changed` ever told the client. A client already showing
+  a non-empty background-task indicator was stranded: `ws-history.js`
+  replays a bare `claude_ready` on reconnect, where an absent field means
+  "keep state", so the stale indicator never cleared. `ClaudeTuiSession` now
+  exposes a side-effect-free `peekBackgroundTaskSnapshot()` — same
+  underlying transcript scan, none of the poll bookkeeping — and
+  `readBackgroundTaskSnapshot()` reads through that instead, alongside
+  #8048's turn-end model refresh (`_refreshObservedModel()`), which already
+  read via the private scanner directly. Only `getBackgroundTaskSnapshot()`
+  itself, still used by the two paths that broadcast, may commit the
+  baseline or arm/stop the poll.
+
 - **`chroxy start`'s dependency checks now preflight the provider the daemon
   is actually about to spawn, not whichever provider the default
   `config.json` names (#8075).** `runDoctorChecks({ port })` was called with

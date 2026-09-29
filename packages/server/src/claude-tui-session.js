@@ -1528,12 +1528,13 @@ export class ClaudeTuiSession extends BaseSession {
    * advance on a call that also broadcasts the result (#7327 review C1: a
    * turn-end scan that silently moved the dedup baseline — or stopped the
    * poll — without broadcasting stranded the background-task indicator).
-   * That invariant is NOT yet held by every caller: the push-notification
-   * handler's idle-body read (no active viewers) still calls THIS method
-   * rather than `_scanTranscript()`, so it can advance the baseline / adopt
-   * a model observation without broadcasting either — tracked as #8052,
-   * unfixed here (out of scope for #7327; round-2 review N3 notes the same
-   * shape applies to the model, self-healing on the next real edge).
+   * #8052 fix: every OTHER caller — the push-notification handler's idle-body
+   * read (no active viewers), #8048's turn-end model refresh — must go
+   * through `peekBackgroundTaskSnapshot()` instead (see below), which returns
+   * the identical data with none of this method's side effects. Picking THIS
+   * method for a read that will not broadcast is the exact #8052 bug: it
+   * silently advances the baseline (and can stop the poll) with nothing ever
+   * telling the client what changed.
    * Never throws.
    */
   getBackgroundTaskSnapshot() {
@@ -1551,13 +1552,50 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #8052 — side-effect-free counterpart to `getBackgroundTaskSnapshot()`,
+   * for any external caller that reads the snapshot WITHOUT broadcasting it:
+   * composing a push-notification body (`readBackgroundTaskSnapshot()` in
+   * `notifications/ready-body.js`, which `PushNotificationHandler` calls),
+   * or any other purely-informational read. Returns the SAME
+   * `_scanTranscript()` data as `getBackgroundTaskSnapshot()` but touches
+   * NONE of its bookkeeping — no `_lastBackgroundTaskKey` advance, no
+   * `_refreshBackgroundTaskPoll` (so an outstanding task's poll is never
+   * stopped by a read nobody broadcasts), no `_adoptObservedModel`.
+   *
+   * A caller that WILL broadcast the result (event-normalizer's `ready`
+   * handler via `backgroundTaskFields`, the poll tick) must keep using
+   * `getBackgroundTaskSnapshot()` instead — its side effects are only ever
+   * safe on a path that also tells the client what changed. Reaching for
+   * this method there would silently drop the poll-arming / baseline-commit
+   * a real broadcast depends on.
+   *
+   * (`_refreshObservedModel()`, #8048's turn-end model refresh, already
+   * calls `_scanTranscript()` directly rather than through either public
+   * method — this is a second, public wrapper around the same private
+   * scanner, not a replacement for that call site.)
+   *
+   * Same "degrade to null on any failure" contract as
+   * `getBackgroundTaskSnapshot()` / `_scanTranscript()`. Never throws.
+   */
+  peekBackgroundTaskSnapshot() {
+    try {
+      return this._scanTranscript()
+    } catch (err) {
+      ;(this._log || log).debug?.(`peekBackgroundTaskSnapshot failed: ${err.message} — degrading to plain ready`)
+      return null
+    }
+  }
+
+  /**
    * #7327 (review C1) — resolve the incremental transcript scanner for the
    * currently-running PTY and return its raw `scan()` result, with NO side
    * effects on the background-task-poll bookkeeping. This is the ONE shared
    * journal reader: `getBackgroundTaskSnapshot()` layers the poll
    * bookkeeping (`_lastBackgroundTaskKey` / `_refreshBackgroundTaskPoll`) on
-   * top of it, while `_refreshObservedModel()` calls this directly and must
-   * NOT touch that bookkeeping — see the C1 note on `getBackgroundTaskSnapshot`.
+   * top of it, while `_refreshObservedModel()` (directly) and
+   * `peekBackgroundTaskSnapshot()` (#8052, for external callers) both call
+   * this directly and must NOT touch that bookkeeping — see the C1 note on
+   * `getBackgroundTaskSnapshot`.
    * `scan()` itself never throws (per `TranscriptTaskScanner`'s own
    * contract) and neither does path resolution, but callers still wrap this
    * in their own try/catch, matching this file's defensive posture
