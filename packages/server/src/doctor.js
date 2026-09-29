@@ -396,11 +396,32 @@ export async function checkTunnelRoutability(deps = {}) {
  *   Dependencies check. Defaults to the server package root. Relative paths are resolved to
  *   absolute at call time so the check is fully decoupled from process.cwd(). Exposed so
  *   tests can point the check at a temp directory without mutating process.cwd().
+ * @param {string|null} [options.tunnelMode] - #8116: override the named-tunnel mode used by
+ *   the routability probe (step 5.6, #5328 WP-5.6). `undefined` (the default) reads it from
+ *   doctor's own default config file, unchanged — `chroxy doctor` never passes this. Supplied
+ *   (including `null`, meaning "no tunnel") it REPLACES the file-derived value entirely —
+ *   `chroxy start` passes the MERGED config's own resolved tunnel mode (same seam shape as
+ *   `binaryProvenanceMode`, #8074).
+ * @param {string|null} [options.tunnelHostname] - Same override shape as `tunnelMode`, for the
+ *   named-tunnel hostname.
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
 export async function runDoctorChecks({
   port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
   tunnelProbe, detectStranded = detectStrandedState, platform = process.platform,
+  // #8116 — same seam shape as #8074's binaryProvenanceMode / #8115's
+  // providers: `undefined` (the default) means "read the named-tunnel
+  // coordinates for the routability probe (step 5.6 below) from doctor's own
+  // default config file", exactly as before — `chroxy doctor` (doctor-cmd.js)
+  // never passes these and is therefore unaffected. Supplied (even `null`,
+  // meaning "no tunnel"), they REPLACE the file-derived value entirely —
+  // `chroxy start` (server-cmd.js) passes both from the MERGED config it
+  // already resolved (-c <path> / --tunnel / --tunnel-hostname /
+  // CHROXY_TUNNEL* env), so the probe always targets the tunnel the daemon
+  // it's about to start actually uses, not whichever tunnel the default file
+  // happens to name.
+  tunnelMode: tunnelModeOverride,
+  tunnelHostname: tunnelHostnameOverride,
   // #8041 — test seams for the opt-in binary-provenance gate applied to the
   // cloudflared / provider-binary / claude-tui version probes below. All
   // default to the real production resolution so `chroxy doctor` / `chroxy
@@ -510,6 +531,14 @@ export async function runDoctorChecks({
   } else {
     configCheck = { name: 'Config', status: 'warn', message: `Not found — run 'chroxy init' to create` }
   }
+
+  // #8116: an explicit override REPLACES the file-derived coordinates above,
+  // independently for mode and hostname (mirrors binaryProvenanceMode /
+  // binarySignatureGate's independent-override shape below) — `undefined`
+  // leaves the file-derived value in place, so `chroxy doctor` (which never
+  // supplies either) is byte-identical to before this issue.
+  if (tunnelModeOverride !== undefined) tunnelMode = tunnelModeOverride
+  if (tunnelHostnameOverride !== undefined) tunnelHostname = tunnelHostnameOverride
 
   // 3. #8041 — resolve the opt-in binary-provenance gate ONCE, from the SAME
   // config + env precedence `chroxy start` / `chroxy resume` use
