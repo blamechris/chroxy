@@ -397,11 +397,6 @@ describe('BaseTunnelAdapter', () => {
   })
 
   describe('static methods', () => {
-    it('checkBinary returns unavailable by default', () => {
-      const result = BaseTunnelAdapter.checkBinary()
-      assert.equal(result.available, false)
-    })
-
     it('setup is a no-op by default', async () => {
       await BaseTunnelAdapter.setup({}) // Should not throw
     })

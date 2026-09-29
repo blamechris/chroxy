@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from 'child_process'
+import { spawn } from 'child_process'
 import { homedir } from 'os'
 import { join } from 'path'
 import { BaseTunnelAdapter } from './base.js'
@@ -91,24 +91,6 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       binaryName: 'cloudflared',
       setupRequired: false,
       installHint: cloudflaredInstallHint(),
-    }
-  }
-
-  static checkBinary() {
-    try {
-      const output = execFileSync('cloudflared', ['--version'], { encoding: 'utf-8', stdio: 'pipe' })
-      const match = output.match(/cloudflared version (\S+)/)
-      return {
-        available: true,
-        version: match ? match[1] : 'unknown',
-        hint: null,
-      }
-    } catch {
-      return {
-        available: false,
-        version: null,
-        hint: `Install with: ${cloudflaredInstallHint()}`,
-      }
     }
   }
 

@@ -59,14 +59,6 @@ export class BaseTunnelAdapter extends EventEmitter {
   }
 
   /**
-   * Check if the tunnel binary is available.
-   * @returns {{ available: boolean, version: string|null, hint: string|null }}
-   */
-  static checkBinary() {
-    return { available: false, version: null, hint: null }
-  }
-
-  /**
    * Interactive setup for this tunnel provider (no-op by default).
    * @param {object} _config
    */

@@ -25,6 +25,7 @@ import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { resolveVerifiedClaudeBinary, runSessionResume } from '../../src/cli/session-cmd.js'
+import { PathHashTrustLedger } from '../../src/path-hash-trust-ledger.js'
 
 // ── shared tmp root ─────────────────────────────────────────────────────────
 
@@ -186,6 +187,14 @@ describe('resolveVerifiedClaudeBinary (#8061)', () => {
   it('gates off + no ledger override never opens (or warns about) the real ledger file (#8065 review nitpick 3 — Copilot thread 1)', (t) => {
     FixtureClaudeProvider.resolvedOverride = null // process.execPath
     const warnMock = t.mock.method(console, 'warn')
+    // #8076 review S5: "never warns" alone cannot fail — a missing ledger
+    // file never warns whether or not it was opened, so a mutant that
+    // unconditionally constructs `new BinaryProvenanceLedger()` survived
+    // against `console.warn` alone. Spy on the actual load call instead —
+    // `BinaryProvenanceLedger`'s constructor calls `this._loadRecords()`
+    // directly (binary-provenance-trust.js), so a callCount of 0 proves no
+    // ledger was ever constructed, not just that nothing logged.
+    const loadMock = t.mock.method(PathHashTrustLedger.prototype, '_loadRecords')
     // No `ledger` key at all — the gate being off must short-circuit BEFORE
     // the lazy default (`new BinaryProvenanceLedger()`, the daemon's real
     // default-path trust file, itself sandboxed to a tmp CHROXY_CONFIG_DIR by
@@ -195,6 +204,7 @@ describe('resolveVerifiedClaudeBinary (#8061)', () => {
       readConfig: () => ({}),
     })
     assert.equal(resolved, process.execPath)
+    assert.equal(loadMock.mock.callCount(), 0, 'gates off must never construct (or load) the real ledger file — this is the test that goes red under a mutant that unconditionally constructs one')
     assert.equal(warnMock.mock.callCount(), 0, 'gates off must never open (or warn about) the ledger file — constructing it unconditionally is what produced the spurious warning Copilot flagged')
   })
 })
