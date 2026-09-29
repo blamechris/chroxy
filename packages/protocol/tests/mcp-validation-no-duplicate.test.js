@@ -60,8 +60,7 @@ import { fileURLToPath } from 'node:url'
  *    `a9fe` has zero pre-existing hits anywhere in the four scan roots and
  *    `fd00:ec2` has exactly one — a comment in `byok-mcp-oauth.js` explaining
  *    why it calls `isBlockedMetadataHost`, not a redefinition — narrowly
- *    excluded below by exact path, same pattern as the pre-existing
- *    usage-normalize.js entry. The name-charset fragment `[a-z0-9_-]{0,63}`
+ *    excluded below by exact path. The name-charset fragment `[a-z0-9_-]{0,63}`
  *    (the regex body without its anchors) has zero pre-existing hits.
  *
  *    No fragment check is added for the reserved-key set: `__proto__`,
@@ -143,14 +142,10 @@ const FRAGMENT_CHECKS = [
 // unrelated to the MCP server-name/config validation duplication this test
 // targets, never a redefinition of the constants themselves.
 const KNOWN_UNRELATED_MATCHES = {
-  // `__proto__`/`constructor`/`prototype` is a generic prototype-pollution
-  // guard, not unique to MCP validation. `usage-normalize.js` guards a
-  // provider MODEL ID, an entirely different concern with its own single
-  // source (`UNSAFE_KEY` there) — consolidating IT with
-  // @chroxy/protocol/mcp-validation too may be worth doing, but is out of
-  // scope for #7030 and is tracked separately (task_d1d5b3ef) rather than
-  // silently widened into this guard.
-  'unsafe/reserved key Set literal': new Set([join(REPO_ROOT, 'packages/server/src/usage-normalize.js')]),
+  // No 'unsafe/reserved key Set literal' entry: usage-normalize.js (the only
+  // one there ever was) now imports UNSAFE_MCP_KEYS instead of carrying its
+  // own copy, so that check scans every file with no exclusions.
+  //
   // A comment explaining WHY this file calls `isBlockedMetadataHost`
   // ("... / fd00:ec2::254) to make the daemon fetch instance credentials on
   // its behalf.") — prose referencing the concept, not a redefinition.
