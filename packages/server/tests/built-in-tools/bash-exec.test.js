@@ -8,6 +8,27 @@ import { executeBash } from '../../src/built-in-tools/bash-exec.js'
  * other built-in tools (Glob, Grep) shell out via this helper.
  */
 
+describe('executeBash — default env when the caller passes none (#8111 review)', () => {
+  it('never hands bash the daemon\'s own secrets, even when they are ambient in process.env', async () => {
+    const keys = ['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT']
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]))
+    process.env.API_TOKEN = 'ambient-token'
+    process.env.CHROXY_HOOK_SECRET = 'ambient-secret'
+    process.env.CHROXY_PORT = '12345'
+    try {
+      const r = await executeBash({
+        command: 'printf "%s|%s|%s|%s" "${API_TOKEN-unset}" "${CHROXY_HOOK_SECRET-unset}" "${CHROXY_PORT-unset}" "${PATH:+path-set}"',
+      })
+      assert.equal(r.stdout, 'unset|unset|unset|path-set')
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+    }
+  })
+})
+
 describe('executeBash', () => {
   it('captures stdout from a simple command', async () => {
     const r = await executeBash({ command: 'echo hello world' })

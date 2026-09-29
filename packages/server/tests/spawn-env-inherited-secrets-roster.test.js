@@ -237,6 +237,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
     // builder having genuinely stopped copying the full env.
     for (const expected of [
       'utils/spawn-env.js',
+      'built-in-tools/bash-exec.js', // #8111 review — executeBash's fallback when a caller passes no env
       'claude-tui-session.js',
       'user-shell-session.js',
       'byok-mcp-client.js',
@@ -268,6 +269,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
     // by name, rather than silently inflating direction 1's pass/fail set.
     const relPaths = copiers.map((c) => c.relPath).sort()
     const expectedExact = [
+      'built-in-tools/bash-exec.js',
       'byok-mcp-client.js',
       'byok-tool-executor.js',
       'claude-tui-session.js',
