@@ -41,6 +41,18 @@ import { registerProvider } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { defaultBinaryTrustFile } from '../src/binary-provenance-trust.js'
 import { configPath } from '../src/config-dir.js'
+import { verifyProvenance as realVerifyProvenance } from '../src/utils/verify-provenance.js'
+
+// #8093 review S5: `runDoctorChecks` also runs the cloudflared row — resolved
+// off the real PATH, with no seam to point it at a fixture — regardless of
+// `providers`. On a host where `claude`/`cloudflared` happens to be an npm JS
+// launcher, the tests below would walk that REAL installed package tree with
+// pinning on. Every `runDoctorChecks` call in this describe that turns the
+// gate ON pins `classifyBinary` to a `native`-only stub, mirroring how
+// verify-provenance.test.js / binary-provenance-trust.test.js already do this
+// for the same reason — these tests are about the GATE's wiring, not about
+// package-tree classification (covered end-to-end elsewhere).
+const CLASSIFY_NATIVE_VERIFY_PROVENANCE = (opts) => realVerifyProvenance({ ...opts, classifyBinary: () => ({ kind: 'native' }) })
 
 // ── shared tmp root ─────────────────────────────────────────────────────────
 
@@ -436,6 +448,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
         providers: [providerName],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: ledger,
+        verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
         detectStranded: CLEAN_STRANDED_STATE,
       })
       const row = binaryRow(checks, providerName)
@@ -465,6 +478,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
         providers: [providerName],
         binaryProvenanceMode: 'block',
         binaryProvenanceLedger: ledger,
+        verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
         detectStranded: CLEAN_STRANDED_STATE,
       })
       const row = binaryRow(checks, providerName)
@@ -524,6 +538,7 @@ describe('runDoctorChecks — provider binary provenance gate, production wiring
       const { checks } = await runDoctorChecks({
         providers: [providerName],
         binaryProvenanceLedger: ledger,
+        verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
         detectStranded: CLEAN_STRANDED_STATE,
       })
       const row = binaryRow(checks, providerName)

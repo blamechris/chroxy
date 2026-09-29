@@ -602,6 +602,101 @@ describe('PathHashTrustLedger (#5580)', () => {
     })
   })
 
+  // #8093 round 2 (C2): `approve(path, hash, { expect })` — a compare-and-
+  // swap write, tagged `'migrate'`. Unlike a plain `approve()` (tagged
+  // `'set'`, which always wins the merge regardless of what a fresh re-read
+  // finds), a `'migrate'` write is applied ONLY when disk still holds a
+  // record matching `expect` at the moment of the flush's own re-read. This
+  // is what makes a caller's post-write `getRecord()` a REAL check instead of
+  // always reading back its own just-applied value (`_setRecord` applies to
+  // `_records` synchronously, before any merge ever runs) — mirrors how
+  // `'tofu'` is conditioned above, just against an explicit snapshot instead
+  // of "is there any record at all".
+  describe('a migrate (compare-and-swap) write only applies when disk still matches `expect` (#8093 round 2, C2)', () => {
+    it('applies when nobody else has touched the record — the plain, single-process case', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      l.approve('/x/p', sha('legacy'))
+      l.approve('/x/p', sha('tree'), { expect: { sha256: sha('legacy') } })
+      assert.equal(l.isTrusted('/x/p', sha('tree')), true)
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/p'].sha256, sha('tree'))
+    })
+
+    // The reviewer's exact two-instance interleaving: A reads the legacy
+    // record, decides a migration is safe, but a DIFFERENT instance (B)
+    // writes to the SAME path before A's own write lands.
+    it('the reviewer\'s exact repro: a genuine write landing after A read but before A wrote is NOT overwritten', () => {
+      const seeder = new TestLedger({ filePath: ledgerPath })
+      seeder.approve('/x/p', sha('legacy')) // the shared starting point
+
+      const daemonA = new TestLedger({ filePath: ledgerPath }) // loads the legacy record
+      const daemonB = new TestLedger({ filePath: ledgerPath }) // loads the SAME legacy record
+
+      // B completes a real migration first and flushes it — genuine, valid,
+      // persisted.
+      daemonB.approve('/x/p', sha('genuine-tree'), { expect: { sha256: sha('legacy') } })
+      assert.equal(daemonB.isTrusted('/x/p', sha('genuine-tree')), true, 'sanity: B\'s own migration must succeed')
+
+      // A proceeds exactly as the migration branch does — no further reload
+      // — attempting to migrate from the SAME legacy snapshot it originally
+      // read, now stale.
+      daemonA.approve('/x/p', sha('attacker-tree'), { expect: { sha256: sha('legacy') } })
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/p'].sha256, sha('genuine-tree'),
+        'B\'s genuine tree pin must survive completely untouched — A\'s stale CAS must be rejected, not silently overwrite it')
+      assert.equal(daemonA.isTrusted('/x/p', sha('attacker-tree')), false,
+        'A\'s own in-memory view must self-heal to reflect the rejection, not keep believing its own write landed')
+      assert.equal(daemonA.isTrusted('/x/p', sha('genuine-tree')), true)
+      assert.equal(daemonA.getRecord('/x/p').sha256, sha('genuine-tree'),
+        'the post-write getRecord() re-read a caller performs must see the ACTUAL merged result, not a value only this instance ever held')
+    })
+
+    it('a migrate write matching `expect` on more than one field only applies when ALL of them still match', () => {
+      const l = new TestLedger({ filePath: ledgerPath })
+      // extraFields is empty for TestLedger, so simulate an extra field via
+      // a manually-constructed expect that simply never matches a bare
+      // sha256-only record — proves the comparison checks every named field,
+      // not merely the first one.
+      l.approve('/x/p', sha('legacy'))
+      l.approve('/x/p', sha('tree'), { expect: { sha256: sha('legacy'), kind: 'file' } })
+      // `kind` is not a real field on this record (TestLedger declares no
+      // extraFields), so `baseRec.kind` is `undefined`, never `'file'` —
+      // the CAS must fail on that mismatch alone.
+      assert.equal(l.isTrusted('/x/p', sha('tree')), false, 'a field named in `expect` that does not match must reject the whole CAS')
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/p'].sha256, sha('legacy'), 'the original record must be untouched')
+    })
+
+    it('does not apply, and is not resurrected later, once disk has moved on (R2-C1-style forget-not-retry)', () => {
+      const seeder = new TestLedger({ filePath: ledgerPath })
+      seeder.approve('/x/p', sha('legacy'))
+
+      // `failing` is the stale instance: it loads the legacy record, exactly
+      // like `daemonA` in the repro test above, but its first flush is
+      // forced to fail so the blanket `_changedKeys.clear()` on a successful
+      // flush does not run and mask the bug.
+      const failing = new FlakyLedger({ filePath: ledgerPath })
+      const daemonB = new TestLedger({ filePath: ledgerPath })
+      daemonB.approve('/x/p', sha('genuine-tree'), { expect: { sha256: sha('legacy') } })
+
+      failing._failNextSerialize = true
+      failing.approve('/x/p', sha('attacker-tree'), { expect: { sha256: sha('legacy') } })
+      // The skip already self-healed failing's in-memory state to B's
+      // genuine record, regardless of the write failure.
+      assert.equal(failing.isTrusted('/x/p', sha('genuine-tree')), true)
+
+      // The failed flush must not leave a 'migrate' op queued to be replayed
+      // against a LATER disk state — approve an unrelated key to force
+      // another flush and confirm P is still untouched.
+      failing.approve('/x/q', sha('q'))
+
+      const onDisk = JSON.parse(readFileSync(ledgerPath, 'utf8'))
+      assert.equal(onDisk.records['/x/p'].sha256, sha('genuine-tree'), 'B\'s genuine pin must still be untouched after a retried flush')
+      assert.ok(onDisk.records['/x/q'], 'the unrelated later write still lands')
+    })
+  })
+
   // #8072 review round 2, R2-C1: when the merge SKIPS a 'tofu'/'touch' write
   // because disk already resolved that key, the tracked op must be FORGOTTEN
   // — not merely left in place for a later flush to replay. Without this, a

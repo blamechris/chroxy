@@ -16,7 +16,11 @@
  *       "/opt/homebrew/bin/codex": {
  *         "sha256": "<64 hex chars>",       // the binary's CONTENT hash
  *         "firstSeen": "2026-07-22T12:34:56.000Z",
- *         "approvedAt": "2026-07-22T12:34:56.000Z"
+ *         "approvedAt": "2026-07-22T12:34:56.000Z",
+ *         "kind": "tree"                    // "file" (single-file hash) or
+ *                                            // "tree" (package-manifest digest,
+ *                                            // #8040) — a record with no `kind`
+ *                                            // is a legacy single-file pin.
  *       }
  *     }
  *   }
@@ -79,6 +83,7 @@ export class BinaryProvenanceLedger extends PathHashTrustLedger {
       approvalField: 'approvedAt',
       wrapperKey: 'binaries',
       throwOnFlushError: false, // best-effort: a read-only $HOME never breaks spawning
+      extraFields: ['kind'], // #8040: 'file' | 'tree' — see verify-provenance.js
     })
     const loaded = this._loadRecords()
     this._records = loaded.records

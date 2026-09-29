@@ -1,7 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { CloudflareTunnelAdapter, TunnelBinaryProvenanceError } from '../src/tunnel/cloudflare.js'
-import { PROVENANCE_STATUS } from '../src/utils/verify-provenance.js'
+import { PROVENANCE_STATUS, verifyProvenance as realVerifyProvenance } from '../src/utils/verify-provenance.js'
 
 /**
  * Tests for the opt-in cloudflared provenance gate (#6858). The gate is folded
@@ -194,5 +197,44 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, 'cloudflared')
     await reapChild(proc)
+  })
+})
+
+// #8040 requirement 7: every verifyProvenance CALLER — preflight.js,
+// doctor.js's two rows, and this tunnel adapter — must get package-tree
+// coverage through the SAME code path, with no per-caller reimplementation.
+// This exercises the REAL `verifyProvenance` (not the fakes every other test
+// in this file injects) through `_verifyCloudflaredProvenance`, against a
+// synthetic launcher-shaped fixture — cloudflared itself is always a native
+// single binary in reality, but the point is that THIS caller runs the exact
+// same classification/manifest logic every other caller does, automatically.
+describe('cloudflared provenance gate — package-tree coverage via the shared code path (#8040)', () => {
+  it('a swap inside a launcher-shaped resolved path is refused, via the REAL verifyProvenance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-cloudflared-tree-'))
+    try {
+      const pkgRoot = join(dir, 'pkg')
+      mkdirSync(join(pkgRoot, 'node_modules', 'dep'), { recursive: true })
+      writeFileSync(join(pkgRoot, 'package.json'), JSON.stringify({ name: 'fixture-cloudflared-wrapper', bin: 'entry.js' }))
+      const entry = join(pkgRoot, 'entry.js')
+      writeFileSync(entry, '#!/usr/bin/env node\n')
+      const nested = join(pkgRoot, 'node_modules', 'dep', 'native')
+      writeFileSync(nested, 'nested native bytes v1')
+
+      const ledger = { _records: new Map(), getRecord(p) { return this._records.has(p) ? { ...this._records.get(p) } : null }, approve(p, h, o = {}) { const r = { sha256: h, firstSeen: 'x', approvedAt: 'x' }; if (o.fields?.kind) r.kind = o.fields.kind; this._records.set(p, r); return true } }
+      const adapter = makeAdapter({
+        binaryProvenance: { mode: 'block', signatureGate: false, ledger },
+        resolveBinary: () => entry,
+        verifyProvenance: realVerifyProvenance,
+      })
+      adapter._verifyCloudflaredProvenance()
+      assert.equal(adapter._resolvedCloudflaredPath, entry, 'first sight pins and proceeds')
+
+      writeFileSync(nested, 'nested native bytes v2 — SWAPPED')
+
+      assert.throws(() => adapter._verifyCloudflaredProvenance(), TunnelBinaryProvenanceError,
+        'a swap nested inside the launcher-shaped tree must be refused through this adapter\'s own call site too')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
