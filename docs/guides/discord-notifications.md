@@ -29,6 +29,22 @@ Notifications still flow through chroxy's shared pipeline first — category
 preferences, quiet hours, and rate limits apply to Discord exactly as they do
 to mobile push.
 
+### Mention safety (#8105)
+
+Every free-text field any of the three Discord sinks embeds — the status
+embed's Status/Detail/Session fields, the billing alert's warning body and
+codes, and the CI sink's PR title/body — has any `@everyone` / `@here` /
+`<@user>` / `<@&role>` mention **neutralized** before it reaches Discord (a
+zero-width space is inserted into the mention syntax so it reads the same to
+a human but can't ping anyone), and every outgoing payload also sets
+`allowed_mentions: { parse: [] }` as a server-side backstop — Discord itself
+is told to parse no mentions out of the message at all, regardless of what
+text made it onto the wire. None of these sinks configure a deliberate ping
+to a specific user or role today; if one is ever added, it must use an
+explicit `allowed_mentions` allow-list (`{ parse: [], users: [id] }` /
+`{ parse: [], roles: [id] }`) rather than the blanket default, or that ping
+would be silently dropped too.
+
 ## Setup
 
 ### 1. Create a webhook in Discord

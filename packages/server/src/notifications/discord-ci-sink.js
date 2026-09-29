@@ -47,6 +47,7 @@ import {
   DEFAULT_PROJECT_COLOR,
   DEFAULT_ERROR_COLOR,
   DEFAULT_ONLINE_COLOR,
+  DEFAULT_ALLOWED_MENTIONS,
   MAX_EMBED_TITLE_CHARS,
   isValidColor,
   escapeAndCap,
@@ -231,10 +232,12 @@ export class DiscordCiSink extends NotificationSink {
     return {
       username: this._botName,
       embeds: [embed],
-      // Server-side backstop for neutralizeMentions(): Discord itself parses no
-      // mentions from this message, so nothing in a GitHub-authored PR title
-      // can ping anyone even if a mention form slips past the text transform.
-      allowed_mentions: { parse: [] },
+      // Server-side backstop for neutralizeMentions() (#8105: now the shared
+      // default every Discord sink sets — see DEFAULT_ALLOWED_MENTIONS):
+      // Discord itself parses no mentions from this message, so nothing in a
+      // GitHub-authored PR title can ping anyone even if a mention form slips
+      // past the text transform.
+      allowed_mentions: DEFAULT_ALLOWED_MENTIONS,
     }
   }
 }

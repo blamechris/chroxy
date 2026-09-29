@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Discord status embed and billing-alert sinks now neutralize
+  `@everyone`/`@here`/role/user mentions in every free-text field, and every
+  Discord payload sets `allowed_mentions: { parse: [] }` as a server-side
+  backstop (#8105).** #8103 added `neutralizeMentions()` for the new CI sink's
+  PR-title text, but `discord-webhook-sink.js` (session name, task/activity
+  body, tool detail) and `discord-billing-sink.js` (warning body, codes)
+  still ran caller-supplied free text through `escapeAndCap` alone, which
+  escapes markdown metacharacters but never touched `@`/`<@...>` — a session
+  name or billing-warning string containing a literal `@everyone` reached
+  Discord as a live ping. All three sinks now neutralize mentions before
+  escaping and set `allowed_mentions` on every outgoing payload
+  (`discord-webhook-client.js`'s new shared `DEFAULT_ALLOWED_MENTIONS`); no
+  sink configures a deliberate user/role ping today, so a blanket `parse: []`
+  is correct everywhere.
+
 - **A claude-tui background-task snapshot read that never gets broadcast no
   longer silently advances the idle poll's dedup baseline or stops the poll
   (#8052).** `ClaudeTuiSession.getBackgroundTaskSnapshot()` did two side

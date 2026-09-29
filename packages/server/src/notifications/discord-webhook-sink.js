@@ -63,9 +63,11 @@ import {
   DEFAULT_ERROR_COLOR,
   DEFAULT_ONLINE_COLOR,
   DEFAULT_OFFLINE_COLOR,
+  DEFAULT_ALLOWED_MENTIONS,
   isValidColor,
   escapeAndCap,
   truncate,
+  neutralizeMentions,
   formatDuration,
   apiBase,
   fetchWithDiscordRetry,
@@ -687,20 +689,30 @@ export class DiscordWebhookSink extends NotificationSink {
     // put a visible backslash in front of every `_` — a character `_projectKey`
     // deliberately allows in a project name. Length is the only hazard here.
     const projectBudget = MAX_EMBED_TITLE_CHARS - titleFor('').length
+    // `project` is NOT re-neutralized here: it is already `_projectKey()`'s
+    // sanitized output (`[^A-Za-z0-9._-]` stripped, #7105/#8063), and that
+    // charset excludes `@`/`<`/`>` outright — a mention can't survive into the
+    // title through this path. (`truncate`, not `escapeAndCap`, for the same
+    // reason noted below: Discord doesn't render markdown in embed titles.)
     const title = truncate(titleFor(truncate(project, projectBudget)), MAX_EMBED_TITLE_CHARS)
     const fields = []
-    // Free-text user/transcript fields (#5475): escape markdown so a body like
-    // `watch dist/*_test.js` renders literally. escapeAndCap truncates first,
-    // escapes, then clamps the FINAL escaped string so it can't blow past
-    // Discord's 1024-char field limit (see escapeAndCap).
+    // Free-text user/transcript fields (#5475/#8105): neutralize Discord
+    // mention syntax FIRST (a session name, task body, or tool detail can
+    // carry a literal `@everyone`/`@here`/role/user mention straight from
+    // caller-supplied data — #8105), THEN escape markdown so e.g.
+    // `watch dist/*_test.js` still renders literally. escapeAndCap truncates
+    // first, escapes, then clamps the FINAL escaped string so it can't blow
+    // past Discord's 1024-char field limit (see escapeAndCap); running
+    // neutralizeMentions after truncation could instead clip a mention
+    // mid-match and let it through, so it always runs on the raw value.
     if (entry.body) {
-      fields.push({ name: 'Status', value: escapeAndCap(entry.body), inline: false })
+      fields.push({ name: 'Status', value: escapeAndCap(neutralizeMentions(entry.body)), inline: false })
     }
     if (entry.detail) {
-      fields.push({ name: 'Detail', value: escapeAndCap(entry.detail), inline: false })
+      fields.push({ name: 'Detail', value: escapeAndCap(neutralizeMentions(entry.detail)), inline: false })
     }
     if (entry.sessionName) {
-      fields.push({ name: 'Session', value: escapeAndCap(entry.sessionName, 100), inline: true })
+      fields.push({ name: 'Session', value: escapeAndCap(neutralizeMentions(entry.sessionName), 100), inline: true })
     }
     if (Number.isFinite(entry.subagents) && entry.subagents > 0) {
       fields.push({ name: 'Subagents', value: String(entry.subagents), inline: true })
@@ -712,9 +724,16 @@ export class DiscordWebhookSink extends NotificationSink {
         title,
         color: this._colorFor(project, entry.state),
         fields,
+        // `this._botName` is a trusted, admin-set constructor option (config.json
+        // / CLI default), never caller-supplied free text — no neutralization
+        // needed for the footer.
         footer: { text: `${this._botName} · ${formatDuration(elapsedSec)}` },
         timestamp: new Date(this._now()).toISOString(),
       }],
+      // Server-side backstop (#8105), on top of neutralizeMentions() above: no
+      // configured user/role ping exists for this sink (see
+      // DEFAULT_ALLOWED_MENTIONS), so no mention type is allowed at all.
+      allowed_mentions: DEFAULT_ALLOWED_MENTIONS,
     }
   }
 

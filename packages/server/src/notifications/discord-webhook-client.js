@@ -153,6 +153,32 @@ export function neutralizeMentions(text) {
   ))
 }
 
+/**
+ * Default `allowed_mentions` payload for every Discord sink (#8105): a
+ * server-side backstop telling Discord to parse NO mentions out of the
+ * message at all, regardless of what text reaches the wire. This is
+ * defense-in-depth layered ON TOP OF neutralizeMentions() (#7428), not a
+ * substitute for it — the text transform keeps a mention from being
+ * recognisable even by a human glancing at the raw JSON payload or a client
+ * that doesn't honour `allowed_mentions`, while this field is Discord's own
+ * guarantee that its API won't ping anyone even if a mention form ever slips
+ * past the text transform (a regex miss, a future field that forgets to
+ * call it, ...).
+ *
+ * None of the three Discord sinks (status, billing, CI) configure a
+ * deliberate ping to a specific user or role — `notifications.discord` has
+ * no such config key (see CONFIG.md / docs/guides/discord-notifications.md)
+ * — so `{ parse: [] }` (no mention types allowed at all) is correct for
+ * every sink today. A sink that ever needs a deliberate, configured ping
+ * would pass its own `{ parse: [], users: [id] }` / `{ ..., roles: [id] }`
+ * instead of this default — never a blanket `parse: []` that would silently
+ * swallow it.
+ *
+ * Frozen so sharing one reference across every payload can't be mutated by
+ * accident; JSON.stringify doesn't care either way, this is just hygiene.
+ */
+export const DEFAULT_ALLOWED_MENTIONS = Object.freeze({ parse: [] })
+
 /** Build the Discord webhook API base from a validated webhook URL. */
 export function apiBase(webhookUrl) {
   const parts = extractWebhookIdToken(webhookUrl)
