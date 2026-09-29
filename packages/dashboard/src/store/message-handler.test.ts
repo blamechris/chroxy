@@ -1606,6 +1606,27 @@ describe('dashboard message-handler dispatch', () => {
         expect(_testMcpServerOpPendingSize()).toBe(0)
       })
 
+      it('a send that THROWS (serialization bug) resolves the armed op once with SEND_FAILED, then re-throws', () => {
+        vi.useFakeTimers()
+        const socket = createMockSocket()
+        const cb = vi.fn()
+        // A BigInt makes JSON.stringify throw inside wsSend, before socket.send —
+        // the path #6283 deliberately keeps loud instead of returning false.
+        expect(() => sendMcpServerOp(
+          socket,
+          'add-send-throw-1',
+          { op: 'add', name: 'filesystem', sessionId: 's1' },
+          { type: 'add_mcp_server', sessionId: 's1', name: 'filesystem', requestId: 'add-send-throw-1', bad: BigInt(1) },
+          cb,
+        )).toThrow(TypeError)
+        expect(socket.send).not.toHaveBeenCalled()
+        expect(cb).toHaveBeenCalledTimes(1)
+        expect(cb).toHaveBeenCalledWith({ ok: false, code: 'SEND_FAILED', message: 'The request could not be sent to the daemon.' })
+        expect(_testMcpServerOpPendingSize()).toBe(0)
+        vi.advanceTimersByTime(MCP_SERVER_OP_TIMEOUT_MS)
+        expect(cb).toHaveBeenCalledTimes(1)
+      })
+
       it('a healthy send still arms normally and does not call back synchronously (happy-path regression guard)', () => {
         const socket = createMockSocket()
         const cb = vi.fn()
