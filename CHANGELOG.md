@@ -23,6 +23,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`chroxy start`'s dependency checks now preflight the provider the daemon
+  is actually about to spawn, not whichever provider the default
+  `config.json` names (#8075).** `runDoctorChecks({ port })` was called with
+  no provider selection at all, so it fell back to re-reading the provider
+  out of doctor's own default config file (or `DEFAULT_PROVIDER` when that
+  file is missing) — never the provider actually chosen via `--provider`,
+  `-c <path>`, or `CHROXY_PROVIDER` on the config `loadAndMergeConfig` had
+  already built for the daemon that was about to start. `chroxy start
+  --provider codex` on an installation whose default `config.json` named
+  `claude-sdk` checked `claude`'s binary/credentials and never touched
+  `codex`; `chroxy start -c other.json` checked whatever the *default* file
+  named, never `other.json`'s own provider; `CHROXY_PROVIDER=gemini chroxy
+  start` checked the default file's provider too. Missing binaries,
+  credentials, version floors, the shim refusal and the `binaryProvenance`
+  gate (#8041/#8074) all went unchecked for the provider that would actually
+  run, while the wrong provider's dependencies were checked instead — and the
+  same misrouted selection fed the billing-canary line's `effectiveDefault`
+  and the claude-tui version-pin probe. `server-cmd.js` now passes
+  `providers: [resolveDaemonDefaultProvider(config)]` — the single existing
+  derivation of "this daemon's resolved default provider" (#7932,
+  `providers.js`), already used everywhere else a spawn needs to agree with
+  the daemon's actual selection — so `runDoctorChecks` never re-reads the
+  default file for a decision the merged config already made. `chroxy
+  doctor` (the standalone command) has no `-c`/config-path option at all and
+  was unaffected — it already only ever reads its own default config file or
+  an explicit `--provider` override, by design.
+
 - **A spawned provider no longer inherits the daemon's own `CHROXY_PORT` /
   `CHROXY_HOOK_SECRET` from the ambient environment when its session sets
   neither, and a BYOK session's own Bash/Grep tool call can no longer read
