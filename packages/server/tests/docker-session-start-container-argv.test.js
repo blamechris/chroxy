@@ -201,15 +201,30 @@ if (typeof mock.module !== 'function') {
       )
     })
 
-    // Review #8109 (Critical #1): the 4 catalogue entries this PR keeps
-    // in place (this._memoryLimit / this._cpuLimit / the cwd mount template /
+    // Review #8109 (Critical #1): the 4 catalogue entries this PR keeps in
+    // place (this._memoryLimit / this._cpuLimit / the cwd mount template /
     // this._image) are STATIC attestations only — they say those elements
-    // are provably safe argv values, never that the argv actually CARRIES
-    // them, in the right flag, with the right value. These three tests close
-    // that behavioural gap directly (the mount is already covered above),
-    // so a `this._image || this._userSuppliedImageOverride`-shaped mutant (or
-    // an equivalent one on memory/cpu) is caught HERE even though it would
-    // stay fully lint-clean.
+    // are provably-safe argv VALUES, never that the argv actually carries
+    // them, in the right flag, at the right value. These three tests close
+    // that behavioural gap for value-swap/wrong-slot/wrong-default mutants
+    // (e.g. --cpus and --memory swapped, or a hardcoded value replacing the
+    // constructor opt).
+    //
+    // One shape it CANNOT close, honestly noted rather than silently
+    // over-claimed (docs/false-safety-guards.md's "comment describes a
+    // stronger check than the code performs"): a `this._image ||
+    // this._userSuppliedImageOverride`-style added fallback is unreachable by
+    // ANY black-box argv assertion, because the constructor already
+    // guarantees `this._image` is truthy (`opts.image || 'node:22-slim'`) —
+    // the fallback never actually fires, so the argv is byte-identical with
+    // or without it. That specific class needs a static check precise enough
+    // to flag the new dynamic identifier regardless of what value it would
+    // produce; `argv-safety.js`'s existing bare-substring `match: 'this._image'`
+    // entry is (confirmed, pre-existing on origin/main, not introduced by this
+    // PR) too loose to do that — it also matches this mutated expression's
+    // text as a substring. Left as a known, out-of-scope gap in the lint's
+    // own catalogue-matching precision, not something #7416 (a test-only
+    // issue) takes on.
     it('pins the exact --memory value', async () => {
       const { captured } = await captureRunArgv({ apiKey: 'sk-real-test-key', memoryLimit: '3g' })
       assert.equal(valueAfter(captured.args, '--memory'), '3g')
