@@ -763,6 +763,64 @@ describe('DiscordWebhookSink — status-message state machine', () => {
   })
 })
 
+// #8105: PR #8103 added neutralizeMentions() but only discord-ci-sink.js
+// called it. This status sink embeds free text (notification.body, data.detail
+// /data.tool, data.sessionName) into the Status/Detail/Session fields via
+// escapeAndCap alone, which escapes markdown metacharacters but does NOT
+// touch `@`/`<@...>` — so a session name or task body containing a literal
+// `@everyone`/`@here`/role/user mention reached Discord as a live ping. These
+// tests pin the fix: every free-text field is neutralized before escaping,
+// and `allowed_mentions: { parse: [] }` is a server-side backstop on every
+// outgoing payload (POST and PATCH alike).
+describe('DiscordWebhookSink — mention neutralization + allowed_mentions (#8105)', () => {
+  it('neutralizes @everyone in the body (Status field)', async () => {
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send({ ...idle(), body: '@everyone check this out' })
+    const status = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Status').value
+    assert.ok(!status.includes('@everyone'), 'raw @everyone must not reach the wire')
+    assert.ok(status.includes('everyone'), 'text is still present, just de-fanged')
+  })
+
+  it('neutralizes @here and a role/user snowflake mention in the detail (Detail field)', async () => {
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send(waiting({ detail: '@here ping <@123456789012345678> and <@&987654321098765432>' }))
+    const detail = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Detail').value
+    assert.ok(!detail.includes('@here'))
+    assert.ok(!detail.includes('<@123456789012345678>'))
+    assert.ok(!detail.includes('<@&987654321098765432>'))
+  })
+
+  it('neutralizes a mention in the session name (Session field)', async () => {
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send(idle({ sessionName: '@everyone-project' }))
+    const session = JSON.parse(calls[0].body).embeds[0].fields.find((f) => f.name === 'Session').value
+    assert.ok(!session.includes('@everyone'), 'raw @everyone must not reach the wire in the Session field')
+  })
+
+  it('sets allowed_mentions { parse: [] } on a POST (ping-worthy repost) payload', async () => {
+    const calls = scriptFetch()
+    const { sink } = makeSink()
+    await sink.send(idle({ sessionName: 'alpha' }))
+    const payload = JSON.parse(calls[0].body)
+    assert.equal(calls[0].method, 'POST')
+    assert.deepEqual(payload.allowed_mentions, { parse: [] })
+  })
+
+  it('sets allowed_mentions { parse: [] } on a PATCH (routine update) payload', async () => {
+    const calls = scriptFetch()
+    const { sink, advance } = makeSink({ updateThrottleMs: 15_000 })
+    await sink.send(errored())     // POST (no prior message)
+    advance(20_000)                 // past the throttle window
+    await sink.send(errored())     // routine PATCH in place
+    assert.deepEqual(calls.map((c) => c.method), ['POST', 'PATCH'])
+    const payload = JSON.parse(calls[1].body)
+    assert.deepEqual(payload.allowed_mentions, { parse: [] })
+  })
+})
+
 describe('DiscordWebhookSink — 429 + failure handling', () => {
   it('respects retry_after from the 429 JSON body (Discord sends seconds)', async () => {
     const calls = scriptFetch([

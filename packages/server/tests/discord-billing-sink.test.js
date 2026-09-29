@@ -255,3 +255,70 @@ describe('DiscordBillingSink — delivery', () => {
     assert.ok(field.value.includes('\\_cloud\\_'))
   })
 })
+
+// #8105: PR #8103 added neutralizeMentions() but only discord-ci-sink.js
+// called it. This sink embeds the billing-canary warning body and codes into
+// the Warnings/Resolved and Codes fields via escapeAndCap alone, which does
+// NOT neutralize `@`/`<@...>` — so a warning body/code containing a literal
+// `@everyone`/`@here`/role/user mention reached Discord as a live ping.
+describe('DiscordBillingSink — mention neutralization + allowed_mentions (#8105)', () => {
+  it('neutralizes @everyone in the warning body (Warnings field)', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT'], '@everyone billing is metered'))
+    const payload = JSON.parse(calls[0].body)
+    const field = payload.embeds[0].fields.find((f) => f.name === 'Warnings')
+    assert.ok(!field.value.includes('@everyone'), 'raw @everyone must not reach the wire')
+    assert.ok(field.value.includes('everyone'), 'text is still present, just de-fanged')
+  })
+
+  it('neutralizes @here and a role/user snowflake mention in the resolved body', async () => {
+    const calls = scriptFetch([
+      { status: 200, body: { id: 'msg-1' } }, // alert POST
+      { status: 200 },                         // resolved PATCH
+    ])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT']))
+    const resolvedNotice = {
+      category: 'billing_warning',
+      title: 'Billing alert cleared',
+      body: '@here <@123456789012345678> <@&987654321098765432> all clear',
+      data: { resolved: true, codes: [] },
+    }
+    await sink.send(resolvedNotice)
+    const payload = JSON.parse(calls[1].body)
+    const field = payload.embeds[0].fields.find((f) => f.name === 'Resolved')
+    assert.ok(!field.value.includes('@here'))
+    assert.ok(!field.value.includes('<@123456789012345678>'))
+    assert.ok(!field.value.includes('<@&987654321098765432>'))
+  })
+
+  it('neutralizes a mention embedded in a warning code (Codes field)', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT', '@everyone']))
+    const payload = JSON.parse(calls[0].body)
+    const field = payload.embeds[0].fields.find((f) => f.name === 'Codes')
+    assert.ok(!field.value.includes('@everyone'), 'raw @everyone must not reach the wire in Codes')
+  })
+
+  it('sets allowed_mentions { parse: [] } on the alert POST payload', async () => {
+    const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT'], '@everyone <@123456789012345678>'))
+    const payload = JSON.parse(calls[0].body)
+    assert.deepEqual(payload.allowed_mentions, { parse: [] })
+  })
+
+  it('sets allowed_mentions { parse: [] } on the resolved PATCH payload', async () => {
+    const calls = scriptFetch([
+      { status: 200, body: { id: 'msg-1' } }, // alert POST
+      { status: 200 },                         // resolved PATCH
+    ])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT']))
+    await sink.send(cleared())
+    const payload = JSON.parse(calls[1].body)
+    assert.deepEqual(payload.allowed_mentions, { parse: [] })
+  })
+})

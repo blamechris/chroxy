@@ -50,8 +50,10 @@ import {
 import {
   DEFAULT_ERROR_COLOR,
   DEFAULT_ONLINE_COLOR,
+  DEFAULT_ALLOWED_MENTIONS,
   isValidColor,
   escapeAndCap,
+  neutralizeMentions,
   apiBase,
   fetchWithDiscordRetry,
 } from './discord-webhook-client.js'
@@ -295,15 +297,25 @@ export class DiscordBillingSink extends NotificationSink {
       ? notification.data.codes.filter((c) => typeof c === 'string')
       : []
     const fields = []
+    // #5475/#8105: neutralize Discord mention syntax FIRST, then escape
+    // markdown. `body` is the billing canary's free-text warning message and
+    // `codes` are its identifiers — both ultimately caller-supplied
+    // (notification.data), so a literal `@everyone`/`@here`/role/user mention
+    // in either must not reach Discord as a live ping. Same ordering
+    // requirement as the status sink: neutralizeMentions on the raw value,
+    // escapeAndCap (truncate + escape + re-clamp) after.
     if (body) {
-      fields.push({ name: resolved ? 'Resolved' : 'Warnings', value: escapeAndCap(body), inline: false })
+      fields.push({ name: resolved ? 'Resolved' : 'Warnings', value: escapeAndCap(neutralizeMentions(body)), inline: false })
     }
     if (!resolved && codes.length > 0) {
       // 200 is a deliberate short cap — codes are short identifiers
       // (SILENT_METERED_DEFAULT, …); a handful never approaches the 1024 field
       // limit, and a runaway list is fine to truncate.
-      fields.push({ name: 'Codes', value: escapeAndCap(codes.join(', '), 200), inline: false })
+      fields.push({ name: 'Codes', value: escapeAndCap(neutralizeMentions(codes.join(', ')), 200), inline: false })
     }
+    // Title is built entirely from `this._botName` (trusted, admin-set) and
+    // `codes.length` (a number) — no caller-supplied free text, so no
+    // neutralization is needed here (unlike the fields above).
     const title = resolved
       ? `\u{2705} ${this._botName} — Billing alerts cleared`
       : codes.length > 1
@@ -315,9 +327,14 @@ export class DiscordBillingSink extends NotificationSink {
         title,
         color: resolved ? this._resolvedColor : this._alertColor,
         fields,
+        // Same reasoning as the title: this._botName is trusted, not free text.
         footer: { text: this._botName },
         timestamp: new Date(this._now()).toISOString(),
       }],
+      // Server-side backstop (#8105), on top of neutralizeMentions() above: no
+      // configured user/role ping exists for this sink — see
+      // DEFAULT_ALLOWED_MENTIONS in discord-webhook-client.js.
+      allowed_mentions: DEFAULT_ALLOWED_MENTIONS,
     }
   }
 }
