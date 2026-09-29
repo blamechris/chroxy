@@ -1,3 +1,5 @@
+import { formatWriteConfirmation } from './built-in-tools/tool-transforms.js'
+
 /**
  * Normalise a claude-tui PostToolUse hook's `tool_response` into the same
  * kind of flat display text SdkSession/CliSession forward for a tool_result
@@ -14,18 +16,52 @@
  * unwraps the known structured shapes into the same kind of plain text
  * instead of forwarding (and previously, JSON.stringify-ing) the envelope.
  *
- * Order of preference:
- *   1. A `content` field shaped like a tool_result block's own content
- *      (string, or an array of `{ type: 'text', text }` blocks) — this is
- *      the exact shape emitToolResults() flattens, and it is what MCP tool
- *      responses carry verbatim (`{ content, isError }`), so MCP tool
- *      results get full parity with SdkSession/CliSession for free.
- *   2. The known built-in Bash shape: `{ stdout, stderr, interrupted,
+ * Order of preference (see the #8082 PR review, Critical #1 — a plain
+ * string `content` field is AMBIGUOUS and its priority relative to the
+ * Write-shape check is load-bearing; a fixture that pins this ordering
+ * lives in the test suite as the "rule order" regression case):
+ *
+ *   1a. A `content` field that is an ARRAY of `{ type: 'text', text }`
+ *       blocks — this shape is unambiguous (Write/Edit/Bash/Read never
+ *       produce it) and always wins: it's the exact shape emitToolResults()
+ *       flattens, and it's what an MCP `{ content: [...], isError }` tool
+ *       response carries verbatim.
+ *   1b. A `content` field that is a STRING — used as-is, UNLESS the object
+ *       is shaped like the built-in Write tool's result (see
+ *       `isFileWriteResponseShape`), in which case this branch is skipped
+ *       and rule 2 handles it instead. Grep's content-mode result
+ *       (`{ mode: 'content', content: '<rg output>', numLines }`) and a
+ *       string-content MCP response both qualify here; Write's result also
+ *       carries a string `content` field, but there it is the ENTIRE
+ *       written file, not a flattened summary — the whole reason this rule
+ *       needs the Write-shape exclusion (#8082 review, Critical #1).
+ *   2. The known built-in Write shape: `{ type: 'create'|'update', filePath,
+ *      content, structuredPatch, originalFile, userModified }` — rendered as
+ *      the SAME short confirmation text `byok-tool-executor.js`'s `runWrite`
+ *      already produces for a successful write (`formatWriteConfirmation`,
+ *      built-in-tools/tool-transforms.js), never the file body. Checked
+ *      BEFORE the Bash/Read unwraps below too — not just before rule 1b —
+ *      so a (pathological, never real) object that happened to satisfy both
+ *      the Write shape and a Bash/Read shape still renders the Write
+ *      confirmation, never the file body misread as stdout/file content.
+ *   3. The known built-in Bash shape: `{ stdout, stderr, interrupted,
  *      isImage, noOutputExpected }`.
- *   3. The known built-in Read shape: `{ type: 'text', file: { content } }`.
- *   4. Anything else — unchanged from today: `JSON.stringify(resp)`. This
- *      is a deliberate no-regression floor: an unrecognised structured
- *      shape must render exactly as it did before this fix, never worse.
+ *   4. The known built-in Read shape: `{ type: 'text', file: { content } }`.
+ *   5. Anything else — unchanged from before this normalizer existed:
+ *      `JSON.stringify(resp)`. This is a deliberate no-regression floor: an
+ *      unrecognised structured shape must render exactly as it did before,
+ *      never worse.
+ *
+ * KNOWN LIMITATION (not a regression — see the #8082 PR review, Suggestion
+ * #3): an array `content` mixing a `{ type: 'image', ... }` block with text
+ * blocks silently drops the image block with no placeholder (unlike Bash's
+ * `isImage: true`, which renders `[Image output omitted]`). Before this
+ * normalizer existed the whole envelope was JSON.stringify-d — including raw
+ * base64 — so this is not worse than before, but it means MCP tool results
+ * get parity with SdkSession/CliSession for TEXT content only; a real
+ * `tool_result` event carries images via a separate `images` array
+ * (tool-result.js's `emitToolResults`) that claude-tui's `tool_result` event
+ * has no field for at all today.
  *
  * @param {string} toolName
  * @param {unknown} resp - `payload.tool_response` from a PostToolUse hook.
@@ -34,10 +70,43 @@
 export function normalizeClaudeTuiToolResponse(toolName, resp) {
   if (typeof resp === 'string') return resp
   if (resp === null || resp === undefined) return ''
-  if (typeof resp !== 'object') return String(resp)
+  if (typeof resp !== 'object') return ''
 
-  const fromContent = flattenToolResultContent(resp.content)
-  if (fromContent !== null) return fromContent
+  // Rule 1a — array-of-text-blocks content ALWAYS qualifies. This shape is
+  // unambiguous: Write/Edit/Bash/Read never produce it, so checking it
+  // unconditionally (before the Write-shape check even runs) cannot regress
+  // anything.
+  const fromArrayContent = flattenArrayContent(resp.content)
+  if (fromArrayContent !== null) return fromArrayContent
+
+  // The Write-shape check MUST be computed (and consulted by rule 1b)
+  // BEFORE a string `content` field is allowed to win. Reversing this —
+  // checking Bash/Read/Write shapes only after an unconditional string
+  // rule 1 — is exactly the regression the #8082 PR review found: Write's
+  // structured result carries a string `content` field (the entire file),
+  // and an unscoped rule 1 renders it verbatim instead of a short
+  // confirmation. See the "rule order" mutant in the test suite for the
+  // fixture that pins this.
+  const isWriteShape = isFileWriteResponseShape(resp)
+
+  // Rule 1b — a plain string `content` field, when the object is NOT
+  // shaped like a Write result (Grep content-mode, string-content MCP).
+  if (typeof resp.content === 'string' && !isWriteShape) {
+    return resp.content
+  }
+
+  // The Write-shape check ALSO has to win over the Bash/Read tool-specific
+  // unwraps below, not just over rule 1b — a pathological object could in
+  // principle satisfy both isFileWriteResponseShape AND
+  // normalizeBashResponse's "has stdout or stderr" test (or Read's file.content
+  // test); Write must still take priority so its `content` (the whole file)
+  // is never mistaken for stdout/file-content text. A genuine Bash/Read
+  // result never carries filePath/structuredPatch/type:create|update, so
+  // this ordering has NO effect on any real tool response — see the
+  // "rule-order regression" fixtures in the test suite that pin it.
+  if (isWriteShape) {
+    return normalizeWriteResponse(resp)
+  }
 
   if (toolName === 'Bash') {
     const bash = normalizeBashResponse(resp)
@@ -58,27 +127,57 @@ export function normalizeClaudeTuiToolResponse(toolName, resp) {
 }
 
 /**
- * Flatten a tool_result-block-shaped `content` field the same way
- * tool-result.js's `emitToolResults` flattens `block.content`: a string is
- * used as-is, an array is filtered to `type: 'text'` blocks and joined with
- * `\n`. Returns null when `content` is absent or not in this shape (so the
- * caller can fall through to a tool-specific unwrap), NOT when it flattens
- * to an empty string (a legitimately empty text result is a valid result).
+ * Flatten a tool_result-block-shaped `content` field that is an ARRAY of
+ * `{ type: 'text', text }` blocks, the same way tool-result.js's
+ * `emitToolResults` flattens `block.content`: filtered to `type: 'text'`
+ * blocks and joined with `\n`. Returns null when `content` is not an array,
+ * or is an array with no text block at all (so the caller falls through to
+ * the Write-shape check / a tool-specific unwrap), NOT when it flattens to
+ * an empty string (a legitimately empty text result is a valid result).
+ *
+ * Deliberately does NOT handle a string `content` — that branch is
+ * ambiguous (see `normalizeClaudeTuiToolResponse`'s rule 1b) and is decided
+ * by the caller together with `isFileWriteResponseShape`, not here.
  *
  * @param {unknown} content
  * @returns {string|null}
  */
-function flattenToolResultContent(content) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    const hasTextBlock = content.some((b) => b && typeof b === 'object' && b.type === 'text')
-    if (!hasTextBlock) return null
-    return content
-      .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
-      .map((b) => b.text)
-      .join('\n')
-  }
-  return null
+function flattenArrayContent(content) {
+  if (!Array.isArray(content)) return null
+  const hasTextBlock = content.some((b) => b && typeof b === 'object' && b.type === 'text')
+  if (!hasTextBlock) return null
+  return content
+    .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+}
+
+/**
+ * Does `resp` look like the built-in Write tool's structured result —
+ * `{ type: 'create'|'update', filePath, content, structuredPatch,
+ * originalFile, userModified }` — where `content` is the ENTIRE written
+ * file, not a flattened model-facing summary?
+ *
+ * Checked via a POSITIVE discriminator (any of `filePath`/`structuredPatch`/
+ * `type: 'create'|'update'`) rather than tool name: the shape, not the hook
+ * payload's `tool_name` string, is what makes a string `content` field
+ * dangerous to forward verbatim, and a positive check composes with rule 1a
+ * (which never fires for this shape — Write's `content` is always a
+ * string) without needing to know every alias a wrapped/renamed Write-like
+ * tool might use.
+ *
+ * `filePath` alone would also match Read's structured result, but Read's
+ * `filePath` is nested under `file.filePath`, never top-level — so a
+ * top-level `filePath` is specific to Write here.
+ *
+ * @param {Record<string, unknown>} resp
+ * @returns {boolean}
+ */
+function isFileWriteResponseShape(resp) {
+  if (typeof resp.filePath === 'string') return true
+  if (Array.isArray(resp.structuredPatch)) return true
+  if (resp.type === 'create' || resp.type === 'update') return true
+  return false
 }
 
 /**
@@ -99,7 +198,7 @@ function flattenToolResultContent(content) {
  *   there's just nothing to show).
  * - `isImage: true` → the hook payload carries no actual image bytes for
  *   Bash (unlike Read/MCP image content blocks, which flow through
- *   `flattenToolResultContent` above and tool-result.js's own image
+ *   `flattenArrayContent` above and tool-result.js's own image
  *   extraction), so `stdout` here is not decodable image data by this
  *   provider today. A placeholder avoids dumping raw/base64 noise into a
  *   plain-text tool card; see the PR for the "Needs live check" note.
@@ -145,4 +244,38 @@ function normalizeReadResponse(resp) {
   const file = resp.file
   if (!file || typeof file !== 'object' || typeof file.content !== 'string') return null
   return file.content
+}
+
+/**
+ * Render the built-in Write tool's structured result — `{ type:
+ * 'create'|'update', filePath, content, structuredPatch, originalFile,
+ * userModified }` — as the SAME short confirmation text
+ * `byok-tool-executor.js`'s `runWrite` already produces for a successful
+ * write, via the shared `formatWriteConfirmation` helper
+ * (built-in-tools/tool-transforms.js). NEVER the file body (#8082 PR
+ * review, Critical #1) — `resp.content` here is the entire written file,
+ * which is exactly why this function exists instead of letting rule 1b
+ * render it.
+ *
+ * `bytesWritten` isn't carried on the hook's `tool_response` the way it is
+ * on `byok-tool-executor.js`'s own write result, so it's derived from the
+ * written content's UTF-8 byte length — the same measure `writeFileTool`
+ * itself reports for an ordinary write.
+ *
+ * Only called when `isFileWriteResponseShape(resp)` is true — which can
+ * match on `structuredPatch` or `type` alone, so `filePath` is NOT
+ * guaranteed to be present here. A missing/non-string `filePath` or
+ * `content` still renders a confirmation (empty path / `0` bytes
+ * respectively) rather than throwing.
+ *
+ * @param {Record<string, unknown>} resp
+ * @returns {string}
+ */
+function normalizeWriteResponse(resp) {
+  const content = typeof resp.content === 'string' ? resp.content : ''
+  return formatWriteConfirmation({
+    bytesWritten: Buffer.byteLength(content, 'utf8'),
+    filePath: typeof resp.filePath === 'string' ? resp.filePath : '',
+    created: resp.type === 'create',
+  })
 }

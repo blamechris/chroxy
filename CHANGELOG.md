@@ -33,10 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (claude-tui-tool-response.js) unwraps the known shapes into the same
   flattened display text SdkSession/CliSession already forward for a real
   tool_result content block — Bash renders `stdout` (plus `stderr` on its own
-  line when non-empty), Read renders `file.content`, and an MCP-shaped
-  `{content, isError}` response is flattened the same way
-  `tool-result.js`'s `emitToolResults` does. An unrecognised structured shape
-  still falls back to `JSON.stringify`, unchanged from before this fix.
+  line when non-empty), Read renders `file.content`, an array-of-text-blocks
+  `content` (Task/Agent, MCP) is flattened the same way `tool-result.js`'s
+  `emitToolResults` does, and a plain string `content` field (Grep's
+  content-mode result, a string-content MCP response) is used as-is —
+  **unless** the object is shaped like the built-in Write tool's result
+  (`{type:'create'|'update', filePath, content, structuredPatch, …}`), where
+  `content` is the entire written file rather than a summary; that shape
+  instead renders the same short confirmation `byok-tool-executor.js`'s
+  `runWrite` already produces (`Wrote N bytes to <path>`, via the shared
+  `formatWriteConfirmation` helper), never the file body. An unrecognised
+  structured shape still falls back to `JSON.stringify`, unchanged from
+  before this fix.
 
 - **Adding or removing an MCP server now resolves the submit spinner
   immediately when the WebSocket send itself fails, instead of waiting out

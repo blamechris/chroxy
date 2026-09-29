@@ -181,6 +181,150 @@ describe('normalizeClaudeTuiToolResponse — unchanged behavior', () => {
     assert.equal(normalizeClaudeTuiToolResponse('Bash', null), '')
     assert.equal(normalizeClaudeTuiToolResponse('Bash', undefined), '')
   })
+
+  // #8082 PR review, Suggestion #4: a bare non-object, non-string
+  // tool_response (no real tool produces this) now renders '' — matching
+  // the ORIGINAL pre-#8082 behavior (only the string and object branches
+  // ever set `result`; everything else fell through to the '' default) —
+  // rather than String(resp), which the initial PR introduced.
+  it('a bare non-object, non-string tool_response (e.g. a number) renders empty string, matching pre-#8082 behavior', () => {
+    assert.equal(normalizeClaudeTuiToolResponse('Bash', 42), '')
+    assert.equal(normalizeClaudeTuiToolResponse('Bash', true), '')
+  })
+})
+
+// #8082 PR review, Critical #1 — Write's structured result:
+// { type: 'create'|'update', filePath, content, structuredPatch,
+// originalFile, userModified }, where `content` is the ENTIRE written
+// file. Before this fix, rule 1's unscoped string-`content` check matched
+// it and rendered the whole file body into the tool card.
+describe('normalizeClaudeTuiToolResponse — Write (#8082 PR review, Critical #1)', () => {
+  // A realistic ~10KB body so a regression (rendering the body instead of
+  // a confirmation) is unambiguous — mirrors the reviewer's own repro.
+  const BIG_FILE_MARKER = 'UNIQUE_FILE_BODY_MARKER_8082'
+  const bigFileBody = `${BIG_FILE_MARKER}\n${'x'.repeat(10 * 1024)}`
+
+  it('create: renders a short confirmation with the path, never the file body', () => {
+    const result = normalizeClaudeTuiToolResponse('Write', {
+      type: 'create',
+      filePath: '/Users/blamechris/Projects/chroxy/scratch.txt',
+      content: bigFileBody,
+      structuredPatch: [],
+      originalFile: '',
+      userModified: false,
+    })
+
+    assert.equal(
+      result,
+      `Wrote ${Buffer.byteLength(bigFileBody, 'utf8')} bytes to /Users/blamechris/Projects/chroxy/scratch.txt (created).`,
+    )
+    assert.ok(!result.includes(BIG_FILE_MARKER), 'must not include the file body')
+    assert.ok(result.length < 200, 'must be a short confirmation, not the ~10KB file')
+  })
+
+  it('update: renders a short confirmation with the path, no "(created)" suffix, never the file body', () => {
+    const result = normalizeClaudeTuiToolResponse('Write', {
+      type: 'update',
+      filePath: '/Users/blamechris/Projects/chroxy/CHANGELOG.md',
+      content: bigFileBody,
+      structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 2, lines: ['+added'] }],
+      originalFile: 'old content',
+      userModified: false,
+    })
+
+    assert.equal(
+      result,
+      `Wrote ${Buffer.byteLength(bigFileBody, 'utf8')} bytes to /Users/blamechris/Projects/chroxy/CHANGELOG.md.`,
+    )
+    assert.ok(!result.includes('(created)'), 'update must not claim "(created)"')
+    assert.ok(!result.includes(BIG_FILE_MARKER), 'must not include the file body')
+  })
+
+  it('matches the wording byok-tool-executor.js already produces for the same tool (formatWriteConfirmation)', async () => {
+    const { formatWriteConfirmation } = await import('../src/built-in-tools/tool-transforms.js')
+    const expected = formatWriteConfirmation({ bytesWritten: 11, filePath: '/tmp/x.txt', created: true })
+
+    const result = normalizeClaudeTuiToolResponse('Write', {
+      type: 'create',
+      filePath: '/tmp/x.txt',
+      content: 'hello world', // 11 bytes
+      structuredPatch: [],
+    })
+
+    assert.equal(result, expected)
+  })
+
+  it('a Write-shaped response is recognised regardless of tool name (shape-based, not name-based)', () => {
+    // The predicate is a shape check (filePath/structuredPatch/type), not a
+    // toolName === 'Write' check — see isFileWriteResponseShape's doc for
+    // why (a wrapped/renamed Write-like tool should get the same
+    // protection). toolName is deliberately something else here.
+    const result = normalizeClaudeTuiToolResponse('mcp__fs__write_file', {
+      type: 'create',
+      filePath: '/tmp/y.txt',
+      content: BIG_FILE_MARKER,
+      structuredPatch: [],
+    })
+    assert.ok(!result.includes(BIG_FILE_MARKER))
+    assert.ok(result.startsWith('Wrote '))
+  })
+})
+
+// #8082 PR review, per-tool table — Grep's content-mode result
+// ({ mode: 'content', content: '<rg output>', numLines }) must still be
+// rendered via rule 1b: it has a string `content` field but is NOT
+// Write-shaped (no filePath/structuredPatch/type: create|update).
+describe('normalizeClaudeTuiToolResponse — Grep content-mode (rule 1b, not Write-shaped)', () => {
+  it('renders the grep output text, not JSON.stringify', () => {
+    const fixture = {
+      mode: 'content',
+      content: 'src/foo.js:12:  const x = 1\nsrc/bar.js:3:  const x = 2',
+      numLines: 2,
+    }
+    const result = normalizeClaudeTuiToolResponse('Grep', fixture)
+    assert.equal(result, fixture.content)
+    assert.ok(!result.startsWith('{'), 'must not be a JSON envelope')
+  })
+})
+
+// #8082 PR review, Suggestion #2 / Mutant B — the surviving mutant: no
+// fixture previously supplied an object carrying BOTH a `content` field
+// AND a Bash/Read discriminator, so swapping the check order (Bash/Read
+// before the content-field rule, or the content-field rule before the
+// Write-shape check) went undetected. These fixtures pin the intended
+// priority so that regression is caught.
+describe('normalizeClaudeTuiToolResponse — rule-order regression (kills the surviving mutant)', () => {
+  it('a Write-shaped object ALSO named "Bash" still renders the Write confirmation, not stdout/stderr (Write-shape check must run before the Bash branch)', () => {
+    // Pathological but exactly what a naive reorder would get wrong: this
+    // object satisfies isFileWriteResponseShape AND normalizeBashResponse's
+    // "has stdout or stderr" test.
+    const result = normalizeClaudeTuiToolResponse('Bash', {
+      type: 'create',
+      filePath: '/tmp/pathological.txt',
+      content: 'the file body, not stdout',
+      structuredPatch: [],
+      stdout: 'this must NOT win',
+      stderr: '',
+    })
+    assert.equal(result, 'Wrote 25 bytes to /tmp/pathological.txt (created).')
+    assert.ok(!result.includes('this must NOT win'))
+  })
+
+  it('a Write-shaped object with a string content field never falls through rule 1b (Write-shape check must run before the content-field rule)', () => {
+    // If rule 1b (plain string `content` wins) were checked WITHOUT the
+    // Write-shape exclusion — i.e. the exclusion existed but ran too late,
+    // or was skipped — this would render the raw file body instead of the
+    // confirmation. Pins the ordering requirement independent of toolName.
+    const fixture = {
+      type: 'update',
+      filePath: '/tmp/ordering.txt',
+      content: 'RAW_FILE_BODY_MUST_NOT_WIN',
+      structuredPatch: [{ oldStart: 1, oldLines: 0, newStart: 1, newLines: 1, lines: ['+x'] }],
+    }
+    const result = normalizeClaudeTuiToolResponse('Write', fixture)
+    assert.ok(!result.includes('RAW_FILE_BODY_MUST_NOT_WIN'))
+    assert.equal(result, 'Wrote 26 bytes to /tmp/ordering.txt.')
+  })
 })
 
 // Parity: the claude-tui path (normalizeClaudeTuiToolResponse) and the
