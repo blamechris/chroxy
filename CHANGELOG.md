@@ -66,6 +66,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator's "remove this entry" remediation until its own next miss or
   flush (#8081).
 
+- **The per-session pull-request survey throttle is pruned on
+  `session_destroyed`, and a completed reading can no longer be stranded in a
+  superseded record (#7450).** #7445's per-session throttle stamped a
+  `WeakMap<sessionManager, Map<sessionId, …>>` that was never cleaned up, so
+  its entry count was bounded by every session id ever surveyed over the
+  daemon's lifetime rather than by the live session count — the same class of
+  leak `SessionCiWatcher._state` already guards against on the same event.
+  `survey-throttle.js` (shared by both the PR-status and the PR-thread-count
+  handlers since #7430) now keeps a registry of every throttle instance it
+  creates, and one exported `forgetSurveyKey(owner, sessionId)`, called from
+  `WsServer`'s `session_destroyed` handler, prunes the record from all of them
+  — a per-instance prune wired to only one handler would have reproduced the
+  exact "guard wired to only some of its callers" shape this codebase already
+  catalogues. Folded in alongside it: a completed survey previously wrote only
+  to its own closure-captured record, so when a survey ran slower than the
+  throttle window itself and a later request was admitted before the first
+  finished, the first survey's completed reading landed in a record nothing
+  reads again — a request arriving in that gap degraded with a rate-limited
+  reason despite a reading having actually completed. `commit()` now writes a
+  superseded reading THROUGH to the current record, but only when that record
+  holds nothing admitted more recently, so a genuinely newer survey's own
+  commit still wins over an older one's late arrival.
+
+- **`session_pr_status`'s server-only `indeterminate` marker can no longer
+  reach the wire from a future sender, because it is no longer an ordinary
+  property at all (#7442).** The marker (added in #7435, so the CI watcher can
+  tell "a fork-widening lookup failed transiently" apart from an authoritative
+  "no open PR") was kept off the wire by a single strip at the one existing
+  WS-handler call site — a whole-object invariant enforced by exactly one of
+  its consumers, the same "guard wired to only some of its callers" shape a
+  second sender (a future broadcast-on-settle, a REST mirror) would have
+  silently defeated. `session-pr-status.js` now defines the field
+  `enumerable: false` via `markIndeterminate()`/`baseSnapshot()`, so an
+  ordinary `{ ...snapshot }` spread or `JSON.stringify(snapshot)` structurally
+  cannot carry it — the handler's explicit strip is gone, and the CI watcher
+  reads the marker through a new `isIndeterminate()` accessor instead of a
+  bare property check.
+
 - **`chroxy tunnel setup` now execs the same verified `cloudflared` binary the
   daemon's tunnel adapter would use, instead of a bare, unverified PATH lookup
   (#8066).** `cli/tunnel-cmd.js` ran an unconditional, ungated

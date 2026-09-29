@@ -55,7 +55,16 @@
  * not downgrade a usable partial answer). The one consumer that must not read
  * it as a fact is the CI watcher, whose `_reconcile` drops an armed watch on
  * `pr: null` — the marker gets the same "changes nothing" treatment there that
- * `reason` already gets, and the WS handler strips it before the reply goes out.
+ * `reason` already gets.
+ *
+ * #7442: wire-only-ness is enforced HERE, at the field's definition, rather
+ * than at a single distant WS-handler call site — `markIndeterminate()` defines
+ * the property `enumerable: false`, so an ordinary `{ ...snapshot }` spread or
+ * `JSON.stringify(snapshot)` structurally cannot carry it, and no future sender
+ * of a survey snapshot needs to remember a strip. Read it back with
+ * `isIndeterminate()`, never `snapshot.indeterminate` directly, since a plain
+ * property access reads the same either way but an accessor keeps every caller
+ * one place if the mechanism ever changes again.
  *
  * Every external interaction is injectable so tests never touch real git/gh:
  *   - `_execFile(file, args, opts)` — async, resolves `{ stdout, stderr }`.
@@ -304,7 +313,7 @@ export function normalisePrRow(row) {
 
 /** Build the snapshot skeleton, so every return path has the same shape. */
 function baseSnapshot(sessionId, generatedAt) {
-  return {
+  const snapshot = {
     sessionId,
     generatedAt,
     branch: null,
@@ -313,9 +322,59 @@ function baseSnapshot(sessionId, generatedAt) {
     checks: null,
     merge: null,
     reason: null,
-    // #7435: server-side only — stripped by the WS handler, never on the wire.
-    indeterminate: false,
   }
+  // #7435 / #7442: server-side only, and defined non-enumerable so the field
+  // is structurally absent from any `{ ...snapshot }` spread or
+  // `JSON.stringify(snapshot)` — see markIndeterminate()/isIndeterminate() and
+  // the module doc above. `writable`/`configurable` stay true so
+  // markIndeterminate() below can flip the value without redefining it.
+  Object.defineProperty(snapshot, 'indeterminate', {
+    value: false,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+  return snapshot
+}
+
+/**
+ * Mark a snapshot `indeterminate` (#7435: a fork-widening lookup failed
+ * transiently, so absence was NOT established). Every fork bail-out below
+ * calls this instead of assigning the field directly.
+ *
+ * Deliberately `Object.defineProperty`, not `snapshot.indeterminate = true`: a
+ * PLAIN assignment only preserves an existing property's non-enumerable
+ * descriptor when the property already exists on that exact object — creating
+ * the property fresh (no prior `baseSnapshot()`, e.g. a test fixture built by
+ * spreading a plain sample object) falls back to the default
+ * writable/enumerable/configurable attributes, silently reintroducing the leak
+ * this whole mechanism exists to close (#7442). Calling `defineProperty` here
+ * too means this function is correct regardless of the snapshot's origin.
+ *
+ * @param {object} snapshot
+ * @returns {object} the same snapshot, for a `return markIndeterminate(x)` style.
+ */
+export function markIndeterminate(snapshot) {
+  Object.defineProperty(snapshot, 'indeterminate', {
+    value: true,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+  return snapshot
+}
+
+/**
+ * Read the `indeterminate` marker without depending on its enumerability —
+ * property access sees a non-enumerable value exactly like an enumerable one,
+ * but going through this accessor keeps every reader (the CI watcher, tests)
+ * pointed at one definition rather than a repeated `?.indeterminate === true`.
+ *
+ * @param {object|null|undefined} snapshot
+ * @returns {boolean}
+ */
+export function isIndeterminate(snapshot) {
+  return snapshot?.indeterminate === true
 }
 
 /**
@@ -516,8 +575,7 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     // result must not downgrade a usable answer to "cannot determine"), but the
     // server-side marker keeps the CI watcher from reading it as a fact (#7435).
     if (parentResult.failed) {
-      snapshot.indeterminate = true
-      return snapshot
+      return markIndeterminate(snapshot)
     }
     // gh answered: not a fork, so the empty origin result IS the quiet negative.
     if (!parentResult.parent) return snapshot
@@ -535,12 +593,10 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
       ], { ...EXEC_OPTS, cwd })
       parentRows = JSON.parse(String(parentOut == null ? '' : parentOut))
     } catch {
-      snapshot.indeterminate = true
-      return snapshot
+      return markIndeterminate(snapshot)
     }
     if (!Array.isArray(parentRows)) {
-      snapshot.indeterminate = true
-      return snapshot
+      return markIndeterminate(snapshot)
     }
 
     const mine = parentRows.find(row => row?.headRepositoryOwner?.login === target.owner)
@@ -552,11 +608,21 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     // Our row exists but is unusable — the same condition the same-repo path
     // reports as a reason. Absence was not established either way (#7435).
     if (!forkNormalised) {
-      snapshot.indeterminate = true
-      return snapshot
+      return markIndeterminate(snapshot)
     }
     // `repo` names the repo the PR actually lives on, which is what the user
     // needs in order to find it — for a fork that is the base, not `origin`.
+    //
+    // #7442: this spread relies on `indeterminate` being non-enumerable to keep
+    // it off the result — which is safe HERE ONLY because every branch above
+    // that marks a snapshot indeterminate returns before reaching this line.
+    // `forkNormalised` is truthy in this branch precisely because absence was
+    // NOT what happened — a real PR row was found — so `snapshot.indeterminate`
+    // is still its `baseSnapshot()` default (`false`) whenever this spread runs.
+    // A future edit that marks-then-falls-through here would rely on the
+    // non-enumerable definition alone to keep the (now-true) marker off the
+    // wire, same as the WS handler's reply — see session-pr-status-test.js's
+    // "never indeterminate on a found PR" coverage.
     return { ...snapshot, repo: { owner: parent.owner, name: parent.repo }, ...forkNormalised }
   }
 
@@ -566,5 +632,9 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     return snapshot
   }
 
+  // #7442: same reasoning as the fork spread above — this same-repo path only
+  // runs when `normalised` is truthy (a real PR row), so `snapshot.indeterminate`
+  // is always still `false` here. Never add an indeterminate bail-out above this
+  // line without checking this comment first.
   return { ...snapshot, ...normalised }
 }

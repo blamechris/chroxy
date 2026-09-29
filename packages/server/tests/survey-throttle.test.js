@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSurveyThrottle } from '../src/handlers/survey-throttle.js'
+import { createSurveyThrottle, forgetSurveyKey, _testTotalRecordCount } from '../src/handlers/survey-throttle.js'
 
 /**
  * Tests for the shared per-session survey throttle (#7436 → extracted #7430,
@@ -169,5 +169,165 @@ describe('#7469 — rollback is unchanged by the replayable argument', () => {
     const h = harness()
     h.open('sess-1').commit({ id: 'a' }, { replayable: true })
     assert.equal(h.open('sess-2').admitted, true)
+  })
+})
+
+describe('#7450 — forgetSurveyKey prunes every throttle instance through ONE call', () => {
+  it('drops the record for (owner, key), so a later open() is admitted immediately', () => {
+    const h = harness()
+    h.open('sess-1').commit({ id: 'a' }, { replayable: true })
+    assert.equal(h.open('sess-1').admitted, false, 'still inside the window')
+
+    forgetSurveyKey(h.owner, 'sess-1')
+
+    // No `advance()` — the record is gone outright, not merely expired.
+    const after = h.open('sess-1')
+    assert.equal(after.admitted, true, 'forgetting the key must re-open the window immediately')
+    assert.equal(after.cached, undefined, 'admitted opens carry no `cached` field at all')
+  })
+
+  it('does not disturb a DIFFERENT key under the same owner', () => {
+    const h = harness()
+    h.open('sess-1').commit({ id: 'a' }, { replayable: true })
+    h.open('sess-2').commit({ id: 'b' }, { replayable: true })
+
+    forgetSurveyKey(h.owner, 'sess-1')
+
+    assert.equal(h.open('sess-1').admitted, true, 'sess-1 was forgotten')
+    assert.equal(h.open('sess-2').admitted, false, 'sess-2 must be unaffected')
+    assert.deepEqual(h.open('sess-2').cached, { id: 'b' })
+  })
+
+  it('does not disturb the SAME key under a DIFFERENT owner', () => {
+    const h1 = harness()
+    const h2 = harness()
+    h1.open('sess-1').commit({ id: 'owner1' }, { replayable: true })
+    h2.open('sess-1').commit({ id: 'owner2' }, { replayable: true })
+
+    forgetSurveyKey(h1.owner, 'sess-1')
+
+    assert.equal(h1.open('sess-1').admitted, true, "owner1's record was forgotten")
+    assert.equal(h2.open('sess-1').admitted, false, "owner2's record must survive — different owner")
+  })
+
+  it('is a no-op for an owner/key that was never opened, or already forgotten twice', () => {
+    const h = harness()
+    assert.doesNotThrow(() => forgetSurveyKey(h.owner, 'never-opened'))
+    h.open('sess-1').commit({ id: 'a' }, { replayable: true })
+    forgetSurveyKey(h.owner, 'sess-1')
+    assert.doesNotThrow(() => forgetSurveyKey(h.owner, 'sess-1'), 'forgetting twice must not throw')
+  })
+
+  it('ONE call reaches EVERY throttle instance created via createSurveyThrottle — the acceptance property', () => {
+    // The defect #7450 catalogues is a guard wired to only SOME of its callers:
+    // #7430 gave the threads handler its own createSurveyThrottle() instance
+    // rather than sharing the status handler's, so a prune implemented against
+    // one instance alone would silently miss the other (and any future third
+    // one). Two independently-created instances stand in for "two handlers,
+    // two module-level throttles" without importing either handler module.
+    const owner = {}
+    const statusThrottle = createSurveyThrottle()
+    const threadsThrottle = createSurveyThrottle()
+    statusThrottle.open(owner, 'sess-1', 1_000, 5_000).commit({ kind: 'status' }, { replayable: true })
+    threadsThrottle.open(owner, 'sess-1', 1_000, 5_000).commit({ kind: 'threads' }, { replayable: true })
+
+    assert.equal(statusThrottle.open(owner, 'sess-1', 1_500, 5_000).admitted, false, 'sanity: status is throttled')
+    assert.equal(threadsThrottle.open(owner, 'sess-1', 1_500, 5_000).admitted, false, 'sanity: threads is throttled')
+
+    forgetSurveyKey(owner, 'sess-1')
+
+    assert.equal(statusThrottle.open(owner, 'sess-1', 1_600, 5_000).admitted, true, 'the status throttle must be pruned')
+    assert.equal(threadsThrottle.open(owner, 'sess-1', 1_600, 5_000).admitted, true, 'the threads throttle must be pruned too, by the SAME call')
+  })
+
+  it('_testTotalRecordCount sums records for one owner across every instance — the bound the acceptance test reads', () => {
+    const owner = {}
+    const a = createSurveyThrottle()
+    const b = createSurveyThrottle()
+    assert.equal(_testTotalRecordCount(owner), 0)
+    a.open(owner, 'k1', 0, 5_000).commit({}, { replayable: true })
+    assert.equal(_testTotalRecordCount(owner), 1)
+    b.open(owner, 'k2', 0, 5_000).commit({}, { replayable: true })
+    assert.equal(_testTotalRecordCount(owner), 2)
+    forgetSurveyKey(owner, 'k1')
+    assert.equal(_testTotalRecordCount(owner), 1)
+    forgetSurveyKey(owner, 'k2')
+    assert.equal(_testTotalRecordCount(owner), 0)
+  })
+})
+
+describe('#7450 scope addition — a completed reading writes THROUGH a superseded record', () => {
+  // The interleaving from #7445's re-verification: two first-ever surveys of
+  // one session overlap because the first is slower than the throttle window
+  // itself, so a THIRD request outside the window is admitted before the first
+  // has committed anything. Writing only to the closure-captured `record` —
+  // the pre-fix behaviour — strands the first survey's completed reading in an
+  // orphaned record nobody reads again, and a request landing in that gap
+  // degrades with RATE_LIMITED_REASON despite a reading having completed.
+
+  it('a late commit on a SUPERSEDED record writes through to the CURRENT one', () => {
+    const h = harness()
+    const first = h.open('sess-1') // admitted at t=1000
+    h.advance(6_000) // past the window — a second survey is admitted
+    h.open('sess-1') // admitted at t=7000; nothing committed yet
+
+    // The first (slow) survey finally finishes and commits, AFTER being
+    // superseded by the second's admission.
+    first.commit({ id: 'first (slow)' }, { replayable: true })
+
+    // A request arriving now must see the FIRST survey's reading, not a
+    // degrade — `second` opened the window but has not committed anything of
+    // its own, so it holds nothing newer to protect.
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.equal(replay.admitted, false, 'still inside the SECOND window')
+    assert.deepEqual(replay.cached, { id: 'first (slow)' }, "the first survey's completed reading must be reachable")
+  })
+
+  it("a superseding survey's OWN later commit still wins over an older one's late write-through", () => {
+    const h = harness()
+    const first = h.open('sess-1') // t=1000
+    h.advance(6_000)
+    const second = h.open('sess-1') // t=7000
+
+    // The second (faster) survey commits FIRST.
+    second.commit({ id: 'second (fast)' }, { replayable: true })
+    // The first, older survey finally resolves and tries to write through.
+    first.commit({ id: 'first (stale)' }, { replayable: true })
+
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.deepEqual(replay.cached, { id: 'second (fast)' }, "the newer survey's own reading must not be overwritten by an older one's late arrival")
+  })
+
+  it('the STILL-CURRENT (non-superseded) path is unaffected — a solo survey commits normally', () => {
+    const h = harness()
+    h.open('sess-1').commit({ id: 'solo' }, { replayable: true })
+    h.advance(1)
+    assert.deepEqual(h.open('sess-1').cached, { id: 'solo' })
+  })
+
+  it('write-through respects `replayable: false` — it opens no cache where none exists', () => {
+    const h = harness()
+    const first = h.open('sess-1')
+    h.advance(6_000)
+    h.open('sess-1') // second, admitted, nothing committed
+    first.commit({ id: 'first (failed)' }, { replayable: false })
+
+    h.advance(1)
+    assert.equal(h.open('sess-1').cached, null, 'a non-replayable late reading must not populate the cache via write-through either')
+  })
+
+  it('a late write-through after the key was FORGOTTEN (session destroyed mid-flight) does not resurrect a record', () => {
+    const h = harness()
+    const first = h.open('sess-1')
+    h.advance(6_000)
+    h.open('sess-1') // supersedes `first`
+
+    forgetSurveyKey(h.owner, 'sess-1') // the session was destroyed while both surveys were in flight
+
+    assert.doesNotThrow(() => first.commit({ id: 'late, orphaned session' }, { replayable: true }))
+    h.advance(1)
+    assert.equal(h.open('sess-1').admitted, true, 'a forgotten key must not be silently recreated by a late write-through')
   })
 })

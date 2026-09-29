@@ -43,6 +43,7 @@ import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
 import { isLocalOrLanPeer } from './connection-locality.js'
 import { configPath } from './config-dir.js'
+import { forgetSurveyKey } from './handlers/survey-throttle.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -1269,6 +1270,19 @@ export class WsServer {
         // accumulate dead entries.
         this._evaluatorIterations.delete(sessionId)
         this._inputDedupRecords.delete(sessionId)
+        // #7450: prune this session's survey-throttle record from EVERY
+        // instance (session_pr_status + session_pr_threads today, any future
+        // handler for free) through the one shared registry in
+        // survey-throttle.js — otherwise the throttle's per-session map is
+        // bounded by every session id EVER surveyed over the daemon's
+        // lifetime, not the live session count, exactly like
+        // SessionCiWatcher's own `_state` map (pruned on this same event, a
+        // few lines below in that module).
+        try {
+          forgetSurveyKey(sessionManager, sessionId)
+        } catch (err) {
+          log.warn(`Failed to prune survey-throttle record for destroyed session ${sessionId}: ${err.message}`)
+        }
       }
       // #3057: audit auto-deny resolution paths (timeout / aborted / cleared).
       // The WS inline response path in settings-handlers.js audits user
