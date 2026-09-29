@@ -172,7 +172,15 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     adapter._verifyCloudflaredProvenance()
     assert.equal(adapter._resolvedCloudflaredPath, null, 'nothing pinned when the gate is off')
 
-    const proc = adapter._spawnCloudflared([], { stdio: 'ignore' })
+    // #8096: a bare `cloudflared` spawn resolves off THIS PROCESS'S real PATH —
+    // on a host with cloudflared installed (Homebrew, etc.) that execs the
+    // REAL binary, which `reapChild` then has to SIGKILL. `env: { PATH: '' }`
+    // makes the OS's own PATH search fail before anything starts (ENOENT,
+    // `proc.pid` stays undefined — same "nothing to reap" case the comment on
+    // `reapChild` already documents for a host with no cloudflared at all) —
+    // `spawnfile` still reports the bare name that was ASKED for, which is
+    // exactly what this test asserts, so the assertion is unaffected.
+    const proc = adapter._spawnCloudflared([], { stdio: 'ignore', env: { PATH: '' } })
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, 'cloudflared', 'spawn must fall back to the bare name when off')
     await reapChild(proc)
@@ -193,7 +201,10 @@ describe('cloudflared spawns the exact verified path (#6937)', () => {
     adapter._verifyCloudflaredProvenance()
     assert.equal(adapter._resolvedCloudflaredPath, null, 'stale path must be cleared on an unhealthy re-check')
 
-    const proc = adapter._spawnCloudflared([], { stdio: 'ignore' })
+    // #8096: same reasoning as the previous test — a scoped-empty PATH keeps
+    // this bare-name fallback spawn from resolving (and exec'ing) a REAL
+    // installed cloudflared.
+    const proc = adapter._spawnCloudflared([], { stdio: 'ignore', env: { PATH: '' } })
     proc.on('error', () => {})
     assert.equal(proc.spawnfile, 'cloudflared')
     await reapChild(proc)

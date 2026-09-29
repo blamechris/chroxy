@@ -107,8 +107,13 @@ const PROVIDER_CONFIG_DIR_VARS = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GEMINI_CON
  * scanning for "the one non-null, non-array, non-function object argument"
  * finds it without hand-coding each function's own arg position, which is
  * what keeps this a category rather than seven bespoke parsers.
+ *
+ * Exported (#8096) so `test-real-binary-tripwire.mjs` can find the SAME
+ * options argument this module does — e.g. to read the effective `PATH` a
+ * given call would actually resolve a bare command name against — rather than
+ * a second hand-rolled "which arg is options" parser drifting from this one.
  */
-function findOptionsIndex(args) {
+export function findOptionsIndex(args) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]
     if (a !== null && typeof a === 'object' && !Array.isArray(a)) return i

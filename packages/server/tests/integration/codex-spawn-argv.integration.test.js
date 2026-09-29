@@ -13,12 +13,20 @@
  *
  * Gating
  * ------
- * Runs when:
- *   - `RUN_CODEX_INTEGRATION=1`, OR
- *   - `codex` is resolvable via CodexSession.binaryCandidates (covers a local
- *     dev box where the binary is already installed).
- * Skips silently otherwise so it is safe to leave in the default test glob and
- * in CI environments where codex is not installed.
+ * Runs ONLY when `RUN_CODEX_INTEGRATION=1` is explicitly set. Skips cleanly
+ * (vacuously — no tests registered) otherwise, REGARDLESS of whether `codex`
+ * happens to be resolvable on the host.
+ *
+ * #8101: this used to ALSO auto-run whenever `codex` was resolvable via
+ * `CodexSession.binaryCandidates`, with no env var required — convenient on a
+ * local dev box, but it meant this file spawned the REAL `codex` binary by
+ * default on any host where one happened to be installed, including a
+ * persistent self-hosted Windows CI runner (confirmed: 9/9 tests spawning the
+ * real binary there, unexempted from `WINDOWS_EXEMPT`, on every PR). A real
+ * spawn — and, when auth is configured, a real network turn — has no business
+ * running by default in CI. Explicit opt-in only, same convention as
+ * `tests/tunnel.integration.test.js`'s `CHROXY_TEST_REAL_CLOUDFLARED=1` and
+ * `keychain.test.js`'s `CHROXY_TEST_REAL_KEYCHAIN=1`.
  *
  * Why this works without a valid OPENAI_API_KEY
  * ---------------------------------------------
@@ -47,10 +55,15 @@ import { CodexSession, buildCodexArgs } from '../../src/codex-session.js'
 
 // ─── gating ───────────────────────────────────────────────────────────────
 
+// #8101: REQUIRED, not optional — see the docblock's "Gating" section. There
+// is no auto-detect fallback any more; a host with codex installed but this
+// var unset must skip cleanly, exactly like a host with no codex at all.
 const FORCE = process.env.RUN_CODEX_INTEGRATION === '1'
 
 /**
- * Probe for a usable codex binary at test time.
+ * Probe for a usable codex binary at test time. Only called once `FORCE` is
+ * already true (#8101) — i.e. the operator already explicitly opted into a
+ * real codex spawn; this just resolves WHERE that real binary actually is.
  *
  * `CodexSession.resolvedBinary` is evaluated at module-load via
  * `resolveBinary('codex', BINARY_CANDIDATES)`, which always returns a string
@@ -91,13 +104,18 @@ function resolveCodexBinary() {
   }
 }
 
-const CODEX_BIN = resolveCodexBinary()
-const SHOULD_RUN = FORCE || CODEX_BIN !== null
+// #8101: only probe for a real codex binary — which itself touches
+// child_process (`which codex`) — once the operator has already explicitly
+// opted in. Unlike the old `SHOULD_RUN = FORCE || CODEX_BIN !== null`, a host
+// with codex installed but this var unset now does NONE of this work and
+// skips exactly like a host with no codex at all.
+const SHOULD_RUN = FORCE
+const CODEX_BIN = SHOULD_RUN ? resolveCodexBinary() : null
 
 if (!SHOULD_RUN) {
   console.log(
-    '[codex-spawn-integration] Skipped — install codex CLI or set ' +
-    'RUN_CODEX_INTEGRATION=1 to run.',
+    '[codex-spawn-integration] Skipped — set RUN_CODEX_INTEGRATION=1 to run ' +
+    '(spawns a REAL codex binary; see this file\'s docblock).',
   )
   // No tests registered → file passes vacuously.
 } else if (!CODEX_BIN) {
@@ -106,6 +124,17 @@ if (!SHOULD_RUN) {
     'binary not found in BINARY_CANDIDATES.',
   )
 } else {
+  // #8096/#8101: this file's own gating above — RUN_CODEX_INTEGRATION=1,
+  // explicit and REQUIRED, never auto-detected — already decided a REAL
+  // `codex` spawn is intentional here. Declare it to the suite-wide
+  // `test-real-binary-tripwire.mjs` guard (installed via `tests/_setup.mjs`),
+  // which would otherwise refuse every `spawn(CODEX_BIN, ...)` call below: its
+  // resolved absolute path sits under a real install prefix (e.g.
+  // `/opt/homebrew/bin/codex` on a Homebrew host) with basename `codex`,
+  // exactly what that guard exists to catch when it is NOT already known-safe.
+  // Safe to set unconditionally in this branch now — unlike before #8101,
+  // reaching here is ITSELF proof of an explicit, intentional opt-in.
+  process.env.CHROXY_TEST_ALLOW_REAL_BINARY = '1'
 
   // ─── constants ──────────────────────────────────────────────────────────
 

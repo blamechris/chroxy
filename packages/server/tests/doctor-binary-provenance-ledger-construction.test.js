@@ -23,6 +23,8 @@
  */
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { registerProvider } from '../src/providers.js'
+import { SdkSession } from '../src/sdk-session.js'
 
 const constructorCalls = []
 class SpyBinaryProvenanceLedger {
@@ -59,17 +61,53 @@ const { verifyProvenance: realVerifyProvenance } = await import('../src/utils/ve
 // calls — this file is about ledger CONSTRUCTION, not classification.
 const CLASSIFY_NATIVE_VERIFY_PROVENANCE = (opts) => realVerifyProvenance({ ...opts, classifyBinary: () => ({ kind: 'native' }) })
 
+// #8096: `providers: []` does NOT mean "no provider row" — `resolveProviders`
+// (doctor.js) falls back to `DEFAULT_PROVIDER` ('claude-tui') whenever the
+// `providers` array is empty, and `effectiveDefault === 'claude-tui'` then
+// ALSO runs the claude-tui-driving version probe (doctor.js step 5.6). Both
+// resolve the REAL `claude` binary via its fixed `CLAUDE_BINARY_CANDIDATES`
+// list (`~/.local/bin/claude` on this repo's own dev machines) — the gate-on
+// test below would then hash (and, were the gate off, exec) the REAL `claude`
+// installed on the machine running this suite, which has nothing to do with
+// what these two tests actually check (ledger CONSTRUCTION, not which
+// provider ran). A no-op fixture provider under a name that is never
+// `'claude-tui'` sidesteps BOTH the provider row's own binary resolution and
+// the 5.6 probe (which only fires for that literal name) in one move.
+class NoopProviderSession extends SdkSession {
+  static get preflight() { return null }
+}
+registerProvider('chroxy-8096-ledger-noop-provider', NoopProviderSession)
+
+// #8096: the cloudflared row (see the comment on CLASSIFY_NATIVE_VERIFY_PROVENANCE
+// above) resolves via `which cloudflared` off this PROCESS'S real PATH first,
+// then falls through to the fixed `CLOUDFLARED_CANDIDATES` install paths —
+// either can find (and, gate off, exec) a REAL cloudflared. Both call sites
+// below route through this helper: it scopes PATH empty and points
+// `cloudflaredCandidates` at nothing, restoring PATH afterward regardless of
+// outcome. See doctor-binary-provenance.test.js's `runDoctorChecksNoRealCloudflared`
+// for the identical reasoning (duplicated here rather than shared across
+// files — this file already keeps its own small, self-contained fixture set).
+async function runDoctorChecksNoRealCloudflared(opts) {
+  const savedPath = process.env.PATH
+  process.env.PATH = ''
+  try {
+    return await runDoctorChecks({ cloudflaredCandidates: [], ...opts })
+  } finally {
+    process.env.PATH = savedPath
+  }
+}
+
 describe('runDoctorChecks — ledger construction, gates off (#8074 review N1)', () => {
   it('never constructs BinaryProvenanceLedger when gates are off', async () => {
     constructorCalls.length = 0
-    await runDoctorChecks({ providers: [], binaryProvenanceMode: 'off', binarySignatureGate: false })
+    await runDoctorChecksNoRealCloudflared({ providers: ['chroxy-8096-ledger-noop-provider'], binaryProvenanceMode: 'off', binarySignatureGate: false })
     assert.equal(constructorCalls.length, 0, 'gates off must never construct the ledger — red under mutant R3 (unconditional `new BinaryProvenanceLedger()`)')
   })
 
   it('DOES construct BinaryProvenanceLedger when a gate is on and no override is supplied (sanity check on the spy itself)', async () => {
     constructorCalls.length = 0
-    await runDoctorChecks({
-      providers: [],
+    await runDoctorChecksNoRealCloudflared({
+      providers: ['chroxy-8096-ledger-noop-provider'],
       binaryProvenanceMode: 'block',
       binarySignatureGate: false,
       verifyProvenance: CLASSIFY_NATIVE_VERIFY_PROVENANCE,
