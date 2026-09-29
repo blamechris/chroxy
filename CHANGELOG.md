@@ -64,32 +64,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flex layout; it is not interactive, so the 44px tap-target rule doesn't
   apply.
 - **`claude-cli`/`claude-sdk` tool calls no longer show `(no input)` while
-  running, after completion, or after a session switch (#7346).** Neither
-  provider's `tool_start` ever carried the real input — the wire protocol's
-  `content_block_start` for a `tool_use` block never does — and nothing
-  captured it once the block finished: `cli-session.js` buffered the
-  streaming `input_json_delta` chunks only to drive four special-cased
-  tools' session state (AskUserQuestion/Task/Agent/EnterPlanMode/
-  ExitPlanMode) and discarded them for everything else, while
-  `sdk-session.js` never emitted `tool_input_delta` at all, so the
+  running, after completion, or after a session switch (#7346) — and the
+  fix does not leak secrets or bypass the persisted-history size cap doing
+  it (#8135, #8136).** Neither provider's `tool_start` ever carried the
+  real input — the wire protocol's `content_block_start` for a `tool_use`
+  block never does — and nothing captured it once the block finished:
+  `cli-session.js` buffered the streaming `input_json_delta` chunks only to
+  drive four special-cased tools' session state (AskUserQuestion/Task/
+  Agent/EnterPlanMode/ExitPlanMode) and discarded them for everything else,
+  while `sdk-session.js` never emitted `tool_input_delta` at all, so the
   dashboard's existing partial-input fallback (#4341) had no CLI/SDK data
-  source. The completed-call symptom was the same root cause surfacing on a
-  session switch: server history's `tool_start` entry was write-once with
-  `input: null`, so a `forceFull` replay faithfully rebuilt the same
-  input-less entry. Both providers now stream `tool_input_delta` for an
-  in-flight tool's input (matching `byok-session.js`'s existing shape, so
-  the client needs no provider branch), and both backfill the finalized
-  input onto `_inFlightToolStarts` (`base-session.js` `_recordToolInput` /
-  `_getTrackedToolInput`) so `tool-result.js`'s `emitToolResults` attaches
-  it to the matching `tool_result` — which `session-message-history.js`
-  now uses to correct the persisted `tool_start` entry, and which the
-  client folds into `toolInput` (`handleToolResult`). The expanded panel's
-  copy also now distinguishes "still running, input not received yet"
-  from "genuinely no input" (matching the existing `(no result yet)` vs.
-  `(no result)` pattern), instead of the same false `(no input)` for both.
-  BYOK, which already had its own working `tool_input_delta` path, is
-  unaffected — it never populates `_inFlightToolStarts`, so the new
-  backfill is a no-op there.
+  source. The completed-call symptom was the same root cause surfacing on
+  a session switch: server history's `tool_start` entry was write-once
+  with `input: null`, so a `forceFull` replay faithfully rebuilt the same
+  input-less entry.
+
+  Both providers now capture the finalized input and record it via
+  `base-session.js`'s new `_recordToolInput` — the ONE choke point both
+  flow through, which runs every input through `sanitizeToolInput`
+  (`redaction.js`, the existing #6029 secret-redaction floor previously
+  applied only on the `permission_request` path) before storing it. That
+  one call redacts secret-shaped values (a key-name pass plus a recursive
+  value-shape pass — a `Bash` command containing `export TOKEN=sk-ant-...`
+  comes out `[REDACTED]`) and caps the serialized size to the existing
+  ~10KB broadcast cap, so `tool-result.js`'s `emitToolResults` (which
+  attaches the tracked input to the matching `tool_result`) and
+  `session-message-history.js`'s backfill of the persisted `tool_start`
+  entry both get an already-safe value for free.
+  `SessionMessageHistory.truncateEntry`'s 50KB persisted-state cap also
+  gained an object-shaped `input` branch (measured by serialized size,
+  same as the pre-existing string branch) as a second, independent bound
+  at the persistence boundary. `event-normalizer.js`'s live `tool_result`
+  wire mapper — previously an explicit field whitelist that dropped
+  `input` — now forwards it too, so the fix reaches the live broadcast
+  path, not only the persisted-history replay.
+
+  Unlike `byok-session.js`, which streams the Agent SDK's raw
+  `input_json_delta` chunks as `tool_input_delta`, cli/sdk do NOT stream
+  raw partial-JSON chunks — a secret can straddle chunk boundaries and
+  mid-stream partial JSON can't be run through the sanitizer. Instead they
+  deliver the sanitized FULL input as a single `tool_input_delta` once the
+  tool_use block finalizes (`content_block_stop` for cli, the assistant
+  message's `block.input` for sdk) — still milliseconds into a
+  long-running tool call, well before it finishes executing. The expanded
+  panel's copy also now distinguishes "still running, input not received
+  yet" from "genuinely no input" (matching the existing `(no result yet)`
+  vs. `(no result)` pattern), instead of the same false `(no input)` for
+  both.
+
+  BYOK is unaffected here — it never populates `_inFlightToolStarts`, so
+  the new capture/backfill is a no-op for it — but BYOK's own
+  `tool_input_delta` streams the same raw, unredacted partial JSON it
+  always has; that pre-existing exposure needs its own fix (its
+  raw-partial-streaming design differs from cli/sdk's) and is filed
+  separately as #8137.
 - **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
   longer reverts itself when its first persist fails (#8098).**
   `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's
