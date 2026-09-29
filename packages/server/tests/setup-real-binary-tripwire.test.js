@@ -21,6 +21,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, exec, execSync, execFile, execFileSync, fork } from 'node:child_process'
 import { promisify } from 'node:util'
+import { isAbsolute, sep } from 'node:path'
 
 import {
   REAL_BINARY_TRIPWIRE_INSTALLED,
@@ -65,10 +66,25 @@ describe('real-binary tripwire: pure isGuardedRealBinary() rule (#8096)', () => 
   })
 
   it('REAL_INSTALL_PREFIXES is non-empty and every entry is an absolute, separator-terminated prefix', () => {
+    // Cross-platform on purpose: some entries are hardcoded POSIX strings
+    // (`/opt/homebrew/`, `/usr/local/`) that stay POSIX-shaped regardless of
+    // the host running this suite, while others are built via `join(homedir(),
+    // …) + sep` and come out platform-native — a `C:\Users\...\.local\` on
+    // win32. `path.isAbsolute()` (the platform-adaptive default export)
+    // recognizes BOTH shapes as absolute on every platform Node runs on —
+    // verified directly: `path.win32.isAbsolute('/opt/homebrew/')` is `true`,
+    // because a leading `/` is a rooted (if driveless) path on Windows too.
+    // The terminator is checked against EITHER `sep` (native) or `/` (the
+    // hardcoded entries), never just one — asserting only `sep` would fail
+    // the two hardcoded POSIX entries on win32, and asserting only `/` is
+    // exactly the bug this test previously had.
     assert.ok(REAL_INSTALL_PREFIXES.length > 0)
     for (const prefix of REAL_INSTALL_PREFIXES) {
-      assert.ok(prefix.startsWith('/'), `expected an absolute prefix, got ${prefix}`)
-      assert.ok(prefix.endsWith('/'), `expected a separator-terminated prefix so it can't match a sibling dir by accident, got ${prefix}`)
+      assert.ok(isAbsolute(prefix), `expected an absolute prefix, got ${prefix}`)
+      assert.ok(
+        prefix.endsWith(sep) || prefix.endsWith('/'),
+        `expected a separator-terminated prefix so it can't match a sibling dir by accident, got ${prefix}`,
+      )
     }
   })
 })
@@ -112,6 +128,29 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     assert.throws(() => spawnSync('claude', ['--version']), { code: REAL_BINARY_ERROR_CODE })
     assert.throws(() => execFileSync('/usr/local/bin/codex', ['--version']), { code: REAL_BINARY_ERROR_CODE })
     assert.throws(() => execFileSync('/opt/homebrew/bin/gemini', ['--version']), { code: REAL_BINARY_ERROR_CODE })
+  })
+
+  it('spawn/spawnSync/execFileSync with options.shell: true still throw — the guarded name is inside a shell command STRING, not args[0] literally (#8102)', () => {
+    // Reproduces the reviewer's exact bypass: `spawn('cloudflared --version',
+    // { shell: true })` — with `shell` truthy, args[0] is a shell command
+    // LINE, not a literal filename, so the guard must split it the same way
+    // exec/execSync's shell-string form already does.
+    assert.throws(
+      () => spawn('cloudflared --version', { shell: true, stdio: 'ignore' }),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+    assert.throws(
+      () => spawnSync('cloudflared --version', { shell: true, stdio: 'ignore' }),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+    assert.throws(
+      () => execFileSync('cloudflared --version', { shell: true }),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+  })
+
+  it('a safe command with options.shell: true is unaffected (proves the shell:true branch is not a blanket refusal)', () => {
+    assert.doesNotThrow(() => execFileSync('git --version', { shell: true, encoding: 'utf-8' }))
   })
 
   it('a promisified execFile() of a guarded binary still throws, not merely warns', async () => {

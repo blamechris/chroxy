@@ -35,6 +35,39 @@
 // fail") for why a guard that is too broad is exactly as unproven as one that
 // is too narrow until something demonstrates the boundary.
 //
+// ── `options.shell: true` (#8102) ───────────────────────────────────────
+//
+// `spawn`/`spawnSync`/`execFile`/`execFileSync` normally take `args[0]` as a
+// literal file/command name — no shell parsing. But when the call's own
+// `options.shell` is truthy, Node runs `args[0]` (plus any `args` array,
+// shell-quoted and appended) through an actual shell, exactly like `exec`/
+// `execSync` always do — so `spawn('cloudflared --version', { shell: true })`
+// is a shell command STRING, not a literal filename, and treating it as one
+// let it slip past this guard entirely (`GUARDED_BASENAMES` never contains
+// the string `'cloudflared --version'`). `resolveCommandArg()` below detects
+// `options.shell` for every launcher except `fork` (which has no such option)
+// and applies the SAME `firstShellToken()` split `exec`/`execSync` always get.
+//
+// ── What this guard still does NOT see (#8102, open) ─────────────────────
+//
+// On win32, a resolved `.cmd`/`.bat` npm shim (an npm-global `claude.cmd`,
+// say) is never spawned directly — `src/utils/win-spawn.js`'s `prepareSpawn()`
+// rewrites the call into `execFileSync('cmd.exe', ['/d', '/s', '/c',
+// '"<cross-spawn-escaped command line>"'], { windowsVerbatimArguments: true
+// })` so Node's own `.cmd`/`.bat` spawn restrictions and argument-quoting
+// bugs (CVE-2024-27980, DEP0190 — see that module's header) don't apply. By
+// the time THIS guard sees that call, `args[0]` is the literal string
+// `'cmd.exe'` — never a guarded name — and the actual target binary is
+// buried inside the escaped `/c` string, encoded with cross-spawn-style
+// caret-escaping (doubled, since a `.cmd`/`.bat` re-parses its own `%*`
+// forwarding through cmd a SECOND time). Reliably recovering "the first
+// token" from that string requires reversing that doubled caret-escaping
+// first — a literal space inside the shim's OWN path is itself caret-escaped
+// (`^ `), so a naive whitespace split truncates mid-path — which is real
+// parser work this PR does not attempt. A `.cmd`/`.bat` provider binary
+// resolved and spawned this way on win32 is therefore NOT caught by this
+// guard. Tracked in #8102; not closed by this change.
+//
 // ── Bypass ───────────────────────────────────────────────────────────────
 //
 // `process.env.CHROXY_TEST_ALLOW_REAL_BINARY === '1'` disables the guard
@@ -44,13 +77,16 @@
 //   - `tests/tunnel.integration.test.js` — opt-in `CHROXY_TEST_REAL_CLOUDFLARED=1`
 //     (#8096 item 3).
 //   - `tests/integration/codex-spawn-argv.integration.test.js` — a PRE-EXISTING,
-//     deliberate real-`codex` integration test (#3873) that auto-detects a
-//     locally-installed `codex` and runs against it with no env var required.
-//     Its own resolved `CODEX_BIN` is an absolute path under
-//     `/opt/homebrew/bin` on a Homebrew host, which — absent this — would trip
-//     the SAME guard this file installs for an already-reviewed, intentional
-//     integration test outside this issue's scope. It sets the flag itself,
-//     once, right after computing `SHOULD_RUN`.
+//     deliberate real-`codex` integration test (#3873), gated behind its own
+//     REQUIRED `RUN_CODEX_INTEGRATION=1` opt-in (#8101 — it used to ALSO
+//     auto-run whenever `codex` happened to be resolvable, with no env var
+//     needed, which is exactly this issue's defect class in a fourth file;
+//     confirmed running for real on a persistent self-hosted Windows CI
+//     runner before that fix). Its resolved `CODEX_BIN` is an absolute path
+//     under a real install prefix (e.g. `/opt/homebrew/bin` on a Homebrew
+//     host), which — absent this — would trip the SAME guard this file
+//     installs. It sets the flag itself, once, only inside the branch that
+//     already required the explicit opt-in to be true.
 // Nothing else in this repo's test suite is known to legitimately need it as
 // of #8096 — the full suite ran clean under this guard with normal PATH once
 // those two call sites were accounted for (see the PR for the two-run proof).
@@ -103,6 +139,22 @@ export const REAL_INSTALL_PREFIXES = Object.freeze([
   join(homedir(), 'Library', 'pnpm') + sep,
 ])
 
+// win32 resolves paths case-insensitively and accepts EITHER separator in a
+// path string regardless of which one is canonical (a resolved `C:\...` and a
+// hand-typed `c:/...` fixture address the same real location); darwin's
+// default HFS+/APFS is ALSO case-insensitive. Fold both onto one comparable
+// form before any prefix comparison on those two platforms — same FOLD_CASE
+// shape `scripts/lib/test-fs-sandbox.mjs` already uses for the identical
+// reason. NOT applied on Linux, where a literal backslash is a normal
+// filename character (folding `\`->`/` there would be wrong, not just
+// unnecessary) and the filesystem is case-sensitive by default.
+const FOLD_CASE_AND_SEP = process.platform === 'darwin' || process.platform === 'win32'
+function comparablePath(p) {
+  return FOLD_CASE_AND_SEP ? p.replace(/\\/g, '/').toLowerCase() : p
+}
+// Precomputed once — REAL_INSTALL_PREFIXES never changes at runtime.
+const COMPARABLE_REAL_INSTALL_PREFIXES = REAL_INSTALL_PREFIXES.map(comparablePath)
+
 /** `true` when `cmd` has no path separator — resolved via the OS's PATH search. */
 function isBareName(cmd) {
   return !cmd.includes('/') && !cmd.includes('\\')
@@ -143,8 +195,15 @@ function firstShellToken(cmdString) {
 
 /**
  * Extract "the command this call would resolve/exec", one per launcher shape:
- *   - spawn/spawnSync/execFile/execFileSync/fork: args[0] IS the file/module.
- *   - exec/execSync: args[0] is a shell command STRING; see firstShellToken.
+ *   - exec/execSync: args[0] is ALWAYS a shell command STRING; see
+ *     firstShellToken.
+ *   - spawn/spawnSync/execFile/execFileSync: args[0] IS the file/module — a
+ *     literal name, NOT shell-parsed — UNLESS the call's own `options.shell`
+ *     is truthy (#8102), in which case Node shell-parses args[0] (plus any
+ *     `args` array, shell-quoted and appended after it) exactly like exec/
+ *     execSync do, and the same split applies.
+ *   - fork: args[0] (a module path) is never shell-parsed; fork has no
+ *     `shell` option.
  * Returns null when args[0] isn't a usable string (malformed call — let the
  * real function's own validation report that; not this guard's job).
  */
@@ -152,6 +211,11 @@ function resolveCommandArg(launcherName, args) {
   const first = args[0]
   if (typeof first !== 'string' || first.length === 0) return null
   if (launcherName === 'exec' || launcherName === 'execSync') return firstShellToken(first)
+  if (launcherName !== 'fork') {
+    const optIndex = findOptionsIndex(args)
+    const options = optIndex === -1 ? undefined : args[optIndex]
+    if (options && options.shell) return firstShellToken(first)
+  }
   return first
 }
 
@@ -190,7 +254,8 @@ export function isGuardedRealBinary(cmd) {
   const base = stripExeExtension(basename(cmd)).toLowerCase()
   if (!GUARDED_BASENAMES.has(base)) return false
   if (isBareName(cmd)) return true
-  return REAL_INSTALL_PREFIXES.some((prefix) => cmd.startsWith(prefix))
+  const comparableCmd = comparablePath(cmd)
+  return COMPARABLE_REAL_INSTALL_PREFIXES.some((prefix) => comparableCmd.startsWith(prefix))
 }
 
 /**
