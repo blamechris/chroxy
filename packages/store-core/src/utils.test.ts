@@ -2,7 +2,13 @@
  * Tests for shared utility functions.
  */
 import { describe, it, expect } from 'vitest'
-import { createEmptyBaseSessionState, isActivityEvent, ACTIVITY_EVENT_TYPES } from './utils'
+import {
+  createEmptyBaseSessionState,
+  isActivityEvent,
+  ACTIVITY_EVENT_TYPES,
+  clearTransientSessionState,
+  TRANSIENT_SESSION_SWEEP_FIELDS,
+} from './utils'
 import type { BaseSessionState } from './types'
 
 describe('createEmptyBaseSessionState', () => {
@@ -115,5 +121,63 @@ describe('isActivityEvent (#3758)', () => {
   it('exposes ACTIVITY_EVENT_TYPES as a read-only set with the same membership', () => {
     expect(ACTIVITY_EVENT_TYPES.has('stream_delta')).toBe(true)
     expect(ACTIVITY_EVENT_TYPES.has('pong')).toBe(false)
+  })
+})
+
+describe('clearTransientSessionState (#7411)', () => {
+  it('returns an empty patch for a fresh (already-clear) session', () => {
+    const ss = createEmptyBaseSessionState()
+    expect(clearTransientSessionState(ss)).toEqual({})
+  })
+
+  it('nulls a set streamingMessageId', () => {
+    const ss = { ...createEmptyBaseSessionState(), streamingMessageId: 'msg-1' }
+    expect(clearTransientSessionState(ss)).toEqual({ streamingMessageId: null })
+  })
+
+  it('clears isPlanPending and planAllowedPrompts together', () => {
+    const ss = {
+      ...createEmptyBaseSessionState(),
+      isPlanPending: true,
+      planAllowedPrompts: [{ tool: 'Bash', prompt: 'echo hi' }],
+    }
+    expect(clearTransientSessionState(ss)).toEqual({
+      isPlanPending: false,
+      planAllowedPrompts: [],
+    })
+  })
+
+  it('clears all three at once, leaving nothing untouched', () => {
+    const ss = {
+      ...createEmptyBaseSessionState(),
+      streamingMessageId: 'msg-b',
+      isPlanPending: true,
+      planAllowedPrompts: [{ tool: 'Bash', prompt: 'go' }],
+    }
+    expect(clearTransientSessionState(ss)).toEqual({
+      streamingMessageId: null,
+      isPlanPending: false,
+      planAllowedPrompts: [],
+    })
+  })
+})
+
+describe('TRANSIENT_SESSION_SWEEP_FIELDS (#7411)', () => {
+  it('lists exactly the six cross-client all-sessions sweep fields', () => {
+    expect(TRANSIENT_SESSION_SWEEP_FIELDS).toEqual([
+      'streamingMessageId',
+      'isPlanPending',
+      'planAllowedPrompts',
+      'inactivityWarning',
+      'sessionRole',
+      'primaryClientId',
+    ])
+  })
+
+  it('every listed field is a real key of a fresh BaseSessionState', () => {
+    const ss = createEmptyBaseSessionState()
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
+      expect(Object.prototype.hasOwnProperty.call(ss, field)).toBe(true)
+    }
   })
 })

@@ -125,6 +125,69 @@ export function createEmptyBaseSessionState(): BaseSessionState {
 }
 
 /**
+ * #7411 — pure patch computation for the transient streaming/plan state that
+ * must be cleared for EVERY session (not just the active one) when the
+ * socket closes. A background session mid-stream otherwise keeps a phantom
+ * "thinking" bubble (`streamingMessageId`) and a stale pending plan across a
+ * reconnect (the exact symptom #5731 T4 already fixed on the dashboard —
+ * the app's onclose handler used `updateActiveSession` here instead, so a
+ * background session's copy of these three fields never got swept).
+ *
+ * Single-sourced here so the two clients' onclose sweeps can't drift again
+ * on this trio the way they just did: previously the dashboard swept all
+ * sessions and the app swept only the active one, and nothing caught it.
+ * Both clients now call this SAME function; a future change to what counts
+ * as "transient" only has one place to edit.
+ *
+ * Scoped to the fields that live on `BaseSessionState` and are common to
+ * both clients. The dashboard's own onclose sweep also clears
+ * `pendingEvaluatorClarify` (dashboard-only — the app has no
+ * evaluator-clarify feature/field) and `inactivityWarning` /
+ * `sessionRole` / `primaryClientId` (also `BaseSessionState` fields, but
+ * already correctly swept by both clients via their own separate
+ * all-sessions helpers predating this fix — see
+ * `TRANSIENT_SESSION_SWEEP_FIELDS`, which enumerates the full set so a
+ * parity test can guard it even where the clearing code itself stays
+ * per-client).
+ *
+ * Pure shape: returns `{}` when nothing needs clearing, so callers can skip
+ * the store write entirely and avoid churning referential equality.
+ */
+export function clearTransientSessionState(
+  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>,
+): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>> {
+  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>> = {}
+  if (ss.streamingMessageId) patch.streamingMessageId = null
+  if (ss.isPlanPending) {
+    patch.isPlanPending = false
+    patch.planAllowedPrompts = []
+  }
+  return patch
+}
+
+/**
+ * #7411 — canonical list of `BaseSessionState` fields that MUST be reset to
+ * their "no transient state" value on EVERY session (not just the active
+ * one) when the socket closes. Both clients' onclose sweeps are tested
+ * against this ONE list rather than each hand-maintaining its own — a field
+ * added to one client's sweep without the other is exactly how #7411
+ * happened, and a shared enumeration turns that into a failing test instead
+ * of a silent gap.
+ *
+ * `pendingEvaluatorClarify` is deliberately excluded: it lives only on the
+ * dashboard's `SessionState` (no evaluator-clarify feature exists on the
+ * app yet), so there is no app-side field to hold it to parity against.
+ */
+export const TRANSIENT_SESSION_SWEEP_FIELDS = [
+  'streamingMessageId',
+  'isPlanPending',
+  'planAllowedPrompts',
+  'inactivityWarning',
+  'sessionRole',
+  'primaryClientId',
+] as const satisfies readonly (keyof BaseSessionState)[]
+
+/**
  * #4653 — cap on the per-session intervention ring buffer. The dashboard
  * counter only ever shows a number + a list of "recent" entries, so we don't
  * need to keep more than this — a sustained intervention storm (e.g. a model
