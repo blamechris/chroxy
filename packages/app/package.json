@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/app",
-  "version": "0.11.1",
+  "version": "0.11.2",
   "description": "Chroxy mobile app",
   "main": "index.js",
   "scripts": {
@@ -42,8 +42,8 @@
     ]
   },
   "dependencies": {
-    "@chroxy/protocol": "^0.11.1",
-    "@chroxy/store-core": "^0.11.1",
+    "@chroxy/protocol": "^0.11.2",
+    "@chroxy/store-core": "^0.11.2",
     "@expo/vector-icons": "^15.0.3",
     "@react-native-async-storage/async-storage": "2.2.0",
     "@react-navigation/native": "^7.0.0",
