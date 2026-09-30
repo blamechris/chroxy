@@ -12,20 +12,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`release.yml`'s Test Suite now installs ripgrep before running the server
   tests, from the same definition `ci.yml`'s Server Tests job uses (#8160).**
   Merging #8157 cut the `v0.11.1` tag and dispatched `release.yml` (run
-  36669663799); Test Suite failed with ten hard failures, all of them "ripgrep
-  is not installed on this CI runner" from
-  `tests/built-in-tools/grep-argv-injection.test.js` (#7295) and the #7978
-  oracle in `tests/permission-floor-grep-glob.test.js` — both are deliberate
-  CI hard-fails, not skips, so a green log was never possible without rg. Every
-  downstream job was skipped as a result, so **the `v0.11.1` tag exists but was
-  never published**: no GitHub release, no `ghcr.io/blamechris/chroxy:0.11.1`
-  image, no desktop artifacts. The two jobs now share one composite action,
-  `.github/actions/ensure-ripgrep`, so they cannot drift apart again, and
+  36669663799); Test Suite failed with ten hard failures in
+  `tests/built-in-tools/grep-argv-injection.test.js` (#7295), all of them
+  "ripgrep is not installed on this CI runner" — a deliberate CI hard-fail, not
+  a skip, so a green log was never possible without rg. The #7978 oracle in
+  `tests/permission-floor-grep-glob.test.js` failed alongside it, in its
+  describe-level `before` hook for the same reason, which cancelled every test
+  under it. Every downstream job was skipped as a result, so **the `v0.11.1`
+  tag exists but was never published**: no GitHub release, no
+  `ghcr.io/blamechris/chroxy:0.11.1` image, no desktop artifacts. The two jobs
+  now share one composite action, `.github/actions/ensure-ripgrep`, so they
+  cannot drift apart again, and
   `packages/server/tests/ci-ripgrep-prerequisite.test.js` fails the build if
   any workflow job that runs the server test suite stops calling it (Windows
   is the one documented exemption — its two rg-dependent test files already
   skip themselves on `win32`). The next release cuts `v0.11.2` with this fix
   included.
+
+- **`scripts/bump-version.sh` now rewrites `@chroxy/*` dependency ranges inside
+  `package-lock.json`'s workspace entries too, not just the manifests (#8159).**
+  The script already re-pointed every workspace `package.json`'s `@chroxy/*`
+  ranges at the new version and bumped the `version` field of every
+  `package-lock.json` workspace entry (`packages["packages/<name>"]`), but left
+  those same entries' own `dependencies`/`devDependencies`/`peerDependencies`/
+  `optionalDependencies` ranges untouched. After a bump the lockfile disagreed
+  with the manifests — `npm ci` didn't catch it, since the linked workspace
+  package satisfies either range, but the lockfile was no longer what
+  `npm install --package-lock-only` would generate, so the next install
+  anywhere rewrote those lines as an unrelated diff (found by hand for 0.11.1,
+  #8157 — exactly 9 stale range lines). The lockfile rewrite now mirrors the
+  manifest rewrite's range construction exactly, and
+  `scripts/__tests__/bump-version.test.sh` gained a case asserting no
+  `@chroxy/*` range in the lockfile still names the old version after a bump,
+  guarded against passing vacuously if its fixture carried none to check.
 
 - **`scripts/bump-version.sh` now passes every path and the version string to
   `node -e` through the environment instead of splicing them into JS program
