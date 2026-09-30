@@ -491,30 +491,17 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
  * path, matching the dashboard's existing asymmetry there — see #7411
  * follow-up notes).
  *
- * Pure shape: skips the store mutation when nothing needs clearing, so we
- * don't churn referential equality.
+ * Each session goes through `updateSession`, never a direct store write:
+ * `updateSession` re-derives `activityState` from the fields cleared here, so
+ * writing around it would leave a phantom 'thinking' in
+ * BackgroundSessionProgress, the composer lozenge and notifications (review
+ * on #8144). It also skips an empty patch, so an already-clean session is
+ * not rewritten.
  */
-function clearStreamingAndPlanStateAcrossSessions(
-  set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void,
-  get: () => ConnectionState,
-): void {
-  const sessionStates = get().sessionStates;
-  const ids = Object.keys(sessionStates);
-  if (ids.length === 0) return;
-  let changed = false;
-  const next: Record<string, SessionState> = {};
-  for (const id of ids) {
-    const ss = sessionStates[id];
-    if (!ss) continue;
-    const patch = clearTransientSessionState(ss);
-    if (Object.keys(patch).length > 0) {
-      next[id] = { ...ss, ...patch };
-      changed = true;
-    } else {
-      next[id] = ss;
-    }
+function clearStreamingAndPlanStateAcrossSessions(get: () => ConnectionState): void {
+  for (const id of Object.keys(get().sessionStates)) {
+    updateSession(id, clearTransientSessionState);
   }
-  if (changed) set({ sessionStates: next });
 }
 
 /**
@@ -1488,7 +1475,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // bubble or a stale pending plan across the reconnect. Mirrors the
       // dashboard's #5731 T4 fix.
       clearPermissionSplits();
-      clearStreamingAndPlanStateAcrossSessions(set, get);
+      clearStreamingAndPlanStateAcrossSessions(get);
       // #3899: server does NOT replay `inactivity_warning` on reconnect,
       // so a chip left over from before the drop would point at stale
       // state. Sweep ALL sessions (not just the active one) because a

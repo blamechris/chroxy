@@ -190,6 +190,38 @@ describe('onclose clears transient streaming/plan state on all sessions (#7411)'
     ws.restore();
   });
 
+  it("re-derives a background session's activityState, so no phantom 'thinking' survives the sweep", async () => {
+    // Review on #8144: the app's `updateSession` re-derives `activityState`
+    // from isIdle/streamingMessageId/isPlanPending ("one writer, one
+    // derivation"). A sweep that writes the store directly clears the fields
+    // but leaves activityState at 'thinking', which BackgroundSessionProgress,
+    // the composer lozenge and notifications all read.
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: {
+          ...createEmptySessionState(),
+          isIdle: true,
+          streamingMessageId: 'msg-b',
+          activityState: { state: 'thinking', startedAt: 1 },
+        },
+      },
+    });
+
+    const socket = ws.instances[ws.instances.length - 1];
+    socket.onclose?.({ code: 1006 });
+    await flushPromises();
+
+    const st = useConnectionStore.getState();
+    expect(st.sessionStates.b!.streamingMessageId).toBeNull();
+    expect(st.sessionStates.b!.activityState?.state).toBe('idle');
+
+    ws.restore();
+  });
+
   it('parity guard: clears every TRANSIENT_SESSION_SWEEP_FIELDS field on a background session', async () => {
     const { ws } = await openConnectedSocket();
 
