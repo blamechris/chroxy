@@ -41,12 +41,12 @@ const FALLBACK_MODELS_SNAPSHOT = [
 // exhaustively in claude-model-catalog.test.js; this snapshot checks a subset.
 const CLAUDE_PRICING_SNAPSHOT = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
-  'claude-opus-4-8': { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
+  'claude-opus-4-8': { input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25 },
   'claude-opus-4-8[1m]': {
-    input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+    input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
     longContext: {
       thresholdInputTokens: 200_000,
-      input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
+      input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
     },
   },
   'claude-fable-5': { input: 10.00, output: 50.00, cacheRead: 1.00, cacheWrite: 12.50 },

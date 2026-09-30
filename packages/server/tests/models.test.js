@@ -590,7 +590,7 @@ describe('getModelPricing()', () => {
 
   it('returns pricing for short aliases (sonnet/opus/haiku)', () => {
     assert.equal(getModelPricing('sonnet').input, 3.00)
-    assert.equal(getModelPricing('opus').output, 75.00)
+    assert.equal(getModelPricing('opus').output, 25.00)
     assert.equal(getModelPricing('haiku').input, 1.00)
   })
 
@@ -605,17 +605,17 @@ describe('getModelPricing()', () => {
     assert.equal(long.cacheWrite, base.cacheWrite)
   })
 
-  it('[1m] entry carries a longContext block with the >200K premium rates (#4087)', () => {
+  it('[1m] entry carries a longContext block with flat rates for Opus 4.8 (#4087)', () => {
     const long = getModelPricing('claude-opus-4-8[1m]')
-    assert.ok(long.longContext, '[1m] entry must declare premium rates')
+    assert.ok(long.longContext, '[1m] entry must declare rates for the drift guard')
     assert.equal(long.longContext.thresholdInputTokens, 200_000)
-    // Anthropic's published 1M premium: 2× input, 2× output (verify on
-    // pricing review). These literals are the contract — if Anthropic
-    // changes them, this test fails loudly.
-    assert.equal(long.longContext.input, 30.00)
-    assert.equal(long.longContext.output, 150.00)
-    assert.equal(long.longContext.cacheRead, 3.00)
-    assert.equal(long.longContext.cacheWrite, 37.50)
+    // Opus 4.8 bills flat: no >200K premium. The longContext rates equal the
+    // base rates. This keeps cost correct AND carries the longContext key the
+    // #4106 drift guard requires (source: https://platform.claude.com/docs/en/about-claude/pricing).
+    assert.equal(long.longContext.input, 5.00)
+    assert.equal(long.longContext.output, 25.00)
+    assert.equal(long.longContext.cacheRead, 0.50)
+    assert.equal(long.longContext.cacheWrite, 6.25)
   })
 
   it('default-window (non-[1m]) Opus entry does NOT carry a longContext block', () => {
@@ -708,16 +708,16 @@ describe('getModelPricing()', () => {
   })
 
   describe('[1m] re-attach after fallback resolution (#4105 + #4107)', () => {
-    it('short-form opus[1m] routes to the explicit [1m] entry (premium pricing preserved)', () => {
+    it('short-form opus[1m] routes to the explicit [1m] entry (flat pricing for Opus 4.8)', () => {
       // resolvePricingKey walks: verbatim miss → strip [1m] → 'opus' table
       // miss → fallback m.id === 'opus' → fullId 'claude-opus-4-8'. Before
       // the fix, this returned the base entry (no longContext block);
       // after, it re-attaches [1m] and returns 'claude-opus-4-8[1m]'
-      // with the longContext premium.
+      // with the longContext block (flat pricing — no >200K premium).
       const longOpus = getModelPricing('opus[1m]')
       assert.ok(longOpus, 'opus[1m] should resolve to a pricing entry')
-      assert.ok(longOpus.longContext, 'opus[1m] must keep premium tier (was missed pre-#4105)')
-      assert.equal(longOpus.longContext.input, 30.00, 'must be the 2x premium input rate')
+      assert.ok(longOpus.longContext, 'opus[1m] must carry longContext block for drift guard (was missed pre-#4105)')
+      assert.equal(longOpus.longContext.input, 5.00, 'must be the flat input rate (no premium)')
     })
 
     it('dated + [1m] combined form routes to the explicit [1m] entry', () => {
@@ -749,15 +749,15 @@ describe('getModelPricing()', () => {
       assert.equal(sonnet1m.input, 3.00, 'base sonnet input rate')
     })
 
-    it('compute end-to-end: 300K input on opus[1m] uses premium rates (#4105 behavioural)', () => {
-      // Round-trip test: short-form opus[1m] + >200K usage → premium
-      // pricing applied via computePromptCostUsd. This catches both the
-      // resolvePricingKey routing (#4105) and the premium-tier selection
-      // in one assertion.
+    it('compute end-to-end: 300K input on opus[1m] uses flat rates (#4105 behavioural)', () => {
+      // Round-trip test: short-form opus[1m] + >200K usage → flat
+      // pricing applied via computePromptCostUsd (Opus 4.8 has no >200K premium).
+      // This catches both the resolvePricingKey routing (#4105) and the flat-rate
+      // selection in one assertion.
       const pricing = getModelPricing('opus[1m]')
       const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, pricing)
-      // 300K * 30/Mtok = 9.0 (premium rate, NOT 4.5 at base 15/Mtok)
-      assert.ok(Math.abs(cost - 9.0) < 1e-6, `expected 9.0 (premium), got ${cost}`)
+      // 300K * 5/Mtok = 1.5 (flat rate, no premium for Opus 4.8)
+      assert.ok(Math.abs(cost - 1.5) < 1e-6, `expected 1.5 (flat), got ${cost}`)
     })
   })
 })
@@ -803,58 +803,58 @@ describe('computePromptCostUsd()', () => {
 
   it('matches Opus 4.8 rate for the canonical happy-path test in byok-session', () => {
     const opus = getModelPricing('claude-opus-4-8')
-    // The byok-session test asserts cost = 0.000375 for 5in/4out on opus-4-8.
+    // The byok-session test asserts cost = 0.000125 for 5in/4out on opus-4-8.
     // If the rate ever changes, the byok-session test's literal must change too.
+    // 5 * 5/Mtok + 4 * 25/Mtok = 25/1e6 + 100/1e6 = 125/1e6 = 0.000125
     const cost = computePromptCostUsd({ input_tokens: 5, output_tokens: 4 }, opus)
-    assert.ok(Math.abs(cost - 0.000375) < 1e-9, `opus 5in/4out reference: expected 0.000375, got ${cost}`)
+    assert.ok(Math.abs(cost - 0.000125) < 1e-9, `opus 5in/4out reference: expected 0.000125, got ${cost}`)
   })
 
   describe('long-context premium tier (#4087)', () => {
     const longOpus = getModelPricing('claude-opus-4-8[1m]')
 
-    it('uses BASE rates when total input is below 200K (Opus [1m])', () => {
-      // 100K input, 50K output — both well below threshold.
+    it('uses FLAT rates when total input is below 200K (Opus [1m])', () => {
+      // 100K input, 50K output — well below threshold, base rates apply.
       const cost = computePromptCostUsd({ input_tokens: 100_000, output_tokens: 50_000 }, longOpus)
-      // 100K * 15/Mtok + 50K * 75/Mtok = 1.5 + 3.75 = 5.25
-      assert.ok(Math.abs(cost - 5.25) < 1e-6, `expected 5.25 (base rates), got ${cost}`)
+      // Opus 4.8 is flat: 100K * 5/Mtok + 50K * 25/Mtok = 0.5 + 1.25 = 1.75
+      assert.ok(Math.abs(cost - 1.75) < 1e-6, `expected 1.75 (flat rates), got ${cost}`)
     })
 
-    it('uses BASE rates at exactly the 200K threshold (boundary)', () => {
-      // 200K input is NOT > 200K — boundary stays on base.
+    it('uses FLAT rates at exactly the 200K threshold (boundary)', () => {
+      // 200K input is NOT > 200K, and Opus 4.8 is flat anyway.
       const cost = computePromptCostUsd({ input_tokens: 200_000, output_tokens: 0 }, longOpus)
-      // 200K * 15/Mtok = 3.0 (base, not premium)
-      assert.ok(Math.abs(cost - 3.0) < 1e-6, `boundary 200K must use base, got ${cost}`)
+      // 200K * 5/Mtok = 1.0 (flat, no premium for Opus 4.8)
+      assert.ok(Math.abs(cost - 1.0) < 1e-6, `boundary 200K must use flat rate, got ${cost}`)
     })
 
-    it('uses PREMIUM rates when total input exceeds 200K (Opus [1m])', () => {
-      // 201K input — one token past the threshold flips ALL tokens to
-      // premium. Matches Anthropic's table-tier semantics.
+    it('uses FLAT rates when total input exceeds 200K (Opus [1m] — no premium)', () => {
+      // Opus 4.8 has no >200K premium tier; it's flat pricing throughout.
       const cost = computePromptCostUsd({ input_tokens: 201_000, output_tokens: 50_000 }, longOpus)
-      // 201K * 30/Mtok + 50K * 150/Mtok = 6.03 + 7.5 = 13.53
-      assert.ok(Math.abs(cost - 13.53) < 1e-6, `expected 13.53 (premium rates), got ${cost}`)
+      // Flat rates: 201K * 5/Mtok + 50K * 25/Mtok = 1.005 + 1.25 = 2.255
+      assert.ok(Math.abs(cost - 2.255) < 1e-6, `expected 2.255 (flat rates), got ${cost}`)
     })
 
-    it('cache_read + cache_creation count toward the threshold', () => {
+    it('cache_read + cache_creation count toward the threshold (still flat)', () => {
       // 100K input + 60K cache_read + 50K cache_creation = 210K total
-      // input → over threshold → premium rates apply.
+      // input — over threshold but Opus 4.8 is flat so no premium applies.
       const cost = computePromptCostUsd({
         input_tokens: 100_000,
         output_tokens: 1_000,
         cache_read_input_tokens: 60_000,
         cache_creation_input_tokens: 50_000,
       }, longOpus)
-      // Premium rates: 100K*30 + 1K*150 + 60K*3 + 50K*37.5 = 3+0.15+0.18+1.875 = 5.205
-      assert.ok(Math.abs(cost - 5.205) < 1e-6, `cache-fed threshold expected 5.205 premium, got ${cost}`)
+      // Flat rates: 100K*5 + 1K*25 + 60K*0.50 + 50K*6.25 = 0.5+0.025+0.03+0.3125 = 0.8675
+      assert.ok(Math.abs(cost - 0.8675) < 1e-6, `cache-fed threshold expected 0.8675 flat, got ${cost}`)
     })
 
-    it('default-window Opus never enters premium tier even if usage somehow exceeds 200K', () => {
+    it('default-window Opus uses flat rates even if usage somehow exceeds 200K', () => {
       // A pathological usage report (claims 300K input on default-window
-      // model) must still use base rates — there's no longContext block
-      // to flip into.
+      // model) must still use base rates — there's no longContext block.
+      // Opus 4.8 is flat anyway, so the result is the same.
       const baseOpus = getModelPricing('claude-opus-4-8')
       const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, baseOpus)
-      // 300K * 15/Mtok = 4.5 (base)
-      assert.ok(Math.abs(cost - 4.5) < 1e-6, `default-window must stay on base regardless, got ${cost}`)
+      // 300K * 5/Mtok = 1.5 (flat)
+      assert.ok(Math.abs(cost - 1.5) < 1e-6, `default-window must stay on flat rate, got ${cost}`)
     })
 
     it('Sonnet and Haiku entries never enter premium tier (no [1m] variant)', () => {

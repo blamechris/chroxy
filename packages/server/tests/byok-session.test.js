@@ -1246,11 +1246,11 @@ describe('ClaudeByokSession', () => {
       // typeof === 'number' gate. Omitting it silently disables BYOK cost
       // accounting (#4056, blocks #4054).
       assert.equal(typeof results[0].payload.cost, 'number')
-      // Opus 4.8 default: 5 input * $15/Mtok + 4 output * $75/Mtok
-      //   = 0.000075 + 0.000300 = 0.000375 USD
+      // Opus 4.8 default: 5 input * $5/Mtok + 4 output * $25/Mtok
+      //   = 0.000025 + 0.000100 = 0.000125 USD (#7434)
       assert.ok(
-        Math.abs(results[0].payload.cost - 0.000375) < 1e-9,
-        `expected cost ~= 0.000375 for 5in/4out on opus-4-8, got ${results[0].payload.cost}`,
+        Math.abs(results[0].payload.cost - 0.000125) < 1e-9,
+        `expected cost ~= 0.000125 for 5in/4out on opus-4-8, got ${results[0].payload.cost}`,
       )
       await session.destroy()
     })
@@ -1293,10 +1293,10 @@ describe('ClaudeByokSession', () => {
       // Accumulated usage: 10+7 input, 20+3 output.
       assert.equal(results[0].payload.usage.input_tokens, 17)
       assert.equal(results[0].payload.usage.output_tokens, 23)
-      // Accumulated cost (Opus 4.8): (17 * 15 + 23 * 75) / 1e6 = 0.001980
+      // Accumulated cost (Opus 4.8): (17 * 5 + 23 * 25) / 1e6 = 0.000660
       assert.ok(
-        Math.abs(results[0].payload.cost - 0.001980) < 1e-9,
-        `expected cost ~= 0.001980, got ${results[0].payload.cost}`,
+        Math.abs(results[0].payload.cost - 0.000660) < 1e-9,
+        `expected cost ~= 0.000660, got ${results[0].payload.cost}`,
       )
       await session.destroy()
     })
@@ -1461,9 +1461,9 @@ describe('ClaudeByokSession', () => {
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result)
       // Same math as the canonical happy-path test (5in/4out on opus-4-8
-      // = 0.000375 USD). Same numeric expectation proves the family
+      // = 0.000125 USD). Same numeric expectation proves the family
       // resolution worked.
-      assert.ok(Math.abs(result.payload.cost - 0.000375) < 1e-9,
+      assert.ok(Math.abs(result.payload.cost - 0.000125) < 1e-9,
         `dated-id pricing must equal family-head pricing; got cost=${result.payload.cost}`)
       // And no warn fired — pricing was found.
       assert.equal(session._pricingWarnedModels.size, 0)
@@ -4305,8 +4305,8 @@ describe('ClaudeByokSession', () => {
       // Total: 1007in/507out
       assert.equal(result.payload.usage.input_tokens, 1007, 'child input tokens fold into parent total')
       assert.equal(result.payload.usage.output_tokens, 507, 'child output tokens fold into parent total')
-      // Cost (Opus 4.8): (1007 * 15 + 507 * 75) / 1e6
-      const expectedCost = (1007 * 15 + 507 * 75) / 1e6
+      // Cost (Opus 4.8): (1007 * 5 + 507 * 25) / 1e6
+      const expectedCost = (1007 * 5 + 507 * 25) / 1e6
       assert.ok(Math.abs(result.payload.cost - expectedCost) < 1e-9,
         `expected cost ~= ${expectedCost}, got ${result.payload.cost}`)
       await session.destroy()
@@ -4381,8 +4381,8 @@ describe('ClaudeByokSession', () => {
         'parent round-1 input + child input fold into error event')
       assert.equal(streamErr.payload.usage.output_tokens, 810,
         'parent round-1 output + child output fold into error event')
-      // Cost (Opus 4.8): (2010 * 15 + 810 * 75) / 1e6
-      const expectedCost = (2010 * 15 + 810 * 75) / 1e6
+      // Cost (Opus 4.8): (2010 * 5 + 810 * 25) / 1e6
+      const expectedCost = (2010 * 5 + 810 * 25) / 1e6
       assert.ok(typeof streamErr.payload.cost === 'number',
         'STREAM_ERROR must carry partial cost')
       assert.ok(Math.abs(streamErr.payload.cost - expectedCost) < 1e-9,
