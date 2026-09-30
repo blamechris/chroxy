@@ -254,7 +254,7 @@ set -e
   || fail "GET /dashboard inside $IMAGE could not be completed (curl exit $dash_status_rc/$dash_body_rc)"
 [ "$DASH_STATUS" = "200" ] \
   || fail "GET /dashboard returned HTTP $DASH_STATUS, not 200 (dashboard dist missing or auth rejected the smoke token?)"
-printf '%s' "$DASH_BODY" | grep -qF '<title>Chroxy Dashboard</title>' \
+grep -qF '<title>Chroxy Dashboard</title>' <<<"$DASH_BODY" \
   || fail "GET /dashboard returned 200 but the body doesn't contain the dashboard's own <title>Chroxy Dashboard</title> marker — served the wrong thing, or an empty/placeholder page"
 
 echo "== Dashboard OK: HTTP 200, marker found"
