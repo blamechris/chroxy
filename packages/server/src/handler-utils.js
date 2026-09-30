@@ -53,6 +53,45 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode)
   ...getProviderPermissionModeSupport(undefined, mode.id),
 }))
 
+// #8090 — claude-tui declares `capabilities.planMode: false`
+// (claude-tui-session.js), but its PreToolUse hook still handles a `plan`
+// sidecar value: unlike approve/acceptEdits/auto (which all route through
+// Chroxy's protected-path floor — see hooks/permission-hook.sh), `plan`
+// unconditionally returns `{"permissionDecision":"ask"}` with no floor check
+// at all, leaving the raw claude TUI process's own PTY-embedded prompt —
+// invisible to the structured chat UI — as the only thing standing between a
+// tool call and execution. Advertising `plan` as a fully supported mode there
+// is misleading, so it is reported unsupported here.
+//
+// This is intentionally NOT folded into `getProviderPermissionModeSupport()`
+// itself, which also feeds `assertProviderPermissionModeSupported`
+// (session-manager.js's create/restore chokepoint, BaseSession's
+// constructor) and `BaseSession.setPermissionMode()`. Those three must keep
+// accepting `plan` on every provider that declares `planMode: false` —
+// including claude-tui itself (claude-tui-session.test.js's "setPermissionMode
+// no-ops cleanly when sidecar path is null" asserts a direct
+// `setPermissionMode('plan')` call still updates state) and codex app-server
+// (this file's own "keeps Approve, Accept Edits, and Plan available" test) —
+// so a blanket capability check in the shared function would throw there,
+// and would also turn boot restore of any already-persisted claude-tui
+// session that happens to be in `plan` mode into a failed "needs attention"
+// restore over what is really just an advertising correction (nothing has
+// ever gated `plan` at create/restore time).
+//
+// Scoped to `provider === 'claude-tui'` rather than the bare capability
+// check for the same reason: codex ALSO declares `planMode: false`, but its
+// own dedicated copy (MODE_DESCRIPTIONS.codex.plan: "Not a distinct codex
+// mode — behaves like Approve") documents that as a deliberate, harmless
+// alias — selecting it has zero functional difference from Approve, unlike
+// claude-tui's genuine gap — and an existing test locks in that codex stays
+// advertised as supported. `provider` and `ProviderClass` are always resolved
+// together by both real callers (ws-history.js, session-handlers.js), so this
+// is as reliable as the existing `provider === 'codex'` description branch
+// just below.
+function isPlanModeGenuinelyUnsupported(provider, ProviderClass, modeId) {
+  return modeId === 'plan' && provider === 'claude-tui' && ProviderClass?.capabilities?.planMode === false
+}
+
 /**
  * The permission-mode list with descriptions tuned to the given provider (#6638).
  * Codex gets codex-specific copy; everything else gets the default. The mode IDs
@@ -63,12 +102,16 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode)
 export function getPermissionModes(provider, ProviderClass) {
   const modes = provider === 'codex' ? buildModes(MODE_DESCRIPTIONS.codex) : buildModes(MODE_DESCRIPTIONS.default)
   return modes.map((mode) => {
-    const support = getProviderPermissionModeSupport(ProviderClass, mode.id)
+    const support = isPlanModeGenuinelyUnsupported(provider, ProviderClass, mode.id)
+      ? { supported: false, enforcement: 'unsupported' }
+      : getProviderPermissionModeSupport(ProviderClass, mode.id)
     if (!support.supported) {
       return {
         ...mode,
         label: `${mode.label} (unavailable)`,
-        description: 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.',
+        description: mode.id === 'plan'
+          ? 'Unavailable for this provider: it has no plan mode, so tool calls are not restricted to read-only.'
+          : 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.',
         ...support,
       }
     }

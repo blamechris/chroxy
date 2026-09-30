@@ -23,6 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The server now reports `plan` permission mode as unsupported for
+  `claude-tui` (and any other provider with `capabilities.planMode: false`),
+  so the mobile app's chip row disables it instead of offering a mode the
+  provider cannot honour (#8090).** `getPermissionModes()`
+  (`handler-utils.js`) only special-cased `auto`/`autoPermissionMode`, so
+  `available_permission_modes` advertised `plan` as fully supported for
+  claude-tui even though its PreToolUse hook skips Chroxy's protected-path
+  floor entirely in that mode (unlike approve/acceptEdits/auto, which all
+  route through it) — the raw PTY's own prompt, invisible to the structured
+  chat UI, was the only thing left standing between a tool call and
+  execution. The mobile `SettingsBar` chip row already disables purely from
+  the server-sent `supported: false` flag, so no app change was needed
+  beyond a regression test. The fix is scoped to the advertised list only —
+  `assertProviderPermissionModeSupported`/`BaseSession.setPermissionMode()`
+  still accept `plan` on every provider (including claude-tui itself, and
+  codex app-server's identical `planMode: false` declaration, which stays
+  advertised as a deliberate, harmless alias for Approve) — so an
+  already-persisted claude-tui session in `plan` mode restores exactly as
+  before instead of failing.
 - **The mobile app now shows the provider badge for every session, the default
   provider included (#8130).** `SessionPicker`'s badge gate
   (`session.provider !== DEFAULT_PROVIDER`) suppressed the badge whenever a
