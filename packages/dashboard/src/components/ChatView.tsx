@@ -104,8 +104,12 @@ export interface ChatViewMessage {
    * Discriminator for rendering. `tool_group` (#3747) is a synthetic type
    * emitted by the App.tsx grouping pass — it has no store-side equivalent
    * and is always rendered through the `renderMessage` callback.
+   * `permission-expired-summary` (#7365) is likewise synthetic — spliced in
+   * by `useChatMessages.ts` (`utils/permissionExpiredSummaryRows.ts`) and
+   * always rendered through `renderMessage` via a payload lookup, the same
+   * shape `tool_group` uses.
    */
-  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group'
+  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary'
   content: string
   timestamp: number
   isStreaming?: boolean

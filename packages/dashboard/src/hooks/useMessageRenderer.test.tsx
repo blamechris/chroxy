@@ -74,6 +74,7 @@ function makeArgs(overrides: Partial<UseMessageRendererArgs>): UseMessageRendere
   return {
     storeMsgMap: new Map(),
     chatToolGroupPayloads: new Map(),
+    permissionExpiredSummaries: new Map(),
     chatTailMessageId: null,
     sendPermissionResponse: vi.fn(),
     sendUserQuestionResponse: vi.fn(),
@@ -198,5 +199,39 @@ describe('useMessageRenderer — Codex shell permission card has no duplicated l
     // Exactly one "shell:" label, and it reads as the single-prefixed prompt.
     expect(text).toBe(`shell: ${desc}`)
     expect(text).not.toContain('shell: shell:')
+  })
+})
+
+describe('useMessageRenderer — permission-expired-summary wiring (#7365 review S2)', () => {
+  // Integration-level coverage the review found missing: the pure aggregator
+  // and the presentational component were each tested in isolation, but
+  // nothing exercised the RENDERER'S OWN wiring — specifically, which
+  // `requestIds` entry it hands to `PermissionExpiredSummary` as the jump
+  // target. The reviewer mutated `requestIds[0]` to the LAST index at this
+  // call site and every existing test (53 of them) stayed green. This test
+  // fails under that exact mutant.
+  it('renders the synthetic row via the permissionExpiredSummaries payload map, jump link targeting the FIRST requestId', () => {
+    const summaryRowId = 'permission-expired-summary-u1'
+    const args = makeArgs({
+      permissionExpiredSummaries: new Map([
+        [summaryRowId, { turnEndMessageId: 'r1', requestIds: ['req-1', 'req-2'], tools: ['Bash', 'Write'], count: 2 }],
+      ]),
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const node = result.current({ id: summaryRowId, type: 'permission-expired-summary', content: '', timestamp: 0 } as ChatViewMessage)
+    render(<>{node}</>)
+
+    const summaryEl = screen.getByTestId('permission-expired-summary')
+    expect(summaryEl).toHaveTextContent('2 permissions expired without a response')
+    const link = screen.getByTestId('permission-expired-summary-jump')
+    expect(link).toHaveAttribute('href', '#perm-desc-req-1')
+    expect(link).not.toHaveAttribute('href', '#perm-desc-req-2')
+  })
+
+  it('renders nothing for a permission-expired-summary row with no matching payload', () => {
+    const args = makeArgs({ permissionExpiredSummaries: new Map() })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const node = result.current({ id: 'permission-expired-summary-missing', type: 'permission-expired-summary', content: '', timestamp: 0 } as ChatViewMessage)
+    expect(node).toBeNull()
   })
 })

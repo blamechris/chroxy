@@ -1453,12 +1453,22 @@ export function App() {
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
+    permissionExpiredSummaries,
   } = useChatMessages({
     storeMessages,
     streamingMessageId,
     // #6799 — global compact chat filter: drop tool_use + thinking rows
     // session-wide when the header toggle is on (mobile parity).
     hideToolAndThinking: compactChatFilter,
+    // #7365 (review round 2) — the same server-authoritative `isIdle` flag
+    // (#4639) `isSessionBusy` reads elsewhere in this file; `?? true` matches
+    // the existing fallback convention at this file's other `isIdle` read
+    // (below, in the ActivityTree wiring) for an unknown/not-yet-reported
+    // value. Gates the still-running (trailing) turn's summary until it
+    // actually ends. (`stillQueuedMessageIds`, round 1's fix, is gone —
+    // turns are now delimited by `turnBoundary` marks, which a queued
+    // follow-up's `user_input` row never affects either way.)
+    isSessionIdle: isIdle ?? true,
   })
 
   // #6788 — searchable-text extractor for the ChatView in-session find bar.
@@ -2348,6 +2358,7 @@ export function App() {
   const renderMessage = useMessageRenderer({
     storeMsgMap,
     chatToolGroupPayloads,
+    permissionExpiredSummaries,
     chatTailMessageId,
     // #5786 — wrapped so approve/answer also snaps the chat to the bottom.
     sendPermissionResponse: respondToPermission,

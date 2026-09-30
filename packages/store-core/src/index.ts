@@ -1034,6 +1034,9 @@ export {
 // "live, unanswered permission prompt" predicate across both clients).
 export {
   isLivePermissionPrompt,
+  // #7365 — the mirror predicate: an unanswered permission prompt whose
+  // expiry has already landed (server-confirmed or countdown-crossed-zero).
+  isExpiredUnansweredPermissionPrompt,
   // #7380 — a REAL user decision, as opposed to `answered` merely being set
   // (history_replay_end stamps '(resolved)' on replayed prompts nobody
   // answered; #7410 narrowed that sweep to the replayed session and to prompts
@@ -1056,6 +1059,20 @@ export {
   pathMatchesViewer,
   findPendingWriteForFile,
 } from './pending-permissions'
+
+// #7365 — position-independent turn-end marking. `markTurnBoundary` is
+// called from `case 'result'` in message-handler.ts (both live and replay —
+// the handler makes no distinction) so a turn's end survives a send-while-busy
+// follow-up planting a `user_input` row mid-turn at its enqueue position.
+export { markTurnBoundary } from './turn-boundaries'
+
+// #7365 — per-turn aggregation of permission prompts that expired unanswered.
+// Dashboard-only consumer today (the web transcript's end-of-turn summary);
+// lives here because it is built directly on `isExpiredUnansweredPermissionPrompt`
+// above and following the shared single-source-of-truth pattern this file
+// already establishes for permission-prompt predicates.
+export type { ExpiredPermissionTurnSummary, TurnBoundarySource } from './permission-turn-summary'
+export { getExpiredPermissionTurnSummaries } from './permission-turn-summary'
 
 // #6542 (IDE P3.1): client-side line hunk diff + per-hunk apply — the shared
 // foundation for the edit-in-place / per-hunk-review surfaces (#6543 feature B,

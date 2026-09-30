@@ -298,6 +298,19 @@ export interface ChatMessage {
    * straight from spawn to final text in one shot).
    */
   childAgentEvents?: ChildAgentEvent[];
+  /**
+   * #7365 (review follow-up) — set to `true` on whichever message is LAST in
+   * `messages` at the moment a `result` frame is processed (`case 'result'`
+   * in message-handler.ts, both the live and replay path — the handler makes
+   * no distinction, so this is reconstructed identically after a reconnect).
+   * Marks a POSITION-INDEPENDENT turn-end: unlike a `user_input` row (which a
+   * mid-turn queued send can plant anywhere, permanently, at its ENQUEUE
+   * position — see `markTurnBoundary`'s doc), this only ever lands on
+   * whatever is chronologically last when the turn genuinely finishes.
+   * Never explicitly `false`; absent everywhere else. Set via
+   * `markTurnBoundary` (`turn-boundaries.ts`) — never written directly.
+   */
+  turnBoundary?: boolean;
 }
 
 /**

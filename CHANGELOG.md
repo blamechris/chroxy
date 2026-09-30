@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard: a persistent end-of-turn summary for permission prompts that
+  expired unanswered (#7365).** When a permission prompt times out with no
+  answer, chroxy silently continues without that tool — the per-prompt
+  marker (`PermissionPrompt.tsx`'s "Permission expired — Claude will continue
+  without this tool") is easy to miss once the turn has moved on, since it is
+  one collapsed row in a long transcript. Once a turn has actually ended, the
+  transcript now also renders a persistent card attached to it, aggregating
+  every prompt that expired unanswered during it: the count, the tool names,
+  and a jump link back to the first one (which also moves keyboard/
+  screen-reader focus, not just the scroll position). Turn boundaries use
+  one of two EXPLICIT sources, chosen by the caller, never inferred: the
+  live dashboard marks a position-independent `turnBoundary` on whichever
+  message is last (skipping past any trailing `user_input` rows) when a
+  turn's own `result` is processed — live or replayed identically — since a
+  `user_input` row from a send-while-busy queued follow-up is recorded by
+  the server at ENQUEUE time and can sit permanently mid-turn, and can even
+  be the LAST thing before that turn's `result` if the turn's own last action
+  was an expiring permission; a closed/historical transcript (no `result`
+  entry exists in that data source) instead uses `user_input` row position,
+  which is sound there specifically because Claude Code's own on-disk log
+  only records a queued follow-up once it actually dispatches. No protocol
+  change was needed for either source. The summary itself is gated on the
+  turn having ended (the server-authoritative `isIdle` flag, defaulting to
+  "ended" for a closed transcript) so its position never shifts while a turn
+  is still streaming. No new native notification: the permission
+  notification already fired when the prompt was raised (#7364); a second one
+  per turn for the same event would be noise. Web dashboard only — the
+  mobile app has no equivalent surface yet.
+
 ### Fixed
 
 - **The root Docker image serves the dashboard and defaults to the headless
@@ -35,6 +66,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hosting-guide.md` documents the supported/unsupported split and the env
   override. `.dockerignore` and `ci.yml`'s `docker` path filter are kept in
   sync for the two newly-whitelisted packages.
+
+- **`release.yml` smokes the Docker image before pushing it (#8150).** The
+  `docker` job built the root Dockerfile with `docker/build-push-action`,
+  `push: true`, and pushed straight to GHCR — nothing in the job ever
+  started the image. That is exactly how the v0.11.0 image shipped unable to
+  start at all (`ERR_MODULE_NOT_FOUND`, #8133): the push succeeded because a
+  push doesn't care whether the thing it uploads can run.
+  `scripts/docker-image-smoke.sh` (added for #8133) already proved an image
+  can start, but nothing wired it into the one workflow that actually
+  publishes a release — it only ran PR-side, path-filtered, and not
+  required. The job now builds once with `load: true` / `push: false`
+  (tagged with both the real metadata-action tags and a fixed local
+  `chroxy:release-smoke` tag), smoke-starts that same local image, logs in to
+  GHCR only AFTER the smoke passes (narrowing the window registry
+  credentials are present), and only then pushes the already-built tags via
+  `env: TAGS:` (never interpolated into the shell script) — never rebuilt, so
+  what is smoked is byte-for-byte what ships. `ci.yml`'s `Docker Image
+  Smoke` job now builds with the SAME pinned `docker/build-push-action` ref
+  and `load: true` / `push: false`, so the release build+load path is
+  exercised on every Docker-touching PR, not just at release time.
+  A new static gate test (`release-docker-smoke-gate.test.js`) runs over
+  every job in `release.yml` with a publishing step (not one job looked up
+  by id) and fails the build if: the smoke step is missing, wrapped (`||
+  true`, `; exit 0`, a preceding `set +e`, or commented out), reordered
+  after a publish, given `continue-on-error`, or paired with a publishing
+  step whose `if:` isn't absent or exactly `success()` (closing three
+  operand-order bypasses `X || success()` / `!success()` / `true ||
+  success()` a naïve "contains always/failure/cancelled" check misses); if a
+  build-push-action step publishes via `outputs: type=registry` or a
+  non-lowercase-`false` `push:` value without ever setting `push: true`;
+  if anything rebuilds the image between the smoke and the last publish; or
+  if a registry login runs before the smoke. The "was this tag really
+  built?" check reads the build step's `tags:` input structurally (not a
+  raw-text scan, which a neighbouring step's comment could satisfy). It also
+  rejects a `shell:` override other than absent or the literal `bash` on the
+  smoke step or a publishing step (a custom shell template can swallow a
+  real exit code without the `run:` text ever changing), rejects job-level
+  `continue-on-error:` anywhere in a publishing job's transitive `needs:`
+  closure (previously checked only inside `verify-artifacts`' own body),
+  and rejects a `docker tag`/`docker image tag`/`docker load`/`docker image
+  load`/`docker import`/`docker pull`/`docker image pull`/`docker commit`/
+  `docker buildx imagetools` step between the smoke and the last publish —
+  a retag or reload repoints the pushed tag at unsmoked content without
+  ever rebuilding. A second new test (`ci-docker-path-filter.test.js`,
+  parsed with `js-yaml`) ties `ci.yml`'s `docker:` path filter to
+  `.dockerignore`'s package whitelist in both directions, so the two
+  rosters cannot drift apart un-noticed (#7639) — a floor, not a pinned
+  set, so a correct two-sided package addition never trips it, and a glob
+  whitelist entry fails loudly instead of misparsing. The shared "what
+  counts as publishing" vocabulary and the job-level gating walk
+  (`packages/server/tests/helpers/release-publish.js`) are now one module
+  imported by both this gate and `release-verify-artifacts-gate.test.js`,
+  which previously carried its own, already-drifted copy.
 
 - **The spawn-env inherited-secrets roster strips comments with a real
   tokenizer, not a regex, so it can no longer misread a glob quoted in a

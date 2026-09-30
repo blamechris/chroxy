@@ -28,10 +28,14 @@ import { useMemo } from 'react'
 import {
   buildChatViewMessages,
   toChatViewMessage,
+  getExpiredPermissionTurnSummaries,
   type ChatMessage,
   type ChatViewMessage as StoreChatViewMessage,
+  type ExpiredPermissionTurnSummary,
+  type TurnBoundarySource,
 } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
+import { insertPermissionExpiredSummaryRows } from '../utils/permissionExpiredSummaryRows'
 
 // The dashboard re-exports its own `ChatViewMessage` for component prop
 // typing; the store-core type is structurally identical (same fields,
@@ -54,6 +58,33 @@ export interface UseChatMessagesProps {
    * the transcript shows only the conversation. Defaults to false (off).
    */
   hideToolAndThinking?: boolean
+  /**
+   * #7365 (review round 2) — whether the active session's LAST turn has
+   * actually ended, i.e. the server-authoritative `isIdle` flag (#4639) — the
+   * same one `isSessionBusy` already reads. The end-of-turn summary is gated
+   * on this for the trailing turn only (every earlier — `turnBoundary`-marked
+   * — turn has, by construction, already ended): per the issue's own wording
+   * ("at turn end"), and because rendering it for a still-running turn made
+   * its list position unstable (it kept re-anchoring to the transcript tail
+   * as more content streamed in). Defaults to `true` — a caller with no live
+   * turn at all (`TranscriptViewer`'s closed conversations) has nothing
+   * "still running" by definition.
+   */
+  isSessionIdle?: boolean
+  /**
+   * #7365 (review round 3, Critical #1) — which signal delimits a turn for
+   * the end-of-turn summary, chosen EXPLICITLY by the caller (never inferred
+   * from "no `turnBoundary` marks present" — a live session before its first
+   * `result` has none either, and must not be mistaken for the other
+   * source). Defaults to `'marker'`: the live chat path's `result`-stamped
+   * `turnBoundary` messages. `TranscriptViewer` passes `'user_input'`
+   * explicitly — its data source (the raw on-disk Claude Code JSONL
+   * transcript) never carries a `result` entry at all, so `'marker'` mode
+   * would find zero boundaries in it. See
+   * `@chroxy/store-core`'s `permission-turn-summary.ts` for the full
+   * rationale for each mode.
+   */
+  turnBoundarySource?: TurnBoundarySource
 }
 
 export interface UseChatMessagesResult {
@@ -71,6 +102,13 @@ export interface UseChatMessagesResult {
    * prompts; the stall chip carries the retry affordance instead.
    */
   stalledPromptIds: Set<string>
+  /**
+   * #7365 — synthetic `permission-expired-summary` row id -> the turn's
+   * aggregated expired-permission payload, for the `renderMessage` lookup
+   * (mirrors `chatToolGroupPayloads`'s shape). Empty when no turn in the
+   * transcript has an expired-unanswered permission prompt.
+   */
+  permissionExpiredSummaries: Map<string, ExpiredPermissionTurnSummary>
 }
 
 // Re-export so existing dashboard call sites (App.tsx imports
@@ -79,7 +117,13 @@ export interface UseChatMessagesResult {
 export { toChatViewMessage }
 
 export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesResult {
-  const { storeMessages, streamingMessageId, hideToolAndThinking = false } = props
+  const {
+    storeMessages,
+    streamingMessageId,
+    hideToolAndThinking = false,
+    isSessionIdle = true,
+    turnBoundarySource = 'marker',
+  } = props
 
   const result = useMemo(
     () => buildChatViewMessages(storeMessages, streamingMessageId, { hideToolAndThinking }),
@@ -89,12 +133,54 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // Destructure to drop `displayGroups` (dashboard uses the flattened
   // `chatMessages` path; only mobile consumes displayGroups directly).
   const {
-    chatMessages,
+    chatMessages: baseChatMessages,
     chatToolGroupPayloads,
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
   } = result
+
+  // #7365 — dashboard-only: splice a synthetic summary row after any
+  // COMPLETED turn that contains an expired-unanswered permission prompt.
+  // Turns are delimited by `turnBoundary`-marked messages (stamped by
+  // `case 'result'` in message-handler.ts, live and replayed alike — see
+  // `@chroxy/store-core`'s `turn-boundaries.ts`), not by `user_input`
+  // position — a send-while-busy queued follow-up's row is ordinary content
+  // wherever it lands, permanently, so `stillQueuedMessageIds` (round 1's
+  // fix) is gone: it only ever covered the WINDOW before a flush, and the
+  // position-based split it patched over was unsound after one regardless.
+  //
+  // Recomputed on every `storeMessages` (or `isSessionIdle`) change — a fresh
+  // `Date.now()` per derivation, not a ticking interval. This is NOT full
+  // parity with the per-prompt marker's countdown: `PermissionPrompt.tsx`
+  // reads a `now` it ticks every second itself, so its "Timed out" label can
+  // flip a few seconds before this memo re-runs (it only re-runs when
+  // `storeMessages`/`isSessionIdle` actually change reference, which in
+  // practice follows soon after — either the server's own
+  // `permission_expired` frame, which mutates the message, or any other
+  // store update in an active session). Low-impact lag, not a guarantee;
+  // called out here rather than overclaimed. Mirrors the same tradeoff
+  // `derivePendingPermissionCounts` already accepts for the "live pending"
+  // badge.
+  //
+  // `chatTailMessageId` is deliberately NOT recomputed from the spliced rows:
+  // it identifies the last REAL content row (for ToolGroup/ToolBubble's
+  // `isTail` expand-state and the stream-stall retry button), and shifting it
+  // to a synthetic summary row would silently collapse a trailing tool group
+  // the moment its turn's permission expired.
+  const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
+    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), isSessionIdle, turnBoundarySource)
+    if (summaries.length === 0) {
+      return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
+    }
+    const { rows, payloads } = insertPermissionExpiredSummaryRows(
+      baseChatMessages,
+      summaries,
+      storeMessages,
+      chatToolGroupPayloads,
+    )
+    return { chatMessages: rows, permissionExpiredSummaries: payloads }
+  }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle, turnBoundarySource])
 
   return {
     chatMessages,
@@ -102,5 +188,6 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
+    permissionExpiredSummaries,
   }
 }

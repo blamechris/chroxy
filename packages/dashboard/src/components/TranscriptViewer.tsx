@@ -30,7 +30,7 @@
  *    prompt, or spawn a session — only `onClose` and `onRetry` (re-fetch).
  */
 import { useCallback } from 'react'
-import type { ChatMessage } from '@chroxy/store-core'
+import type { ChatMessage, ExpiredPermissionTurnSummary } from '@chroxy/store-core'
 import { Modal } from './Modal'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ToolGroup } from './ToolGroup'
@@ -38,6 +38,7 @@ import { ToolBubble } from './ToolBubble'
 import { CompactionMarker } from './CompactionMarker'
 import { EvaluatorRewriteBanner } from './EvaluatorPrompts'
 import { McpPromptExpansionMarker } from './McpPromptExpansionMarker'
+import { PermissionExpiredSummary } from './PermissionExpiredSummary'
 import { useChatMessages } from '../hooks/useChatMessages'
 import type { TranscriptViewerState } from '../store/types'
 import './TranscriptViewer.css'
@@ -61,12 +62,32 @@ export function transcriptRenderMessage(
   chatToolGroupPayloads: Map<string, { messages: ChatMessage[]; isActive: boolean }>,
   chatTailMessageId: string | null,
   storeMsgMap: Map<string, ChatMessage>,
+  permissionExpiredSummaries?: Map<string, ExpiredPermissionTurnSummary>,
 ) {
   if (msg.type === 'tool_group') {
     const payload = chatToolGroupPayloads.get(msg.id)
     if (!payload) return null
     // A closed conversation has no in-flight activity — always inactive.
     return <ToolGroup messages={payload.messages} isActive={false} isTail={msg.id === chatTailMessageId} />
+  }
+  // #7365 — the end-of-turn expired-permission summary is purely
+  // presentational (no live decision, unlike PermissionPrompt/QuestionPrompt),
+  // so a closed conversation gets it too: whether a turn ran without a tool
+  // it asked for is exactly the kind of thing worth seeing when reviewing a
+  // finished transcript, and the jump link is a harmless no-op here (the
+  // read-only view renders permission prompts as plain text, not the
+  // interactive `PermissionPrompt` whose `perm-desc-<requestId>` anchor the
+  // link targets).
+  if (msg.type === 'permission-expired-summary') {
+    const summary = permissionExpiredSummaries?.get(msg.id)
+    if (!summary || summary.requestIds.length === 0) return null
+    return (
+      <PermissionExpiredSummary
+        count={summary.count}
+        tools={summary.tools}
+        firstRequestId={summary.requestIds[0]!}
+      />
+    )
   }
   const storeMsg = storeMsgMap.get(msg.id)
   if (!storeMsg) return null
@@ -105,14 +126,23 @@ export function transcriptRenderMessage(
 export function TranscriptViewer({ conversationId, status, messages, error, onClose, onRetry }: TranscriptViewerProps) {
   // Same pure pipeline the live session view uses (filter system events,
   // group contiguous tool runs, flatten) — reuse, not a fork.
-  const { chatMessages, chatToolGroupPayloads, chatTailMessageId, storeMsgMap } = useChatMessages({
+  const { chatMessages, chatToolGroupPayloads, chatTailMessageId, storeMsgMap, permissionExpiredSummaries } = useChatMessages({
     storeMessages: messages,
     streamingMessageId: null,
+    // #7365 (review round 3, Critical #1) — this data source is the raw
+    // on-disk Claude Code JSONL transcript (jsonl-reader.js), which never
+    // carries a `result` entry, so the default 'marker' mode would find zero
+    // turnBoundary marks and collapse the whole conversation into one
+    // summary. 'user_input' position is sound here specifically because
+    // this is Claude Code's own log of what the CLI/SDK actually did, not
+    // chroxy's queue bookkeeping — see permission-turn-summary.ts's doc.
+    turnBoundarySource: 'user_input',
   })
 
   const renderMessage = useCallback(
-    (msg: ChatViewMessage) => transcriptRenderMessage(msg, chatToolGroupPayloads, chatTailMessageId, storeMsgMap),
-    [chatToolGroupPayloads, chatTailMessageId, storeMsgMap],
+    (msg: ChatViewMessage) =>
+      transcriptRenderMessage(msg, chatToolGroupPayloads, chatTailMessageId, storeMsgMap, permissionExpiredSummaries),
+    [chatToolGroupPayloads, chatTailMessageId, storeMsgMap, permissionExpiredSummaries],
   )
 
   return (
