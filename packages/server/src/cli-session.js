@@ -238,15 +238,16 @@ export class CliSession extends BaseSession {
     // as a single chunk once its content_block finalizes (see
     // `_captureFinalizedToolInput`, called from `content_block_stop`) —
     // matches byok-session.js's wire shape/client handler exactly so
-    // store-core's `handleToolInputDelta` needs no provider branch, even
-    // though (per #8135) cli-session.js does NOT stream raw per-chunk
-    // `input_json_delta` partials the way byok-session.js does — a
+    // store-core's `handleToolInputDelta` needs no provider branch.
+    // Per #8135/#8137, NEITHER cli-session.js NOR byok-session.js
+    // streams raw per-chunk `input_json_delta` partials any more — a
     // secret can straddle chunk boundaries and can't be sanitized
-    // mid-stream, so this only ever emits once, already-safe. Without
-    // listing it here, `session-manager.js`'s `_wireSessionEvents` never
-    // bridges the local EventEmitter emit onto the `session_event`
-    // channel and it never reaches the client (same wiring requirement
-    // documented on byok-session.js's `customEvents`).
+    // mid-stream, so both providers only ever emit once, already-safe.
+    // Without listing it here, `session-manager.js`'s
+    // `_wireSessionEvents` never bridges the local EventEmitter emit
+    // onto the `session_event` channel and it never reaches the client
+    // (same wiring requirement documented on byok-session.js's
+    // `customEvents`).
     return ['respawn_exhausted', 'tool_input_delta']
   }
 

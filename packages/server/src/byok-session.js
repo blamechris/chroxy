@@ -1290,39 +1290,24 @@ export class ClaudeByokSession extends BaseSession {
               }
               break
             }
-            case 'tool_input_delta': {
-              // #4080: stream the partial JSON to the dashboard so the
-              // tool-call bubble can live-preview the model's evolving
-              // input (especially valuable for Bash, where users can
-              // early-abort once they see a destructive `command`
-              // forming). The translator only carries the block index;
-              // resolve to toolUseId via the per-stream map we populated
-              // on tool_start.
-              const toolUseId = typeof t.index === 'number'
-                ? this._streamingIndexToToolUseId.get(t.index)
-                : undefined
-              if (!toolUseId) {
-                // Delta for a content block that wasn't a tool_use
-                // (text deltas already went through stream_delta) or
-                // for an index we never saw a start for (SDK reorder /
-                // malformed event). Drop quietly — the accepted shape
-                // for partial input is "may not arrive."
-                break
-              }
-              if (this._pendingPermissionToolUseIds.has(toolUseId)) {
-                // A permission prompt is pending for this exact
-                // toolUseId — suppress the delta so the bubble doesn't
-                // flicker between "running…" and partial-input while
-                // the user is mid-decision. See constructor comment.
-                break
-              }
-              this.emit('tool_input_delta', {
-                messageId,
-                toolUseId,
-                partialJson: t.partial,
-              })
+            case 'tool_input_delta':
+              // #8137: the SDK's raw `input_json_delta` chunks are
+              // deliberately NOT forwarded — a secret can straddle chunk
+              // boundaries (e.g. "export TOKEN=sk-" in one delta,
+              // "ant-api03-…" in the next), and mid-stream partial JSON
+              // generally isn't valid JSON, so it can't be parsed to run
+              // `sanitizeToolInput`'s structured key/value passes over it
+              // either. Matches the #8135 fix already applied to
+              // cli-session.js / sdk-session.js: the sanitized FULL input
+              // is instead delivered once, as a single `tool_input_delta`,
+              // right after `stream.finalMessage()` resolves below — see
+              // the loop over `toolBlocks` a few dozen lines down. Was
+              // previously forwarded raw here (pre-#8137); see also the
+              // now-unused-for-forwarding `_streamingIndexToToolUseId` /
+              // `_pendingPermissionToolUseIds` machinery, kept for
+              // `content_block_stop` bookkeeping and the finalized-emission
+              // suppression check below.
               break
-            }
             case 'content_block_stop':
               // #4080: free the per-index slot as soon as the block
               // finishes so a long turn's map doesn't grow unbounded.
@@ -1401,6 +1386,56 @@ export class ClaudeByokSession extends BaseSession {
         // tool_use blocks for the next round of conversation.
         this._history.push({ role: 'assistant', content: final.content })
 
+        // Computed once — reused below both for the finalized
+        // tool_input_delta emission (#8137) and, if the round proceeds
+        // past the stop_reason check, for tool execution.
+        const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
+
+        // #8137: deliver the SANITIZED full input for every tool_use
+        // block as a single `tool_input_delta`, now that
+        // `stream.finalMessage()` has resolved and the complete, parsed
+        // input is known. This REPLACES the raw per-chunk
+        // `input_json_delta` forwarding removed from the
+        // `tool_input_delta` case above — a secret can straddle chunk
+        // boundaries and mid-stream partial JSON can't be sanitized, so
+        // the safe delivery point is "sanitize the complete parsed
+        // value, then send it once" (mirrors the #8135 fix already
+        // applied to cli-session.js's `_captureFinalizedToolInput` /
+        // sdk-session.js's `_handleToolUseBlock`). Runs through
+        // `_recordToolInput` (base-session.js), the same #6029
+        // `sanitizeToolInput` floor already applied on the
+        // permission_request path — BYOK never populates
+        // `_inFlightToolStarts`, so the tracking half of
+        // `_recordToolInput` is a no-op here, but the sanitize call
+        // always runs. Emitted before the `lastStopReason` check below
+        // so the client sees the tool's input even in the
+        // (should-never-happen) case where the API pairs tool_use
+        // content with a non-tool_use stop_reason.
+        for (const block of toolBlocks) {
+          const toolUseId = block?.id
+          if (!toolUseId) continue
+          if (this._pendingPermissionToolUseIds.has(toolUseId)) {
+            // Defensive — mirrors the pre-#8137 per-chunk suppression
+            // (see the constructor comment on
+            // `_pendingPermissionToolUseIds`). Today permission gating
+            // for this toolUseId can't start until AFTER this point in
+            // the same round (`_processToolBlocks` runs later, below),
+            // so this branch is unreachable in production; kept in case
+            // a future refactor requests permission before a round's
+            // tool inputs are surfaced.
+            continue
+          }
+          const sanitizedInput = this._recordToolInput(toolUseId, block.input ?? null)
+          // `null`/`undefined` means "known to have no input" — don't
+          // ship a literal "null" chunk for it (mirrors sdk-session.js).
+          if (sanitizedInput === null || sanitizedInput === undefined) continue
+          this.emit('tool_input_delta', {
+            messageId,
+            toolUseId,
+            partialJson: JSON.stringify(sanitizedInput),
+          })
+        }
+
         if (lastStopReason !== 'tool_use') {
           // Done — model wants no more tools. Break out and emit result.
           break
@@ -1438,7 +1473,6 @@ export class ClaudeByokSession extends BaseSession {
         // 'Interrupted' tool_result (same #4061 invariant). If it trips
         // mid-execution, the shared AbortSignal propagates to
         // executeBuiltinTool and any in-flight tool aborts cleanly.
-        const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
         const toolResults = await this._processToolBlocks({ toolBlocks, messageId })
         if (toolResults.length === 0) {
           // stop_reason was tool_use but no tool_use blocks — defensive
