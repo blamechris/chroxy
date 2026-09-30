@@ -476,7 +476,18 @@ CARGO_CUR="$CARGO_CURRENT" CARGO_NEW="$NEW_VERSION" awk '
 ' "$CARGO_TOML" > "$CARGO_TOML.tmp" && mv "$CARGO_TOML.tmp" "$CARGO_TOML"
 # Verify the replacement succeeded — scope check to [package] section to avoid false-passing
 # on a dependency that happens to share the same version string
-CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"" || true)
+# The expected line is compared as a literal prefix in awk, with the version
+# read from ENVIRON. It used to be a grep regex built from $NEW_VERSION: a
+# value that passed the line-based format check but carried a newline and a
+# long tail (the #7907 padded-argument test) became a ~100KB pattern that GNU
+# grep exhausted memory compiling, which is how the Linux CI runner died.
+CARGO_VERIFY=$(CARGO_NEW="$NEW_VERSION" awk '
+  BEGIN { want = "version = \"" ENVIRON["CARGO_NEW"] "\"" }
+  /^\[package\]/ { f = 1; next }
+  /^\[/ { f = 0 }
+  f && index($0, want) == 1 { n++ }
+  END { print n + 0 }
+' "$CARGO_TOML")
 if [ "$CARGO_VERIFY" -ne 1 ]; then
   echo "Error: Failed to update version in $CARGO_TOML [package] section" >&2
   exit 1
