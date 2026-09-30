@@ -455,6 +455,15 @@ function stripAppliedToItsOwnReturnValue(code) {
   const callRe = /stripInheritedChroxySecrets\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g
   let m
   while ((m = callRe.exec(code))) {
+    // Skip the helper's own DEFINITION (`function stripInheritedChroxySecrets(env) {`,
+    // or a method of that name): its body ends in `return env`, which would
+    // otherwise satisfy the check for the whole file before the real call
+    // site is ever looked at (review on #8140).
+    let before = m.index
+    while (before > 0 && /\s/.test(code[before - 1])) before -= 1
+    let after = callRe.lastIndex
+    while (after < code.length && /\s/.test(code[after])) after += 1
+    if (wordEndingAt(code, before) === 'function' || code[after] === '{') continue
     const ident = m[1]
     const fnEnd = enclosingFunctionEnd(scopes, m.index, code.length)
     const region = code.slice(callRe.lastIndex, fnEnd)
@@ -636,6 +645,26 @@ function buildEnv() {
 }
 `
     assert.ok(!stripAppliedToItsOwnReturnValue(src), 'a return that re-merges raw process.env must be rejected')
+  })
+
+  it("rejects decoy (a) in the file that DEFINES the helper — the definition's own `return env` must not count", () => {
+    // utils/spawn-env.js both defines stripInheritedChroxySecrets (whose body
+    // returns its argument) and calls it. The definition's signature matched
+    // the call regex first, and its `return env` satisfied the check before
+    // the real, re-merging call site was reached.
+    const src = `
+export function stripInheritedChroxySecrets(env) {
+  delete env.API_TOKEN
+  return env
+}
+
+export function buildSpawnEnv() {
+  const env = { ...process.env }
+  stripInheritedChroxySecrets(env)
+  return { ...process.env, ...env }
+}
+`
+    assert.ok(!stripAppliedToItsOwnReturnValue(src), 'the helper definition must not satisfy the check for a re-merging call site')
   })
 
   it('rejects decoy (a) with the spread order flipped — the re-merge is not fixed by spreading the stripped copy last', () => {
