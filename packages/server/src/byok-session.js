@@ -372,23 +372,16 @@ export class ClaudeByokSession extends BaseSession {
     // pair" — not "one warn per current model."
     this._pricingWarnedModels = new Set()
 
-    // #4080: Per-stream index→toolUseId map. Populated on
-    // `content_block_start` with `block.type === 'tool_use'` (where the
-    // SDK emits both the block index and the tool_use id) and queried on
-    // `tool_input_delta`, which only carries the index. Entry is deleted
-    // on `content_block_stop` so the map stays small even on multi-tool
-    // turns. The full map is cleared after the for-await loop in case
-    // the stream terminated without emitting a final stop for every
-    // block — kept inside the session (not the translator) per #4059's
-    // boundary call: the translator stays pure, stateful tracking lives
-    // here.
-    this._streamingIndexToToolUseId = new Map()
-
-    // #6756: per-stream index → thinking messageId, mirroring the toolUseId map
-    // above. The translated `thinking_delta` events carry only the block index;
-    // this maps each thinking block's index to the distinct thinking id we open
-    // on its first delta so subsequent deltas + the content_block_stop route
-    // correctly. Cleared alongside `_streamingIndexToToolUseId`.
+    // #6756: per-stream index → thinking messageId. The translated
+    // `thinking_delta` events carry only the block index; this maps each
+    // thinking block's index to the distinct thinking id we open on its first
+    // delta so subsequent deltas + the content_block_stop route correctly.
+    // Entry is deleted on `content_block_stop`; the whole map is also cleared
+    // after each round and on every turn exit path. Kept inside the session
+    // (not the translator) per #4059's boundary call: the translator stays
+    // pure, stateful tracking lives here. (#8137 removed the matching
+    // index→toolUseId map: tool input is now read off `final.content`, so
+    // nothing resolves a streaming index back to a tool_use id any more.)
     this._streamingIndexToThinkingId = new Map()
 
     // #6391 (chat-redesign footer-stat): thinking messageId → performance.now()
@@ -1282,55 +1275,24 @@ export class ClaudeByokSession extends BaseSession {
                 tool: t.toolName,
                 input: null,
               })
-              // #4080: track index→toolUseId so the upcoming
-              // tool_input_delta events (which only carry the index)
-              // can be re-tagged with the toolUseId before re-emit.
-              if (typeof t.index === 'number' && t.toolUseId) {
-                this._streamingIndexToToolUseId.set(t.index, t.toolUseId)
-              }
               break
             }
-            case 'tool_input_delta': {
-              // #4080: stream the partial JSON to the dashboard so the
-              // tool-call bubble can live-preview the model's evolving
-              // input (especially valuable for Bash, where users can
-              // early-abort once they see a destructive `command`
-              // forming). The translator only carries the block index;
-              // resolve to toolUseId via the per-stream map we populated
-              // on tool_start.
-              const toolUseId = typeof t.index === 'number'
-                ? this._streamingIndexToToolUseId.get(t.index)
-                : undefined
-              if (!toolUseId) {
-                // Delta for a content block that wasn't a tool_use
-                // (text deltas already went through stream_delta) or
-                // for an index we never saw a start for (SDK reorder /
-                // malformed event). Drop quietly — the accepted shape
-                // for partial input is "may not arrive."
-                break
-              }
-              if (this._pendingPermissionToolUseIds.has(toolUseId)) {
-                // A permission prompt is pending for this exact
-                // toolUseId — suppress the delta so the bubble doesn't
-                // flicker between "running…" and partial-input while
-                // the user is mid-decision. See constructor comment.
-                break
-              }
-              this.emit('tool_input_delta', {
-                messageId,
-                toolUseId,
-                partialJson: t.partial,
-              })
+            case 'tool_input_delta':
+              // #8137: the SDK's raw `input_json_delta` chunks are
+              // deliberately NOT forwarded — a secret can straddle chunk
+              // boundaries (e.g. "export TOKEN=sk-" in one delta,
+              // "ant-api03-…" in the next), and mid-stream partial JSON
+              // generally isn't valid JSON, so it can't be parsed to run
+              // `sanitizeToolInput`'s structured key/value passes over it
+              // either. Matches the #8135 fix already applied to
+              // cli-session.js / sdk-session.js: the sanitized FULL input
+              // is instead delivered once, as a single `tool_input_delta`,
+              // right after `stream.finalMessage()` resolves below — see
+              // the loop over `toolBlocks` a few dozen lines down. Was
+              // previously forwarded raw here (pre-#8137).
               break
-            }
             case 'content_block_stop':
-              // #4080: free the per-index slot as soon as the block
-              // finishes so a long turn's map doesn't grow unbounded.
-              // Safe to delete even if index isn't in the map — that
-              // just means we never tracked this block (text) and the
-              // lookup is a no-op.
               if (typeof t.index === 'number') {
-                this._streamingIndexToToolUseId.delete(t.index)
                 // #6756 — close the thinking stream for this block so the
                 // client finalises its "Thinking… → Thought" label.
                 const thinkingId = this._streamingIndexToThinkingId.get(t.index)
@@ -1374,11 +1336,10 @@ export class ClaudeByokSession extends BaseSession {
         // #4080: defensive cleanup. content_block_stop should have
         // drained every entry above, but if the stream ended on an
         // error path or the SDK ever skips the stop event for a
-        // block, the map would leak across rounds and a later
-        // tool_input_delta for index N could pick up a STALE
-        // toolUseId from the previous round. Clear here so each round
-        // starts with an empty per-stream map.
-        this._streamingIndexToToolUseId.clear()
+        // block, a thinking entry would leak across rounds and a later
+        // delta for index N could route to a STALE thinking id from the
+        // previous round. Clear here so each round starts with empty
+        // per-stream maps.
         this._streamingIndexToThinkingId.clear()
         this._thinkingStartMs.clear()
         lastStopReason = final.stop_reason
@@ -1400,6 +1361,56 @@ export class ClaudeByokSession extends BaseSession {
         // Append the assistant turn — full content array preserves
         // tool_use blocks for the next round of conversation.
         this._history.push({ role: 'assistant', content: final.content })
+
+        // Computed once — reused below both for the finalized
+        // tool_input_delta emission (#8137) and, if the round proceeds
+        // past the stop_reason check, for tool execution.
+        const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
+
+        // #8137: deliver the SANITIZED full input for every tool_use
+        // block as a single `tool_input_delta`, now that
+        // `stream.finalMessage()` has resolved and the complete, parsed
+        // input is known. This REPLACES the raw per-chunk
+        // `input_json_delta` forwarding removed from the
+        // `tool_input_delta` case above — a secret can straddle chunk
+        // boundaries and mid-stream partial JSON can't be sanitized, so
+        // the safe delivery point is "sanitize the complete parsed
+        // value, then send it once" (mirrors the #8135 fix already
+        // applied to cli-session.js's `_captureFinalizedToolInput` /
+        // sdk-session.js's `_handleToolUseBlock`). Runs through
+        // `_recordToolInput` (base-session.js), the same #6029
+        // `sanitizeToolInput` floor already applied on the
+        // permission_request path — BYOK never populates
+        // `_inFlightToolStarts`, so the tracking half of
+        // `_recordToolInput` is a no-op here, but the sanitize call
+        // always runs. Emitted before the `lastStopReason` check below
+        // so the client sees the tool's input even in the
+        // (should-never-happen) case where the API pairs tool_use
+        // content with a non-tool_use stop_reason.
+        for (const block of toolBlocks) {
+          const toolUseId = block?.id
+          if (!toolUseId) continue
+          if (this._pendingPermissionToolUseIds.has(toolUseId)) {
+            // Defensive — mirrors the pre-#8137 per-chunk suppression
+            // (see the constructor comment on
+            // `_pendingPermissionToolUseIds`). Today permission gating
+            // for this toolUseId can't start until AFTER this point in
+            // the same round (`_processToolBlocks` runs later, below),
+            // so this branch is unreachable in production; kept in case
+            // a future refactor requests permission before a round's
+            // tool inputs are surfaced.
+            continue
+          }
+          const sanitizedInput = this._recordToolInput(toolUseId, block.input ?? null)
+          // `null`/`undefined` means "known to have no input" — don't
+          // ship a literal "null" chunk for it (mirrors sdk-session.js).
+          if (sanitizedInput === null || sanitizedInput === undefined) continue
+          this.emit('tool_input_delta', {
+            messageId,
+            toolUseId,
+            partialJson: JSON.stringify(sanitizedInput),
+          })
+        }
 
         if (lastStopReason !== 'tool_use') {
           // Done — model wants no more tools. Break out and emit result.
@@ -1438,7 +1449,6 @@ export class ClaudeByokSession extends BaseSession {
         // 'Interrupted' tool_result (same #4061 invariant). If it trips
         // mid-execution, the shared AbortSignal propagates to
         // executeBuiltinTool and any in-flight tool aborts cleanly.
-        const toolBlocks = (final.content || []).filter((b) => b?.type === 'tool_use')
         const toolResults = await this._processToolBlocks({ toolBlocks, messageId })
         if (toolResults.length === 0) {
           // stop_reason was tool_use but no tool_use blocks — defensive
@@ -1652,12 +1662,11 @@ export class ClaudeByokSession extends BaseSession {
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after
       // finalMessage() above runs on the success path; an iteration or
-      // finalMessage() throw skips it and would leak stale
-      // index→toolUseId entries into the next turn (mis-tagging the
-      // next stream's tool_input_delta events). Clearing here drains
-      // them on every exit path — success, error, abort, hard timeout.
-      // Safe to call when already empty.
-      this._streamingIndexToToolUseId.clear()
+      // finalMessage() throw skips it and would leak stale per-index
+      // entries into the next turn (mis-routing the next stream's
+      // thinking deltas). Clearing here drains them on every exit path
+      // — success, error, abort, hard timeout. Safe to call when
+      // already empty.
       this._streamingIndexToThinkingId.clear()
       this._thinkingStartMs.clear()
       this._finishTurn()
@@ -2876,7 +2885,6 @@ export class ClaudeByokSession extends BaseSession {
     // #4080: same-rationale teardown — both maps are bounded by the
     // active stream / outstanding permission count, but any external
     // reference (test capture, future export) would keep them alive.
-    this._streamingIndexToToolUseId.clear()
     this._streamingIndexToThinkingId.clear()
     this._thinkingStartMs.clear()
     this._pendingPermissionToolUseIds.clear()
