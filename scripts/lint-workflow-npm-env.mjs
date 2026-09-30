@@ -67,7 +67,12 @@
  * `npm ci --omit=dev` went from `added 66 packages, and audited 67 packages in
  * 4s` (run 33951308582) to `added 66 packages in 1s` (run 33952673042) with no
  * change inside the action. A reusable workflow would NOT inherit it, and this
- * repo calls none — `grep -rn 'uses: \./' .github/workflows/` is empty.
+ * repo calls none — `grep -rnE '^ {8}uses: \./' .github/workflows/` finds only
+ * the step-level `uses: ./.github/actions/ensure-ripgrep` in ci.yml and
+ * release.yml (#8160), and that composite action runs no npm install of its
+ * own — it only shells out to `apt-get`/`rg` — so it needs no env of its own
+ * either; it inherits whatever the calling workflow already set, per the
+ * composite-inherits-workflow-env property this comment already established.
  *
  * WHY QUOTED "false" AND NOT BARE `false`
  * ---------------------------------------

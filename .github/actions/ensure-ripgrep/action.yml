@@ -34,7 +34,7 @@ runs:
     # sudo, so the sudo branch is the one taken there; the no-sudo branch
     # covers a root/container runner (a local `act` run, or a self-hosted
     # container runner).
-    - name: Ensure ripgrep is installed (required by the #7295 execution proof)
+    - name: "Ensure ripgrep is installed (required by the #7295 execution proof)"
       shell: bash
       run: |
         if command -v rg >/dev/null 2>&1; then rg --version | head -1; exit 0; fi
@@ -43,4 +43,13 @@ runs:
         else
           apt-get update && apt-get install -y ripgrep
         fi
+        # Independent of `set -o pipefail`: composite `shell: bash` steps run
+        # with pipefail today, which is what makes `rg --version | head -1`
+        # below fail the step if the install silently produced no working rg —
+        # but that behavior is bash's default job control, not something this
+        # step controls, so this check does not rely on it either way.
+        command -v rg >/dev/null 2>&1 || {
+          echo '::error::ripgrep install failed; the #7295/#7978 proofs cannot run'
+          exit 1
+        }
         rg --version | head -1

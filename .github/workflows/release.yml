@@ -70,7 +70,7 @@ jobs:
       # again. packages/server/tests/ci-ripgrep-prerequisite.test.js fails the
       # build if any workflow job that runs the server test suite stops calling
       # it.
-      - name: Ensure ripgrep is installed (required by the #7295 execution proof)
+      - name: "Ensure ripgrep is installed (required by the #7295 execution proof)"
         uses: ./.github/actions/ensure-ripgrep
 
       - name: Test server

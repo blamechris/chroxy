@@ -290,8 +290,9 @@ function findOnPath(name) {
 const RG_PATH = findOnPath('rg')
 
 describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the floor floors it', {
-  // ripgrep is installed on the Linux/macOS Server Tests legs (ci.yml, #7295),
-  // not on the Windows runner.
+  // ripgrep is installed via `uses: ./.github/actions/ensure-ripgrep` (#7295,
+  // #8160) on every Linux server-test leg — ci.yml's Server Tests AND
+  // release.yml's Test Suite — not on the Windows runner.
   skip: process.platform === 'win32' ? 'ripgrep oracle runs on the POSIX legs' : false,
 }, () => {
   // Gitignored secrets — the barrier an include glob overrides. The first group
@@ -313,7 +314,7 @@ describe('#7978 ORACLE: whenever real ripgrep reads a secret for a glob, the flo
   before(() => {
     if (!RG_PATH) {
       if (process.env.CI) {
-        assert.fail('ripgrep is not installed on this CI runner, so the #7978 oracle did not run. Install it in the Server Tests job (see #7295).')
+        assert.fail('ripgrep is not installed on this CI runner, so the #7978 oracle did not run. Install it via `uses: ./.github/actions/ensure-ripgrep` (see #7295, #8160).')
       }
       // Leave `root` unset: every test below then skips itself with its own
       // `t.skip()`. The hook cannot skip them (#8100): a before() hook's
