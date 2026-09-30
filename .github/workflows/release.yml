@@ -61,6 +61,18 @@ jobs:
         run: npm run lint
         working-directory: packages/server
 
+      # #8160: v0.11.1's tag exists but was never published — this job ran
+      # `npm test` in packages/server on the same ubuntu-24.04 image as ci.yml's
+      # Server Tests job, but without the ripgrep prerequisite that job carries,
+      # so the #7295 execution proof and the #7978 oracle hard-failed here every
+      # time. Shared with ci.yml via ONE composite action
+      # (.github/actions/ensure-ripgrep) so the two jobs cannot drift apart
+      # again. packages/server/tests/ci-ripgrep-prerequisite.test.js fails the
+      # build if any workflow job that runs the server test suite stops calling
+      # it.
+      - name: Ensure ripgrep is installed (required by the #7295 execution proof)
+        uses: ./.github/actions/ensure-ripgrep
+
       - name: Test server
         run: npm test
         working-directory: packages/server

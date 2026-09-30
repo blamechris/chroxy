@@ -1,0 +1,46 @@
+name: Ensure ripgrep
+description: >-
+  Installs ripgrep if it is not already on PATH. Required by the #7295 Grep
+  argv-injection execution proof (tests/built-in-tools/grep-argv-injection.test.js)
+  and the #7978 oracle (tests/permission-floor-grep-glob.test.js), both of which
+  hard-fail in CI when rg is missing rather than skip — a skip would let
+  "ripgrep is missing" silently read as "nothing to check"
+  (docs/false-safety-guards.md).
+#
+# #8160 — this used to be a hand-copied step in ci.yml's Server Tests job only.
+# release.yml's Test Suite ran the same `npm test` on the same ubuntu-24.04
+# image WITHOUT it, so the two-copy version was never actually two copies: one
+# workflow had the step and the other didn't, and nothing enforced that they
+# agree. v0.11.1's tag exists but was never published because of exactly that
+# gap. Sharing ONE definition, used by every workflow job that runs the server
+# test suite, makes that drift structurally impossible instead of merely
+# prohibited — the same move CLAUDE.md's `runner-target` job and `npmcache`
+# output made for the self-hosted/hosted routing rule.
+#
+# packages/server/tests/ci-ripgrep-prerequisite.test.js fails the build if any
+# such job stops calling this action (or a documented exemption is not on
+# record) — see that file for the discovery rule and the Windows exemption.
+runs:
+  using: composite
+  steps:
+    # #7295: the Grep argv-injection proof SPAWNS ripgrep and asserts it does
+    # not execute a `--pre=` preprocessor. A string assertion cannot stand in
+    # for that — the whole point is that rg's own option parser is the thing
+    # under test. The test FAILS (not skips) when rg is missing and CI is set,
+    # so this step is what keeps that from reddening the job: absent it,
+    # "cannot check" and "checked" were the same green, which is the second
+    # recurring cause in docs/false-safety-guards.md. A GitHub-hosted
+    # ubuntu-24.04 runner runs the job as a non-root user with passwordless
+    # sudo, so the sudo branch is the one taken there; the no-sudo branch
+    # covers a root/container runner (a local `act` run, or a self-hosted
+    # container runner).
+    - name: Ensure ripgrep is installed (required by the #7295 execution proof)
+      shell: bash
+      run: |
+        if command -v rg >/dev/null 2>&1; then rg --version | head -1; exit 0; fi
+        if command -v sudo >/dev/null 2>&1; then
+          sudo apt-get update && sudo apt-get install -y ripgrep
+        else
+          apt-get update && apt-get install -y ripgrep
+        fi
+        rg --version | head -1

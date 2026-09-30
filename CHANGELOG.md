@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`release.yml`'s Test Suite now installs ripgrep before running the server
+  tests, from the same definition `ci.yml`'s Server Tests job uses (#8160).**
+  Merging #8157 cut the `v0.11.1` tag and dispatched `release.yml` (run
+  36669663799); Test Suite failed with ten hard failures, all of them "ripgrep
+  is not installed on this CI runner" from
+  `tests/built-in-tools/grep-argv-injection.test.js` (#7295) and the #7978
+  oracle in `tests/permission-floor-grep-glob.test.js` — both are deliberate
+  CI hard-fails, not skips, so a green log was never possible without rg. Every
+  downstream job was skipped as a result, so **the `v0.11.1` tag exists but was
+  never published**: no GitHub release, no `ghcr.io/blamechris/chroxy:0.11.1`
+  image, no desktop artifacts. The two jobs now share one composite action,
+  `.github/actions/ensure-ripgrep`, so they cannot drift apart again, and
+  `packages/server/tests/ci-ripgrep-prerequisite.test.js` fails the build if
+  any workflow job that runs the server test suite stops calling it (Windows
+  is the one documented exemption — its two rg-dependent test files already
+  skip themselves on `win32`). The next release cuts `v0.11.2` with this fix
+  included.
+
 - **`scripts/bump-version.sh` now passes every path and the version string to
   `node -e` through the environment instead of splicing them into JS program
   text (#7237).** Every `node -e "..."` block — reading the current version,
