@@ -31,11 +31,12 @@
 //
 // Exit code 0 = the artifacts are safe to publish. Non-zero = do not publish.
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { classifyDoctorOutput } from './lib/classify-doctor-output.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const KEEP = process.argv.includes('--keep')
@@ -138,12 +139,26 @@ try {
     } catch (err) {
       fail(`chroxy --version did not run: ${String(err.stderr || err.message).split('\n')[0]}`)
     }
-    try {
-      const doc = run(bin, ['doctor'], { env })
-      if (/All checks passed/.test(doc)) pass('chroxy doctor came up clean')
-      else fail(`chroxy doctor did not report success:\n${doc.split('\n').slice(-6).join('\n')}`)
-    } catch (err) {
-      fail(`chroxy doctor did not run: ${String(err.stderr || err.message).split('\n')[0]}`)
+    // #8165: `chroxy doctor` ALWAYS fails two required binary checks on the
+    // hosted release runner (ubuntu-24.04 has neither `cloudflared` nor the
+    // default claude-tui provider's `claude`), so requiring doctor's own
+    // "All checks passed" line made this gate permanently red for a reason
+    // unrelated to whether the package we just installed actually works.
+    // spawnSync (not execFileSync/run) so a nonzero exit is data, not a
+    // throw — doctor's real output is what tells us whether the failure is
+    // one of those two known-missing binaries or something that actually
+    // matters. See classify-doctor-output.mjs for the pass/fail contract.
+    const doctorResult = spawnSync(bin, ['doctor'], { env, encoding: 'utf8' })
+    // `.error` is set when the process never launched at all (e.g. ENOENT) —
+    // stdout/stderr are then empty, so fold it in or the diagnostic below
+    // would print nothing useful about why.
+    const doctorOutput = `${doctorResult.stdout || ''}${doctorResult.stderr || ''}${doctorResult.error ? `\n${doctorResult.error}` : ''}`
+    const verdict = classifyDoctorOutput(doctorOutput)
+    if (verdict.ok) {
+      pass('chroxy doctor came up clean (Node.js + Dependencies OK; any other FAIL was a binary this runner never installs)')
+    } else {
+      fail(`chroxy doctor: ${verdict.reasons.join('; ')}`)
+      console.error(`\n  ----- chroxy doctor output -----\n${doctorOutput.split('\n').map((l) => `  ${l}`).join('\n')}\n  --------------------------------\n`)
     }
   }
 

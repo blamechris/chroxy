@@ -1803,6 +1803,13 @@ jobs:
       - name: Run check-release-pr-subject.mjs tests
         run: node scripts/__tests__/check-release-pr-subject.test.mjs
 
+      - name: Run classify-doctor-output.mjs tests
+        # #8165 — the pure classifier scripts/verify-publish-artifacts.mjs uses
+        # to decide whether `chroxy doctor` failing on the hosted release
+        # runner (which has neither cloudflared nor a provider CLI) is the
+        # known, tolerated shape or a real defect.
+        run: node scripts/__tests__/classify-doctor-output.test.mjs
+
       - name: Every hand-rolled harness goes red when its cases stop running
         # #7653 — eleven of the repo's sixteen hand-rolled harnesses printed
         # their normal summary with every counter at zero and exited 0: "all

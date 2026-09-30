@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`release.yml`'s `verify-artifacts` gate can now actually pass on the hosted
+  runner, and nothing publishes ahead of it (#8165).** `scripts/verify-publish-artifacts.mjs`
+  required `chroxy doctor` to print "All checks passed", but ubuntu-24.04 has
+  neither `cloudflared` nor the default claude-tui provider's `claude` binary,
+  so doctor always failed those two checks there and the gate could never go
+  green — meanwhile `docker` and the desktop builds needed only `test`, so a
+  release could push the GHCR image (and move its floating `:{major}.{minor}`
+  tag) while verification failed and `github-release` was skipped: a partial
+  publish. Doctor now runs via `spawnSync` (a nonzero exit is data, not a
+  throw) and its output is classified by a new pure `classifyDoctorOutput()`
+  (`scripts/lib/classify-doctor-output.mjs`): the `Node.js` and `Dependencies`
+  rows must be OK, and any `FAIL` row is tolerated only when it is a missing
+  binary (`Not found — <hint>`, cloudflared or a provider CLI) — anything else
+  still fails the gate. `docker`, `desktop-macos`, and `desktop-windows` now
+  each also `needs: verify-artifacts`, and a new workflow-structure test
+  (`packages/server/tests/release-verify-artifacts-gate.test.js`) pins that
+  every job performing a publish action (a Docker push, the GitHub Release
+  upload) transitively needs it.
+
 - **`scripts/bump-version.sh` now rewrites `@chroxy/*` dependency ranges inside
   `package-lock.json`'s workspace entries too, not just the manifests (#8159).**
   The script already re-pointed every workspace `package.json`'s `@chroxy/*`
