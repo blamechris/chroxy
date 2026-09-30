@@ -259,7 +259,7 @@ node -e '
     if (!fs.existsSync(f)) continue;
     const pkg = JSON.parse(fs.readFileSync(f, "utf-8"));
     let changed = false;
-    for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
+    for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
       for (const dep of Object.keys(pkg[field] || {})) {
         if (!dep.startsWith("@chroxy/")) continue;
         if (pkg[field][dep] === range) continue;
