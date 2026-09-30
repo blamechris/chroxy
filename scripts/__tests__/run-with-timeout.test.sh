@@ -18,7 +18,10 @@
 #   2. it returns 124 on a timeout (scripts/docker-image-smoke.sh's own
 #      `import_rc -ne 124` check relies on this exact convention);
 #   3. the perl fallback path specifically works, forced by a PATH with
-#      neither `timeout` nor `gtimeout` on it.
+#      neither `timeout` nor `gtimeout` on it — including its own exit-code
+#      passthrough, proven separately from the 0/124 cases above so a perl
+#      implementation that always exits 0 on a normal completion cannot pass
+#      by accident (#8145 review).
 #
 # No external test framework — same zero-dep convention as
 # docker-entrypoint.test.sh / bump-version.test.sh.
@@ -36,7 +39,7 @@ LIB="$REPO_ROOT/scripts/lib/run-with-timeout.sh"
 # Every case below must run. Without this, a harness whose cases stop
 # executing prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and
 # "no case executed" are the same observable outcome (#7653).
-EXPECTED_CASES=7
+EXPECTED_CASES=8
 
 PASS=0
 FAIL=0
@@ -131,6 +134,18 @@ if [ "$rc" = "0" ]; then
   pass "perl fallback: returns 0 for a command that exits 0"
 else
   fail "perl fallback: returns 0 for a command that exits 0" "got rc='$rc' out='$out'"
+fi
+
+# Exit-code PASSTHROUGH under the perl fallback specifically, not just the
+# 0/124 cases above: a perl implementation that (for example) always
+# `exit`ed 0 on a normal, non-timed-out completion would still pass both of
+# those, since neither uses a nonzero, non-timeout exit code (#8145 review).
+out=$(env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 5 bash -c 'exit 7'"; echo "rc=$?")
+rc="${out##*rc=}"
+if [ "$rc" = "7" ]; then
+  pass "perl fallback: returns the command's own exit code (7), not 0 or a fixed value"
+else
+  fail "perl fallback: returns the command's own exit code (7), not 0 or a fixed value" "got rc='$rc' out='$out'"
 fi
 
 start=$(date +%s)

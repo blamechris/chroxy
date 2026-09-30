@@ -32,8 +32,25 @@ import { compareSemver } from '../src/utils/binary-version.js'
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
 
-/** Matches every occurrence in a file's text, not just the first. */
-const PIN_RE = /ARG\s+CLAUDE_CODE_VERSION=([^\s]+)/g
+/**
+ * Matches every occurrence in a file's text, not just the first. Case-
+ * insensitive: Dockerfile instructions are case-insensitive per the spec
+ * (`docker build` accepts `arg claude_code_version=...` exactly as it
+ * accepts `ARG CLAUDE_CODE_VERSION=...`), and a pin spelled in a case this
+ * regex did not expect must still be floored rather than silently skipped
+ * (#8145 review).
+ *
+ * ANCHORED to the start of a line (only leading whitespace before `ARG`),
+ * not a bare substring search — going case-insensitive without this anchor
+ * makes `arg` inside prose match too: the sidecar Dockerfile's own usage
+ * comment, `#   docker build --build-arg CLAUDE_CODE_VERSION=x.y.z .`,
+ * contains the substring "arg CLAUDE_CODE_VERSION=x.y.z" (from
+ * "--build-ARG"), which an unanchored case-insensitive `PIN_RE` reads as a
+ * pin of literal version "x.y.z" — caught by this test itself going red
+ * against the real tree the moment the `i` flag was added, before the anchor
+ * was.
+ */
+const PIN_RE = /^\s*ARG\s+CLAUDE_CODE_VERSION=([^\s]+)/gim
 
 /**
  * Every tracked path matching `*Dockerfile*`, via `git ls-files`. NUL-
@@ -93,6 +110,20 @@ describe('every ARG CLAUDE_CODE_VERSION pin meets CLAUDE_SDK_MIN_CLI_VERSION (#8
     )
   })
 
+  it('each of the two known Dockerfiles carries >=1 pin, not just the total', () => {
+    // A total-only assertion is satisfiable by ONE file losing its pin
+    // entirely as long as another still has some — e.g. the root Dockerfile
+    // dropping its `ARG CLAUDE_CODE_VERSION=` line (a rename, a refactor that
+    // moves the version elsewhere) would leave the total at 1 (the sidecar's)
+    // and this whole suite would stay green while the root image silently
+    // stopped being floored (#8145 review).
+    const pins = allPins()
+    for (const file of ['Dockerfile', 'packages/server/sidecar/Dockerfile']) {
+      const count = pins.filter((p) => p.file === file).length
+      assert.ok(count >= 1, `${file} carries zero ARG CLAUDE_CODE_VERSION= pins (found: ${JSON.stringify(pins)})`)
+    }
+  })
+
   it('every discovered pin is >= CLAUDE_SDK_MIN_CLI_VERSION', () => {
     const pins = allPins()
     const below = pins.filter((p) => compareSemver(p.version, CLAUDE_SDK_MIN_CLI_VERSION) < 0)
@@ -111,5 +142,12 @@ describe('every ARG CLAUDE_CODE_VERSION pin meets CLAUDE_SDK_MIN_CLI_VERSION (#8
     assert.ok(compareSemver('2.1.140', '2.1.141') < 0)
     assert.ok(compareSemver('2.1.141', '2.1.141') === 0)
     assert.ok(compareSemver('2.1.280', '2.1.141') > 0)
+    // Cross-width pairs: a naive string/lexical comparison (rather than a
+    // real per-component numeric one) gets these backwards — "2.1.99" sorts
+    // AFTER "2.1.141" lexically (9 > 1 at the first differing character),
+    // and "2.1.1000" sorts BEFORE "2.1.999" the same way. Both directions are
+    // exactly the shape a version floor must never get wrong (#8145 review).
+    assert.ok(compareSemver('2.1.99', '2.1.141') < 0)
+    assert.ok(compareSemver('2.1.1000', '2.1.999') > 0)
   })
 })

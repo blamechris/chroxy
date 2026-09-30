@@ -1,26 +1,57 @@
+# Declared ONCE, above the first FROM, and re-declared bare (no default) in
+# each stage that needs it (#8145 review) — Docker's documented pattern for a
+# single value shared across stages. The old shape — a second, INDEPENDENT
+# `ARG` default for this same name inside the final stage — could drift from
+# this one with no build error, which is exactly the defect class this pin
+# exists to prevent one layer up (docs/false-safety-guards.md): the LABEL and
+# the verified binary could silently disagree. It is also why only ONE
+# assignment of this ARG's default may exist anywhere in this file: Renovate's
+# regex manager and packages/server/tests/dockerfile-claude-version-floor.
+# test.js's PIN_RE both key off that literal spelling (name, then bare `=`,
+# then a value with no space), and a bare re-declaration below has no `=` to
+# match.
+ARG CLAUDE_CODE_VERSION=2.1.280
+
 FROM node:22-slim AS claude-cli
 
-# Pinned, signature-verified Claude Code CLI for the final image (#8145). This
-# stage downloads one exact release straight from Anthropic's release bucket
-# and verifies it before the final stage ever sees it:
-#   1. the GPG key that signs releases is fetched and its fingerprint is
-#      checked against the pin below — an unpinned `gpg --import` would trust
-#      whatever key the download happened to return;
-#   2. the release manifest and its detached signature are downloaded and
-#      `gpg --verify`d against that key;
-#   3. the manifest's own `version` field must equal the pin (catches a
+# Pinned, signature-verified Claude Code CLI for the final image (#8145).
+# This stage downloads one exact release straight from Anthropic's release
+# bucket and verifies it before the final stage ever sees it:
+#   1. the GPG key that signs releases is fetched, imported into a throwaway
+#      keyring, and its fingerprint is checked against the pin below — an
+#      unpinned `gpg --import` would trust whatever key the download
+#      happened to return;
+#   2. the checked key is re-exported, BY FINGERPRINT, into its own
+#      single-key keyring file. This step is the fix for a real bypass
+#      (#8170 review, reproduced twice): the downloaded `claude-code.asc` is
+#      not guaranteed to hold only one key — an attacker controlling the
+#      download can APPEND a second key to it. Checking that the pinned
+#      fingerprint is present SOMEWHERE in an imported keyring, then
+#      verifying with `gpg --verify` against that WHOLE keyring, accepts a
+#      signature from either key: the pin was checked, but nothing then
+#      stopped the OTHER key from signing. Exporting just the one fingerprint
+#      into its own file, and verifying with `gpgv --keyring` against THAT
+#      file, cannot accept a signature from any key but the one just checked.
+#   3. the release manifest and its detached signature are downloaded and
+#      verified with `gpgv` against that single-key keyring — never
+#      `gpg --verify`, which trusts every key in whatever keyring it is
+#      pointed at;
+#   4. the manifest's own `version` field must equal the pin (catches a
 #      substituted or off-channel manifest slipping past a valid signature);
-#   4. the platform binary is downloaded and checked against the manifest's
+#   5. the platform binary is downloaded and checked against the manifest's
 #      sha256 checksum.
 # Every step fails the build on mismatch — no `|| true`, no silent fallback.
 # curl/ca-certificates/gnupg are installed ONLY in this throwaway stage; the
-# final image never gets a GPG toolchain.
+# final image never gets a GPG toolchain. `gpgv` ships in the same `gnupg`
+# apt package as `gpg` — no extra install — and is used deliberately in place
+# of `gpg --verify --assert-signer`, which needs gnupg >=2.4.1; this image's
+# base (Debian bookworm) ships 2.2.40.
 #
 # Docs: https://code.claude.com/docs/en/setup, "Binary integrity and code
 # signing" — key URL, fingerprint and manifest/signature layout below are
 # taken from there (confirmed 2026-09-30).
-ARG CLAUDE_CODE_VERSION=2.1.280
-ARG CLAUDE_CODE_SIGNING_KEY_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
+ARG CLAUDE_CODE_VERSION
+ARG CLAUDE_CODE_SIGNING_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -42,27 +73,38 @@ RUN set -eu; \
     esac; \
     echo "$PLATFORM" > /claude-cli/platform
 
-# Fetch the release signing key into a throwaway keyring and refuse to
-# proceed unless its fingerprint is EXACTLY the pinned one.
+# Fetch the release signing key into a throwaway keyring, confirm the pinned
+# fingerprint is present, then re-export JUST that key (by fingerprint) into
+# its own single-key keyring file — see the stage header for why "the pin is
+# present somewhere in the download" is not the same claim as "only the
+# pinned key can sign".
 ENV GNUPGHOME=/claude-cli/gnupg
 RUN set -eu; \
     mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"; \
-    curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /claude-cli/claude-code.asc; \
+    curl --proto '=https' --tlsv1.2 -fsSL https://downloads.claude.ai/keys/claude-code.asc -o /claude-cli/claude-code.asc; \
     gpg --batch --import /claude-cli/claude-code.asc; \
     FPR="$(gpg --batch --with-colons --fingerprint security@anthropic.com \
       | awk -F: '/^fpr:/ { print $10; exit }')"; \
-    if [ "$FPR" != "$CLAUDE_CODE_SIGNING_KEY_FPR" ]; then \
-      echo "claude-cli: release key fingerprint mismatch: got '$FPR', expected '$CLAUDE_CODE_SIGNING_KEY_FPR'" >&2; \
+    if [ "$FPR" != "$CLAUDE_CODE_SIGNING_FPR" ]; then \
+      echo "claude-cli: release key fingerprint mismatch: got '$FPR', expected '$CLAUDE_CODE_SIGNING_FPR'" >&2; \
       exit 1; \
     fi; \
-    echo "claude-cli: key fingerprint OK: $FPR"
+    echo "claude-cli: key fingerprint OK: $FPR"; \
+    gpg --batch --export "$FPR" > /claude-cli/release-key.gpg; \
+    if [ ! -s /claude-cli/release-key.gpg ]; then \
+      echo "claude-cli: exporting the pinned key produced an empty keyring file" >&2; \
+      exit 1; \
+    fi
 
-# Fetch the signed release manifest and verify it against that key.
+# Fetch the signed release manifest and verify it against ONLY the pinned key
+# — gpgv, not `gpg --verify`: gpgv trusts nothing beyond the exact --keyring
+# file it is given, so a second key anywhere in the download tree cannot
+# vouch for anything here.
 RUN set -eu; \
     REPO=https://downloads.claude.ai/claude-code-releases; \
-    curl -fsSL "$REPO/${CLAUDE_CODE_VERSION}/manifest.json" -o /claude-cli/manifest.json; \
-    curl -fsSL "$REPO/${CLAUDE_CODE_VERSION}/manifest.json.sig" -o /claude-cli/manifest.json.sig; \
-    gpg --batch --verify /claude-cli/manifest.json.sig /claude-cli/manifest.json
+    curl --proto '=https' --tlsv1.2 -fsSL "$REPO/${CLAUDE_CODE_VERSION}/manifest.json" -o /claude-cli/manifest.json; \
+    curl --proto '=https' --tlsv1.2 -fsSL "$REPO/${CLAUDE_CODE_VERSION}/manifest.json.sig" -o /claude-cli/manifest.json.sig; \
+    gpgv --keyring /claude-cli/release-key.gpg /claude-cli/manifest.json.sig /claude-cli/manifest.json
 
 # The manifest's own top-level version must equal the pin: a signature check
 # alone would happily pass on a correctly-signed manifest for the WRONG
@@ -79,7 +121,7 @@ RUN set -eu; \
 RUN set -eu; \
     PLATFORM="$(cat /claude-cli/platform)"; \
     REPO=https://downloads.claude.ai/claude-code-releases; \
-    curl -fsSL "$REPO/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude" -o /claude-cli/claude; \
+    curl --proto '=https' --tlsv1.2 -fsSL "$REPO/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude" -o /claude-cli/claude; \
     CHECKSUM="$(node -e "console.log(JSON.parse(require('fs').readFileSync('/claude-cli/manifest.json','utf8')).platforms['$PLATFORM'].checksum)")"; \
     echo "${CHECKSUM}  /claude-cli/claude" | sha256sum -c -; \
     chmod 0755 /claude-cli/claude
@@ -98,7 +140,7 @@ ARG CLOUDFLARED_VERSION=2026.2.0
 ARG CLOUDFLARED_SHA256_AMD64=176746db3be7dc7bd48f3dd287c8930a4645ebb6e6700f883fddda5a4c307c16
 ARG CLOUDFLARED_SHA256_ARM64=03c5d58e283f521d752dc4436014eb341092edf076eb1095953ab82debe54a8e
 RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" \
+    curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${ARCH}" \
       -o /usr/local/bin/cloudflared && \
     EXPECTED=$(eval echo "\$CLOUDFLARED_SHA256_$(echo $ARCH | tr a-z A-Z | tr - _)") && \
     echo "${EXPECTED}  /usr/local/bin/cloudflared" | sha256sum -c - && \
@@ -142,8 +184,10 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Pinned, signature-verified claude CLI (#8145) — built and verified in the
 # claude-cli stage above. Copied here, before USER chroxy, so it lands
-# root:root 0755 like the rest of /usr/local/bin.
-ARG CLAUDE_CODE_VERSION=2.1.280
+# root:root 0755 like the rest of /usr/local/bin. Bare re-declare of the
+# global ARG above the first FROM — see that declaration for why there is
+# only one line in this file that assigns CLAUDE_CODE_VERSION a value.
+ARG CLAUDE_CODE_VERSION
 COPY --from=claude-cli --chown=root:root --chmod=0755 /claude-cli/claude /usr/local/bin/claude
 
 # The image is immutable — a new claude version means a new image build, not

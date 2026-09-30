@@ -17,9 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `chroxy start` in the image failed preflight with `✗ claude: Not found`. A
   new `claude-cli` builder stage downloads one exact release straight from
   Anthropic's release bucket, verifies the release signing key's fingerprint,
-  `gpg --verify`s the signed manifest, checks the manifest's own version
-  against the pin, and checks the platform binary's sha256 against the
-  manifest before it is copied into the final image — every step fails the
+  re-exports that key BY FINGERPRINT into its own single-key keyring, and
+  verifies the signed manifest against ONLY that keyring with `gpgv`, not
+  `gpg --verify` — checking that the pinned fingerprint is present somewhere
+  in the downloaded key file and then verifying against the whole imported
+  keyring accepts a signature from *any* key in it, which is a real bypass an
+  attacker controlling the download could exploit by appending a second key
+  (found and reproduced during review). The manifest's own version is then
+  checked against the pin, and the platform binary's sha256 against the
+  manifest, before it is copied into the final image — every step fails the
   build on mismatch. `scripts/docker-image-smoke.sh` no longer passes
   `--skip-checks` to `start`, and now also checks that the image's own
   `claude --version` reports the pinned version. The sidecar Dockerfile's

@@ -32,8 +32,25 @@ run_with_timeout() {
     echo "run_with_timeout: usage: run_with_timeout SECS cmd [args...]" >&2
     return 2
   fi
-  secs="$1"
+  # `local`, not a bare global assignment: a caller may itself be named (or
+  # source another script that names) a global $secs, and a wrapper that
+  # clobbers the caller's variable is its own kind of bug (#8145 review).
+  local secs="$1"
   shift
+
+  # perl's `alarm()` only accepts a whole number of seconds — a non-numeric
+  # or fractional value does not raise an error, it silently numifies (e.g.
+  # "5abc" -> 5, "" -> 0, "-3" -> -3, arming an alarm for the wrong duration
+  # or none at all). Reject anything that is not a plain non-negative
+  # integer up front, in the wrapper itself, so every backend (`timeout`,
+  # `gtimeout`, perl) is handed the same validated value rather than each
+  # coping with — or silently mis-parsing — a bad one differently.
+  case "$secs" in
+    ''|*[!0-9]*)
+      echo "run_with_timeout: SECS must be a plain whole number of seconds, got '$secs'" >&2
+      return 2
+      ;;
+  esac
 
   if command -v timeout >/dev/null 2>&1; then
     timeout "$secs" "$@"
@@ -51,11 +68,21 @@ run_with_timeout() {
   fi
 
   # The perl fallback. fork()s the command, arms an alarm for the parent's
-  # wait, and on expiry SIGTERMs the child and exits 124 — GNU timeout's own
-  # exit code and default signal. Exec uses the indirect-object form
-  # (`exec { $cmd[0] } @cmd`) so argv[0] is set explicitly and no shell ever
-  # re-parses the arguments (unlike `exec "@cmd"`, which shells out through
-  # /bin/sh when given a single scalar containing spaces).
+  # wait, and on expiry SIGTERMs the child's WHOLE PROCESS GROUP and exits
+  # 124 — GNU timeout's own exit code and default signal. Exec uses the
+  # indirect-object form (`exec { $cmd[0] } @cmd`) so argv[0] is set
+  # explicitly and no shell ever re-parses the arguments (unlike
+  # `exec "@cmd"`, which shells out through /bin/sh when given a single
+  # scalar containing spaces).
+  #
+  # `setpgrp(0,0)` in the child, before exec, puts it in its OWN new process
+  # group (pgid == its own pid); `kill "TERM", -$pid` in the ALRM handler
+  # then signals that whole group, not just the one process. Without this, a
+  # bounded command that itself forks (a shell wrapper, `docker run`
+  # spawning a helper) can outlive the alarm: killing only $pid leaves its
+  # children running and the wait may never return, and the wrapper's own
+  # 124 contract would then depend on what the bounded command happened to
+  # fork, rather than being unconditional (#8145 review).
   perl -e '
     my ($secs, @cmd) = @ARGV;
     my $pid = fork();
@@ -64,13 +91,14 @@ run_with_timeout() {
       exit 1;
     }
     if ($pid == 0) {
+      setpgrp(0, 0);
       exec { $cmd[0] } @cmd;
       # exec only returns on failure (e.g. command not found).
       print STDERR "run_with_timeout: exec failed: $!\n";
       exit 127;
     }
     my $timed_out = 0;
-    local $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", $pid; };
+    local $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
     alarm($secs);
     waitpid($pid, 0);
     alarm(0);

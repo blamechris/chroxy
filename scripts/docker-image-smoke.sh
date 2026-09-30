@@ -184,12 +184,15 @@ claude_version_rc=$?
 set -e
 [ "$claude_version_rc" -ne 124 ] || fail "claude --version timed out after 30s inside $IMAGE"
 [ "$claude_version_rc" -eq 0 ] || fail "claude --version exited $claude_version_rc inside $IMAGE: $CLAUDE_VERSION_OUT"
-# Here-string, not `printf ... | grep -q`: this script sets pipefail, and a
-# producer piped into an early-exiting `grep -q` can SIGPIPE and report
-# "not found" for a needle that is genuinely present (#7907;
-# scripts/lint-no-pipe-into-grep-q.sh). A here-string hands grep the data
-# directly, so there is no separate writer process to race.
-grep -qF "$CLAUDE_LABEL_VERSION" <<<"$CLAUDE_VERSION_OUT" \
-  || fail "claude --version output did not contain the pinned version '$CLAUDE_LABEL_VERSION': $CLAUDE_VERSION_OUT"
+# EXACT first-token compare, not a substring match: `claude --version` prints
+# "X.Y.Z (Claude Code)", and a substring `grep -qF` against the pin would let
+# a label of "2.1.28" pass against a reported "2.1.280" (the shorter string is
+# contained in the longer one) — the opposite direction a version check must
+# never be wrong in (#8145 review). `${var%%[[:space:]]*}` takes everything
+# before the first whitespace, so a stray leading/trailing space in either
+# value cannot produce a false mismatch either.
+CLAUDE_VERSION_REPORTED="${CLAUDE_VERSION_OUT%%[[:space:]]*}"
+[ "$CLAUDE_VERSION_REPORTED" = "$CLAUDE_LABEL_VERSION" ] \
+  || fail "claude --version reported '$CLAUDE_VERSION_REPORTED', not the pinned '$CLAUDE_LABEL_VERSION': $CLAUDE_VERSION_OUT"
 
 echo "== claude CLI OK: $CLAUDE_VERSION_OUT"
