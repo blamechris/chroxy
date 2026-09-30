@@ -1575,8 +1575,8 @@ jobs:
 
   docker-image-smoke:
     # Not named `Docker Image`: release.yml already has a job by that name (it
-    # builds and pushes the image), and branch protection matches check names
-    # across workflows.
+    # builds, smokes, and pushes the image), and branch protection matches
+    # check names across workflows.
     name: Docker Image Smoke
     # #8133 — build the root Dockerfile and smoke-start the image. The image
     # shipped for months unable to start (the server's @chroxy/* workspace
@@ -1586,13 +1586,22 @@ jobs:
     # server imports resolves in the image, then that the entrypoint's `start`
     # passes the image's own HEALTHCHECK. It runs the same way locally.
     #
+    # #8150 (S5) — builds with the SAME pinned docker/build-push-action ref,
+    # load: true / push: false, that release.yml's docker job uses, instead of
+    # a plain `docker build`. That means the exact build+load path a release
+    # depends on is exercised on every PR that touches the image, not just at
+    # release time. packages/server/tests/release-docker-smoke-gate.test.js
+    # asserts both jobs' build steps stay in lockstep (same action ref, same
+    # load/push flags) and that both smoke invocations are the same pinned
+    # shape.
+    #
     # PR-only, like Renovate Config: `changes` runs on pull_request events
     # only, so a push to main skips this job.
     #
-    # Always GitHub-hosted: `docker build` needs a Docker daemon. GitHub's
+    # Always GitHub-hosted: building needs a Docker daemon. GitHub's
     # ubuntu-24.04 image ships one; the self-hosted pool is mixed (ARM64
     # members running as Docker containers on the Mac, plus an x86_64 VM), and
-    # nothing here establishes that its members can run `docker build`.
+    # nothing here establishes that its members can run a docker build.
     # ubuntu-24.04 is a standard label (free for this public repo, see
     # LONG JOBS ON GITHUB-HOSTED RUNNERS in the header).
     needs: changes
@@ -1602,8 +1611,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Build image
-        run: docker build -t chroxy:ci .
+      - name: Build image (local, unpushed)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: chroxy:ci
 
       - name: Smoke-start image
         run: bash scripts/docker-image-smoke.sh chroxy:ci

@@ -4,46 +4,61 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import yaml from 'js-yaml'
 import { readWorkflows } from './helpers/workflow-reader.js'
 
 /**
  * ci.yml's `changes` job hand-mirrors `.dockerignore`'s whitelist in its
- * `docker:` dorny/paths-filter list (#7196's `renovate` roster problem, #8150's
- * review nit N5).
+ * `docker:` dorny/paths-filter list (#7196's `renovate` roster problem,
+ * #8150's review nit N5).
  *
  * THE DEFECT. `.dockerignore` is whitelist-based (`*` excludes everything,
  * then `!packages/<x>/...` re-includes exactly what the image needs), and
- * `ci.yml`'s `docker:` filter lists `packages/server/**`, `packages/protocol/**`
- * and `packages/store-core/**` BY HAND to mirror it — a comment says so, but
- * nothing checks it. A package added to the image (a new `!packages/<x>/`
- * whitelist entry) with no matching filter entry means an edit to that new
- * package's `src/` never triggers `Docker Image Smoke` on the PR that changes
- * it. The reverse gap — a filter entry for a package `.dockerignore` never
- * ships — wastes CI on files that cannot affect the image, and silently
- * masks the day the roster was supposed to shrink instead.
+ * `ci.yml`'s `docker:` filter lists the same packages BY HAND to mirror it —
+ * a comment says so, but nothing checked it. A package added to the image
+ * with no matching filter entry means an edit to that new package's `src/`
+ * never triggers `Docker Image Smoke` on the PR that changes it. The
+ * reverse gap — a filter entry for a package `.dockerignore` never ships —
+ * wastes CI on files that cannot affect the image.
  *
  * THE INVARIANT, checked in BOTH directions (#7639's "a roster checked in
- * only one direction" — the same defect class four separate issues re-filed
- * before anyone read it as a missing invariant, this repo's own memory
- * records): every package `.dockerignore` whitelists has a matching
+ * only one direction" — the same defect class filed four times, once per
+ * job, before anyone read it as a missing invariant, per this repo's own
+ * memory): every package `.dockerignore` whitelists has a matching
  * `packages/<x>/**` filter entry, and every `packages/<x>/**` filter entry
  * names a package `.dockerignore` actually whitelists. Every OTHER
- * whitelisted path (`package.json`, `package-lock.json`,
- * `scripts/docker-entrypoint.sh`) is covered by some filter entry too, and
- * `Dockerfile` / `.dockerignore` themselves must be filter entries — an edit
- * to either changes what ships without touching any package tree at all.
+ * whitelisted path (`package.json`, `scripts/docker-entrypoint.sh`, ...) is
+ * covered by some filter entry too, and `Dockerfile` / `.dockerignore`
+ * themselves must be filter entries.
  *
- * FLOOR. A parser that silently found zero packages on either side would let
- * every rule below pass over an empty set (docs/false-safety-guards.md's
- * "filter whose terms match nothing" cause, #7503) — asserted directly,
- * never inferred from the real corpus alone.
+ * PARSING (#8150 review, S4): the `filters: |` value is a YAML document
+ * ITSELF, held as a string inside the outer workflow YAML — parsed with
+ * `js-yaml`'s `yaml.load`, once for the outer document and once more for
+ * the nested one, rather than a hand-rolled indentation scanner. A real
+ * parser accepts every YAML spelling of a list entry (plain, single- or
+ * double-quoted) without three copies of the same regex, and can't be
+ * fooled by a comment that merely quotes a filter entry in prose.
+ *
+ * NORMALISATION (#8150 review, S4b): `.dockerignore` can whitelist a package
+ * either with a trailing slash (`!packages/server/`) or without
+ * (`!packages/server`) — both name the same package and must land in the
+ * same bucket.
+ *
+ * FLOOR, NOT AN EXACT SET (#8150 review, S4d): the real package roster is
+ * NOT pinned here. PR #8151 is adding several new packages to BOTH sides at
+ * once, and a CONTROL that freezes today's three-package list would go red
+ * for a correct two-sided addition — the opposite of what this file exists
+ * to catch. `server` alone is pinned as a stable sentinel (the server
+ * package is not going away), alongside a floor that neither side parses to
+ * zero.
  */
 
-// ---- the pure rule, over already-parsed text -------------------------------
+// ---- the pure rule, over already-parsed YAML values ------------------------
 
 /**
  * `.dockerignore`'s whitelist (`!`-prefixed re-include lines), split into
- * package directories (`!packages/<x>/...`) and everything else.
+ * package directories (`!packages/<x>` or `!packages/<x>/...`, normalised to
+ * the same bucket regardless of a trailing slash) and everything else.
  *
  * @param {string} text Raw `.dockerignore` contents.
  * @returns {{packages: Set<string>, paths: Set<string>}}
@@ -56,7 +71,7 @@ export function parseDockerignoreWhitelist(text) {
     if (!line || line.startsWith('#')) continue
     if (!line.startsWith('!')) continue // only a re-include line is a WHITELIST entry
     const entry = line.slice(1)
-    const pkgMatch = /^packages\/([^/]+)\//.exec(entry)
+    const pkgMatch = /^packages\/([^/]+)(?:\/.*)?$/.exec(entry)
     if (pkgMatch) {
       packages.add(pkgMatch[1])
     } else {
@@ -67,81 +82,43 @@ export function parseDockerignoreWhitelist(text) {
 }
 
 /**
- * A `key:\n  <indent>...` YAML mapping key's block-scalar BODY lines — used
- * here for the dorny/paths-filter step's `filters: |` value, which is itself
- * a nested YAML document as a string. Not a general YAML parser: it collects
- * every line indented deeper than the key until the first line back at or
- * above the key's own indent, which is all a block scalar's body is.
- *
- * @param {string[]} bodyLines
- * @param {string} key
- * @returns {string[]}
- */
-function blockScalarBody(bodyLines, key) {
-  const keyRe = new RegExp(`^(\\s*)${key}:\\s*\\|\\s*(?:#.*)?$`)
-  const at = bodyLines.findIndex((l) => keyRe.test(l))
-  assert.notEqual(at, -1, `expected a '${key}: |' key`)
-  const keyIndent = keyRe.exec(bodyLines[at])[1].length
-  const lines = []
-  for (let i = at + 1; i < bodyLines.length; i++) {
-    const line = bodyLines[i]
-    if (/^\s*$/.test(line)) {
-      lines.push('')
-      continue
-    }
-    const indent = /^(\s*)/.exec(line)[1].length
-    if (indent <= keyIndent) break
-    lines.push(line)
-  }
-  return lines
-}
-
-/**
- * The `- '<entry>'` list items under one top-level category key (e.g.
- * `docker:`) inside a block-scalar body already extracted by
- * `blockScalarBody`.
- *
- * @param {string[]} blockLines
- * @param {string} category
- * @returns {string[]}
- */
-function categoryEntries(blockLines, category) {
-  const catRe = new RegExp(`^(\\s*)${category}:\\s*(?:#.*)?$`)
-  const at = blockLines.findIndex((l) => catRe.test(l))
-  assert.notEqual(at, -1, `expected a '${category}:' category in the filters block`)
-  const catIndent = catRe.exec(blockLines[at])[1].length
-  const entries = []
-  for (let i = at + 1; i < blockLines.length; i++) {
-    const line = blockLines[i]
-    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue // blank/comment: skip, don't end the category
-    const indent = /^(\s*)/.exec(line)[1].length
-    if (indent <= catIndent) break
-    const m = /^\s*-\s*'([^']*)'/.exec(line)
-    if (m) entries.push(m[1])
-  }
-  return entries
-}
-
-/**
  * ci.yml's `changes` job's `docker:` path-filter entries, split into package
- * globs (`packages/<x>/**`) and everything else — the same two buckets
- * `parseDockerignoreWhitelist` produces, so the two sides can be compared
- * directly.
+ * globs (`packages/<x>/**`, or bare `packages/<x>`) and everything else — the
+ * same two buckets `parseDockerignoreWhitelist` produces.
  *
- * @param {string[]} changesJobBody Raw body lines of the `changes` job.
+ * @param {string[]} entries The parsed `docker:` filter array.
  * @returns {{packages: Set<string>, paths: Set<string>}}
  */
-export function parseCiDockerFilter(changesJobBody) {
-  const filtersBlock = blockScalarBody(changesJobBody, 'filters')
-  const entries = categoryEntries(filtersBlock, 'docker')
+export function bucketDockerFilterEntries(entries) {
   const packages = new Set()
   const paths = new Set()
   for (const e of entries) {
-    const m = /^packages\/([^/]+)\/\*\*$/.exec(e)
+    const m = /^packages\/([^/]+)(?:\/.*)?$/.exec(e)
     if (m) packages.add(m[1])
     else paths.add(e)
   }
   return { packages, paths }
+}
+
+/**
+ * Parses ci.yml's `changes` job's dorny/paths-filter `filters:` value —
+ * itself a YAML document held as a string — and returns its `docker:`
+ * category's raw entry list.
+ *
+ * @param {object} ciDoc The js-yaml-parsed ci.yml document.
+ * @returns {string[]}
+ */
+export function dockerFilterEntriesFromCiDoc(ciDoc) {
+  const changesJob = ciDoc && ciDoc.jobs && ciDoc.jobs.changes
+  assert.ok(changesJob, "expected a 'changes' job in ci.yml")
+  const filterStep = (changesJob.steps || []).find((s) => typeof s.uses === 'string' && s.uses.includes('dorny/paths-filter'))
+  assert.ok(filterStep, "expected a dorny/paths-filter step in ci.yml's 'changes' job")
+  const filtersText = filterStep.with && filterStep.with.filters
+  assert.equal(typeof filtersText, 'string', "expected the paths-filter step's with.filters to be a string")
+  const filters = yaml.load(filtersText)
+  assert.ok(filters && typeof filters === 'object', 'expected filters: to parse to an object')
+  assert.ok(Array.isArray(filters.docker), "expected a 'docker:' category in the filters document")
+  return filters.docker
 }
 
 /**
@@ -185,8 +162,7 @@ export function dockerPathFilterIssues(dockerignore, filter) {
 /**
  * The shared floor: a parser that silently found zero packages on either
  * side would let `dockerPathFilterIssues` pass over an empty set. Asserted
- * directly rather than inferred from agreement alone — agreement over two
- * empty sets is not evidence of anything (#7503).
+ * directly rather than inferred from agreement alone (#7503).
  *
  * @param {{packages: Set<string>, paths: Set<string>}} dockerignore
  * @param {{packages: Set<string>, paths: Set<string>}} filter
@@ -209,18 +185,18 @@ describe("ci.yml's docker path filter mirrors .dockerignore's whitelist, in both
     const workflows = await readWorkflows()
     const ci = workflows.find((w) => w.name === 'ci.yml')
     assert.ok(ci, 'expected ci.yml among the scanned workflows')
-    const changesJob = ci.jobs.find((j) => j.id === 'changes')
-    assert.ok(changesJob, "expected a 'changes' job in ci.yml")
-    filter = parseCiDockerFilter(changesJob.body)
+    const ciDoc = yaml.load(ci.text)
+    const entries = dockerFilterEntriesFromCiDoc(ciDoc)
+    filter = bucketDockerFilterEntries(entries)
   })
 
   it('floor: neither side parses to zero packages', () => {
     assertNeitherSideIsEmpty(dockerignore, filter)
   })
 
-  it('CONTROL: the real roster is exactly {server, protocol, store-core} on both sides', () => {
-    assert.deepEqual([...dockerignore.packages].sort(), ['protocol', 'server', 'store-core'])
-    assert.deepEqual([...filter.packages].sort(), ['protocol', 'server', 'store-core'])
+  it("CONTROL: 'server' is present on both sides (a stable sentinel — NOT the full set, which #8151 is about to grow on both sides at once)", () => {
+    assert.ok(dockerignore.packages.has('server'), '.dockerignore should whitelist packages/server/')
+    assert.ok(filter.packages.has('server'), "ci.yml's docker filter should have a packages/server/** entry")
   })
 
   it('the roster agrees in both directions, plus every non-package whitelisted path', () => {
@@ -246,16 +222,16 @@ describe('dockerPathFilterIssues reports each shape it exists to find (#8150)', 
 
   it('reports a package whitelisted in .dockerignore with no matching filter entry', () => {
     const { dockerignore, filter } = sound()
-    dockerignore.packages.add('store-core')
+    dockerignore.packages.add('zz-mutant-not-a-package')
     const issues = dockerPathFilterIssues(dockerignore, filter)
-    assert.ok(issues.some((i) => /whitelists packages\/store-core\/ but.*no packages\/store-core\/\*\* entry/.test(i)), JSON.stringify(issues))
+    assert.ok(issues.some((i) => /whitelists packages\/zz-mutant-not-a-package\/ but.*no packages\/zz-mutant-not-a-package\/\*\* entry/.test(i)), JSON.stringify(issues))
   })
 
   it('reports a filter entry with no matching .dockerignore whitelist (the OTHER direction)', () => {
     const { dockerignore, filter } = sound()
-    filter.packages.add('foo')
+    filter.packages.add('zz-mutant-not-a-package')
     const issues = dockerPathFilterIssues(dockerignore, filter)
-    assert.ok(issues.some((i) => /docker filter has packages\/foo\/\*\* but \.dockerignore does not whitelist/.test(i)), JSON.stringify(issues))
+    assert.ok(issues.some((i) => /docker filter has packages\/zz-mutant-not-a-package\/\*\* but \.dockerignore does not whitelist/.test(i)), JSON.stringify(issues))
   })
 
   it('reports a non-package whitelisted path with no filter coverage', () => {
@@ -280,7 +256,7 @@ describe('dockerPathFilterIssues reports each shape it exists to find (#8150)', 
   })
 })
 
-describe('parseDockerignoreWhitelist / parseCiDockerFilter parse the real shapes (#8150)', () => {
+describe('parseDockerignoreWhitelist / bucketDockerFilterEntries parse the real shapes (#8150)', () => {
   it('parseDockerignoreWhitelist ignores exclusion lines and comments, and strips a trailing slash', () => {
     const text = [
       '*',
@@ -295,44 +271,96 @@ describe('parseDockerignoreWhitelist / parseCiDockerFilter parse the real shapes
     assert.deepEqual([...paths], ['package.json'])
   })
 
+  it('parseDockerignoreWhitelist normalises a package WITH and WITHOUT a trailing slash into the same bucket', () => {
+    const text = ['*', '!packages/protocol', '!packages/protocol/dist/'].join('\n')
+    const { packages } = parseDockerignoreWhitelist(text)
+    assert.deepEqual([...packages], ['protocol'])
+  })
+
   it('parseDockerignoreWhitelist counts each distinct package once even with multiple whitelist lines', () => {
     const text = ['*', '!packages/protocol/package.json', '!packages/protocol/dist/'].join('\n')
     const { packages } = parseDockerignoreWhitelist(text)
     assert.deepEqual([...packages], ['protocol'])
   })
 
-  it('parseCiDockerFilter reads entries past a comment between the category key and the list', () => {
-    const body = [
-      '        with:',
-      '          filters: |',
-      '            docker:',
-      '              # a comment between the key and its items',
-      "              - 'Dockerfile'",
-      "              - 'packages/server/**'",
-      '            renovate:',
-      "              - 'renovate.json'",
-    ]
-    const { packages, paths } = parseCiDockerFilter(body)
+  it('bucketDockerFilterEntries reads a bare packages/<x> entry (no glob suffix) into the package bucket', () => {
+    const { packages, paths } = bucketDockerFilterEntries(['Dockerfile', 'packages/server'])
     assert.deepEqual([...packages], ['server'])
     assert.deepEqual([...paths], ['Dockerfile'])
   })
 
-  it('parseCiDockerFilter does not read past the docker: category into a sibling category', () => {
-    const body = [
-      '          filters: |',
-      '            docker:',
-      "              - 'packages/server/**'",
-      '            renovate:',
-      "              - 'packages/should-not-count/**'",
-    ]
-    const { packages } = parseCiDockerFilter(body)
-    assert.deepEqual([...packages], ['server'])
+  // S4a: js-yaml must accept every spelling of a filter entry GitHub Actions
+  // YAML allows — plain, single-quoted, and double-quoted.
+  it('dockerFilterEntriesFromCiDoc reads plain, single-quoted, and double-quoted filter entries alike', () => {
+    const ciDoc = {
+      jobs: {
+        changes: {
+          steps: [
+            {
+              uses: 'dorny/paths-filter@v3',
+              with: {
+                filters: [
+                  'docker:',
+                  '  - Dockerfile',
+                  "  - 'packages/server/**'",
+                  '  - "packages/protocol/**"',
+                ].join('\n'),
+              },
+            },
+          ],
+        },
+      },
+    }
+    const entries = dockerFilterEntriesFromCiDoc(ciDoc)
+    assert.deepEqual(entries.sort(), ['Dockerfile', 'packages/protocol/**', 'packages/server/**'].sort())
+  })
+
+  it('dockerFilterEntriesFromCiDoc does not read past the docker: category into a sibling category', () => {
+    const ciDoc = {
+      jobs: {
+        changes: {
+          steps: [
+            {
+              uses: 'dorny/paths-filter@v3',
+              with: {
+                filters: ['docker:', "  - 'packages/server/**'", 'renovate:', "  - 'packages/should-not-count/**'"].join('\n'),
+              },
+            },
+          ],
+        },
+      },
+    }
+    const entries = dockerFilterEntriesFromCiDoc(ciDoc)
+    assert.deepEqual(entries, ['packages/server/**'])
+  })
+
+  it('a comment inside the nested filters: document is not data (js-yaml strips it, unlike a regex scan)', () => {
+    const ciDoc = {
+      jobs: {
+        changes: {
+          steps: [
+            {
+              uses: 'dorny/paths-filter@v3',
+              with: {
+                filters: ['docker:', '  # a comment naming packages/should-not-count/**', "  - 'packages/server/**'"].join('\n'),
+              },
+            },
+          ],
+        },
+      },
+    }
+    const entries = dockerFilterEntriesFromCiDoc(ciDoc)
+    assert.deepEqual(entries, ['packages/server/**'])
   })
 })
 
 /**
  * The WIRING, proven against mutated COPIES of the real `.dockerignore` and
- * `ci.yml` — never the real files.
+ * `ci.yml` — never the real files. Mutant names are OBVIOUSLY FICTIONAL
+ * (`zz-mutant-not-a-package`), never a real-looking package name — #8151 is
+ * adding real packages to this roster in the same window this PR lands in,
+ * and a mutant using a name that could become real is a test that silently
+ * changes meaning out from under itself (#8150 review, S4c).
  */
 describe('the rule reads the real .dockerignore and ci.yml (mutation proof, #8150)', () => {
   const dirs = []
@@ -356,8 +384,7 @@ describe('the rule reads the real .dockerignore and ci.yml (mutation proof, #815
     const occurrences = text.split(find).length - 1
     assert.equal(
       occurrences, 1,
-      `expected exactly 1 occurrence of ${JSON.stringify(find.slice(0, 80))}, found ${occurrences} — ` +
-        'the real file has drifted from what this mutant edits'
+      `expected exactly 1 occurrence of ${JSON.stringify(find.slice(0, 80))}, found ${occurrences} — the real file has drifted from what this mutant edits`
     )
     writeFileSync(target, text.replace(find, replace))
   }
@@ -368,9 +395,9 @@ describe('the rule reads the real .dockerignore and ci.yml (mutation proof, #815
     const workflows = await readWorkflows(pathToFileURL(`${join(dir, 'workflows')}/`))
     const ci = workflows.find((w) => w.name === 'ci.yml')
     assert.ok(ci, 'expected ci.yml among the scanned workflows in the mutated copy')
-    const changesJob = ci.jobs.find((j) => j.id === 'changes')
-    assert.ok(changesJob, "expected a 'changes' job in the mutated copy")
-    const filter = parseCiDockerFilter(changesJob.body)
+    const ciDoc = yaml.load(ci.text)
+    const entries = dockerFilterEntriesFromCiDoc(ciDoc)
+    const filter = bucketDockerFilterEntries(entries)
     return dockerPathFilterIssues(dockerignore, filter)
   }
 
@@ -379,21 +406,21 @@ describe('the rule reads the real .dockerignore and ci.yml (mutation proof, #815
     assert.deepEqual(await loadIssues(dir), [])
   })
 
-  it('goes RED when .dockerignore whitelists a new package the filter does not know about', async () => {
+  it('goes RED when .dockerignore whitelists a new (fictional) package the filter does not know about', async () => {
     const dir = freshCopy()
-    mutate(join(dir, '.dockerignore'), '!packages/store-core/dist/\n', '!packages/store-core/dist/\n!packages/dashboard/dist/\n')
+    mutate(join(dir, '.dockerignore'), '!packages/store-core/dist/\n', '!packages/store-core/dist/\n!packages/zz-mutant-not-a-package/dist/\n')
     const issues = await loadIssues(dir)
-    assert.ok(issues.some((i) => /whitelists packages\/dashboard\/ but.*no packages\/dashboard\/\*\* entry/.test(i)), JSON.stringify(issues))
+    assert.ok(issues.some((i) => /whitelists packages\/zz-mutant-not-a-package\/ but.*no packages\/zz-mutant-not-a-package\/\*\* entry/.test(i)), JSON.stringify(issues))
   })
 
-  it('goes RED when ci.yml\'s docker filter gains a package .dockerignore does not whitelist', async () => {
+  it("goes RED when ci.yml's docker filter gains a (fictional) package .dockerignore does not whitelist", async () => {
     const dir = freshCopy()
     mutate(
       join(dir, 'workflows', 'ci.yml'),
       "              - 'packages/store-core/**'\n",
-      "              - 'packages/store-core/**'\n              - 'packages/foo/**'\n"
+      "              - 'packages/store-core/**'\n              - 'packages/zz-mutant-not-a-package/**'\n"
     )
     const issues = await loadIssues(dir)
-    assert.ok(issues.some((i) => /docker filter has packages\/foo\/\*\* but \.dockerignore does not whitelist/.test(i)), JSON.stringify(issues))
+    assert.ok(issues.some((i) => /docker filter has packages\/zz-mutant-not-a-package\/\*\* but \.dockerignore does not whitelist/.test(i)), JSON.stringify(issues))
   })
 })

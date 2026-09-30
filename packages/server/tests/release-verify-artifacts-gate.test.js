@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readWorkflows, assertReaderSane } from './helpers/workflow-reader.js'
 import { DAEMON_ENTRY_MODULES } from '../../../scripts/lib/daemon-entry-modules.mjs'
+import { dangerousIfIssue, isPublishingJob, stripYamlComments } from './helpers/release-publish.js'
 
 /**
  * release.yml: every publishing job transitively needs verify-artifacts (#8165).
@@ -92,97 +93,27 @@ export function transitiveNeeds(jobsById, id, seen = new Set()) {
 }
 
 /**
- * Removes YAML comments before matching, QUOTE-AWARE: a `#` inside a
- * single- or double-quoted string is not a comment marker (`run: echo "a #
- * not a comment"` must keep its `#`), and — like real YAML — a `#` only
- * starts a comment when it is at the start of the line or preceded by
- * whitespace (`path: foo#bar` is left alone). A line that is ENTIRELY a
- * comment is truncated to (at most) its leading whitespace; a trailing
- * `  # comment` on an otherwise-real line is truncated to the code before
- * it. This is a small scanner, not a YAML parser — it tracks quote state
- * char-by-char for exactly this one decision, nothing more.
+ * `stripYamlComments`, the publish-detection regexes, `hasPublishingPermissions`
+ * and `isPublishingJob` all now live in `./helpers/release-publish.js`
+ * (#8150 review, S3) — shared with `release-docker-smoke-gate.test.js`,
+ * which needs the SAME "what counts as publishing" vocabulary one level
+ * down (per STEP rather than per job). Before the move, the two files'
+ * copies had already drifted: this file's `PUBLISH_RUN_RE` didn't recognise
+ * `docker image push`, the step-level one did. One shared module means one
+ * vocabulary.
  *
- * Why this matters here specifically (#8166 review): this repo's own
- * doctrine comments routinely narrate the very actions this file matches on
- * — `release.yml`'s `docker` job carries a comment reading "this job PUSHES
- * to GHCR (docker/build-push-action, push: true)" — so without stripping
- * comments first, a job whose REAL step was renamed or removed but whose
- * COMMENT still describes the old shape would satisfy `isPublishingJob`
- * anyway. That is the comment-stands-in-for-code failure
- * docs/false-safety-guards.md catalogues (#7290/#7291): the check must read
- * what runs, not what is said about what runs.
+ * Why comment-stripping matters here specifically (#8166 review), restated
+ * because the concrete example below has changed at least once already and
+ * will again: this repo's own doctrine comments routinely narrate the very
+ * actions this file matches on — release.yml's `docker` job header has
+ * repeatedly described its own build/smoke/push mechanics in prose (most
+ * recently for #8150) — so without stripping comments first, a job whose
+ * REAL step was renamed or removed but whose COMMENT still describes the
+ * old shape would satisfy `isPublishingJob` anyway. That is the
+ * comment-stands-in-for-code failure docs/false-safety-guards.md
+ * catalogues (#7290/#7291): the check must read what runs, not what is said
+ * about what runs.
  */
-function stripYamlComments(bodyLines) {
-  return bodyLines.map((line) => {
-    let inSingle = false
-    let inDouble = false
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i]
-      if (inSingle) {
-        if (c === "'") inSingle = false
-        continue
-      }
-      if (inDouble) {
-        if (c === '\\') { i++; continue } // skip the escaped character
-        if (c === '"') inDouble = false
-        continue
-      }
-      if (c === "'") { inSingle = true; continue }
-      if (c === '"') { inDouble = true; continue }
-      if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i)
-    }
-    return line
-  })
-}
-
-// Matched by the ACTION/COMMAND a step invokes, not by job id/name — a job
-// renamed away from "docker" is still caught, and a job merely named
-// "docker-setup" that pushes nothing is not swept in by coincidence.
-// Widened (#8166 review) beyond the two GitHub Actions this repo currently
-// uses, to the raw-CLI shapes a future job could plausibly use instead:
-// `docker push`, `docker buildx build ... --push`, `gh release
-// create/upload/edit`, and `npm`/`pnpm`/`yarn publish`.
-const PUBLISH_ACTION_RE = /docker\/build-push-action|softprops\/action-gh-release/
-const PUBLISH_RUN_RE = /\bdocker\s+push\b|\bgh\s+release\s+(?:create|upload|edit)\b|\b(?:npm|pnpm|yarn)\s+publish\b/
-const PUBLISH_BUILDX_PUSH_RE = /\bdocker\s+buildx\b[\s\S]{0,300}?--push\b/
-
-// A job whose OWN `permissions:` grant something that ONLY a publish-shaped
-// action would need is publishing even if its exact command isn't one of the
-// ones matched above (#8166 second review) — a future job could plausibly
-// use an action neither list anticipates, and least-privilege workflows
-// don't request `packages: write` for anything else. `write-all` subsumes
-// all of these. `contents: write` is broader than "publish" in general (it
-// also covers e.g. pushing a commit), but on a RELEASE workflow specifically
-// it is exactly github-release's own grant, and matches nothing else on the
-// real tree (verified: `test`/`verify-artifacts`/`desktop-macos`/
-// `desktop-windows` all declare `contents: read` only).
-const DANGEROUS_PERMISSION_RE = /^\s*(?:packages|contents|id-token):\s*write\s*$/
-
-/** True when `jobBody` (already comment-stripped) declares one of the
- * publish-shaped permissions above, at the job's own `permissions:` block
- * (4-space indent — not a step's, which doesn't exist as a concept here). */
-function hasPublishingPermissions(jobBody) {
-  const at = jobBody.findIndex((l) => /^ {4}permissions:/.test(l))
-  if (at === -1) return false
-  if (/write-all/.test(jobBody[at])) return true
-  for (let i = at + 1; i < jobBody.length; i++) {
-    const line = jobBody[i]
-    if (/^\s*$/.test(line)) continue
-    const indent = /^(\s*)/.exec(line)[1].length
-    if (indent <= 4) break
-    if (DANGEROUS_PERMISSION_RE.test(line)) return true
-  }
-  return false
-}
-
-/** True when `job`'s real (non-comment) step content invokes a publish-shaped
- * action or command, OR its own permissions grant is publish-shaped. */
-export function isPublishingJob(job) {
-  const code = stripYamlComments(job.body)
-  const codeText = code.join('\n')
-  return PUBLISH_ACTION_RE.test(codeText) || PUBLISH_RUN_RE.test(codeText) || PUBLISH_BUILDX_PUSH_RE.test(codeText)
-    || hasPublishingPermissions(code)
-}
 
 /**
  * A job's own job-level `if:` expression (4-space indent — a job body's own
@@ -215,19 +146,15 @@ function jobIf(jobBody) {
 
 // GitHub Actions' IMPLICIT gating — a job with `needs: [X]` only runs if
 // every dependency succeeded — is silently REPLACED the moment the job
-// declares its OWN `if:`. `always()`, `failure()`, and `cancelled()` (which
-// also covers the common `!cancelled()` spelling, a substring of it) are
-// functions that deliberately run a job even after an upstream failure —
-// exactly the shape that would let a publishing job push/release even
-// though verify-artifacts just failed, `needs:` entry notwithstanding.
-// `success() || <anything>` is the same hole by another route: `success()`
-// alone is the safe default, but OR-ing it with another condition widens the
-// gate right back open. Case-insensitive: GitHub Actions expressions are not
-// case-sensitive (`Always()`/`ALWAYS()` work exactly like `always()`), so a
-// case-sensitive check would miss a functionally identical spelling.
-// `success()` alone, or no `if:` at all (the default), are safe.
-const DANGEROUS_IF_RE = /\balways\(\)|\bfailure\(\)|\bcancelled\(\)|\bsuccess\(\)\s*\|\|/i
-
+// declares its OWN `if:`. `dangerousIfIssue` (shared with
+// release-docker-smoke-gate.test.js, `./helpers/release-publish.js`) requires
+// the SAFE form — absent, or exactly `success()` — rather than enumerating
+// unsafe function names, because enumerating them is operand-order-blind:
+// `if: X || success()`, `if: !success()` and `if: true || success()` all
+// used to pass the old `DANGEROUS_IF_RE`-based check, since none of them
+// spells `always()`/`failure()`/`cancelled()` and the old regex only ever
+// looked for `success()` immediately followed by `||` (#8150 review, C3).
+//
 /**
  * Every publishing job (or a job on its `needs:` closure) whose job-level
  * `if:` could let it run — and, for the publishing job itself, actually
@@ -245,7 +172,7 @@ export function publishingJobsWithDangerousIf(jobs) {
       const dep = byId.get(id)
       if (!dep) continue
       const ifExpr = jobIf(dep.body)
-      if (ifExpr && DANGEROUS_IF_RE.test(ifExpr)) {
+      if (ifExpr && dangerousIfIssue(ifExpr)) {
         findings.push(`${job.id} (via '${id}'s if: ${ifExpr})`)
         break
       }
@@ -520,7 +447,11 @@ describe('isPublishingJob detects real step content, never comments (#8166)', ()
 
   for (const [label, runLine] of [
     ['raw `docker push`', '      - run: docker push ghcr.io/blamechris/chroxy:0.11.2'],
+    ['`docker image push`', '      - run: docker image push ghcr.io/blamechris/chroxy:0.11.2'],
+    ['`docker manifest push`', '      - run: docker manifest push ghcr.io/blamechris/chroxy:0.11.2'],
+    ['`docker buildx imagetools create`', '      - run: docker buildx imagetools create -t ghcr.io/x:1 ghcr.io/x:1@sha256:abc'],
     ['`docker buildx ... --push`', '      - run: docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/x:1 --push .'],
+    ['`docker buildx ... --output type=registry`', '      - run: docker buildx build --output type=registry,name=ghcr.io/x:1 .'],
     ['`gh release create`', '      - run: gh release create v0.11.2 --notes "..."'],
     ['`gh release upload`', '      - run: gh release upload v0.11.2 dist/chroxy.dmg'],
     ['`gh release edit`', '      - run: gh release edit v0.11.2 --draft=false'],
@@ -638,9 +569,21 @@ describe('publishingJobsWithDangerousIf reports a bypassable gate (#8166)', () =
   })
 
   it('CONTROL: success() alone (no OR) is still safe', () => {
+    // A `runs-on:` key (4-space indent) between the if: and the step dash
+    // line, unlike the fixtures above — jobIf()'s multi-line continuation
+    // stops at the first line back at the key's own indent, and a step dash
+    // line alone (6-space indent, > 4) reads as a CONTINUATION of a bare
+    // `if: success()` with nothing to stop it otherwise. That garbles the
+    // value into "success() - uses: ..." and would fail the new EXACT
+    // "success()" comparison for the wrong reason (#8150 review, C3) — the
+    // other cases above are unaffected because their dangerous text still
+    // contains a status-fn name regardless of the garbling.
     const jobs = [
       ...base(),
-      { id: 'docker', body: ['    needs: [test, verify-artifacts]', '    if: success()', '      - uses: docker/build-push-action@x'] },
+      {
+        id: 'docker',
+        body: ['    needs: [test, verify-artifacts]', '    if: success()', '    runs-on: ubuntu-24.04', '      - uses: docker/build-push-action@x'],
+      },
     ]
     assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
   })

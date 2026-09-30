@@ -5,10 +5,15 @@
 # ERR_MODULE_NOT_FOUND: the image never contained packages/protocol or
 # packages/store-core, so npm's workspace links in node_modules/@chroxy/ pointed
 # at nothing. release.yml built that image and pushed it to GHCR on every
-# release, but nothing ever RAN it, so nothing noticed. This script is what
-# CI's `Docker Image Smoke` job runs against a freshly built image, and it runs
-# locally the same way — including the bounded-execution calls below, which
-# use a portable wrapper rather than bare `timeout` (see the note below):
+# release, but nothing ever RAN it, so nothing noticed. Two callers run this
+# script against a freshly built image, both against a LOCAL, unpushed
+# `docker/build-push-action` build (`load: true`, `push: false`) — never a
+# registry pull: ci.yml's `Docker Image Smoke` job (PR-time, path-filtered,
+# tag `chroxy:ci`), and release.yml's `Docker Image` job (release-time,
+# tag `chroxy:release-smoke` — pushes to GHCR only after this script exits 0,
+# #8150). It runs locally the same way — including the bounded-execution
+# calls below, which use a portable wrapper rather than bare `timeout` (see
+# the note below):
 #
 #   docker build -t chroxy:local . && bash scripts/docker-image-smoke.sh chroxy:local
 #

@@ -20,16 +20,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publishes a release — it only ran PR-side, path-filtered, and not
   required. The job now builds once with `load: true` / `push: false`
   (tagged with both the real metadata-action tags and a fixed local
-  `chroxy:release-smoke` tag), smoke-starts that same local image, and only
-  on success pushes the already-built tags — never rebuilt, so what is
-  smoked is byte-for-byte what ships. A new static gate test
-  (`release-docker-smoke-gate.test.js`) fails the build if the smoke step is
-  ever removed, reordered after the push, given `continue-on-error`, pointed
-  at a tag the build never produced, or if the push step gains an `if:` that
-  could bypass a failed smoke. A second new test
-  (`ci-docker-path-filter.test.js`) ties `ci.yml`'s `docker:` path filter to
-  `.dockerignore`'s package whitelist in both directions, so the two rosters
-  cannot drift apart un-noticed (#7639).
+  `chroxy:release-smoke` tag), smoke-starts that same local image, logs in to
+  GHCR only AFTER the smoke passes (narrowing the window registry
+  credentials are present), and only then pushes the already-built tags via
+  `env: TAGS:` (never interpolated into the shell script) — never rebuilt, so
+  what is smoked is byte-for-byte what ships. `ci.yml`'s `Docker Image
+  Smoke` job now builds with the SAME pinned `docker/build-push-action` ref
+  and `load: true` / `push: false`, so the release build+load path is
+  exercised on every Docker-touching PR, not just at release time.
+  A new static gate test (`release-docker-smoke-gate.test.js`) runs over
+  every job in `release.yml` with a publishing step (not one job looked up
+  by id) and fails the build if: the smoke step is missing, wrapped (`||
+  true`, `; exit 0`, a preceding `set +e`, or commented out), reordered
+  after a publish, given `continue-on-error`, or paired with a publishing
+  step whose `if:` isn't absent or exactly `success()` (closing three
+  operand-order bypasses `X || success()` / `!success()` / `true ||
+  success()` a naïve "contains always/failure/cancelled" check misses); if a
+  build-push-action step publishes via `outputs: type=registry` or a
+  non-lowercase-`false` `push:` value without ever setting `push: true`;
+  if anything rebuilds the image between the smoke and the last publish; or
+  if a registry login runs before the smoke. The "was this tag really
+  built?" check reads the build step's `tags:` input structurally (not a
+  raw-text scan, which a neighbouring step's comment could satisfy). A
+  second new test (`ci-docker-path-filter.test.js`, parsed with `js-yaml`)
+  ties `ci.yml`'s `docker:` path filter to `.dockerignore`'s package
+  whitelist in both directions, so the two rosters cannot drift apart
+  un-noticed (#7639) — a floor, not a pinned set, so a correct two-sided
+  package addition never trips it. The shared "what counts as publishing"
+  vocabulary (`packages/server/tests/helpers/release-publish.js`) is now one
+  module imported by both this gate and `release-verify-artifacts-gate
+  .test.js`, which previously carried its own, already-drifted copy.
 
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so
   `start` now passes preflight without `--skip-checks` (#8145).** The image
