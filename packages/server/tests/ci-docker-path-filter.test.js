@@ -63,6 +63,18 @@ import { readWorkflows } from './helpers/workflow-reader.js'
  * @param {string} text Raw `.dockerignore` contents.
  * @returns {{packages: Set<string>, paths: Set<string>}}
  */
+// `.dockerignore` allows a glob whitelist entry (`!packages/*/dist/` is
+// valid Docker syntax), but this parser understands only literal package
+// paths. Left unguarded, `[^/]+` in the package regex below happily accepts
+// `*` as if it were a literal package NAME, producing a spurious roster
+// mismatch instead of a crash (#8150 review round 3, nitpick) — the "cannot
+// check this treated as nothing to check" failure one level removed: here
+// it is "cannot check this treated as a normal, checkable thing", which is
+// worse, because the resulting mismatch looks like a real finding. Fail
+// loudly instead: a glob character anywhere in a whitelist entry is a
+// parser limitation, not a roster fact, and must say so.
+const GLOB_CHAR_RE = /[*?[\]{}]/
+
 export function parseDockerignoreWhitelist(text) {
   const packages = new Set()
   const paths = new Set()
@@ -71,6 +83,13 @@ export function parseDockerignoreWhitelist(text) {
     if (!line || line.startsWith('#')) continue
     if (!line.startsWith('!')) continue // only a re-include line is a WHITELIST entry
     const entry = line.slice(1)
+    if (GLOB_CHAR_RE.test(entry)) {
+      throw new Error(
+        `glob whitelist entries are not supported by this roster test ('!${entry}') — ` +
+          '.dockerignore allows a glob here, but parseDockerignoreWhitelist only understands literal ' +
+          'package paths; extend the parser (or rewrite the .dockerignore entry as literal paths) before relying on this check'
+      )
+    }
     const pkgMatch = /^packages\/([^/]+)(?:\/.*)?$/.exec(entry)
     if (pkgMatch) {
       packages.add(pkgMatch[1])
@@ -257,6 +276,13 @@ describe('dockerPathFilterIssues reports each shape it exists to find (#8150)', 
 })
 
 describe('parseDockerignoreWhitelist / bucketDockerFilterEntries parse the real shapes (#8150)', () => {
+  // #8150 review round 3 nitpick: a glob whitelist entry must fail loudly,
+  // not silently misparse into a bogus package named "*".
+  it('parseDockerignoreWhitelist throws a clear error on a glob whitelist entry, rather than misparsing it', () => {
+    const text = ['*', '!packages/*/dist/'].join('\n')
+    assert.throws(() => parseDockerignoreWhitelist(text), /glob whitelist entries are not supported by this roster test/)
+  })
+
   it('parseDockerignoreWhitelist ignores exclusion lines and comments, and strips a trailing slash', () => {
     const text = [
       '*',

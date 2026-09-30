@@ -74,6 +74,18 @@ export const PUBLISH_OUTPUT_PUSH_TRUE_RE = /(?:--output|-o)(?:=|\s+)\S*\bpush=tr
 // REBUILD after the smoke step (#8150 review, S1), regardless of whether
 // that particular invocation pushes.
 export const RUN_DOCKER_BUILD_RE = /\bdocker\s+(?:buildx\s+)?build\b/
+// A RETAG or RELOAD — none of these rebuild the image, but each can repoint
+// the tag the push loop pushes at content the smoke step never saw (#8150
+// review round 3, finding 3): `docker tag`/`docker image tag` renames a
+// local reference, `docker load`/`docker image load`/`docker import` bring
+// in a tar from anywhere, `docker pull`/`docker image pull` overwrites a tag
+// from a registry, `docker commit` makes a new image from a container's
+// current filesystem state, and `docker buildx imagetools` (not just its
+// `create` subcommand — `inspect` is harmless but every mutating one matters
+// here) can retarget a manifest list without ever invoking `build`. Only the
+// push loop itself may touch a tag between the smoke and the last publish.
+export const RUN_RETAG_OR_RELOAD_RE =
+  /\bdocker\s+(?:image\s+)?tag\b|\bdocker\s+(?:image\s+)?load\b|\bdocker\s+import\b|\bdocker\s+(?:image\s+)?pull\b|\bdocker\s+commit\b|\bdocker\s+buildx\s+imagetools\b/
 
 /** True when `runBody` (a step's `run:` script, as `stepRun()` returns it)
  * matches any raw-CLI publish shape. */
@@ -300,6 +312,194 @@ export function stepIsBuildStep(stepLines) {
   if (stepUsesBuildPushAction(stepLines)) return true
   const runBody = stepRun(stepLines)
   return typeof runBody === 'string' && RUN_DOCKER_BUILD_RE.test(runBody)
+}
+
+/**
+ * True when this `run:` step retags or reloads an image — see
+ * `RUN_RETAG_OR_RELOAD_RE` for the full list and why each one matters. A
+ * sibling check to `stepIsBuildStep`, not a replacement: a build is a NEW
+ * image from source, a retag/reload repoints an EXISTING tag at different
+ * content without building anything, and the smoke-before-push gate must
+ * reject both between the smoke step and the last publish.
+ *
+ * @param {string[]} stepLines
+ * @returns {boolean}
+ */
+export function stepRetagsOrReloadsImage(stepLines) {
+  const runBody = stepRun(stepLines)
+  return typeof runBody === 'string' && RUN_RETAG_OR_RELOAD_RE.test(runBody)
+}
+
+/**
+ * Does this step set a `shell:` that could mask a real failure (#8150
+ * review round 3, finding 1)? `shell: bash -c "{0} || true"` (or any custom
+ * template that wraps `{0}` — GitHub's placeholder for the script file — in
+ * something that swallows a non-zero exit) changes what actually executes
+ * without changing the `run:` TEXT a regex-based check inspects. The safe
+ * forms are: the key absent (the runner's default shell), or the literal
+ * value `bash` — nothing else, because this repo cannot enumerate every
+ * unsafe template any more than `dangerousIfIssue` could enumerate every
+ * unsafe `if:`.
+ *
+ * @param {string[]} stepLines
+ * @returns {string|null} An issue message, or null when safe.
+ */
+export function stepShellIssue(stepLines) {
+  const shell = stepInput(stepLines, 'shell')
+  if (shell === undefined || shell === 'bash') return null
+  return `shell: ${shell} — only the default shell or exactly bash is allowed`
+}
+
+// ---- job-level gating, walked transitively (#8150 review round 3, finding 2) ----
+
+/**
+ * A job's `needs:` list, parsed from its raw body lines. GitHub Actions
+ * accepts two spellings, and both must resolve the same way:
+ *
+ *     needs: test                    # flow, single job id
+ *     needs: [test, verify-artifacts] # flow, list
+ *     needs:                          # block
+ *       - test
+ *       - verify-artifacts
+ *
+ * Moved here from release-verify-artifacts-gate.test.js unchanged (#8150
+ * review round 3, finding 2) — `release-docker-smoke-gate.test.js` needs the
+ * SAME transitive-needs walk, for the SAME reason: a dangerous job-level
+ * gate can sit on any job upstream of a publishing one, not just the
+ * publishing job itself.
+ *
+ * @param {string[]} jobBody
+ * @returns {string[]}
+ */
+export function jobNeeds(jobBody) {
+  const at = jobBody.findIndex((l) => /^\s*needs:/.test(l))
+  if (at === -1) return []
+  const keyLine = jobBody[at]
+  const inline = keyLine.replace(/^\s*needs:\s*/, '').trim()
+  if (inline.length > 0) {
+    return inline
+      .replace(/^\[/, '')
+      .replace(/\]$/, '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  }
+  const keyIndent = /^(\s*)/.exec(keyLine)[1].length
+  const ids = []
+  for (let i = at + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
+    const indent = /^(\s*)/.exec(line)[1].length
+    if (indent <= keyIndent) break
+    const m = /^\s*-\s*(\S+)/.exec(line)
+    if (m) ids.push(m[1])
+  }
+  return ids
+}
+
+/** Every job id reachable from `id` by following `needs:` edges, `id` included. */
+export function transitiveNeeds(jobsById, id, seen = new Set()) {
+  if (seen.has(id)) return seen
+  seen.add(id)
+  const job = jobsById.get(id)
+  if (!job) return seen // a dangling reference is not this rule's subject
+  for (const dep of jobNeeds(job.body)) transitiveNeeds(jobsById, dep, seen)
+  return seen
+}
+
+/**
+ * A job's own job-level `if:` expression (4-space indent — a job body's own
+ * keys, as opposed to a STEP's `if:`, which sits far deeper under `steps:`),
+ * or null when the job has none. Collects the WHOLE value, not just the key
+ * line: a job-level `if:` can be a YAML block scalar (`if: |` / `if: >`) or
+ * a plain scalar that wraps onto continuation lines indented deeper than
+ * the key.
+ *
+ * @param {string[]} jobBody
+ * @returns {string|null}
+ */
+export function jobIf(jobBody) {
+  const at = jobBody.findIndex((l) => /^ {4}if:/.test(l))
+  if (at === -1) return null
+  const parts = [jobBody[at].replace(/^ {4}if:\s*/, '')]
+  for (let i = at + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*$/.test(line)) continue // a blank line inside a block scalar doesn't end it
+    const indent = /^(\s*)/.exec(line)[1].length
+    if (indent <= 4) break
+    parts.push(line.trim())
+  }
+  const combined = parts.join(' ').trim()
+  return combined.length > 0 ? combined : null
+}
+
+/**
+ * Job-level `continue-on-error:` (4-space indent), any value other than the
+ * literal `false`, is dangerous for the same reason a dangerous `if:` is:
+ * GitHub Actions' implicit "only run / only count as succeeded if every
+ * dependency succeeded" gating depends on a dependency's REPORTED
+ * conclusion, and `continue-on-error: true` can make a job that really
+ * failed report as succeeded to everything downstream — invisible to a
+ * check that only ever looked at `if:`.
+ *
+ * Before this (#8150 review round 3, finding 2), this was checked only
+ * inside `verify-artifacts`' own job body, by `verifyArtifactsGateIssues`
+ * — a job-level `continue-on-error: true` on `docker` itself, or on `test`/
+ * `validate` upstream of `verify-artifacts`, was invisible to every check in
+ * the repo.
+ *
+ * @param {string[]} jobBody
+ * @returns {string|null} An issue message, or null when safe.
+ */
+export function jobContinueOnErrorIssue(jobBody) {
+  const at = jobBody.findIndex((l) => /^ {4}continue-on-error:/.test(l))
+  if (at === -1) return null
+  const m = /^ {4}continue-on-error:\s*(.*)$/.exec(jobBody[at])
+  const val = (m ? m[1] : '').replace(/\s+#.*$/, '').trim()
+  if (val === 'false') return null
+  return `continue-on-error: ${val} at job level`
+}
+
+/**
+ * Every publishing job (or a job on its TRANSITIVE `needs:` closure) with an
+ * unsafe job-level gate — a dangerous `if:` (`dangerousIfIssue`) or a truthy
+ * job-level `continue-on-error:` (`jobContinueOnErrorIssue`). Both defeat
+ * the same mechanism (GitHub Actions' implicit "only run/count as succeeded
+ * if every dependency succeeded" gating), so both are walked the same way:
+ * transitively, because "needs: alone is not enough" applies equally to
+ * either bypass — a dangerous gate anywhere upstream of a publishing job,
+ * not just on the publishing job itself, can let it run/count as succeeded
+ * after a real upstream failure.
+ *
+ * Shared by `release-verify-artifacts-gate.test.js` (walking release.yml's
+ * jobs against its own `verify-artifacts` gate) and
+ * `release-docker-smoke-gate.test.js` (walking release.yml's jobs against
+ * the smoke-before-push gate) — before this was shared, only the `if:` half
+ * of this walk existed at all, and only in the first file.
+ *
+ * @param {{id: string, body: string[]}[]} jobs
+ * @returns {string[]} human-readable findings, empty when clean
+ */
+export function publishingJobsWithDangerousGating(jobs) {
+  const byId = new Map(jobs.map((j) => [j.id, j]))
+  const findings = []
+  for (const job of jobs.filter(isPublishingJob)) {
+    for (const id of transitiveNeeds(byId, job.id)) {
+      const dep = byId.get(id)
+      if (!dep) continue
+      const ifExpr = jobIf(dep.body)
+      if (ifExpr && dangerousIfIssue(ifExpr)) {
+        findings.push(`${job.id} (via '${id}'s if: ${ifExpr})`)
+        break
+      }
+      const coeIssue = jobContinueOnErrorIssue(dep.body)
+      if (coeIssue) {
+        findings.push(`${job.id} (via '${id}'s ${coeIssue})`)
+        break
+      }
+    }
+  }
+  return findings
 }
 
 assert.ok(typeof stepInput === 'function' && typeof stepRun === 'function', 'expected workflow-reader.js to export stepInput and stepRun')

@@ -41,15 +41,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   if anything rebuilds the image between the smoke and the last publish; or
   if a registry login runs before the smoke. The "was this tag really
   built?" check reads the build step's `tags:` input structurally (not a
-  raw-text scan, which a neighbouring step's comment could satisfy). A
-  second new test (`ci-docker-path-filter.test.js`, parsed with `js-yaml`)
-  ties `ci.yml`'s `docker:` path filter to `.dockerignore`'s package
-  whitelist in both directions, so the two rosters cannot drift apart
-  un-noticed (#7639) — a floor, not a pinned set, so a correct two-sided
-  package addition never trips it. The shared "what counts as publishing"
-  vocabulary (`packages/server/tests/helpers/release-publish.js`) is now one
-  module imported by both this gate and `release-verify-artifacts-gate
-  .test.js`, which previously carried its own, already-drifted copy.
+  raw-text scan, which a neighbouring step's comment could satisfy). It also
+  rejects a `shell:` override other than absent or the literal `bash` on the
+  smoke step or a publishing step (a custom shell template can swallow a
+  real exit code without the `run:` text ever changing), rejects job-level
+  `continue-on-error:` anywhere in a publishing job's transitive `needs:`
+  closure (previously checked only inside `verify-artifacts`' own body),
+  and rejects a `docker tag`/`docker image tag`/`docker load`/`docker image
+  load`/`docker import`/`docker pull`/`docker image pull`/`docker commit`/
+  `docker buildx imagetools` step between the smoke and the last publish —
+  a retag or reload repoints the pushed tag at unsmoked content without
+  ever rebuilding. A second new test (`ci-docker-path-filter.test.js`,
+  parsed with `js-yaml`) ties `ci.yml`'s `docker:` path filter to
+  `.dockerignore`'s package whitelist in both directions, so the two
+  rosters cannot drift apart un-noticed (#7639) — a floor, not a pinned
+  set, so a correct two-sided package addition never trips it, and a glob
+  whitelist entry fails loudly instead of misparsing. The shared "what
+  counts as publishing" vocabulary and the job-level gating walk
+  (`packages/server/tests/helpers/release-publish.js`) are now one module
+  imported by both this gate and `release-verify-artifacts-gate.test.js`,
+  which previously carried its own, already-drifted copy.
 
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so
   `start` now passes preflight without `--skip-checks` (#8145).** The image

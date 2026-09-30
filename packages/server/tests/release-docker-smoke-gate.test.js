@@ -8,8 +8,11 @@ import { readWorkflows, assertReaderSane, stepInput, stepRun } from './helpers/w
 import {
   BUILD_PUSH_ACTION_RE,
   dangerousIfIssue,
+  publishingJobsWithDangerousGating,
   stepIsBuildStep,
   stepPublishesImage,
+  stepRetagsOrReloadsImage,
+  stepShellIssue,
   stepUsesLoginAction,
   tagsBlockContainsExactTag,
 } from './helpers/release-publish.js'
@@ -73,6 +76,27 @@ import {
  * by the id `docker` — a copy of the push step pasted into a new job with no
  * smoke step is caught precisely because nothing here assumes there is only
  * one such job.
+ *
+ * ROUND 3 (three more verified-GREEN bypasses, none exercised by round 2):
+ *  - A `shell:` override (e.g. `shell: bash -c "{0} || true"`) on the smoke
+ *    or a publishing step can mask a real failure while the `run:` text
+ *    stays byte-for-byte pinned — nothing here read a step's `shell:` key.
+ *    Fixed by `stepShellIssue`: absent or exactly `bash` is the only safe
+ *    form, applied everywhere the if:/continue-on-error checks already are.
+ *  - Job-level `continue-on-error:` was checked NOWHERE except inside
+ *    `verify-artifacts`' own body (a `release-verify-artifacts-gate.test.js`
+ *    concern) — on `docker` itself, or on `test`/`validate` upstream of it,
+ *    it was invisible to every check in this file. Fixed by
+ *    `publishingJobsWithDangerousGating`, which walks the SAME transitive
+ *    `needs:` closure `dangerousIfIssue` already used for `if:`, now also
+ *    checking `jobContinueOnErrorIssue` — shared with the sibling gate via
+ *    `./helpers/release-publish.js`, folded into `allDockerSmokeGateIssues`.
+ *  - A `docker tag`/`docker load`/`docker import`/`docker pull`/`docker
+ *    commit`/`docker buildx imagetools` step between the smoke and the last
+ *    publish repoints the pushed tag at content the smoke step never saw,
+ *    without ever invoking `build` — invisible to S1's rebuild check.
+ *    Fixed by `stepRetagsOrReloadsImage`, a sibling check scanned over the
+ *    same index range as the rebuild check.
  */
 
 // ---- the pure rule, over already-parsed step bodies ------------------------
@@ -155,13 +179,20 @@ export function dockerSmokeGateIssues(job) {
   const issues = []
   // C2: apply if:/continue-on-error checks to EVERY step that mentions the
   // script, not just the one recognised as the real invocation — a decoy
-  // must not be able to hide behind "it wasn't the real smoke step".
+  // must not be able to hide behind "it wasn't the real smoke step". Same
+  // treatment for shell: (#8150 review round 3, finding 1) — a custom
+  // shell template can swallow the smoke's real exit code without the
+  // run: TEXT ever changing.
   for (const i of candidates) {
     if (stepInput(steps[i], 'if') !== undefined) {
       issues.push(`step at index ${i} mentions docker-image-smoke.sh and has an if: condition that could skip it`)
     }
     if (stepHasContinueOnError(steps[i])) {
       issues.push(`step at index ${i} mentions docker-image-smoke.sh and has continue-on-error set — a real smoke failure might not fail the job`)
+    }
+    const shellIssue = stepShellIssue(steps[i])
+    if (shellIssue) {
+      issues.push(`step at index ${i} mentions docker-image-smoke.sh and sets ${shellIssue}`)
     }
   }
 
@@ -200,14 +231,26 @@ export function dockerSmokeGateIssues(job) {
     if (ifIssue) {
       issues.push(`publishing step at index ${i} has a ${ifIssue}`)
     }
+    // #8150 review round 3, finding 1: the same shell: override risk applies
+    // to a publishing step — a custom shell could wrap the push loop in a
+    // way that reports success regardless of whether the push itself failed.
+    const pubShellIssue = stepShellIssue(steps[i])
+    if (pubShellIssue) {
+      issues.push(`publishing step at index ${i} sets ${pubShellIssue}`)
+    }
   }
 
   // S1: nothing may rebuild the image between the smoke and the LAST
   // publish — "never rebuilt" is part of the invariant, not a side note.
+  // #8150 review round 3, finding 3: a RETAG or RELOAD is just as dangerous
+  // as a rebuild — it repoints the tag the push loop pushes at content the
+  // smoke step never saw, without ever invoking `build`.
   const maxPubIdx = Math.max(...pubIdx)
   for (let i = smokeIdx + 1; i <= maxPubIdx; i++) {
     if (stepIsBuildStep(steps[i])) {
       issues.push(`step at index ${i} builds the image again between the smoke step and the last publishing step — what is pushed may not be what was smoked`)
+    } else if (stepRetagsOrReloadsImage(steps[i])) {
+      issues.push(`step at index ${i} retags or reloads the image between the smoke step and the last publishing step (docker tag/load/import/pull/commit/buildx imagetools) — what is pushed may not be what was smoked`)
     }
   }
 
@@ -243,9 +286,19 @@ export function jobsWithPublishingSteps(jobs) {
 
 /**
  * `dockerSmokeGateIssues` over every job with a publishing step, never a
- * single job looked up by id (S2) — `{}` means every such job is sound.
+ * single job looked up by id (S2), PLUS a dangerous job-level gate anywhere
+ * in a publishing job's transitive `needs:` closure (#8150 review round 3,
+ * finding 2 — `continue-on-error: true` on `docker` itself, or on `test`/
+ * `validate` upstream of it, was invisible to every step-level check here).
+ * `{}` means every such job is sound.
  *
- * @param {{id: string, steps: string[][]}[]} jobs
+ * `publishingJobsWithDangerousGating` uses the JOB-level `isPublishingJob`
+ * (which also matches `github-release`, a job with no smoke-relevant steps
+ * at all per `jobsWithPublishingSteps`) — a finding attributed to a job
+ * outside this file's narrower "has a publishing STEP" world is still a
+ * real finding and is still reported, keyed by that job's id.
+ *
+ * @param {{id: string, body: string[], steps: string[][]}[]} jobs
  * @returns {Record<string, string[]>}
  */
 export function allDockerSmokeGateIssues(jobs) {
@@ -253,6 +306,10 @@ export function allDockerSmokeGateIssues(jobs) {
   for (const job of jobsWithPublishingSteps(jobs)) {
     const issues = dockerSmokeGateIssues(job)
     if (issues.length > 0) findings[job.id] = issues
+  }
+  for (const finding of publishingJobsWithDangerousGating(jobs)) {
+    const jobId = /^(\S+)/.exec(finding)[1]
+    findings[jobId] = [...(findings[jobId] || []), finding]
   }
   return findings
 }
@@ -570,13 +627,96 @@ describe('dockerSmokeGateIssues reports each shape it exists to find (#8150)', (
   })
 
   it('S2: allDockerSmokeGateIssues reports the rogue job by id, and leaves the sound one alone', () => {
+    // .body is needed too (not just .steps): allDockerSmokeGateIssues also
+    // runs the job-level gating walk (finding 2), which reads job.body.
     const jobs = [
-      { id: 'docker', steps: soundSteps() },
-      { id: 'rogue-publish', steps: [['      - name: Push', '        run: docker push ghcr.io/x/y:1']] },
+      { id: 'docker', body: ['    needs: test'], steps: soundSteps() },
+      { id: 'rogue-publish', body: ['    needs: test', '      - run: docker push ghcr.io/x/y:1'], steps: [['      - name: Push', '        run: docker push ghcr.io/x/y:1']] },
     ]
     const findings = allDockerSmokeGateIssues(jobs)
     assert.deepEqual(Object.keys(findings), ['rogue-publish'])
     assert.ok(findings['rogue-publish'].some((i) => /no step runs scripts\/docker-image-smoke\.sh/.test(i)))
+  })
+
+  // ---- finding 1: a shell: override must not be able to mask a smoke failure ----
+  it('shell override: reports shell: on a step that mentions the smoke script', () => {
+    const steps = soundSteps()
+    steps[3] = [...steps[3], '        shell: bash -c "{0} || true"']
+    const issues = dockerSmokeGateIssues({ steps })
+    assert.ok(issues.some((i) => /sets shell:.*only the default shell or exactly bash is allowed/.test(i)), JSON.stringify(issues))
+  })
+
+  it('shell override: reports shell: on the publishing (push) step too', () => {
+    const steps = soundSteps()
+    steps[5] = [...steps[5], '        shell: bash -c "{0} || true"']
+    const issues = dockerSmokeGateIssues({ steps })
+    assert.ok(issues.some((i) => /publishing step at index 5 sets shell:/.test(i)), JSON.stringify(issues))
+  })
+
+  it('shell override CONTROL: shell: bash (the literal, default-equivalent value) is safe', () => {
+    const steps = soundSteps()
+    steps[3] = [...steps[3], '        shell: bash']
+    assert.deepEqual(dockerSmokeGateIssues({ steps }), [])
+  })
+
+  // ---- finding 3: a retag/reload between smoke and push must be caught ----
+  for (const [label, runLine] of [
+    ['`docker tag`', '        run: docker tag busybox:latest ghcr.io/x/y:1'],
+    ['`docker image tag`', '        run: docker image tag busybox:latest ghcr.io/x/y:1'],
+    ['`docker load`', '        run: docker load -i other.tar'],
+    ['`docker image load`', '        run: docker image load -i other.tar'],
+    ['`docker import`', '        run: docker import other.tar ghcr.io/x/y:1'],
+    ['`docker pull`', '        run: docker pull ghcr.io/x/y:1'],
+    ['`docker image pull`', '        run: docker image pull ghcr.io/x/y:1'],
+    ['`docker commit`', '        run: docker commit some-container ghcr.io/x/y:1'],
+    ['`docker buildx imagetools`', '        run: docker buildx imagetools create -t ghcr.io/x/y:1 ghcr.io/x/y:1@sha256:abc'],
+  ]) {
+    it(`retag/reload: ${label} between smoke and push is reported`, () => {
+      const steps = soundSteps()
+      steps.splice(4, 0, ['      - name: Retag or reload', runLine])
+      const issues = dockerSmokeGateIssues({ steps })
+      assert.ok(issues.some((i) => /retags or reloads the image between/.test(i)), `${label}: ${JSON.stringify(issues)}`)
+    })
+  }
+
+  it('retag/reload CONTROL: the push step\'s own `docker push` is not flagged as a retag', () => {
+    assert.deepEqual(dockerSmokeGateIssues({ steps: soundSteps() }), [])
+  })
+
+  // ---- finding 2: job-level continue-on-error, walked transitively -------
+  // .body must itself contain a publish-shaped line (isPublishingJob reads
+  // job.body text, not job.steps) — a body that only says `needs:`/
+  // `continue-on-error:` with no real publish content would not be picked
+  // up by the walk at all, which would make these tests pass for the wrong
+  // reason (a vacuous "found nothing to check" rather than a real CONTROL).
+  const publishingBody = (...extra) => ['    needs: test', ...extra, '    runs-on: ubuntu-24.04', '      - run: docker push ghcr.io/x/y:1']
+
+  it('job-level gating: reports continue-on-error: true on the publishing job itself', () => {
+    const jobs = [
+      { id: 'test', body: [], steps: [] },
+      { id: 'docker', body: publishingBody('    continue-on-error: true'), steps: soundSteps() },
+    ]
+    const findings = allDockerSmokeGateIssues(jobs)
+    assert.ok('docker' in findings, JSON.stringify(findings))
+    assert.ok(findings.docker.some((i) => /continue-on-error: true at job level/.test(i)), JSON.stringify(findings))
+  })
+
+  it('job-level gating: reports continue-on-error: true on an UPSTREAM job (test)', () => {
+    const jobs = [
+      { id: 'test', body: ['    continue-on-error: true'], steps: [] },
+      { id: 'docker', body: publishingBody(), steps: soundSteps() },
+    ]
+    const findings = allDockerSmokeGateIssues(jobs)
+    assert.ok('docker' in findings, JSON.stringify(findings))
+    assert.ok(findings.docker.some((i) => /'test'.*continue-on-error: true at job level/.test(i)), JSON.stringify(findings))
+  })
+
+  it('job-level gating CONTROL: continue-on-error: false is safe', () => {
+    const jobs = [
+      { id: 'test', body: [], steps: [] },
+      { id: 'docker', body: publishingBody('    continue-on-error: false'), steps: soundSteps() },
+    ]
+    assert.deepEqual(allDockerSmokeGateIssues(jobs), {})
   })
 })
 
@@ -695,6 +835,64 @@ describe('the rule reads the real release.yml (mutation proof, #8150)', () => {
     const { job } = await loadDockerJob(dir)
     const issues = dockerSmokeGateIssues(job)
     assert.ok(issues.some((i) => /runs at or before the smoke step/.test(i)), JSON.stringify(issues))
+  })
+
+  // Finding 1 (review round 3): a shell: override on the smoke step can
+  // mask a real failure while the run: text stays byte-for-byte pinned.
+  it('finding 1: goes RED when the smoke step gains shell: bash -c "{0} || true"', async () => {
+    const dir = freshCopy()
+    const target = join(dir, 'release.yml')
+    mutate(
+      target,
+      '        run: bash scripts/docker-image-smoke.sh chroxy:release-smoke',
+      '        shell: bash -c "{0} || true"\n        run: bash scripts/docker-image-smoke.sh chroxy:release-smoke'
+    )
+    const { job } = await loadDockerJob(dir)
+    const issues = dockerSmokeGateIssues(job)
+    assert.ok(issues.some((i) => /sets shell:.*only the default shell or exactly bash is allowed/.test(i)), JSON.stringify(issues))
+  })
+
+  // Finding 3 (review round 3): S1's rebuild check misses a RETAG between
+  // the smoke and the push, which repoints the pushed tag at unsmoked
+  // content without ever invoking `build`.
+  it('finding 3: goes RED when docker tag is inserted between the smoke and the push', async () => {
+    const dir = freshCopy()
+    const target = join(dir, 'release.yml')
+    const rogueTag = '      - name: Retag for some reason\n        run: docker tag busybox:latest "$TAG_FOR_MUTANT_TEST"\n\n'
+    mutate(target, '      - name: Log in to GHCR\n', `${rogueTag}      - name: Log in to GHCR\n`)
+    const { job } = await loadDockerJob(dir)
+    const issues = dockerSmokeGateIssues(job)
+    assert.ok(issues.some((i) => /retags or reloads the image between/.test(i)), JSON.stringify(issues))
+  })
+
+  // Finding 2 (review round 3): job-level continue-on-error: anywhere in a
+  // publishing job's transitive needs: closure was checked NOWHERE. Needs
+  // the WHOLE workflow's jobs (not just the docker job in isolation) since
+  // the mutant lands on `docker` itself or on an UPSTREAM job (`test`).
+  it('finding 2: goes RED when the docker job itself gains continue-on-error: true', async () => {
+    const dir = freshCopy()
+    const target = join(dir, 'release.yml')
+    mutate(target, '    needs: [test, verify-artifacts]\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n', '    needs: [test, verify-artifacts]\n    continue-on-error: true\n    runs-on: ubuntu-24.04\n    timeout-minutes: 30\n')
+    const workflows = await readWorkflows(pathToFileURL(`${dir}/`))
+    const release = workflows.find((w) => w.name === 'release.yml')
+    const findings = allDockerSmokeGateIssues(release.jobs)
+    assert.ok('docker' in findings, JSON.stringify(findings))
+    assert.ok(findings.docker.some((i) => /continue-on-error: true at job level/.test(i)), JSON.stringify(findings))
+  })
+
+  it("finding 2: goes RED when the UPSTREAM 'test' job gains continue-on-error: true", async () => {
+    const dir = freshCopy()
+    const target = join(dir, 'release.yml')
+    mutate(
+      target,
+      '  test:\n    name: Test Suite\n    needs: validate\n',
+      '  test:\n    name: Test Suite\n    needs: validate\n    continue-on-error: true\n'
+    )
+    const workflows = await readWorkflows(pathToFileURL(`${dir}/`))
+    const release = workflows.find((w) => w.name === 'release.yml')
+    const findings = allDockerSmokeGateIssues(release.jobs)
+    assert.ok('docker' in findings, JSON.stringify(findings))
+    assert.ok(findings.docker.some((i) => /'test'.*continue-on-error: true at job level/.test(i)), JSON.stringify(findings))
   })
 
   it('S1: goes RED when a second build-push-action step is inserted between the smoke and the push', async () => {

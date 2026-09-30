@@ -6,7 +6,14 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readWorkflows, assertReaderSane } from './helpers/workflow-reader.js'
 import { DAEMON_ENTRY_MODULES } from '../../../scripts/lib/daemon-entry-modules.mjs'
-import { dangerousIfIssue, isPublishingJob, stripYamlComments } from './helpers/release-publish.js'
+import {
+  isPublishingJob,
+  jobIf,
+  jobNeeds,
+  publishingJobsWithDangerousGating,
+  stripYamlComments,
+  transitiveNeeds,
+} from './helpers/release-publish.js'
 
 /**
  * release.yml: every publishing job transitively needs verify-artifacts (#8165).
@@ -39,58 +46,14 @@ import { dangerousIfIssue, isPublishingJob, stripYamlComments } from './helpers/
  */
 
 // ---- the pure rule, over already-parsed job bodies -------------------------
-
-/**
- * A job's `needs:` list, parsed from its raw body lines. GitHub Actions
- * accepts two spellings, and both must resolve the same way — the same
- * discipline `runsOnOf()` in workflow-reader.js applies to `runs-on:` after
- * the block-form gap in #7383 silently exempted every self-hosted job written
- * that way:
- *
- *     needs: test                    # flow, single job id
- *     needs: [test, verify-artifacts] # flow, list
- *     needs:                          # block
- *       - test
- *       - verify-artifacts
- *
- * @param {string[]} jobBody
- * @returns {string[]}
- */
-export function jobNeeds(jobBody) {
-  const at = jobBody.findIndex((l) => /^\s*needs:/.test(l))
-  if (at === -1) return []
-  const keyLine = jobBody[at]
-  const inline = keyLine.replace(/^\s*needs:\s*/, '').trim()
-  if (inline.length > 0) {
-    return inline
-      .replace(/^\[/, '')
-      .replace(/\]$/, '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  }
-  const keyIndent = /^(\s*)/.exec(keyLine)[1].length
-  const ids = []
-  for (let i = at + 1; i < jobBody.length; i++) {
-    const line = jobBody[i]
-    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
-    const indent = /^(\s*)/.exec(line)[1].length
-    if (indent <= keyIndent) break
-    const m = /^\s*-\s*(\S+)/.exec(line)
-    if (m) ids.push(m[1])
-  }
-  return ids
-}
-
-/** Every job id reachable from `id` by following `needs:` edges, `id` included. */
-export function transitiveNeeds(jobsById, id, seen = new Set()) {
-  if (seen.has(id)) return seen
-  seen.add(id)
-  const job = jobsById.get(id)
-  if (!job) return seen // a dangling reference is not this rule's subject
-  for (const dep of jobNeeds(job.body)) transitiveNeeds(jobsById, dep, seen)
-  return seen
-}
+//
+// `jobNeeds`, `transitiveNeeds`, and `jobIf` now live in
+// `./helpers/release-publish.js` (#8150 review round 3, finding 2) —
+// re-exported here (they still pass their own local tests below, unchanged)
+// because `release-docker-smoke-gate.test.js` needs the SAME transitive-
+// needs walk for the SAME reason: a dangerous job-level gate can sit on any
+// job upstream of a publishing one, not only on the publishing job itself.
+export { jobIf, jobNeeds, transitiveNeeds }
 
 /**
  * `stripYamlComments`, the publish-detection regexes, `hasPublishingPermissions`
@@ -115,35 +78,6 @@ export function transitiveNeeds(jobsById, id, seen = new Set()) {
  * about what runs.
  */
 
-/**
- * A job's own job-level `if:` expression (4-space indent — a job body's own
- * keys, as opposed to a STEP's `if:`, which sits far deeper under `steps:`),
- * or null when the job has none.
- *
- * COLLECTS THE WHOLE VALUE, not just the key line (#8166 second review): a
- * job-level `if:` can be a YAML block scalar (`if: |` / `if: >`) or a plain
- * scalar that wraps onto continuation lines indented deeper than the key —
- * both valid, and a reader that only looked at the key line would miss a
- * dangerous function sitting on line 2. Collection stops at the first line
- * back at or above the key's own indent (the next job-level key, `steps:`
- * included) — real workflow YAML always has one of those following `if:`,
- * which is what makes this unambiguous.
- */
-function jobIf(jobBody) {
-  const at = jobBody.findIndex((l) => /^ {4}if:/.test(l))
-  if (at === -1) return null
-  const parts = [jobBody[at].replace(/^ {4}if:\s*/, '')]
-  for (let i = at + 1; i < jobBody.length; i++) {
-    const line = jobBody[i]
-    if (/^\s*$/.test(line)) continue // a blank line inside a block scalar doesn't end it
-    const indent = /^(\s*)/.exec(line)[1].length
-    if (indent <= 4) break
-    parts.push(line.trim())
-  }
-  const combined = parts.join(' ').trim()
-  return combined.length > 0 ? combined : null
-}
-
 // GitHub Actions' IMPLICIT gating — a job with `needs: [X]` only runs if
 // every dependency succeeded — is silently REPLACED the moment the job
 // declares its OWN `if:`. `dangerousIfIssue` (shared with
@@ -155,30 +89,25 @@ function jobIf(jobBody) {
 // spells `always()`/`failure()`/`cancelled()` and the old regex only ever
 // looked for `success()` immediately followed by `||` (#8150 review, C3).
 //
+// #8150 review round 3, finding 2: the SAME implicit gating is replaced by a
+// job-level `continue-on-error: true` too (a dependency's reported
+// conclusion becomes non-failing to everything downstream), and it was
+// checked NOWHERE except inside `verify-artifacts`' own body. `jobIf`'s
+// dangerous-if walk and `jobContinueOnErrorIssue`'s check are now combined
+// in ONE transitive walk, `publishingJobsWithDangerousGating` (`./helpers/
+// release-publish.js`), reused by `release-docker-smoke-gate.test.js` for
+// the identical reason.
 /**
  * Every publishing job (or a job on its `needs:` closure) whose job-level
- * `if:` could let it run — and, for the publishing job itself, actually
- * publish — even after an upstream dependency (verify-artifacts included)
- * failed.
+ * `if:` or `continue-on-error:` could let it run — and, for the publishing
+ * job itself, actually publish — even after an upstream dependency
+ * (verify-artifacts included) failed.
  *
  * @param {{id: string, body: string[]}[]} jobs
  * @returns {string[]} human-readable findings, empty when clean
  */
 export function publishingJobsWithDangerousIf(jobs) {
-  const byId = new Map(jobs.map((j) => [j.id, j]))
-  const findings = []
-  for (const job of jobs.filter(isPublishingJob)) {
-    for (const id of transitiveNeeds(byId, job.id)) {
-      const dep = byId.get(id)
-      if (!dep) continue
-      const ifExpr = jobIf(dep.body)
-      if (ifExpr && dangerousIfIssue(ifExpr)) {
-        findings.push(`${job.id} (via '${id}'s if: ${ifExpr})`)
-        break
-      }
-    }
-  }
-  return findings
+  return publishingJobsWithDangerousGating(jobs)
 }
 
 /** Splits a job body into step blocks — a step begins at a `- ` list item
@@ -585,6 +514,67 @@ describe('publishingJobsWithDangerousIf reports a bypassable gate (#8166)', () =
         body: ['    needs: [test, verify-artifacts]', '    if: success()', '    runs-on: ubuntu-24.04', '      - uses: docker/build-push-action@x'],
       },
     ]
+    assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
+  })
+
+  // #8150 review round 3, finding 2: job-level continue-on-error: was
+  // checked NOWHERE except inside verify-artifacts' own body — on the
+  // publishing job itself, or on ANY job in its transitive needs: closure
+  // (test, validate, ...), it was invisible.
+  it('reports job-level continue-on-error: true on the PUBLISHING JOB itself', () => {
+    const jobs = [
+      ...base(),
+      {
+        id: 'docker',
+        body: ['    needs: [test, verify-artifacts]', '    continue-on-error: true', '    runs-on: ubuntu-24.04', '      - uses: docker/build-push-action@x'],
+      },
+    ]
+    const findings = publishingJobsWithDangerousIf(jobs)
+    assert.equal(findings.length, 1, JSON.stringify(findings))
+    assert.match(findings[0], /docker/)
+  })
+
+  it('reports job-level continue-on-error: true on an UPSTREAM job (test), not the publisher itself', () => {
+    const jobs = [
+      { id: 'test', body: ['    continue-on-error: true'] },
+      { id: 'verify-artifacts', body: ['    needs: test'] },
+      { id: 'docker', body: ['    needs: [test, verify-artifacts]', '    runs-on: ubuntu-24.04', '      - uses: docker/build-push-action@x'] },
+    ]
+    const findings = publishingJobsWithDangerousIf(jobs)
+    assert.equal(findings.length, 1, JSON.stringify(findings))
+    assert.match(findings[0], /docker/)
+    assert.match(findings[0], /test/)
+  })
+
+  it('CONTROL: continue-on-error: false at job level is still safe', () => {
+    const jobs = [
+      ...base(),
+      {
+        id: 'docker',
+        body: ['    needs: [test, verify-artifacts]', '    continue-on-error: false', '    runs-on: ubuntu-24.04', '      - uses: docker/build-push-action@x'],
+      },
+    ]
+    assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
+  })
+
+  it('CONTROL: a STEP-level continue-on-error (4+ indent under steps:) is not read as a job-level one', () => {
+    const jobs = [
+      ...base(),
+      {
+        id: 'docker',
+        body: [
+          '    needs: [test, verify-artifacts]',
+          '    runs-on: ubuntu-24.04',
+          '    steps:',
+          '      - uses: docker/build-push-action@x',
+          '        continue-on-error: true',
+        ],
+      },
+    ]
+    // Not a false negative for the job-level rule: a step-level
+    // continue-on-error is a DIFFERENT (already-covered, see
+    // verifyArtifactsGateIssues) concern from the job-level gate this rule
+    // checks — jobContinueOnErrorIssue only reads the 4-space-indent key.
     assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
   })
 })
