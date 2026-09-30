@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// Tests for scripts/lib/classify-doctor-output.mjs (#8165).
+// Tests for scripts/lib/classify-doctor-output.mjs (#8165, hardened #8166).
 //
 // `verify-publish-artifacts.mjs` used to require `chroxy doctor`'s own "All
 // checks passed" line and let a nonzero exit throw, which meant the release
 // gate could never pass on the hosted runner: ubuntu-24.04 has neither
 // `cloudflared` nor the default claude-tui provider's `claude` binary, so
 // doctor always reports two FAILs there. `classifyDoctorOutput` is the pure
-// classifier that replaces that all-or-nothing check — these are its cases.
+// classifier that replaces that all-or-nothing check, and
+// `classifyDoctorSpawnResult` wraps it with the two things a bare captured
+// string can never carry — a signal-killed child, or one that never spawned
+// at all — these are their cases.
 //
 // Every case below must run. A harness whose cases stop executing reports
 // "N passed, 0 failed" and looks identical to a genuinely clean run — the
@@ -14,9 +17,9 @@
 // EXPECTED_CASES is asserted equal, not >=, the same guard
 // check-release-pr-subject.test.mjs uses.
 
-import { classifyDoctorOutput } from '../lib/classify-doctor-output.mjs'
+import { classifyDoctorOutput, classifyDoctorSpawnResult } from '../lib/classify-doctor-output.mjs'
 
-const EXPECTED_CASES = 16
+const EXPECTED_CASES = 34
 
 let passed = 0
 let failed = 0
@@ -36,9 +39,20 @@ const row = (status, name, message) => `  [${ICONS[status]}] ${name.padEnd(18)} 
 const providerRow = (status, name, message) => `    [${ICONS[status]}] ${name.padEnd(18)} ${message}`
 
 const HEADER = '\nChroxy Doctor\n'
+const PASSED_SUMMARY = 'All checks passed. Ready to start.'
+const FAILED_SUMMARY = 'Some checks failed. Fix the issues above and try again.'
 
+// Builds a realistic doctor transcript: header, rows, and the matching
+// closing summary line doctor-cmd.js always prints last — a FAIL badge
+// anywhere means "Some checks failed...", otherwise "All checks passed...".
+// Every fixture below goes through this (real doctor output always has a
+// closing line), EXCEPT the dedicated truncation cases, which build the
+// transcript by hand specifically WITHOUT one.
 function doc(...lines) {
-  return `${HEADER}\n${lines.join('\n')}\n`
+  const body = lines.join('\n')
+  const hasFail = body.includes(ICONS.fail)
+  const summary = hasFail ? FAILED_SUMMARY : PASSED_SUMMARY
+  return `${HEADER}\n${body}\n\n${summary}\n`
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +102,7 @@ check('non-string input (null) is not ok', classifyDoctorOutput(null).ok === fal
   const r = classifyDoctorOutput(output)
   check('missing-binaries-only run (cloudflared + provider claude) is ok', r.ok === true)
   check('  …with no reasons reported', r.reasons.length === 0)
+  check('  …and names exactly the two waived binaries in `tolerated`', JSON.stringify([...r.tolerated].sort()) === JSON.stringify(['claude', 'cloudflared']))
 }
 
 // A byte-for-byte capture from `node packages/server/src/cli.js doctor` run
@@ -118,21 +133,38 @@ const REAL_CAPTURED_OUTPUT = "\nChroxy Doctor\n\n  [\u001b[32m OK \u001b[0m] Nod
   check('  …and names the offending row', r.reasons.some((m) => /Port/.test(m)))
 }
 
-// The disambiguation this classifier exists to get right: the Config/state
-// root drift check (doctor.js #7240) ALSO starts its message with
-// "Not found" — "Not found at <path> — it is still at <source>" — but with
-// a different shape (no em dash right after "found") than a missing-binary
-// row's "Not found — <installHint>". A naive substring match on "Not found"
-// would wrongly tolerate a stranded config directory, which is a real defect
-// having nothing to do with a runner missing an optional binary.
+// The disambiguation this classifier exists to get right: the 'Config' row's
+// stranded-state drift check (doctor.js, ~line 620 — configCheck, NOT the
+// separate always-warn 'Config/state root' check) ALSO starts its message
+// with "Not found" — "Not found at <path> — it is still at <source>" — but
+// with a different shape (no em dash right after "found") than a
+// missing-binary row's "Not found — <installHint>". A naive substring match
+// on "Not found" would wrongly tolerate a stranded config directory, which
+// is a real defect having nothing to do with a runner missing an optional
+// binary.
 {
   const output = doc(
     row('pass', 'Node.js', 'v22.9.0'),
     row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
-    row('fail', 'Config/state root', 'Not found at /root/.chroxy/config.json — it is still at /home/user/.chroxy/config.json'),
+    row('fail', 'Config', 'Not found at /root/.chroxy/config.json — it is still at /home/user/.chroxy/config.json'),
   )
   const r = classifyDoctorOutput(output)
   check('a "Not found at <path>" config-drift FAIL is NOT tolerated as a binary miss', r.ok === false)
+}
+
+// The other direction of the same anchoring: a FAIL row whose message merely
+// CONTAINS the tolerated phrase somewhere LATER, rather than starting with
+// it, must not be tolerated either (#8166 review) — only checkBinary()'s
+// actual shape, at the very start of the message, is a real binary miss.
+{
+  const output = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+    row('fail', 'Weird check', 'something else went wrong — see the docs — Not found — retry later'),
+  )
+  const r = classifyDoctorOutput(output)
+  check('a FAIL row that merely CONTAINS "Not found — " later (not anchored) is NOT tolerated', r.ok === false)
+  check('  …and names the offending row', r.reasons.some((m) => /Weird check/.test(m)))
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +194,119 @@ const REAL_CAPTURED_OUTPUT = "\nChroxy Doctor\n\n  [\u001b[32m OK \u001b[0m] Nod
   const r = classifyDoctorOutput(output)
   check('a missing Dependencies row entirely fails the gate', r.ok === false)
   check('  …and says which required row is missing', r.reasons.some((m) => /Dependencies/.test(m)))
+}
+
+// ---------------------------------------------------------------------------
+// Fail closed on a row that LOOKS like a status row but doesn't fully parse
+// (#8166 review): `.` (no /s flag) does not match a bare `\r`, U+2028, or
+// U+2029, so a naive `(.*)$` silently drops such a row instead of reporting
+// it — exactly the "cannot check this treated as nothing to check" failure
+// in docs/false-safety-guards.md. Each of these embeds the character
+// somewhere INSIDE a FAIL row's message, which must still surface as a
+// gate failure rather than vanish.
+// ---------------------------------------------------------------------------
+
+{
+  const output = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+    row('fail', 'Weird', 'bad\rtail'),
+  )
+  const r = classifyDoctorOutput(output)
+  check('a FAIL row with an embedded bare \\r fails the gate (not silently dropped)', r.ok === false)
+  check('  …and reports it as unparseable, not just absent', r.reasons.some((m) => /did not fully parse/.test(m)))
+}
+
+{
+  const output = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+    row('fail', 'Weird', 'bad tail'),
+  )
+  const r = classifyDoctorOutput(output)
+  check('a FAIL row with an embedded U+2028 (LINE SEPARATOR) fails the gate', r.ok === false)
+  check('  …and reports it as unparseable', r.reasons.some((m) => /did not fully parse/.test(m)))
+}
+
+{
+  const output = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+    row('fail', 'Weird', 'bad tail'),
+  )
+  const r = classifyDoctorOutput(output)
+  check('a FAIL row with an embedded U+2029 (PARAGRAPH SEPARATOR) fails the gate', r.ok === false)
+}
+
+{
+  // A CRLF-terminated transcript (a genuinely benign shape, unlike a lone
+  // embedded \r above) must NOT trip the same guard — normalized away
+  // before parsing, so a Windows-style capture isn't a false positive.
+  const output = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+  ).replace(/\n/g, '\r\n')
+  const r = classifyDoctorOutput(output)
+  check('a CRLF-terminated (Windows-style) transcript is NOT penalized', r.ok === true)
+}
+
+// ---------------------------------------------------------------------------
+// Require that doctor ran to COMPLETION, not just that it started cleanly
+// (#8166 review): a closing summary line is the only thing that tells us
+// the process was not truncated or killed mid-write.
+// ---------------------------------------------------------------------------
+
+{
+  // Built by hand, WITHOUT the closing summary `doc()` always appends —
+  // this is what a killed-mid-run or buffer-truncated transcript looks like:
+  // a clean header and clean rows, then nothing.
+  const truncated = `${HEADER}\n${row('pass', 'Node.js', 'v22.9.0')}\n${row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js')}\n`
+  const r = classifyDoctorOutput(truncated)
+  check('output with no closing summary line fails the gate (looks truncated)', r.ok === false)
+  check('  …and says so', r.reasons.some((m) => /closing summary/.test(m)))
+}
+
+// ---------------------------------------------------------------------------
+// classifyDoctorSpawnResult — the caller-level wrapper for signals a bare
+// captured string can never carry (#8166 review): a signal-killed child, or
+// a spawn that never launched at all. Both must fail regardless of whatever
+// text happened to be captured before that point. Tested via the pure
+// helper directly (no real spawn/kill), per the review's own guidance.
+// ---------------------------------------------------------------------------
+
+{
+  const good = doc(
+    row('pass', 'Node.js', 'v22.9.0'),
+    row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+  )
+  const r = classifyDoctorSpawnResult({ stdout: good, stderr: '', signal: null, error: null })
+  check('classifyDoctorSpawnResult passes through a clean spawn result', r.ok === true)
+}
+
+{
+  const r = classifyDoctorSpawnResult({ stdout: 'partial outp', stderr: '', signal: 'SIGTERM', error: null })
+  check('classifyDoctorSpawnResult fails on a signal-killed child', r.ok === false)
+  check('  …and names the signal', r.reasons.some((m) => /SIGTERM/.test(m)))
+}
+
+{
+  const err = new Error('spawn /prefix/bin/chroxy ENOENT')
+  const r = classifyDoctorSpawnResult({ stdout: '', stderr: '', signal: null, error: err })
+  check('classifyDoctorSpawnResult fails when the process never launched', r.ok === false)
+  check('  …and names the launch error', r.reasons.some((m) => /ENOENT/.test(m)))
+}
+
+{
+  // Both set — error must win (it means the process never ran at all, which
+  // is a stronger claim than "it ran and was then killed").
+  const err = new Error('spawn ENOENT')
+  const r = classifyDoctorSpawnResult({ stdout: '', stderr: '', signal: 'SIGKILL', error: err })
+  check('classifyDoctorSpawnResult prefers the launch error over a signal when both are set', r.reasons.some((m) => /ENOENT/.test(m)) && !r.reasons.some((m) => /SIGKILL/.test(m)))
+}
+
+{
+  const r = classifyDoctorSpawnResult()
+  check('classifyDoctorSpawnResult tolerates being called with no argument at all', r.ok === false)
 }
 
 console.log('\nclassify-doctor-output.mjs')

@@ -90,14 +90,140 @@ export function transitiveNeeds(jobsById, id, seen = new Set()) {
   return seen
 }
 
-// Matched by the ACTION a step invokes, not by job id/name — a job renamed
-// away from "docker" is still caught, and a job merely named "docker-setup"
-// that pushes nothing is not swept in by coincidence.
-const PUBLISH_ACTION_RE = /docker\/build-push-action|softprops\/action-gh-release/
+/**
+ * Removes YAML comments before matching. A line that is ENTIRELY a comment
+ * is dropped outright; a trailing `  # comment` on an otherwise-real line is
+ * truncated to the code before it (a leading space is required, so `path:
+ * foo#bar` — no space before `#` — is left alone).
+ *
+ * Why this matters here specifically (#8166 review): this repo's own
+ * doctrine comments routinely narrate the very actions this file matches on
+ * — `release.yml`'s `docker` job carries a comment reading "this job PUSHES
+ * to GHCR (docker/build-push-action, push: true)" — so without stripping
+ * comments first, a job whose REAL step was renamed or removed but whose
+ * COMMENT still describes the old shape would satisfy `isPublishingJob`
+ * anyway. That is the comment-stands-in-for-code failure
+ * docs/false-safety-guards.md catalogues (#7290/#7291): the check must read
+ * what runs, not what is said about what runs.
+ */
+function stripYamlComments(bodyLines) {
+  return bodyLines.filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s#.*$/, ''))
+}
 
-/** True when any step line in `job.body` invokes a publish-shaped action. */
+// Matched by the ACTION/COMMAND a step invokes, not by job id/name — a job
+// renamed away from "docker" is still caught, and a job merely named
+// "docker-setup" that pushes nothing is not swept in by coincidence.
+// Widened (#8166 review) beyond the two GitHub Actions this repo currently
+// uses, to the raw-CLI shapes a future job could plausibly use instead:
+// `docker push`, `docker buildx build ... --push`, `gh release
+// create/upload/edit`, and `npm`/`pnpm`/`yarn publish`.
+const PUBLISH_ACTION_RE = /docker\/build-push-action|softprops\/action-gh-release/
+const PUBLISH_RUN_RE = /\bdocker\s+push\b|\bgh\s+release\s+(?:create|upload|edit)\b|\b(?:npm|pnpm|yarn)\s+publish\b/
+const PUBLISH_BUILDX_PUSH_RE = /\bdocker\s+buildx\b[\s\S]{0,300}?--push\b/
+
+/** True when `job`'s real (non-comment) step content invokes a publish-shaped action or command. */
 export function isPublishingJob(job) {
-  return job.body.some((l) => PUBLISH_ACTION_RE.test(l))
+  const codeText = stripYamlComments(job.body).join('\n')
+  return PUBLISH_ACTION_RE.test(codeText) || PUBLISH_RUN_RE.test(codeText) || PUBLISH_BUILDX_PUSH_RE.test(codeText)
+}
+
+/** A job's own job-level `if:` expression (4-space indent — a job body's own
+ * keys, as opposed to a STEP's `if:`, which sits far deeper under `steps:`),
+ * or null when the job has none. */
+function jobIf(jobBody) {
+  const m = jobBody.find((l) => /^ {4}if:/.test(l))
+  return m ? m.replace(/^ {4}if:\s*/, '').trim() : null
+}
+
+// GitHub Actions' IMPLICIT gating — a job with `needs: [X]` only runs if
+// every dependency succeeded — is silently REPLACED the moment the job
+// declares its OWN `if:`. `always()`, `failure()`, and `cancelled()` (which
+// also covers the common `!cancelled()` spelling, a substring of it) are the
+// three functions that deliberately run a job even after an upstream
+// failure — exactly the shape that would let a publishing job push/release
+// even though verify-artifacts just failed, `needs:` entry notwithstanding.
+// `success()`, or no `if:` at all (the default), are safe.
+const DANGEROUS_IF_RE = /\balways\(\)|\bfailure\(\)|\bcancelled\(\)/
+
+/**
+ * Every publishing job (or a job on its `needs:` closure) whose job-level
+ * `if:` could let it run — and, for the publishing job itself, actually
+ * publish — even after an upstream dependency (verify-artifacts included)
+ * failed.
+ *
+ * @param {{id: string, body: string[]}[]} jobs
+ * @returns {string[]} human-readable findings, empty when clean
+ */
+export function publishingJobsWithDangerousIf(jobs) {
+  const byId = new Map(jobs.map((j) => [j.id, j]))
+  const findings = []
+  for (const job of jobs.filter(isPublishingJob)) {
+    for (const id of transitiveNeeds(byId, job.id)) {
+      const dep = byId.get(id)
+      if (!dep) continue
+      const ifExpr = jobIf(dep.body)
+      if (ifExpr && DANGEROUS_IF_RE.test(ifExpr)) {
+        findings.push(`${job.id} (via '${id}'s if: ${ifExpr})`)
+        break
+      }
+    }
+  }
+  return findings
+}
+
+/** Splits a job body into step blocks — a step begins at a `- ` list item
+ * under `steps:`, and runs until the next one. Mirrors the shape
+ * workflow-reader.js's own `parseSteps` splits on, kept local and minimal
+ * (this rule only needs "the lines belonging to one step", not that
+ * helper's fuller key/value parsing) so this file's invariant isn't coupled
+ * to that helper's internals. */
+function stepBodies(jobBody) {
+  const stepsAt = jobBody.findIndex((l) => /^\s*steps:/.test(l))
+  if (stepsAt === -1) return []
+  const steps = []
+  let current = null
+  for (let i = stepsAt + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*- /.test(line)) {
+      if (current) steps.push(current)
+      current = [line]
+    } else if (current) {
+      current.push(line)
+    }
+  }
+  if (current) steps.push(current)
+  return steps
+}
+
+/**
+ * Everything that could make `verify-artifacts` NOT actually verify, even
+ * though it exists and is wired into every publishing job's `needs:`
+ * (#8166 review, item 7): a `continue-on-error: true` that swallows its own
+ * failure, a conditional that could skip it, or the job simply not running
+ * the verifier script at all (a rename/typo that silently turned it into a
+ * no-op).
+ *
+ * @param {{id: string, body: string[]}} job
+ * @returns {string[]} findings, empty when the job is sound
+ */
+export function verifyArtifactsGateIssues(job) {
+  const issues = []
+  const code = stripYamlComments(job.body)
+  if (code.some((l) => /^\s*continue-on-error:\s*true\s*$/.test(l))) {
+    issues.push('continue-on-error: true appears somewhere in this job (job- or step-level) — a real failure would not fail the job')
+  }
+  const ifExpr = jobIf(job.body)
+  if (ifExpr) {
+    issues.push(`has a job-level if: (${ifExpr}) — it must run unconditionally on every release trigger (tag push AND workflow_dispatch)`)
+  }
+  const steps = stepBodies(code)
+  const verifierStep = steps.find((s) => s.some((l) => /node\s+scripts\/verify-publish-artifacts\.mjs/.test(l)))
+  if (!verifierStep) {
+    issues.push('no step actually runs `node scripts/verify-publish-artifacts.mjs`')
+  } else if (verifierStep.some((l) => /^\s*if:/.test(l))) {
+    issues.push('the verifier step itself has an if: condition that could skip it')
+  }
+  return issues
 }
 
 /**
@@ -154,6 +280,22 @@ describe('release.yml: every publishing job transitively needs verify-artifacts 
         `verify-artifacts: ${missing.join(', ')} — a release could push/publish before ` +
         `the artifact gate has run (#8165)`
     )
+  })
+
+  it('no publishing job (or a job on its needs path) has an if: that could bypass the gate', () => {
+    // #8166 review: needs: alone is not enough — GitHub Actions' implicit
+    // "only run if every dependency succeeded" gating is silently replaced
+    // the moment a job declares its own if:. always()/failure()/cancelled()
+    // are the shapes that would let a publishing job push/release even after
+    // verify-artifacts failed.
+    const findings = publishingJobsWithDangerousIf(release.jobs)
+    assert.deepEqual(findings, [], `dangerous if: found on the publish path: ${findings.join('; ')}`)
+  })
+
+  it('verify-artifacts itself is sound: it really runs the verifier, unconditionally, and cannot silently swallow a failure', () => {
+    const verifyArtifacts = release.jobs.find((j) => j.id === 'verify-artifacts')
+    const issues = verifyArtifactsGateIssues(verifyArtifacts)
+    assert.deepEqual(issues, [], `verify-artifacts is not sound: ${issues.join('; ')}`)
   })
 })
 
@@ -214,6 +356,182 @@ describe('publishingJobsMissingGate reports each shape it exists to find (#8165)
   it('a dangling needs: reference does not throw and still reports the gap', () => {
     const jobs = [{ id: 'docker', body: ['    needs: some-deleted-job', '      - uses: docker/build-push-action@x'] }]
     assert.deepEqual(publishingJobsMissingGate(jobs), ['docker'])
+  })
+})
+
+/**
+ * isPublishingJob's detection surface (#8166 review): comment-exclusion, and
+ * every widened form beyond the two GitHub Actions this repo currently uses.
+ */
+describe('isPublishingJob detects real step content, never comments (#8166)', () => {
+  it('a job whose ONLY mention of a publish action is a COMMENT is not publishing', () => {
+    // This is the concrete regression the review found: release.yml's real
+    // `docker` job carries a comment narrating "docker/build-push-action,
+    // push: true" right above its `needs:` line. Without comment-stripping,
+    // a job whose real step was removed/renamed but whose comment still
+    // says this would satisfy the detector anyway.
+    const job = {
+      id: 'docker-setup',
+      body: [
+        '    # this job pushes to GHCR (docker/build-push-action, push: true)',
+        '    needs: test',
+        '      - run: echo "just a placeholder, nothing here actually publishes"',
+      ],
+    }
+    assert.equal(isPublishingJob(job), false)
+  })
+
+  it('an inline trailing comment repeating the phrase does not count either', () => {
+    const job = {
+      id: 'noop',
+      body: ['      - run: echo hello  # not docker/build-push-action, just talking about it'],
+    }
+    assert.equal(isPublishingJob(job), false)
+  })
+
+  for (const [label, runLine] of [
+    ['raw `docker push`', '      - run: docker push ghcr.io/blamechris/chroxy:0.11.2'],
+    ['`docker buildx ... --push`', '      - run: docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/x:1 --push .'],
+    ['`gh release create`', '      - run: gh release create v0.11.2 --notes "..."'],
+    ['`gh release upload`', '      - run: gh release upload v0.11.2 dist/chroxy.dmg'],
+    ['`gh release edit`', '      - run: gh release edit v0.11.2 --draft=false'],
+    ['`npm publish`', '      - run: npm publish --access public'],
+    ['`pnpm publish`', '      - run: pnpm publish'],
+    ['`yarn publish`', '      - run: yarn publish'],
+  ]) {
+    it(`detects a raw-CLI publish job (${label}) and reports it when ungated`, () => {
+      const jobs = [
+        { id: 'test', body: [] },
+        { id: 'verify-artifacts', body: ['    needs: test'] },
+        { id: 'raw-publisher', body: ['    needs: test', runLine] },
+      ]
+      assert.equal(isPublishingJob(jobs[2]), true, `expected ${label} to be detected as publishing`)
+      assert.deepEqual(publishingJobsMissingGate(jobs), ['raw-publisher'])
+    })
+  }
+})
+
+/**
+ * publishingJobsWithDangerousIf (#8166 review, item 6): needs: alone is not
+ * enough — a job-level if: silently replaces GitHub Actions' implicit
+ * "only run if every dependency succeeded" gating.
+ */
+describe('publishingJobsWithDangerousIf reports a bypassable gate (#8166)', () => {
+  const base = () => [
+    { id: 'test', body: [] },
+    { id: 'verify-artifacts', body: ['    needs: test'] },
+  ]
+
+  it('CONTROL: reports nothing when the publishing job has no if: at all', () => {
+    const jobs = [...base(), { id: 'docker', body: ['    needs: [test, verify-artifacts]', '      - uses: docker/build-push-action@x'] }]
+    assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
+  })
+
+  it('CONTROL: a benign if: (e.g. a tag-ref guard) is not flagged', () => {
+    const jobs = [
+      ...base(),
+      {
+        id: 'github-release',
+        body: ["    needs: [verify-artifacts]", "    if: startsWith(github.ref, 'refs/tags/v')", '      - uses: softprops/action-gh-release@x'],
+      },
+    ]
+    assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
+  })
+
+  for (const dangerous of ['always()', 'failure()', 'cancelled()', '${{ !cancelled() }}']) {
+    it(`reports a publishing job whose OWN if: contains ${dangerous}`, () => {
+      const jobs = [
+        ...base(),
+        { id: 'docker', body: ['    needs: [test, verify-artifacts]', `    if: ${dangerous}`, '      - uses: docker/build-push-action@x'] },
+      ]
+      const findings = publishingJobsWithDangerousIf(jobs)
+      assert.equal(findings.length, 1, `expected exactly 1 finding for ${dangerous}, got: ${JSON.stringify(findings)}`)
+      assert.match(findings[0], /docker/)
+    })
+  }
+
+  it('reports it even when the dangerous if: sits on an UPSTREAM job in the needs path, not the publisher itself', () => {
+    const jobs = [
+      { id: 'test', body: [] },
+      { id: 'verify-artifacts', body: ['    needs: test', '    if: always()'] },
+      { id: 'docker', body: ['    needs: [test, verify-artifacts]', '      - uses: docker/build-push-action@x'] },
+    ]
+    const findings = publishingJobsWithDangerousIf(jobs)
+    assert.equal(findings.length, 1)
+    assert.match(findings[0], /verify-artifacts/)
+  })
+})
+
+/**
+ * verifyArtifactsGateIssues (#8166 review, item 7): the gate must actually
+ * gate — no swallowed failure, no conditional skip, and it must actually
+ * invoke the verifier script.
+ */
+describe('verifyArtifactsGateIssues catches a hollowed-out gate (#8166)', () => {
+  const soundJob = () => ({
+    id: 'verify-artifacts',
+    body: [
+      '    needs: test',
+      '    runs-on: ubuntu-24.04',
+      '    steps:',
+      '      - uses: actions/checkout@x',
+      '      - name: Pack, install into a clean prefix, and run',
+      '        run: node scripts/verify-publish-artifacts.mjs',
+    ],
+  })
+
+  it('CONTROL: a sound job reports nothing', () => {
+    assert.deepEqual(verifyArtifactsGateIssues(soundJob()), [])
+  })
+
+  it('reports continue-on-error: true on the step', () => {
+    const job = soundJob()
+    job.body.splice(job.body.length - 1, 0, '        continue-on-error: true')
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /continue-on-error/.test(i)), JSON.stringify(issues))
+  })
+
+  it('reports continue-on-error: true at job level', () => {
+    const job = soundJob()
+    job.body.splice(1, 0, '    continue-on-error: true')
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /continue-on-error/.test(i)), JSON.stringify(issues))
+  })
+
+  it('reports a job-level if: that could skip it', () => {
+    const job = soundJob()
+    job.body.splice(1, 0, '    if: github.event_name == \'workflow_dispatch\'')
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /job-level if:/.test(i)), JSON.stringify(issues))
+  })
+
+  it('reports a step-level if: on the verifier step itself', () => {
+    const job = soundJob()
+    const idx = job.body.findIndex((l) => /verify-publish-artifacts\.mjs/.test(l))
+    job.body.splice(idx, 0, "        if: runner.os == 'Linux'")
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /verifier step itself/.test(i)), JSON.stringify(issues))
+  })
+
+  it('reports when NO step actually runs the verifier script (renamed/typo\'d away)', () => {
+    const job = soundJob()
+    job.body = job.body.map((l) => l.replace('verify-publish-artifacts.mjs', 'verify-publish-artifacts-OLD.mjs'))
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
+  })
+
+  it('a comment mentioning the verifier script does not count as actually running it', () => {
+    const job = {
+      id: 'verify-artifacts',
+      body: [
+        '    needs: test',
+        '    # this job runs node scripts/verify-publish-artifacts.mjs',
+        '    steps:',
+        '      - run: echo "oops, the real step got deleted"',
+      ],
+    }
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
   })
 })
 
@@ -311,5 +629,43 @@ describe('the rule reads the real release.yml (mutation proof, #8165)', () => {
     const workflows = await readWorkflows(pathToFileURL(`${dir}/`))
     const release = workflows.find((w) => w.name === 'release.yml')
     assert.deepEqual(publishingJobsMissingGate(release.jobs).sort(), ['docker', 'github-release'])
+  })
+
+  it('goes RED if docker gains an if: always() (#8166 review, item 6)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-release-gate-'))
+    dirs.push(dir)
+    cpSync(REAL, dir, { recursive: true })
+    const target = join(dir, 'release.yml')
+    const text = readFileSync(target, 'utf8')
+    const find = '    needs: [test, verify-artifacts]\n    runs-on: ubuntu-24.04'
+    const occurrences = text.split(find).length - 1
+    assert.equal(occurrences, 1, `expected exactly 1 occurrence, found ${occurrences} — release.yml has drifted from what this case edits`)
+    writeFileSync(target, text.replace(find, '    needs: [test, verify-artifacts]\n    if: always()\n    runs-on: ubuntu-24.04'))
+    const workflows = await readWorkflows(pathToFileURL(`${dir}/`))
+    const release = workflows.find((w) => w.name === 'release.yml')
+    const findings = publishingJobsWithDangerousIf(release.jobs)
+    // Both docker (its OWN if:) and github-release (which needs docker, so
+    // docker's now-unsound gate is on ITS needs path too — "any job on its
+    // needs path" per the review) are correctly flagged.
+    assert.equal(findings.length, 2, JSON.stringify(findings))
+    assert.ok(findings.some((f) => /^docker /.test(f)), JSON.stringify(findings))
+    assert.ok(findings.some((f) => /^github-release /.test(f)), JSON.stringify(findings))
+  })
+
+  it('goes RED if verify-artifacts stops actually running the verifier script (#8166 review, item 7)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-release-gate-'))
+    dirs.push(dir)
+    cpSync(REAL, dir, { recursive: true })
+    const target = join(dir, 'release.yml')
+    const text = readFileSync(target, 'utf8')
+    const find = 'run: node scripts/verify-publish-artifacts.mjs'
+    const occurrences = text.split(find).length - 1
+    assert.equal(occurrences, 1, `expected exactly 1 occurrence, found ${occurrences} — release.yml has drifted from what this case edits`)
+    writeFileSync(target, text.replace(find, 'run: echo "oops, silently turned into a no-op"'))
+    const workflows = await readWorkflows(pathToFileURL(`${dir}/`))
+    const release = workflows.find((w) => w.name === 'release.yml')
+    const verifyArtifacts = release.jobs.find((j) => j.id === 'verify-artifacts')
+    const issues = verifyArtifactsGateIssues(verifyArtifacts)
+    assert.ok(issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
   })
 })
