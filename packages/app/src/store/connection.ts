@@ -486,10 +486,8 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
  * `clearTransientSessionState` (@chroxy/store-core) so the two clients
  * can't drift on this again — same dual-call contract as
  * `clearInactivityWarningsAcrossSessions`/`clearSessionRolesAcrossSessions`
- * below (used by the `socket.onclose` cleanup only; unlike those two, this
- * one is not currently mirrored into the user-initiated `disconnect()`
- * path, matching the dashboard's existing asymmetry there — see #7411
- * follow-up notes).
+ * below, used by both the `socket.onclose` cleanup and the user-initiated
+ * `disconnect()` path (#8148 — see that function's call site for why).
  *
  * Each session goes through `updateSession`, never a direct store write:
  * `updateSession` re-derives `activityState` from the fields cleared here, so
@@ -1605,6 +1603,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // it here so a stale "Observing"/driver badge doesn't survive into
     // the next connect.
     clearSessionRolesAcrossSessions(set, get);
+    // #8148: same dual-call contract — user-initiated disconnect nulls
+    // socket.onclose above, so the onclose streaming/plan sweep never runs;
+    // mirror it here so a background session mid-stream (or with a pending
+    // plan) doesn't keep a phantom "thinking" bubble / stale plan through
+    // the next connect.
+    clearStreamingAndPlanStateAcrossSessions(get);
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
     // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay

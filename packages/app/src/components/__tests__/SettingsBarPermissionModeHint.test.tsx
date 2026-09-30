@@ -77,6 +77,34 @@ describe('SettingsBar permission-mode hint (#4213)', () => {
     expect(collectVisibleText(unsupported)).toContain('Auto (unavailable)');
   });
 
+  // #8090 — the server now reports `plan` unsupported for a provider that
+  // declares `capabilities.planMode: false` (claude-tui), mirroring the
+  // existing `auto`/`autoPermissionMode` case above. The chip row already
+  // disables purely from `m.supported === false` with no separate
+  // capability lookup, so no SettingsBar.tsx change was needed — this pins
+  // that the generic mechanism also covers `plan` specifically, not just
+  // `auto`.
+  it('disables the Plan chip once the server reports it unsupported for the active provider (#8090)', () => {
+    let tree: renderer.ReactTestRenderer | null = null;
+    act(() => {
+      tree = renderer.create(
+        <SettingsBar
+          {...makeProps({
+            permissionMode: 'approve',
+            availablePermissionModes: [
+              { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
+              { id: 'plan', label: 'Plan (unavailable)', supported: false, enforcement: 'unsupported' },
+            ],
+          })}
+        />,
+      );
+    });
+    const unsupported = tree!.root.findByProps({ testID: 'permission-mode-plan' });
+    expect(unsupported.props.disabled).toBe(true);
+    expect(unsupported.props.accessibilityState).toEqual({ selected: false, disabled: true });
+    expect(collectVisibleText(unsupported)).toContain('Plan (unavailable)');
+  });
+
   it('renders the server-supplied description for the selected mode', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {

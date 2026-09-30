@@ -399,6 +399,125 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
 })
 
 // ---------------------------------------------------------------------------
+// #8148 — disconnect() never got the onclose sweep #7411/#5731 T4 added.
+// A user-initiated Disconnect nulls socket.onclose (to suppress
+// auto-reconnect) before closing the socket, so onclose's sweep above never
+// runs on THIS path — a background session mid-stream (or with a pending
+// plan/clarify question/stale role) kept its state through the next
+// connect. The fix reuses the SAME per-session patch onclose already
+// applies, so these tests mirror the onclose ones above 1:1, calling
+// disconnect() instead of ws.onclose?.().
+// ---------------------------------------------------------------------------
+
+describe('disconnect() clears transient streaming/plan state on all sessions (#8148)', () => {
+  it('nulls streamingMessageId, isPlanPending and planAllowedPrompts on a BACKGROUND session', async () => {
+    await openConnected()
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: {
+          messages: [],
+          streamingMessageId: null,
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+        },
+        b: {
+          messages: [],
+          streamingMessageId: 'msg-b',
+          isPlanPending: true,
+          planAllowedPrompts: ['go'],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+        },
+      } as never,
+    })
+
+    useConnectionStore.getState().disconnect()
+
+    const st = useConnectionStore.getState()
+    // Background session "b" is the one the bug left dirty.
+    expect(st.sessionStates.b!.streamingMessageId).toBeNull()
+    expect(st.sessionStates.b!.isPlanPending).toBe(false)
+    expect(st.sessionStates.b!.planAllowedPrompts).toEqual([])
+  })
+
+  // #8148 acceptance — the onclose sweep also clears pendingEvaluatorClarify
+  // (dashboard-only, #3188); disconnect() must match it.
+  it('clears pendingEvaluatorClarify on a background session (parity with onclose)', async () => {
+    await openConnected()
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: {
+          messages: [],
+          streamingMessageId: null,
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+        },
+        b: {
+          messages: [],
+          streamingMessageId: null,
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: { question: 'why?' },
+          inactivityWarning: null,
+        },
+      } as never,
+    })
+
+    useConnectionStore.getState().disconnect()
+
+    expect(useConnectionStore.getState().sessionStates.b!.pendingEvaluatorClarify).toBeNull()
+  })
+
+  // #7411/#8148 — the same shared-list parity guard as the onclose describe
+  // above, run against disconnect() instead.
+  it('parity guard: clears every TRANSIENT_SESSION_SWEEP_FIELDS field on a background session', async () => {
+    await openConnected()
+    type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
+    const DIRTY: Record<SweepField, unknown> = {
+      streamingMessageId: 'msg-b',
+      isPlanPending: true,
+      planAllowedPrompts: ['go'],
+      inactivityWarning: { sinceMs: 1 },
+      sessionRole: 'observer',
+      primaryClientId: 'other-device',
+    }
+    const CLEAN: Record<SweepField, unknown> = {
+      streamingMessageId: null,
+      isPlanPending: false,
+      planAllowedPrompts: [],
+      inactivityWarning: null,
+      sessionRole: null,
+      primaryClientId: null,
+    }
+    expect(Object.keys(DIRTY).sort()).toEqual([...TRANSIENT_SESSION_SWEEP_FIELDS].sort())
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) expect(DIRTY[field], field).not.toEqual(CLEAN[field])
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: { messages: [], pendingEvaluatorClarify: null, ...CLEAN },
+        b: { messages: [], pendingEvaluatorClarify: null, ...DIRTY },
+      } as never,
+    })
+
+    useConnectionStore.getState().disconnect()
+
+    const b = useConnectionStore.getState().sessionStates.b as unknown as Record<string, unknown>
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
+      expect(b[field], field).toEqual(CLEAN[field])
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // #6153 — onclose resets every Control Room survey *Loading flag. A refresh in
 // flight when the socket drops would otherwise leave loading=true forever, and
 // refreshDisabled = loading || !connected wedges the disabled Refresh button
