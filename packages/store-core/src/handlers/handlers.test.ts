@@ -3839,16 +3839,33 @@ describe('handleFileContent', () => {
 describe('handleProviderList', () => {
   it('returns providers array when valid', () => {
     const providers = [{ name: 'anthropic' }, { name: 'openai' }]
-    expect(handleProviderList({ providers })).toEqual({ providers })
+    expect(handleProviderList({ providers })).toEqual({ providers, defaultProvider: null })
   })
 
   it('returns empty providers array verbatim', () => {
-    expect(handleProviderList({ providers: [] })).toEqual({ providers: [] })
+    expect(handleProviderList({ providers: [] })).toEqual({ providers: [], defaultProvider: null })
   })
 
   it('ignores session id on message (no guard)', () => {
     const providers = [{ name: 'anthropic' }]
-    expect(handleProviderList({ sessionId: 'whatever', providers })).toEqual({ providers })
+    expect(handleProviderList({ sessionId: 'whatever', providers })).toEqual({ providers, defaultProvider: null })
+  })
+
+  // #8151 (C3) — the daemon's resolved default provider, same parser as
+  // available_models' defaultModel (parseStringField: trim + reject empty).
+  it('extracts defaultProvider when present', () => {
+    const providers = [{ name: 'anthropic' }]
+    expect(handleProviderList({ providers, defaultProvider: 'claude-sdk' })).toEqual({
+      providers,
+      defaultProvider: 'claude-sdk',
+    })
+  })
+
+  it('defaults defaultProvider to null when missing, blank, or non-string', () => {
+    expect(handleProviderList({ providers: [] })?.defaultProvider).toBeNull()
+    expect(handleProviderList({ providers: [], defaultProvider: '' })?.defaultProvider).toBeNull()
+    expect(handleProviderList({ providers: [], defaultProvider: '   ' })?.defaultProvider).toBeNull()
+    expect(handleProviderList({ providers: [], defaultProvider: 42 })?.defaultProvider).toBeNull()
   })
 
   it('returns null when providers is missing', () => {
@@ -3872,7 +3889,7 @@ describe('handleAuthBootstrap', () => {
     const agents = [{ name: 'reviewer', source: 'project' }]
     expect(
       handleAuthBootstrap({ type: 'auth_bootstrap', providers, slashCommands, agents, sessionId: 'sess-1' }),
-    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null })
+    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null, defaultProvider: null })
   })
 
   it('defaults each missing list to [] and sessionId to null', () => {
@@ -3882,13 +3899,22 @@ describe('handleAuthBootstrap', () => {
       agents: [],
       sessionId: null,
       tunnelUrl: null,
+      defaultProvider: null,
     })
   })
 
   it('coerces non-array lists to [] independently (partial-compute tolerance)', () => {
     expect(
       handleAuthBootstrap({ providers: [{ name: 'x' }], slashCommands: 'oops', agents: null }),
-    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null })
+    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null, defaultProvider: null })
+  })
+
+  // #8151 (C3) — same field as handleProviderList's defaultProvider.
+  it('extracts defaultProvider when present, else null', () => {
+    expect(handleAuthBootstrap({ defaultProvider: 'claude-sdk' }).defaultProvider).toBe('claude-sdk')
+    expect(handleAuthBootstrap({}).defaultProvider).toBeNull()
+    expect(handleAuthBootstrap({ defaultProvider: '' }).defaultProvider).toBeNull()
+    expect(handleAuthBootstrap({ defaultProvider: 42 as unknown as string }).defaultProvider).toBeNull()
   })
 
   it('treats empty/non-string sessionId as null', () => {

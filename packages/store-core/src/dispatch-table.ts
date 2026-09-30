@@ -559,6 +559,25 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * message via its shared list writes.
    */
   applyRotatedTunnelUrl?(url: string, previousUrl: string | null): void
+  /**
+   * Apply the server's resolved default provider (#8151 C3) — e.g. a Docker
+   * image's `ENV CHROXY_PROVIDER=claude-sdk` overriding the protocol's
+   * `DEFAULT_PROVIDER` constant (claude-tui) every client bakes in. Carried
+   * on `provider_list` and the `auth_bootstrap` connect-time burst as an
+   * optional `defaultProvider` field; both dispatch handlers call this
+   * best-effort (optional-chained), only when the server actually sent a
+   * non-null value.
+   *
+   * The STORAGE and "did the user already choose explicitly?" check are both
+   * platform-local (dashboard: a localStorage key; the app: its own
+   * persisted-settings store), so — like {@link applyRotatedTunnelUrl} —
+   * this stays a hook rather than a shared write: the adapter decides
+   * whether an explicit user choice should win.
+   *
+   * OPTIONAL: when omitted, a client keeps using its own hardcoded
+   * DEFAULT_PROVIDER fallback, exactly as before this field existed.
+   */
+  applyServerDefaultProvider?(name: string): void
 }
 
 /**
@@ -1666,6 +1685,9 @@ function dispatchProviderList<S extends DispatchSessionBase>(
     ? adapter.mapProviderList(result.providers)
     : result.providers
   adapter.setState({ availableProviders: providers } as Record<string, unknown[]>)
+  // #8151 (C3) — best-effort: absent on an older server, and the adapter
+  // itself decides whether an explicit user choice outranks it.
+  if (result.defaultProvider) adapter.applyServerDefaultProvider?.(result.defaultProvider)
 }
 
 // ---------------------------------------------------------------------------
@@ -1890,6 +1912,9 @@ function dispatchAuthBootstrap<S extends DispatchSessionBase>(
   // mapProviderList; the dashboard writes verbatim (the Batch 2 divergence).
   const providers = adapter.mapProviderList ? adapter.mapProviderList(boot.providers) : boot.providers
   adapter.setState({ availableProviders: providers } as Record<string, unknown>)
+  // #8151 (C3) — same best-effort apply as dispatchProviderList; this is the
+  // connect-time fast path most clients actually learn the default from.
+  if (boot.defaultProvider) adapter.applyServerDefaultProvider?.(boot.defaultProvider)
   // Slash commands + agents are scoped to the connect-time active session: skip
   // them (but keep providers) when a session switch already moved off the burst's
   // sessionId — the post-switch flow re-requests them.

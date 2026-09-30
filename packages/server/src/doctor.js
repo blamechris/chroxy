@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs'
 import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { createServer } from 'net'
-import { validateConfig, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
+import { validateConfig, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled, envKeyForConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
 import { resolveDeclaredMinVersion } from './utils/binary-version.js'
@@ -123,15 +123,33 @@ export function isBundledOrSupervisedContext() {
 /**
  * Resolve the list of providers to preflight check.
  *
- * Precedence:
- *   1. Explicit `providers` option (array of provider names)
- *   2. `provider` field from loaded config file
- *   3. DEFAULT_PROVIDER (see providers.js)
+ * #8151 review (S6) — this used to skip the ENV tier entirely: a Docker
+ * image setting `CHROXY_PROVIDER=claude-sdk` (no config file written yet on
+ * a fresh container) still fell all the way through to `DEFAULT_PROVIDER`
+ * (claude-tui) here, so `chroxy doctor` preflighted and reported on the
+ * WRONG provider — the one `chroxy start` would go on to never actually use
+ * (config.js's `mergeConfig` resolves `provider` with CLI > ENV > file >
+ * default, and `chroxy start` reads config.js, not this function).
+ *
+ * Precedence now matches config.js exactly:
+ *   1. Explicit `providers` option (array of provider names — doctor's own
+ *      `--provider a,b` flag, the CLI tier)
+ *   2. `CHROXY_PROVIDERS` / `CHROXY_PROVIDER` env vars (the ENV tier) — env
+ *      var NAMES come from `envKeyForConfig` (config.js), not re-typed here,
+ *      so a rename there can't silently desync this copy.
+ *   3. `provider` field from loaded config file
+ *   4. DEFAULT_PROVIDER (see providers.js)
  *
  * Returns an array of provider name strings.
  */
-function resolveProviders({ providers, configProvider }) {
+function resolveProviders({ providers, configProvider, env = process.env }) {
   if (Array.isArray(providers) && providers.length > 0) return providers
+  const envProviders = env[envKeyForConfig('providers')]
+  if (typeof envProviders === 'string' && envProviders.trim()) {
+    return envProviders.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  const envProvider = env[envKeyForConfig('provider')]
+  if (typeof envProvider === 'string' && envProvider.trim()) return [envProvider.trim()]
   if (typeof configProvider === 'string' && configProvider.length > 0) return [configProvider]
   return [DEFAULT_PROVIDER]
 }

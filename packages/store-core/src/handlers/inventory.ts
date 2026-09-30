@@ -107,12 +107,20 @@ export function handleAgentList(
  * `msg.providers` is missing/non-array. The mobile app additionally tightens
  * element validation at the call site; this handler only handles the
  * shared array-ness check.
+ *
+ * `defaultProvider` (#8151 C3) — the daemon's own resolved default provider
+ * (e.g. a Docker image's `CHROXY_PROVIDER=claude-sdk`), trimmed/validated the
+ * same way `available_models`'s `defaultModel` is; `null` when absent/blank
+ * so a client can tell "no server opinion" from "use this one".
  */
 export function handleProviderList(
   msg: Record<string, unknown>,
-): { providers: unknown[] } | null {
+): { providers: unknown[]; defaultProvider: string | null } | null {
   if (!Array.isArray(msg.providers)) return null
-  return { providers: msg.providers as unknown[] }
+  return {
+    providers: msg.providers as unknown[],
+    defaultProvider: parseStringField(msg, 'defaultProvider'),
+  }
 }
 
 /**

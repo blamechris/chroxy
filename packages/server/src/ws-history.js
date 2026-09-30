@@ -6,7 +6,7 @@
  */
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
-import { listProviders, getProvider } from './providers.js'
+import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
@@ -1077,6 +1077,9 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
     send(ws, {
       type: 'auth_bootstrap',
       providers,
+      // #8151 (C3) — same field/derivation as list_providers' response; see
+      // handleListProviders (settings-handlers.js).
+      defaultProvider: resolveDaemonDefaultProvider(services?.config),
       slashCommands,
       agents,
       ...(info.sessionId ? { sessionId: info.sessionId } : {}),

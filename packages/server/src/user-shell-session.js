@@ -181,10 +181,34 @@ export class UserShellSession extends BaseSession {
    */
   async start() {
     let ptyMod
-    try {
-      ptyMod = await import('node-pty')
-    } catch (err) {
-      throw new Error(describeNodePtyUnavailable(err))
+    // Test seam (#8151 C4): a test may set `_ptyModOverride` to a FUNCTION to
+    // simulate the import ITSELF rejecting, exercising this real catch/throw
+    // rather than reimplementing its logic in the test. Undefined in
+    // production → the genuine dynamic import runs unchanged. Kept as a
+    // SEPARATE branch rather than routing the real import through a shared
+    // wrapper function: lint-argv-sinks.mjs recognises `ptyMod = await
+    // import('node-pty')` as a literal AST shape (an import expression bound
+    // DIRECTLY to `ptyMod`) to find this node-pty spawn sink and argv-guard
+    // it — a wrapper would make the lint blind to this call site (see
+    // claude-tui-session.js's `_spawnPty` for the same reasoning, applied
+    // there first).
+    if (typeof this._ptyModOverride === 'function') {
+      try {
+        ptyMod = await this._ptyModOverride()
+      } catch (err) {
+        throw Object.assign(new Error(describeNodePtyUnavailable(err)), { code: 'PTY_UNAVAILABLE' })
+      }
+    } else {
+      try {
+        ptyMod = await import('node-pty')
+      } catch (err) {
+        // #8151 (C4) — start() already rejects directly with the actionable
+        // message (no intermediate generic-message overwrite the way
+        // claude-tui-session.js's _spawnPty/start() split needed fixing for);
+        // `.code` is added here purely for parity with that fix, so both
+        // providers' session_create_failed carry the same, taggable code.
+        throw Object.assign(new Error(describeNodePtyUnavailable(err)), { code: 'PTY_UNAVAILABLE' })
+      }
     }
 
     // Resolved in the constructor (see _shellPath) so the create-audit can read

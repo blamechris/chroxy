@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
-import { registerProvider } from '../src/providers.js'
+import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from '../src/utils/agent-sdk-version.js'
 import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
@@ -66,6 +66,66 @@ describe('runDoctorChecks', () => {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const configCheck = checks.find(c => c.name === 'Config')
     assert.ok(configCheck)
+  })
+
+  describe('resolveProviders honours CHROXY_PROVIDER / CHROXY_PROVIDERS (#8151 S6)', () => {
+    // Before this fix, `chroxy doctor` (and the image's own preflight) fell
+    // straight from "no explicit --provider" to the CONFIG FILE's provider,
+    // skipping the env tier entirely — a Docker image with no config file yet
+    // written and `CHROXY_PROVIDER=claude-sdk` set still reported/preflighted
+    // DEFAULT_PROVIDER (claude-tui), the one provider the image doesn't
+    // support. A DEDICATED temp CHROXY_CONFIG_DIR guarantees no config.json is
+    // present (the real fix only matters when the file tier has nothing to
+    // say), independent of whatever other tests in this file/worker write to
+    // the shared sandboxed config dir.
+    const withIsolatedEnv = async (envOverrides, fn) => {
+      const configDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-provider-env-'))
+      // CHROXY_CONFIG_DIR is a SIDE EFFECT of this helper (for isolation), not
+      // one of the caller's explicit overrides — it must be saved/restored
+      // too, or leaving it pointed at the tmpdir this function deletes below
+      // would corrupt CHROXY_CONFIG_DIR for every test that runs after this
+      // one in the same process (confirmed the hard way: the first version of
+      // this helper only saved/restored the override KEYS and broke every
+      // later checkTunnelRoutability test in this file with an ENOENT on the
+      // now-deleted config.json).
+      const savedKeys = [...Object.keys(envOverrides), 'CHROXY_CONFIG_DIR']
+      const saved = {}
+      for (const k of savedKeys) saved[k] = process.env[k]
+      process.env.CHROXY_CONFIG_DIR = configDir
+      for (const [k, v] of Object.entries(envOverrides)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      try {
+        return await fn()
+      } finally {
+        for (const k of savedKeys) {
+          if (saved[k] === undefined) delete process.env[k]
+          else process.env[k] = saved[k]
+        }
+        rmSync(configDir, { recursive: true, force: true })
+      }
+    }
+
+    it('CHROXY_PROVIDER=claude-sdk (no config file, no explicit --provider) resolves to claude-sdk, not DEFAULT_PROVIDER', async () => {
+      const { providers } = await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, () => runDoctorChecks({}))
+      assert.deepEqual(providers, ['claude-sdk'])
+    })
+
+    it('CHROXY_PROVIDERS (plural, comma-separated) resolves to multiple providers', async () => {
+      const { providers } = await withIsolatedEnv({ CHROXY_PROVIDERS: 'claude-sdk, gemini' }, () => runDoctorChecks({}))
+      assert.deepEqual(providers, ['claude-sdk', 'gemini'])
+    })
+
+    it('an explicit providers option still wins over the env var (CLI > ENV precedence)', async () => {
+      const { providers } = await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, () => runDoctorChecks({ providers: ['gemini'] }))
+      assert.deepEqual(providers, ['gemini'])
+    })
+
+    it('with neither an env var nor a config file, still falls back to DEFAULT_PROVIDER (no regression on the old floor)', async () => {
+      const { providers } = await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, () => runDoctorChecks({}))
+      assert.deepEqual(providers, [DEFAULT_PROVIDER])
+    })
   })
 
   describe('Billing check (#5821)', () => {

@@ -1705,10 +1705,17 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
 
 /**
  * Convert config key to corresponding environment variable name.
+ *
+ * Exported (#8151 review S6) so a caller outside mergeConfig's own precedence
+ * walk — currently doctor.js's `resolveProviders` — can read the SAME env var
+ * name this file uses for a given config key, rather than a second hand-typed
+ * copy of e.g. "provider's env var is CHROXY_PROVIDER" drifting from this one
+ * if it's ever renamed.
+ *
  * @param {string} key - Config key
  * @returns {string} Environment variable name
  */
-function envKeyForConfig(key) {
+export function envKeyForConfig(key) {
   const envMap = {
     apiToken: 'API_TOKEN',
     port: 'PORT',

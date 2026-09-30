@@ -17,7 +17,7 @@
 #
 #   docker build -t chroxy:local . && bash scripts/docker-image-smoke.sh chroxy:local
 #
-# Five checks, all against the image as built:
+# Six checks, all against the image as built:
 #
 # 1. Every `@chroxy/*` specifier the server imports resolves inside the image.
 #    The specifiers are read from the image's OWN copy of packages/server/src on
@@ -34,22 +34,51 @@
 #    this checks the probe Docker itself would run, including that its tools
 #    exist in the image.
 #
-# 3. The image's own `claude` CLI (#8145) runs and reports the version the
+# 3. #8151 review (C1) — the Default session actually comes up under the
+#    HEADLESS claude-sdk provider, not merely "the process answers HTTP".
+#    Check 2's HEALTHCHECK is `curl http://localhost:.../` — it returns ok
+#    regardless of session state, so an image whose provider resolves to
+#    claude-tui (node-pty unavailable here) was previously HEALTHCHECK-healthy
+#    AND passed every check above it, while its own logs showed the Default
+#    session's node-pty import fail and the session get torn down a moment
+#    later. Proven by polling `docker logs` (bounded) for the sdk session's own
+#    "[sdk] Ready for messages" line, and asserting the logs contain NEITHER
+#    "node-pty unavailable" NOR "Destroyed session" — the exact signature of a
+#    PTY-based provider failing and its phantom session being cleaned up. A WS
+#    probe of `session_list` would name the provider more directly, but this
+#    image's default posture requires E2E encryption for anything beyond the
+#    unauthenticated `/` health route, and standing up that handshake from a
+#    disposable bash+node probe is not cheap; the log signature is specific
+#    enough that this script prefers it over building a partial WS client.
+#
+#    Mutant: build `FROM <this image>` + `ENV CHROXY_PROVIDER=claude-tui` —
+#    still HEALTHCHECK-healthy, still passes checks 1/2/4/6, and goes RED here.
+#
+# 4. The image's own `claude` CLI (#8145) runs and reports the version the
 #    Dockerfile pinned. The pin is read from the image's own
 #    `org.chroxy.claude-code.version` label via `docker inspect`, never
 #    parsed from the Dockerfile source, so this checks what actually shipped.
 #
-# 4. GET /dashboard, on the already-running healthy container, returns 200 and
-#    serves the actual built dashboard — not just any 200 (#8151). Before
-#    #8151 this 404'd ("Dashboard dist directory not found") while the
-#    startup banner advertised the URL. Authenticates the same way a real
-#    dashboard client does (?token=), using a fixed API_TOKEN this script
-#    itself passed to `docker run`, so this never needs to read the
-#    auto-generated token back out of the container.
+# 5. GET /dashboard, on the already-running healthy container, serves the
+#    REAL BUILT dashboard — not just any 200, and not the unbuilt SOURCE
+#    index.html (#8151 review C2): the dashboard's <title> marker sits in
+#    BOTH, so a title-only check passes on a blank page whose script tag
+#    points at /src/main.tsx (never fetched, never built) instead of a real
+#    /dashboard/assets/*.js bundle. This extracts the actual <script src="...">
+#    bundle path from the served HTML and fetches THAT asset with the token,
+#    requiring 200, a non-empty body, and a JS content-type — the unbuilt
+#    source HTML has no such script tag at all, so the extraction itself fails
+#    first. #8151 review (S1) also runs a NEGATIVE control FIRST: GET
+#    /dashboard with NO token must be 403 — proving auth actually gates the
+#    route before the positive check's token is trusted to mean anything.
 #
-# 5. Every THIRD-PARTY dependency the server's OWN package.json declares
+#    Mutants: an image serving the source index.html (no bundle to extract,
+#    RED); a dist whose assets/ directory is emptied (bundle path extracted,
+#    fetch 404s, RED).
+#
+# 6. Every THIRD-PARTY dependency the server's OWN package.json declares
 #    (`dependencies` + `optionalDependencies`, read from the image's own copy,
-#    never this checkout's) resolves inside the image. `@chroxy/*` names are
+#    never this checkout's) is checked inside the image. `@chroxy/*` names are
 #    excluded — check 1 already resolves every specifier the server actually
 #    imports, subpaths included, which a blind bare-root import here cannot
 #    (e.g. `@chroxy/store-core`'s root export is a TypeScript source file the
@@ -57,15 +86,46 @@
 #    catches a lazily-imported dep going missing (#8151): deleting
 #    `@kubernetes/client-node` from the image previously still passed the
 #    smoke with exit 0, because config.js only imports it when a K8s/Rancher
-#    environment backend is actually used. A name this check cannot validly
-#    resolve via a bare import — deliberately unsupported here (`node-pty` —
-#    no linux prebuild, see the Dockerfile's `CHROXY_PROVIDER` comment), or a
-#    package that is real but only usable via a subpath / as a static asset,
-#    never as a bare Node import (`@modelcontextprotocol/sdk`, `@xterm/*`) —
-#    goes in EXEMPT_JSON below with a reason, checked in BOTH directions:
-#    every exempt name must actually be a declared dependency, so a name that
-#    stops being one (or a typo) fails loudly instead of silently widening
-#    the exemption.
+#    environment backend is actually used.
+#
+#    #8151 review (S2): for each name, the image's OWN packages/server/src is
+#    scanned for the specifier(s) actually used (bare or with a subpath,
+#    static `from`/`import`/`require`/dynamic `import(`) — the SAME mechanism
+#    check 1 uses for `@chroxy/*`, generalised to every dependency name so
+#    there is no hand-kept subpath list. A package used only via a subpath
+#    (`@modelcontextprotocol/sdk/server/...`) is resolved at THAT subpath, not
+#    a blind bare-root import — `@modelcontextprotocol/sdk`'s own bare "."
+#    export is a dead link in the published package on every platform
+#    (confirmed outside Docker too), which the old hand-written exemption hid
+#    this check from ever actually exercising that dependency at all. Falls
+#    back to the bare name only when the scan finds no specifier for it (e.g.
+#    `@kubernetes/client-node`, imported bare with no subpath).
+#
+#    Two SEPARATE kinds of special case remain, both CHECKED — never
+#    silently skipped — and both validated in BOTH directions (every
+#    special-cased name must still be a real declared dependency, so a
+#    typo'd or removed name fails loudly instead of silently widening what
+#    this check accepts):
+#
+#      - EXEMPT_JSON: a name this check cannot validly `import()` at all —
+#        currently only `node-pty` (no linux prebuild; the embedded terminal
+#        and claude-tui provider are unsupported in this image, see the
+#        Dockerfile's `CHROXY_PROVIDER` comment). #8151 review (S3): treated
+#        as an EXPECTED FAILURE, not a free pass — the import is still
+#        attempted, and it must actually fail; if it ever unexpectedly
+#        SUCCEEDS (a future base image ships a prebuild, say), that is
+#        reported as a failure too ("exemption no longer needed"), so a
+#        silently-fixed exemption doesn't sit there unnoticed forever.
+#      - STATIC_ASSETS_JSON: a package that is real and genuinely used, but
+#        only as raw asset BYTES — http-routes.js's `readModule` reads
+#        specific files off disk and serves them verbatim, never `import()`s
+#        the package as a Node module. `@xterm/xterm` / `@xterm/addon-fit`
+#        are exactly this (and `@xterm/xterm`'s own entry point throws "self
+#        is not defined" under plain Node by design — it assumes a
+#        browser/webworker global). #8151 review (S3): these are checked by
+#        FILE EXISTENCE at the exact paths `readModule` reads, mirroring its
+#        own two-candidate-path fallback — never exempted from checking at
+#        all, the way they previously were.
 #
 # Every docker call that runs something in the image is bounded by
 # `run_with_timeout` (scripts/lib/run-with-timeout.sh), so a wedged image
@@ -79,6 +139,12 @@
 # tries `timeout`, then `gtimeout`, then falls back to a `perl` alarm/exec
 # implementation that preserves the same exit-124-on-expiry contract this
 # script's own `import_rc` check below relies on.
+#
+# #8151 review (S4): every `docker run` this script issues also gets `--init`
+# — a tiny PID-1 (tini) inside the container that forwards signals and reaps
+# zombies, so a SIGTERM from `run_with_timeout` on a wedged call actually
+# stops the container's real process instead of being swallowed by an
+# application PID 1 that never installed its own handler.
 #
 # Exit codes: 0 = healthy, 1 = a check failed, 2 = usage error.
 set -euo pipefail
@@ -104,7 +170,7 @@ fail() {
 }
 
 cleanup() {
-  docker rm -f "$NAME" "$NAME-scan" "$NAME-imports" "$NAME-deps" >/dev/null 2>&1 || true
+  docker rm -f "$NAME" "$NAME-scan" "$NAME-imports" "$NAME-depjson" "$NAME-deps" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -119,7 +185,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "no such image: $IMAGE (bu
 # Every line of the image's server JavaScript that quotes an @chroxy/ specifier
 # (JS only: src/ also holds Markdown design notes that name packages in prose).
 set +e
-SRC_LINES="$(run_with_timeout 60 docker run --rm --name "$NAME-scan" --entrypoint grep "$IMAGE" \
+SRC_LINES="$(run_with_timeout 60 docker run --rm --init --name "$NAME-scan" --entrypoint grep "$IMAGE" \
   -rhE --include='*.js' --include='*.mjs' --include='*.cjs' "['\"\`]@chroxy/" "$IMAGE_SERVER/src")"
 scan_rc=$?
 set -e
@@ -152,7 +218,7 @@ echo "== Resolving $(printf '%s\n' "$SPECS" | wc -l | tr -d ' ') @chroxy/* speci
 # server's own imports do. $SPECS is intentionally unquoted: one argv each.
 set +e
 # shellcheck disable=SC2086
-run_with_timeout 120 docker run --rm --name "$NAME-imports" -w "$IMAGE_SERVER" "$IMAGE" node --input-type=module -e '
+run_with_timeout 120 docker run --rm --init --name "$NAME-imports" -w "$IMAGE_SERVER" "$IMAGE" node --input-type=module -e '
   for (const spec of process.argv.slice(1)) {
     await import(spec)
     console.log("  resolved " + spec)
@@ -178,13 +244,13 @@ else
 fi
 
 # Fixed rather than auto-generated (the entrypoint would otherwise mint a
-# fresh uuid and write it ONLY to the container's own config.json) so check 4
-# below can authenticate a dashboard request without reaching into the
+# fresh uuid and write it ONLY to the container's own config.json) so checks
+# 5/6 below can authenticate a dashboard request without reaching into the
 # container to read it back.
 DASHBOARD_TOKEN="chroxy-smoke-test-dashboard-token"
 
 echo "== Starting $IMAGE (tunnel off) and waiting up to ${TIMEOUT_SECONDS}s for: $HC_CMD"
-docker run -d --name "$NAME" \
+docker run -d --init --name "$NAME" \
   -e ANTHROPIC_API_KEY=sk-ant-smoke-test-not-a-real-key \
   -e CHROXY_TUNNEL=none \
   -e PORT="$PORT" \
@@ -206,7 +272,39 @@ done
 
 echo "== Healthy: the image's HEALTHCHECK passed"
 
-# --- 3. The image's own claude CLI runs and reports the pinned version -----
+# --- 3. The Default session is actually live under claude-sdk (#8151 C1) ---
+# HEALTHCHECK above proves only "the HTTP server answers" — main's own
+# claude-tui image was ALSO healthy while its Default session's node-pty
+# import failed and the phantom session was torn down a moment later. Poll
+# `docker logs` (bounded) for the sdk session's own "Ready for messages" line
+# (sdk-session.js, logger tag [sdk] — see logger.js's
+# "<ts> [INFO] [sdk] <msg>" format), and assert the logs show NEITHER a
+# node-pty failure NOR a destroyed session — the signature of a PTY-based
+# provider failing instead.
+echo "== Checking the Default session actually started under claude-sdk (not a silently-failing claude-tui)"
+SDK_READY_DEADLINE=$((SECONDS + 20))
+sdk_ready=0
+LOGS=""
+while [ "$SECONDS" -lt "$SDK_READY_DEADLINE" ]; do
+  LOGS="$(docker logs "$NAME" 2>&1)"
+  if grep -qF '[sdk] Ready for messages' <<<"$LOGS"; then
+    sdk_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$sdk_ready" -ne 1 ]; then
+  printf '%s\n' "$LOGS" >&2
+  fail "the Default session never logged '[sdk] Ready for messages' within 20s (logs above) — the configured provider may not be claude-sdk, or it failed to start"
+fi
+grep -qF 'node-pty unavailable' <<<"$LOGS" \
+  && fail "container logs contain 'node-pty unavailable' — the Default session attempted a PTY-based provider (claude-tui/user-shell), not claude-sdk"
+grep -qF 'Destroyed session' <<<"$LOGS" \
+  && fail "container logs contain 'Destroyed session' — the Default session was torn down after a start failure"
+
+echo "== Default session OK: claude-sdk is live (no node-pty/destroy signals)"
+
+# --- 4. The image's own claude CLI runs and reports the pinned version -----
 # Read the pin from the image's OWN label (baked in by the root Dockerfile,
 # #8145) rather than parsing the Dockerfile here — this checks what shipped,
 # not what the source says should ship. `start` above ran preflight for real
@@ -219,7 +317,7 @@ CLAUDE_LABEL_VERSION="$(docker inspect -f '{{index .Config.Labels "org.chroxy.cl
 
 echo "== Checking the image's claude CLI reports the pinned version ($CLAUDE_LABEL_VERSION)"
 set +e
-CLAUDE_VERSION_OUT="$(run_with_timeout 30 docker run --rm --entrypoint claude "$IMAGE" --version 2>&1)"
+CLAUDE_VERSION_OUT="$(run_with_timeout 30 docker run --rm --init --entrypoint claude "$IMAGE" --version 2>&1)"
 claude_version_rc=$?
 set -e
 [ "$claude_version_rc" -ne 124 ] || fail "claude --version timed out after 30s inside $IMAGE"
@@ -237,14 +335,27 @@ CLAUDE_VERSION_REPORTED="${CLAUDE_VERSION_OUT%%[[:space:]]*}"
 
 echo "== claude CLI OK: $CLAUDE_VERSION_OUT"
 
-# --- 4. GET /dashboard serves the built dashboard, not a 404 ----------------
+# --- 5. GET /dashboard serves the REAL BUILT bundle, not a 404 or a blank --
 # The already-running, already-healthy container from check 2. curl runs
 # INSIDE the container (the image has curl — see the Dockerfile's "System
 # dependencies" step) rather than against a published host port, because this
-# script never publishes one. Marker is the dashboard's own <title>, taken
-# from packages/dashboard/index.html / the built output — not just "some 200",
-# which a stock 404 handler could also produce if this check were looser.
-echo "== Checking GET /dashboard serves the built dashboard"
+# script never publishes one.
+#
+# #8151 review (S1): negative control FIRST — no token must be 403, proving
+# auth actually gates the route before the positive check below trusts the
+# token to mean anything.
+echo "== Checking GET /dashboard with NO token is rejected (403)"
+set +e
+NOAUTH_STATUS="$(run_with_timeout 15 docker exec "$NAME" curl -s -o /dev/null -w '%{http_code}' \
+  "http://localhost:${PORT}/dashboard")"
+noauth_rc=$?
+set -e
+[ "$noauth_rc" -ne 124 ] || fail "GET /dashboard (no token) timed out after 15s inside $IMAGE"
+[ "$noauth_rc" -eq 0 ] || fail "GET /dashboard (no token) inside $IMAGE could not be completed (curl exit $noauth_rc)"
+[ "$NOAUTH_STATUS" = "403" ] \
+  || fail "GET /dashboard with NO token returned HTTP $NOAUTH_STATUS, not 403 — auth is not actually gating the dashboard"
+
+echo "== Checking GET /dashboard serves the built dashboard (real bundle, not the source HTML)"
 set +e
 DASH_STATUS="$(run_with_timeout 15 docker exec "$NAME" curl -s -o /dev/null -w '%{http_code}' \
   "http://localhost:${PORT}/dashboard?token=${DASHBOARD_TOKEN}")"
@@ -262,11 +373,39 @@ set -e
 grep -qF '<title>Chroxy Dashboard</title>' <<<"$DASH_BODY" \
   || fail "GET /dashboard returned 200 but the body doesn't contain the dashboard's own <title>Chroxy Dashboard</title> marker — served the wrong thing, or an empty/placeholder page"
 
-echo "== Dashboard OK: HTTP 200, marker found"
+# #8151 review (C2) — the title marker sits in the UNBUILT source index.html
+# too (it has a plain <script src="/src/main.tsx"> instead of a built
+# /dashboard/assets/*.js bundle), so it alone proves nothing about whether a
+# BUILD actually happened. Extract the real entry-bundle path and fetch it.
+BUNDLE_PATH="$(grep_or_empty -oE 'src="(/dashboard/assets/[^"]+\.js)"' <<<"$DASH_BODY" | head -1 | sed -E 's/^src="//; s/"$//')" \
+  || fail "internal: bundle-path extraction errored"
+if [ -z "$BUNDLE_PATH" ]; then
+  fail "GET /dashboard's HTML has no <script src=\"/dashboard/assets/*.js\"> entry-bundle tag — this is the SOURCE index.html (script src=\"/src/main.tsx\"), not a built dashboard"
+fi
 
-# --- 5. Every server dependency (not just @chroxy/*) resolves in the image -
+echo "== Fetching the dashboard's entry bundle: $BUNDLE_PATH"
+set +e
+BUNDLE_INFO="$(run_with_timeout 15 docker exec "$NAME" curl -s -o /dev/null -w '%{http_code} %{content_type} %{size_download}' \
+  "http://localhost:${PORT}${BUNDLE_PATH}?token=${DASHBOARD_TOKEN}")"
+bundle_rc=$?
+set -e
+[ "$bundle_rc" -ne 124 ] || fail "fetching $BUNDLE_PATH timed out after 15s inside $IMAGE"
+[ "$bundle_rc" -eq 0 ] || fail "fetching $BUNDLE_PATH inside $IMAGE could not be completed (curl exit $bundle_rc)"
+read -r BUNDLE_HTTP_CODE BUNDLE_CONTENT_TYPE BUNDLE_SIZE <<<"$BUNDLE_INFO"
+[ "$BUNDLE_HTTP_CODE" = "200" ] \
+  || fail "the dashboard's entry bundle ($BUNDLE_PATH) returned HTTP $BUNDLE_HTTP_CODE, not 200 — the dist's assets/ directory may be missing or emptied"
+[ -n "$BUNDLE_SIZE" ] && [ "$BUNDLE_SIZE" -gt 0 ] 2>/dev/null \
+  || fail "the dashboard's entry bundle ($BUNDLE_PATH) returned an empty body"
+case "$BUNDLE_CONTENT_TYPE" in
+  application/javascript*) ;;
+  *) fail "the dashboard's entry bundle ($BUNDLE_PATH) has content-type '$BUNDLE_CONTENT_TYPE', not application/javascript" ;;
+esac
+
+echo "== Dashboard OK: 403 with no token, 200 + real bundle ($BUNDLE_SIZE bytes) with one"
+
+# --- 6. Every server dependency (not just @chroxy/*) is checked ------------
 # Read the NAME list from the image's own packages/server/package.json (never
-# this checkout's) — same "ask the shipped artifact" principle as checks 2/3.
+# this checkout's) — same "ask the shipped artifact" principle as checks 2/4.
 # `@chroxy/*` names are filtered out here: check 1 above already resolves
 # every @chroxy/* specifier the server ACTUALLY imports, including subpaths
 # (e.g. `@chroxy/store-core/crypto`) — testing the bare `@chroxy/store-core`
@@ -277,7 +416,7 @@ echo "== Dashboard OK: HTTP 200, marker found"
 # job is everything else.
 echo "== Reading the image's own server dependency list"
 set +e
-DEP_JSON="$(run_with_timeout 30 docker run --rm --entrypoint node "$IMAGE" -e "
+DEP_JSON="$(run_with_timeout 30 docker run --rm --init --name "$NAME-depjson" --entrypoint node "$IMAGE" -e "
   const pkg = JSON.parse(require('fs').readFileSync('$IMAGE_SERVER/package.json', 'utf8'));
   const names = [
     ...Object.keys(pkg.dependencies || {}),
@@ -290,95 +429,146 @@ set -e
 [ "$dep_json_rc" -ne 124 ] || fail "reading the image's server package.json timed out after 30s"
 [ "$dep_json_rc" -eq 0 ] || fail "could not read packages/server/package.json's dependencies inside $IMAGE (exit $dep_json_rc): $DEP_JSON"
 
-# Names this check cannot validly resolve via a plain `import()` of the bare
-# specifier — each needs an honest, specific reason, not just "unsupported":
-#
-#   - node-pty: deliberately unsupported in this image (no linux prebuild —
-#     npm ci --ignore-scripts skips the native build; see the Dockerfile's
-#     `CHROXY_PROVIDER=claude-sdk` comment). This is the one #8151 asks for
-#     by name, and the one this whole check exists to catch a regression on.
-#   - @modelcontextprotocol/sdk: its own package.json maps the bare "."
-#     export to dist/esm/index.js, a file that does not exist ANYWHERE this
-#     package is installed (confirmed outside Docker too) — an upstream
-#     packaging gap, not a docker-image one. chroxy only ever imports its
-#     documented subpaths (e.g. `@modelcontextprotocol/sdk/server/...`),
-#     which resolve fine; this entry exempts the specific bare root import
-#     this check would otherwise wrongly attempt.
-#   - @xterm/xterm, @xterm/addon-fit: browser-only bundles. http-routes.js
-#     serves them as raw asset BYTES (readFileSync of a specific lib/ file
-#     path), never `import()`s them as a Node module — and @xterm/xterm's
-#     own entry point throws "self is not defined" when evaluated under
-#     plain Node (it assumes a browser/webworker global), which is expected,
-#     not a sign anything is missing.
-#
-# The ARRAY (not a bare name list) is what lets the "every exempt name must
-# be a real dependency" check below report WHICH name is stale, without
-# re-parsing anything.
+# See the header comment (check 6) for what each list means and why.
 EXEMPT_JSON='[
-  {"name": "node-pty", "reason": "no linux prebuild — npm ci --ignore-scripts skips the native build; the embedded terminal and claude-tui provider are unsupported in this image"},
-  {"name": "@modelcontextprotocol/sdk", "reason": "package'"'"'s own bare \".\" export target (dist/esm/index.js) does not exist in the published package on any platform; chroxy only imports its subpaths, which resolve fine"},
-  {"name": "@xterm/xterm", "reason": "browser-only bundle served as static asset bytes by http-routes.js, never imported as a Node module; throws '"'"'self is not defined'"'"' under plain Node by design"},
-  {"name": "@xterm/addon-fit", "reason": "browser-only bundle served as static asset bytes by http-routes.js, never imported as a Node module; throws '"'"'self is not defined'"'"' under plain Node by design"}
+  {"name": "node-pty", "reason": "no linux prebuild — npm ci --ignore-scripts skips the native build; the embedded terminal and claude-tui provider are unsupported in this image"}
 ]'
+# http-routes.js's readModule(pkg, file) — the EXACT files it reads (checked
+# by existence, never import()ed: see the header comment, S3).
+STATIC_ASSETS_JSON='{
+  "@xterm/xterm": ["lib/xterm.js", "css/xterm.css"],
+  "@xterm/addon-fit": ["lib/addon-fit.js"]
+}'
 
-# One node invocation resolves the full set AND does the bidirectional
-# exemption check, so there is exactly one source of truth for "the full
-# dependency list" inside this run (no separate shell-side re-parse of
-# DEP_JSON/EXEMPT_JSON to drift from what node actually iterated).
-echo "== Resolving the image's server dependencies (exemptions checked both directions)"
+echo "== Checking the image's server dependencies (subpath-aware; exemptions are expected failures, not free passes)"
 set +e
 # shellcheck disable=SC2016
-RESOLVE_OUT="$(run_with_timeout 120 docker run --rm --name "$NAME-deps" -w "$IMAGE_SERVER" "$IMAGE" \
+RESOLVE_OUT="$(run_with_timeout 120 docker run --rm --init --name "$NAME-deps" -w "$IMAGE_SERVER" "$IMAGE" \
   node --input-type=module -e '
+    import { readFileSync, readdirSync, existsSync } from "fs"
+    import { join } from "path"
+
     const names = JSON.parse(process.argv[1])
     const exempt = JSON.parse(process.argv[2])
-    const exemptNames = new Set(exempt.map((e) => e.name))
+    const staticAssets = JSON.parse(process.argv[3])
 
     if (names.length === 0) {
       console.error("FAIL: found zero dependencies in packages/server/package.json inside the image — proves nothing")
       process.exit(1)
     }
 
-    // Bidirectional: every EXEMPT name must be a REAL declared dependency —
-    // a stale/renamed exemption (the dep was removed, or never existed) must
-    // fail loudly rather than silently widen what this check accepts.
+    // Bidirectional (both special-case categories): every special-cased name
+    // must be a REAL declared dependency — a stale/renamed entry (the dep was
+    // removed, or never existed) must fail loudly rather than silently widen
+    // what this check accepts.
     const nameSet = new Set(names)
-    const staleExempt = exempt.filter((e) => !nameSet.has(e.name))
-    if (staleExempt.length > 0) {
-      for (const e of staleExempt) {
-        console.error(`FAIL: exemption "${e.name}" is not a declared dependency of packages/server/package.json — remove it or fix the typo`)
+    const specialCased = [...exempt.map((e) => e.name), ...Object.keys(staticAssets)]
+    const stale = specialCased.filter((n) => !nameSet.has(n))
+    if (stale.length > 0) {
+      for (const n of stale) {
+        console.error(`FAIL: special-cased name "${n}" is not a declared dependency of packages/server/package.json — remove it or fix the typo`)
       }
       process.exit(1)
+    }
+
+    // #8151 review S2 — scan the image'"'"'s OWN server src for the
+    // specifier(s) actually used per package name (bare or with a subpath),
+    // so a package resolved only via a subpath is checked AT that subpath
+    // rather than via a blind bare-root import.
+    function walk(dir) {
+      let out = []
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name)
+        if (entry.isDirectory()) out = out.concat(walk(p))
+        else if (/\.(js|mjs|cjs)$/.test(entry.name)) out.push(p)
+      }
+      return out
+    }
+    // Comment lines only (mirrors check 1'"'"'s CODE_LINES filter): a JSDoc
+    // line naming a specifier in PROSE (e.g. explaining why a package'"'"'s
+    // exports map does NOT allow some subpath) would otherwise be scanned as
+    // if it were a real import — this is a heuristic per-line strip, not a
+    // real parser, so a trailing `// comment` on a code line is not stripped;
+    // that only risks a spurious EXTRA specifier tried (still checked, at
+    // worst redundantly), never a real one silently skipped.
+    const stripCommentLines = (text) =>
+      text.split("\n").filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line)).join("\n")
+    const srcFiles = walk("src")
+    const srcText = srcFiles.map((f) => stripCommentLines(readFileSync(f, "utf8"))).join("\n")
+
+    function escapeRegex(s) {
+      return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    }
+    function specifiersUsedFor(name) {
+      const re = new RegExp(
+        "(?:^|[^A-Za-z0-9_$.])(?:from|import|require)\\s*\\(?\\s*[\x27\"\x60](" + escapeRegex(name) + "(?:/[A-Za-z0-9_./-]+)?)[\x27\"\x60]",
+        "g",
+      )
+      const found = new Set()
+      let m
+      while ((m = re.exec(srcText))) found.add(m[1])
+      return found
     }
 
     let checked = 0
     let failed = 0
+
     for (const name of names) {
-      if (exemptNames.has(name)) {
-        console.log(`  skipped ${name} (exempt: ${exempt.find((e) => e.name === name).reason})`)
+      if (name in staticAssets) {
+        for (const file of staticAssets[name]) {
+          const candidates = [join("node_modules", name, file), join("..", "..", "node_modules", name, file)]
+          if (candidates.some((p) => existsSync(p))) {
+            console.log(`  resolved ${name}/${file} (static asset — checked by existence, matches http-routes.js readModule)`)
+            checked++
+          } else {
+            console.error(`FAIL: static asset "${name}/${file}" not found at either candidate path readModule checks: ${candidates.join(" or ")}`)
+            failed++
+          }
+        }
         continue
       }
-      try {
-        await import(name)
-        console.log(`  resolved ${name}`)
-        checked++
-      } catch (err) {
-        console.error(`FAIL: dependency "${name}" does not resolve inside the image: ${err.message}`)
-        failed++
+
+      const exemption = exempt.find((e) => e.name === name)
+      if (exemption) {
+        // #8151 review S3 — an EXPECTED failure, not a free pass: the import
+        // is still attempted, and must actually fail; an unexpected SUCCESS
+        // is reported as a failure too ("exemption no longer needed").
+        try {
+          await import(name)
+          console.error(`FAIL: exemption "${name}" is no longer needed — it imported successfully inside this image (reason on file: ${exemption.reason})`)
+          failed++
+        } catch (err) {
+          console.log(`  expected failure confirmed: ${name} (${exemption.reason}) — ${String(err.message).split("\n")[0]}`)
+          checked++
+        }
+        continue
+      }
+
+      const specifiers = specifiersUsedFor(name)
+      const toResolve = specifiers.size > 0 ? [...specifiers] : [name]
+      for (const spec of toResolve) {
+        try {
+          await import(spec)
+          console.log(`  resolved ${spec}`)
+          checked++
+        } catch (err) {
+          console.error(`FAIL: dependency "${spec}" does not resolve inside the image: ${err.message}`)
+          failed++
+        }
       }
     }
 
     if (checked === 0) {
-      console.error("FAIL: zero non-exempt dependencies were actually resolved — the floor check above must never pass on nothing checked")
+      console.error("FAIL: zero dependencies were actually checked — the floor check above must never pass on nothing checked")
       process.exit(1)
     }
     if (failed > 0) process.exit(1)
-    console.log(`== ${checked} dependencies resolved, ${exempt.length} exempted`)
-  ' "$DEP_JSON" "$EXEMPT_JSON")"
+    console.log(`== ${checked} check(s) passed (${exempt.length} expected-failure exemption(s), ${Object.keys(staticAssets).length} static-asset package(s))`)
+  ' "$DEP_JSON" "$EXEMPT_JSON" "$STATIC_ASSETS_JSON")"
 resolve_rc=$?
 set -e
 printf '%s\n' "$RESOLVE_OUT"
-[ "$resolve_rc" -ne 124 ] || fail "resolving the image's server dependencies timed out after 120s"
-[ "$resolve_rc" -eq 0 ] || fail "one or more server dependencies failed to resolve inside $IMAGE (see FAIL lines above)"
+[ "$resolve_rc" -ne 124 ] || fail "checking the image's server dependencies timed out after 120s"
+[ "$resolve_rc" -eq 0 ] || fail "one or more server dependency checks failed inside $IMAGE (see FAIL lines above)"
 
-echo "== Dependency resolution OK"
+echo "== Dependency checks OK"

@@ -2008,6 +2008,12 @@ export class ClaudeTuiSession extends BaseSession {
       // `_spawnPty` hit an early-return failure path (node-pty unavailable /
       // spawn throw). It already emitted a descriptive `error`; reject so the
       // failure isn't swallowed.
+      // #8151 (C4) — when the early return latched a SPECIFIC failure
+      // (currently: node-pty unavailable), reject with THAT error — preserving
+      // its `.code` and full actionable message — instead of the generic
+      // fallback below, so session_create_failed.errorMessage carries the
+      // real, actionable reason a client actually renders.
+      if (this._spawnFailure) throw this._spawnFailure
       throw new Error('claude PTY failed to spawn (no live process after _spawnPty)')
     }
 
@@ -2661,6 +2667,9 @@ export class ClaudeTuiSession extends BaseSession {
     // every attempt (mirrors CliSession._spawnPersistentProcess). A fresh
     // attempt gets a fresh gate verdict.
     this._spawnRefusal = null
+    // #8151 (C4): same reset, for a prior attempt's latched node-pty-unavailable
+    // failure — see the node-pty import catch below and start()'s read of it.
+    this._spawnFailure = null
     if (this._connectionAuthRoute === 'native') {
       this._nativeRouteVerifiedForSpawn = false
       this._beginNativeRouteVerification()
@@ -2724,13 +2733,44 @@ export class ClaudeTuiSession extends BaseSession {
     // REAL arg-builder below runs against it — catching drift on the actual spawn
     // argv (e.g. a dropped --no-chrome), which a wholesale _spawnPty mock cannot.
     // Undefined in production → the genuine dynamic import runs unchanged.
-    if (this._ptyModOverride) {
+    //
+    // #8151 (C4): a FUNCTION override additionally lets a test simulate the
+    // import ITSELF rejecting (not just stand in for what it resolves to),
+    // exercising the real catch/latch/emit logic below instead of mocking the
+    // whole spawn away. Kept as a SEPARATE branch rather than unifying it with
+    // the plain `import('node-pty')` call below through a shared wrapper
+    // function: lint-argv-sinks.mjs recognises `ptyMod = await
+    // import('node-pty')` as a literal AST shape (an import expression bound
+    // DIRECTLY to `ptyMod`) to find this node-pty spawn sink and argv-guard
+    // it — routing the real import through a wrapper would make the lint
+    // blind to this call site, which is exactly the "guard that goes blind"
+    // defect class docs/false-safety-guards.md warns about. The two branches
+    // below duplicate the 5-line catch body rather than risk that.
+    if (typeof this._ptyModOverride === 'function') {
+      try {
+        ptyMod = await this._ptyModOverride()
+      } catch (err) {
+        const message = describeNodePtyUnavailable(err)
+        this._spawnFailure = Object.assign(new Error(message), { code: 'PTY_UNAVAILABLE' })
+        this.emit('error', { code: 'PTY_UNAVAILABLE', message })
+        return
+      }
+    } else if (this._ptyModOverride) {
       ptyMod = this._ptyModOverride
     } else {
       try {
         ptyMod = await import('node-pty')
       } catch (err) {
-        this.emit('error', { message: describeNodePtyUnavailable(err) })
+        // #8151 (C4) — latch the ACTIONABLE message so start() (below) can
+        // reject with it. Before this fix, start()'s generic "claude PTY
+        // failed to spawn (no live process after _spawnPty)" overwrote
+        // whatever this emit() carried the instant start() rejected — the
+        // 'error' event and the REJECTION are two different channels, and
+        // session_create_failed.errorMessage (what the client actually
+        // renders) reads the rejection, not the emit.
+        const message = describeNodePtyUnavailable(err)
+        this._spawnFailure = Object.assign(new Error(message), { code: 'PTY_UNAVAILABLE' })
+        this.emit('error', { code: 'PTY_UNAVAILABLE', message })
         return
       }
     }

@@ -35,20 +35,27 @@ import { getErrorMessage } from './error-message.js'
 
 /**
  * Build the user-visible error message for a failed `import('node-pty')`.
- * Keeps the original `node-pty unavailable: <cause>` prefix (existing tests
- * match `/^node-pty unavailable/`) and appends the actionable part.
+ *
+ * #8151 review (S8): the ACTIONABLE sentence leads — a client showing only
+ * the first N characters of a toast still shows the fix, not just a fact.
+ * The cause is appended LAST, and only its FIRST LINE: node-pty's own
+ * "Cannot find module '.../build/Release/pty.node'" is one line, but some
+ * native-addon load failures (a segfault backtrace, an N-API ABI-mismatch
+ * dump) are many, and a multi-line cause buried in the middle of an already
+ * long message is unreadable in a one-line toast.
  *
  * @param {unknown} err - the caught import rejection
  * @returns {string}
  */
 export function describeNodePtyUnavailable(err) {
-  const cause = getErrorMessage(err, 'unknown error')
+  const cause = getErrorMessage(err, 'unknown error').split('\n')[0]
   return (
-    `node-pty unavailable: ${cause} — the embedded terminal and the ` +
-    `claude-tui provider both require a native PTY binding that failed to ` +
-    `load here. This is expected inside the official chroxy Docker image, ` +
-    `which ships without a native build toolchain (node-pty has no linux ` +
-    `prebuild); use the claude-sdk provider instead. Outside Docker, this ` +
-    `usually means node-pty needs to be rebuilt for this Node version.`
+    `node-pty is unavailable here — use the claude-sdk provider instead. ` +
+    `The embedded terminal and the claude-tui provider both require a ` +
+    `native PTY binding that failed to load. This is expected inside the ` +
+    `official chroxy Docker image, which ships without a native build ` +
+    `toolchain (node-pty has no linux prebuild). Outside Docker, reinstall ` +
+    `it (\`npm rebuild node-pty\`) — on Linux this needs python3, make and ` +
+    `a C++ compiler. Cause: ${cause}`
   )
 }

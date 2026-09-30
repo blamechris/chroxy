@@ -22,7 +22,7 @@ import {
   buildSessionTokenMismatchPayload,
   isSessionViewer,
 } from '../handler-utils.js'
-import { listProviders, getProvider } from '../providers.js'
+import { listProviders, getProvider, resolveDaemonDefaultProvider } from '../providers.js'
 import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
@@ -639,6 +639,11 @@ function handleListProviders(ws, client, msg, ctx) {
   ctx.transport.send(ws, {
     type: 'provider_list',
     providers: listProviders({ agentConnections: ctx.services?.config?.agentConnections }),
+    // #8151 (C3) — this daemon's own resolved default (CLI > env > config file
+    // > DEFAULT_PROVIDER), so a client can override its baked-in
+    // DEFAULT_PROVIDER fallback (claude-tui) with what actually works here —
+    // e.g. the Docker image's ENV CHROXY_PROVIDER=claude-sdk.
+    defaultProvider: resolveDaemonDefaultProvider(ctx.services?.config),
   })
 }
 

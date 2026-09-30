@@ -41,31 +41,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The root Docker image serves the dashboard and defaults to the headless
-  `claude-sdk` provider (#8151).** An owner decision scoped the image to
-  exactly two things: the headless `claude-sdk` provider, and the web
-  dashboard — the embedded user-shell terminal and the `claude-tui` provider
-  are not supported (`node-pty` has no linux prebuild in this image, and
-  `claude-tui` assumes an interactive login shell). A new `dashboard-builder`
-  stage builds `@chroxy/dashboard` (Vite) from just its own dependency graph
-  (`@chroxy/design-tokens`, `@chroxy/protocol`, `@chroxy/store-core` —
-  installed via `npm ci --workspace=@chroxy/dashboard`, never the whole
-  monorepo) and the final image copies in only the built `dist/`, so
-  `GET /dashboard` now serves the real app instead of 404ing. `ENV
-  CHROXY_PROVIDER=claude-sdk` overrides the daemon's own default (`claude-tui`)
-  so a plain `docker run` no longer starts sessions doomed to fail; `-e
-  CHROXY_PROVIDER=...` still overrides it per the normal CLI > env > config >
-  default precedence. Selecting the terminal or `claude-tui` anyway now fails
-  with a clear "node-pty unavailable ... use claude-sdk instead" message
-  (`describeNodePtyUnavailable`, shared by both call sites) rather than a raw
-  native-module error. `scripts/docker-image-smoke.sh` gained two checks:
-  `GET /dashboard` returns 200 and serves the dashboard's own `<title>`
-  marker, and every dependency in `packages/server/package.json` (not just
-  `@chroxy/*`) resolves inside the image — with an explicit, bidirectionally-
-  checked exemption list for `node-pty` and the handful of dependencies that
-  are real but only ever used via a subpath or as a static asset. `docs/self-
-  hosting-guide.md` documents the supported/unsupported split and the env
-  override. `.dockerignore` and `ci.yml`'s `docker` path filter are kept in
-  sync for the two newly-whitelisted packages.
+  `claude-sdk` provider, and actually proves it (#8151, HIGH-tier review
+  round).** An owner decision scoped the image to exactly two things: the
+  headless `claude-sdk` provider, and the web dashboard — the embedded
+  user-shell terminal and the `claude-tui` provider are not supported
+  (`node-pty` has no linux prebuild in this image, and `claude-tui` assumes
+  an interactive login shell).
+
+  A new `dashboard-builder` stage builds `@chroxy/dashboard` (Vite) from just
+  its own dependency graph (`@chroxy/design-tokens`, `@chroxy/protocol`,
+  `@chroxy/store-core` — installed via `npm ci --workspace=@chroxy/dashboard`,
+  never the whole monorepo) and the final image copies in only the built
+  `dist/`, so `GET /dashboard` now serves the real app instead of 404ing.
+  `ENV CHROXY_PROVIDER=claude-sdk` overrides the daemon's own default
+  (`claude-tui`) so a plain `docker run` no longer starts sessions doomed to
+  fail; `-e CHROXY_PROVIDER=...` still overrides it per the normal CLI > env
+  > config > default precedence — and so does `chroxy doctor`'s own provider
+  resolution now, which previously skipped the env tier entirely and
+  preflighted/reported on `claude-tui` even with `CHROXY_PROVIDER=claude-sdk`
+  set and no config file yet written.
+
+  Selecting the terminal or `claude-tui` anyway fails with a clear,
+  ACTIONABLE message (`describeNodePtyUnavailable`, shared by both call
+  sites, leading with "use claude-sdk instead" and appending only the first
+  line of the real cause) rather than a raw native-module error — and that
+  message is now the one a client actually SEES: `claude-tui-session.js`'s
+  `start()`/`_spawnPty()` split used to let a generic "claude PTY failed to
+  spawn" overwrite it the instant `start()` rejected (the `error` event and
+  the rejection are different channels; `session_create_failed.errorMessage`
+  reads the rejection). Both call sites now latch the real failure
+  (`.code: 'PTY_UNAVAILABLE'`) and reject with it directly.
+
+  The dashboard's own "New Session" provider picker also used to pre-select
+  the shared `DEFAULT_PROVIDER` constant (`claude-tui`) regardless of what
+  the connected server actually runs by default — `provider_list` /
+  `auth_bootstrap` now carry the daemon's resolved `defaultProvider`
+  (`resolveDaemonDefaultProvider`), applied client-side only when the user
+  has no persisted explicit choice; `listProviders()` also marks `claude-tui`
+  `auth.ready: false` with an actionable hint when a cached, one-shot
+  node-pty probe (`node-pty-probe.js`, warmed once at boot) finds it
+  unavailable, so the picker greys it out instead of letting it be chosen at
+  all.
+
+  `scripts/docker-image-smoke.sh` grew from three checks to six: (1) the
+  Default session actually comes up under `claude-sdk` — checked 2's
+  HEALTHCHECK answers regardless of session state, so a `claude-tui` image
+  was previously HEALTHCHECK-healthy while its Default session silently
+  failed and was torn down — proven by polling `docker logs` for the sdk
+  session's own ready line and asserting neither a node-pty failure nor a
+  destroyed-session line appears; (2) `GET /dashboard` first confirms NO
+  token is rejected (403), then extracts the REAL entry-bundle path from the
+  served HTML and fetches it — a `<title>` check alone passes on the UNBUILT
+  source `index.html` just as readily as on a real build; (3) every
+  THIRD-PARTY dependency in `packages/server/package.json` is checked via
+  the same subpath-aware specifier scan check 1 already used for
+  `@chroxy/*`, generalized — `@modelcontextprotocol/sdk` is resolved at its
+  real used subpaths instead of a hand-written exemption that hid it from
+  ever being checked at all, and the two remaining special cases
+  (`node-pty`, an EXPECTED import failure that itself fails loudly if it
+  ever unexpectedly succeeds; `@xterm/*`, checked by file existence at the
+  exact paths `http-routes.js`'s `readModule` reads, never exempted from
+  checking) are validated in both directions.
+
+  `docs/self-hosting-guide.md` documents the supported/unsupported split,
+  the terminal's actual failure message, the `CHROXY_CWD=/workspace` example
+  (new sessions otherwise default to `$HOME`, not the bind-mounted
+  workspace), and that the baked-in `ENV` outranks a mounted config file's
+  `provider`. `.dockerignore` and `ci.yml`'s `docker` path filter stay in
+  sync for the two newly-whitelisted packages, and `.dockerignore` now also
+  excludes stray `.env*`/coverage/`.tsbuildinfo` files, the dashboard's own
+  test sources, and `packages/server/src/dashboard-next` (the gitignored
+  Tauri-bundle copy of this same dashboard, invisible to `.dockerignore`
+  once it exists on a machine that has built the desktop app).
 
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
