@@ -22,6 +22,11 @@
  * existing subscriber ignore unknown result fields by design.
  */
 
+// The generic prototype-pollution key set (`__proto__` / `constructor` /
+// `prototype`), single-sourced in @chroxy/protocol since #7030. Imported from
+// the Zod-free subpath so this module stays dependency-light.
+import { UNSAFE_MCP_KEYS } from '@chroxy/protocol/mcp-validation'
+
 /**
  * Clamp to a non-negative finite integer — mirrors `_trackUsage`'s
  * tokenDelta coercion so a poisoned provider value can never drive an
@@ -33,16 +38,15 @@ export function nonNegInt(x) {
   return Math.floor(n)
 }
 
+// model ids come from provider output (untrusted). Reject the keys that could
+// pollute a plain object so a hostile/buggy id can't reach `out[id] = …`.
+const isSafeModelId = (id) => typeof id === 'string' && id.length > 0 && !UNSAFE_MCP_KEYS.has(id)
+
 /**
  * Normalize the Agent SDK's per-model usage map (camelCase ModelUsage
  * entries) into the wire contract above. Returns null when the input is
  * absent, not an object, or normalizes to zero entries.
  */
-// model ids come from provider output (untrusted). Reject the keys that could
-// pollute a plain object so a hostile/buggy id can't reach `out[id] = …`.
-const UNSAFE_KEY = new Set(['__proto__', 'constructor', 'prototype'])
-const isSafeModelId = (id) => typeof id === 'string' && id.length > 0 && !UNSAFE_KEY.has(id)
-
 export function normalizeSdkModelUsage(raw) {
   if (!raw || typeof raw !== 'object') return null
   const out = {}
