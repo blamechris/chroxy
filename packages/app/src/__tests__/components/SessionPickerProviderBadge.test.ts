@@ -24,14 +24,18 @@ describe('SessionPicker pill chip — provider hint badge (#3940)', () => {
     expect(pillSection).toMatch(/getProviderInfo\(session\.provider\)/);
   });
 
-  it("only renders the provider hint when the session's provider is not the default", () => {
-    // Same gate as the long-press alert title from #3937 — gate on
-    // "session.provider && session.provider !== DEFAULT_PROVIDER" so the
-    // default pill stays clean and only non-default providers (claude-sdk,
-    // codex, gemini, docker-cli, ...) get a badge. Keyed on the shared
-    // DEFAULT_PROVIDER constant (#5823) so a default flip can't reintroduce
-    // the stale-literal drift.
-    expect(pillSection).toMatch(
+  // #8130 — the badge used to suppress for the DEFAULT provider
+  // (`session.provider !== DEFAULT_PROVIDER`), so a claude-tui session sat
+  // with nothing beside it while a claude-cli session next to it showed
+  // `CLI` — ambiguous in a mixed-provider setup. The gate is now removed so
+  // EVERY session with a known provider shows a badge (matching the dashboard
+  // Sidebar, fixed in #8129).
+  it('renders the provider hint for every session with a known provider, including the default', () => {
+    // The badge should render when session.provider is truthy (any known
+    // provider). The DEFAULT_PROVIDER no longer suppresses it.
+    expect(pillSection).toMatch(/session\.provider\s*\?/);
+    // But should NOT match the old suppression pattern:
+    expect(pillSection).not.toMatch(
       /session\.provider\s*&&\s*session\.provider\s*!==\s*DEFAULT_PROVIDER/,
     );
   });
@@ -75,5 +79,27 @@ describe('SessionPicker pill chip — provider hint badge (#3940)', () => {
     expect(source).toMatch(
       /import\s*\{[^}]*getProviderInfo[^}]*\}\s*from\s*['"]\.\.\/constants\/providers['"]/,
     );
+  });
+
+  // #8130 — the long-press alert title suffix also needs to show the
+  // default provider badge, not suppress it. Same as the badge gate, the
+  // alert suffix should appear for every session with a known provider.
+  describe('long-press alert title suffix', () => {
+    it('also includes the provider label for every session with a known provider (including default)', () => {
+      // The alert suffix should render when session.provider is truthy, but
+      // NOT suppress for DEFAULT_PROVIDER anymore.
+      expect(source).toMatch(
+        /const\s+providerLabel\s*=\s*session\.provider\s*\?/,
+      );
+      expect(source).not.toMatch(
+        /session\.provider\s*&&\s*session\.provider\s*!==\s*DEFAULT_PROVIDER/,
+      );
+    });
+
+    it('uses getProviderInfo(...).short for the alert suffix, same as the badge', () => {
+      // The suffix should route through getProviderInfo for consistency with
+      // the badge (and the dashboard).
+      expect(source).toMatch(/getProviderInfo\(session\.provider\)\.short/);
+    });
   });
 });
