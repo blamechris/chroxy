@@ -506,6 +506,25 @@ describe('#8094 — a straggler admitted before forget() cannot write through in
     assert.equal(replay.cached, null, "B's record must hold no reading from A's stale write-through")
   })
 
+  it("admit A, forget, admit B (same key) — A's late ROLLBACK does not disturb B's record", () => {
+    // The rollback side of the same straggler. rollback() is protected by
+    // its token check (a new admission always mints a fresh token), not by
+    // lineage — pinned here so weakening that check can't go unnoticed on
+    // the forget + reuse path.
+    const h = harness()
+    const A = h.open('sess-1')
+    forgetSurveyKey(h.owner, 'sess-1')
+    const B = h.open('sess-1')
+    B.commit({ id: 'B result' }, { replayable: true })
+
+    A.rollback()
+
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.equal(replay.admitted, false, "still inside B's window")
+    assert.deepEqual(replay.cached, { id: 'B result' }, "A's stale rollback must not disturb B's committed reading")
+  })
+
   it('POSITIVE CONTROL: the ordinary (non-forget) superseded write-through is unaffected — same lineage still writes through', () => {
     // Without this, a fix that blocked EVERY write-through (not just a
     // cross-lineage one) would pass the test above for the wrong reason.
