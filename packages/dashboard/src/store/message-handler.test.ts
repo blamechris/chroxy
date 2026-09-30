@@ -9579,4 +9579,96 @@ describe("checkpoint_restored (mode 'files') confirmation (#6827)", () => {
       expect(state.mcpResources).toEqual([])
     })
   })
+
+  // #7365 (review round 2) — `case 'result'` stamps `turnBoundary: true` on
+  // whichever message is currently last, live or replayed alike (no
+  // isSessionReplaying gate, matching the #7515 precedent for the
+  // activeTools sweep above — both halves of the same unconditional patch).
+  // This is the position-independent turn-end signal
+  // `getExpiredPermissionTurnSummaries` (@chroxy/store-core) keys on instead
+  // of `user_input` position, which a send-while-busy queued follow-up can
+  // plant permanently mid-turn.
+  describe('result stamps a position-independent turn-end marker (#7365)', () => {
+    function seedSession(messages: ReturnType<typeof createEmptySessionState>['messages']) {
+      store = createMockStore(baseState({
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), messages } },
+      }));
+      setStore(store);
+    }
+
+    it('marks the LAST message on a LIVE result (no historySeq)', () => {
+      seedSession([
+        { id: 'u1', type: 'user_input', content: 'go', timestamp: 0 },
+        { id: 'r1', type: 'response', content: 'done', timestamp: 0 },
+      ] as any);
+      handleMessage({ type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 }, ctx() as any);
+      const messages = (store.getState() as any).sessionStates.s1.messages;
+      expect(messages.find((m: any) => m.id === 'r1').turnBoundary).toBe(true);
+      expect(messages.find((m: any) => m.id === 'u1').turnBoundary).toBeUndefined();
+    });
+
+    it('marks the LAST message on a REPLAYED result (historySeq present) — the same as live, no gate', () => {
+      seedSession([
+        { id: 'u1', type: 'user_input', content: 'go', timestamp: 0 },
+        { id: 'r1', type: 'response', content: 'done', timestamp: 0 },
+      ] as any);
+      handleMessage({ type: 'history_replay_start', sessionId: 's1' }, ctx() as any);
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, historySeq: 5 },
+        ctx() as any,
+      );
+      const messages = (store.getState() as any).sessionStates.s1.messages;
+      expect(messages.find((m: any) => m.id === 'r1').turnBoundary).toBe(true);
+    });
+
+    it('a full replay rebuild reconstructs the SAME marker positions as the original live session', () => {
+      // Simulates a reconnect: an EMPTY session state, then the entire
+      // history replayed from scratch through the same handler, in the same
+      // order a live session would have produced it. `history_replay_start`
+      // with `fullHistory: true` is the server's actual signal for this —
+      // ws-history.js always sends it that way (see the #4607 comment
+      // elsewhere in this file).
+      seedSession([]);
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any);
+      handleMessage(
+        { type: 'message', sessionId: 's1', messageType: 'user_input', content: 'go', timestamp: 1, historySeq: 1 } as any,
+        ctx() as any,
+      );
+      handleMessage(
+        { type: 'message', sessionId: 's1', messageType: 'response', content: 'turn 1 done', messageId: 'r1', timestamp: 2, historySeq: 2 } as any,
+        ctx() as any,
+      );
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, historySeq: 3 },
+        ctx() as any,
+      );
+      handleMessage(
+        { type: 'message', sessionId: 's1', messageType: 'user_input', content: 'go again', timestamp: 3, historySeq: 4 } as any,
+        ctx() as any,
+      );
+      handleMessage(
+        { type: 'message', sessionId: 's1', messageType: 'response', content: 'turn 2 done', messageId: 'r2', timestamp: 4, historySeq: 5 } as any,
+        ctx() as any,
+      );
+      handleMessage(
+        { type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0, historySeq: 6 },
+        ctx() as any,
+      );
+      const messages = (store.getState() as any).sessionStates.s1.messages;
+      const marked = messages.filter((m: any) => m.turnBoundary === true).map((m: any) => m.id);
+      expect(marked).toEqual(['r1', 'r2']);
+    });
+
+    it('is idempotent — a duplicate/retried result does not un-mark or double-mark', () => {
+      seedSession([
+        { id: 'u1', type: 'user_input', content: 'go', timestamp: 0 },
+        { id: 'r1', type: 'response', content: 'done', timestamp: 0 },
+      ] as any);
+      handleMessage({ type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 }, ctx() as any);
+      handleMessage({ type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0 }, ctx() as any);
+      const messages = (store.getState() as any).sessionStates.s1.messages;
+      expect(messages.filter((m: any) => m.turnBoundary === true)).toHaveLength(1);
+    });
+  });
 })

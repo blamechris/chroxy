@@ -4,42 +4,42 @@
  * `buildChatViewMessages` pipeline.
  *
  * Each {@link ExpiredPermissionTurnSummary} (from `@chroxy/store-core`)
- * anchors to a turn by its `turnStartMessageId` (the turn's `user_input`
- * row). `user_input` rows are never dropped or grouped by
- * `buildChatViewMessages` (only `system` rows are filtered, and only
- * `tool_use`/`thinking` runs are collapsed into `tool_group`), so the anchor
- * id is always found in `rows` when a summary exists for it.
+ * anchors to a turn by its `turnEndMessageId` — the RAW store message that
+ * carries `turnBoundary: true` (see `@chroxy/store-core`'s
+ * `turn-boundaries.ts`). That raw message does not always have its OWN row
+ * in `rows`, though:
+ *   - it can be absorbed into a collapsed `tool_group` (a contiguous run of
+ *     2+ `tool_use`/`thinking` messages renders as one synthetic row keyed
+ *     by the group, not by any individual message's id) — see
+ *     `chatToolGroupPayloads`;
+ *   - it can be filtered out entirely — a `type: 'system'` row never reaches
+ *     `rows` at all (system events render on the System tab), and
+ *     `tool_use`/`thinking` rows vanish session-wide under the dashboard's
+ *     compact-chat toggle (`hideToolAndThinking`).
  *
- * The summary row for a turn is inserted immediately before the NEXT turn's
- * `user_input` row, or appended at the very end of `rows` when the
- * summarised turn is the last (possibly still-open) one — i.e. "attached to
- * the turn" means "the last thing rendered for that turn", without needing
- * to know which real row happened to be last inside it (which could itself
- * be a collapsed `tool_group`).
+ * `resolveAnchorRowId` walks BACKWARD from the raw message through
+ * `storeMessages` (the pipeline's raw input) until it finds one that DOES
+ * have a row — either directly (`rows` contains its own id) or via
+ * `chatToolGroupPayloads` (it was absorbed into a group whose key IS a row).
+ * The summary is then spliced immediately after THAT row. This is the
+ * position-independent replacement for the round-1 fix's
+ * "insert before the next turn's `user_input`" rule, which no longer applies
+ * now that turns are delimited by `turnBoundary`, not `user_input` position
+ * (see `permission-turn-summary.ts`'s doc for why).
  *
- * `stillQueuedMessageIds` (post-review follow-up, #7365) must mirror the SAME
- * set passed to `getExpiredPermissionTurnSummaries` — a `user_input` row
- * whose id is in it is a send-while-busy follow-up the server has not started
- * yet (see that function's doc for the full rationale), not a turn boundary.
- * Without this, a still-open turn's summary would be flushed (and visually
- * inserted) the moment a queued row is reached, splitting it away from the
- * turn's later content that is still, correctly, part of the SAME summary.
- *
- * Turn-completion gating (`isSessionIdle`, #7365 review S3) needs NO handling
- * here: a still-running trailing turn simply produces no
- * `ExpiredPermissionTurnSummary` object at all from the aggregator, so there
- * is nothing for this function to splice in for it — the gate lives entirely
- * upstream.
+ * The trailing (still-open) turn — `turnEndMessageId: null` — has no anchor
+ * yet and is appended at the very end of `rows`, same as before.
  */
+import type { ChatMessage, ExpiredPermissionTurnSummary } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
-import type { ExpiredPermissionTurnSummary } from '@chroxy/store-core'
-
-const EMPTY_ID_SET: ReadonlySet<string> = new Set()
 
 /** Deterministic row id for a turn's summary — stable across re-renders. */
-export function permissionExpiredSummaryRowId(turnStartMessageId: string): string {
-  return `permission-expired-summary-${turnStartMessageId}`
+export function permissionExpiredSummaryRowId(anchorKey: string): string {
+  return `permission-expired-summary-${anchorKey}`
 }
+
+/** Sentinel anchor key for the trailing (not yet ended) turn — distinguishable from any real message id (`nextMessageId` prefixes never produce this literal string). */
+const TRAILING_ANCHOR_KEY = '__current_turn__'
 
 export interface InsertPermissionExpiredSummaryRowsResult {
   /** `rows` with one synthetic row spliced in per qualifying turn. */
@@ -48,45 +48,74 @@ export interface InsertPermissionExpiredSummaryRowsResult {
   payloads: Map<string, ExpiredPermissionTurnSummary>
 }
 
+/**
+ * Resolve the raw message id `rawId` to the `rows` id it renders as (or was
+ * absorbed into), walking backward through `storeMessages` from `rawId`'s own
+ * position until one resolves. Returns `null` only in the degenerate case
+ * where NOTHING from the start of the transcript up to and including `rawId`
+ * has a row at all (the whole prefix was filtered) — vanishingly rare, and
+ * the caller drops that summary rather than mis-anchoring it.
+ */
+export function resolveAnchorRowId(
+  rawId: string,
+  storeMessages: ChatMessage[],
+  rowIdSet: ReadonlySet<string>,
+  chatToolGroupPayloads: ReadonlyMap<string, { messages: ChatMessage[]; isActive: boolean }>,
+): string | null {
+  const rawIdToRowId = new Map<string, string>()
+  for (const [groupKey, payload] of chatToolGroupPayloads) {
+    for (const m of payload.messages) rawIdToRowId.set(m.id, groupKey)
+  }
+  const startIdx = storeMessages.findIndex((m) => m.id === rawId)
+  if (startIdx === -1) return null
+  for (let i = startIdx; i >= 0; i--) {
+    const candidateRawId = storeMessages[i]!.id
+    const mapped = rawIdToRowId.get(candidateRawId) ?? candidateRawId
+    if (rowIdSet.has(mapped)) return mapped
+  }
+  return null
+}
+
 export function insertPermissionExpiredSummaryRows(
   rows: ChatViewMessage[],
   summaries: ExpiredPermissionTurnSummary[],
-  stillQueuedMessageIds: ReadonlySet<string> = EMPTY_ID_SET,
+  storeMessages: ChatMessage[],
+  chatToolGroupPayloads: ReadonlyMap<string, { messages: ChatMessage[]; isActive: boolean }>,
 ): InsertPermissionExpiredSummaryRowsResult {
   const payloads = new Map<string, ExpiredPermissionTurnSummary>()
   if (summaries.length === 0) return { rows, payloads }
 
-  const summaryByTurnStart = new Map(summaries.map((s) => [s.turnStartMessageId, s]))
-  const out: ChatViewMessage[] = []
-  let pending: ExpiredPermissionTurnSummary | null = null
-  let lastTimestamp = 0
+  const rowIdSet = new Set(rows.map((r) => r.id))
+  const byAnchorRowId = new Map<string, ExpiredPermissionTurnSummary>()
+  let trailing: ExpiredPermissionTurnSummary | null = null
 
-  const flushPending = () => {
-    if (!pending) return
-    const rowId = permissionExpiredSummaryRowId(pending.turnStartMessageId)
-    payloads.set(rowId, pending)
-    out.push({ id: rowId, type: 'permission-expired-summary', content: '', timestamp: lastTimestamp })
-    pending = null
-  }
-
-  for (const row of rows) {
-    // A still-queued `user_input` is not a boundary (see the module doc) —
-    // it never keys `summaryByTurnStart` (the aggregator excludes it the
-    // same way), so it must not flush the currently-pending turn either;
-    // treat it as ordinary content and fall through to the plain push below.
-    if (row.type === 'user_input' && !stillQueuedMessageIds.has(row.id)) {
-      // Close out the PREVIOUS turn's summary (if any) before opening the
-      // next one's tracking — this is what places the row right before the
-      // turn boundary rather than at the end of the whole list.
-      flushPending()
-      pending = summaryByTurnStart.get(row.id) ?? null
+  for (const s of summaries) {
+    if (s.turnEndMessageId === null) {
+      trailing = s
+      continue
     }
-    out.push(row)
-    lastTimestamp = row.timestamp
+    const anchor = resolveAnchorRowId(s.turnEndMessageId, storeMessages, rowIdSet, chatToolGroupPayloads)
+    if (anchor === null) continue // degenerate — nothing to anchor to; drop rather than mis-render
+    byAnchorRowId.set(anchor, s)
   }
-  // The last (possibly still-open) turn's summary, if any — appended at the
-  // very end since there is no following `user_input` to insert before.
-  flushPending()
+
+  const out: ChatViewMessage[] = []
+  for (const row of rows) {
+    out.push(row)
+    const summary = byAnchorRowId.get(row.id)
+    if (summary) {
+      const rowId = permissionExpiredSummaryRowId(row.id)
+      payloads.set(rowId, summary)
+      out.push({ id: rowId, type: 'permission-expired-summary', content: '', timestamp: row.timestamp })
+    }
+  }
+
+  if (trailing) {
+    const rowId = permissionExpiredSummaryRowId(TRAILING_ANCHOR_KEY)
+    payloads.set(rowId, trailing)
+    const lastTimestamp = out.length > 0 ? out[out.length - 1]!.timestamp : 0
+    out.push({ id: rowId, type: 'permission-expired-summary', content: '', timestamp: lastTimestamp })
+  }
 
   return { rows: out, payloads }
 }

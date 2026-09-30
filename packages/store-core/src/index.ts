@@ -1060,6 +1060,12 @@ export {
   findPendingWriteForFile,
 } from './pending-permissions'
 
+// #7365 — position-independent turn-end marking. `markTurnBoundary` is
+// called from `case 'result'` in message-handler.ts (both live and replay —
+// the handler makes no distinction) so a turn's end survives a send-while-busy
+// follow-up planting a `user_input` row mid-turn at its enqueue position.
+export { markTurnBoundary } from './turn-boundaries'
+
 // #7365 — per-turn aggregation of permission prompts that expired unanswered.
 // Dashboard-only consumer today (the web transcript's end-of-turn summary);
 // lives here because it is built directly on `isExpiredUnansweredPermissionPrompt`

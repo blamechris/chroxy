@@ -1460,17 +1460,14 @@ export function App() {
     // #6799 — global compact chat filter: drop tool_use + thinking rows
     // session-wide when the header toggle is on (mobile parity).
     hideToolAndThinking: compactChatFilter,
-    // #7365 (post-review) — the SAME set the "Queued" badge already reads
-    // (queuedIds, derived above from the active session's queuedMessages):
-    // a follow-up sent while this turn is still running is not a turn
-    // boundary until the server actually dequeues it.
-    stillQueuedMessageIds: queuedIds,
-    // #7365 (post-review) — the same server-authoritative `isIdle` flag
+    // #7365 (review round 2) — the same server-authoritative `isIdle` flag
     // (#4639) `isSessionBusy` reads elsewhere in this file; `?? true` matches
     // the existing fallback convention at this file's other `isIdle` read
     // (below, in the ActivityTree wiring) for an unknown/not-yet-reported
     // value. Gates the still-running (trailing) turn's summary until it
-    // actually ends.
+    // actually ends. (`stillQueuedMessageIds`, round 1's fix, is gone —
+    // turns are now delimited by `turnBoundary` marks, which a queued
+    // follow-up's `user_input` row never affects either way.)
     isSessionIdle: isIdle ?? true,
   })
 

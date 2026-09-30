@@ -58,28 +58,16 @@ export interface UseChatMessagesProps {
    */
   hideToolAndThinking?: boolean
   /**
-   * #7365 (post-review follow-up) — ids of `user_input` messages currently
-   * sitting in the active session's outgoing queue (send-while-busy, #5939):
-   * sent optimistically but not yet dequeued/flushed by the server, so the
-   * turn they would start has not actually begun. The caller already computes
-   * this for the "Queued" badge (`queuedIds` in App.tsx, derived from
-   * `queuedMessages`) — pass the SAME set through so the end-of-turn summary
-   * doesn't split a still-running turn's permissions across a follow-up that
-   * hasn't started yet. Omitted (empty) for callers with no live queue, e.g.
-   * `TranscriptViewer`'s closed conversations.
-   */
-  stillQueuedMessageIds?: ReadonlySet<string>
-  /**
-   * #7365 (post-review follow-up) — whether the active session's LAST turn
-   * has actually ended, i.e. the server-authoritative `isIdle` flag (#4639) —
-   * the same one `isSessionBusy` already reads. The end-of-turn summary is
-   * gated on this for the trailing turn only (every earlier turn has, by
-   * construction, already ended): per the issue's own wording ("at turn
-   * end"), and because rendering it for a still-running turn made its list
-   * position unstable (it kept re-anchoring to the transcript tail as more
-   * content streamed in). Defaults to `true` — a caller with no live turn at
-   * all (`TranscriptViewer`'s closed conversations) has nothing "still
-   * running" by definition.
+   * #7365 (review round 2) — whether the active session's LAST turn has
+   * actually ended, i.e. the server-authoritative `isIdle` flag (#4639) — the
+   * same one `isSessionBusy` already reads. The end-of-turn summary is gated
+   * on this for the trailing turn only (every earlier — `turnBoundary`-marked
+   * — turn has, by construction, already ended): per the issue's own wording
+   * ("at turn end"), and because rendering it for a still-running turn made
+   * its list position unstable (it kept re-anchoring to the transcript tail
+   * as more content streamed in). Defaults to `true` — a caller with no live
+   * turn at all (`TranscriptViewer`'s closed conversations) has nothing
+   * "still running" by definition.
    */
   isSessionIdle?: boolean
 }
@@ -113,16 +101,8 @@ export interface UseChatMessagesResult {
 // compiling without a churn diff.
 export { toChatViewMessage }
 
-const EMPTY_ID_SET: ReadonlySet<string> = new Set()
-
 export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesResult {
-  const {
-    storeMessages,
-    streamingMessageId,
-    hideToolAndThinking = false,
-    stillQueuedMessageIds = EMPTY_ID_SET,
-    isSessionIdle = true,
-  } = props
+  const { storeMessages, streamingMessageId, hideToolAndThinking = false, isSessionIdle = true } = props
 
   const result = useMemo(
     () => buildChatViewMessages(storeMessages, streamingMessageId, { hideToolAndThinking }),
@@ -139,15 +119,23 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     stalledPromptIds,
   } = result
 
-  // #7365 — dashboard-only: splice a synthetic summary row after any turn
-  // that contains an expired-unanswered permission prompt. Recomputed on
-  // every `storeMessages` (or `stillQueuedMessageIds`) change — a fresh
+  // #7365 — dashboard-only: splice a synthetic summary row after any
+  // COMPLETED turn that contains an expired-unanswered permission prompt.
+  // Turns are delimited by `turnBoundary`-marked messages (stamped by
+  // `case 'result'` in message-handler.ts, live and replayed alike — see
+  // `@chroxy/store-core`'s `turn-boundaries.ts`), not by `user_input`
+  // position — a send-while-busy queued follow-up's row is ordinary content
+  // wherever it lands, permanently, so `stillQueuedMessageIds` (round 1's
+  // fix) is gone: it only ever covered the WINDOW before a flush, and the
+  // position-based split it patched over was unsound after one regardless.
+  //
+  // Recomputed on every `storeMessages` (or `isSessionIdle`) change — a fresh
   // `Date.now()` per derivation, not a ticking interval. This is NOT full
   // parity with the per-prompt marker's countdown: `PermissionPrompt.tsx`
   // reads a `now` it ticks every second itself, so its "Timed out" label can
   // flip a few seconds before this memo re-runs (it only re-runs when
-  // `storeMessages`/`stillQueuedMessageIds` actually change reference, which
-  // in practice follows soon after — either the server's own
+  // `storeMessages`/`isSessionIdle` actually change reference, which in
+  // practice follows soon after — either the server's own
   // `permission_expired` frame, which mutates the message, or any other
   // store update in an active session). Low-impact lag, not a guarantee;
   // called out here rather than overclaimed. Mirrors the same tradeoff
@@ -160,13 +148,18 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // to a synthetic summary row would silently collapse a trailing tool group
   // the moment its turn's permission expired.
   const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
-    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), stillQueuedMessageIds, isSessionIdle)
+    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), isSessionIdle)
     if (summaries.length === 0) {
       return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
     }
-    const { rows, payloads } = insertPermissionExpiredSummaryRows(baseChatMessages, summaries, stillQueuedMessageIds)
+    const { rows, payloads } = insertPermissionExpiredSummaryRows(
+      baseChatMessages,
+      summaries,
+      storeMessages,
+      chatToolGroupPayloads,
+    )
     return { chatMessages: rows, permissionExpiredSummaries: payloads }
-  }, [storeMessages, baseChatMessages, stillQueuedMessageIds, isSessionIdle])
+  }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle])
 
   return {
     chatMessages,

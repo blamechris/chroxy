@@ -214,7 +214,7 @@ describe('useMessageRenderer — permission-expired-summary wiring (#7365 review
     const summaryRowId = 'permission-expired-summary-u1'
     const args = makeArgs({
       permissionExpiredSummaries: new Map([
-        [summaryRowId, { turnStartMessageId: 'u1', requestIds: ['req-1', 'req-2'], tools: ['Bash', 'Write'], count: 2 }],
+        [summaryRowId, { turnEndMessageId: 'r1', requestIds: ['req-1', 'req-2'], tools: ['Bash', 'Write'], count: 2 }],
       ]),
     })
     const { result } = renderHook(() => useMessageRenderer(args))
