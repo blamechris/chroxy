@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`release.yml` smokes the Docker image before pushing it (#8150).** The
+  `docker` job built the root Dockerfile with `docker/build-push-action`,
+  `push: true`, and pushed straight to GHCR — nothing in the job ever
+  started the image. That is exactly how the v0.11.0 image shipped unable to
+  start at all (`ERR_MODULE_NOT_FOUND`, #8133): the push succeeded because a
+  push doesn't care whether the thing it uploads can run.
+  `scripts/docker-image-smoke.sh` (added for #8133) already proved an image
+  can start, but nothing wired it into the one workflow that actually
+  publishes a release — it only ran PR-side, path-filtered, and not
+  required. The job now builds once with `load: true` / `push: false`
+  (tagged with both the real metadata-action tags and a fixed local
+  `chroxy:release-smoke` tag), smoke-starts that same local image, and only
+  on success pushes the already-built tags — never rebuilt, so what is
+  smoked is byte-for-byte what ships. A new static gate test
+  (`release-docker-smoke-gate.test.js`) fails the build if the smoke step is
+  ever removed, reordered after the push, given `continue-on-error`, pointed
+  at a tag the build never produced, or if the push step gains an `if:` that
+  could bypass a failed smoke. A second new test
+  (`ci-docker-path-filter.test.js`) ties `ci.yml`'s `docker:` path filter to
+  `.dockerignore`'s package whitelist in both directions, so the two rosters
+  cannot drift apart un-noticed (#7639).
+
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so
   `start` now passes preflight without `--skip-checks` (#8145).** The image
   never installed a `claude` binary at all: since #7986/#8035, SDK mode
