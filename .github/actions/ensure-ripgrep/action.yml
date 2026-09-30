@@ -43,12 +43,16 @@ runs:
         else
           apt-get update && apt-get install -y ripgrep
         fi
-        # Independent of `set -o pipefail`: composite `shell: bash` steps run
-        # with pipefail today, which is what makes `rg --version | head -1`
-        # below fail the step if the install silently produced no working rg —
-        # but that behavior is bash's default job control, not something this
-        # step controls, so this check does not rely on it either way.
-        command -v rg >/dev/null 2>&1 || {
+        # Independent of `set -o pipefail`: GitHub's own `shell: bash` template
+        # invokes every run step as `bash --noprofile --norc -eo pipefail {0}`
+        # (bash's OWN default has pipefail OFF — the flag is GitHub's, not
+        # bash's), so `rg --version | head -1` below already fails the step if
+        # the pipeline's first command fails. This check does not depend on
+        # that either way: it runs `rg --version` directly (not `command -v
+        # rg`, which only proves the binary is on PATH, not that it EXECUTES)
+        # and fails loudly if the binary is present but broken — wrong arch, a
+        # truncated apt package, a binary that traps or segfaults immediately.
+        rg --version >/dev/null 2>&1 || {
           echo '::error::ripgrep install failed; the #7295/#7978 proofs cannot run'
           exit 1
         }

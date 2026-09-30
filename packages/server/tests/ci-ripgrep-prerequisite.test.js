@@ -50,8 +50,9 @@ import { readWorkflows, assertReaderSane, jobName, parseJobs, stepRun, stepInput
  * records that, the same way CONTRIBUTING.md's not-required table records a
  * PR-visible job that deliberately does not gate a merge
  * (ci-required-check-partition.test.js). The exemption also checks the job's
- * ACTUAL `runs-on:`, not just its name — see the comment on `RIPGREP_EXEMPT`
- * (#8164 review).
+ * ACTUAL `runs-on:` — with any trailing comment stripped per line first, so a
+ * comment cannot forge or deny it — not just its name (#8164 review, #8164
+ * second review).
  *
  * PATTERN, deliberately followed rather than reinvented: this reads workflow
  * YAML through the shared hand-rolled reader in ./helpers/workflow-reader.js
@@ -112,10 +113,52 @@ function jobDefaultWorkingDirectory(jobBody) {
 }
 
 /**
+ * A job's `runs-on:` value, with any trailing `# comment` stripped from EACH
+ * contributing line BEFORE joining — not from the already-joined value
+ * `workflow-reader.js`'s own `runsOnOf()` produces, which has lost the
+ * per-line boundary by the time it returns (#8164 second review).
+ *
+ * That distinction is load-bearing, not cosmetic. A comment can contain the
+ * very words an exemption regex tests for — "not windows-latest, this one's
+ * still ubuntu" reads as a match for `windows-latest` to anything that scans
+ * the raw joined text — and a fail-open exemption would then read PROSE as
+ * CONFIGURATION, the same class of bug docs/false-safety-guards.md
+ * catalogues for a comment quoting a guard's own matched strings. Stripping
+ * per line, before the join, is what keeps a comment on one label from
+ * bleeding into the next: `runsOnOf()`'s own join collapses newlines to
+ * spaces, so stripping AFTER joining could not tell where one line's comment
+ * ends and the next line's real content begins.
+ *
+ * Mirrors `runsOnOf()`'s traversal (same indent-based termination, same
+ * blank/comment-line skip) so the two must always agree on WHICH lines
+ * contribute — they differ only in whether a trailing comment survives on
+ * each one. A block-sequence `runs-on:` still keeps every one of its labels;
+ * only a `# ...` suffix on a line is removed, per the same whitespace-preceded
+ * `#` rule `stepInput()` and `jobName()` already apply.
+ */
+function cleanRunsOn(jobBody) {
+  const at = jobBody.findIndex(l => /^\s*runs-on:/.test(l))
+  if (at === -1) return ''
+  const keyIndent = /^(\s*)/.exec(jobBody[at])[1].length
+  const strip = line => line.replace(/\s+#.*$/, '')
+  const parts = [strip(jobBody[at])]
+  for (let i = at + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue
+    if (/^(\s*)/.exec(line)[1].length <= keyIndent) break
+    parts.push(strip(line))
+  }
+  return parts.join(' ')
+}
+
+/**
  * Fold every spelling of the SAME working directory to one canonical value,
  * so a discovery check can compare with `===` instead of re-deriving
  * equivalence at every call site.
  *
+ *   - surrounding YAML quotes are cosmetic: `"./packages/server"` ==
+ *     `./packages/server` (#8164 second review) — stripped FIRST, since a
+ *     quoted value wraps the whole thing, before any of the folds below run
  *   - a trailing slash is cosmetic: `packages/server/` == `packages/server`
  *   - a leading `./` is cosmetic: `./packages/server` == `packages/server`
  *   - `${{ github.workspace }}` IS the repo root — GitHub's own docs define it
@@ -131,6 +174,7 @@ function jobDefaultWorkingDirectory(jobBody) {
 function normaliseWd(wd) {
   if (wd === undefined) return undefined
   let v = wd.trim()
+  v = v.replace(/^(['"])(.*)\1$/, '$2')
   v = v.replace(/^\$\{\{\s*github\.workspace\s*\}\}\/?/, '')
   v = v.replace(/^\.\//, '')
   v = v.replace(/\/$/, '')
@@ -138,28 +182,38 @@ function normaliseWd(wd) {
 }
 
 /**
- * A `run:` body invokes the bare `test` script — never a SCOPED one — under
- * any of npm's real spellings: `npm test`, `npm run test`, or the `npm t`
- * alias, with arbitrary flags/values allowed on EITHER side of the script
- * name (`npm test --prefix packages/server`, `npm --prefix packages/server
- * test`, `npm run test --workspace=packages/server`, …) so the flag position
- * doesn't matter. `(?=\s|$)` after the script name is load-bearing the same
- * way the old `(?!:)` was: without it this also matches `npm run
- * test:integration:k8s`, which `nightly-k8s-integration.yml` runs against a
- * single unrelated file (`tests/integration/k8s-sidecar-roundtrip.test.js`,
- * which touches no ripgrep) rather than the `./tests/**\/*.test.js` glob the
- * bare `test` script runs. Verified (both before and after this widening):
- * that job's step stays excluded by this pattern, not by a workflow-name
- * special case — see "excludes the k8s integration job" below.
+ * A `run:` body invokes the bare `test` script — never a script name with a
+ * CONTINUATION, such as `test:integration:k8s`, `test-e2e`, `tests`, or
+ * `test.js` — under any of npm's real spellings: `test`, `tst`, `t`
+ * (aliases of the plain test script), or `install-test`/`it`,
+ * `install-ci-test`/`cit`/`sit`, `clean-install-test` (the install-then-test
+ * family, which also always runs the `test` script). Arbitrary flags/values
+ * are allowed on EITHER side of the script name (`npm test --prefix
+ * packages/server`, `npm --prefix packages/server test`, `npm run test
+ * --workspace=packages/server`, …) so flag position doesn't matter.
+ *
+ * `(?![\w:.-])` after the script name is the boundary that does the real
+ * work, and it is NOT "whitespace or end of string" — that was the previous
+ * (and the original) shape, and both regressed on anything that follows a
+ * script name with a SHELL METACHARACTER rather than whitespace: `npm test;
+ * rc=$?`, `npm test&& echo ok`, `npm test|tee log.txt`, `out=$(npm test)`,
+ * `npm test>log`, and `bash -c "npm test"` all matched before either fix and
+ * were silently missed by both `(?!:)` (the very first version) and `(?=\s|$)`
+ * (the #8164 first-review widening) — none of `;`, `&`, `|`, `)`, `>`, or `"`
+ * is whitespace or end-of-string, so a step whose script legitimately runs
+ * `npm test` as part of a larger command line stopped being discovered
+ * (#8164 second review). The fix is to name what must NOT follow — a script-
+ * name continuation character (word char, `:`, `.`, or `-`) — rather than
+ * what must: everything else, metacharacters included, is fair game.
  *
  * This repo's own workflows today only ever spell it `npm test`, scoped by a
  * step- or job-level `working-directory:` (grep-verified across every
- * `.github/workflows/*.yml`: no `npm t`, `--prefix`, or `--workspace`
- * invocation of the server suite exists yet). The wider forms exist so the
- * NEXT job that spells it differently is still caught, per
- * docs/false-safety-guards.md's "hardcoded list beside a growing set" — and
- * each is proven below with its own synthetic-input case
- * (`serverTestInvocations recognizes every real npm-test spelling`).
+ * `.github/workflows/*.yml`: none of the other spellings above invoke the
+ * server suite yet). The wider forms exist so the NEXT job that spells it
+ * differently is still caught, per docs/false-safety-guards.md's "hardcoded
+ * list beside a growing set" — and each is proven below with its own
+ * synthetic-input case (`serverTestInvocations recognizes every real
+ * npm-test spelling`).
  *
  * The tradeoff this accepts, stated rather than assumed: allowing ARBITRARY
  * tokens between `npm` and the script name (rather than only a fixed
@@ -172,20 +226,38 @@ function normaliseWd(wd) {
  * "over-inclusive is the safe direction" reasoning for exactly this
  * asymmetry).
  */
-const NPM_TEST_RE = /\bnpm\b(?:\s+\S+)*?\s+(?:test|t)(?=\s|$)/
+const NPM_TEST_RE = /\bnpm\b(?:\s+\S+)*?\s+(?:test|tst|t|it|install-test|cit|sit|clean-install-test|install-ci-test)(?![\w:.-])/
 
 /**
- * `-w`, `--workspace`, or `--prefix` naming `packages/server` — inside the run
- * body itself, independent of any `working-directory:` — in either the
- * `=value` or ` value` form. The PREVIOUS pattern
- * (`(?:-w|--workspace=?)\s+packages\/server\b`) required whitespace even for
- * the `=` spelling, so `--workspace=packages/server` never matched despite
- * the comment above it claiming it did (#8164 review — the bug was in the
- * comment's claim, not in anything the old code was asked to prove: nothing
- * exercised that spelling before now). `(?:=|\s+)` treats `=` and whitespace
- * as the two real separators npm accepts, never requiring both at once.
+ * The run body itself scopes the invocation to `packages/server` or
+ * `@chroxy/server` (the workspace's own package name — the repo's root
+ * `package.json` uses exactly this idiom for its own scripts), independent
+ * of any `working-directory:`. Recognizes:
+ *
+ *   - `-w`, `--workspace`, or `--prefix` naming either spelling, in the
+ *     `=value` or ` value` form, optionally quoted and optionally prefixed
+ *     with `./` or `${{ github.workspace }}/`
+ *   - `-C` naming `packages/server` (a directory-change flag some npm-like
+ *     tooling accepts the same way `--prefix` does)
+ *   - `-ws` / `--workspaces` (ALL workspaces, server included)
+ *   - `cd packages/server` / `cd ./packages/server` earlier in the same run
+ *     body, optionally quoted
+ *
+ * The PREVIOUS pattern (`(?:-w|--workspace=?)\s+packages\/server\b`) required
+ * whitespace even for the `=` spelling, so `--workspace=packages/server`
+ * never matched despite the comment above it claiming it did (#8164 review —
+ * the bug was in the comment's claim, not in anything the old code was asked
+ * to prove: nothing exercised that spelling before then). `(?:=|\s+)` treats
+ * `=` and whitespace as the two real separators npm accepts, never requiring
+ * both at once.
+ *
+ * `(?![\w.-])` after each package spelling excludes a NAME CONTINUATION —
+ * `packages/server-foo` and `@chroxy/server-x` are real, different packages,
+ * not the server package with noise after it, and must not match (proven
+ * below as a control).
  */
-const SCOPE_SERVER_RE = /(?:-w|--workspace|--prefix)(?:=|\s+)packages\/server\b/
+const SCOPE_SERVER_RE =
+  /(?:-w|--workspace|--prefix|-C)(?:=|\s+)['"]?(?:\.\/|\$\{\{\s*github\.workspace\s*\}\}\/)?(?:packages\/server|@chroxy\/server)(?![\w.-])|(?:^|\s)(?:-ws|--workspaces)(?![\w-])|\bcd\s+['"]?(?:\.\/)?packages\/server(?![\w.-])/
 
 /**
  * The Windows-only derived test runner (#7270) — `ci.yml`'s
@@ -203,15 +275,17 @@ const WINDOWS_RUNNER_RE = /run-windows-tests\.mjs/
  * `hasRipgrepBefore` is resolved HERE, in the same pass, because it needs the
  * job's own step list at the exact index the invocation was found at — a
  * second consumer re-deriving it from just a job name would be exactly the
- * copy this repo's doctrine warns against. `runsOn` is carried through so an
- * exemption can be checked against the job's ACTUAL runner, not just its name
- * (#8164 review) — see `RIPGREP_EXEMPT`.
+ * copy this repo's doctrine warns against. `runsOn` is `cleanRunsOn(job.body)`
+ * — comment-stripped per line — so an exemption can be checked against the
+ * job's ACTUAL runner, never a comment about it (#8164 review, #8164 second
+ * review) — see `RIPGREP_EXEMPT`.
  */
 export function serverTestInvocations(workflows) {
   const found = []
   for (const w of workflows) {
     for (const job of w.jobs) {
       const defaultWd = normaliseWd(jobDefaultWorkingDirectory(job.body))
+      const runsOn = cleanRunsOn(job.body)
       job.steps.forEach((stepLines, stepIndex) => {
         const runBody = stepRun(stepLines)
         if (runBody === undefined) return
@@ -221,7 +295,7 @@ export function serverTestInvocations(workflows) {
           .some(prior => (stepInput(prior, 'uses') || '').startsWith('./.github/actions/ensure-ripgrep'))
 
         if (WINDOWS_RUNNER_RE.test(runBody)) {
-          found.push({ workflow: w.name, job: jobName(job), kind: 'windows-derived-runner', runsOn: job.runsOn, hasRipgrepBefore })
+          found.push({ workflow: w.name, job: jobName(job), kind: 'windows-derived-runner', runsOn, hasRipgrepBefore })
           return
         }
 
@@ -229,7 +303,7 @@ export function serverTestInvocations(workflows) {
         const stepWd = normaliseWd(stepInput(stepLines, 'working-directory'))
         const effectiveWd = stepWd !== undefined ? stepWd : defaultWd
         const scoped = effectiveWd === 'packages/server' || SCOPE_SERVER_RE.test(runBody)
-        if (scoped) found.push({ workflow: w.name, job: jobName(job), kind: 'npm-test', runsOn: job.runsOn, hasRipgrepBefore })
+        if (scoped) found.push({ workflow: w.name, job: jobName(job), kind: 'npm-test', runsOn, hasRipgrepBefore })
       })
     }
   }
@@ -242,20 +316,22 @@ export function serverTestInvocations(workflows) {
  * discovered that is neither ripgrep-first NOR matched by a row here is a gap
  * (#8160 all over again, just with a new job name).
  *
- * `runsOn` is a REQUIRED second key alongside `{workflow, job}`, not an
- * optional refinement (#8164 review). Keying on name alone means a job
- * RENAMED to "Server Windows Tests" while staying on a Linux runner would
- * inherit this exemption for free — the exact shape of a silent regression
- * this file exists to prevent, just one level up. ci.yml's real Windows job
- * routes its runner through `runner-target`'s `winrunner` OUTPUT
- * (`runs-on: ${{ fromJSON(needs.runner-target.outputs.winrunner) }}`), which
- * resolves at RUN TIME to either `["self-hosted","Windows","X64","chroxy-win"]`
- * or `"windows-latest"` (see ci.yml's `resolve` step) — a static YAML read
+ * `runsOn` is a REQUIRED `RegExp` alongside `{workflow, job}`, not an
+ * optional refinement (#8164 review) — `ripgrepGaps` refuses to exempt
+ * anything for a row that omits it (#8164 second review: a missing `runsOn`
+ * used to fall back to "match on name alone", which is the exact loophole
+ * this field exists to close, just moved one level down into the fallback
+ * path instead of removed). ci.yml's real Windows job routes its runner
+ * through `runner-target`'s `winrunner` OUTPUT (`runs-on: ${{
+ * fromJSON(needs.runner-target.outputs.winrunner) }}`), which resolves at RUN
+ * TIME to either `["self-hosted","Windows","X64","chroxy-win"]` or
+ * `"windows-latest"` (see ci.yml's `resolve` step) — a static YAML read
  * cannot evaluate that expression, so this matches the literal `winrunner`
  * reference instead (grep-verified: it is the only job in ci.yml whose
  * `runs-on:` mentions it), with the literal `windows-latest` / `chroxy-win`
  * spellings also accepted for a future Windows job that skips the routing
- * indirection.
+ * indirection. Matched against `cleanRunsOn()`'s comment-stripped value, so a
+ * comment claiming (or denying) Windows cannot forge — or defeat — the match.
  */
 export const RIPGREP_EXEMPT = [
   {
@@ -277,15 +353,17 @@ export const RIPGREP_EXEMPT = [
  * reason: on the real tree this returns empty, and empty-because-broken must
  * not read the same as empty-because-clean.
  *
- * An exemption row without a `runsOn` pattern (none exist today) would match
- * on name alone — `!e.runsOn ||` — but every row that DOES carry one must
- * pass it; there is no way to satisfy a `runsOn`-bearing row except by
- * actually running on that kind of runner.
+ * `exemptOf` is FAIL-CLOSED on `runsOn`: `e.runsOn instanceof RegExp &&
+ * e.runsOn.test(...)`, not `!e.runsOn || ...` (#8164 second review). The old
+ * form treated a row with NO `runsOn` as exempting on `{workflow, job}` name
+ * alone — which is precisely the loophole item 4 of the first review closed
+ * for the row that HAS one, reopened for any row that doesn't. There is no
+ * longer a way to write an exemption that skips the runner check.
  */
 export function ripgrepGaps(invocations, exempt = RIPGREP_EXEMPT) {
   const exemptOf = inv =>
     exempt.find(
-      e => e.workflow === inv.workflow && e.job === inv.job && (!e.runsOn || e.runsOn.test(inv.runsOn || ''))
+      e => e.workflow === inv.workflow && e.job === inv.job && e.runsOn instanceof RegExp && e.runsOn.test(inv.runsOn || '')
     )
   return {
     // A discovered job with no ripgrep step before it and no exemption row.
@@ -335,6 +413,16 @@ describe('every workflow job that runs the server test suite installs ripgrep fi
       invocations.some(i => i.workflow === 'release.yml'),
       'expected at least one server-test-running job in release.yml — the #8160 job itself'
     )
+  })
+
+  it('discovers exactly the three real server-test-running jobs — no more, no less (#8164 second review)', () => {
+    // The PRECISE version of the floor above: the widened NPM_TEST_RE and
+    // SCOPE_SERVER_RE must not have picked up anything ELSE in the real tree
+    // (a lint step mentioning "test" in prose, a differently-scoped `npm
+    // test` elsewhere, …). If this ever needs to change, it should change on
+    // PURPOSE, in the same PR that adds or removes a real job.
+    const discovered = invocations.map(i => `${i.job} (${i.workflow})`).sort()
+    assert.deepEqual(discovered, ['Server Tests (ci.yml)', 'Server Windows Tests (ci.yml)', 'Test Suite (release.yml)'])
   })
 
   it('excludes the k8s integration job, which runs a single unrelated file, not the server suite', () => {
@@ -400,10 +488,22 @@ describe('ripgrepGaps reports each defect it exists to find (#8160)', () => {
     assert.deepEqual(ripgrepGaps([], exempt).staleExemptions, ['Renamed Away (ci.yml)'])
   })
 
-  it('does NOT let a same-named job on a different runner inherit the Windows exemption (#8164 review)', () => {
-    // The exact shape of the loophole item 4 named: a job sharing the exempt
-    // row's {workflow, job} but actually running on Linux must still be
-    // reported, not waved through on name alone.
+  it('does NOT let an exemption row WITHOUT a runsOn pattern exempt anything (#8164 second review)', () => {
+    // The fail-closed proof: a row naming the right {workflow, job} but no
+    // `runsOn` at all must not exempt — the old `!e.runsOn ||` fallback would
+    // have let this through.
+    const invocations = [{ workflow: 'ci.yml', job: 'Server Windows Tests', kind: 'npm-test', runsOn: 'runs-on: windows-latest', hasRipgrepBefore: false }]
+    const exempt = [{ workflow: 'ci.yml', job: 'Server Windows Tests', reason: 'no runsOn on this row' }]
+    assert.deepEqual(ripgrepGaps(invocations, exempt).missing, ['Server Windows Tests (ci.yml)'])
+  })
+
+  it('does NOT let a same-named job on a different runner inherit the REAL Windows exemption (#8164 review, #8164 second review)', () => {
+    // The exact shape of the loophole item 4 (first review) named: a job
+    // sharing the exempt row's {workflow, job} but actually running on Linux
+    // must still be reported, not waved through on name alone. Uses the REAL
+    // RIPGREP_EXEMPT (the default parameter), not a local stand-in, so this
+    // proves the PRODUCTION row's own runsOn guard holds (#8164 second
+    // review) — a local copy could pass while the real row regressed.
     const invocations = [
       {
         workflow: 'ci.yml',
@@ -413,17 +513,37 @@ describe('ripgrepGaps reports each defect it exists to find (#8160)', () => {
         hasRipgrepBefore: false,
       },
     ]
-    const exempt = [{ workflow: 'ci.yml', job: 'Server Windows Tests', runsOn: /winrunner|windows-latest|chroxy-win/, reason: 'x' }]
-    assert.deepEqual(ripgrepGaps(invocations, exempt).missing, ['Server Windows Tests (ci.yml)'])
+    assert.deepEqual(ripgrepGaps(invocations).missing, ['Server Windows Tests (ci.yml)'])
+  })
+
+  it('a runs-on COMMENT mentioning Windows does not satisfy the REAL exemption (#8164 second review)', () => {
+    // cleanRunsOn() strips the comment before this ever reaches ripgrepGaps,
+    // so a job named exactly like the exempt row, genuinely running on
+    // ubuntu with a comment that happens to say "windows", is still reported.
+    const yml =
+      'name: probe\n' +
+      'on: push\n' +
+      'jobs:\n' +
+      '  probe:\n' +
+      '    name: Server Windows Tests\n' +
+      '    runs-on: ubuntu-24.04 # not windows, despite the job name\n' +
+      '    steps:\n' +
+      '      - uses: actions/checkout@v4\n' +
+      '      - name: Test server\n' +
+      '        run: npm test\n' +
+      '        working-directory: packages/server\n'
+    const workflow = { name: 'ci.yml', text: yml, jobs: parseJobs(yml, 'ci.yml') }
+    const invocations = serverTestInvocations([workflow])
+    assert.deepEqual(ripgrepGaps(invocations).missing, ['Server Windows Tests (ci.yml)'])
   })
 })
 
 /**
  * `serverTestInvocations` proven against every real npm-test spelling the
- * #8164 review named, decoupled from the real workflow tree via a small
- * synthetic single-job workflow per case (built with the SAME `parseJobs`
- * the real reader uses, so this exercises the actual parsing path, not a
- * hand-rolled stand-in for it).
+ * #8164 review (both passes) named, decoupled from the real workflow tree
+ * via a small synthetic single-job workflow per case (built with the SAME
+ * `parseJobs` the real reader uses, so this exercises the actual parsing
+ * path, not a hand-rolled stand-in for it).
  */
 describe('serverTestInvocations recognizes every real npm-test spelling (#8164 review)', () => {
   /**
@@ -469,6 +589,32 @@ describe('serverTestInvocations recognizes every real npm-test spelling (#8164 r
     })
   }
 
+  // ---- metacharacter-adjacent and alias spellings (#8164 second review) ----
+
+  for (const cmd of [
+    'npm tst',
+    'npm test; rc=$?',
+    'npm test|tee log.txt',
+    'npm test&& echo ok',
+    'out=$(npm test)',
+    'npm cit',
+    'npm it',
+  ]) {
+    it(`recognizes \`${cmd}\` scoped by a step-level working-directory, and goes red without ensure-ripgrep (#8164 second review)`, () => {
+      const missing = ripgrepGaps(probe(cmd, { workingDirectory: 'packages/server' })).missing
+      assert.deepEqual(missing, ['Probe Job (probe.yml)'])
+      const clean = ripgrepGaps(probe(cmd, { workingDirectory: 'packages/server', withRipgrep: true })).missing
+      assert.deepEqual(clean, [])
+    })
+  }
+
+  it('excludes script-name CONTINUATIONS: test-e2e, tests, and test.js are not the bare test script (#8164 second review)', () => {
+    for (const cmd of ['npm test-e2e', 'npm tests', 'npm test.js']) {
+      const missing = ripgrepGaps(probe(cmd, { workingDirectory: 'packages/server' })).missing
+      assert.deepEqual(missing, [], `\`${cmd}\` must not be discovered as the bare test script`)
+    }
+  })
+
   // ---- the script itself carries the scope ----
 
   for (const cmd of [
@@ -479,6 +625,12 @@ describe('serverTestInvocations recognizes every real npm-test spelling (#8164 r
     'npm run test --workspace=packages/server',
     'npm test --prefix packages/server',
     'npm --prefix packages/server test',
+    'npm test -w @chroxy/server',
+    'npm test -C packages/server',
+    'npm test --workspaces',
+    'npm test -ws',
+    'cd packages/server && npm test',
+    'cd ./packages/server && npm test',
   ]) {
     it(`recognizes \`${cmd}\`, scoped by the command itself, and goes red without ensure-ripgrep`, () => {
       const missing = ripgrepGaps(probe(cmd)).missing
@@ -487,6 +639,13 @@ describe('serverTestInvocations recognizes every real npm-test spelling (#8164 r
       assert.deepEqual(clean, [])
     })
   }
+
+  it('does NOT scope on a DIFFERENT package that merely starts with the same name (#8164 second review)', () => {
+    for (const cmd of ['npm test -w packages/server-foo', 'npm test -w @chroxy/server-x']) {
+      const missing = ripgrepGaps(probe(cmd)).missing
+      assert.deepEqual(missing, [], `\`${cmd}\` scopes a DIFFERENT package and must not be discovered`)
+    }
+  })
 
   // ---- working-directory spellings that must resolve to packages/server ----
 
@@ -520,10 +679,18 @@ describe('serverTestInvocations recognizes every real npm-test spelling (#8164 r
     assert.deepEqual(clean, [])
   })
 
+  it('resolves a QUOTED job-default `"./packages/server"` working-directory, and goes red without ensure-ripgrep (#8164 second review)', () => {
+    const wd = '"./packages/server"'
+    const missing = ripgrepGaps(probe('npm test', { jobDefaultWd: wd })).missing
+    assert.deepEqual(missing, ['Probe Job (probe.yml)'])
+    const clean = ripgrepGaps(probe('npm test', { jobDefaultWd: wd, withRipgrep: true })).missing
+    assert.deepEqual(clean, [])
+  })
+
   it('still excludes a scoped script name even with the widened command regex', () => {
     // The regression this whole widening could have reintroduced: allowing
     // arbitrary tokens between `npm` and the script name must not let
-    // `test:integration:k8s` slip through the `(?=\s|$)` boundary.
+    // `test:integration:k8s` slip through the continuation-character boundary.
     const missing = ripgrepGaps(probe('npm run test:integration:k8s -w packages/server')).missing
     assert.deepEqual(missing, [])
   })
