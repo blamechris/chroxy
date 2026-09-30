@@ -10,7 +10,7 @@
 # packages/protocol/dist/foo.js — leaves that file both untracked and IGNORED.
 # `git diff` never sees an ignored/untracked path, so the check stayed at exit
 # 0 while the new file was never committed. Downstream (the published package,
-# the Docker image build in #6133) silently ships without it. This is the
+# the Docker image build in #8133) silently ships without it. This is the
 # "cannot check this" == "nothing to check" class in docs/false-safety-guards.md.
 #
 # This script checks BOTH drift shapes:
