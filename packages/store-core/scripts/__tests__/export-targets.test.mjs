@@ -205,6 +205,47 @@ describe('resolveExportTarget', () => {
   })
 })
 
+// #7211. The tests above already prove the containment check catches a
+// trailing-slash-dropped base URL for "." — but "." is not a representative
+// case. Before the containment check existed (#7225), a wrong-tree resolution
+// was caught ONLY when the wrongly-resolved file failed to import, and
+// packages/store-core/dist/crypto.js is tracked, has zero relative
+// specifiers, and imports cleanly — so a wrong-tree resolution for ./crypto
+// specifically was indistinguishable from success, and was noticed only
+// because "." happened to be checked first and happened to throw. Reorder the
+// manifest (or check ./crypto alone) and that accident goes away. These tests
+// pin ./crypto directly, both alone and checked first, so a future
+// "simplification" of the base URL cannot pass by luck of key order.
+describe('./crypto gets the same guarantee as "." (#7211)', () => {
+  const outDir = join(sep === '\\' ? 'C:\\repo' : '/repo', 'store-core', 'publish')
+
+  // No '.' anywhere in this call — the containment check is not passing
+  // because some OTHER export threw first.
+  it('resolves ./crypto correctly when it is the only export checked', () => {
+    const url = resolveExportTarget(outDir, './crypto', './dist/crypto.js')
+    expect(fileURLToPath(url)).toBe(join(outDir, 'dist', 'crypto.js'))
+  })
+
+  // The manifest build-publish-dir.mjs generates lists '.' before './crypto'
+  // (see 'the manifest build-publish-dir actually generates' below) — this
+  // reverses that order and runs the exact two functions its loop calls,
+  // declaredTargets feeding resolveExportTarget in sequence, so nothing here
+  // is a reimplementation of the script's own logic.
+  it('resolves every export correctly even when ./crypto is declared before "."', () => {
+    const manifest = {
+      './crypto': { types: './dist/crypto.d.ts', import: './dist/crypto.js' },
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+    }
+    const declared = declaredTargets(manifest)
+    expect(declared[0][0]).toBe('./crypto') // guards the test itself: order really is reversed
+
+    for (const [label, target] of declared) {
+      const url = resolveExportTarget(outDir, label, target)
+      expect(fileURLToPath(url).startsWith(outDir + sep), `${label} -> ${target}`).toBe(true)
+    }
+  })
+})
+
 // Store Core Tests runs on Linux only, so without an injectable path module
 // these clauses could never execute — `isAbsolute(rel)` in particular is
 // unreachable on POSIX (relative() never returns an absolute path when both
