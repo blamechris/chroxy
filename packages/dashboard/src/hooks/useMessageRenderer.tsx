@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import type { ReactNode } from 'react'
-import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
+import type { ChatMessage, SessionInfo, ExpiredPermissionTurnSummary } from '@chroxy/store-core'
 import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
@@ -8,6 +8,7 @@ import type { ProviderCapabilities } from '../store/types'
 import { ToolGroup } from '../components/ToolGroup'
 import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
+import { PermissionExpiredSummary } from '../components/PermissionExpiredSummary'
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
 import { CompactionMarker } from '../components/CompactionMarker'
@@ -20,6 +21,13 @@ import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary'
 export interface UseMessageRendererArgs {
   storeMsgMap: Map<string, ChatMessage>
   chatToolGroupPayloads: Map<string, { messages: ChatMessage[]; isActive: boolean }>
+  /**
+   * #7365 — synthetic `permission-expired-summary` row id -> the turn's
+   * aggregated expired-permission payload. Same shape as
+   * `chatToolGroupPayloads`: the row's `id` has no store-side message to look
+   * up in `storeMsgMap`, so it is handled before that lookup.
+   */
+  permissionExpiredSummaries: Map<string, ExpiredPermissionTurnSummary>
   chatTailMessageId: string | null
   sendPermissionResponse: ConnectionState['sendPermissionResponse']
   sendUserQuestionResponse: ConnectionState['sendUserQuestionResponse']
@@ -92,6 +100,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
   const {
     storeMsgMap,
     chatToolGroupPayloads,
+    permissionExpiredSummaries,
     chatTailMessageId,
     sendPermissionResponse,
     sendUserQuestionResponse,
@@ -121,6 +130,21 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           messages={payload.messages}
           isActive={payload.isActive}
           isTail={msg.id === chatTailMessageId}
+        />
+      )
+    }
+
+    // #7365 — end-of-turn summary for permission prompts that expired
+    // unanswered. Synthetic row (#7365, mirrors `tool_group`'s shape): id is
+    // a turn-keyed row id, not a store id.
+    if (msg.type === 'permission-expired-summary') {
+      const summary = permissionExpiredSummaries.get(msg.id)
+      if (!summary || summary.requestIds.length === 0) return null
+      return (
+        <PermissionExpiredSummary
+          count={summary.count}
+          tools={summary.tools}
+          firstRequestId={summary.requestIds[0]!}
         />
       )
     }
@@ -355,5 +379,5 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
+  }, [storeMsgMap, chatToolGroupPayloads, permissionExpiredSummaries, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
 }

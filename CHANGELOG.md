@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard: a persistent end-of-turn summary for permission prompts that
+  expired unanswered (#7365).** When a permission prompt times out with no
+  answer, chroxy silently continues without that tool — the per-prompt
+  marker (`PermissionPrompt.tsx`'s "Permission expired — Claude will continue
+  without this tool") is easy to miss once the turn has moved on, since it is
+  one collapsed row in a long transcript. Once a turn has actually ended, the
+  transcript now also renders a persistent card attached to it, aggregating
+  every prompt that expired unanswered during it: the count, the tool names,
+  and a jump link back to the first one (which also moves keyboard/
+  screen-reader focus, not just the scroll position). Turn boundaries use
+  one of two EXPLICIT sources, chosen by the caller, never inferred: the
+  live dashboard marks a position-independent `turnBoundary` on whichever
+  message is last (skipping past any trailing `user_input` rows) when a
+  turn's own `result` is processed — live or replayed identically — since a
+  `user_input` row from a send-while-busy queued follow-up is recorded by
+  the server at ENQUEUE time and can sit permanently mid-turn, and can even
+  be the LAST thing before that turn's `result` if the turn's own last action
+  was an expiring permission; a closed/historical transcript (no `result`
+  entry exists in that data source) instead uses `user_input` row position,
+  which is sound there specifically because Claude Code's own on-disk log
+  only records a queued follow-up once it actually dispatches. No protocol
+  change was needed for either source. The summary itself is gated on the
+  turn having ended (the server-authoritative `isIdle` flag, defaulting to
+  "ended" for a closed transcript) so its position never shifts while a turn
+  is still streaming. No new native notification: the permission
+  notification already fired when the prompt was raised (#7364); a second one
+  per turn for the same event would be noise. Web dashboard only — the
+  mobile app has no equivalent surface yet.
+
 ### Fixed
 
 - **The spawn-env inherited-secrets roster strips comments with a real

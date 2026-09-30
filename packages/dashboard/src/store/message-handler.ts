@@ -125,6 +125,9 @@ import {
   // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
   handleResultQueueReconcile,
+  // #7365 (review round 2) — stamp the position-independent turn-end marker
+  // on `result`, live or replayed alike (see turn-boundaries.ts).
+  markTurnBoundary,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -5971,14 +5974,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             // #6756 — `result` is the guaranteed turn boundary; finalise any
             // thinking bubble whose own stream_end was dropped (mirrors the
             // activeTools orphan sweep below).
-            messages: finalizeThinkingStreams([...ss.messages]),
+            // #7365 (review round 2) — mark the position-independent
+            // turn-end (turn-boundaries.ts) on the same unconditional,
+            // live-or-replayed path. Order doesn't matter here: finalizing a
+            // thinking stream never changes WHICH message is last, only its
+            // own `thinkingStreaming` field.
+            messages: markTurnBoundary(finalizeThinkingStreams([...ss.messages])),
             ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
           if (ss.activeTools.length > 0) patch.activeTools = [];
           return patch;
         });
       } else {
-        set((s) => ({ ...resultPatch, messages: finalizeThinkingStreams([...s.messages]) }));
+        set((s) => ({ ...resultPatch, messages: markTurnBoundary(finalizeThinkingStreams([...s.messages])) }));
       }
       break;
     }
