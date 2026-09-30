@@ -33,7 +33,7 @@ describe('SessionPicker long-press alert title — provider suffix (#3937)', () 
     // it showed ` (CLI)` — indistinguishable from a session whose provider was
     // unknown. Fixed to suffix for every known provider (matching the badge
     // gate). Matches the ternary pattern (session.provider ? ... : '') but NOT
-    // the old suppresson pattern.
+    // the old suppression pattern.
     expect(alertTitleSection).toMatch(/session\.provider\s*\?/);
     expect(alertTitleSection).not.toMatch(/session\.provider\s*&&\s*session\.provider\s*!==\s*DEFAULT_PROVIDER/);
   });
