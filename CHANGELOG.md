@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-09-30
+
 ### Added
 
 - **Tab now completes the highlighted slash command or `@`-file into the
