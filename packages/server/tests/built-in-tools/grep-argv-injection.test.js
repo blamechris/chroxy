@@ -152,7 +152,7 @@ function requireRgOrSkip(t, what) {
   if (process.env.CI) {
     assert.fail(
       `ripgrep is not installed on this CI runner, so ${what} did not run. ` +
-      'This proof must not be skipped in CI — install ripgrep in the Server Tests job (#7295).',
+      'This proof must not be skipped in CI — install it via `uses: ./.github/actions/ensure-ripgrep` (#7295, #8160).',
     )
   }
   t.skip(`ripgrep is not installed on this machine — ${what} did NOT run (it is enforced in CI).`)
