@@ -7,11 +7,12 @@
 # at nothing. release.yml built that image and pushed it to GHCR on every
 # release, but nothing ever RAN it, so nothing noticed. This script is what
 # CI's `Docker Image Smoke` job runs against a freshly built image, and it runs
-# locally the same way:
+# locally the same way — including the bounded-execution calls below, which
+# use a portable wrapper rather than bare `timeout` (see the note below):
 #
 #   docker build -t chroxy:local . && bash scripts/docker-image-smoke.sh chroxy:local
 #
-# Two checks, both against the image as built:
+# Three checks, all against the image as built:
 #
 # 1. Every `@chroxy/*` specifier the server imports resolves inside the image.
 #    The specifiers are read from the image's OWN copy of packages/server/src on
@@ -28,15 +29,30 @@
 #    this checks the probe Docker itself would run, including that its tools
 #    exist in the image.
 #
-# Every docker call that runs something in the image is bounded by `timeout`,
-# so a wedged image fails with a message instead of hanging the job.
+# 3. The image's own `claude` CLI (#8145) runs and reports the version the
+#    Dockerfile pinned. The pin is read from the image's own
+#    `org.chroxy.claude-code.version` label via `docker inspect`, never
+#    parsed from the Dockerfile source, so this checks what actually shipped.
 #
-# `--skip-checks` is passed to `start` because the image has no `claude` CLI
-# yet, and preflight refuses to start without one (#8145). Drop it when #8145
-# lands.
+# Every docker call that runs something in the image is bounded by
+# `run_with_timeout` (scripts/lib/run-with-timeout.sh), so a wedged image
+# fails with a message instead of hanging the job. It is NOT bare `timeout`:
+# GNU coreutils' `timeout` ships on ubuntu-24.04 (where CI runs this) but on
+# NEITHER a stock macOS NOR its Homebrew `coreutils` cask by default (which
+# installs the GNU tools prefixed `gtimeout`, precisely so they do not shadow
+# BSD's own utilities) — so a bare `timeout` call here previously made the
+# "runs locally the same way" claim above false on this Mac: every bounded
+# call failed with exit 127 before ever reaching the image. run_with_timeout
+# tries `timeout`, then `gtimeout`, then falls back to a `perl` alarm/exec
+# implementation that preserves the same exit-124-on-expiry contract this
+# script's own `import_rc` check below relies on.
 #
 # Exit codes: 0 = healthy, 1 = a check failed, 2 = usage error.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/run-with-timeout.sh
+source "$SCRIPT_DIR/lib/run-with-timeout.sh"
 
 IMAGE="${1:-}"
 if [ -z "$IMAGE" ]; then
@@ -70,7 +86,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "no such image: $IMAGE (bu
 # Every line of the image's server JavaScript that quotes an @chroxy/ specifier
 # (JS only: src/ also holds Markdown design notes that name packages in prose).
 set +e
-SRC_LINES="$(timeout 60 docker run --rm --name "$NAME-scan" --entrypoint grep "$IMAGE" \
+SRC_LINES="$(run_with_timeout 60 docker run --rm --name "$NAME-scan" --entrypoint grep "$IMAGE" \
   -rhE --include='*.js' --include='*.mjs' --include='*.cjs' "['\"\`]@chroxy/" "$IMAGE_SERVER/src")"
 scan_rc=$?
 set -e
@@ -103,7 +119,7 @@ echo "== Resolving $(printf '%s\n' "$SPECS" | wc -l | tr -d ' ') @chroxy/* speci
 # server's own imports do. $SPECS is intentionally unquoted: one argv each.
 set +e
 # shellcheck disable=SC2086
-timeout 120 docker run --rm --name "$NAME-imports" -w "$IMAGE_SERVER" "$IMAGE" node --input-type=module -e '
+run_with_timeout 120 docker run --rm --name "$NAME-imports" -w "$IMAGE_SERVER" "$IMAGE" node --input-type=module -e '
   for (const spec of process.argv.slice(1)) {
     await import(spec)
     console.log("  resolved " + spec)
@@ -133,10 +149,10 @@ docker run -d --name "$NAME" \
   -e ANTHROPIC_API_KEY=sk-ant-smoke-test-not-a-real-key \
   -e CHROXY_TUNNEL=none \
   -e PORT="$PORT" \
-  "$IMAGE" start --skip-checks >/dev/null || fail "could not start a container from $IMAGE"
+  "$IMAGE" start >/dev/null || fail "could not start a container from $IMAGE"
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))
-until timeout "${HC_TIMEOUT_S}s" docker exec "$NAME" sh -c "$HC_CMD" >/dev/null 2>&1; do
+until run_with_timeout "$HC_TIMEOUT_S" docker exec "$NAME" sh -c "$HC_CMD" >/dev/null 2>&1; do
   if [ "$(docker inspect -f '{{.State.Running}}' "$NAME")" != "true" ]; then
     docker logs "$NAME" >&2 || true
     fail "container exited before becoming healthy (logs above)"
@@ -149,3 +165,31 @@ until timeout "${HC_TIMEOUT_S}s" docker exec "$NAME" sh -c "$HC_CMD" >/dev/null 
 done
 
 echo "== Healthy: the image's HEALTHCHECK passed"
+
+# --- 3. The image's own claude CLI runs and reports the pinned version -----
+# Read the pin from the image's OWN label (baked in by the root Dockerfile,
+# #8145) rather than parsing the Dockerfile here — this checks what shipped,
+# not what the source says should ship. `start` above ran preflight for real
+# (no `--skip-checks`): if `claude` were missing or unusable the container
+# would already have failed to become healthy, so this check is confirming
+# the SPECIFIC version, not merely presence.
+CLAUDE_LABEL_VERSION="$(docker inspect -f '{{index .Config.Labels "org.chroxy.claude-code.version"}}' "$IMAGE" 2>/dev/null)"
+[ -n "$CLAUDE_LABEL_VERSION" ] \
+  || fail "image carries no org.chroxy.claude-code.version label — cannot verify the installed claude CLI's version against the pin"
+
+echo "== Checking the image's claude CLI reports the pinned version ($CLAUDE_LABEL_VERSION)"
+set +e
+CLAUDE_VERSION_OUT="$(run_with_timeout 30 docker run --rm --entrypoint claude "$IMAGE" --version 2>&1)"
+claude_version_rc=$?
+set -e
+[ "$claude_version_rc" -ne 124 ] || fail "claude --version timed out after 30s inside $IMAGE"
+[ "$claude_version_rc" -eq 0 ] || fail "claude --version exited $claude_version_rc inside $IMAGE: $CLAUDE_VERSION_OUT"
+# Here-string, not `printf ... | grep -q`: this script sets pipefail, and a
+# producer piped into an early-exiting `grep -q` can SIGPIPE and report
+# "not found" for a needle that is genuinely present (#7907;
+# scripts/lint-no-pipe-into-grep-q.sh). A here-string hands grep the data
+# directly, so there is no separate writer process to race.
+grep -qF "$CLAUDE_LABEL_VERSION" <<<"$CLAUDE_VERSION_OUT" \
+  || fail "claude --version output did not contain the pinned version '$CLAUDE_LABEL_VERSION': $CLAUDE_VERSION_OUT"
+
+echo "== claude CLI OK: $CLAUDE_VERSION_OUT"

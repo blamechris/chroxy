@@ -7,8 +7,8 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Track @anthropic-ai/claude-code version pinned in the sidecar Dockerfile ARG",
-      "managerFilePatterns": ["/^packages/server/sidecar/Dockerfile$/"],
+      "description": "Track @anthropic-ai/claude-code version pinned in the sidecar Dockerfile ARG and the root Dockerfile's claude-cli build stage (#8145)",
+      "managerFilePatterns": ["/^packages/server/sidecar/Dockerfile$/", "/^Dockerfile$/"],
       "matchStrings": [
         "ARG CLAUDE_CODE_VERSION=(?<currentValue>[^\\s]+)"
       ],

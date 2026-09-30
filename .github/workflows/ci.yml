@@ -406,6 +406,9 @@ jobs:
               - '.dockerignore'
               - 'scripts/docker-entrypoint.sh'
               - 'scripts/docker-image-smoke.sh'
+              # #8145 — docker-image-smoke.sh sources this for its portable
+              # timeout wrapper; a change here needs the same re-run.
+              - 'scripts/lib/run-with-timeout.sh'
               - 'package.json'
               - 'package-lock.json'
               - 'packages/server/**'
@@ -1825,6 +1828,21 @@ jobs:
         # runner (which has neither cloudflared nor a provider CLI) is the
         # known, tolerated shape or a real defect.
         run: node scripts/__tests__/classify-doctor-output.test.mjs
+
+      - name: Run run-with-timeout.sh tests
+        # #8145 — scripts/docker-image-smoke.sh called bare `timeout`
+        # throughout while claiming to run "locally the same way" as CI;
+        # neither a stock macOS nor its Homebrew coreutils cask ships an
+        # un-prefixed `timeout`, so every bounded call there failed with exit
+        # 127 on that platform. run_with_timeout() (scripts/lib/run-with-
+        # timeout.sh) replaces those calls with a wrapper that falls back
+        # through `timeout` -> `gtimeout` -> a `perl` alarm/exec
+        # implementation, preserving the exit-124-on-timeout contract the
+        # smoke script's own checks rely on. This proves the passthrough exit
+        # code, the 124-on-timeout behaviour, and the perl fallback path
+        # specifically, forced by a PATH with neither `timeout` nor
+        # `gtimeout` on it.
+        run: bash scripts/__tests__/run-with-timeout.test.sh
 
       - name: Every hand-rolled harness goes red when its cases stop running
         # #7653 — eleven of the repo's sixteen hand-rolled harnesses printed

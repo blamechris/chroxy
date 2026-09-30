@@ -658,7 +658,7 @@ EOF and the grace would just be wasted shutdown latency.
 ## claude-code Version Pinning
 
 The `Dockerfile` installs `@anthropic-ai/claude-code` at a fixed version via
-the `CLAUDE_CODE_VERSION` build ARG (default: `2.1.128`).
+the `CLAUDE_CODE_VERSION` build ARG (default: `2.1.280`).
 
 **Override at build time:**
 ```sh
