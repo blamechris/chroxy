@@ -42,7 +42,7 @@ const CLAUDE_PRICING: Record<string, ModelPricing> = {
   // USD/1k table can't represent the >200K premium tier the server models in
   // its `oneM.longContext` block (#4087), and no model carries a [1m] row here.
   // The drift-warn in calculateCost surfaces any offered-but-unpriced model.)
-  'claude-opus-4-8': { inputPer1k: 0.015, outputPer1k: 0.075, label: 'Claude Opus 4.8' },
+  'claude-opus-4-8': { inputPer1k: 0.005, outputPer1k: 0.025, label: 'Claude Opus 4.8' },
   'claude-sonnet-4-6': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.6' },
   'claude-haiku-4-5': { inputPer1k: 0.001, outputPer1k: 0.005, label: 'Claude Haiku 4.5' },
   // Claude Sonnet 4.5 — previously mislabeled "Claude 3.7 Sonnet" (the rate
