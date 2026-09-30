@@ -372,23 +372,16 @@ export class ClaudeByokSession extends BaseSession {
     // pair" — not "one warn per current model."
     this._pricingWarnedModels = new Set()
 
-    // #4080: Per-stream index→toolUseId map. Populated on
-    // `content_block_start` with `block.type === 'tool_use'` (where the
-    // SDK emits both the block index and the tool_use id) and queried on
-    // `tool_input_delta`, which only carries the index. Entry is deleted
-    // on `content_block_stop` so the map stays small even on multi-tool
-    // turns. The full map is cleared after the for-await loop in case
-    // the stream terminated without emitting a final stop for every
-    // block — kept inside the session (not the translator) per #4059's
-    // boundary call: the translator stays pure, stateful tracking lives
-    // here.
-    this._streamingIndexToToolUseId = new Map()
-
-    // #6756: per-stream index → thinking messageId, mirroring the toolUseId map
-    // above. The translated `thinking_delta` events carry only the block index;
-    // this maps each thinking block's index to the distinct thinking id we open
-    // on its first delta so subsequent deltas + the content_block_stop route
-    // correctly. Cleared alongside `_streamingIndexToToolUseId`.
+    // #6756: per-stream index → thinking messageId. The translated
+    // `thinking_delta` events carry only the block index; this maps each
+    // thinking block's index to the distinct thinking id we open on its first
+    // delta so subsequent deltas + the content_block_stop route correctly.
+    // Entry is deleted on `content_block_stop`; the whole map is also cleared
+    // after each round and on every turn exit path. Kept inside the session
+    // (not the translator) per #4059's boundary call: the translator stays
+    // pure, stateful tracking lives here. (#8137 removed the matching
+    // index→toolUseId map: tool input is now read off `final.content`, so
+    // nothing resolves a streaming index back to a tool_use id any more.)
     this._streamingIndexToThinkingId = new Map()
 
     // #6391 (chat-redesign footer-stat): thinking messageId → performance.now()
@@ -1282,12 +1275,6 @@ export class ClaudeByokSession extends BaseSession {
                 tool: t.toolName,
                 input: null,
               })
-              // #4080: track index→toolUseId so the upcoming
-              // tool_input_delta events (which only carry the index)
-              // can be re-tagged with the toolUseId before re-emit.
-              if (typeof t.index === 'number' && t.toolUseId) {
-                this._streamingIndexToToolUseId.set(t.index, t.toolUseId)
-              }
               break
             }
             case 'tool_input_delta':
@@ -1302,20 +1289,10 @@ export class ClaudeByokSession extends BaseSession {
               // is instead delivered once, as a single `tool_input_delta`,
               // right after `stream.finalMessage()` resolves below — see
               // the loop over `toolBlocks` a few dozen lines down. Was
-              // previously forwarded raw here (pre-#8137); see also the
-              // now-unused-for-forwarding `_streamingIndexToToolUseId` /
-              // `_pendingPermissionToolUseIds` machinery, kept for
-              // `content_block_stop` bookkeeping and the finalized-emission
-              // suppression check below.
+              // previously forwarded raw here (pre-#8137).
               break
             case 'content_block_stop':
-              // #4080: free the per-index slot as soon as the block
-              // finishes so a long turn's map doesn't grow unbounded.
-              // Safe to delete even if index isn't in the map — that
-              // just means we never tracked this block (text) and the
-              // lookup is a no-op.
               if (typeof t.index === 'number') {
-                this._streamingIndexToToolUseId.delete(t.index)
                 // #6756 — close the thinking stream for this block so the
                 // client finalises its "Thinking… → Thought" label.
                 const thinkingId = this._streamingIndexToThinkingId.get(t.index)
@@ -1359,11 +1336,10 @@ export class ClaudeByokSession extends BaseSession {
         // #4080: defensive cleanup. content_block_stop should have
         // drained every entry above, but if the stream ended on an
         // error path or the SDK ever skips the stop event for a
-        // block, the map would leak across rounds and a later
-        // tool_input_delta for index N could pick up a STALE
-        // toolUseId from the previous round. Clear here so each round
-        // starts with an empty per-stream map.
-        this._streamingIndexToToolUseId.clear()
+        // block, a thinking entry would leak across rounds and a later
+        // delta for index N could route to a STALE thinking id from the
+        // previous round. Clear here so each round starts with empty
+        // per-stream maps.
         this._streamingIndexToThinkingId.clear()
         this._thinkingStartMs.clear()
         lastStopReason = final.stop_reason
@@ -1686,12 +1662,11 @@ export class ClaudeByokSession extends BaseSession {
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after
       // finalMessage() above runs on the success path; an iteration or
-      // finalMessage() throw skips it and would leak stale
-      // index→toolUseId entries into the next turn (mis-tagging the
-      // next stream's tool_input_delta events). Clearing here drains
-      // them on every exit path — success, error, abort, hard timeout.
-      // Safe to call when already empty.
-      this._streamingIndexToToolUseId.clear()
+      // finalMessage() throw skips it and would leak stale per-index
+      // entries into the next turn (mis-routing the next stream's
+      // thinking deltas). Clearing here drains them on every exit path
+      // — success, error, abort, hard timeout. Safe to call when
+      // already empty.
       this._streamingIndexToThinkingId.clear()
       this._thinkingStartMs.clear()
       this._finishTurn()
@@ -2910,7 +2885,6 @@ export class ClaudeByokSession extends BaseSession {
     // #4080: same-rationale teardown — both maps are bounded by the
     // active stream / outstanding permission count, but any external
     // reference (test capture, future export) would keep them alive.
-    this._streamingIndexToToolUseId.clear()
     this._streamingIndexToThinkingId.clear()
     this._thinkingStartMs.clear()
     this._pendingPermissionToolUseIds.clear()

@@ -2342,12 +2342,11 @@ describe('ClaudeByokSession', () => {
     // is the canonical case where the user wants to see "rm -rf"
     // forming and abort BEFORE the round finishes).
     //
-    // The translator emits `tool_input_delta` carrying ONLY the block
-    // index. byok-session is the source of truth for index→toolUseId
-    // (populated on content_block_start with type=tool_use, cleared
-    // on content_block_stop), per the #4059 translator-stays-pure
-    // boundary. These tests pin the wire shape and the surrounding
-    // contract.
+    // #8137 replaced that live per-chunk preview: raw partial JSON can't
+    // be redacted, so byok-session now ignores the translator's
+    // `tool_input_delta` and emits ONE sanitized delta per tool_use block,
+    // read off `final.content` once `stream.finalMessage()` resolves.
+    // These tests pin the wire shape and the surrounding contract.
 
     it('delivers exactly ONE sanitized tool_input_delta once the block finalizes (#8137 — no raw per-chunk forwarding)', async () => {
       // Pre-#8137 byok-session forwarded each `input_json_delta` chunk
@@ -2470,23 +2469,19 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    it('clears the index→toolUseId map on the error path so stale entries do not leak into the next turn', async () => {
-      // Copilot review on #4233: pre-fix the per-round clear lived
-      // ONLY after finalMessage() resolved. An iteration /
-      // finalMessage() throw skipped it, so a stream that errored
-      // mid-tool-stream left index N → tu_X stuck in the map, and the
-      // NEXT turn's tool_input_delta for index N would resolve to the
-      // previous turn's tu_X — silently mis-tagging. Verify the
-      // finally block drains the map regardless of exit path.
+    it('emits no tool_input_delta for a tool_use whose stream errors before it finalizes', async () => {
+      // An input that never finalized was never sanitized, so nothing of
+      // it may reach the wire. Pre-#8137 the raw chunk streamed before the
+      // stream threw; post-#8137 the only emission point is after
+      // `stream.finalMessage()`, which this stream never reaches.
+      const secretKey = `sk-ant-api03-${'C'.repeat(40)}`
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
         messages: {
           stream: () => ({
             async *[Symbol.asyncIterator]() {
-              // Yield a tool_use start so the map gets populated,
-              // then throw — finalMessage() never runs, so the
-              // per-round clear after it never fires.
-              yield { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_pre_err', name: 'Read', input: {} } }
+              yield { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_pre_err', name: 'Bash', input: {} } }
+              yield { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: `{"command":"export K=${secretKey}` } }
               throw new Error('simulated mid-stream failure')
             },
             async finalMessage() {
@@ -2498,16 +2493,11 @@ describe('ClaudeByokSession', () => {
       const captured = captureEvents(session)
       await session.start()
       await session.sendMessage('this turn will fail')
-      // The error path emits an error event and ends the turn.
       const errors = captured.filter((e) => e.name === 'error')
       assert.ok(errors.length >= 1, 'error event surfaces on the failure path')
-      // The map MUST be empty before the next turn starts. Reading
-      // private state is acceptable here because the alternative
-      // (running a SECOND fake stream and asserting no stale toolUseId
-      // leaks through) duplicates the existing per-round-clear test
-      // without proving the finally path actually ran.
-      assert.equal(session._streamingIndexToToolUseId.size, 0,
-        'finally must clear the map even when the stream throws')
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.equal(deltas.length, 0, 'an unfinalized tool_use emits no tool_input_delta')
+      assert.ok(!JSON.stringify(captured).includes(secretKey), 'no emitted event carries the unfinalized raw input')
       await session.destroy()
     })
 
@@ -2626,7 +2616,7 @@ describe('ClaudeByokSession', () => {
               { type: 'message_stop' },
             ], {
               // stop_reason deliberately 'end_turn' (mirrors the existing
-              // "clears the index map between rounds" fixture above) so the
+              // per-round toolUseId fixture above) so the
               // turn ends without gating/executing the tool — this test is
               // about the STREAMED wire events, not tool dispatch.
               stop_reason: 'end_turn',
@@ -2672,6 +2662,54 @@ describe('ClaudeByokSession', () => {
       const sanitized = JSON.parse(deltas[0].payload.partialJson)
       assert.ok(sanitized.command.includes('[REDACTED]'), 'sanitized command must carry the redaction marker')
       assert.ok(!sanitized.command.includes('sk-ant-api03-'), 'sanitized command must not retain the Anthropic key prefix')
+
+      await session.destroy()
+    })
+
+    it('sanitizes and emits EVERY tool_use block in a multi-tool round, not just the first', async () => {
+      // Review on #8138: a mutant that sanitized only `toolBlocks[0]`
+      // survived the whole file. Two tool_use blocks, each carrying its
+      // own secret, must yield two deltas — one per toolUseId, in order —
+      // each redacted.
+      const keyA = `sk-ant-api03-${'D'.repeat(40)}`
+      const keyB = `sk-ant-api03-${'E'.repeat(40)}`
+      const inputA = { command: `export ANTHROPIC_API_KEY=${keyA}` }
+      const inputB = { command: `export OTHER_KEY=${keyB}` }
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session._client = {
+        messages: {
+          stream: () =>
+            fakeStream([
+              { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_a', name: 'Bash', input: {} } },
+              { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(inputA) } },
+              { type: 'content_block_stop', index: 0 },
+              { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu_b', name: 'Bash', input: {} } },
+              { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: JSON.stringify(inputB) } },
+              { type: 'content_block_stop', index: 1 },
+              { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 5, output_tokens: 8 } },
+              { type: 'message_stop' },
+            ], {
+              stop_reason: 'end_turn',
+              content: [
+                { type: 'tool_use', id: 'tu_a', name: 'Bash', input: inputA },
+                { type: 'tool_use', id: 'tu_b', name: 'Bash', input: inputB },
+              ],
+              usage: { input_tokens: 5, output_tokens: 8 },
+            }),
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('run both')
+
+      const deltas = captured.filter((e) => e.name === 'tool_input_delta')
+      assert.deepEqual(deltas.map((d) => d.payload.toolUseId), ['tu_a', 'tu_b'], 'one delta per tool_use block, in order')
+      for (const d of deltas) {
+        assert.ok(JSON.parse(d.payload.partialJson).command.includes('[REDACTED]'), `${d.payload.toolUseId}'s command carries the redaction marker`)
+      }
+      const haystack = JSON.stringify(captured)
+      assert.ok(!haystack.includes(keyA), 'no emitted event carries the first block\'s raw key')
+      assert.ok(!haystack.includes(keyB), 'no emitted event carries the second block\'s raw key')
 
       await session.destroy()
     })
