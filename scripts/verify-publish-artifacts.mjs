@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { classifyDoctorSpawnResult } from './lib/classify-doctor-output.mjs'
+import { DAEMON_ENTRY_MODULES } from './lib/daemon-entry-modules.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const KEEP = process.argv.includes('--keep')
@@ -152,7 +153,11 @@ try {
     // means doctor did not run to completion, and printed text (however
     // clean) must not be trusted as if it were the whole run (#8166 review).
     // See classify-doctor-output.mjs for the full pass/fail contract.
-    const doctorResult = spawnSync(bin, ['doctor'], { env, encoding: 'utf8' })
+    // timeout: a hang (e.g. a probe that never resolves) becomes a SIGTERM
+    // kill rather than wedging the whole release job forever — spawnSync
+    // then reports `.signal`, which classifyDoctorSpawnResult treats as a
+    // hard failure rather than trusting whatever partial text was captured.
+    const doctorResult = spawnSync(bin, ['doctor'], { env, encoding: 'utf8', timeout: 120000 })
     const doctorOutput = `${doctorResult.stdout || ''}${doctorResult.stderr || ''}`
     const verdict = classifyDoctorSpawnResult(doctorResult)
     if (verdict.ok) {
@@ -177,7 +182,6 @@ try {
     // start` with ERR_MODULE_NOT_FOUND.
     log('\n5b. chroxy start\'s module graph links')
     const serverPkgDir = join(prefix, 'lib', 'node_modules', '@chroxy', 'server')
-    const DAEMON_ENTRY_MODULES = ['src/server-cli.js', 'src/supervisor.js']
     for (const rel of DAEMON_ENTRY_MODULES) {
       const modPath = join(serverPkgDir, rel)
       if (!existsSync(modPath)) {

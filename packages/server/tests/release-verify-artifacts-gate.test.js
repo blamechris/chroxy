@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readWorkflows, assertReaderSane } from './helpers/workflow-reader.js'
+import { DAEMON_ENTRY_MODULES } from '../../../scripts/lib/daemon-entry-modules.mjs'
 
 /**
  * release.yml: every publishing job transitively needs verify-artifacts (#8165).
@@ -91,10 +92,15 @@ export function transitiveNeeds(jobsById, id, seen = new Set()) {
 }
 
 /**
- * Removes YAML comments before matching. A line that is ENTIRELY a comment
- * is dropped outright; a trailing `  # comment` on an otherwise-real line is
- * truncated to the code before it (a leading space is required, so `path:
- * foo#bar` — no space before `#` — is left alone).
+ * Removes YAML comments before matching, QUOTE-AWARE: a `#` inside a
+ * single- or double-quoted string is not a comment marker (`run: echo "a #
+ * not a comment"` must keep its `#`), and — like real YAML — a `#` only
+ * starts a comment when it is at the start of the line or preceded by
+ * whitespace (`path: foo#bar` is left alone). A line that is ENTIRELY a
+ * comment is truncated to (at most) its leading whitespace; a trailing
+ * `  # comment` on an otherwise-real line is truncated to the code before
+ * it. This is a small scanner, not a YAML parser — it tracks quote state
+ * char-by-char for exactly this one decision, nothing more.
  *
  * Why this matters here specifically (#8166 review): this repo's own
  * doctrine comments routinely narrate the very actions this file matches on
@@ -107,7 +113,26 @@ export function transitiveNeeds(jobsById, id, seen = new Set()) {
  * what runs, not what is said about what runs.
  */
 function stripYamlComments(bodyLines) {
-  return bodyLines.filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s#.*$/, ''))
+  return bodyLines.map((line) => {
+    let inSingle = false
+    let inDouble = false
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i]
+      if (inSingle) {
+        if (c === "'") inSingle = false
+        continue
+      }
+      if (inDouble) {
+        if (c === '\\') { i++; continue } // skip the escaped character
+        if (c === '"') inDouble = false
+        continue
+      }
+      if (c === "'") { inSingle = true; continue }
+      if (c === '"') { inDouble = true; continue }
+      if (c === '#' && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i)
+    }
+    return line
+  })
 }
 
 // Matched by the ACTION/COMMAND a step invokes, not by job id/name — a job
@@ -121,29 +146,87 @@ const PUBLISH_ACTION_RE = /docker\/build-push-action|softprops\/action-gh-releas
 const PUBLISH_RUN_RE = /\bdocker\s+push\b|\bgh\s+release\s+(?:create|upload|edit)\b|\b(?:npm|pnpm|yarn)\s+publish\b/
 const PUBLISH_BUILDX_PUSH_RE = /\bdocker\s+buildx\b[\s\S]{0,300}?--push\b/
 
-/** True when `job`'s real (non-comment) step content invokes a publish-shaped action or command. */
-export function isPublishingJob(job) {
-  const codeText = stripYamlComments(job.body).join('\n')
-  return PUBLISH_ACTION_RE.test(codeText) || PUBLISH_RUN_RE.test(codeText) || PUBLISH_BUILDX_PUSH_RE.test(codeText)
+// A job whose OWN `permissions:` grant something that ONLY a publish-shaped
+// action would need is publishing even if its exact command isn't one of the
+// ones matched above (#8166 second review) — a future job could plausibly
+// use an action neither list anticipates, and least-privilege workflows
+// don't request `packages: write` for anything else. `write-all` subsumes
+// all of these. `contents: write` is broader than "publish" in general (it
+// also covers e.g. pushing a commit), but on a RELEASE workflow specifically
+// it is exactly github-release's own grant, and matches nothing else on the
+// real tree (verified: `test`/`verify-artifacts`/`desktop-macos`/
+// `desktop-windows` all declare `contents: read` only).
+const DANGEROUS_PERMISSION_RE = /^\s*(?:packages|contents|id-token):\s*write\s*$/
+
+/** True when `jobBody` (already comment-stripped) declares one of the
+ * publish-shaped permissions above, at the job's own `permissions:` block
+ * (4-space indent — not a step's, which doesn't exist as a concept here). */
+function hasPublishingPermissions(jobBody) {
+  const at = jobBody.findIndex((l) => /^ {4}permissions:/.test(l))
+  if (at === -1) return false
+  if (/write-all/.test(jobBody[at])) return true
+  for (let i = at + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*$/.test(line)) continue
+    const indent = /^(\s*)/.exec(line)[1].length
+    if (indent <= 4) break
+    if (DANGEROUS_PERMISSION_RE.test(line)) return true
+  }
+  return false
 }
 
-/** A job's own job-level `if:` expression (4-space indent — a job body's own
+/** True when `job`'s real (non-comment) step content invokes a publish-shaped
+ * action or command, OR its own permissions grant is publish-shaped. */
+export function isPublishingJob(job) {
+  const code = stripYamlComments(job.body)
+  const codeText = code.join('\n')
+  return PUBLISH_ACTION_RE.test(codeText) || PUBLISH_RUN_RE.test(codeText) || PUBLISH_BUILDX_PUSH_RE.test(codeText)
+    || hasPublishingPermissions(code)
+}
+
+/**
+ * A job's own job-level `if:` expression (4-space indent — a job body's own
  * keys, as opposed to a STEP's `if:`, which sits far deeper under `steps:`),
- * or null when the job has none. */
+ * or null when the job has none.
+ *
+ * COLLECTS THE WHOLE VALUE, not just the key line (#8166 second review): a
+ * job-level `if:` can be a YAML block scalar (`if: |` / `if: >`) or a plain
+ * scalar that wraps onto continuation lines indented deeper than the key —
+ * both valid, and a reader that only looked at the key line would miss a
+ * dangerous function sitting on line 2. Collection stops at the first line
+ * back at or above the key's own indent (the next job-level key, `steps:`
+ * included) — real workflow YAML always has one of those following `if:`,
+ * which is what makes this unambiguous.
+ */
 function jobIf(jobBody) {
-  const m = jobBody.find((l) => /^ {4}if:/.test(l))
-  return m ? m.replace(/^ {4}if:\s*/, '').trim() : null
+  const at = jobBody.findIndex((l) => /^ {4}if:/.test(l))
+  if (at === -1) return null
+  const parts = [jobBody[at].replace(/^ {4}if:\s*/, '')]
+  for (let i = at + 1; i < jobBody.length; i++) {
+    const line = jobBody[i]
+    if (/^\s*$/.test(line)) continue // a blank line inside a block scalar doesn't end it
+    const indent = /^(\s*)/.exec(line)[1].length
+    if (indent <= 4) break
+    parts.push(line.trim())
+  }
+  const combined = parts.join(' ').trim()
+  return combined.length > 0 ? combined : null
 }
 
 // GitHub Actions' IMPLICIT gating — a job with `needs: [X]` only runs if
 // every dependency succeeded — is silently REPLACED the moment the job
 // declares its OWN `if:`. `always()`, `failure()`, and `cancelled()` (which
-// also covers the common `!cancelled()` spelling, a substring of it) are the
-// three functions that deliberately run a job even after an upstream
-// failure — exactly the shape that would let a publishing job push/release
-// even though verify-artifacts just failed, `needs:` entry notwithstanding.
-// `success()`, or no `if:` at all (the default), are safe.
-const DANGEROUS_IF_RE = /\balways\(\)|\bfailure\(\)|\bcancelled\(\)/
+// also covers the common `!cancelled()` spelling, a substring of it) are
+// functions that deliberately run a job even after an upstream failure —
+// exactly the shape that would let a publishing job push/release even
+// though verify-artifacts just failed, `needs:` entry notwithstanding.
+// `success() || <anything>` is the same hole by another route: `success()`
+// alone is the safe default, but OR-ing it with another condition widens the
+// gate right back open. Case-insensitive: GitHub Actions expressions are not
+// case-sensitive (`Always()`/`ALWAYS()` work exactly like `always()`), so a
+// case-sensitive check would miss a functionally identical spelling.
+// `success()` alone, or no `if:` at all (the default), are safe.
+const DANGEROUS_IF_RE = /\balways\(\)|\bfailure\(\)|\bcancelled\(\)|\bsuccess\(\)\s*\|\|/i
 
 /**
  * Every publishing job (or a job on its `needs:` closure) whose job-level
@@ -206,21 +289,46 @@ function stepBodies(jobBody) {
  * @param {{id: string, body: string[]}} job
  * @returns {string[]} findings, empty when the job is sound
  */
+// Any value other than the literal `false` can suppress a real failure —
+// `continue-on-error: ${{ true }}`, `continue-on-error: ${{ some.expr }}`, or
+// simply a typo'd non-boolean are all still truthy to GitHub Actions. Only
+// the exact literal `false` is the safe, inert spelling (#8166 second
+// review) — the previous check matched only the literal `true` and missed
+// every other truthy spelling.
+const CONTINUE_ON_ERROR_RE = /^\s*continue-on-error:\s*(.+?)\s*$/
+
+// The verifier step must RUN the script DIRECTLY — `run: node
+// scripts/verify-publish-artifacts.mjs`, optionally with flags (`--keep`,
+// etc.), and nothing else on that line. A wrapper (`... || true`, `if …;
+// then … fi`, a piped/redirected invocation, or merely an `echo` mentioning
+// the path) must not satisfy this: exactly that shape is how a "gate" stops
+// gating while every other check here still finds a step that "runs" it.
+const VERIFIER_RUN_RE = /^\s*(?:-\s+)?run:\s*node\s+scripts\/verify-publish-artifacts\.mjs(?:\s+--?[\w-]+)*\s*$/
+const VERIFIER_MENTION_RE = /verify-publish-artifacts\.mjs/
+
 export function verifyArtifactsGateIssues(job) {
   const issues = []
   const code = stripYamlComments(job.body)
-  if (code.some((l) => /^\s*continue-on-error:\s*true\s*$/.test(l))) {
-    issues.push('continue-on-error: true appears somewhere in this job (job- or step-level) — a real failure would not fail the job')
+  if (code.some((l) => {
+    const m = CONTINUE_ON_ERROR_RE.exec(l)
+    return m && m[1] !== 'false'
+  })) {
+    issues.push('continue-on-error is set to something other than the literal false somewhere in this job (job- or step-level) — a real failure might not fail the job')
   }
   const ifExpr = jobIf(job.body)
   if (ifExpr) {
     issues.push(`has a job-level if: (${ifExpr}) — it must run unconditionally on every release trigger (tag push AND workflow_dispatch)`)
   }
   const steps = stepBodies(code)
-  const verifierStep = steps.find((s) => s.some((l) => /node\s+scripts\/verify-publish-artifacts\.mjs/.test(l)))
-  if (!verifierStep) {
-    issues.push('no step actually runs `node scripts/verify-publish-artifacts.mjs`')
-  } else if (verifierStep.some((l) => /^\s*if:/.test(l))) {
+  const exactStep = steps.find((s) => s.some((l) => VERIFIER_RUN_RE.test(l)))
+  if (!exactStep) {
+    const mentioningStep = steps.find((s) => s.some((l) => VERIFIER_MENTION_RE.test(l)))
+    if (mentioningStep) {
+      issues.push('a step mentions verify-publish-artifacts.mjs but does not run it directly (wrapped in `... || true`, a conditional, a pipe, or similar) — a real failure could be silently swallowed')
+    } else {
+      issues.push('no step actually runs `node scripts/verify-publish-artifacts.mjs`')
+    }
+  } else if (exactStep.some((l) => /^\s*if:/.test(l))) {
     issues.push('the verifier step itself has an if: condition that could skip it')
   }
   return issues
@@ -263,12 +371,18 @@ describe('release.yml: every publishing job transitively needs verify-artifacts 
     )
   })
 
-  it('CONTROL: isPublishingJob finds the docker and github-release jobs (not the others)', () => {
+  it('CONTROL: isPublishingJob finds EXACTLY the real publishing-job set: docker, github-release', () => {
+    // #8166 second review: an assert.ok(includes(...)) list only ever
+    // catches a job DROPPING out of the set — it says nothing about an
+    // EXTRA job wrongly joining it (the permissions-based OR condition
+    // added in this round is exactly the kind of change that could do
+    // that). deepEqual against the exact expected set catches both
+    // directions. Verified by hand against the real tree: `test`,
+    // `verify-artifacts`, `desktop-macos`, and `desktop-windows` each
+    // declare only `contents: read`, so widening the detector to also
+    // match on `permissions:` does not add any of them.
     const ids = release.jobs.filter(isPublishingJob).map((j) => j.id)
-    assert.ok(ids.includes('docker'), `expected 'docker' among publishing jobs, found: ${ids.join(', ')}`)
-    assert.ok(ids.includes('github-release'), `expected 'github-release' among publishing jobs, found: ${ids.join(', ')}`)
-    assert.ok(!ids.includes('desktop-macos'), "desktop-macos only uploads a CI artifact — it doesn't itself publish")
-    assert.ok(!ids.includes('test'), 'test does not publish anything')
+    assert.deepEqual([...ids].sort(), ['docker', 'github-release'])
   })
 
   it('every publishing job transitively needs verify-artifacts', () => {
@@ -389,6 +503,21 @@ describe('isPublishingJob detects real step content, never comments (#8166)', ()
     assert.equal(isPublishingJob(job), false)
   })
 
+  // #8166 second review, nit: comment-stripping must be quote-aware. A `#`
+  // inside a quoted string is real content, not a comment marker — a naive
+  // `\s#.*$` truncation would find THAT `#` first and chop off everything
+  // after it, including a REAL publish command later on the same line. That
+  // is a false NEGATIVE (a job that does publish reads as if it doesn't),
+  // the opposite direction from — but just as wrong as — the comment-stands-
+  // in-for-code failure the outer stripping exists to catch.
+  it('a `#` inside a quoted string does not truncate away a REAL command later on the line', () => {
+    const job = {
+      id: 'publisher',
+      body: ['      - run: echo "value #looks like a comment but is just quoted text" && docker push ghcr.io/x:1'],
+    }
+    assert.equal(isPublishingJob(job), true, 'a naive (non-quote-aware) stripper would truncate at the quoted #, hiding the real docker push that follows')
+  })
+
   for (const [label, runLine] of [
     ['raw `docker push`', '      - run: docker push ghcr.io/blamechris/chroxy:0.11.2'],
     ['`docker buildx ... --push`', '      - run: docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/x:1 --push .'],
@@ -460,6 +589,61 @@ describe('publishingJobsWithDangerousIf reports a bypassable gate (#8166)', () =
     assert.equal(findings.length, 1)
     assert.match(findings[0], /verify-artifacts/)
   })
+
+  // #8166 second review: jobIf() used to read only the if: KEY LINE, missing
+  // a multi-line value entirely — a YAML block scalar, or a plain scalar
+  // wrapped onto continuation lines indented deeper than the key, both of
+  // which are valid and neither of which fit on line 1.
+  it('reports a multi-line if: (block scalar) with always() on line 2, not line 1', () => {
+    const jobs = [
+      ...base(),
+      {
+        id: 'docker',
+        body: [
+          '    needs: [test, verify-artifacts]',
+          '    if: |',
+          "      github.event_name == 'workflow_dispatch' ||",
+          '      always()',
+          '    runs-on: ubuntu-24.04',
+          '      - uses: docker/build-push-action@x',
+        ],
+      },
+    ]
+    const findings = publishingJobsWithDangerousIf(jobs)
+    assert.equal(findings.length, 1, JSON.stringify(findings))
+    assert.match(findings[0], /docker/)
+  })
+
+  // Case-insensitivity: GitHub Actions expressions aren't case-sensitive, so
+  // `Always()` bypasses gating exactly like `always()` does.
+  for (const spelling of ['Always()', 'ALWAYS()', 'Failure()']) {
+    it(`reports a differently-cased spelling: ${spelling}`, () => {
+      const jobs = [
+        ...base(),
+        { id: 'docker', body: ['    needs: [test, verify-artifacts]', `    if: ${spelling}`, '      - uses: docker/build-push-action@x'] },
+      ]
+      assert.equal(publishingJobsWithDangerousIf(jobs).length, 1)
+    })
+  }
+
+  // `success() || X` widens the gate right back open — success() ALONE is
+  // the safe default, but OR-ing another condition onto it reintroduces a
+  // bypass.
+  it('reports success() || failure() (an OR widens the gate back open)', () => {
+    const jobs = [
+      ...base(),
+      { id: 'docker', body: ['    needs: [test, verify-artifacts]', '    if: success() || failure()', '      - uses: docker/build-push-action@x'] },
+    ]
+    assert.equal(publishingJobsWithDangerousIf(jobs).length, 1)
+  })
+
+  it('CONTROL: success() alone (no OR) is still safe', () => {
+    const jobs = [
+      ...base(),
+      { id: 'docker', body: ['    needs: [test, verify-artifacts]', '    if: success()', '      - uses: docker/build-push-action@x'] },
+    ]
+    assert.deepEqual(publishingJobsWithDangerousIf(jobs), [])
+  })
 })
 
 /**
@@ -498,6 +682,22 @@ describe('verifyArtifactsGateIssues catches a hollowed-out gate (#8166)', () => 
     assert.ok(issues.some((i) => /continue-on-error/.test(i)), JSON.stringify(issues))
   })
 
+  // #8166 second review: only the literal `true` used to be flagged — an
+  // expression like `${{ true }}` (or any other non-`false` spelling) is
+  // just as truthy to GitHub Actions and was previously invisible here.
+  it('reports continue-on-error: ${{ true }} (an expression, not the bare literal)', () => {
+    const job = soundJob()
+    job.body.splice(job.body.length - 1, 0, '        continue-on-error: ${{ true }}')
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /continue-on-error/.test(i)), JSON.stringify(issues))
+  })
+
+  it('CONTROL: continue-on-error: false is still safe', () => {
+    const job = soundJob()
+    job.body.splice(job.body.length - 1, 0, '        continue-on-error: false')
+    assert.deepEqual(verifyArtifactsGateIssues(job), [])
+  })
+
   it('reports a job-level if: that could skip it', () => {
     const job = soundJob()
     job.body.splice(1, 0, '    if: github.event_name == \'workflow_dispatch\'')
@@ -518,6 +718,31 @@ describe('verifyArtifactsGateIssues catches a hollowed-out gate (#8166)', () => 
     job.body = job.body.map((l) => l.replace('verify-publish-artifacts.mjs', 'verify-publish-artifacts-OLD.mjs'))
     const issues = verifyArtifactsGateIssues(job)
     assert.ok(issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
+  })
+
+  // #8166 second review: the step must run the command DIRECTLY. A wrapper
+  // — `... || true` swallows a nonzero exit right there, defeating the gate
+  // even though a step visibly "runs" the script — must be distinguished
+  // from "no step mentions it at all" (the case above), since the fix is
+  // different (unwrap it, vs. add the step back).
+  it('reports a wrapped invocation (`... || true`) distinctly from "missing entirely"', () => {
+    const job = soundJob()
+    job.body = job.body.map((l) => l.replace(
+      'run: node scripts/verify-publish-artifacts.mjs',
+      'run: node scripts/verify-publish-artifacts.mjs || true'
+    ))
+    const issues = verifyArtifactsGateIssues(job)
+    assert.ok(issues.some((i) => /does not run it directly/.test(i)), JSON.stringify(issues))
+    assert.ok(!issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
+  })
+
+  it('CONTROL: a trailing flag (--keep) is still a direct invocation', () => {
+    const job = soundJob()
+    job.body = job.body.map((l) => l.replace(
+      'run: node scripts/verify-publish-artifacts.mjs',
+      'run: node scripts/verify-publish-artifacts.mjs --keep'
+    ))
+    assert.deepEqual(verifyArtifactsGateIssues(job), [])
   })
 
   it('a comment mentioning the verifier script does not count as actually running it', () => {
@@ -667,5 +892,36 @@ describe('the rule reads the real release.yml (mutation proof, #8165)', () => {
     const verifyArtifacts = release.jobs.find((j) => j.id === 'verify-artifacts')
     const issues = verifyArtifactsGateIssues(verifyArtifacts)
     assert.ok(issues.some((i) => /no step actually runs/.test(i)), JSON.stringify(issues))
+  })
+})
+
+/**
+ * DAEMON_ENTRY_MODULES stays tied to server-cmd.js's real dynamic imports
+ * (#8166 second review, item 9). scripts/verify-publish-artifacts.mjs
+ * import()s this list out of the installed package to prove `chroxy
+ * start`'s daemon module graph links; that list is only worth anything if
+ * it actually matches what server-cmd.js dynamically imports. Exported from
+ * one shared module (scripts/lib/daemon-entry-modules.mjs) rather than
+ * duplicated as a literal array in both files, and cross-checked here
+ * against server-cmd.js's OWN source so a third daemon entry point added
+ * there without updating the shared list is caught — the "hardcoded list
+ * beside a growing set" cause docs/false-safety-guards.md catalogues.
+ */
+describe('DAEMON_ENTRY_MODULES matches server-cmd.js\'s real dynamic imports (#8166)', () => {
+  it('every relative import(\'../X.js\') in server-cmd.js, minus logger.js, equals DAEMON_ENTRY_MODULES', () => {
+    const serverCmdPath = fileURLToPath(new URL('../src/cli/server-cmd.js', import.meta.url))
+    const src = readFileSync(serverCmdPath, 'utf8')
+    const found = new Set()
+    for (const m of src.matchAll(/await import\('\.\.\/([\w.-]+)'\)/g)) found.add(m[1])
+    assert.ok(found.size > 0, 'expected to find at least one relative dynamic import in server-cmd.js — the parser is probably broken')
+    // logger.js is a plain logging utility server-cmd.js reaches for
+    // mid-startup, not a daemon "entry point" the way server-cli.js /
+    // supervisor.js are: chroxy start never completes without eventually
+    // importing one of THOSE two, whereas logger.js is incidental to the
+    // actual daemon graph verify-publish-artifacts.mjs is trying to prove
+    // links.
+    found.delete('logger.js')
+    const expected = new Set(DAEMON_ENTRY_MODULES.map((p) => p.replace(/^src\//, '')))
+    assert.deepEqual([...found].sort(), [...expected].sort())
   })
 })

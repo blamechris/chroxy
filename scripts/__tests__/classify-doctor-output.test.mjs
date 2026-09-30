@@ -19,7 +19,7 @@
 
 import { classifyDoctorOutput, classifyDoctorSpawnResult } from '../lib/classify-doctor-output.mjs'
 
-const EXPECTED_CASES = 34
+const EXPECTED_CASES = 39
 
 let passed = 0
 let failed = 0
@@ -114,6 +114,49 @@ const REAL_CAPTURED_OUTPUT = "\nChroxy Doctor\n\n  [\u001b[32m OK \u001b[0m] Nod
 {
   const r = classifyDoctorOutput(REAL_CAPTURED_OUTPUT)
   check('real captured hosted-runner-shaped doctor output is ok', r.ok === true)
+}
+
+// ---------------------------------------------------------------------------
+// The tolerance match must not depend on doctor-cmd.js's column width
+// (#8166 second review): it pads to 18 today, but nothing promises that
+// stays true, and a fixed-width split would silently misclassify the moment
+// it changes. Real output at width 18 AND a hand-built transcript at width
+// 20 must classify identically.
+// ---------------------------------------------------------------------------
+
+{
+  const rowAt = (width) => (status, name, message) => `  [${ICONS[status]}] ${name.padEnd(width)} ${message}`
+  for (const width of [18, 20]) {
+    const r18 = rowAt(width)
+    const output = doc(
+      r18('pass', 'Node.js', 'v22.9.0'),
+      r18('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+      r18('fail', 'cloudflared', 'Not found — see https://pkg.cloudflare.com/ for installation'),
+    )
+    const r = classifyDoctorOutput(output)
+    check(`a transcript padded to width ${width} classifies ok (not width-coupled)`, r.ok === true)
+  }
+}
+
+// The single-token-name anchoring this classifier relies on instead of a
+// column split: every one of these must still be REJECTED (not tolerated),
+// exercising exactly the shapes a width-based split could get right or wrong
+// for the wrong reasons.
+{
+  const cases = [
+    ['a name followed by extra words before "Not found — "', row('fail', 'cloudflared', 'boom — Not found — x')],
+    ['the Config drift row ("Not found at", no matching phrase)', row('fail', 'Config', 'Not found at /root/.chroxy/config.json — it is still at /home/user/.chroxy/config.json')],
+    ['a two-token row name ("Credential storage")', row('fail', 'Credential storage', 'Not found — x')],
+  ]
+  for (const [label, badRow] of cases) {
+    const output = doc(
+      row('pass', 'Node.js', 'v22.9.0'),
+      row('pass', 'Dependencies', 'resolved via /work/node_modules/commander/index.js'),
+      badRow,
+    )
+    const r = classifyDoctorOutput(output)
+    check(`${label} is NOT tolerated`, r.ok === false)
+  }
 }
 
 // ---------------------------------------------------------------------------

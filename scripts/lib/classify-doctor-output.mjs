@@ -96,45 +96,36 @@ const ROW_START_RE = /^\[( OK |WARN|FAIL)\]/
 const ROW_RE = /^\[( OK |WARN|FAIL)\]\s+(.*)$/
 
 // `checkBinary()` (packages/server/src/doctor.js) reports a missing required
-// binary as `Not found — ${installHint}` — literally that text, with an em
-// dash (U+2014) — as the very FIRST thing in the row's MESSAGE (i.e.,
-// anchored, not merely present somewhere in it). This is deliberately NOT a
-// loose substring match: (1) the 'Config' row's stranded-state drift check
-// (doctor.js, ~line 620) reports an unrelated condition that also starts
-// with the word "Not found" — `Not found at ${path} — it is still at ...` —
-// which must NOT be tolerated here, a stranded config directory is a real
-// defect, not a "binary isn't installed on this runner" case; and (2) an
-// unrelated FAIL row whose message happens to CONTAIN the exact tolerated
-// phrase later in its text (e.g. "... see docs — Not found — retry") must
-// also not be tolerated — only a message that STARTS with it is the shape
-// checkBinary() actually produces.
-const BINARY_NOT_FOUND_RE = /^Not found — /
-
-// doctor-cmd.js's row template is `${name.padEnd(18)} ${message}` — the name
-// field is left-justified to AT LEAST 18 columns, followed by exactly one
-// literal separating space, then the message. Every row name doctor.js
-// prints today is <=18 characters (Node.js, Dependencies, Config,
-// Config/state root, Credential storage, Billing, Port, claude-tui driving,
-// Tunnel routability, and every configured provider binary name — claude,
-// codex, gemini, cloudflared — all fit), so slicing at this fixed field
-// width reliably lands on the separator regardless of the row's own name.
-// (A future name longer than 18 characters would make this slice land
-// inside the name instead of at the true message start, which fails CLOSED
-// — the tolerance check below just won't match a message that starts with
-// "Not found — ", so an actually-tolerable row would incorrectly still
-// block the gate. That is the safe direction for a release gate.)
-const NAME_FIELD_WIDTH = 18
+// binary as `<name> Not found — ${installHint}` — the row's NAME (a single
+// token: a binary name never contains whitespace) followed by whitespace and
+// literally `Not found — ` (em dash, U+2014). Matched directly against
+// `row.rest` this way (#8166 second review), rather than by first slicing
+// out a fixed-width name column: doctor-cmd.js pads every name to AT LEAST
+// 18 columns, but that padding is purely cosmetic — doctor.js has never
+// promised any row name stays under it, and a column-width split silently
+// breaks the moment one doesn't. "One token, then whitespace, then the exact
+// tolerated phrase" needs no assumption about column widths at all, so it
+// survives doctor-cmd.js's padding changing (verified: real captured output
+// padded to 18, and a hand-built padEnd(20) transcript, both classify
+// identically).
+//
+// This is deliberately anchored, not a loose substring match: (1) the
+// 'Config' row's stranded-state drift check (doctor.js, ~line 620) reports
+// an unrelated condition that ALSO starts with the word "Not found" —
+// `Not found at ${path} — it is still at ...` — which must NOT be tolerated
+// here, a stranded config directory is a real defect, not a "binary isn't
+// installed on this runner" case; (2) an unrelated FAIL row whose message
+// happens to CONTAIN the exact tolerated phrase later in its text (e.g.
+// "... see docs — Not found — retry") must also not be tolerated; and (3) a
+// row whose name is actually MULTIPLE words (e.g. a hypothetical
+// 'Credential storage' FAIL) can never match: the single-token capture group
+// can only ever consume the FIRST word, and the literal text immediately
+// after it would then have to be "Not found — " with nothing in between —
+// which a second name-word occupies instead.
+const BINARY_FAIL_RE = /^(\S+) +Not found — /
 
 function stripAnsi(input) {
   return input.replace(ANSI_ESCAPE_RE, '')
-}
-
-/** Split a row's `rest` (name-field + message) into `{ name, message }`. */
-function splitNameAndMessage(rest) {
-  return {
-    name: rest.slice(0, NAME_FIELD_WIDTH).replace(/\s+$/, ''),
-    message: rest.slice(NAME_FIELD_WIDTH + 1),
-  }
 }
 
 /**
@@ -216,9 +207,9 @@ export function classifyDoctorOutput(rawOutput) {
   const tolerated = []
   for (const row of rows) {
     if (row.status !== 'FAIL') continue
-    const { name, message } = splitNameAndMessage(row.rest)
-    if (BINARY_NOT_FOUND_RE.test(message)) {
-      tolerated.push(name)
+    const m = row.rest.match(BINARY_FAIL_RE)
+    if (m) {
+      tolerated.push(m[1])
       continue
     }
     reasons.push(`unexpected FAIL row: ${row.rest}`)
