@@ -40,6 +40,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The protocol and store-core dist-drift CI checks now catch a tracked dist
+  file orphaned by a deleted source, not just a modified or new one (#8163).**
+  #8152 closed the "new untracked/ignored file" blind spot, but a narrower one
+  survived: a tracked dist file whose SOURCE was deleted is byte-identical to
+  what's committed and matches neither check — `tsc` never removes output for
+  a source file no longer in its program, it just leaves the old file sitting
+  there. `scripts/check-dist-drift.sh` now owns the build itself instead of
+  diffing whatever a separate build step left behind: it takes the build
+  command as arguments, wipes `<dist-dir>`, reruns that command from scratch,
+  and only then diffs — a source file that no longer exists simply produces
+  nothing for it, which turns the orphan into an ordinary tracked-file
+  deletion that `git diff --name-status` reports as `D` and the script names
+  explicitly. Deriving "what's expected" from a real clean build (rather than
+  a hardcoded file list) also means the check keeps working as each package's
+  set of tracked dist files grows, instead of needing to be told about it.
+  The script fails closed if the build command itself fails, or reports
+  success but emits zero files, and restores the pre-existing `dist/` in
+  either case rather than stranding a developer's tree wiped or half-built.
+  Both CI call sites (`ci.yml`'s `protocol-tests` and `store-core-tests` jobs)
+  now pass their build command straight to the script instead of running it
+  as a separate prior step. `scripts/__tests__/check-dist-drift.test.sh` adds
+  the orphan case (proven red against the old one-argument contract on the
+  same fixture), the zero-emit floor, and the failed-build case, alongside
+  the existing clean/modified/untracked coverage from #8152.
+
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
   `push: true`, and pushed straight to GHCR — nothing in the job ever
