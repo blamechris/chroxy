@@ -301,6 +301,10 @@ export {
   isActivityEvent,
   // #4653: ring cap for SessionIntervention list on BaseSessionState
   MAX_SESSION_INTERVENTIONS,
+  // #7411: shared streaming/plan transient-state clear + the canonical
+  // cross-client field list it's tested against.
+  clearTransientSessionState,
+  TRANSIENT_SESSION_SWEEP_FIELDS,
 } from './utils'
 
 // #6453 — shared one-line summary for an answered question prompt (was a

@@ -190,6 +190,11 @@ import {
   buildInputMessage,
   beginInputDelivery,
   cancelInputDelivery,
+  // #7411 — shared streaming/plan transient-state clear, single-sourced so
+  // the app and dashboard onclose sweeps can't drift apart on this trio
+  // again (the dashboard swept all sessions; the app only swept the active
+  // one).
+  clearTransientSessionState,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -468,6 +473,35 @@ function getDeviceInfo(): { deviceName: string | null; deviceType: 'phone' | 'ta
     deviceType,
     platform: Platform.OS,
   };
+}
+
+/**
+ * #7411 — clear the transient streaming/plan state (`streamingMessageId`,
+ * `isPlanPending`, `planAllowedPrompts`) on every session in the store.
+ *
+ * The dashboard has swept ALL sessions for this since #5731 T4; the app's
+ * onclose handler used `updateActiveSession` here instead, so a BACKGROUND
+ * session mid-stream kept a phantom "thinking" bubble and a stale pending
+ * plan across a reconnect. Delegates the per-session patch to the shared
+ * `clearTransientSessionState` (@chroxy/store-core) so the two clients
+ * can't drift on this again — same dual-call contract as
+ * `clearInactivityWarningsAcrossSessions`/`clearSessionRolesAcrossSessions`
+ * below (used by the `socket.onclose` cleanup only; unlike those two, this
+ * one is not currently mirrored into the user-initiated `disconnect()`
+ * path, matching the dashboard's existing asymmetry there — see #7411
+ * follow-up notes).
+ *
+ * Each session goes through `updateSession`, never a direct store write:
+ * `updateSession` re-derives `activityState` from the fields cleared here, so
+ * writing around it would leave a phantom 'thinking' in
+ * BackgroundSessionProgress, the composer lozenge and notifications (review
+ * on #8144). It also skips an empty patch, so an already-clean session is
+ * not rewritten.
+ */
+function clearStreamingAndPlanStateAcrossSessions(get: () => ConnectionState): void {
+  for (const id of Object.keys(get().sessionStates)) {
+    updateSession(id, clearTransientSessionState);
+  }
 }
 
 /**
@@ -1435,17 +1469,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // reconnect a delta replay, #5555.3).
       resetReplayReconcile();
 
-      // Clear transient streaming/plan state so stale UI doesn't persist
+      // #7411: clear transient streaming/plan state so stale UI doesn't
+      // persist — swept across ALL sessions (not just the active one) so a
+      // background session mid-stream doesn't keep a phantom "thinking"
+      // bubble or a stale pending plan across the reconnect. Mirrors the
+      // dashboard's #5731 T4 fix.
       clearPermissionSplits();
-      updateActiveSession((ss) => {
-        const patch: Partial<import('./types').SessionState> = {};
-        if (ss.streamingMessageId) patch.streamingMessageId = null;
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
-        return Object.keys(patch).length > 0 ? patch : {};
-      });
+      clearStreamingAndPlanStateAcrossSessions(get);
       // #3899: server does NOT replay `inactivity_warning` on reconnect,
       // so a chip left over from before the drop would point at stale
       // state. Sweep ALL sessions (not just the active one) because a

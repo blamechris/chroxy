@@ -192,6 +192,10 @@ import {
   buildInputMessage,
   beginInputDelivery,
   cancelInputDelivery,
+  // #7411 — shared streaming/plan transient-state clear, single-sourced so
+  // the app and dashboard onclose sweeps can't drift apart on this trio
+  // again (the app's used to sweep only the active session).
+  clearTransientSessionState as clearSharedTransientStreamAndPlanState,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -3029,12 +3033,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const clearTransientSessionState = (
         ss: SessionState,
       ): Partial<SessionState> => {
-        const patch: Partial<SessionState> = {};
-        if (ss.streamingMessageId) patch.streamingMessageId = null;
-        if (ss.isPlanPending) {
-          patch.isPlanPending = false;
-          patch.planAllowedPrompts = [];
-        }
+        // #7411: streamingMessageId/isPlanPending/planAllowedPrompts are
+        // now single-sourced in @chroxy/store-core so the app's onclose
+        // sweep can't drift from this one again — it previously only swept
+        // the active session for this trio.
+        const patch: Partial<SessionState> = clearSharedTransientStreamAndPlanState(ss);
         // #3188: pendingEvaluatorClarify is explicitly transient — the
         // server re-fires `evaluator_clarify` on the next user_input
         // cycle if the verdict is still clarify. Clearing here keeps the
