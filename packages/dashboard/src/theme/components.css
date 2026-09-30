@@ -4725,6 +4725,55 @@ button.sidebar-token-view-session-row:hover {
 .perm-countdown.urgent { color: var(--accent-red); font-weight: bold; }
 .perm-countdown.expired { color: var(--text-dim); font-style: italic; }
 
+/* ---- Permission Expired Summary (#7365) ---- */
+/* End-of-turn aggregate for permission prompts that expired unanswered —
+   distinct from (and rendered in addition to) the per-prompt `.perm-expired-info`
+   marker above, which stays unchanged. */
+.permission-expired-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: var(--bg-permission);
+  border: 1px solid var(--border-permission);
+  border-radius: 10px;
+  padding: 10px 14px;
+  align-self: flex-start;
+  max-width: 85%;
+}
+
+.permission-expired-summary-text {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.permission-expired-summary-jump {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-permission);
+  color: var(--accent-purple);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.permission-expired-summary-jump:hover,
+.permission-expired-summary-jump:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+.permission-expired-summary-jump:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
 /* ---- Plan Approval ---- */
 .plan-approval {
   background: var(--bg-permission);

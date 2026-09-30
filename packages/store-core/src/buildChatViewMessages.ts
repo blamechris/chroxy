@@ -55,10 +55,21 @@ import type { ChatMessage, MessageAttachment } from './types'
  * `tool_group` is a synthetic discriminator emitted by the grouping pass —
  * it has no store-side equivalent and consumers always render it via a
  * custom renderer that looks the payload up in `chatToolGroupPayloads`.
+ *
+ * `permission-expired-summary` (#7365) is likewise synthetic and has no
+ * store-side equivalent — `buildChatViewMessages` below never constructs one.
+ * It exists on this SHARED type only so the dashboard's local `ChatViewMessage`
+ * (packages/dashboard/src/components/ChatView.tsx) can carry it without
+ * tripping `useChatMessages.ts`'s structural-compatibility assertion between
+ * the two types. The row is spliced in dashboard-only, downstream of this
+ * pipeline (`useChatMessages.ts` + `utils/permissionExpiredSummaryRows.ts`) —
+ * mobile calls this same pure function but never sees the type constructed,
+ * since mobile consumes `displayGroups`, not the dashboard's spliced
+ * `chatMessages`.
  */
 export interface ChatViewMessage {
   id: string
-  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group'
+  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary'
   content: string
   timestamp: number
   isStreaming?: boolean

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { ChatMessage } from './types'
 import {
   isLivePermissionPrompt,
+  isExpiredUnansweredPermissionPrompt,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,
@@ -44,6 +45,32 @@ describe('isLivePermissionPrompt', () => {
     expect(isLivePermissionPrompt(prompt({ requestId: undefined }), NOW)).toBe(false)
     expect(isLivePermissionPrompt(prompt({ expiresAt: undefined }), NOW)).toBe(false)
     expect(isLivePermissionPrompt({ id: 't', type: 'response', content: '', timestamp: NOW }, NOW)).toBe(false)
+  })
+})
+
+describe('isExpiredUnansweredPermissionPrompt (#7365)', () => {
+  it('is true only for an unanswered permission prompt whose expiry has landed', () => {
+    expect(isExpiredUnansweredPermissionPrompt(prompt({ expiresAt: NOW - 1 }), NOW)).toBe(true)
+    // Still live — expiresAt is in the future.
+    expect(isExpiredUnansweredPermissionPrompt(prompt({ expiresAt: NOW + 1 }), NOW)).toBe(false)
+    // Answered (even after expiring) is no longer "dropped".
+    expect(isExpiredUnansweredPermissionPrompt(prompt({ expiresAt: NOW - 1, answered: 'allow' }), NOW)).toBe(false)
+    // No requestId (an AskUserQuestion prompt, not a permission) never counts.
+    expect(isExpiredUnansweredPermissionPrompt(prompt({ expiresAt: NOW - 1, requestId: undefined }), NOW)).toBe(false)
+    // No expiresAt at all — nothing to compare.
+    expect(isExpiredUnansweredPermissionPrompt(prompt({ expiresAt: undefined }), NOW)).toBe(false)
+    // A non-prompt message never counts.
+    expect(isExpiredUnansweredPermissionPrompt({ id: 't', type: 'response', content: '', timestamp: NOW }, NOW)).toBe(false)
+  })
+
+  it('is the exact complement of isLivePermissionPrompt on the expiry axis (both false only when answered/no requestId/no expiresAt)', () => {
+    const expired = prompt({ expiresAt: NOW - 1 })
+    expect(isLivePermissionPrompt(expired, NOW)).toBe(false)
+    expect(isExpiredUnansweredPermissionPrompt(expired, NOW)).toBe(true)
+
+    const live = prompt({ expiresAt: NOW + 1 })
+    expect(isLivePermissionPrompt(live, NOW)).toBe(true)
+    expect(isExpiredUnansweredPermissionPrompt(live, NOW)).toBe(false)
   })
 })
 

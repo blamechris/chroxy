@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard: a persistent end-of-turn summary for permission prompts that
+  expired unanswered (#7365).** When a permission prompt times out with no
+  answer, chroxy silently continues without that tool — the per-prompt
+  marker (`PermissionPrompt.tsx`'s "Permission expired — Claude will continue
+  without this tool") is easy to miss once the turn has moved on, since it is
+  one collapsed row in a long transcript. The transcript now also renders a
+  persistent card attached to the turn, aggregating every prompt that expired
+  unanswered during it: the count, the tool names, and a jump link back to
+  the first one. Turn attribution is derived from existing store state (a
+  turn is everything between one `user_input` and the next — no new wire
+  field), so no protocol change was needed. No new native notification: the
+  permission notification already fired when the prompt was raised (#7364);
+  a second one per turn for the same event would be noise. Web dashboard
+  only — the mobile app has no equivalent surface yet.
+
 ### Fixed
 
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so

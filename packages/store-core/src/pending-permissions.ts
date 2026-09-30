@@ -123,6 +123,45 @@ export function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
   )
 }
 
+/**
+ * True iff `m` is an unanswered permission prompt whose expiry has already
+ * landed — the mirror image of {@link isLivePermissionPrompt} with the
+ * comparison flipped (#7365).
+ *
+ * Two distinct paths set a past `expiresAt` on an unanswered prompt, and this
+ * predicate deliberately doesn't care which one fired:
+ *   - the server's `permission_expired` frame stamps `expiresAt: Date.now()`
+ *     on the stored message (message-handler.ts's `permission_expired` case,
+ *     both clients) once it has confirmed the request timed out server-side;
+ *   - the LOCAL countdown can cross zero first — `PermissionPrompt`'s own
+ *     `remaining <= 0` check is computed from the same `expiresAt` against a
+ *     ticking `now`, independent of whether the server's frame has arrived
+ *     yet — so a caller re-evaluating this predicate on a live `now` (not
+ *     just on message mutation) sees the same transition the countdown UI
+ *     does, with no server round trip required.
+ *
+ * `!m.answered` (not {@link isPermissionDecision}) matches
+ * `isLivePermissionPrompt`'s convention: permission prompts always carry a
+ * `requestId`, and the `history_replay_end` sweep that stamps the
+ * `'(resolved)'` placeholder explicitly skips any prompt with one (#7410) —
+ * so a permission prompt's `answered` is either a real decision token or
+ * unset, never the placeholder. If the prompt is later answered (the #2833
+ * race — an in-flight decision resolves after the countdown/expiry already
+ * fired), `answered` flips to a real token and this predicate stops matching
+ * on the next evaluation, which is the correct self-heal: an expired
+ * permission that got answered anyway did not, in the end, drop the tool
+ * call.
+ */
+export function isExpiredUnansweredPermissionPrompt(m: ChatMessage, now: number): boolean {
+  return (
+    m.type === 'prompt' &&
+    !!m.requestId &&
+    !!m.expiresAt &&
+    m.expiresAt <= now &&
+    !m.answered
+  )
+}
+
 /** The first live, unanswered permission prompt in `messages`, or null. */
 export function firstLivePermissionPrompt(messages: ChatMessage[], now: number): ChatMessage | null {
   for (const m of messages) {

@@ -28,10 +28,13 @@ import { useMemo } from 'react'
 import {
   buildChatViewMessages,
   toChatViewMessage,
+  getExpiredPermissionTurnSummaries,
   type ChatMessage,
   type ChatViewMessage as StoreChatViewMessage,
+  type ExpiredPermissionTurnSummary,
 } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
+import { insertPermissionExpiredSummaryRows } from '../utils/permissionExpiredSummaryRows'
 
 // The dashboard re-exports its own `ChatViewMessage` for component prop
 // typing; the store-core type is structurally identical (same fields,
@@ -71,6 +74,13 @@ export interface UseChatMessagesResult {
    * prompts; the stall chip carries the retry affordance instead.
    */
   stalledPromptIds: Set<string>
+  /**
+   * #7365 — synthetic `permission-expired-summary` row id -> the turn's
+   * aggregated expired-permission payload, for the `renderMessage` lookup
+   * (mirrors `chatToolGroupPayloads`'s shape). Empty when no turn in the
+   * transcript has an expired-unanswered permission prompt.
+   */
+  permissionExpiredSummaries: Map<string, ExpiredPermissionTurnSummary>
 }
 
 // Re-export so existing dashboard call sites (App.tsx imports
@@ -89,12 +99,35 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // Destructure to drop `displayGroups` (dashboard uses the flattened
   // `chatMessages` path; only mobile consumes displayGroups directly).
   const {
-    chatMessages,
+    chatMessages: baseChatMessages,
     chatToolGroupPayloads,
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
   } = result
+
+  // #7365 — dashboard-only: splice a synthetic summary row after any turn
+  // that contains an expired-unanswered permission prompt. Recomputed on
+  // every `storeMessages` change (a fresh `Date.now()` per derivation, not a
+  // ticking interval) — the same convention `derivePendingPermissionCounts`
+  // already uses for the analogous "live pending" badge, since the events
+  // that actually flip a prompt to expired (the server's `permission_expired`
+  // frame, or the client answering one) both mutate `storeMessages` and
+  // trigger a fresh render anyway.
+  //
+  // `chatTailMessageId` is deliberately NOT recomputed from the spliced rows:
+  // it identifies the last REAL content row (for ToolGroup/ToolBubble's
+  // `isTail` expand-state and the stream-stall retry button), and shifting it
+  // to a synthetic summary row would silently collapse a trailing tool group
+  // the moment its turn's permission expired.
+  const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
+    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now())
+    if (summaries.length === 0) {
+      return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
+    }
+    const { rows, payloads } = insertPermissionExpiredSummaryRows(baseChatMessages, summaries)
+    return { chatMessages: rows, permissionExpiredSummaries: payloads }
+  }, [storeMessages, baseChatMessages])
 
   return {
     chatMessages,
@@ -102,5 +135,6 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
+    permissionExpiredSummaries,
   }
 }

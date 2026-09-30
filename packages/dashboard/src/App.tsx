@@ -1453,6 +1453,7 @@ export function App() {
     chatTailMessageId,
     storeMsgMap,
     stalledPromptIds,
+    permissionExpiredSummaries,
   } = useChatMessages({
     storeMessages,
     streamingMessageId,
@@ -2348,6 +2349,7 @@ export function App() {
   const renderMessage = useMessageRenderer({
     storeMsgMap,
     chatToolGroupPayloads,
+    permissionExpiredSummaries,
     chatTailMessageId,
     // #5786 — wrapped so approve/answer also snaps the chat to the bottom.
     sendPermissionResponse: respondToPermission,
