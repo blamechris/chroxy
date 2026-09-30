@@ -28,8 +28,11 @@ COPY packages/server/package.json packages/server/
 # npm ci does not compare it, and a hardcoded one only goes stale.
 RUN mkdir -p packages/app && echo '{"name":"@chroxy/app","private":true}' > packages/app/package.json
 
-# Install server dependencies only (skip native compilation for optional deps)
-RUN npm ci --workspace=@chroxy/server --omit=dev --ignore-scripts
+# Install server dependencies only (skip native compilation for optional deps).
+# --no-audit/--no-fund: the audit call has stalled 17-48s per install against
+# the registry (#7616), and the workflow-level NPM_CONFIG_* settings that
+# disable it in CI do not reach inside `docker build`.
+RUN npm ci --workspace=@chroxy/server --omit=dev --ignore-scripts --no-audit --no-fund
 
 # Copy server source
 COPY packages/server/ packages/server/
