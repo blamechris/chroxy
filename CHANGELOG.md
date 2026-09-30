@@ -30,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrite and its verification had the same shape in `sed` and `grep`: both
   now use `awk` with the versions read from `ENVIRON`.
 
+- **The protocol and store-core dist-drift CI checks now catch a new,
+  never-committed dist file, not just a modified one (#8152).** Both steps
+  rebuilt the package and then ran a bare `git diff --exit-code` against the
+  committed `dist/` — but `dist/` is gitignored, so a build that emits a NEW
+  file (a new `packages/protocol/src/foo.ts` producing `dist/foo.js`) leaves
+  that file untracked *and* ignored, which `git diff` never sees; the check
+  stayed green while the file was never committed. `scripts/check-dist-drift.sh
+  <dist-dir>` replaces both inline checks: it still diffs tracked content, and
+  additionally fails on any untracked/ignored file under the directory
+  (`git ls-files --others --ignored --exclude-standard`), printing the
+  offending paths and pointing at `git add -f` since the directory is
+  gitignored. The store-core step got the same review: its check only ever
+  diffed the single `dist/crypto.js` file and never looked at the also-committed
+  `dist/crypto.d.ts` at all, a real (and now closed) false-green on its own.
+  `scripts/__tests__/check-dist-drift.test.sh` proves a clean dist passes, a
+  modified tracked file fails, a new untracked/ignored file fails (the #8152
+  case, reproduced against the old check to show it stayed green), and a
+  missing dist directory fails loudly rather than reading as clean.
+
 ## [0.11.1] - 2026-09-30
 
 ### Added
