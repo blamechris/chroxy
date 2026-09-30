@@ -1214,9 +1214,21 @@ test_bump_succeeds_at_awkward_path_with_space_and_quote() {
 # which grep/awk cannot express here without either missing real cases or
 # flagging safe ones — so this check does not attempt it, rather than
 # shipping one that only looks like it does.
+#
+# Two more shapes it does not see (review on #8158): an invocation split
+# across lines (`node \` with `-e "..."` on the next line), and node reached
+# through a variable (`"$NODE" -e "..."`). Neither appears in the script
+# today. And because a filter that matches nothing passes, the check first
+# requires that it found at least one invocation at all.
 test_no_shell_expansion_in_node_e_program_text() {
   local self="$BUMP"
-  local offenders
+  local offenders total
+
+  total="$(grep -cE -- 'node([[:space:]]+--input-type=module)?[[:space:]]+-e[[:space:]]' "$self" || true)"
+  if [ "${total:-0}" -eq 0 ]; then
+    echo "    found no node -e invocation in $self — the pattern matches nothing, so this check would pass vacuously" >&2
+    return 1
+  fi
 
   offenders="$(grep -nE -- 'node([[:space:]]+--input-type=module)?[[:space:]]+-e[[:space:]]' "$self" \
     | grep -vE -- "-e[[:space:]]+'" || true)"

@@ -461,8 +461,19 @@ if [ -z "$CARGO_CURRENT" ]; then
   echo "Error: Failed to parse current version from $CARGO_TOML [package] section" >&2
   exit 1
 fi
-sed -i.bak "/^\[package\]/,/^\[/s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
-rm -f "$CARGO_TOML.bak"
+# Both versions reach awk through the environment (ENVIRON, which applies no
+# escape processing) rather than being spliced into a sed program: the same
+# #7237 rule as the `node -e` blocks. CARGO_CURRENT is read from the file, so it
+# is not format-validated, and a literal prefix match (index == 1) replaces
+# sed's regex, where an unescaped `.` in the version matched any character.
+track_tmp "$CARGO_TOML.tmp"
+CARGO_CUR="$CARGO_CURRENT" CARGO_NEW="$NEW_VERSION" awk '
+  BEGIN { old = "version = \"" ENVIRON["CARGO_CUR"] "\""; repl = "version = \"" ENVIRON["CARGO_NEW"] "\"" }
+  /^\[package\]/ { in_pkg = 1; print; next }
+  /^\[/ { in_pkg = 0 }
+  in_pkg && index($0, old) == 1 { $0 = repl substr($0, length(old) + 1) }
+  { print }
+' "$CARGO_TOML" > "$CARGO_TOML.tmp" && mv "$CARGO_TOML.tmp" "$CARGO_TOML"
 # Verify the replacement succeeded — scope check to [package] section to avoid false-passing
 # on a dependency that happens to share the same version string
 CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"" || true)
