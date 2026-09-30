@@ -22,6 +22,7 @@ export declare const ServerGitStatusResultSchema: z.ZodObject<{
             renamed: "renamed";
             copied: "copied";
         }>;
+        oldPath: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     unstaged: z.ZodArray<z.ZodObject<{
         path: z.ZodString;
@@ -33,6 +34,7 @@ export declare const ServerGitStatusResultSchema: z.ZodObject<{
             renamed: "renamed";
             copied: "copied";
         }>;
+        oldPath: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
     untracked: z.ZodArray<z.ZodString>;
     error: z.ZodNullable<z.ZodString>;

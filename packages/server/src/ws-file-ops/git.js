@@ -1,3 +1,32 @@
+/**
+ * Git operations for the WsServer file-ops surface: status, branches, stage,
+ * unstage, commit, create PR.
+ *
+ * #7292 — WIRE CONTRACT for `git_status_result` paths (`staged[].path`,
+ * `unstaged[].path`, `untracked[]`, and the rename/copy `oldPath` field):
+ * every path is relative to the SESSION CWD, '/'-separated on every platform,
+ * and never quoted/escaped. This is the same base `git_stage`/`git_unstage`
+ * already resolve `file` against (`resolve(cwdReal, file)` below), so a path
+ * a client reads off a status entry can be sent straight back on `git_stage`/
+ * `git_unstage` without any client-side translation.
+ *
+ * `git status --porcelain` itself emits paths relative to the REPO ROOT
+ * (unconditionally — even when run from a subdirectory) and, without `-z`,
+ * C-quotes/octal-escapes paths containing spaces or non-ASCII bytes. Both are
+ * rebased/decoded server-side before anything reaches the wire; see
+ * `toCwdRelativeGitPath` and the `-z`/NUL-delimited parsing in `gitStatus`
+ * below. A path outside the session cwd (e.g. a repo-root file, viewed from a
+ * subdirectory session) is reported with a leading `..`, and `gitStage`/
+ * `gitUnstage` correctly refuse it via the existing containment check — git
+ * ops are confined to the session cwd by design, independent of this fix.
+ *
+ * A renamed/copied entry additionally carries `oldPath` (the pre-rename
+ * path, same base/encoding): git records a rename as two independent index
+ * operations (remove the source, add the destination), so a pathspec naming
+ * only the destination leaves the source's staged change behind. A client
+ * that stages/unstages a rename/copy entry should send both `path` and
+ * `oldPath`.
+ */
 import { normalize, resolve, join, relative, sep } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -223,6 +252,32 @@ function gitUnresolvableReasons(file) {
 }
 
 /**
+ * #7292 — rebase a `git status` path from REPO-ROOT-relative (what git always
+ * emits, even when invoked from a subdirectory) to SESSION-CWD-relative (the
+ * base `gitStage`/`gitUnstage` already resolve(cwdReal, file) against, and the
+ * same convention `listFiles` uses on the wire, #7282).
+ *
+ * At the repo root the two bases coincide and this is a no-op (`rel` is the
+ * path unchanged). From a subdirectory, a repo-root file legitimately resolves
+ * OUTSIDE the session cwd — the result then carries a leading '..', which
+ * `gitStage`/`gitUnstage` correctly reject via the existing containment check
+ * (git ops are confined to the session cwd by design); that is a pre-existing
+ * invariant, not a regression this function introduces.
+ *
+ * @param {string} repoRoot - absolute repo root (`git rev-parse --show-toplevel`)
+ * @param {string} cwdReal - resolved session cwd
+ * @param {string} repoRelativePath - '/'-separated path as git emitted it
+ * @returns {string} '/'-separated path relative to `cwdReal`
+ */
+function toCwdRelativeGitPath(repoRoot, cwdReal, repoRelativePath) {
+  const abs = join(repoRoot, repoRelativePath)
+  const rel = relative(cwdReal, abs)
+  // git (and the wire contract, #7282) always uses '/'; relative() yields
+  // backslashes on Windows.
+  return sep === '\\' ? rel.split(sep).join('/') : rel
+}
+
+/**
  * Git operations: status, branches, stage, unstage, commit, create PR.
  *
  * @param {Function} sendFn - (ws, message) => void
@@ -267,8 +322,37 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         // Not a git repo
       }
 
-      // Get porcelain status
-      const { stdout: statusOutput } = await execFileAsync(GIT, ['status', '--porcelain=v1'], {
+      // #7292 — `git status --porcelain` paths are REPO-ROOT-relative even
+      // when invoked from a subdirectory (measured, git 2.54.0), while
+      // gitStage/gitUnstage resolve whatever they're given against the
+      // SESSION CWD. Rebasing every path below needs the repo root; falling
+      // back to `cwdReal` on failure makes toCwdRelativeGitPath a no-op
+      // rather than crashing — the git status call right below will hit the
+      // same "not a git repo" failure and the outer catch sends the error
+      // response, so this fallback is not expected to be reachable in
+      // practice.
+      let repoRoot = cwdReal
+      try {
+        const { stdout } = await execFileAsync(GIT, ['rev-parse', '--show-toplevel'], {
+          cwd: cwdReal,
+          timeout: 5000,
+        })
+        const top = stdout.trim()
+        if (top) repoRoot = top
+      } catch {
+        // Not a git repo — handled by the git status call below.
+      }
+
+      // #7292 — `-z` (NUL-delimited, no per-line quoting) replaces the default
+      // `--porcelain=v1` framing for two reasons:
+      //  - it disables the C-quoting/octal-escaping git applies to paths with
+      //    spaces or non-ASCII bytes — the client received the literal quotes
+      //    and octal escapes and could never stage the file back;
+      //  - a rename/copy is reported as two separate NUL-terminated fields
+      //    (destination, then source) instead of an ambiguous
+      //    `<path> -> <path>` text join, which a path containing the literal
+      //    substring ' -> ' would mis-split.
+      const { stdout: statusOutput } = await execFileAsync(GIT, ['status', '--porcelain=v1', '-z'], {
         cwd: cwdReal,
         maxBuffer: 1024 * 1024,
         timeout: 10000,
@@ -286,25 +370,48 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         'C': 'copied',
       }
 
-      for (const rawLine of statusOutput.split(/\r?\n/)) {
-        const line = rawLine.trimEnd()
-        if (!line) continue
-        const x = line[0] // index/staged status
-        const y = line[1] // working tree status
-        let filePath = line.slice(3)
-        // Rename/copy entries use "old -> new" format; extract destination
-        if ((x === 'R' || x === 'C') && filePath.includes(' -> ')) {
-          filePath = filePath.split(' -> ').pop()
+      // NUL-delimited records (a trailing NUL leaves one empty string at the
+      // end of the split, which the loop below skips).
+      const fields = statusOutput.split('\0')
+      for (let i = 0; i < fields.length; i++) {
+        const record = fields[i]
+        if (record === '') continue
+        const x = record[0] // index/staged status
+        const y = record[1] // working tree status
+        const repoRelPath = record.slice(3)
+
+        // Rename/copy: the NEXT NUL-terminated field is the pre-rename/copy
+        // (source) path — consume it here so it isn't mistaken for its own
+        // status record on the next loop iteration.
+        let oldPath = null
+        if (x === 'R' || x === 'C') {
+          i += 1
+          const repoRelOldPath = fields[i]
+          if (repoRelOldPath !== undefined) {
+            oldPath = toCwdRelativeGitPath(repoRoot, cwdReal, repoRelOldPath)
+          }
         }
+
+        const filePath = toCwdRelativeGitPath(repoRoot, cwdReal, repoRelPath)
 
         if (x === '?' && y === '?') {
           untracked.push(filePath)
         } else {
           if (x !== ' ' && x !== '?') {
-            staged.push({ path: filePath, status: STATUS_MAP[x] || 'unknown' })
+            const entry = { path: filePath, status: STATUS_MAP[x] || 'unknown' }
+            // #7292 — carry the pre-rename/copy path so a client can ask
+            // gitUnstage/gitStage to move both halves together: a pathspec
+            // naming only the destination leaves the source's staged change
+            // behind (git records a rename as two independent index
+            // entries — removal of the source, addition of the
+            // destination — not as one atomic operation).
+            if (oldPath !== null) entry.oldPath = oldPath
+            staged.push(entry)
           }
           if (y !== ' ' && y !== '?') {
-            unstaged.push({ path: filePath, status: STATUS_MAP[y] || 'unknown' })
+            const entry = { path: filePath, status: STATUS_MAP[y] || 'unknown' }
+            if (oldPath !== null) entry.oldPath = oldPath
+            unstaged.push(entry)
           }
         }
       }

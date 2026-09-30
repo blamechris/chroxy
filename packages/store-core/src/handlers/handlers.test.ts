@@ -74,6 +74,7 @@ import {
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
+  expandRenamePathsForStaging,
   handleGitBranchesResult,
   handleGitStageResult,
   handleGitCommitResult,
@@ -4221,6 +4222,79 @@ describe('handleGitStatusResult', () => {
       untracked: [],
       error: '',
     })
+  })
+
+  // #7292 — `oldPath` is populated only on a renamed/copied entry.
+  it('passes through oldPath on a renamed entry', () => {
+    const result = handleGitStatusResult({
+      staged: [{ path: 'new.txt', status: 'renamed', oldPath: 'old.txt' }],
+      unstaged: [],
+      untracked: [],
+    })
+    expect(result.staged).toEqual([{ path: 'new.txt', status: 'renamed', oldPath: 'old.txt' }])
+  })
+
+  it('drops an entry whose oldPath is present but not a string (#7292)', () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const result = handleGitStatusResult({
+      staged: [
+        { path: 'good', status: 'modified' },
+        { path: 'bad', status: 'renamed', oldPath: 42 },
+      ],
+      unstaged: [],
+      untracked: [],
+    })
+    expect(result.staged).toEqual([{ path: 'good', status: 'modified' }])
+    debugSpy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// expandRenamePathsForStaging (#7292)
+// ---------------------------------------------------------------------------
+describe('expandRenamePathsForStaging', () => {
+  it('leaves plain (non-rename) selections unchanged', () => {
+    const entries = [
+      { path: 'a.txt', status: 'modified' as const },
+      { path: 'b.txt', status: 'added' as const },
+    ]
+    expect(expandRenamePathsForStaging(['a.txt', 'b.txt'], entries)).toEqual(['a.txt', 'b.txt'])
+  })
+
+  it('inserts the oldPath ahead of a selected renamed entry', () => {
+    const entries = [
+      { path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' },
+    ]
+    expect(expandRenamePathsForStaging(['new.txt'], entries)).toEqual(['old.txt', 'new.txt'])
+  })
+
+  it('does not touch an entry not present in the selection', () => {
+    const entries = [
+      { path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' },
+      { path: 'plain.txt', status: 'modified' as const },
+    ]
+    expect(expandRenamePathsForStaging(['plain.txt'], entries)).toEqual(['plain.txt'])
+  })
+
+  it('de-duplicates when the oldPath was already selected directly', () => {
+    const entries = [
+      { path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' },
+    ]
+    expect(expandRenamePathsForStaging(['old.txt', 'new.txt'], entries)).toEqual(['old.txt', 'new.txt'])
+  })
+
+  it('handles multiple renamed selections, preserving first-seen order', () => {
+    const entries = [
+      { path: 'new1.txt', status: 'renamed' as const, oldPath: 'old1.txt' },
+      { path: 'new2.txt', status: 'renamed' as const, oldPath: 'old2.txt' },
+    ]
+    expect(expandRenamePathsForStaging(['new1.txt', 'new2.txt'], entries)).toEqual([
+      'old1.txt', 'new1.txt', 'old2.txt', 'new2.txt',
+    ])
+  })
+
+  it('returns [] for an empty selection', () => {
+    expect(expandRenamePathsForStaging([], [{ path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' }])).toEqual([])
   })
 })
 

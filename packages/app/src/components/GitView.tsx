@@ -11,6 +11,11 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
+// #7292 — a staged/unstaged rename or copy entry carries its pre-rename
+// `oldPath`; expandRenamePathsForStaging inserts it alongside the selected
+// `path` before a git_stage/git_unstage request so both index halves of the
+// rename move together (see @chroxy/store-core's handlers/git.ts).
+import { expandRenamePathsForStaging } from '@chroxy/store-core';
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -194,9 +199,12 @@ export function GitView({ visible, onClose }: GitViewProps) {
     // Only stage unstaged + untracked files (not already-staged ones)
     const unstagedPaths = new Set(unstaged.map((f) => f.path));
     const untrackedSet = new Set(untracked);
-    const paths = Array.from(selectedPaths).filter(
+    const selectedUnstagedPaths = Array.from(selectedPaths).filter(
       (p) => unstagedPaths.has(p) || untrackedSet.has(p),
     );
+    // #7292 — a selected rename/copy entry's oldPath rides along so the
+    // whole rename is staged, not just the destination half.
+    const paths = expandRenamePathsForStaging(selectedUnstagedPaths, unstaged);
     if (paths.length === 0) return;
 
     setStagingInProgress(true);
@@ -238,7 +246,10 @@ export function GitView({ visible, onClose }: GitViewProps) {
   const handleUnstageSelected = useCallback(() => {
     // Only unstage staged files (not unstaged/untracked ones)
     const stagedPaths = new Set(staged.map((f) => f.path));
-    const paths = Array.from(selectedPaths).filter((p) => stagedPaths.has(p));
+    const selectedStagedPaths = Array.from(selectedPaths).filter((p) => stagedPaths.has(p));
+    // #7292 — see handleStageSelected: an unstaged rename entry would
+    // otherwise leave its source's staged change behind.
+    const paths = expandRenamePathsForStaging(selectedStagedPaths, staged);
     if (paths.length === 0) return;
 
     setStagingInProgress(true);

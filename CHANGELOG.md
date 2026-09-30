@@ -40,6 +40,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`git_status` and `git_stage`/`git_unstage` now agree on what a path
+  means, and status paths are no longer C-quoted or octal-escaped (#7292).**
+  `gitStatus` (`packages/server/src/ws-file-ops/git.js`) forwarded `git
+  status --porcelain=v1` paths to the client verbatim. Three defects fell
+  out of that, all invisible at the repo root (every prior git-status/
+  git-stage fixture used it) and all real from a session cwd that is a repo
+  subdirectory: (1) `git status` paths are REPO-ROOT-relative even when run
+  from a subdirectory, while `gitStage`/`gitUnstage` resolve whatever they
+  receive against the SESSION CWD — staging from a subdirectory session
+  could silently stage the wrong file, or fail with an opaque pathspec
+  error; (2) porcelain C-quotes/octal-escapes a path containing spaces or
+  non-ASCII bytes (`"caf\303\251.txt"`), and the client received the
+  literal quotes/escapes, which can never match a real file; (3) a
+  staged rename reported only its destination, so unstaging it left the
+  source's staged deletion behind (git records a rename as two independent
+  index operations, not one atomic move).
+  The wire contract is now explicit (documented in `git.js`'s header and the
+  protocol schema): `git_status_result` paths are always relative to the
+  SESSION CWD — the same base `git_stage`/`git_unstage` already resolve
+  `file` against — '/'-separated, and never quoted/escaped. `gitStatus` gets
+  there with `git status --porcelain=v1 -z` (NUL-delimited, which disables
+  quoting and reports a rename/copy as two separate fields instead of an
+  ambiguous `<path> -> <path>` join) and rebases every repo-root-relative
+  path onto the session cwd via `git rev-parse --show-toplevel`. A renamed/
+  copied entry now also carries `oldPath` (the protocol's `GitStatusEntrySchema`
+  gained an optional field), and the dashboard's `GitPanel` and the mobile
+  app's `GitView` both send it alongside `path` on stage/unstage
+  (`@chroxy/store-core`'s new `expandRenamePathsForStaging`), so staging or
+  unstaging a rename moves both index halves together instead of leaving one
+  behind.
+
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
   `push: true`, and pushed straight to GHCR — nothing in the job ever

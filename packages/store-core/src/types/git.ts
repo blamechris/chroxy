@@ -11,6 +11,12 @@
 export interface GitFileStatus {
   path: string;
   status: 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unknown';
+  // #7292 — present only on a 'renamed'/'copied' entry: the pre-rename/copy
+  // path (same cwd-relative base as `path`). git records a rename as two
+  // independent index operations (remove the source, add the destination),
+  // so staging/unstaging this entry should send BOTH `path` and `oldPath`
+  // back on git_stage/git_unstage — see expandRenamePathsForStaging below.
+  oldPath?: string;
 }
 
 export interface GitBranch {

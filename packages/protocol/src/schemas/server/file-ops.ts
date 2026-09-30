@@ -12,9 +12,21 @@ import { z } from 'zod'
 
 // One staged/unstaged entry in a git_status_result. `untracked` is a flat array
 // of path strings (NOT objects). The status enum is the server STATUS_MAP set.
+//
+// WIRE CONTRACT (#7292): `path` (and `oldPath`, below) are relative to the
+// SESSION CWD — the same base git_stage/git_unstage resolve `file` against —
+// never repo-root-relative, and never quoted/escaped. See the header comment
+// in packages/server/src/ws-file-ops/git.js for the full contract.
 const GitStatusEntrySchema = z.object({
   path: z.string(),
   status: z.enum(['modified', 'added', 'deleted', 'renamed', 'copied', 'unknown']),
+  // #7292 — present only on a 'renamed'/'copied' entry: the pre-rename/copy
+  // path (same base/encoding as `path`). git stages a rename as two
+  // independent index operations (remove the source, add the destination),
+  // so a client that stages/unstages this entry should send BOTH `path` and
+  // `oldPath` back on git_stage/git_unstage — sending only `path` leaves the
+  // other half of the rename staged. Omitted entirely for every other status.
+  oldPath: z.string().optional(),
 })
 
 // `git_status` response. `branch` is null in detached-HEAD / not-a-repo; the

@@ -66,11 +66,12 @@ const VALID_DIFF_LINE_TYPES: ReadonlySet<DiffHunkLine['type']> = new Set([
 function isGitFileStatus(v: unknown): v is GitFileStatus {
   if (typeof v !== 'object' || v === null) return false
   const o = v as Record<string, unknown>
-  return (
-    typeof o.path === 'string' &&
-    typeof o.status === 'string' &&
-    VALID_GIT_FILE_STATUSES.has(o.status as GitFileStatus['status'])
-  )
+  if (typeof o.path !== 'string') return false
+  if (typeof o.status !== 'string' || !VALID_GIT_FILE_STATUSES.has(o.status as GitFileStatus['status'])) return false
+  // #7292 — `oldPath` is OPTIONAL (present only on 'renamed'/'copied'
+  // entries): absent is valid, but present-and-wrong-type is not.
+  if ('oldPath' in o && o.oldPath !== undefined && typeof o.oldPath !== 'string') return false
+  return true
 }
 
 function isGitBranch(v: unknown): v is GitBranch {
@@ -222,6 +223,45 @@ export function handleGitStatusResult(
     ),
     error: parseRawStringField(msg, 'error'),
   }
+}
+
+/**
+ * #7292 — expand a set of selected `git_status_result` entry paths to also
+ * include each entry's `oldPath`, so staging/unstaging a rename or copy moves
+ * BOTH halves together.
+ *
+ * git records a rename/copy as two independent index operations (remove the
+ * source, add the destination) rather than one atomic move; a pathspec
+ * naming only the destination (what a UI naturally has on hand — the
+ * entry's `path`) leaves the source's staged change behind. `entries` should
+ * be the SAME array (`staged` or `unstaged`) the selected paths were drawn
+ * from, so entries without a matching `oldPath` are passed through
+ * unchanged. De-duplicates (a path selected more than once, or an `oldPath`
+ * that coincides with another selected `path`) and preserves first-seen
+ * order so the emitted pathspec list stays deterministic.
+ */
+export function expandRenamePathsForStaging(
+  selectedPaths: readonly string[],
+  entries: readonly GitFileStatus[],
+): string[] {
+  const oldPathByPath = new Map<string, string>()
+  for (const entry of entries) {
+    if (entry.oldPath) oldPathByPath.set(entry.path, entry.oldPath)
+  }
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const path of selectedPaths) {
+    const oldPath = oldPathByPath.get(path)
+    if (oldPath !== undefined && !seen.has(oldPath)) {
+      seen.add(oldPath)
+      out.push(oldPath)
+    }
+    if (!seen.has(path)) {
+      seen.add(path)
+      out.push(path)
+    }
+  }
+  return out
 }
 
 /** Parsed payload from a `git_branches_result` message (app-only today). */
