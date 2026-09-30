@@ -1045,11 +1045,19 @@ jobs:
         # #6488: the build:crypto import-shim rewrite is committed to dist/. Rebuild
         # and diff so a stale committed artifact (or a generator change that isn't
         # re-committed) fails CI, mirroring the packages/protocol/dist guard.
+        #
+        # #8152 — that mirrored guard had the same blind spot: diffing only the
+        # single tracked dist/crypto.js file never notices a NEW file landing in
+        # dist/ (e.g. if crypto.ts ever imports a local sibling module, tsc
+        # emits its compiled output alongside crypto.js — untracked, and
+        # ignored by packages/store-core/.gitignore's blanket `dist/*`).
+        # scripts/check-dist-drift.sh checks the whole dist/ directory instead
+        # of one file, so it also catches that case; see its header.
         working-directory: .
         run: |
           npm run build:crypto -w @chroxy/store-core
-          git diff --exit-code packages/store-core/dist/crypto.js || {
-            echo "::error::packages/store-core/dist/crypto.js drift detected. Run 'npm run build:crypto -w @chroxy/store-core' and commit the result."
+          bash scripts/check-dist-drift.sh packages/store-core/dist || {
+            echo "::error::Run 'npm run build:crypto -w @chroxy/store-core' and commit the result (a NEW dist file needs 'git add -f' since dist/ is gitignored)."
             exit 1
           }
 
@@ -1338,10 +1346,16 @@ jobs:
         run: npm run build
 
       - name: Check protocol dist is in sync with src
+        # #8152 — a bare `git diff --exit-code` only looks at TRACKED paths.
+        # dist/ is gitignored, so a NEW file the build emits (a new
+        # src/foo.ts producing dist/foo.js) is untracked AND ignored —
+        # invisible to `git diff` — and this step stayed green while the file
+        # was never committed. scripts/check-dist-drift.sh also fails on that
+        # untracked/ignored case; see its header for the full writeup.
         working-directory: .
         run: |
-          git diff --exit-code packages/protocol/dist || {
-            echo "::error::packages/protocol/dist drift detected. Run 'npm run build -w packages/protocol' and commit the changes."
+          bash scripts/check-dist-drift.sh packages/protocol/dist || {
+            echo "::error::Run 'npm run build -w packages/protocol' and commit the changes (a NEW dist file needs 'git add -f' since dist/ is gitignored)."
             exit 1
           }
 
@@ -1732,6 +1746,13 @@ jobs:
         # would go on passing. That control is the only thing in the repo that
         # would notice.
         run: node scripts/__tests__/lint-workflow-npm-env.test.mjs
+
+      - name: Run check-dist-drift.sh tests
+        # #8152 — golden test for the protocol/store-core dist-drift guards
+        # above: a clean dist passes, a modified tracked file fails, a NEW
+        # untracked+ignored file fails (the bug this script fixes), and a
+        # missing dist directory fails loudly rather than reading as clean.
+        run: bash scripts/__tests__/check-dist-drift.test.sh
 
       - name: No write-only per-connection state (app context + dashboard bindings)
         # #7452 — a field on the app store's `_ctx` that is written but never
