@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.source=https://github.com/blamechris/chroxy
 #   docker build --build-arg CLAUDE_CODE_VERSION=x.y.z .
 # Bump this ARG when upgrading claude-code; keep it in sync with the version
 # used by the rest of the server package.
-ARG CLAUDE_CODE_VERSION=2.1.128
+ARG CLAUDE_CODE_VERSION=2.1.280
 
 # Install claude-code globally so the sidecar can spawn it when K8sBackend
 # sends a spawn frame.  This is the only external npm dependency the image

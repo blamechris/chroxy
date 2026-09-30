@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The root Docker image ships a pinned, signature-verified `claude` CLI, so
+  `start` now passes preflight without `--skip-checks` (#8145).** The image
+  never installed a `claude` binary at all: since #7986/#8035, SDK mode
+  deliberately spawns an *installed* CLI via `pathToClaudeCodeExecutable` and
+  refuses the Agent SDK's own bundled platform binary as unverified, so
+  `chroxy start` in the image failed preflight with `✗ claude: Not found`. A
+  new `claude-cli` builder stage downloads one exact release straight from
+  Anthropic's release bucket, verifies the release signing key's fingerprint,
+  re-exports that key BY FINGERPRINT into its own single-key keyring, and
+  verifies the signed manifest against ONLY that keyring with `gpgv`, not
+  `gpg --verify` — checking that the pinned fingerprint is present somewhere
+  in the downloaded key file and then verifying against the whole imported
+  keyring accepts a signature from *any* key in it, which is a real bypass an
+  attacker controlling the download could exploit by appending a second key
+  (found and reproduced during review). The manifest's own version is then
+  checked against the pin, and the platform binary's sha256 against the
+  manifest, before it is copied into the final image — every step fails the
+  build on mismatch. `scripts/docker-image-smoke.sh` no longer passes
+  `--skip-checks` to `start`, and now also checks that the image's own
+  `claude --version` reports the pinned version. The sidecar Dockerfile's
+  `CLAUDE_CODE_VERSION` pin is bumped from 2.1.128 (below the
+  `CLAUDE_SDK_MIN_CLI_VERSION` floor) to 2.1.280, and a new server test
+  (`dockerfile-claude-version-floor.test.js`) fails the build if any
+  Dockerfile's pin ever falls below that floor again. Renovate now tracks the
+  root Dockerfile's pin alongside the sidecar's.
+
 ## [0.11.2] - 2026-09-30
 
 ### Fixed
