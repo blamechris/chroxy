@@ -74,6 +74,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packages/app` was checked for the same leak and does not share this fix —
   see the follow-up note below.
 
+  **Review follow-up (same PR):** the grouping-key change above had one
+  consumer nobody had updated — `sidebarContextMenuItems.ts`'s repo-group
+  "Summarize & start new session" item still filtered on raw `s.cwd`, so a
+  worktree-only repo group's Summarize item silently vanished and a mixed
+  group could only ever target its plain session. Fixed by extracting the
+  group-key rule into a THIRD shared helper, `sessionGroupKey` (also in
+  `repoLabel.ts`), that both `App.tsx`'s `sidebarRepos` memo and
+  `sidebarContextMenuItems.ts` now call — the two can no longer drift apart.
+  `RepoEventsSection.tsx`'s "active repos" scope (`activeRepoBasenames`) had
+  the same bug class and now derives from the same key. `abbreviateCwd` now
+  splits on `[\\/]+` (matching `repoBasename`'s Windows-aware split) instead
+  of `/` only, so the two "basename of a path" helpers can't silently
+  disagree on a Windows daemon's backslash cwd.
+
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
   `push: true`, and pushed straight to GHCR — nothing in the job ever

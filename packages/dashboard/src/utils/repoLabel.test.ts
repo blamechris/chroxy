@@ -2,7 +2,7 @@
  * repoLabel tests (#7328) — worktree-aware cwd badge label.
  */
 import { describe, it, expect } from 'vitest'
-import { abbreviateCwd, repoDisplayName } from './repoLabel'
+import { abbreviateCwd, repoDisplayName, sessionGroupKey } from './repoLabel'
 
 describe('abbreviateCwd', () => {
   it('returns the last path segment', () => {
@@ -12,6 +12,15 @@ describe('abbreviateCwd', () => {
   it('falls back to the input when there is no segment', () => {
     expect(abbreviateCwd('')).toBe('')
     expect(abbreviateCwd('/')).toBe('/')
+  })
+
+  // Review nitpick on PR #8180 (issuecomment-5921537989): this split on `/`
+  // only, while RepoEventsSection.tsx's `repoBasename` already split on
+  // `[\\/]+` for exactly this reason (a Windows daemon sends backslash
+  // cwds). Unify on the same separator set so the two "basename of a path"
+  // helpers can't silently disagree on a Windows session.
+  it('normalizes Windows backslash separators the same way repoBasename does (review nitpick, #8180)', () => {
+    expect(abbreviateCwd('C:\\Users\\me\\chroxy')).toBe('chroxy')
   })
 })
 
@@ -62,5 +71,37 @@ describe('repoDisplayName with a custom fallback (#8123)', () => {
 
   it('defaults to the single-segment fallback when no fallback is passed (unchanged pre-#8123 signature)', () => {
     expect(repoDisplayName('/Users/me/Projects/chroxy', null)).toBe('chroxy')
+  })
+})
+
+// Review follow-up on PR #8180 (issuecomment-5921537989, Critical #1):
+// App.tsx's `sidebarRepos` memo computes the sidebar's repo GROUP KEY as
+// `repoCwd || cwd`, but `sidebarContextMenuItems.ts`'s repo-group "Summarize"
+// filter kept comparing against raw `cwd` — a second, independent copy of
+// the same rule that drifted the moment the memo's rule changed. This
+// helper is the ONE place that rule now lives; both call sites use it so
+// they cannot drift again.
+describe('sessionGroupKey (#8123 review follow-up)', () => {
+  it('is repoCwd for a worktree-isolated session', () => {
+    expect(sessionGroupKey({
+      cwd: '/Users/me/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+      repoCwd: '/Users/me/Projects/chroxy',
+    })).toBe('/Users/me/Projects/chroxy')
+  })
+
+  it('falls back to cwd when repoCwd is null (plain session)', () => {
+    expect(sessionGroupKey({ cwd: '/home/user/projects/api', repoCwd: null })).toBe('/home/user/projects/api')
+  })
+
+  it('falls back to cwd when repoCwd is undefined (pre-#7328 server)', () => {
+    expect(sessionGroupKey({ cwd: '/home/user/projects/api' })).toBe('/home/user/projects/api')
+  })
+
+  it('falls back to cwd when repoCwd is an empty string', () => {
+    expect(sessionGroupKey({ cwd: '/home/user/projects/api', repoCwd: '' })).toBe('/home/user/projects/api')
+  })
+
+  it('returns an empty string rather than throwing when cwd is missing too', () => {
+    expect(sessionGroupKey({})).toBe('')
   })
 })

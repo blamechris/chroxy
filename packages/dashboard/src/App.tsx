@@ -101,7 +101,7 @@ import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, thinkingLevelOptions } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistTurnCompleteNotification, loadPersistedTurnCompleteNotification, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
-import { repoDisplayName } from './utils/repoLabel'
+import { repoDisplayName, sessionGroupKey } from './utils/repoLabel'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -1694,9 +1694,16 @@ export function App() {
     // and drag/collapse state, so a worktree-grouped repo's new-session action
     // now targets the real repo dir instead of a worktree path — the more
     // useful behaviour, not just a side effect.
+    //
+    // Review follow-up on PR #8180 (Critical #1): this key is computed via
+    // the shared `sessionGroupKey` helper (`utils/repoLabel.ts`), not an
+    // inline `s.repoCwd || s.cwd` — `sidebarContextMenuItems.ts`'s repo-group
+    // "Summarize" filter needs the IDENTICAL rule, and a hand-copied
+    // expression in each place is exactly how that filter drifted out of
+    // sync with this memo the first time.
     for (const s of sessions) {
       if (!s.cwd) continue
-      const groupKey = s.repoCwd || s.cwd
+      const groupKey = sessionGroupKey(s)
       let repo = repoMap.get(groupKey)
       if (!repo) {
         const name = repoDisplayName(s.cwd, s.repoCwd)

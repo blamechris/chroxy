@@ -32,10 +32,16 @@
  * is itself empty, or a bare `/`). Matches `SessionBar`'s pre-#7328
  * `abbreviateCwd` exactly — moved here unchanged so the worktree-aware
  * fallback path stays byte-identical to today's behaviour.
+ *
+ * Splits on a run of forward OR backslash separators (review nitpick on PR
+ * #8180) so a Windows daemon's backslash cwd abbreviates the same way
+ * `RepoEventsSection.tsx`'s `repoBasename` already does — the two
+ * "basename of a path" helpers must not silently disagree on a Windows
+ * session.
  */
 export function abbreviateCwd(cwd: string): string {
-  const parts = cwd.split('/')
-  return parts[parts.length - 1] || cwd
+  const parts = cwd.split(/[\\/]+/).filter(Boolean)
+  return parts.length > 0 ? parts[parts.length - 1]! : cwd
 }
 
 /**
@@ -60,4 +66,23 @@ export function repoDisplayName(
     return abbreviateCwd(repoCwd)
   }
   return fallback(cwd || '')
+}
+
+/**
+ * The sidebar's repo GROUP KEY for a session: `repoCwd` when it's a
+ * non-empty string (a worktree-isolated session), else `cwd`.
+ *
+ * Review follow-up on PR #8180 (issuecomment-5921537989, Critical #1):
+ * `App.tsx`'s `sidebarRepos` memo and `sidebarContextMenuItems.ts`'s
+ * repo-group "Summarize & start new session" filter both need to agree on
+ * which sessions belong to a repo group. Before this helper existed they
+ * independently computed the same rule as two separate expressions — #8123
+ * changed the memo's rule (`s.cwd` → `s.repoCwd || s.cwd`) but left the
+ * menu's copy comparing against raw `s.cwd`, so a worktree-only group's
+ * Summarize item silently disappeared (`groupSessions` computed to `[]`)
+ * and a mixed group could only ever target its plain session. Sharing this
+ * one function is what makes that class of drift impossible to reintroduce.
+ */
+export function sessionGroupKey(s: { cwd?: string; repoCwd?: string | null }): string {
+  return s.repoCwd || s.cwd || ''
 }
