@@ -12,7 +12,7 @@
  * connection-pairing.test.ts, with fake timers so we can assert exact delays.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { RECONNECT_MAX_RUNG } from '@chroxy/store-core'
+import { RECONNECT_MAX_RUNG, TRANSIENT_SESSION_SWEEP_FIELDS } from '@chroxy/store-core'
 
 const store: Record<string, string> = {}
 const localStorageMock = {
@@ -307,6 +307,52 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     expect(st.sessionStates.b!.planAllowedPrompts).toEqual([])
     expect(st.sessionStates.b!.pendingEvaluatorClarify).toBeNull()
     expect(st.sessionStates.b!.inactivityWarning).toBeNull()
+  })
+
+  // #7411 — the dashboard half of the shared-list parity guard (the app half is
+  // connection-transient-state-sweep.test.ts). Iterating the shared list means a
+  // field added to TRANSIENT_SESSION_SWEEP_FIELDS that this sweep doesn't clear
+  // fails here, not only on the app side.
+  it('parity guard: clears every TRANSIENT_SESSION_SWEEP_FIELDS field on a background session (#7411)', async () => {
+    const ws = await openConnected()
+    type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
+    const DIRTY: Record<SweepField, unknown> = {
+      streamingMessageId: 'msg-b',
+      isPlanPending: true,
+      planAllowedPrompts: ['go'],
+      inactivityWarning: { sinceMs: 1 },
+      sessionRole: 'observer',
+      primaryClientId: 'other-device',
+    }
+    const CLEAN: Record<SweepField, unknown> = {
+      streamingMessageId: null,
+      isPlanPending: false,
+      planAllowedPrompts: [],
+      inactivityWarning: null,
+      sessionRole: null,
+      primaryClientId: null,
+    }
+    // Runtime half of the Record<SweepField> typing: a field added to the list
+    // without a dirty/clean pair here must fail even where nothing typechecks
+    // the test, and every dirty value must actually differ from its clean one.
+    expect(Object.keys(DIRTY).sort()).toEqual([...TRANSIENT_SESSION_SWEEP_FIELDS].sort())
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) expect(DIRTY[field], field).not.toEqual(CLEAN[field])
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: { messages: [], pendingEvaluatorClarify: null, ...CLEAN },
+        b: { messages: [], pendingEvaluatorClarify: null, ...DIRTY },
+      } as never,
+    })
+
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const b = useConnectionStore.getState().sessionStates.b as unknown as Record<string, unknown>
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
+      expect(b[field], field).toEqual(CLEAN[field])
+    }
   })
 
   // #5623 — onclose also clears the presence role (sessionRole/primaryClientId)

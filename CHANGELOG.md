@@ -47,6 +47,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must then pass the image's own HEALTHCHECK. The smoke run passes
   `--skip-checks` until the image ships a `claude` CLI (#8145). Gating the
   release push on the same smoke is #8150.
+- **The mobile app's socket-close handler no longer strands a phantom
+  "thinking" bubble or a stale pending plan on a background session across a
+  reconnect (#7411).** The dashboard has swept transient state
+  (`streamingMessageId`, `isPlanPending`/`planAllowedPrompts`) for every
+  session on socket close since #5731 T4; the app's `onclose` handler still
+  used `updateActiveSession` for this trio, so a session other than the one
+  currently on screen kept its dirty state through the drop and reconnect —
+  `streamingMessageId` in particular renders as a stuck "thinking" indicator
+  the next time that session is viewed. `clearTransientSessionState`
+  (`@chroxy/store-core`) is now the single source for this clear, used by
+  both clients so the two sweeps can't drift apart on it again, and the app's
+  `onclose` now sweeps every session the same way it already does for
+  `inactivityWarning`/`sessionRole`/`primaryClientId`.
 - **The mobile app now shows the provider badge for every session, the default
   provider included (#8130).** `SessionPicker`'s badge gate
   (`session.provider !== DEFAULT_PROVIDER`) suppressed the badge whenever a
