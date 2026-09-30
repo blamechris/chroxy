@@ -37,12 +37,23 @@ function summaryText(count: number, tools: string[]): string {
 
 export function PermissionExpiredSummary({ count, tools, firstRequestId }: PermissionExpiredSummaryProps) {
   const targetId = `perm-desc-${firstRequestId}`
+  // #7365 review (nitpick #7) — name WHICH prompt the link jumps to. "Jump to
+  // prompt" alone is ambiguous once a turn has several expired prompts; the
+  // first tool in `tools` is exactly the one `firstRequestId` points at
+  // (same index — both are built from the same ordered requestIds list).
+  const firstTool = tools[0] ?? 'permission'
 
   // Real anchor-navigation (`href`) is the fallback for a target that isn't
   // currently mounted (a windowed-out row in a long transcript — see
   // ChatView.tsx's virtualization); `scrollIntoView` gives a smooth,
   // centered landing for the common case where it IS mounted. Both paths
   // land on the same element, so there is nothing to keep in sync.
+  //
+  // #7365 review (S1) — `.focus()` only actually moves focus because
+  // `PermissionPrompt.tsx`'s `.perm-desc` target now carries `tabIndex={-1}`;
+  // without it this call silently no-ops on a plain, non-focusable `<div>`,
+  // and only the scroll (not the focus) would land — invisible to keyboard
+  // and screen-reader users.
   const handleJump = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>) => {
       const target = document.getElementById(targetId)
@@ -64,6 +75,7 @@ export function PermissionExpiredSummary({ count, tools, firstRequestId }: Permi
         data-testid="permission-expired-summary-jump"
         href={`#${targetId}`}
         onClick={handleJump}
+        aria-label={`Jump to the ${firstTool} permission prompt`}
       >
         Jump to prompt
       </a>

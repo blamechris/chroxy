@@ -203,4 +203,51 @@ describe('TranscriptViewer (#6863)', () => {
       expect(screen.queryByRole('button', { name: /deny/i })).not.toBeInTheDocument()
     })
   })
+
+  // #7365 review (S2) — integration coverage the reviewer found missing: the
+  // reviewer mutated `summary.requestIds[0]` to the LAST index at this
+  // component's own call site (TranscriptViewer.tsx) and every existing test
+  // stayed green, because nothing here exercised the real splice-then-render
+  // path for a `permission-expired-summary` row.
+  describe('end-of-turn permission-expired summary (#7365)', () => {
+    it('renders the summary for a closed conversation, jump link targeting the FIRST expired prompt', () => {
+      const past = Date.now() - 1000
+      render(
+        <TranscriptViewer
+          conversationId="conv-1"
+          status="ready"
+          messages={[
+            makeMessage({ id: 'u1', type: 'user_input', content: 'do the thing' }),
+            makeMessage({ id: 'p1', type: 'prompt', content: 'Bash: rm -rf /tmp/scratch', requestId: 'req-1', tool: 'Bash', expiresAt: past }),
+            makeMessage({ id: 'p2', type: 'prompt', content: 'Write: scratch.txt', requestId: 'req-2', tool: 'Write', expiresAt: past }),
+          ]}
+          error={null}
+          onClose={vi.fn()}
+          onRetry={vi.fn()}
+        />,
+      )
+      const summaryEl = screen.getByTestId('permission-expired-summary')
+      expect(summaryEl).toHaveTextContent('2 permissions expired without a response')
+      const link = screen.getByTestId('permission-expired-summary-jump')
+      expect(link).toHaveAttribute('href', '#perm-desc-req-1')
+      expect(link).not.toHaveAttribute('href', '#perm-desc-req-2')
+    })
+
+    it('renders no summary when every permission in the transcript was answered', () => {
+      render(
+        <TranscriptViewer
+          conversationId="conv-1"
+          status="ready"
+          messages={[
+            makeMessage({ id: 'u1', type: 'user_input', content: 'do the thing' }),
+            makeMessage({ id: 'p1', type: 'prompt', content: 'Bash: ls', requestId: 'req-1', tool: 'Bash', answered: 'allow' }),
+          ]}
+          error={null}
+          onClose={vi.fn()}
+          onRetry={vi.fn()}
+        />,
+      )
+      expect(screen.queryByTestId('permission-expired-summary')).not.toBeInTheDocument()
+    })
+  })
 })

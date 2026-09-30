@@ -57,6 +57,31 @@ export interface UseChatMessagesProps {
    * the transcript shows only the conversation. Defaults to false (off).
    */
   hideToolAndThinking?: boolean
+  /**
+   * #7365 (post-review follow-up) — ids of `user_input` messages currently
+   * sitting in the active session's outgoing queue (send-while-busy, #5939):
+   * sent optimistically but not yet dequeued/flushed by the server, so the
+   * turn they would start has not actually begun. The caller already computes
+   * this for the "Queued" badge (`queuedIds` in App.tsx, derived from
+   * `queuedMessages`) — pass the SAME set through so the end-of-turn summary
+   * doesn't split a still-running turn's permissions across a follow-up that
+   * hasn't started yet. Omitted (empty) for callers with no live queue, e.g.
+   * `TranscriptViewer`'s closed conversations.
+   */
+  stillQueuedMessageIds?: ReadonlySet<string>
+  /**
+   * #7365 (post-review follow-up) — whether the active session's LAST turn
+   * has actually ended, i.e. the server-authoritative `isIdle` flag (#4639) —
+   * the same one `isSessionBusy` already reads. The end-of-turn summary is
+   * gated on this for the trailing turn only (every earlier turn has, by
+   * construction, already ended): per the issue's own wording ("at turn
+   * end"), and because rendering it for a still-running turn made its list
+   * position unstable (it kept re-anchoring to the transcript tail as more
+   * content streamed in). Defaults to `true` — a caller with no live turn at
+   * all (`TranscriptViewer`'s closed conversations) has nothing "still
+   * running" by definition.
+   */
+  isSessionIdle?: boolean
 }
 
 export interface UseChatMessagesResult {
@@ -88,8 +113,16 @@ export interface UseChatMessagesResult {
 // compiling without a churn diff.
 export { toChatViewMessage }
 
+const EMPTY_ID_SET: ReadonlySet<string> = new Set()
+
 export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesResult {
-  const { storeMessages, streamingMessageId, hideToolAndThinking = false } = props
+  const {
+    storeMessages,
+    streamingMessageId,
+    hideToolAndThinking = false,
+    stillQueuedMessageIds = EMPTY_ID_SET,
+    isSessionIdle = true,
+  } = props
 
   const result = useMemo(
     () => buildChatViewMessages(storeMessages, streamingMessageId, { hideToolAndThinking }),
@@ -108,12 +141,18 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
 
   // #7365 — dashboard-only: splice a synthetic summary row after any turn
   // that contains an expired-unanswered permission prompt. Recomputed on
-  // every `storeMessages` change (a fresh `Date.now()` per derivation, not a
-  // ticking interval) — the same convention `derivePendingPermissionCounts`
-  // already uses for the analogous "live pending" badge, since the events
-  // that actually flip a prompt to expired (the server's `permission_expired`
-  // frame, or the client answering one) both mutate `storeMessages` and
-  // trigger a fresh render anyway.
+  // every `storeMessages` (or `stillQueuedMessageIds`) change — a fresh
+  // `Date.now()` per derivation, not a ticking interval. This is NOT full
+  // parity with the per-prompt marker's countdown: `PermissionPrompt.tsx`
+  // reads a `now` it ticks every second itself, so its "Timed out" label can
+  // flip a few seconds before this memo re-runs (it only re-runs when
+  // `storeMessages`/`stillQueuedMessageIds` actually change reference, which
+  // in practice follows soon after — either the server's own
+  // `permission_expired` frame, which mutates the message, or any other
+  // store update in an active session). Low-impact lag, not a guarantee;
+  // called out here rather than overclaimed. Mirrors the same tradeoff
+  // `derivePendingPermissionCounts` already accepts for the "live pending"
+  // badge.
   //
   // `chatTailMessageId` is deliberately NOT recomputed from the spliced rows:
   // it identifies the last REAL content row (for ToolGroup/ToolBubble's
@@ -121,13 +160,13 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // to a synthetic summary row would silently collapse a trailing tool group
   // the moment its turn's permission expired.
   const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
-    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now())
+    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), stillQueuedMessageIds, isSessionIdle)
     if (summaries.length === 0) {
       return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
     }
-    const { rows, payloads } = insertPermissionExpiredSummaryRows(baseChatMessages, summaries)
+    const { rows, payloads } = insertPermissionExpiredSummaryRows(baseChatMessages, summaries, stillQueuedMessageIds)
     return { chatMessages: rows, permissionExpiredSummaries: payloads }
-  }, [storeMessages, baseChatMessages])
+  }, [storeMessages, baseChatMessages, stillQueuedMessageIds, isSessionIdle])
 
   return {
     chatMessages,

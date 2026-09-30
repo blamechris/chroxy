@@ -14,12 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer, chroxy silently continues without that tool — the per-prompt
   marker (`PermissionPrompt.tsx`'s "Permission expired — Claude will continue
   without this tool") is easy to miss once the turn has moved on, since it is
-  one collapsed row in a long transcript. The transcript now also renders a
-  persistent card attached to the turn, aggregating every prompt that expired
-  unanswered during it: the count, the tool names, and a jump link back to
-  the first one. Turn attribution is derived from existing store state (a
-  turn is everything between one `user_input` and the next — no new wire
-  field), so no protocol change was needed. No new native notification: the
+  one collapsed row in a long transcript. Once a turn has actually ended, the
+  transcript now also renders a persistent card attached to it, aggregating
+  every prompt that expired unanswered during it: the count, the tool names,
+  and a jump link back to the first one (which also moves keyboard/
+  screen-reader focus, not just the scroll position). Turn attribution is
+  derived from existing store state — a turn is everything between one
+  `user_input` and the next — so no protocol change was needed; this also
+  correctly folds a send-while-busy queued follow-up into the turn that is
+  actually still running, rather than misattributing its work to the
+  follow-up's not-yet-started turn. The summary itself is gated on the turn
+  having ended (the server-authoritative `isIdle` flag) so its position never
+  shifts while a turn is still streaming. No new native notification: the
   permission notification already fired when the prompt was raised (#7364);
   a second one per turn for the same event would be noise. Web dashboard
   only — the mobile app has no equivalent surface yet.

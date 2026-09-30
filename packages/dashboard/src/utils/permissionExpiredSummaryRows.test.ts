@@ -74,4 +74,38 @@ describe('insertPermissionExpiredSummaryRows (#7365)', () => {
     const result = insertPermissionExpiredSummaryRows(rows, [s])
     expect(result.rows.map((r) => r.id)).toEqual(['u1', 'u2', permissionExpiredSummaryRowId('u2')])
   })
+
+  // #7365 review (Critical #1 follow-up) — a still-queued `user_input` must
+  // not flush the currently-pending turn's summary early, or it would be
+  // visually inserted BEFORE that turn's later content (which the aggregator
+  // still, correctly, attributes to it).
+  it('does not flush the pending summary at a still-queued user_input — it stays attached to the running turn\'s real end', () => {
+    const rows = [
+      row('u1', 'user_input'),
+      row('p1', 'response'),
+      row('u2', 'user_input'), // queued follow-up, not yet dequeued
+      row('p2', 'response'),   // still turn 1's content
+    ]
+    const s = summary({ turnStartMessageId: 'u1', requestIds: ['req-p1', 'req-p2'], count: 2 })
+    const result = insertPermissionExpiredSummaryRows(rows, [s], new Set(['u2']))
+    const rowId = permissionExpiredSummaryRowId('u1')
+    // The summary lands AFTER p2 (the turn's actual last content), not
+    // squeezed in between p1 and the queued u2 row.
+    expect(result.rows.map((r) => r.id)).toEqual(['u1', 'p1', 'u2', 'p2', rowId])
+  })
+
+  it('once the queued user_input is no longer in the still-queued set, it resumes acting as a real boundary', () => {
+    const rows = [
+      row('u1', 'user_input'),
+      row('p1', 'response'),
+      row('u2', 'user_input'), // now dequeued — a real turn boundary
+      row('p2', 'response'),
+    ]
+    const s1 = summary({ turnStartMessageId: 'u1', requestIds: ['req-p1'] })
+    const s2 = summary({ turnStartMessageId: 'u2', requestIds: ['req-p2'] })
+    const result = insertPermissionExpiredSummaryRows(rows, [s1, s2], new Set())
+    const id1 = permissionExpiredSummaryRowId('u1')
+    const id2 = permissionExpiredSummaryRowId('u2')
+    expect(result.rows.map((r) => r.id)).toEqual(['u1', 'p1', id1, 'u2', 'p2', id2])
+  })
 })

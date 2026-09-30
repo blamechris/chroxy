@@ -301,4 +301,94 @@ describe('useChatMessages', () => {
       expect(result.current.stalledPromptIds.size).toBe(0)
     })
   })
+
+  // #7365 review (S2) — end-to-end integration for the full splice: raw
+  // `storeMessages` in, a spliced `permission-expired-summary` row + its
+  // `permissionExpiredSummaries` payload out. The two pure units
+  // (`getExpiredPermissionTurnSummaries`, `insertPermissionExpiredSummaryRows`)
+  // already have isolated coverage; this is the hook's OWN wiring between
+  // them, which the review found untested (a swapped index or a dropped
+  // `permissionExpiredSummaries` prop-thread would previously ship silently).
+  describe('permissionExpiredSummaries (#7365)', () => {
+    const NOW = Date.now()
+
+    function promptMsg(id: string, requestId: string, tool: string, expiresAt: number): ChatMessage {
+      return msg({ id, type: 'prompt', content: `${tool}: ...`, tool, requestId, expiresAt })
+    }
+
+    it('a fixture with 2 expired prompts in one (ended) turn produces one summary row with both requestIds', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        promptMsg('p1', 'req-1', 'Bash', NOW - 1000),
+        promptMsg('p2', 'req-2', 'Write', NOW - 1000),
+      ]
+      // isSessionIdle: true (default) — the fixture represents an ENDED turn.
+      const { result } = renderHook(() =>
+        useChatMessages({ storeMessages: messages, streamingMessageId: null }),
+      )
+      const summaryRow = result.current.chatMessages.find((m) => m.type === 'permission-expired-summary')
+      expect(summaryRow).toBeDefined()
+      // Attached at the turn's end — after both prompts, nothing after it.
+      expect(result.current.chatMessages.map((m) => m.id)).toEqual(['u1', 'p1', 'p2', summaryRow!.id])
+
+      const payload = result.current.permissionExpiredSummaries.get(summaryRow!.id)
+      expect(payload).toEqual({
+        turnStartMessageId: 'u1',
+        requestIds: ['req-1', 'req-2'],
+        tools: ['Bash', 'Write'],
+        count: 2,
+      })
+    })
+
+    it('produces no summary row or payload entries when nothing expired', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        promptMsg('p1', 'req-1', 'Bash', NOW + 60_000),
+      ]
+      const { result } = renderHook(() =>
+        useChatMessages({ storeMessages: messages, streamingMessageId: null }),
+      )
+      expect(result.current.chatMessages.some((m) => m.type === 'permission-expired-summary')).toBe(false)
+      expect(result.current.permissionExpiredSummaries.size).toBe(0)
+    })
+
+    it('suppresses the summary while isSessionIdle is false (turn still running), shows it once true', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        promptMsg('p1', 'req-1', 'Bash', NOW - 1000),
+      ]
+      const { result, rerender } = renderHook(
+        (props: { isSessionIdle: boolean }) =>
+          useChatMessages({ storeMessages: messages, streamingMessageId: null, isSessionIdle: props.isSessionIdle }),
+        { initialProps: { isSessionIdle: false } },
+      )
+      expect(result.current.chatMessages.some((m) => m.type === 'permission-expired-summary')).toBe(false)
+
+      rerender({ isSessionIdle: true })
+      const summaryRow = result.current.chatMessages.find((m) => m.type === 'permission-expired-summary')
+      expect(summaryRow).toBeDefined()
+      expect(result.current.permissionExpiredSummaries.get(summaryRow!.id)?.requestIds).toEqual(['req-1'])
+    })
+
+    it('folds a still-queued follow-up into the running turn instead of splitting it (Critical #1 regression)', () => {
+      const messages = [
+        msg({ id: 'u1', type: 'user_input', content: 'go' }),
+        promptMsg('p1', 'req-1', 'Bash', NOW - 1000),
+        msg({ id: 'u2', type: 'user_input', content: 'queued follow-up' }),
+        promptMsg('p2', 'req-2', 'Write', NOW - 1000),
+      ]
+      const { result } = renderHook(() =>
+        useChatMessages({
+          storeMessages: messages,
+          streamingMessageId: null,
+          stillQueuedMessageIds: new Set(['u2']),
+          isSessionIdle: true,
+        }),
+      )
+      const summaryRows = result.current.chatMessages.filter((m) => m.type === 'permission-expired-summary')
+      expect(summaryRows).toHaveLength(1)
+      const payload = result.current.permissionExpiredSummaries.get(summaryRows[0]!.id)
+      expect(payload).toMatchObject({ turnStartMessageId: 'u1', requestIds: ['req-1', 'req-2'] })
+    })
+  })
 })

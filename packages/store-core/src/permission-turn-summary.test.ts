@@ -133,7 +133,7 @@ describe('getExpiredPermissionTurnSummaries (#7365)', () => {
     expect(getExpiredPermissionTurnSummaries(messages, NOW)).toEqual([])
   })
 
-  it('includes the still-open (current) turn even with no result/next user_input yet', () => {
+  it('the trailing turn is included when isSessionIdle defaults to true (e.g. TranscriptViewer\'s closed conversations)', () => {
     const messages = [
       userInput('u1'),
       prompt('p1', { expiresAt: NOW - 1 }),
@@ -154,5 +154,149 @@ describe('getExpiredPermissionTurnSummaries (#7365)', () => {
 
   it('an empty message list produces no summaries', () => {
     expect(getExpiredPermissionTurnSummaries([], NOW)).toEqual([])
+  })
+})
+
+describe('getExpiredPermissionTurnSummaries — send-while-busy queued follow-ups (#7365 review)', () => {
+  // isSessionIdle is pinned to `true` throughout this block: these tests
+  // isolate ATTRIBUTION (which turn a permission belongs to) from turn-
+  // completion GATING (whether the trailing turn's summary is shown at all),
+  // which has its own dedicated test suite below. "Assume the turn has
+  // ended" lets these assert what the aggregate would contain once it is
+  // actually shown, without coupling the two concerns in one assertion.
+
+  it('(a) the reviewer\'s exact repro: queuing a follow-up mid-turn does not steal a later expiry from the RUNNING turn', () => {
+    const messages = [
+      userInput('u1'),                          // turn 1 starts
+      prompt('p1', { expiresAt: NOW - 1 }),      // turn 1's first tool, expires
+      userInput('u2'),                          // queued follow-up, optimistically appended mid-turn-1
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }), // ALSO turn 1's work — no result seen yet
+    ]
+    const stillQueued = new Set(['u2'])
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, stillQueued, true)
+    // Both expirations belong to the one turn that is actually running (u1) —
+    // NOT split into a u1-summary and a wrongly-started u2-summary.
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      turnStartMessageId: 'u1',
+      requestIds: ['req-p1', 'req-p2'],
+      count: 2,
+    })
+  })
+
+  it('(a) reproduces red without the fix: omitting stillQueuedMessageIds misattributes the second expiry to the queued turn', () => {
+    // Same messages as (a) above, but WITHOUT passing the queued-id set —
+    // this is the exact bug the review reported (2 summaries, the second
+    // wrongly keyed on 'u2'). Pinned here as a regression witness: if this
+    // ever stops failing, `stillQueuedMessageIds` silently stopped mattering.
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, undefined, true)
+    expect(summaries).toHaveLength(2)
+    expect(summaries[1]!.turnStartMessageId).toBe('u2')
+  })
+
+  it('(b) a permission raised in the queued turn AFTER it actually starts is counted in that (now real) turn', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),
+      // u2 has been dequeued by the time this is raised — it is no longer in
+      // stillQueuedMessageIds, so it is a genuine turn boundary.
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, new Set(), true)
+    expect(summaries).toHaveLength(2)
+    expect(summaries[0]).toMatchObject({ turnStartMessageId: 'u1', requestIds: ['req-p1'] })
+    expect(summaries[1]).toMatchObject({ turnStartMessageId: 'u2', requestIds: ['req-p2'] })
+  })
+
+  it('(c) two queued follow-ups both fold into the one running turn', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),                          // queued follow-up #1
+      userInput('u3'),                          // queued follow-up #2, queued before #1 started
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }),
+    ]
+    const stillQueued = new Set(['u2', 'u3'])
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, stillQueued, true)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      turnStartMessageId: 'u1',
+      requestIds: ['req-p1', 'req-p2'],
+      count: 2,
+    })
+  })
+
+  it('(c) once the first of two queued follow-ups starts, the second still folds into IT, not the original turn', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),                          // dequeued — now the real running turn
+      userInput('u3'),                          // still queued behind u2
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }),
+    ]
+    const stillQueued = new Set(['u3'])
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, stillQueued, true)
+    expect(summaries).toHaveLength(2)
+    expect(summaries[0]).toMatchObject({ turnStartMessageId: 'u1', requestIds: ['req-p1'] })
+    expect(summaries[1]).toMatchObject({ turnStartMessageId: 'u2', requestIds: ['req-p2'] })
+  })
+
+  it('a queued id with no expired prompts at all produces no extra summary', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, new Set(['u2']), true)
+    expect(summaries).toEqual([{ turnStartMessageId: 'u1', requestIds: ['req-p1'], tools: ['Bash'], count: 1 }])
+  })
+})
+
+describe('getExpiredPermissionTurnSummaries — turn-completion gating (#7365 review, S3)', () => {
+  it('suppresses the trailing (still-running) turn\'s summary when isSessionIdle is false', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+    ]
+    expect(getExpiredPermissionTurnSummaries(messages, NOW, undefined, false)).toEqual([])
+  })
+
+  it('shows the trailing turn\'s summary once isSessionIdle flips to true (the turn actually ended)', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+    ]
+    expect(getExpiredPermissionTurnSummaries(messages, NOW, undefined, false)).toEqual([])
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, undefined, true)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]!.turnStartMessageId).toBe('u1')
+  })
+
+  it('gates ONLY the trailing turn — an earlier (necessarily already-ended) turn is included regardless', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { expiresAt: NOW - 1 }),
+      userInput('u2'),
+      prompt('p2', { expiresAt: NOW - 1, requestId: 'req-p2' }),
+    ]
+    // isSessionIdle: false means u2 (the trailing turn) is still running and
+    // must be suppressed, but u1 already ended by construction (u2 could not
+    // have started otherwise) and must still appear.
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, undefined, false)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({ turnStartMessageId: 'u1', requestIds: ['req-p1'] })
+  })
+
+  it('a trailing turn with zero expired prompts is unaffected by isSessionIdle either way', () => {
+    const messages = [userInput('u1'), response('r1')]
+    expect(getExpiredPermissionTurnSummaries(messages, NOW, undefined, false)).toEqual([])
+    expect(getExpiredPermissionTurnSummaries(messages, NOW, undefined, true)).toEqual([])
   })
 })

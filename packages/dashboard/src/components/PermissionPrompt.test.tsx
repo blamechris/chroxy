@@ -106,7 +106,13 @@ describe('PermissionPrompt', () => {
     expect(prompt.getAttribute('aria-label')).toMatch(/permission request/i)
     // The description is associated for SR context.
     expect(prompt).toHaveAttribute('aria-describedby', 'perm-desc-req-a11y')
-    expect(document.getElementById('perm-desc-req-a11y')).toBeInTheDocument()
+    const descEl = document.getElementById('perm-desc-req-a11y')
+    expect(descEl).toBeInTheDocument()
+    // #7365 review (S1) — a valid focus target for
+    // PermissionExpiredSummary's jump link: without `tabIndex={-1}`, a plain
+    // `div` is not focusable and `.focus()` silently no-ops for keyboard /
+    // screen-reader users (only the scroll would land).
+    expect(descEl).toHaveAttribute('tabIndex', '-1')
     // The 1s countdown is muted so the assertive region announces the request
     // ONCE on appearance, not re-announcing the ticking time every second.
     expect(screen.getByTestId('perm-countdown')).toHaveAttribute('aria-live', 'off')

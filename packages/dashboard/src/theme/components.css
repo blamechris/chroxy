@@ -4765,7 +4765,9 @@ button.sidebar-token-view-session-row:hover {
 
 .permission-expired-summary-jump:hover,
 .permission-expired-summary-jump:focus-visible {
-  background: rgba(255, 255, 255, 0.06);
+  /* #7365 review (nitpick #6) — token-with-fallback, matching this file's
+     existing convention (line ~1491) rather than a bare raw color. */
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
   outline: none;
 }
 

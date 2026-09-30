@@ -28,10 +28,11 @@ describe('PermissionExpiredSummary (#7365)', () => {
 
   it('renders a working jump link targeting the first expired prompt\'s element', () => {
     // The real anchor the per-prompt marker exposes (PermissionPrompt.tsx's
-    // `id={`perm-desc-${requestId}`}`) — simulated here without mounting the
-    // full prompt component.
+    // `id={`perm-desc-${requestId}`}`, `tabIndex={-1}`) — simulated here
+    // without mounting the full prompt component.
     const target = document.createElement('div')
     target.id = 'perm-desc-req-1'
+    target.tabIndex = -1
     target.scrollIntoView = vi.fn()
     document.body.appendChild(target)
 
@@ -45,9 +46,36 @@ describe('PermissionExpiredSummary (#7365)', () => {
     document.body.removeChild(target)
   })
 
+  // #7365 review (S1) — the jump must move FOCUS, not just scroll the page
+  // into view, or keyboard/screen-reader users get no signal that anything
+  // happened. `.focus()` on a plain `<div>` with no `tabIndex` is a silent
+  // no-op — this only passes because the target below carries the
+  // `tabIndex={-1}` PermissionPrompt.tsx's `.perm-desc` now has.
+  it('moves focus to the jump target (not just scroll) for keyboard/screen-reader users', () => {
+    const target = document.createElement('div')
+    target.id = 'perm-desc-req-1'
+    target.tabIndex = -1
+    target.scrollIntoView = vi.fn()
+    document.body.appendChild(target)
+
+    render(<PermissionExpiredSummary count={1} tools={['Bash']} firstRequestId="req-1" />)
+    fireEvent.click(screen.getByTestId('permission-expired-summary-jump'))
+
+    expect(document.activeElement).toBe(target)
+
+    document.body.removeChild(target)
+  })
+
   it('does not throw when the jump target is not currently mounted (windowed out)', () => {
     render(<PermissionExpiredSummary count={1} tools={['Bash']} firstRequestId="req-missing" />)
     const link = screen.getByTestId('permission-expired-summary-jump')
     expect(() => fireEvent.click(link)).not.toThrow()
+  })
+
+  // Nitpick #7 — the accessible name should name which permission it jumps
+  // to (not just "Jump to prompt") when there are several in the turn.
+  it('gives the jump link an accessible name naming the first expired tool', () => {
+    render(<PermissionExpiredSummary count={2} tools={['Bash', 'Write']} firstRequestId="req-1" />)
+    expect(screen.getByRole('link', { name: /jump to the bash permission prompt/i })).toBeInTheDocument()
   })
 })

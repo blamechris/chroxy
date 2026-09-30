@@ -285,7 +285,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
           {sessionLabel}
         </div>
       )}
-      <div className="perm-desc" id={`perm-desc-${requestId}`}>
+      {/* #7365 review (S1) — `tabIndex={-1}` makes this a valid focus target
+          for `PermissionExpiredSummary`'s jump link: it is a plain `div`
+          (not natively focusable), so without this `.focus()` silently
+          no-ops for keyboard/screen-reader users — only the visual scroll
+          would land, never the focus. `-1` keeps it out of normal Tab
+          order (it's not a control), reachable only via `.focus()`. */}
+      <div className="perm-desc" id={`perm-desc-${requestId}`} tabIndex={-1}>
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
 
