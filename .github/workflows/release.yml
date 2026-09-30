@@ -147,7 +147,13 @@ jobs:
 
   docker:
     name: Docker Image
-    needs: test
+    # #8165 — this job PUSHES to GHCR (docker/build-push-action, push: true)
+    # and moves the floating :{major}.{minor} tag, so it must never start
+    # before verify-artifacts has passed. `needs: test` alone let this run in
+    # parallel with verify-artifacts and publish the image even when the
+    # packed npm artifacts were broken and github-release (already gated on
+    # verify-artifacts) was then skipped — a partial publish.
+    needs: [test, verify-artifacts]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -182,7 +188,11 @@ jobs:
 
   desktop-macos:
     name: Desktop (macOS)
-    needs: test
+    # #8165 — this build feeds github-release's artifact download directly
+    # (and github-release already needs verify-artifacts), but gating it here
+    # too means a broken publish artifact is caught BEFORE this expensive
+    # native build runs rather than after.
+    needs: [test, verify-artifacts]
     runs-on: macos-latest
     permissions:
       contents: read
@@ -328,7 +338,10 @@ jobs:
 
   desktop-windows:
     name: Desktop (Windows)
-    needs: test
+    # #8165 — same reasoning as desktop-macos above: gated on verify-artifacts
+    # so a broken publish artifact is caught before this expensive native
+    # build runs, not just after, at github-release.
+    needs: [test, verify-artifacts]
     runs-on: windows-latest
     permissions:
       contents: read
