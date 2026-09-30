@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`scripts/bump-version.sh` now passes every path and the version string to
+  `node -e` through the environment instead of splicing them into JS program
+  text (#7237).** Every `node -e "..."` block — reading the current version,
+  rewriting each package's `package.json`/`app.json`/`tauri.conf.json`, the
+  workspace `@chroxy/*` dependency ranges, `package-lock.json`, and the
+  CLAUDE.md version references — built its JS source by interpolating shell
+  variables (`$SERVER_PKG`, `$CLAUDE_MD`, `$TAURI_CONF`, `$ROOT_LOCK`,
+  `$NEW_VERSION`) straight into single-quoted JS string literals, the same
+  shape #7234's AGENTS.md verification had already moved off of. A checkout
+  path containing a single quote broke every one of these with a JS
+  `SyntaxError` before a single file was written; a crafted path could have
+  gone further. Every `-e` program is now a single-quoted shell argument (so
+  the shell performs no expansion on it at all, regardless of content) and
+  reads its inputs via `process.env.*`. `scripts/__tests__/bump-version.test.sh`
+  gained a case that runs a full bump against a fixture path containing both
+  a space and a single quote, and a static guard that fails if any `node -e`
+  invocation in `bump-version.sh` is not single-quoted (and that refuses to
+  pass when it finds no invocation at all). The Cargo.toml `[package]` version
+  rewrite and its verification had the same shape in `sed` and `grep`: both
+  now use `awk` with the versions read from `ENVIRON`.
+
 ## [0.11.1] - 2026-09-30
 
 ### Added

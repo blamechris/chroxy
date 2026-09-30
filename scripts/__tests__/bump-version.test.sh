@@ -30,7 +30,7 @@ BUMP="$REPO_ROOT/scripts/bump-version.sh"
 # case executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=30
+EXPECTED_CASES=32
 
 PASS=0
 FAIL=0
@@ -1083,6 +1083,164 @@ STUB
   return 0
 }
 
+# --- awkward absolute path: space AND single quote (#7237) ------------------
+
+# The bump must succeed from a checkout whose absolute path contains BOTH a
+# space and a single quote. Before #7237, every `node -e "..."` block spliced
+# shell variables straight into JS string literals (`const file = '$CLAUDE_MD'`,
+# `require('$SERVER_PKG')`, etc.) — a single quote in the path breaks out of
+# the literal with a JS SyntaxError before the bump writes a single file.
+# Verified against the UNMODIFIED (pre-#7237) script: exit 1, zero files
+# touched, `SyntaxError: missing ) after argument list` from the very first
+# node -e call in the script (reading CURRENT off SERVER_PKG).
+test_bump_succeeds_at_awkward_path_with_space_and_quote() {
+  local base dir
+  base=$(mktemp -d)
+  # Clean up the PARENT ($base), never a path built from $dir directly — $dir
+  # itself contains a literal single quote, and wrapping an already-quote-
+  # bearing value in more shell quoting is exactly the class of bug this test
+  # exists to catch.
+  trap "rm -rf '$base'" RETURN
+
+  dir="$base/bump test's dir"
+  mkdir -p "$dir"
+
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  install_agents_generator "$dir" || return 1
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+  write_claude_md "$dir/CLAUDE.md" "0.5.7"
+
+  local output rc
+  output=$(cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0 2>&1)
+  rc=$?
+
+  [ "$rc" -eq 0 ] || {
+    echo "    bump failed at an awkward path (space + single quote): exit $rc" >&2
+    echo "    output: $output" >&2
+    return 1
+  }
+
+  # Every version-bearing file actually landed on 0.6.0 — "exit 0" alone
+  # would also be true of a script that silently touched nothing.
+  local f
+  for f in package.json packages/server/package.json packages/app/package.json \
+           packages/desktop/package.json packages/protocol/package.json \
+           packages/store-core/package.json packages/dashboard/package.json \
+           packages/claude-hooks/package.json packages/design-tokens/package.json \
+           package-lock.json; do
+    grep -qE '"version": ?"0\.6\.0"' "$dir/$f" || {
+      echo "    $f was not updated to 0.6.0" >&2
+      return 1
+    }
+  done
+  grep -qE '"version": ?"0\.6\.0"' "$dir/packages/app/app.json" || {
+    echo "    packages/app/app.json (expo) was not updated to 0.6.0" >&2
+    return 1
+  }
+  grep -qE '"version": ?"0\.6\.0"' "$dir/packages/desktop/src-tauri/tauri.conf.json" || {
+    echo "    tauri.conf.json was not updated to 0.6.0" >&2
+    return 1
+  }
+  grep -q '^\*\*Current Status (v0.6.0):\*\*' "$dir/CLAUDE.md" || {
+    echo "    CLAUDE.md Current Status header was not updated" >&2
+    return 1
+  }
+  grep -q '^\*Version: 0.6.0\*$' "$dir/CLAUDE.md" || {
+    echo "    CLAUDE.md Version footer was not updated" >&2
+    return 1
+  }
+  grep -q 'AUTO-GENERATED FROM CLAUDE.md' "$dir/AGENTS.md" || {
+    echo "    AGENTS.md was not regenerated" >&2
+    return 1
+  }
+  grep -q "^## \[0.6.0\] - " "$dir/CHANGELOG.md" || {
+    echo "    CHANGELOG.md was not scaffolded for 0.6.0" >&2
+    return 1
+  }
+
+  # Cargo.toml / Cargo.lock, scoped to their respective stanzas the same way
+  # the existing lockfile tests do (a bare grep would false-pass on the decoy
+  # dependency build_fake_repo seeds at the same starting version).
+  awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$dir/packages/desktop/src-tauri/Cargo.toml" \
+    | grep -q '^version = "0.6.0"' || {
+    echo "    Cargo.toml [package] version was not updated" >&2
+    return 1
+  }
+  awk '
+    /^\[\[package\]\]/ { in_pkg = 1; is_target = 0; next }
+    in_pkg && /^name = "chroxy-desktop"$/ { is_target = 1; next }
+    in_pkg && is_target && /^version = "/ {
+      sub(/^version = "/, ""); sub(/".*$/, ""); print; exit
+    }
+    /^$/ { in_pkg = 0; is_target = 0 }
+  ' "$dir/packages/desktop/src-tauri/Cargo.lock" | grep -qx "0.6.0" || {
+    echo "    Cargo.lock chroxy-desktop stanza was not updated" >&2
+    return 1
+  }
+}
+
+# --- no shell expansion inside `node -e` program text (#7237) ---------------
+#
+# Every node -e / node --input-type=module -e invocation in bump-version.sh
+# must pass its program as a SINGLE-quoted shell argument. Single quotes are
+# the one POSIX shell quoting form that admits no expansion of any kind
+# inside — no parameter expansion (`$VAR`), no command substitution
+# (`$(...)`), no arithmetic expansion (`$((...))`) — regardless of what
+# characters the program text itself contains. That is what makes the QUOTE
+# DELIMITER a sound thing to check, rather than grepping the program text for
+# a literal `$`: this file's OWN CLAUDE.md footer pattern legitimately
+# contains a bare `$` (`/(\*$)/m`, an end-of-line regex anchor), and a naive
+# "any $ is bad" scan would flag that correctness-critical anchor as a
+# violation while missing that the real hazard was never "a $ character
+# exists" but "the shell is still willing to expand one when it sees it" —
+# which single-quoting forecloses categorically, independent of content.
+#
+# Scope/limits, stated rather than assumed (docs/false-safety-guards.md): this
+# is a structural check, not a full shell parser. It is sound for the exact
+# invariant #7237 establishes — each `-e` argument is one contiguous
+# single-quoted string — but it does not prove that nothing LATER in the same
+# shell "word" breaks back out into an expandable context (e.g. a
+# hypothetical `-e 'foo'"$INJECTED"'bar'`, three concatenated tokens forming
+# one argument). A blanket whole-file scan for adjacent `'"`/`"'` was tried
+# and rejected: it false-positives on unrelated, already-safe code elsewhere
+# in this script (the `'$arg'` quoting in the --unknown-flag error message,
+# and this very comment block's own prose quoting the old `printf "'%s',"`
+# pattern) — exactly the "pattern that also matches content it wasn't meant
+# to" failure mode docs/false-safety-guards.md warns about. Catching the
+# concatenation shape soundly would need a real shell-quote-state tracker,
+# which grep/awk cannot express here without either missing real cases or
+# flagging safe ones — so this check does not attempt it, rather than
+# shipping one that only looks like it does.
+#
+# Two more shapes it does not see (review on #8158): an invocation split
+# across lines (`node \` with `-e "..."` on the next line), and node reached
+# through a variable (`"$NODE" -e "..."`). Neither appears in the script
+# today. And because a filter that matches nothing passes, the check first
+# requires that it found at least one invocation at all.
+test_no_shell_expansion_in_node_e_program_text() {
+  local self="$BUMP"
+  local offenders total
+
+  total="$(grep -cE -- 'node([[:space:]]+--input-type=module)?[[:space:]]+-e[[:space:]]' "$self" || true)"
+  if [ "${total:-0}" -eq 0 ]; then
+    echo "    found no node -e invocation in $self — the pattern matches nothing, so this check would pass vacuously" >&2
+    return 1
+  fi
+
+  offenders="$(grep -nE -- 'node([[:space:]]+--input-type=module)?[[:space:]]+-e[[:space:]]' "$self" \
+    | grep -vE -- "-e[[:space:]]+'" || true)"
+
+  if [ -n "$offenders" ]; then
+    echo "    found a node -e invocation NOT delimited by a single quote in $self:" >&2
+    echo "$offenders" >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- pipefail + SIGPIPE self-test (#7892) -------------------------------------
 #
 # This harness runs under `set -uo pipefail` (line 14). Every check above used
@@ -1424,6 +1582,10 @@ run_test "an absent AGENTS.md fails the bump rather than reading as nothing-to-c
   test_agents_md_fails_when_mirror_is_absent
 run_test "a generator that exits during IMPORT fails the bump (#7231 regression)" \
   test_agents_md_fails_when_generator_exits_during_import
+run_test "bump succeeds at an awkward path containing a space and a single quote (#7237)" \
+  test_bump_succeeds_at_awkward_path_with_space_and_quote
+run_test "no node -e invocation is shell-expandable — every one is single-quoted (#7237)" \
+  test_no_shell_expansion_in_node_e_program_text
 run_test "grep -q checks in this harness survive SIGPIPE under pipefail on a >128KB haystack (#7892)" \
   test_pipefail_sigpipe_self_test
 run_test "no unsafe producer-piped-into-grep pattern remains in this file" \

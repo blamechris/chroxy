@@ -64,6 +64,17 @@ CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 ROOT_LOCK="$ROOT/package-lock.json"
 CHANGELOG="$ROOT/CHANGELOG.md"
 
+# Exported so every `node -e` block below reads these paths via
+# process.env.* instead of having the shell splice them into JS program
+# text. A path containing a single quote (or worse, a `$(...)`) used to
+# break the JSON.parse/writeFileSync calls with a JS SyntaxError at best and
+# be a code-injection vector at worst (#7237) — env vars carry arbitrary
+# bytes (short of NUL) with no shell-quoting/JS-string-literal interaction
+# at all.
+export SERVER_PKG APP_PKG APP_JSON ROOT_PKG DESKTOP_PKG PROTOCOL_PKG \
+  STORE_CORE_PKG DASHBOARD_PKG CLAUDE_HOOKS_PKG DESIGN_TOKENS_PKG \
+  CLAUDE_MD TAURI_CONF ROOT_LOCK
+
 # Clean up any orphan .tmp siblings created by the awk-into-place pattern
 # below. With `set -euo pipefail` an awk failure (disk full, killed process,
 # permission flip) aborts before the `mv`, leaving a stale `.tmp` next to
@@ -87,8 +98,10 @@ cleanup_tmp_files() {
 }
 trap cleanup_tmp_files EXIT
 
-# Read current version from server package.json (single source of truth)
-CURRENT=$(node -e "console.log(require('$SERVER_PKG').version)")
+# Read current version from server package.json (single source of truth).
+# SERVER_PKG reaches node through the environment (exported above), never
+# interpolated into the -e program text — see #7237.
+CURRENT=$(node -e 'console.log(require(process.env.SERVER_PKG).version)')
 
 if [ "${#POSITIONAL[@]}" -gt 1 ]; then
   echo "Error: Too many positional arguments. Expected at most one version." >&2
@@ -109,87 +122,106 @@ if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$NEW_VERSION"; then
   exit 1
 fi
 
+# Exported for the same reason as the path variables above: every `node -e`
+# block reads it via process.env.NEW_VERSION rather than having it spliced
+# into JS program text. Having just passed the format check above does not
+# change that — "validated" and "safe to interpolate into a program's
+# source text" are different claims, and only the environment sidesteps
+# having to prove the second one (#7237).
+export NEW_VERSION
+
 echo "Bumping version: $CURRENT → $NEW_VERSION"
 
-# Update server package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$SERVER_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$SERVER_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update server package.json. SERVER_PKG and NEW_VERSION reach node through
+# the environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.SERVER_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.SERVER_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update app package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$APP_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$APP_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update app package.json. Paths/version reach node via the environment,
+# never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.APP_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.APP_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update app.json (Expo config — shown as "App Version" in mobile app)
-node -e "
-  const fs = require('fs');
-  const app = JSON.parse(fs.readFileSync('$APP_JSON', 'utf-8'));
-  app.expo.version = '$NEW_VERSION';
-  fs.writeFileSync('$APP_JSON', JSON.stringify(app, null, 2) + '\n');
-"
+# Update app.json (Expo config — shown as "App Version" in mobile app).
+# Paths/version reach node via the environment, never interpolated into the
+# -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const app = JSON.parse(fs.readFileSync(process.env.APP_JSON, "utf-8"));
+  app.expo.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.APP_JSON, JSON.stringify(app, null, 2) + "\n");
+'
 
-# Update root package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$ROOT_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$ROOT_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update root package.json. Paths/version reach node via the environment,
+# never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.ROOT_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.ROOT_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update desktop package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$DESKTOP_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$DESKTOP_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update desktop package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.DESKTOP_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.DESKTOP_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update protocol package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$PROTOCOL_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$PROTOCOL_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update protocol package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.PROTOCOL_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.PROTOCOL_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update store-core package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$STORE_CORE_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$STORE_CORE_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update store-core package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.STORE_CORE_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.STORE_CORE_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update dashboard package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$DASHBOARD_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$DASHBOARD_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update dashboard package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.DASHBOARD_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.DASHBOARD_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update claude-hooks package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$CLAUDE_HOOKS_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$CLAUDE_HOOKS_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update claude-hooks package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.CLAUDE_HOOKS_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.CLAUDE_HOOKS_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
-# Update design-tokens package.json
-node -e "
-  const fs = require('fs');
-  const pkg = JSON.parse(fs.readFileSync('$DESIGN_TOKENS_PKG', 'utf-8'));
-  pkg.version = '$NEW_VERSION';
-  fs.writeFileSync('$DESIGN_TOKENS_PKG', JSON.stringify(pkg, null, 2) + '\n');
-"
+# Update design-tokens package.json. Paths/version reach node via the
+# environment, never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.env.DESIGN_TOKENS_PKG, "utf-8"));
+  pkg.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.DESIGN_TOKENS_PKG, JSON.stringify(pkg, null, 2) + "\n");
+'
 
 # Re-point every workspace-internal @chroxy/* dependency range at the new
 # version. These MUST move with the version: the ranges are bounded (^X.Y.Z),
@@ -202,27 +234,43 @@ node -e "
 # is newest on npm, so a published server can acquire a breaking sibling long
 # after release. A bound without this rewrite would break local linking on
 # the next bump. Both halves are required; neither works alone.
-node -e "
-  const fs = require('fs');
-  const files = [$(printf "'%s'," "$ROOT_PKG" "$SERVER_PKG" "$APP_PKG" "$DESKTOP_PKG" "$PROTOCOL_PKG" "$STORE_CORE_PKG" "$DASHBOARD_PKG" "$CLAUDE_HOOKS_PKG" "$DESIGN_TOKENS_PKG")];
-  const range = '^$NEW_VERSION';
+#
+# Every path below reaches node via the environment (all exported above) —
+# the previous version of this block built the `files` array by shelling out
+# to `printf "'%s',"` and splicing the quoted result straight into the -e
+# program text, which had the same single-quote-breaks-out-of-a-JS-string-
+# literal problem as every other block here (#7237).
+node -e '
+  const fs = require("fs");
+  const files = [
+    process.env.ROOT_PKG,
+    process.env.SERVER_PKG,
+    process.env.APP_PKG,
+    process.env.DESKTOP_PKG,
+    process.env.PROTOCOL_PKG,
+    process.env.STORE_CORE_PKG,
+    process.env.DASHBOARD_PKG,
+    process.env.CLAUDE_HOOKS_PKG,
+    process.env.DESIGN_TOKENS_PKG,
+  ];
+  const range = "^" + process.env.NEW_VERSION;
   let n = 0;
   for (const f of files) {
     if (!fs.existsSync(f)) continue;
-    const pkg = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    const pkg = JSON.parse(fs.readFileSync(f, "utf-8"));
     let changed = false;
-    for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
+    for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
       for (const dep of Object.keys(pkg[field] || {})) {
-        if (!dep.startsWith('@chroxy/')) continue;
+        if (!dep.startsWith("@chroxy/")) continue;
         if (pkg[field][dep] === range) continue;
         pkg[field][dep] = range;
         changed = true; n++;
       }
     }
-    if (changed) fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + '\n');
+    if (changed) fs.writeFileSync(f, JSON.stringify(pkg, null, 2) + "\n");
   }
-  console.log('  workspace @chroxy/* dependency ranges -> ' + range + ' (' + n + ' updated)');
-"
+  console.log("  workspace @chroxy/* dependency ranges -> " + range + " (" + n + " updated)");
+'
 
 # Update the two version references in CLAUDE.md's prose, then regenerate
 # AGENTS.md from it (#7183).
@@ -235,42 +283,52 @@ node -e "
 # Only touched when the file is present, so the script still runs against a
 # minimal tree (the bump-version test fixtures build one).
 if [ -f "$CLAUDE_MD" ]; then
-  node -e "
-    const fs = require('fs');
-    const file = '$CLAUDE_MD';
-    const version = '$NEW_VERSION';
-    let src = fs.readFileSync(file, 'utf-8');
+  # CLAUDE_MD and NEW_VERSION reach node via the environment (exported
+  # above), never interpolated into the -e program text — a path containing
+  # a single quote used to break out of the `'$CLAUDE_MD'` JS string literal
+  # with a SyntaxError (#7237). The footer pattern's trailing `$` is a bare,
+  # unescaped end-of-line regex anchor: with the program text now
+  # single-quoted, the shell performs no backslash processing on it at all,
+  # so nothing needs escaping to keep it literal the way the old
+  # double-quoted `\$` did (bash's double-quote rules turned that `\$` into
+  # a bare `$` before node ever saw it — the same character this now spells
+  # directly).
+  node -e '
+    const fs = require("fs");
+    const file = process.env.CLAUDE_MD;
+    const version = process.env.NEW_VERSION;
+    let src = fs.readFileSync(file, "utf-8");
     const edits = [
-      // '**Current Status (v0.11.0):**' in the Project Overview
-      [/(\*\*Current Status \(v)\d+\.\d+\.\d+(\):\*\*)/, version, 'the Current Status header'],
-      // '*Version: 0.11.0*' in the footer
-      [/(^\*Version: )\d+\.\d+\.\d+(\*\$)/m, version, 'the Version footer'],
+      // "**Current Status (v0.11.0):**" in the Project Overview
+      [/(\*\*Current Status \(v)\d+\.\d+\.\d+(\):\*\*)/, version, "the Current Status header"],
+      // "*Version: 0.11.0*" in the footer
+      [/(^\*Version: )\d+\.\d+\.\d+(\*$)/m, version, "the Version footer"],
     ];
     // A pattern that matches NOTHING must fail, not be skipped. Skipping is a
-    // fail-open on the exact scenario this guards: if CLAUDE.md's line format
+    // fail-open on the exact scenario this guards: if the CLAUDE.md line format
     // is reworded, the rewrite quietly does nothing, the script reports
     // success, and the version silently drifts again — which is how these two
     // lines got two releases stale in the first place.
     const missing = edits.filter(([re]) => !re.test(src)).map(([, , label]) => label);
     if (missing.length) {
-      console.error('Error: ' + file + ' does not contain the expected version reference(s): ' + missing.join(', '));
-      console.error('       The line format changed. Update the patterns in scripts/bump-version.sh');
-      console.error('       rather than letting the version drift silently (#7183).');
+      console.error("Error: " + file + " does not contain the expected version reference(s): " + missing.join(", "));
+      console.error("       The line format changed. Update the patterns in scripts/bump-version.sh");
+      console.error("       rather than letting the version drift silently (#7183).");
       process.exit(1);
     }
     for (const [re, v] of edits) src = src.replace(re, (_m, a, b) => a + v + b);
     fs.writeFileSync(file, src);
     // Verify after write, mirroring the Cargo.toml handling.
-    const after = fs.readFileSync(file, 'utf-8');
+    const after = fs.readFileSync(file, "utf-8");
     for (const [re, , label] of edits) {
       const m = after.match(re);
       if (!m || !m[0].includes(version)) {
-        console.error('Error: failed to update ' + label + ' in ' + file);
+        console.error("Error: failed to update " + label + " in " + file);
         process.exit(1);
       }
     }
-    console.log('  CLAUDE.md version references -> ' + version + ' (' + edits.length + ' line(s))');
-  "
+    console.log("  CLAUDE.md version references -> " + version + " (" + edits.length + " line(s))");
+  '
 
   # AGENTS.md is generated from CLAUDE.md and CI (Scripts Tests) fails on drift,
   # so regenerating here is not optional.
@@ -387,13 +445,14 @@ if [ -f "$CLAUDE_MD" ]; then
   fi
 fi
 
-# Update tauri.conf.json
-node -e "
-  const fs = require('fs');
-  const conf = JSON.parse(fs.readFileSync('$TAURI_CONF', 'utf-8'));
-  conf.version = '$NEW_VERSION';
-  fs.writeFileSync('$TAURI_CONF', JSON.stringify(conf, null, 2) + '\n');
-"
+# Update tauri.conf.json. Paths/version reach node via the environment,
+# never interpolated into the -e program text (#7237).
+node -e '
+  const fs = require("fs");
+  const conf = JSON.parse(fs.readFileSync(process.env.TAURI_CONF, "utf-8"));
+  conf.version = process.env.NEW_VERSION;
+  fs.writeFileSync(process.env.TAURI_CONF, JSON.stringify(conf, null, 2) + "\n");
+'
 
 # Update Cargo.toml (line-based replacement to preserve formatting)
 # Read the Cargo.toml version from [package] section only — avoid matching dependency version lines
@@ -402,11 +461,33 @@ if [ -z "$CARGO_CURRENT" ]; then
   echo "Error: Failed to parse current version from $CARGO_TOML [package] section" >&2
   exit 1
 fi
-sed -i.bak "/^\[package\]/,/^\[/s/^version = \"$CARGO_CURRENT\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
-rm -f "$CARGO_TOML.bak"
+# Both versions reach awk through the environment (ENVIRON, which applies no
+# escape processing) rather than being spliced into a sed program: the same
+# #7237 rule as the `node -e` blocks. CARGO_CURRENT is read from the file, so it
+# is not format-validated, and a literal prefix match (index == 1) replaces
+# sed's regex, where an unescaped `.` in the version matched any character.
+track_tmp "$CARGO_TOML.tmp"
+CARGO_CUR="$CARGO_CURRENT" CARGO_NEW="$NEW_VERSION" awk '
+  BEGIN { old = "version = \"" ENVIRON["CARGO_CUR"] "\""; repl = "version = \"" ENVIRON["CARGO_NEW"] "\"" }
+  /^\[package\]/ { in_pkg = 1; print; next }
+  /^\[/ { in_pkg = 0 }
+  in_pkg && index($0, old) == 1 { $0 = repl substr($0, length(old) + 1) }
+  { print }
+' "$CARGO_TOML" > "$CARGO_TOML.tmp" && mv "$CARGO_TOML.tmp" "$CARGO_TOML"
 # Verify the replacement succeeded — scope check to [package] section to avoid false-passing
 # on a dependency that happens to share the same version string
-CARGO_VERIFY=$(awk '/^\[package\]/{f=1; next} /^\[/{f=0} f' "$CARGO_TOML" | grep -c "^version = \"$NEW_VERSION\"" || true)
+# The expected line is compared as a literal prefix in awk, with the version
+# read from ENVIRON. It used to be a grep regex built from $NEW_VERSION: a
+# value that passed the line-based format check but carried a newline and a
+# long tail (the #7907 padded-argument test) became a ~100KB pattern that GNU
+# grep exhausted memory compiling, which is how the Linux CI runner died.
+CARGO_VERIFY=$(CARGO_NEW="$NEW_VERSION" awk '
+  BEGIN { want = "version = \"" ENVIRON["CARGO_NEW"] "\"" }
+  /^\[package\]/ { f = 1; next }
+  /^\[/ { f = 0 }
+  f && index($0, want) == 1 { n++ }
+  END { print n + 0 }
+' "$CARGO_TOML")
 if [ "$CARGO_VERIFY" -ne 1 ]; then
   echo "Error: Failed to update version in $CARGO_TOML [package] section" >&2
   exit 1
@@ -428,23 +509,27 @@ fi
 # (packages/desktop/scripts/derive-server-lockfile.mjs), so it can never go
 # stale the way a second committed copy did.
 if [ -f "$ROOT_LOCK" ]; then
-  node -e "
-    const fs = require('fs');
-    const lock = JSON.parse(fs.readFileSync('$ROOT_LOCK', 'utf-8'));
-    lock.version = '$NEW_VERSION';
+  # ROOT_LOCK and NEW_VERSION reach node via the environment, never
+  # interpolated into the -e program text (#7237).
+  node -e '
+    const fs = require("fs");
+    const lockPath = process.env.ROOT_LOCK;
+    const version = process.env.NEW_VERSION;
+    const lock = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    lock.version = version;
     if (lock.packages) {
-      if (lock.packages['']) {
-        lock.packages[''].version = '$NEW_VERSION';
+      if (lock.packages[""]) {
+        lock.packages[""].version = version;
       }
       for (const key of Object.keys(lock.packages)) {
         // Only rewrite workspace entries (packages/<name>), never their nested node_modules paths.
-        if (key.startsWith('packages/') && !key.includes('/node_modules/')) {
-          lock.packages[key].version = '$NEW_VERSION';
+        if (key.startsWith("packages/") && !key.includes("/node_modules/")) {
+          lock.packages[key].version = version;
         }
       }
     }
-    fs.writeFileSync('$ROOT_LOCK', JSON.stringify(lock, null, 2) + '\n');
-  "
+    fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + "\n");
+  '
 fi
 
 # iOS/Android native version: nothing to sync here. Both native projects are
