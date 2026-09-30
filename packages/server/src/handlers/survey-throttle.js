@@ -117,6 +117,37 @@
  * opens its own independent instance of this gate, and a per-instance prune
  * added to only one of them would be exactly the `docs/false-safety-guards.md`
  * "a guard wired to only some of its callers" shape.
+ *
+ * ## A `forget()` + reused-id straggler cannot write through into the new incarnation (#8094)
+ *
+ * `commit()`'s write-through guard (`cur.snapshotAt !== null && cur.snapshotAt
+ * >= myAt`) orders write-throughs by `snapshotAt` alone, and a record with NO
+ * reading yet (`snapshotAt: null`) passes it unconditionally — that escape
+ * hatch is what lets the FIRST-ever survey of a session write through onto a
+ * record that has not committed anything of its own (the #7450 scope
+ * addition, see above). But `forget()` (a session_destroyed prune) deletes a
+ * record outright, and a session id can be REUSED afterward (`preserveId`
+ * restore/rebind) — the new admission's record also starts with `snapshotAt:
+ * null`. A survey admitted under the FORGOTTEN (prior) incarnation that
+ * finally resolves after the reuse then satisfies the same guard: from
+ * `commit()`'s point of view it is indistinguishable from an ordinary
+ * straggler writing through onto its own still-live successor. Nothing in
+ * `.at`/`.token` tells "superseded, same session" apart from "superseded by a
+ * forget()+reuse, a DIFFERENT incarnation" — both look like "some earlier
+ * admission, now superseded."
+ *
+ * Every record therefore also carries a `lineage` — a fresh, unique marker
+ * that a new admission COPIES from `prior` when one exists (an ordinary
+ * supersede: the session is still live, so the incarnation is unchanged) and
+ * MINTS FRESH only when there is no `prior` to copy from, which happens
+ * exactly when the key was just `forget()`-ed. `commit()`'s write-through
+ * additionally requires `cur.lineage === myLineage`: a straggler from a
+ * forgotten incarnation carries the OLD lineage forward in its own closure,
+ * so it can never match a freshly-minted one, however the `snapshotAt`
+ * ordering alone would have let it through. Lineage lives only inside a
+ * record (carried forward exactly like `.token`), so it does not reintroduce
+ * the unbounded map #7450 removed — it costs nothing once the record itself
+ * is gone.
  */
 
 /**
@@ -157,7 +188,7 @@ const throttleInstances = new Set()
 export function createSurveyThrottle() {
   /**
    * WeakMap<owner, Map<key, {
-   *   at: number, token: object, snapshot: *, snapshotAt: number|null
+   *   at: number, token: object, lineage: object, snapshot: *, snapshotAt: number|null
    * }>>
    *
    * `token` is a fresh, unique marker minted per `open()` call — see the
@@ -165,6 +196,14 @@ export function createSurveyThrottle() {
    * section (#8091). A record's `token` is carried forward by `commit()`'s
    * write-through and by `rollback()`'s restore; it changes ONLY when a NEW
    * `open()` call supersedes the current admission.
+   *
+   * `lineage` is a fresh, unique marker minted only when an admission has NO
+   * `prior` record to copy it from — i.e. right after a `forget()` — and
+   * copied forward from `prior` otherwise. See the module doc's "a forget() +
+   * reused-id straggler cannot write through" section (#8094). Distinct from
+   * `token`: `token` identifies the CURRENT admission (changes on every
+   * supersede); `lineage` identifies the INCARNATION (changes only across a
+   * forget()+reuse).
    */
   const byOwner = new WeakMap()
 
@@ -199,10 +238,15 @@ export function createSurveyThrottle() {
       // record's own `.at` — so a later write-through (see `commit()`) can
       // tell a genuinely newer cached reading apart from one merely carried
       // forward under a more recent window. `token` is this admission's own
-      // fresh identity — see the module doc (#8091).
+      // fresh identity — see the module doc (#8091). `lineage` identifies the
+      // INCARNATION this admission belongs to: copied from `prior` when one
+      // exists (still the same, live session) and minted fresh only when
+      // there is none (the key was just `forget()`-ed — a reused id starts a
+      // new incarnation) — see the module doc (#8094).
       const myAt = nowMs
       const token = {}
-      records.set(key, { at: myAt, token, snapshot: prior?.snapshot ?? null, snapshotAt: prior?.snapshotAt ?? null })
+      const lineage = prior?.lineage ?? {}
+      records.set(key, { at: myAt, token, lineage, snapshot: prior?.snapshot ?? null, snapshotAt: prior?.snapshotAt ?? null })
       return {
         admitted: true,
         commit(snapshot, opts) {
@@ -223,6 +267,14 @@ export function createSurveyThrottle() {
           // nothing to write to, and recreating the entry would resurrect a
           // record for a session that no longer exists.
           if (!cur) return
+          // The record can also belong to a DIFFERENT incarnation than the
+          // one this survey was admitted under: a forget() + reused-id
+          // straggler passes every check below (its `cur` exists, and a
+          // fresh incarnation's `snapshotAt` is null, same as an ordinary
+          // not-yet-committed successor) unless lineage is checked explicitly
+          // (#8094). This must run BEFORE the snapshotAt guard, which cannot
+          // tell the two cases apart on its own.
+          if (cur.lineage !== lineage) return
           // One rule, whether this is the common (untouched-since-admission)
           // case or a write-through onto a record someone else has since
           // superseded: never let a reading older than what is already
@@ -233,12 +285,12 @@ export function createSurveyThrottle() {
           // case. `>=`, not `>` — an EXACT tie keeps the CURRENT reading
           // (pinned by the "S3" test in survey-throttle.test.js).
           if (cur.snapshotAt !== null && cur.snapshotAt >= myAt) return
-          // REPLACE, never mutate in place (#8091) — carrying `cur.token` and
-          // `cur.at` forward unchanged is what lets a later `rollback()` (see
-          // below) still recognise this slot as belonging to whichever
-          // admission currently owns it, however the SNAPSHOT has been
-          // enriched since.
-          records.set(key, { at: cur.at, token: cur.token, snapshot, snapshotAt: myAt })
+          // REPLACE, never mutate in place (#8091) — carrying `cur.token`,
+          // `cur.lineage` and `cur.at` forward unchanged is what lets a later
+          // `rollback()` (see below) still recognise this slot as belonging
+          // to whichever admission currently owns it, however the SNAPSHOT
+          // has been enriched since.
+          records.set(key, { at: cur.at, token: cur.token, lineage: cur.lineage, snapshot, snapshotAt: myAt })
         },
         rollback() {
           const cur = records.get(key)
@@ -261,6 +313,14 @@ export function createSurveyThrottle() {
           records.set(key, {
             at: prior ? prior.at : -Infinity,
             token: prior ? prior.token : {},
+            // Restore `prior`'s lineage along with its token when there is a
+            // `prior` to revert to. When there is none, this admission was
+            // itself the first of a fresh incarnation, so any survivor
+            // snapshot came from a write-through that already had to match
+            // THIS lineage (#8094) — keep it rather than minting yet another
+            // one, which would strand the survivor behind a lineage nothing
+            // still admitted holds.
+            lineage: prior ? prior.lineage : lineage,
             snapshot: survivor.snapshot,
             snapshotAt: survivor.snapshotAt,
           })

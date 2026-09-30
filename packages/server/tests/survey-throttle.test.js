@@ -447,15 +447,18 @@ describe('S3 — the write-through recency guard\'s tie-break is pinned', () => 
     // The review's own mutant (`>=` -> `>`) survived the full targeted suite
     // (191/191) because every existing test compares clearly-ordered
     // timestamps. Constructing an exact tie legitimately (via the public API)
-    // needs two DIFFERENT admissions that share one admission timestamp —
-    // `forget()` (a session_destroyed prune) resets the key so a second
-    // admission can reuse the same tick a first one used.
+    // needs two DIFFERENT admissions of the SAME incarnation that share one
+    // admission timestamp — a zero-width window admits a second survey on
+    // the very tick the first one used. (This test used to build the tie with
+    // `forget()` + reuse; since #8094 that path is rejected earlier by the
+    // lineage check and never reaches the tie-break, so the `>` mutant would
+    // have survived it.)
     const throttle = createSurveyThrottle()
     const owner = {}
 
-    const A = throttle.open(owner, 'sess-1', 5_000, 5_000)
-    throttle.forget(owner, 'sess-1')
-    const B = throttle.open(owner, 'sess-1', 5_000, 5_000) // same tick as A, on a fresh key
+    const A = throttle.open(owner, 'sess-1', 5_000, 0)
+    const B = throttle.open(owner, 'sess-1', 5_000, 0) // same tick, same incarnation, supersedes A
+    assert.equal(B.admitted, true, 'sanity: a zero-width window admits a second survey on the same tick')
 
     B.commit({ id: 'B (current)' }, { replayable: true }) // snapshotAt becomes exactly 5000
 
@@ -465,5 +468,76 @@ describe('S3 — the write-through recency guard\'s tie-break is pinned', () => 
 
     const after = throttle.open(owner, 'sess-1', 5_500, 5_000)
     assert.deepEqual(after.cached, { id: 'B (current)' }, 'on an exact tie, the CURRENT reading must win — the boundary this test pins')
+  })
+})
+
+describe('#8094 — a straggler admitted before forget() cannot write through into a reused id\'s new record', () => {
+  // `commit()`'s write-through orders only by `snapshotAt`, so a record with
+  // NO reading yet (`snapshotAt: null`, the S3/write-through guard's escape
+  // hatch) passes that guard unconditionally. `forget()` (a session_destroyed
+  // prune) deletes the record outright, so a NEW admission on the same key —
+  // a reused session id via `preserveId` restore/rebind — starts a record
+  // with `snapshotAt: null` again. A survey admitted under the FORGOTTEN
+  // (prior) incarnation that finally resolves after the reuse then looks,
+  // from `commit()`'s point of view, identical to an ordinary in-flight
+  // straggler being written through onto its own still-live successor — the
+  // one case `snapshotAt: null` is meant to allow. Nothing in `at`/`token`
+  // distinguishes "superseded, same session" from "superseded by a forget +
+  // reuse, different incarnation" — hence a `lineage` the record carries
+  // forward on an ordinary supersede and mints fresh only when there is no
+  // `prior` to copy from (i.e. right after a `forget()`).
+
+  it("admit A, forget, admit B (same key) — A's late commit does not land in B's record", () => {
+    const h = harness()
+    const A = h.open('sess-1') // admitted under the key's FIRST incarnation
+
+    forgetSurveyKey(h.owner, 'sess-1') // session destroyed while A's survey was in flight
+
+    h.open('sess-1') // the id is REUSED (preserveId restore/rebind) — a brand-new incarnation, snapshotAt: null
+
+    // A's straggling survey finally resolves. It must not be able to write
+    // into the NEW incarnation's record merely because that record has no
+    // reading of its own yet.
+    A.commit({ id: 'A (straggler from the forgotten incarnation)' }, { replayable: true })
+
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.equal(replay.admitted, false, "still inside B's window")
+    assert.equal(replay.cached, null, "B's record must hold no reading from A's stale write-through")
+  })
+
+  it("admit A, forget, admit B (same key) — A's late ROLLBACK does not disturb B's record", () => {
+    // The rollback side of the same straggler. rollback() is protected by
+    // its token check (a new admission always mints a fresh token), not by
+    // lineage — pinned here so weakening that check can't go unnoticed on
+    // the forget + reuse path.
+    const h = harness()
+    const A = h.open('sess-1')
+    forgetSurveyKey(h.owner, 'sess-1')
+    const B = h.open('sess-1')
+    B.commit({ id: 'B result' }, { replayable: true })
+
+    A.rollback()
+
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.equal(replay.admitted, false, "still inside B's window")
+    assert.deepEqual(replay.cached, { id: 'B result' }, "A's stale rollback must not disturb B's committed reading")
+  })
+
+  it('POSITIVE CONTROL: the ordinary (non-forget) superseded write-through is unaffected — same lineage still writes through', () => {
+    // Without this, a fix that blocked EVERY write-through (not just a
+    // cross-lineage one) would pass the test above for the wrong reason.
+    const h = harness()
+    const first = h.open('sess-1')
+    h.advance(6_000)
+    h.open('sess-1') // supersedes `first` — no forget() in between, same lineage
+
+    first.commit({ id: 'first (slow)' }, { replayable: true })
+
+    h.advance(1)
+    const replay = h.open('sess-1')
+    assert.equal(replay.admitted, false)
+    assert.deepEqual(replay.cached, { id: 'first (slow)' }, 'a same-lineage write-through must still land')
   })
 })
