@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A straggling survey from a pruned session can no longer write its stale
+  reading into a reused session id's new record (#8094).** The shared
+  per-session survey throttle (`survey-throttle.js`) orders a write-through
+  onto a superseded record only by `snapshotAt`, and a record with no reading
+  yet passes that check unconditionally — the escape hatch that lets a first
+  survey's completed reading reach a record its own admission has since been
+  superseded on. `forget()` (a session_destroyed prune) deletes a record
+  outright, and a session id can be reused afterward (`preserveId`
+  restore/rebind) with the new admission's record starting the same way, with
+  no reading yet. A survey admitted under the forgotten prior incarnation that
+  finally resolved after the reuse satisfied the same escape hatch, writing
+  its stale reading into the new incarnation's record. Every record now also
+  carries a `lineage` — copied forward from `prior` on an ordinary supersede,
+  minted fresh only when there is none to copy (i.e. right after a
+  `forget()`) — and a write-through additionally requires the committing
+  survey's lineage to match the current record's, so a straggler from a
+  forgotten incarnation can never land in one that reused its key.
 - **`lint-argv-sinks`'s catalogue now matches an argv expression exactly, not
   by substring (#8112).** `AUDITED_SINKS` entries like `match: 'this._image'`
   were compared against a finding with `.includes()`, so any WIDER expression
