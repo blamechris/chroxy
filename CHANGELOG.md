@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-opus-4-8` pricing corrected to $5/$25 with no long-context premium
+  (#7434).** Was incorrectly priced at $15/$75 with a 2× premium above 200K
+  input tokens. Opus 4.8 has 1M context at standard API pricing with no
+  premium tier (source: https://platform.claude.com/docs/en/about-claude/pricing).
+  Cost display and estimates now accurately reflect published rates.
 - **A straggling survey from a pruned session can no longer write its stale
   reading into a reused session id's new record (#8094).** The shared
   per-session survey throttle (`survey-throttle.js`) orders a write-through
