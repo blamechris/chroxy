@@ -147,26 +147,44 @@ jobs:
 
   docker:
     name: Docker Image
-    # #8165 — this job PUSHES to GHCR (docker/build-push-action, push: true)
-    # and moves the floating :{major}.{minor} tag, so it must never start
-    # before verify-artifacts has passed. `needs: test` alone let this run in
-    # parallel with verify-artifacts and publish the image even when the
-    # packed npm artifacts were broken and github-release (already gated on
+    # #8150 — this job PUSHES to GHCR and moves the floating :{major}.{minor}
+    # tag, so it must never start before verify-artifacts has passed (#8165),
+    # and it must never push an image that has not been smoke-started first
+    # (#8133 / #8150): the v0.11.0 image built and pushed clean while every
+    # `start` of it died on ERR_MODULE_NOT_FOUND, because nothing ever ran it
+    # before it shipped. `needs: test` alone let this run in parallel with
+    # verify-artifacts and publish the image even when the packed npm
+    # artifacts were broken and github-release (already gated on
     # verify-artifacts) was then skipped — a partial publish.
+    #
+    # Order, and why: Extract metadata -> Build (local, unpushed) -> smoke ->
+    # Log in to GHCR -> push. The build loads the image into the runner's
+    # local docker daemon under BOTH the real metadata-action tags and a
+    # fixed local `chroxy:release-smoke` tag (load: true, push: false, no
+    # setup-buildx step here, so this uses the runner's default docker
+    # driver); scripts/docker-image-smoke.sh then smoke-starts that exact
+    # local image; only on success does the job log in to GHCR and push the
+    # already-built metadata tags — never rebuilt, so what was smoked is
+    # byte-for-byte what ships. Login sits AFTER the smoke deliberately:
+    # registry credentials have no reason to exist in the job's environment
+    # while an untrusted-until-proven image is being built and started, and
+    # narrowing that window is free (docker/login-action's credential helper
+    # is only consulted at `docker push` time, not before). The smoke step
+    # carries no `if:` and no `continue-on-error:`, so GitHub Actions'
+    # implicit "only run if the previous step succeeded" gating is what
+    # blocks login/push on a smoke failure.
+    # packages/server/tests/release-docker-smoke-gate.test.js pins this shape
+    # statically; packages/server/tests/release-verify-artifacts-gate.test.js
+    # still covers this job's verify-artifacts gating and if:/permissions
+    # safety independently.
     needs: [test, verify-artifacts]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -178,13 +196,55 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
 
-      - name: Build and push
+      # load: true / push: false — builds once and loads the result into the
+      # runner's local docker daemon, tagged with every metadata-action tag
+      # PLUS the fixed local `chroxy:release-smoke` tag the next step smoke-
+      # starts. Nothing here reaches the registry.
+      - name: Build (local, unpushed)
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          push: false
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            chroxy:release-smoke
           labels: ${{ steps.meta.outputs.labels }}
+
+      # No if:, no continue-on-error: — a real failure here fails the job and
+      # blocks login/push below via GitHub Actions' implicit gating.
+      - name: Smoke-start the built image
+        run: bash scripts/docker-image-smoke.sh chroxy:release-smoke
+
+      # Deliberately AFTER the smoke — see the job header comment.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushes the EXACT tags the build step above already built and loaded —
+      # never rebuilt, so what was smoked is what ships. TAGS (newline-
+      # separated) comes in via env:, never interpolated into the script
+      # text, so a tag value can never be read as shell syntax. `set -euo
+      # pipefail` plus the explicit empty-list check means a metadata-action
+      # regression that yields zero tags fails loudly here instead of
+      # silently pushing nothing.
+      - name: Push the smoked image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAGS" ]; then
+            echo "no tags from metadata-action — refusing to push nothing" >&2
+            exit 1
+          fi
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker push "$tag"
+          done <<< "$TAGS"
 
   desktop-macos:
     name: Desktop (macOS)

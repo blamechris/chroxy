@@ -40,6 +40,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`release.yml` smokes the Docker image before pushing it (#8150).** The
+  `docker` job built the root Dockerfile with `docker/build-push-action`,
+  `push: true`, and pushed straight to GHCR — nothing in the job ever
+  started the image. That is exactly how the v0.11.0 image shipped unable to
+  start at all (`ERR_MODULE_NOT_FOUND`, #8133): the push succeeded because a
+  push doesn't care whether the thing it uploads can run.
+  `scripts/docker-image-smoke.sh` (added for #8133) already proved an image
+  can start, but nothing wired it into the one workflow that actually
+  publishes a release — it only ran PR-side, path-filtered, and not
+  required. The job now builds once with `load: true` / `push: false`
+  (tagged with both the real metadata-action tags and a fixed local
+  `chroxy:release-smoke` tag), smoke-starts that same local image, logs in to
+  GHCR only AFTER the smoke passes (narrowing the window registry
+  credentials are present), and only then pushes the already-built tags via
+  `env: TAGS:` (never interpolated into the shell script) — never rebuilt, so
+  what is smoked is byte-for-byte what ships. `ci.yml`'s `Docker Image
+  Smoke` job now builds with the SAME pinned `docker/build-push-action` ref
+  and `load: true` / `push: false`, so the release build+load path is
+  exercised on every Docker-touching PR, not just at release time.
+  A new static gate test (`release-docker-smoke-gate.test.js`) runs over
+  every job in `release.yml` with a publishing step (not one job looked up
+  by id) and fails the build if: the smoke step is missing, wrapped (`||
+  true`, `; exit 0`, a preceding `set +e`, or commented out), reordered
+  after a publish, given `continue-on-error`, or paired with a publishing
+  step whose `if:` isn't absent or exactly `success()` (closing three
+  operand-order bypasses `X || success()` / `!success()` / `true ||
+  success()` a naïve "contains always/failure/cancelled" check misses); if a
+  build-push-action step publishes via `outputs: type=registry` or a
+  non-lowercase-`false` `push:` value without ever setting `push: true`;
+  if anything rebuilds the image between the smoke and the last publish; or
+  if a registry login runs before the smoke. The "was this tag really
+  built?" check reads the build step's `tags:` input structurally (not a
+  raw-text scan, which a neighbouring step's comment could satisfy). It also
+  rejects a `shell:` override other than absent or the literal `bash` on the
+  smoke step or a publishing step (a custom shell template can swallow a
+  real exit code without the `run:` text ever changing), rejects job-level
+  `continue-on-error:` anywhere in a publishing job's transitive `needs:`
+  closure (previously checked only inside `verify-artifacts`' own body),
+  and rejects a `docker tag`/`docker image tag`/`docker load`/`docker image
+  load`/`docker import`/`docker pull`/`docker image pull`/`docker commit`/
+  `docker buildx imagetools` step between the smoke and the last publish —
+  a retag or reload repoints the pushed tag at unsmoked content without
+  ever rebuilding. A second new test (`ci-docker-path-filter.test.js`,
+  parsed with `js-yaml`) ties `ci.yml`'s `docker:` path filter to
+  `.dockerignore`'s package whitelist in both directions, so the two
+  rosters cannot drift apart un-noticed (#7639) — a floor, not a pinned
+  set, so a correct two-sided package addition never trips it, and a glob
+  whitelist entry fails loudly instead of misparsing. The shared "what
+  counts as publishing" vocabulary and the job-level gating walk
+  (`packages/server/tests/helpers/release-publish.js`) are now one module
+  imported by both this gate and `release-verify-artifacts-gate.test.js`,
+  which previously carried its own, already-drifted copy.
+
 - **The spawn-env inherited-secrets roster strips comments with a real
   tokenizer, not a regex, so it can no longer misread a glob quoted in a
   comment as a block-comment delimiter (#8142).** The roster test's
