@@ -6107,6 +6107,12 @@ describe('ClaudeTuiSession', () => {
       }, 'msg-1')
 
       // Dashboard sends an answer for a DIFFERENT (stale) toolUseId.
+      // #7293 / #7812: this site is deliberately NOT converted to the drain
+      // handle. The assertion is negative ("nothing was written") — dropping
+      // happens before any keystroke drive starts, so there is nothing to
+      // await, and a longer wait can only make the negative assertion MORE
+      // reliable under load, never less. Do not re-flag this as a sibling of
+      // the truncated-write flake.
       session.respondToQuestion('A', undefined, 'toolu_stale_or_missing')
       await new Promise((resolve) => setTimeout(resolve, 50))
 
@@ -6124,7 +6130,7 @@ describe('ClaudeTuiSession', () => {
         options: [{ label: 'Patch' }, { label: 'Minor' }],
       }
 
-      // #7812 - this was the flake. The freeform answer is typed into the PTY
+      // #7293 / #7812 - this was the flake. The freeform answer is typed into the PTY
       // one character per PROMPT_CHAR_DELAY_MS tick; sleeping a fixed 100 ms and
       // then slicing `writes` read a TRUNCATED prefix on a loaded runner
       // ('Brand new freeform ans', 22 of 25 chars - run 34731508759). Awaiting
@@ -6203,6 +6209,11 @@ describe('ClaudeTuiSession', () => {
 
     // #4848 boundary: opt-11 (idx 11) in a 12-option question — pin the
     // larger-N arrow-nav case so the loop count tracks idx exactly.
+    // #7293's second comment named this exact test (12 of 14 writes landed
+    // before the old fixed 50 ms sleep fired, run 32450826322) as the
+    // confirmed sibling of the freeform flake above — same
+    // respondToQuestion → throttled-writer race, counted in writes rather
+    // than characters. Fixed by the same #7812 drain-handle await.
     it('respondToQuestion drives matchIdx=11 via 11× Down + Enter (#4848 boundary)', async () => {
       const writes = []
       session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
@@ -6370,6 +6381,10 @@ describe('ClaudeTuiSession', () => {
         // Defensive: dashboard sent freeformText for an AskUserQuestion that
         // has no "Other" option. Don't blindly write the freeform text at
         // the digit menu (that's the #4288 jump-nav footgun). Drop + clear.
+        // #7293 / #7812: no drain handle to await here either — the drop
+        // happens before any keystroke drive starts, so this is the same
+        // negative-assertion shape as the stale-toolUseId test above, not a
+        // sibling of the truncated-write flake.
         session.respondToQuestion('Other', undefined, 'toolu_aq_no_other', {
           freeformText: 'should be dropped',
         })
@@ -6391,6 +6406,18 @@ describe('ClaudeTuiSession', () => {
       //      revives a write path against a torn-down session).
       // Fix is `if (this._destroying) return` after each `await` and a
       // null-check on `this._term` before stage 2.
+      //
+      // #7293 / #7812: the fixed sleeps inside this describe block are
+      // intentionally NOT converted to the drain handle. These tests
+      // interleave destroy() INTO the middle of the drive on purpose — a
+      // drain handle can only express "wait until the whole sequence is
+      // done," not "wait until halfway then tear down," and every assertion
+      // here reads either bytes written synchronously before the interleave
+      // (stage-1's digit) or a watchdog Map / log line that must NOT
+      // reappear. Under load the wait window only gets SAFER (more time for
+      // a wrongly-re-armed watchdog to show up), never racier. Do not
+      // re-flag these as siblings of the truncated-write flake this issue
+      // fixed.
       describe('destroy() during the two-stage IIFE (#4808)', () => {
         it('destroy() between stage-1 and stage-2 does NOT re-arm the watchdog', async () => {
           const writes = []
@@ -7536,6 +7563,11 @@ describe('ClaudeTuiSession', () => {
       await s.destroy()
     })
 
+    // #7293 / #7812: same exemption as the #4808 destroy-race describe block
+    // above — interrupt() is deliberately interleaved INTO the settle window,
+    // and both assertions below are negative (no re-armed watchdog, no
+    // stage-2 write), so a longer wait only strengthens them. Not a sibling
+    // of the truncated-write flake.
     it('interrupt() during the Other-freeform settle stops the IIFE re-arming the watchdog', async () => {
       const s = makeAnsweringSession()
       const writes = []
