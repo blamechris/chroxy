@@ -57,7 +57,24 @@ echo "run-with-timeout.sh (#8145)"
 # `gtimeout` — this is what forces cases 5-7 down the perl fallback, and it
 # is also representative of a stock macOS dev machine, which is the whole
 # reason this file exists.
-NO_TIMEOUT_PATH="/usr/bin:/bin"
+#
+# It is a temp dir of links to exactly those tools, not a system directory
+# like /usr/bin: on ubuntu-24.04 /usr/bin carries GNU `timeout`, so a PATH of
+# system dirs silently ran cases 5-7 through GNU timeout instead of perl on
+# the one platform CI uses (#8145 CI).
+NO_TIMEOUT_DIR="$(mktemp -d)"
+trap 'rm -rf "$NO_TIMEOUT_DIR"' EXIT
+for tool in bash sh perl true false sleep env; do
+  # `type -P`, not `command -v`: `true`/`false` are shell builtins, and
+  # `command -v true` prints the bare name, which would make a dangling link.
+  src="$(type -P "$tool" 2>/dev/null || true)"
+  if [ -z "$src" ]; then
+    echo "run-with-timeout.test.sh: required tool '$tool' not found on PATH" >&2
+    exit 1
+  fi
+  ln -s "$src" "$NO_TIMEOUT_DIR/$tool"
+done
+NO_TIMEOUT_PATH="$NO_TIMEOUT_DIR"
 
 # --- 1. Passthrough: a successful command's exit code (0) ------------------
 out=$(env -i PATH="$PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 5 true"; echo "rc=$?")
